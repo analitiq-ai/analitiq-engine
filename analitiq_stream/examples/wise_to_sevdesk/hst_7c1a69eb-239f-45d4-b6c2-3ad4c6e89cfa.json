@@ -1,0 +1,16 @@
+{
+  "base_url": "https://my.sevdesk.de",
+  "type": "api",
+  "headers": {
+    "Content-Type": "application/json",
+    "Accept": "application/json",
+    "Authorization": "${SEVDESK_API_TOKEN}"
+  },
+  "timeout": 30,
+  "max_connections": 10,
+  "max_connections_per_host": 5,
+  "rate_limit": {
+    "max_requests": 60,
+    "time_window": 60
+  }
+}

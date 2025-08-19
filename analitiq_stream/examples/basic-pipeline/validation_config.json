@@ -1,0 +1,19 @@
+{
+  "rules": [
+    {
+      "field": "user_id",
+      "type": "not_null",
+      "error_action": "dlq"
+    },
+    {
+      "field": "email_address",
+      "type": "not_null",
+      "error_action": "dlq"
+    },
+    {
+      "field": "full_name",
+      "type": "not_null",
+      "error_action": "skip"
+    }
+  ]
+}

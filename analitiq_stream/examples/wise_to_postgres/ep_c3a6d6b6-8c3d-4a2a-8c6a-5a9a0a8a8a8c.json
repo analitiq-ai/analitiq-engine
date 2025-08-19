@@ -1,0 +1,175 @@
+{
+  "schema": "wise_data",
+  "table": "transactions",
+  "primary_key": ["wise_id"],
+  "unique_constraints": ["wise_id"],
+  "configure": {
+    "auto_create_schema": true,
+    "auto_create_table": true,
+    "auto_create_indexes": [
+      {
+        "name": "idx_transactions_created_at",
+        "columns": ["created_at"],
+        "type": "btree"
+      },
+      {
+        "name": "idx_transactions_amount",
+        "columns": ["amount"],
+        "type": "btree"
+      },
+      {
+        "name": "idx_transactions_status",
+        "columns": ["status"],
+        "type": "btree"
+      },
+      {
+        "name": "idx_transactions_currency",
+        "columns": ["target_currency"],
+        "type": "btree"
+      }
+    ]
+  },
+  "table_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "Wise Transactions Table Schema",
+    "description": "PostgreSQL table schema for storing Wise transaction data",
+    "type": "object",
+    "properties": {
+      "wise_id": {
+        "type": "integer",
+        "description": "Original Wise transaction ID",
+        "database_type": "BIGINT",
+        "nullable": false,
+        "primary_key": true
+      },
+      "created_at": {
+        "type": "string",
+        "format": "date-time",
+        "description": "Transaction creation timestamp",
+        "database_type": "TIMESTAMPTZ",
+        "nullable": false
+      },
+      "amount": {
+        "type": "number",
+        "description": "Transaction amount",
+        "database_type": "DECIMAL(15,2)",
+        "nullable": false
+      },
+      "target_currency": {
+        "type": "string",
+        "description": "Target currency code",
+        "database_type": "VARCHAR(3)",
+        "nullable": false,
+        "maxLength": 3
+      },
+      "source_currency": {
+        "type": "string",
+        "description": "Source currency code", 
+        "database_type": "VARCHAR(3)",
+        "nullable": true,
+        "maxLength": 3
+      },
+      "status": {
+        "type": "string",
+        "description": "Transaction status",
+        "database_type": "VARCHAR(50)",
+        "nullable": false,
+        "enum": [
+          "outgoing_payment_sent",
+          "incoming_payment_waiting",
+          "funds_converted",
+          "cancelled"
+        ]
+      },
+      "reference": {
+        "type": "string",
+        "description": "Payment reference/description",
+        "database_type": "TEXT",
+        "nullable": true
+      },
+      "merchant_name": {
+        "type": "string", 
+        "description": "Merchant or counterparty name",
+        "database_type": "VARCHAR(255)",
+        "nullable": true
+      },
+      "category": {
+        "type": "string",
+        "description": "Transaction category",
+        "database_type": "VARCHAR(100)",
+        "nullable": true
+      },
+      "fee_amount": {
+        "type": "number",
+        "description": "Transaction fee amount",
+        "database_type": "DECIMAL(10,2)",
+        "nullable": true
+      },
+      "fee_currency": {
+        "type": "string",
+        "description": "Fee currency code",
+        "database_type": "VARCHAR(3)",
+        "nullable": true,
+        "maxLength": 3
+      },
+      "exchange_rate": {
+        "type": "number",
+        "description": "Exchange rate used",
+        "database_type": "DECIMAL(10,6)",
+        "nullable": true
+      },
+      "wise_account_id": {
+        "type": "integer",
+        "description": "Wise account identifier",
+        "database_type": "BIGINT",
+        "nullable": true
+      },
+      "raw_data": {
+        "type": "object",
+        "description": "Original JSON data from Wise API",
+        "database_type": "JSONB",
+        "nullable": true
+      },
+      "synced_at": {
+        "type": "string",
+        "format": "date-time", 
+        "description": "Timestamp when record was synced",
+        "database_type": "TIMESTAMPTZ",
+        "nullable": false,
+        "default": "CURRENT_TIMESTAMP"
+      },
+      "updated_at": {
+        "type": "string",
+        "format": "date-time",
+        "description": "Record last update timestamp", 
+        "database_type": "TIMESTAMPTZ",
+        "nullable": false,
+        "default": "CURRENT_TIMESTAMP"
+      }
+    },
+    "required": [
+      "wise_id",
+      "created_at", 
+      "amount",
+      "target_currency",
+      "status"
+    ]
+  },
+  "write_mode": "upsert",
+  "conflict_resolution": {
+    "on_conflict": "wise_id",
+    "action": "update",
+    "update_columns": [
+      "amount",
+      "status", 
+      "reference",
+      "merchant_name",
+      "category",
+      "fee_amount",
+      "fee_currency",
+      "exchange_rate",
+      "raw_data",
+      "updated_at"
+    ]
+  }
+}

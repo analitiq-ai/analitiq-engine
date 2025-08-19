@@ -1,0 +1,42 @@
+Perfect! Now I have found the transaction/statement endpoint. Based on the Wise API documentation, here's the analysis for exporting transactions from a EUR account:
+
+
+
+## Summary for Exporting EUR Transactions from Wise to SevDesk
+
+Based on the Wise API documentation analysis, here's what you need to know:
+
+### Key Endpoint
+- **Endpoint**: `/v1/profiles/{{profileId}}/balance-statements/{{balanceId}}/statement.json`
+- **Method**: GET
+- **Purpose**: Retrieves transaction statements for a specific balance account
+
+### Prerequisites
+1. **Authentication**: You'll need OAuth 2.0 access with appropriate scopes
+2. **Profile ID**: Your Wise profile identifier
+3. **Balance ID**: The ID of your EUR balance account (you can get this from the `/v4/profiles/{{profileId}}/balances` endpoint)
+
+### Key Features
+- **Multiple Formats**: Available in JSON, CSV, PDF, XLSX, CAMT.053, MT940, or QIF formats
+- **Date Range**: Can specify custom date ranges (max 469 days)
+- **Currency Specific**: Filter by EUR currency
+- **Transaction Types**: Includes DEBIT/CREDIT with detailed breakdown
+
+### Transaction Data Available
+Each transaction includes:
+- Transaction type (DEBIT/CREDIT)
+- Date and amount
+- Fees
+- Detailed descriptions
+- Merchant information (for card transactions)
+- Reference numbers
+- Running balance
+
+### For SevDesk Integration
+The JSON format would be ideal for programmatic import into SevDesk. You can:
+1. Use the `currency=EUR` parameter to get only EUR transactions
+2. Set appropriate date ranges using `intervalStart` and `intervalEnd`
+3. Use `type=COMPACT` for cleaner transaction records
+4. Map the transaction data to SevDesk's bank account import format
+
+The transaction data is comprehensive and should provide all the information needed for accounting purposes in SevDesk.

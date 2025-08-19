@@ -1,0 +1,33 @@
+{
+  "transformations": [
+    {
+      "type": "field_mapping",
+      "description": "Map PostgreSQL fields to API fields",
+      "mappings": {
+        "id": "user_id",
+        "name": "full_name",
+        "email": "email_address",
+        "created_at": "created_timestamp",
+        "updated_at": "last_modified"
+      }
+    },
+    {
+      "type": "value_transformation",
+      "description": "Convert email to lowercase",
+      "field": "email_address",
+      "function": "lower"
+    },
+    {
+      "type": "computed_field",
+      "description": "Add sync timestamp",
+      "field": "sync_timestamp",
+      "expression": "now()"
+    },
+    {
+      "type": "computed_field",
+      "description": "Add data source identifier",
+      "field": "source_system",
+      "expression": "postgresql"
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+Based on my analysis of the SevDesk API documentation, I can now provide you with specifications for the endpoint most relevant to importing transactions from Wise into a SevDesk bank account. Here's the consolidated information for the **CheckAccountTransaction** endpoint:
+
+
+
+## Summary for your Wise to SevDesk integration:
+
+**Key points for importing Wise EUR transactions:**
+
+1. **Endpoint**: Use `POST /CheckAccountTransaction` to create new transactions
+2. **Required fields** for creating transactions:
+   - `valueDate`: Transaction date from Wise
+   - `amount`: Transaction amount (negative for debits, positive for credits)
+   - `checkAccount`: Reference to your SevDesk bank account (needs ID and objectName)
+   - `payeePayerName`: Name of the other party in the transaction
+   - `status`: Transaction status (100=Created, 200=Linked, etc.)
+
+3. **Optional but useful fields**:
+   - `paymtPurpose`: Transaction description/purpose
+   - `payeePayerAcctNo`: IBAN of the other party
+   - `payeePayerBankCode`: BIC of the other party
+
+4. **Prerequisites**: 
+   - You'll need to first create or identify your EUR bank account in SevDesk using the `/CheckAccount` endpoints
+   - You'll need proper authentication (API key in Authorization header)
+
+The endpoint supports filtering to avoid duplicate imports and can handle both individual transaction creation and batch processing of your Wise transaction exports.

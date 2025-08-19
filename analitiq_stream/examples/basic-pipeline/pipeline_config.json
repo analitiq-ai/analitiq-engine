@@ -1,0 +1,69 @@
+{
+  "pipeline_id": "basic-db-to-api-pipeline",
+  "name": "Basic Database to API Sync",
+  "version": "1.0",
+  
+  "engine_config": {
+    "batch_size": 1000,
+    "max_concurrent_batches": 10,
+    "buffer_size": 10000,
+    "state_file": "state/basic_pipeline_state.json",
+    "schedule": {
+      "type": "interval",
+      "interval_minutes": 60,
+      "timezone": "UTC"
+    }
+  },
+  
+  "dst": {
+    "refresh_mode": "upsert",
+    "batch_support": false,
+    "batch_size": 100
+  },
+  
+  "mapping": {
+    "transformations": [
+      {
+        "type": "field_mapping",
+        "description": "Map PostgreSQL fields to API fields",
+        "mappings": {
+          "id": "user_id",
+          "name": "full_name",
+          "email": "email_address",
+          "created_at": "created_timestamp",
+          "updated_at": "last_modified"
+        }
+      },
+      {
+        "type": "value_transformation",
+        "description": "Convert email to lowercase",
+        "field": "email_address",
+        "function": "lower"
+      },
+      {
+        "type": "computed_field",
+        "description": "Add sync timestamp",
+        "field": "sync_timestamp",
+        "expression": "now()"
+      },
+      {
+        "type": "computed_field",
+        "description": "Add data source identifier",
+        "field": "source_system",
+        "expression": "postgresql"
+      }
+    ]
+  },
+  
+  "error_handling": {
+    "strategy": "dlq",
+    "retry_failed_records": true,
+    "max_retries": 3
+  },
+  
+  "monitoring": {
+    "metrics_enabled": true,
+    "log_level": "INFO",
+    "checkpoint_interval": 100
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "endpoint_id": "rest-api-users",
+  "type": "api",
+  "config": {
+    "endpoint": "/users",
+    "method": "POST",
+    "idempotency_header": "Idempotency-Key"
+  }
+}

@@ -1,0 +1,220 @@
+[tool.poetry]
+name = "analitiq-stream"
+version = "0.1.0"
+description = "A fault-tolerant data streaming framework for Python 3.11+"
+authors = ["Analitiq Core Team <dev@analitiq.com>"]
+license = "MIT"
+readme = "README.md"
+homepage = "https://github.com/analitiq/analitiq-stream"
+repository = "https://github.com/analitiq/analitiq-stream"
+documentation = "https://docs.analitiq.com"
+keywords = ["data-streaming", "etl", "pipeline", "async", "fault-tolerant"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Database",
+    "Topic :: Internet :: WWW/HTTP",
+    "Topic :: System :: Distributed Computing",
+]
+packages = [{include = "analitiq_stream"}]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+
+# Core async and concurrency
+aiofiles = "^23.0.0"
+
+# Database connectors
+asyncpg = "^0.28.0"
+aiomysql = "^0.2.0"
+
+# API connectors
+aiohttp = "^3.8.0"
+aiohttp-retry = "^2.8.3"
+
+# Data processing and validation
+pydantic = "^2.0.0"
+jsonschema = "^4.0.0"
+
+# Retry and fault tolerance
+backoff = "^2.0.0"
+
+# Logging and monitoring
+structlog = "^23.0.0"
+prometheus-client = "^0.17.0"
+
+# Configuration and utilities
+python-dotenv = "^1.0.0"
+click = "^8.0.0"
+
+# Optional dependencies
+kafka-python = {version = "^2.0.0", optional = true}
+aiokafka = {version = "^0.8.0", optional = true}
+boto3 = {version = "^1.26.0", optional = true}
+azure-storage-blob = {version = "^12.0.0", optional = true}
+google-cloud-storage = {version = "^2.0.0", optional = true}
+pandas = {version = "^2.0.0", optional = true}
+numpy = {version = "^1.24.0", optional = true}
+pyarrow = {version = "^12.0.0", optional = true}
+motor = {version = "^3.0.0", optional = true}
+aioredis = {version = "^2.0.0", optional = true}
+cryptography = {version = "^41.0.0", optional = true}
+passlib = {version = "^1.7.4", optional = true}
+apscheduler = {version = "^3.10.0", optional = true}
+strands-agents = "^1.3.0"
+strands-agents-tools = "^0.2.3"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^7.0.0"
+pytest-asyncio = "^0.21.0"
+pytest-cov = "^4.0.0"
+pytest-mock = "^3.10.0"
+black = "^23.0.0"
+flake8 = "^6.0.0"
+mypy = "^1.5.0"
+isort = "^5.12.0"
+pre-commit = "^3.3.0"
+sphinx = "^7.0.0"
+sphinx-rtd-theme = "^1.3.0"
+coverage = "^7.10.3"
+
+[tool.poetry.extras]
+kafka = ["kafka-python", "aiokafka"]
+cloud = ["boto3", "azure-storage-blob", "google-cloud-storage"]
+analytics = ["pandas", "numpy", "pyarrow"]
+nosql = ["motor", "aioredis"]
+security = ["cryptography", "passlib"]
+scheduling = ["apscheduler"]
+all = [
+    "kafka-python", "aiokafka", 
+    "boto3", "azure-storage-blob", "google-cloud-storage",
+    "pandas", "numpy", "pyarrow",
+    "motor", "aioredis",
+    "cryptography", "passlib",
+    "apscheduler"
+]
+
+[tool.poetry.scripts]
+analitiq-stream = "analitiq_stream.cli:main"
+test = "pytest"
+coverage = "analitiq_stream.cli:coverage_html"      # terminal + HTML via pytest-cov
+coverage-html = "analitiq_stream.cli:coverage_html" # alias, both work
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+# Tool configurations
+[tool.black]
+line-length = 88
+target-version = ['py311']
+include = '\.pyi?$'
+extend-exclude = '''
+/(
+  # directories
+  \.eggs
+  | \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | build
+  | dist
+)/
+'''
+
+[tool.isort]
+profile = "black"
+multi_line_output = 3
+line_length = 88
+include_trailing_comma = true
+force_grid_wrap = 0
+use_parentheses = true
+ensure_newline_before_comments = true
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+warn_unreachable = true
+strict_equality = true
+
+[[tool.mypy.overrides]]
+module = [
+    "asyncpg.*",
+    "aiomysql.*",
+    "aiohttp.*",
+    "kafka.*",
+    "boto3.*",
+    "azure.*",
+    "google.*",
+]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+addopts = "-ra -q --strict-markers --strict-config"
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests as integration tests",
+    "unit: marks tests as unit tests",
+]
+asyncio_mode = "auto"
+
+[tool.coverage.run]
+source = ["analitiq_stream"]
+omit = [
+    "*/tests/*",
+    "*/test_*",
+    "*/__pycache__/*",
+    "*/venv/*",
+    "*/virtualenv/*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "if self.debug:",
+    "if settings.DEBUG",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if 0:",
+    "if __name__ == .__main__.:",
+    "class .*\\bProtocol\\):",
+    "@(abc\\.)?abstractmethod",
+]
+show_missing = true
+skip_covered = true
+
+[tool.flake8]
+max-line-length = 88
+extend-ignore = ["E203", "W503"]
+exclude = [
+    ".git",
+    "__pycache__",
+    "docs/source/conf.py",
+    "old",
+    "build",
+    "dist",
+    ".venv",
+    "venv",
+]
