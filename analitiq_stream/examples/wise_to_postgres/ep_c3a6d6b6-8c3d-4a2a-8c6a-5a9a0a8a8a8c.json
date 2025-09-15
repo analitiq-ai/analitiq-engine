@@ -1,33 +1,11 @@
 {
   "schema": "wise_data",
   "table": "transactions",
-  "primary_key": ["wise_id"],
-  "unique_constraints": ["wise_id"],
+  "primary_key": ["id"],
+  "unique_constraints": ["id"],
   "configure": {
     "auto_create_schema": true,
-    "auto_create_table": true,
-    "auto_create_indexes": [
-      {
-        "name": "idx_transactions_created_at",
-        "columns": ["created_at"],
-        "type": "btree"
-      },
-      {
-        "name": "idx_transactions_amount",
-        "columns": ["amount"],
-        "type": "btree"
-      },
-      {
-        "name": "idx_transactions_status",
-        "columns": ["status"],
-        "type": "btree"
-      },
-      {
-        "name": "idx_transactions_currency",
-        "columns": ["target_currency"],
-        "type": "btree"
-      }
-    ]
+    "auto_create_table": true
   },
   "table_schema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -35,23 +13,97 @@
     "description": "PostgreSQL table schema for storing Wise transaction data",
     "type": "object",
     "properties": {
-      "wise_id": {
+      "id": {
         "type": "integer",
-        "description": "Original Wise transaction ID",
+        "description": "Wise transfer ID (primary key)",
         "database_type": "BIGINT",
         "nullable": false,
         "primary_key": true
       },
-      "created_at": {
+      "user_id": {
+        "type": "integer",
+        "description": "User ID",
+        "database_type": "BIGINT",
+        "nullable": false
+      },
+      "target_account": {
+        "type": "integer",
+        "description": "Recipient account ID",
+        "database_type": "BIGINT",
+        "nullable": false
+      },
+      "source_account": {
+        "type": "integer",
+        "description": "Source account ID",
+        "database_type": "BIGINT",
+        "nullable": true
+      },
+      "quote": {
+        "type": "integer",
+        "description": "v1 quote ID",
+        "database_type": "BIGINT",
+        "nullable": true
+      },
+      "quote_uuid": {
+        "type": "string",
+        "description": "v2 quote ID",
+        "database_type": "VARCHAR(36)",
+        "nullable": true
+      },
+      "status": {
+        "type": "string",
+        "description": "Transfer status",
+        "database_type": "VARCHAR(50)",
+        "nullable": false
+      },
+      "reference": {
+        "type": "string",
+        "description": "Legacy reference field",
+        "database_type": "TEXT",
+        "nullable": true
+      },
+      "details_reference": {
+        "type": "string",
+        "description": "Payment reference text",
+        "database_type": "TEXT",
+        "nullable": true
+      },
+      "rate": {
+        "type": "number",
+        "description": "Exchange rate value",
+        "database_type": "DECIMAL(10,6)",
+        "nullable": true
+      },
+      "created": {
         "type": "string",
         "format": "date-time",
         "description": "Transaction creation timestamp",
         "database_type": "TIMESTAMPTZ",
         "nullable": false
       },
-      "amount": {
+      "business": {
+        "type": "integer",
+        "description": "Business profile ID",
+        "database_type": "BIGINT",
+        "nullable": true
+      },
+      "has_active_issues": {
+        "type": "boolean",
+        "description": "Are there any pending issues?",
+        "database_type": "BOOLEAN",
+        "nullable": false,
+        "default": true
+      },
+      "source_currency": {
+        "type": "string",
+        "description": "Source currency code",
+        "database_type": "VARCHAR(3)",
+        "nullable": false,
+        "maxLength": 3
+      },
+      "source_value": {
         "type": "number",
-        "description": "Transaction amount",
+        "description": "Transfer amount in source currency",
         "database_type": "DECIMAL(15,2)",
         "nullable": false
       },
@@ -62,114 +114,59 @@
         "nullable": false,
         "maxLength": 3
       },
-      "source_currency": {
-        "type": "string",
-        "description": "Source currency code", 
-        "database_type": "VARCHAR(3)",
-        "nullable": true,
-        "maxLength": 3
+      "target_value": {
+        "type": "number",
+        "description": "Transfer amount in target currency",
+        "database_type": "DECIMAL(15,2)",
+        "nullable": false
       },
-      "status": {
+      "customer_transaction_id": {
         "type": "string",
-        "description": "Transaction status",
-        "database_type": "VARCHAR(50)",
-        "nullable": false,
-        "enum": [
-          "outgoing_payment_sent",
-          "incoming_payment_waiting",
-          "funds_converted",
-          "cancelled"
-        ]
-      },
-      "reference": {
-        "type": "string",
-        "description": "Payment reference/description",
-        "database_type": "TEXT",
-        "nullable": true
-      },
-      "merchant_name": {
-        "type": "string", 
-        "description": "Merchant or counterparty name",
+        "description": "Client-generated unique identifier",
         "database_type": "VARCHAR(255)",
         "nullable": true
       },
-      "category": {
-        "type": "string",
-        "description": "Transaction category",
-        "database_type": "VARCHAR(100)",
-        "nullable": true
-      },
-      "fee_amount": {
-        "type": "number",
-        "description": "Transaction fee amount",
-        "database_type": "DECIMAL(10,2)",
-        "nullable": true
-      },
-      "fee_currency": {
-        "type": "string",
-        "description": "Fee currency code",
-        "database_type": "VARCHAR(3)",
-        "nullable": true,
-        "maxLength": 3
-      },
-      "exchange_rate": {
-        "type": "number",
-        "description": "Exchange rate used",
-        "database_type": "DECIMAL(10,6)",
-        "nullable": true
-      },
-      "wise_account_id": {
-        "type": "integer",
-        "description": "Wise account identifier",
-        "database_type": "BIGINT",
-        "nullable": true
-      },
-      "raw_data": {
+      "originator_data": {
         "type": "object",
-        "description": "Original JSON data from Wise API",
+        "description": "Payment originator information",
         "database_type": "JSONB",
         "nullable": true
-      },
-      "synced_at": {
-        "type": "string",
-        "format": "date-time", 
-        "description": "Timestamp when record was synced",
-        "database_type": "TIMESTAMPTZ",
-        "nullable": false,
-        "default": "CURRENT_TIMESTAMP"
-      },
-      "updated_at": {
-        "type": "string",
-        "format": "date-time",
-        "description": "Record last update timestamp", 
-        "database_type": "TIMESTAMPTZ",
-        "nullable": false,
-        "default": "CURRENT_TIMESTAMP"
       }
     },
     "required": [
-      "wise_id",
-      "created_at", 
-      "amount",
+      "id",
+      "user_id",
+      "target_account",
+      "status",
+      "rate",
+      "created",
+      "source_currency",
+      "source_value",
       "target_currency",
-      "status"
+      "target_value"
     ]
   },
   "write_mode": "upsert",
   "conflict_resolution": {
-    "on_conflict": "wise_id",
+    "on_conflict": "id",
     "action": "update",
     "update_columns": [
-      "amount",
-      "status", 
+      "user_id",
+      "target_account",
+      "source_account",
+      "quote",
+      "quote_uuid",
+      "status",
       "reference",
-      "merchant_name",
-      "category",
-      "fee_amount",
-      "fee_currency",
-      "exchange_rate",
-      "raw_data",
-      "updated_at"
+      "details_reference",
+      "rate",
+      "business",
+      "has_active_issues",
+      "source_currency",
+      "source_value",
+      "target_currency",
+      "target_value",
+      "customer_transaction_id"
     ]
   }
 }

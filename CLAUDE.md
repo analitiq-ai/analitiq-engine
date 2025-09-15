@@ -570,3 +570,4 @@ Test files follow the pattern `test_*.py` or `*_test.py` in the `tests/` directo
 - When making code changes, no need to consider backward compatibility.
 - Update documentation when implementiing new features or modifying existing key functionality that previolsy documented in README.md
 - Do not keep code for Backward Compatibility. Do not create code that is needed only for Backward Compatibility.
+- Do not use empticons in code. Do not use emojis in code.

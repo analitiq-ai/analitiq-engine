@@ -84,8 +84,7 @@ class DatabaseConnector(BaseConnector):
             
             self.is_connected = True
             self._initialized = True
-            
-            logger.info(f"Connected to {db_config.driver} database using {self.driver.name} driver")
+            logger.info(f"Connected to database {db_config.database} on {db_config.host}.")
 
         except Exception as e:
             logger.error(f"Failed to connect to database: {str(e)}")

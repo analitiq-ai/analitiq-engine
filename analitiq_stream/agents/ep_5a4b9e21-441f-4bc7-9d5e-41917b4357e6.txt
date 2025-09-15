@@ -1,1 +1,0 @@
-Based on the API documentation I've reviewed, I can now provide the consolidated JSON specification for the `/v1/transfers` endpoint. From the documentation, this endpoint is primarily used for listing transfers, and I can see it supports various filtering options.

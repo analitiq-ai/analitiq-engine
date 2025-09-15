@@ -142,6 +142,8 @@ class DataTransformer:
                     value = await self._parse_iso_date(value)
                 case "iso_to_timestamp" if isinstance(value, str):
                     value = await self._parse_iso_timestamp(value)
+                case "iso_string_to_datetime":
+                    value = await self._parse_iso_to_datetime_object(value)
                 case "to_int" if isinstance(value, (str, float)):
                     try:
                         value = int(float(value))
@@ -180,15 +182,15 @@ class DataTransformer:
             logger.warning(f"Failed to parse ISO date '{value}': {e}")
             return value  # Return original on error
 
-    async def _parse_iso_timestamp(self, value: str) -> str:
+    async def _parse_iso_timestamp(self, value: str) -> datetime:
         """
-        Parse ISO datetime string to timestamp format.
+        Parse ISO datetime string to datetime object.
         
         Args:
             value: ISO datetime string
             
         Returns:
-            Timestamp string
+            DateTime object
         """
         try:
             # Handle various ISO formats
@@ -196,7 +198,36 @@ class DataTransformer:
                 value = value.replace('Z', '+00:00')
             
             dt = datetime.fromisoformat(value)
-            return dt.strftime('%Y-%m-%d %H:%M:%S')
+            return dt  # Return datetime object instead of string
         except ValueError as e:
             logger.warning(f"Failed to parse ISO timestamp '{value}': {e}")
-            return value  # Return original on error
+            return datetime.now()  # Return current datetime on error
+
+    async def _parse_iso_to_datetime_object(self, value: Any) -> datetime:
+        """
+        Convert ISO timestamp string or datetime to datetime object for database storage.
+        
+        Args:
+            value: ISO datetime string or datetime object
+            
+        Returns:
+            DateTime object
+        """
+        try:
+            if value is None:
+                raise ValueError("Cannot convert None to datetime")
+            
+            # Handle datetime objects
+            if isinstance(value, datetime):
+                return value
+            
+            # Handle string ISO format
+            iso_string = str(value)
+            if iso_string.endswith('Z'):
+                iso_string = iso_string.replace('Z', '+00:00')
+            
+            dt = datetime.fromisoformat(iso_string)
+            return dt
+        except (ValueError, TypeError) as e:
+            logger.warning(f"Failed to parse value '{value}' to datetime: {e}")
+            return datetime.now()  # Return current datetime on error

@@ -1,5 +1,5 @@
 {
-  "base_url": "https://api.wise.com",
+  "host": "https://api.wise.com",
   "type": "api",
   "headers": {
     "Content-Type": "application/json",
