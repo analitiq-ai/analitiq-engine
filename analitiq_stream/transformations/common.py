@@ -133,6 +133,26 @@ def uuid_transform(value: Any = None) -> str:
         raise TransformationError(f"uuid transformation failed: {str(e)}")
 
 
+def iso_string_to_datetime_transform(value: Any) -> datetime:
+    """Convert ISO timestamp string to datetime object for database storage."""
+    try:
+        if value is None:
+            raise TransformationError("Cannot convert None to datetime")
+        
+        # Handle datetime objects
+        if isinstance(value, datetime):
+            return value
+        
+        # Handle string ISO format
+        iso_string = str(value)
+        iso_clean = iso_string.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(iso_clean)
+        return dt
+        
+    except Exception as e:
+        raise TransformationError(f"iso_string_to_datetime transformation failed for '{value}': {str(e)}")
+
+
 def md5_transform(value: Any) -> str:
     """Generate MD5 hash of the input value."""
     try:

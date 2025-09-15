@@ -1,5 +1,5 @@
 {
-  "base_url": "https://my.sevdesk.de",
+  "host": "https://my.sevdesk.de",
   "type": "api",
   "headers": {
     "Content-Type": "application/json",

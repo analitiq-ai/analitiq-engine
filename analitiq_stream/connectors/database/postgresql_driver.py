@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from .base_driver import BaseDatabaseDriver
+from .utils import extract_values_for_columns, convert_record_from_db
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +23,7 @@ class PostgreSQLDriver(BaseDatabaseDriver):
     def __init__(self):
         super().__init__("PostgreSQL")
         self.asyncpg = None
+        self._column_types = {}  # Cache of column name -> database type mappings
 
     async def create_connection_pool(self, config: Dict[str, Any]):
         """Create PostgreSQL connection pool with advanced configuration."""
@@ -130,6 +132,9 @@ class PostgreSQLDriver(BaseDatabaseDriver):
         async with self.connection_pool.acquire() as conn:
             await conn.execute(query)
             logger.info(f"Table '{full_table_name}' ensured to exist")
+            
+        # Build column type mapping for schema-aware conversions
+        self._build_column_type_mapping(table_schema)
 
     def _get_default_clause(self, field_def: Dict[str, Any]) -> str:
         """Get DEFAULT clause for column definition."""
@@ -225,6 +230,19 @@ class PostgreSQLDriver(BaseDatabaseDriver):
                 return "JSONB"
         else:
             return "TEXT"
+    
+    def _build_column_type_mapping(self, table_schema: Dict[str, Any]):
+        """Build mapping of column names to database types for schema-aware conversions."""
+        properties = table_schema.get("properties", {})
+        
+        for field_name, field_def in properties.items():
+            if not self.validate_identifier(field_name):
+                continue
+                
+            sql_type = self.map_json_schema_to_sql_type(field_def)
+            self._column_types[field_name] = sql_type
+        
+        logger.debug(f"Built column type mapping: {self._column_types}")
 
     async def execute_upsert(
         self,
@@ -262,19 +280,23 @@ class PostgreSQLDriver(BaseDatabaseDriver):
         DO UPDATE SET {update_clause}
         """
         
-        # Prepare batch values
+        # Prepare batch values using utilities for type conversion with schema awareness
         values = []
-        for record in batch:
-            row_values = []
-            for col in columns:
-                value = record.get(col)
-                # Convert dict/list to JSON for JSONB columns
-                if isinstance(value, (dict, list)):
-                    value = json.dumps(value)
-                row_values.append(value)
+        for i, record in enumerate(batch):
+            row_values = extract_values_for_columns(record, columns, self._column_types)
             values.append(row_values)
         
-        await conn.executemany(query, values)
+        try:
+            await conn.executemany(query, values)
+        except Exception as e:
+            # Debug log the first problematic row for troubleshooting
+            logger.error(f"Database upsert failed for table {full_table_name}")
+            logger.error(f"Query: {query}")
+            logger.error(f"Columns: {columns}")
+            if batch:
+                logger.error(f"First record data: {batch[0]}")
+                logger.error(f"First record value types: {[(k, type(v).__name__, v) for k, v in batch[0].items()]}")
+            raise
 
     async def execute_insert(
         self,
@@ -295,17 +317,23 @@ class PostgreSQLDriver(BaseDatabaseDriver):
         
         query = f"INSERT INTO {full_table_name} ({columns_str}) VALUES ({placeholders})"
         
+        # Prepare batch values using utilities for type conversion with schema awareness
         values = []
         for record in batch:
-            row_values = []
-            for col in columns:
-                value = record.get(col)
-                if isinstance(value, (dict, list)):
-                    value = json.dumps(value)
-                row_values.append(value)
+            row_values = extract_values_for_columns(record, columns, self._column_types)
             values.append(row_values)
         
-        await conn.executemany(query, values)
+        try:
+            await conn.executemany(query, values)
+        except Exception as e:
+            # Debug log the first problematic row for troubleshooting
+            logger.error(f"Database insert failed for table {full_table_name}")
+            logger.error(f"Query: {query}")
+            logger.error(f"Columns: {columns}")
+            if batch:
+                logger.error(f"First record data: {batch[0]}")
+                logger.error(f"First record value types: {[(k, type(v).__name__, v) for k, v in batch[0].items()]}")
+            raise
 
     async def execute_query(
         self,
@@ -319,15 +347,12 @@ class PostgreSQLDriver(BaseDatabaseDriver):
         else:
             rows = await conn.fetch(query)
         
-        # Convert rows to dictionaries with datetime handling
+        # Convert rows to dictionaries using utilities for consistent type conversion
         results = []
         for row in rows:
             record = dict(row)
-            # Convert datetime objects to ISO strings for JSON serialization
-            for key, value in record.items():
-                if isinstance(value, datetime):
-                    record[key] = value.isoformat()
-            results.append(record)
+            converted_record = convert_record_from_db(record)
+            results.append(converted_record)
         
         return results
 

@@ -1,6 +1,5 @@
 {
   "endpoint": "/v1/transfers",
-  "type": "api",
   "method": "GET",
   "replication_filter_mapping": {
     "created": "createdDateStart"

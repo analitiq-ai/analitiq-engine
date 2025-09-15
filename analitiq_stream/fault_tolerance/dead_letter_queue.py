@@ -12,6 +12,14 @@ from uuid import uuid4
 logger = logging.getLogger(__name__)
 
 
+class DateTimeEncoder(json.JSONEncoder):
+    """JSON encoder that handles datetime objects."""
+    def default(self, obj):
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        return super().default(obj)
+
+
 class DeadLetterQueue:
     """
     Dead Letter Queue for handling records that fail processing.
@@ -130,7 +138,7 @@ class DeadLetterQueue:
                 await self._create_new_file()
 
             # Write record to current file
-            record_json = json.dumps(dlq_record) + "\n"
+            record_json = json.dumps(dlq_record, cls=DateTimeEncoder) + "\n"
             record_bytes = record_json.encode("utf-8")
 
             with open(self.current_file, "a", encoding="utf-8") as f:
@@ -146,7 +154,7 @@ class DeadLetterQueue:
                 / f"dlq_fallback_{datetime.utcnow().strftime('%Y%m%d_%H%M%S_%f')}.json"
             )
             with open(fallback_file, "w", encoding="utf-8") as f:
-                json.dump(dlq_record, f, indent=2)
+                json.dump(dlq_record, f, indent=2, cls=DateTimeEncoder)
 
     def _need_new_file(self) -> bool:
         """Check if we need to create a new DLQ file."""

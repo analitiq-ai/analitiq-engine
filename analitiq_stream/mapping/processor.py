@@ -5,7 +5,8 @@ import os
 import re
 from typing import Any, Dict, List, Optional, Union
 
-from ..transformations import TransformationError, get_transformation_function
+from ..transformations.registry import get_transformation_registry, TransformationError
+from ..models.transformations import TransformationConfig, TransformationType
 
 logger = logging.getLogger(__name__)
 
@@ -54,10 +55,14 @@ class FieldMappingProcessor:
             
             # Validate transformations exist
             if "transformations" in config:
+                registry = get_transformation_registry()
                 for transform in config["transformations"]:
                     try:
-                        get_transformation_function(transform)
-                    except TransformationError as e:
+                        if isinstance(transform, str):
+                            TransformationType(transform)  # Validate transformation type
+                        elif isinstance(transform, dict):
+                            TransformationConfig(**transform)  # Validate config format
+                    except (ValueError, Exception) as e:
                         raise MappingError(f"Invalid transformation '{transform}' for field '{source_field}': {str(e)}")
     
     def process_record(self, record: Dict[str, Any]) -> Dict[str, Any]:
@@ -141,16 +146,29 @@ class FieldMappingProcessor:
         except Exception:
             return None
     
-    def _apply_transformations(self, value: Any, transformations: List[str]) -> Any:
+    def _apply_transformations(self, value: Any, transformations: List[Union[str, Dict[str, Any]]]) -> Any:
         """Apply list of transformations to value in order."""
+        if not transformations:
+            return value
+            
         result = value
+        registry = get_transformation_registry()
         
-        for transform_name in transformations:
+        for transform in transformations:
             try:
-                transform_func = get_transformation_function(transform_name)
-                result = transform_func(result)
-            except TransformationError as e:
-                raise MappingError(f"Transformation '{transform_name}' failed: {str(e)}")
+                if isinstance(transform, str):
+                    # Simple string transformation
+                    config = TransformationConfig(type=TransformationType(transform))
+                elif isinstance(transform, dict):
+                    # Dict transformation with parameters
+                    config = TransformationConfig(**transform)
+                else:
+                    raise MappingError(f"Invalid transformation format: {transform}")
+                
+                result = registry.apply_transformation(result, config)
+                
+            except (TransformationError, ValueError) as e:
+                raise MappingError(f"Transformation '{transform}' failed: {str(e)}")
         
         return result
     
@@ -222,7 +240,7 @@ class FieldMappingProcessor:
             # Handle function calls
             if expression == "now()":
                 from datetime import datetime
-                return datetime.now().isoformat()
+                return datetime.now()
             elif expression == "uuid()":
                 import uuid
                 return str(uuid.uuid4())

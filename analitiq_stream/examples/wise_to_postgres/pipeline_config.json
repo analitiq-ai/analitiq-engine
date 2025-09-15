@@ -41,34 +41,111 @@
       },
       "mapping": {
         "field_mappings": {
+          "id": {
+            "target": "id",
+            "validation": {
+              "rules": [{"type": "not_null"}],
+              "error_action": "dlq"
+            }
+          },
+          "user": {
+            "target": "user_id",
+            "validation": {
+              "rules": [{"type": "not_null"}],
+              "error_action": "dlq"
+            }
+          },
+          "targetAccount": {
+            "target": "target_account",
+            "validation": {
+              "rules": [{"type": "not_null"}],
+              "error_action": "dlq"
+            }
+          },
+          "sourceAccount": {
+            "target": "source_account"
+          },
+          "quote": {
+            "target": "quote"
+          },
+          "quoteUuid": {
+            "target": "quote_uuid",
+            "validation": {
+              "rules": [{"type": "not_null"}],
+              "error_action": "dlq"
+            }
+          },
+          "status": {
+            "target": "status",
+            "validation": {
+              "rules": [{"type": "not_null"}],
+              "error_action": "dlq"
+            }
+          },
+          "reference": {
+            "target": "reference"
+          },
+          "details.reference": {
+            "target": "details_reference"
+          },
+          "rate": {
+            "target": "rate",
+            "validation": {
+              "rules": [{"type": "not_null"}],
+              "error_action": "dlq"
+            }
+          },
           "created": {
-            "target": "valueDate",
-            "transformations": ["iso_to_date"],
+            "target": "created",
+            "transformations": ["iso_string_to_datetime"],
+            "validation": {
+              "rules": [{"type": "not_null"}],
+              "error_action": "dlq"
+            }
+          },
+          "business": {
+            "target": "business"
+          },
+          "hasActiveIssues": {
+            "target": "has_active_issues",
+            "validation": {
+              "rules": [{"type": "not_null"}],
+              "error_action": "dlq"
+            }
+          },
+          "sourceCurrency": {
+            "target": "source_currency",
+            "validation": {
+              "rules": [{"type": "not_null"}],
+              "error_action": "dlq"
+            }
+          },
+          "sourceValue": {
+            "target": "source_value",
+            "validation": {
+              "rules": [{"type": "not_null"}],
+              "error_action": "dlq"
+            }
+          },
+          "targetCurrency": {
+            "target": "target_currency",
             "validation": {
               "rules": [{"type": "not_null"}],
               "error_action": "dlq"
             }
           },
           "targetValue": {
-            "target": "amount",
+            "target": "target_value",
             "validation": {
               "rules": [{"type": "not_null"}],
               "error_action": "dlq"
             }
           },
-          "details.reference": {
-            "target": "paymtPurpose"
-          }
-        },
-        "computed_fields": {
-          "objectName": {
-            "expression": "CheckAccountTransaction"
+          "customerTransactionId": {
+            "target": "customer_transaction_id"
           },
-          "checkAccount": {
-            "expression": "{\"id\": \"5936402\", \"objectName\": \"CheckAccount\"}"
-          },
-          "status": {
-            "expression": "100"
+          "originator": {
+            "target": "originator_data"
           }
         }
       }
