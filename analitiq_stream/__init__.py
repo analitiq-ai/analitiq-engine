@@ -17,7 +17,6 @@ from .core.pipeline import Pipeline
 from .fault_tolerance.circuit_breaker import CircuitBreaker
 from .fault_tolerance.dead_letter_queue import DeadLetterQueue
 from .fault_tolerance.retry_handler import RetryHandler
-from .fault_tolerance.state_manager import StateManager
 from .schema.schema_manager import SchemaManager
 
 __all__ = [
@@ -25,7 +24,6 @@ __all__ = [
     "Pipeline",
     "credentials_manager",
     "CredentialsManager",
-    "StateManager",
     "RetryHandler",
     "CircuitBreaker",
     "DeadLetterQueue",
