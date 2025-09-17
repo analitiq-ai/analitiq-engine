@@ -50,3 +50,59 @@ Type coverage/strictness: ❌ (no typing for many internals)
 
 # Schema changes
 Add source and destination schema hash that are defi and on changes invalidate state on breaking schema changes.
+
+
+
+# Add circuit breaker to documentation
+
+Circuit Breaker States & Failure Count Logic
+
+The Problem
+
+The test expects that in CLOSED state, successful calls should NOT reset the failure count. But my current implementation resets it. Here's why this matters:
+
+Example Scenario
+
+Imagine you have a flaky service that sometimes fails:
+
+Calls: SUCCESS, FAIL, SUCCESS, FAIL, FAIL, SUCCESS, FAIL, FAIL, FAIL
+
+Current Implementation (Wrong):
+
+Call 1: SUCCESS → failure_count = 0 (reset)
+Call 2: FAIL → failure_count = 1
+Call 3: SUCCESS → failure_count = 0 (reset) ❌
+Call 4: FAIL → failure_count = 1
+Call 5: FAIL → failure_count = 2
+Call 6: SUCCESS → failure_count = 0 (reset) ❌
+Call 7: FAIL → failure_count = 1
+Call 8: FAIL → failure_count = 2
+Call 9: FAIL → failure_count = 3
+Result: Never reaches threshold (5), circuit never opens!
+
+Correct Implementation (What test expects):
+
+Call 1: SUCCESS → failure_count = 0 (starts at 0)
+Call 2: FAIL → failure_count = 1
+Call 3: SUCCESS → failure_count = 1 (NO reset) ✅
+Call 4: FAIL → failure_count = 2
+Call 5: FAIL → failure_count = 3
+Call 6: SUCCESS → failure_count = 3 (NO reset) ✅
+Call 7: FAIL → failure_count = 4
+Call 8: FAIL → failure_count = 5 → CIRCUIT OPENS! 🔴
+
+Why This Matters
+
+Without resetting on success in CLOSED state:
+- Circuit breaker properly detects degraded services
+- Even if some calls succeed, accumulated failures trigger protection
+- Prevents "lucky success" from hiding underlying problems
+
+The failure count should only reset when:
+1. Circuit transitions from OPEN → HALF_OPEN → CLOSED (full recovery cycle)
+2. Manual reset is called
+3. Force close is called
+
+In HALF_OPEN state: Success SHOULD close the circuit because that's the "test if service recovered" phase.
+
+This is a classic circuit breaker pattern - it tracks the general health trend rather than just the last call result.

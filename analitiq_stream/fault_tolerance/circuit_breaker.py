@@ -32,6 +32,7 @@ class CircuitBreaker:
         self,
         failure_threshold: int = 5,
         recovery_timeout: int = 60,
+        success_threshold: int = 1,
         expected_exception: type = Exception,
         name: Optional[str] = None,
     ):
@@ -44,8 +45,14 @@ class CircuitBreaker:
             expected_exception: Exception type that triggers circuit opening
             name: Optional name for the circuit breaker
         """
+        if failure_threshold <= 0:
+            raise ValueError("failure_threshold must be positive")
+        if recovery_timeout <= 0:
+            raise ValueError("recovery_timeout must be positive")
+
         self.failure_threshold = failure_threshold
         self.recovery_timeout = recovery_timeout
+        self.success_threshold = success_threshold
         self.expected_exception = expected_exception
         self.name = name or "CircuitBreaker"
 
@@ -114,7 +121,14 @@ class CircuitBreaker:
         """Check if enough time has passed to attempt reset."""
         if self.last_failure_time is None:
             return True
-        return time.time() - self.last_failure_time >= self.recovery_timeout
+
+        # Handle both datetime objects and timestamps
+        if hasattr(self.last_failure_time, 'timestamp'):
+            last_time = self.last_failure_time.timestamp()
+        else:
+            last_time = self.last_failure_time
+
+        return time.time() - last_time >= self.recovery_timeout
 
     def _transition_to_half_open(self):
         """Transition circuit to half-open state."""
@@ -129,11 +143,13 @@ class CircuitBreaker:
 
         if self.state == CircuitState.HALF_OPEN:
             self.success_count += 1
-            # After successful call in half-open, close the circuit
-            self._close_circuit()
+            # After reaching success threshold in half-open, close the circuit
+            if self.success_count >= self.success_threshold:
+                self._close_circuit()
         elif self.state == CircuitState.CLOSED:
-            # Reset failure count on success
-            self.failure_count = 0
+            # In closed state, don't reset failure count on success
+            # Only reset on explicit reset or after opening/closing cycle
+            pass
 
     def _on_failure(self):
         """Handle failed function execution."""
@@ -212,6 +228,24 @@ class CircuitBreaker:
         logger.info(f"Forcing circuit breaker {self.name} to closed state")
         self.state = CircuitState.CLOSED
         self.failure_count = 0
+
+    def _record_failure(self):
+        """Record a failure for testing purposes."""
+        self._on_failure()
+
+    def _record_success(self):
+        """Record a success for testing purposes."""
+        self._on_success()
+
+    def _is_call_allowed(self) -> bool:
+        """Check if a call is allowed based on current circuit state."""
+        if self.state == CircuitState.CLOSED:
+            return True
+        elif self.state == CircuitState.OPEN:
+            return self._should_attempt_reset()
+        elif self.state == CircuitState.HALF_OPEN:
+            return True
+        return False
 
 
 class CircuitBreakerOpenError(Exception):

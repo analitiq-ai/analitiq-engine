@@ -237,22 +237,27 @@ class FieldMappingProcessor:
         - Literal values
         """
         try:
-            # Handle function calls
+            # Handle function calls using transformation registry
             if expression == "now()":
-                from datetime import datetime
-                return datetime.now()
+                from ..transformations.registry import transformation_registry
+                from ..models.transformations import TransformationType, TransformationConfig
+                config = TransformationConfig(type=TransformationType.NOW)
+                return transformation_registry.apply_transformation(None, config)
             elif expression == "uuid()":
-                import uuid
-                return str(uuid.uuid4())
+                from ..transformations.registry import transformation_registry
+                from ..models.transformations import TransformationType, TransformationConfig
+                config = TransformationConfig(type=TransformationType.UUID)
+                return transformation_registry.apply_transformation(None, config)
             
             # Handle environment variables and field references
             result = expression
-            
+            unresolved_vars = []
+
             # Replace environment variables ${ENV_VAR}
             env_pattern = r'\$\{([^}]+)\}'
             for match in re.finditer(env_pattern, expression):
                 var_name = match.group(1)
-                
+
                 # Check if it's an environment variable
                 env_value = os.getenv(var_name)
                 if env_value is not None:
@@ -266,9 +271,14 @@ class FieldMappingProcessor:
                     field_value = str(target_record[var_name]) if target_record[var_name] is not None else ""
                     result = result.replace(match.group(0), field_value)
                 else:
-                    # Keep original placeholder if not found
+                    # Variable not found
+                    unresolved_vars.append(var_name)
                     logger.warning(f"Variable '{var_name}' not found in environment or record fields")
-            
+
+            # If there are unresolved variables, return None (for validation to catch)
+            if unresolved_vars:
+                return None
+
             return result
             
         except Exception as e:

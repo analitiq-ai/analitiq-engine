@@ -1,9 +1,19 @@
 """Transformation functions for data mapping and processing."""
 
-from .common import (
+from .registry import (
     TransformationError,
-    get_transformation_function,
-    list_available_transformations,
+    TransformationRegistry,
+    transformation_registry,
+    get_transformation_registry,
+    apply_transformation,
+    apply_transformations,
 )
 
-__all__ = ["TransformationError", "get_transformation_function", "list_available_transformations"]
+__all__ = [
+    "TransformationError",
+    "TransformationRegistry",
+    "transformation_registry",
+    "get_transformation_registry",
+    "apply_transformation",
+    "apply_transformations",
+]

@@ -94,6 +94,7 @@ fastapi = "^0.116.1"
 uvicorn = "^0.35.0"
 flask = "^3.1.2"
 
+
 [tool.poetry.extras]
 kafka = ["kafka-python", "aiokafka"]
 cloud = ["boto3", "azure-storage-blob", "google-cloud-storage"]
@@ -111,10 +112,11 @@ all = [
 ]
 
 [tool.poetry.scripts]
-analitiq-stream = "analitiq_stream.cli:main"
-test = "pytest"
-coverage = "analitiq_stream.cli:coverage_html"      # terminal + HTML via pytest-cov
-coverage-html = "analitiq_stream.cli:coverage_html" # alias, both work
+# Scripts removed for Docker deployment - using entrypoint.py directly
+# analitiq-stream = "analitiq_stream.cli:main"
+# test = "pytest"
+# coverage = "analitiq_stream.cli:coverage_html"
+# coverage-html = "analitiq_stream.cli:coverage_html"
 
 [build-system]
 requires = ["poetry-core"]
