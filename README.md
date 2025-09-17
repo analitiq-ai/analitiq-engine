@@ -29,6 +29,42 @@ A high-performance, fault-tolerant data streaming framework for Python 3.11+ tha
 - **Dead letter queues** for poison record isolation
 - **Exception aggregation** with Python 3.11+ ExceptionGroup patterns
 
+#### Circuit Breaker Pattern
+
+The framework implements a sophisticated circuit breaker to prevent cascading failures:
+
+**States & Failure Count Logic:**
+
+- **CLOSED** (Normal operation): Successful calls do NOT reset failure count
+- **OPEN** (Failing fast): All calls blocked until recovery timeout
+- **HALF_OPEN** (Testing recovery): Limited calls allowed to test service health
+
+**Why failure count persists in CLOSED state:**
+
+```
+Scenario: SUCCESS, FAIL, SUCCESS, FAIL, FAIL, SUCCESS, FAIL, FAIL, FAIL
+
+Correct Implementation:
+Call 1: SUCCESS → failure_count = 0 (starts at 0)
+Call 2: FAIL → failure_count = 1
+Call 3: SUCCESS → failure_count = 1 (NO reset) ✅
+Call 4: FAIL → failure_count = 2
+Call 5: FAIL → failure_count = 3
+Call 6: SUCCESS → failure_count = 3 (NO reset) ✅
+Call 7: FAIL → failure_count = 4
+Call 8: FAIL → failure_count = 5 → CIRCUIT OPENS! 🔴
+```
+
+**Benefits:**
+- Detects degraded services even with intermittent successes
+- Prevents "lucky success" from hiding underlying problems
+- Tracks general health trend rather than just last call result
+
+**Failure count resets only when:**
+1. Circuit transitions OPEN → HALF_OPEN → CLOSED (full recovery cycle)
+2. Manual reset is called
+3. Force close is called
+
 ## 📦 Installation
 
 ```bash
