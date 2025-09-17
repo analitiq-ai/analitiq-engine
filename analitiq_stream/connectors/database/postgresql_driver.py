@@ -360,9 +360,10 @@ class PostgreSQLDriver(BaseDatabaseDriver):
         self,
         schema_name: str,
         table_name: str,
-        config: Dict[str, Any]
+        config: Dict[str, Any],
+        cursor_value: Optional[Any] = None
     ) -> Tuple[str, List[Any]]:
-        """Build PostgreSQL incremental read query."""
+        """Build PostgreSQL incremental read query with cursor support."""
         full_table_name = self.get_full_table_name(schema_name, table_name)
         
         columns = config.get("columns", ["*"])
@@ -377,9 +378,11 @@ class PostgreSQLDriver(BaseDatabaseDriver):
         if config.get("where"):
             where_clauses.append(config["where"])
         
-        # Add incremental filter
+        # Add incremental filter using passed cursor_value parameter
         cursor_field = config.get("cursor_field", "updated_at")
-        cursor_value = config.get("cursor_value")
+        # Use the cursor_value parameter passed to this method, fallback to config
+        if cursor_value is None:
+            cursor_value = config.get("cursor_value")
         cursor_mode = config.get("cursor_mode", "exclusive")
         
         if cursor_value:

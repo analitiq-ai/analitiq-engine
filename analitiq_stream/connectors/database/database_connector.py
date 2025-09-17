@@ -148,13 +148,22 @@ class DatabaseConnector(BaseConnector):
             raise ConnectionError(f"Database configuration failed: {str(e)}")
 
     async def read_batches(
-        self, config: Dict[str, Any], batch_size: int = 1000
+        self,
+        config: Dict[str, Any],
+        *,
+        state_manager: "ShardedStateManager",
+        stream_name: str,
+        partition: Optional[Dict[str, Any]] = None,
+        batch_size: int = 1000
     ) -> AsyncIterator[List[Dict[str, Any]]]:
         """
-        Read data in batches from database table using driver delegation.
+        Read data in batches from database table with state management for incremental replication.
 
         Args:
             config: Read configuration
+            state_manager: Sharded state manager for incremental replication
+            stream_name: Name of the stream for state tracking
+            partition: Optional partition identifier for sharded streams
             batch_size: Number of records per batch
 
         Yields:
@@ -165,38 +174,62 @@ class DatabaseConnector(BaseConnector):
             
         try:
             endpoint_config = EndpointConfig(**config)
-            
-            # Build incremental query through driver
+            partition = partition or {}
+
+            # Get current cursor from state manager for incremental reads
+            cursor_state = await state_manager.get_cursor(stream_name, partition)
+            cursor_value = cursor_state.get("cursor") if cursor_state else None
+
+            logger.debug(f"Database read starting with cursor: {cursor_value}")
+
+            # Build incremental query through driver with cursor
             query, params = self.driver.build_incremental_query(
                 endpoint_config.schema,
                 endpoint_config.table,
-                config
+                config,
+                cursor_value=cursor_value
             )
-            
+
             # Execute query with batching
             async with self.driver.connection_pool.acquire() as conn:
                 offset = 0
-                
+                last_cursor_value = cursor_value
+
                 while True:
                     # Add pagination to query
                     batch_query = f"{query} LIMIT {batch_size} OFFSET {offset}"
-                    
+
                     # Execute through driver
                     rows = await self.driver.execute_query(conn, batch_query, params)
-                    
+
                     if not rows:
                         break
-                    
+
+                    # Update cursor from the last record if replication_key exists
+                    replication_key = config.get("replication_key")
+                    if replication_key and rows:
+                        last_cursor_value = rows[-1].get(replication_key)
+
                     self.metrics["records_read"] += len(rows)
                     self.metrics["batches_read"] += 1
-                    
+
                     yield rows
-                    
+
+                    # Save cursor state after each batch
+                    if last_cursor_value is not None:
+                        await state_manager.save_cursor(
+                            stream_name,
+                            partition,
+                            {"cursor": last_cursor_value}
+                        )
+
                     offset += batch_size
-                    
+
                     # If we got less than batch_size, we're done
                     if len(rows) < batch_size:
                         break
+
+            logger.debug(f"Database read completed with final cursor: {last_cursor_value}")
 
         except Exception as e:
             self.metrics["errors"] += 1

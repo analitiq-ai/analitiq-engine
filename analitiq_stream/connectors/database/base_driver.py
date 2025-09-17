@@ -100,9 +100,10 @@ class BaseDatabaseDriver(ABC):
         self,
         schema_name: str,
         table_name: str,
-        config: Dict[str, Any]
+        config: Dict[str, Any],
+        cursor_value: Optional[Any] = None
     ) -> Tuple[str, List[Any]]:
-        """Build incremental read query with parameters."""
+        """Build incremental read query with parameters and cursor support."""
         pass
 
     @abstractmethod

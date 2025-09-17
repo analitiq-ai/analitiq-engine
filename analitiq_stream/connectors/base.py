@@ -51,13 +51,22 @@ class BaseConnector(ABC):
 
     @abstractmethod
     async def read_batches(
-        self, config: Dict[str, Any], batch_size: int = 1000
+        self,
+        config: Dict[str, Any],
+        *,
+        state_manager: "ShardedStateManager",
+        stream_name: str,
+        partition: Optional[Dict[str, Any]] = None,
+        batch_size: int = 1000
     ) -> AsyncIterator[List[Dict[str, Any]]]:
         """
-        Read data in batches from the source.
+        Read data in batches from the source with state management.
 
         Args:
             config: Read configuration
+            state_manager: Sharded state manager for incremental replication
+            stream_name: Name of the stream for state tracking
+            partition: Optional partition identifier for sharded streams
             batch_size: Number of records per batch
 
         Yields:

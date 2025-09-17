@@ -87,8 +87,9 @@ class APIConnector(BaseConnector):
             self.is_connected = False
 
     async def read_batches(
-        self, 
-        config: Dict[str, Any], 
+        self,
+        config: Dict[str, Any],
+        *,
         state_manager: ShardedStateManager,
         stream_name: str,
         partition: Optional[Dict[str, Any]] = None,
