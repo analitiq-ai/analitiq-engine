@@ -252,9 +252,65 @@ class RecordBatch(BaseModel):
         """Validate batch metadata is consistent."""
         if self.total_count is not None and self.total_count < len(self.records):
             raise ValueError("total_count cannot be less than actual record count")
-            
+
         if self.has_more and not self.next_cursor:
             # Warning rather than error - some APIs don't provide cursors
             pass
-            
+
         return self
+
+
+class EndpointConfig(BaseModel):
+    """API endpoint configuration."""
+
+    endpoint: str = Field(..., description="API endpoint path")
+    method: Literal["GET", "POST", "PUT", "PATCH", "DELETE"] = Field("GET", description="HTTP method")
+    response_schema: Optional[Dict[str, Any]] = Field(None, description="JSON Schema for response validation")
+
+    @field_validator("endpoint")
+    @classmethod
+    def validate_endpoint(cls, v):
+        """Validate endpoint path."""
+        if not v or not v.strip():
+            raise ValueError("endpoint cannot be empty")
+
+        # Ensure endpoint starts with /
+        endpoint = v.strip()
+        if not endpoint.startswith("/"):
+            endpoint = "/" + endpoint
+
+        return endpoint
+
+
+class HostConfig(BaseModel):
+    """API host configuration."""
+
+    base_url: str = Field(..., description="Base URL for the API")
+    headers: Dict[str, str] = Field(default_factory=dict, description="HTTP headers")
+    rate_limit: Optional[RateLimitConfig] = Field(None, description="Rate limiting configuration")
+
+    @field_validator("base_url")
+    @classmethod
+    def validate_base_url(cls, v):
+        """Validate base URL format."""
+        if not v:
+            raise ValueError("base_url cannot be empty")
+
+        parsed = urlparse(v)
+        if not parsed.scheme or not parsed.netloc:
+            raise ValueError("base_url must be a valid URL with scheme and host")
+
+        if parsed.scheme not in ["http", "https"]:
+            raise ValueError("base_url must use http or https scheme")
+
+        return v
+
+
+class APIConfig(BaseModel):
+    """Complete API configuration combining host and endpoint."""
+
+    host: HostConfig = Field(..., description="Host configuration")
+    endpoint: EndpointConfig = Field(..., description="Endpoint configuration")
+    connection: Optional[APIConnectionConfig] = Field(None, description="Connection configuration")
+    read_config: Optional[APIReadConfig] = Field(None, description="Read-specific configuration")
+    write_config: Optional[APIWriteConfig] = Field(None, description="Write-specific configuration")

@@ -1,0 +1,78 @@
+version: '3.8'
+
+# AWS ECS-compatible Docker Compose configuration
+# This configuration mirrors what would be deployed in AWS ECS
+
+services:
+  analitiq-stream:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: analitiq-stream:latest
+    container_name: analitiq-stream-aws
+
+    # AWS environment configuration
+    environment:
+      - ENV=dev  # or 'prod' for production
+      - PIPELINE_ID=${PIPELINE_ID}  # Must be provided at runtime
+      - AWS_REGION=eu-central-1
+      - S3_CONFIG_BUCKET=analitiq-config
+
+    # ECS-equivalent resource configuration
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'        # 1024 CPU units in ECS
+          memory: 2048M      # 2GB RAM
+        reservations:
+          cpus: '0.5'        # 512 CPU units in ECS
+          memory: 1024M      # 1GB RAM
+
+    # Mount only essential directories (no local config mount in AWS)
+    volumes:
+      - analitiq_state:/app/state
+      - analitiq_logs:/app/logs
+      - analitiq_deadletter:/app/deadletter
+
+    # ECS-compatible restart policy
+    restart: unless-stopped
+
+    # Health check (ECS equivalent)
+    healthcheck:
+      test: ["CMD", "python", "-c", "from analitiq_stream.core.pipeline_config_prep import PipelineConfigPrep; print('Health check passed')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+    # CloudWatch-compatible logging
+    logging:
+      driver: "awslogs"
+      options:
+        awslogs-group: "/ecs/analitiq-stream"
+        awslogs-region: "eu-central-1"
+        awslogs-stream-prefix: "pipeline"
+        # Alternative for local testing with AWS logging
+        # driver: "json-file"
+        # options:
+        #   max-size: "100m"
+        #   max-file: "5"
+
+# Named volumes (in ECS, these would be EFS or EBS volumes)
+volumes:
+  analitiq_state:
+    driver: local
+    # In ECS, this would be:
+    # driver_opts:
+    #   type: efs
+    #   device: "fs-xxxxxxxxx.efs.eu-central-1.amazonaws.com:/"
+  analitiq_logs:
+    driver: local
+  analitiq_deadletter:
+    driver: local
+
+# Network configuration (ECS uses VPC networking)
+networks:
+  default:
+    driver: bridge
+    # In ECS, this would be handled by VPC configuration

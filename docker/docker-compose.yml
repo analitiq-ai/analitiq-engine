@@ -1,0 +1,70 @@
+version: '3.8'
+
+services:
+  analitiq-stream:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: analitiq-stream:latest
+    container_name: analitiq-stream-pipeline
+
+    # Environment variables - configure these for your deployment
+    env_file: .env
+    environment:
+      - ENV=local  # Change to 'dev' or 'prod' for AWS deployments
+      - PIPELINE_ID=a1b2c3d4-e5f6-7890-abcd-ef1234567890  # Replace with your pipeline ID
+      - AWS_REGION=eu-central-1
+      - S3_CONFIG_BUCKET=analitiq-config
+      - LOCAL_CONFIG_MOUNT=/config
+
+    # Volume mounts for local development
+    volumes:
+      # Mount local config directory for testing
+      - ../examples/wise_to_sevdesk:/config:ro
+
+      # Mount state, logs, and deadletter directories for persistence
+      - analitiq_state:/app/state
+      - analitiq_logs:/app/logs
+      - analitiq_deadletter:/app/deadletter
+
+    # Resource limits (similar to ECS task definition)
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1024M
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
+    # Restart policy
+    restart: unless-stopped
+
+    # Health check
+    healthcheck:
+      test: ["CMD", "python", "-c", "from analitiq_stream.core.pipeline_config_prep import PipelineConfigPrep; print('Health check passed')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "3"
+
+# Named volumes for data persistence
+volumes:
+  analitiq_state:
+    driver: local
+  analitiq_logs:
+    driver: local
+  analitiq_deadletter:
+    driver: local
+
+# Example network configuration (if needed)
+networks:
+  default:
+    driver: bridge
