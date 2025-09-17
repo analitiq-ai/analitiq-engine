@@ -437,13 +437,23 @@ class TestPostgreSQLDriverDataOperations:
     async def test_execute_upsert_with_json_data(self, driver):
         """Test upsert with JSON data."""
         mock_conn = AsyncMock()
-        
+
+        # Set up schema information in driver for JSON conversion
+        table_schema = {
+            "properties": {
+                "id": {"type": "integer", "database_type": "BIGINT"},
+                "metadata": {"type": "object", "database_type": "JSONB"},
+                "tags": {"type": "array", "database_type": "JSONB"}
+            }
+        }
+        driver._build_column_type_mapping(table_schema)
+
         batch = [
             {"id": 1, "metadata": {"key": "value"}, "tags": ["tag1", "tag2"]}
         ]
-        
+
         conflict_config = {"on_conflict": "id"}
-        
+
         await driver.execute_upsert(mock_conn, "schema", "table", batch, conflict_config)
         
         values = mock_conn.executemany.call_args[0][1]

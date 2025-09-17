@@ -77,11 +77,11 @@ class TestDatabaseConfig:
         """Test valid database configuration."""
         config = DatabaseConfig(**database_config)
         assert config.driver == "postgresql"
-        assert config.host == "localhost"
-        assert config.port == 5432
-        assert config.database == "test_db"
-        assert config.user == "test_user"
-        assert config.password == "test_password"
+        assert config.host == os.getenv("POSTGRES_HOST", "localhost")
+        assert config.port == int(os.getenv("POSTGRES_PORT", "5432"))
+        assert config.database == os.getenv("POSTGRES_DB", "analitiq_test")
+        assert config.user == os.getenv("POSTGRES_USER", "postgres")
+        assert config.password == os.getenv("POSTGRES_PASSWORD", "test_password")
 
     def test_missing_required_fields(self):
         """Test validation with missing required fields."""

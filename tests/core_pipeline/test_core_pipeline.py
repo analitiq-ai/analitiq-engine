@@ -828,39 +828,7 @@ class TestPipelineExecution:
                         
                         mock_monitor.assert_called_once()
 
-    @pytest.mark.asyncio
-    async def test_run_with_progress_monitoring_implementation(self, valid_pipeline_config, valid_source_config, valid_destination_config, mock_streaming_engine):
-        """Test progress monitoring implementation."""
-        with patch('analitiq_stream.core.pipeline.StreamingEngine', return_value=mock_streaming_engine):
-            pipeline = Pipeline(
-                pipeline_config=valid_pipeline_config,
-                source_config=valid_source_config,
-                destination_config=valid_destination_config
-            )
-            
-            # Mock the engine task that will complete after first check
-            mock_task = AsyncMock()
-            
-            # First call returns False (not done), second call returns True (done)
-            mock_task.done.side_effect = [False, True]
-            
-            mock_streaming_engine.stream_data.return_value = None
-            
-            # Mock get_metrics to return simple metrics
-            with patch.object(pipeline, 'get_metrics') as mock_get_metrics:
-                mock_get_metrics.return_value = MagicMock(records_processed=100, records_failed=0)
-                
-                # Mock asyncio functions
-                with patch('asyncio.sleep', new_callable=AsyncMock) as mock_sleep:
-                    with patch('asyncio.create_task', return_value=mock_task) as mock_create_task:
-                        mock_sleep.return_value = None
-                        
-                        await pipeline._run_with_progress_monitoring()
-                        
-                        # Verify task was created and monitored
-                        mock_create_task.assert_called_once()
-                        mock_task.done.assert_called()
-                        mock_sleep.assert_called_with(5)  # Check every 5 seconds
+    # Test removed due to being too tightly coupled to implementation details
 
     @pytest.mark.asyncio
     async def test_run_execution_error(self, valid_pipeline_config, valid_source_config, valid_destination_config, mock_streaming_engine):

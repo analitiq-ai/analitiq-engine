@@ -282,8 +282,7 @@ class Pipeline:
                     logger.error(f"engine_config.{field} must be an integer")
                     return False
 
-        @staticmethod
-        def _validate_src_dest(key:str) -> bool:
+        def _validate_src_dest(key: str) -> bool:
             config_value = self.config[key]
             if not isinstance(config_value, dict):
                 logger.error(f"{key} must be a dictionary")
@@ -317,8 +316,7 @@ class Pipeline:
         # Validate src and dst sections if present
         for section in ("src", "dst"):
             if section in self.config:
-                results = _validate_src_dest(section)
-                if not results:
+                if not _validate_src_dest(section):
                     return False
 
         return True

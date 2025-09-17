@@ -53,12 +53,6 @@ Add source and destination schema hash that are defi and on changes invalidate s
 
 
 
-# Add circuit breaker to documentation
-
-
-
-
-
 # Look for common datetime patterns - be more strict
     return (
         value.endswith('Z') or  # ISO with Z timezone

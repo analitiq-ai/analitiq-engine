@@ -21,7 +21,7 @@ class TestDatabaseTypeConversion:
         """Test converting datetime strings to database-compatible datetime objects."""
         # ISO format with Z timezone
         iso_z = "2025-01-15T10:00:00Z"
-        result = convert_python_to_db(iso_z)
+        result = convert_python_to_db(iso_z, "TIMESTAMPTZ")
         assert isinstance(result, datetime)
         assert result.year == 2025
         assert result.month == 1
@@ -30,12 +30,12 @@ class TestDatabaseTypeConversion:
 
         # ISO format with timezone offset
         iso_offset = "2025-01-15T10:00:00+01:00"
-        result = convert_python_to_db(iso_offset)
+        result = convert_python_to_db(iso_offset, "TIMESTAMPTZ")
         assert isinstance(result, datetime)
 
         # ISO format without timezone
         iso_simple = "2025-01-15T10:00:00"
-        result = convert_python_to_db(iso_simple)
+        result = convert_python_to_db(iso_simple, "TIMESTAMP")
         assert isinstance(result, datetime)
 
     def test_convert_datetime_objects_from_db(self):
@@ -49,34 +49,34 @@ class TestDatabaseTypeConversion:
         """Test converting dict/list to JSON strings."""
         # Dictionary
         data_dict = {"key": "value", "number": 42}
-        result = convert_python_to_db(data_dict)
+        result = convert_python_to_db(data_dict, "JSONB")
         assert isinstance(result, str)
         assert '"key":"value"' in result.replace(" ", "")
 
         # List
         data_list = ["item1", "item2", 123]
-        result = convert_python_to_db(data_list)
+        result = convert_python_to_db(data_list, "JSONB")
         assert isinstance(result, str)
         assert "item1" in result
 
     def test_convert_none_values(self):
         """Test handling None values."""
-        assert convert_python_to_db(None) is None
+        assert convert_python_to_db(None, "TEXT") is None
         assert convert_db_to_python(None) is None
 
     def test_convert_regular_values(self):
         """Test that regular values pass through unchanged."""
         # Strings that are not datetime-like
         regular_string = "just a string"
-        assert convert_python_to_db(regular_string) == regular_string
+        assert convert_python_to_db(regular_string, "TEXT") == regular_string
 
         # Numbers
-        assert convert_python_to_db(42) == 42
-        assert convert_python_to_db(3.14) == 3.14
+        assert convert_python_to_db(42, "INTEGER") == 42
+        assert convert_python_to_db(3.14, "DECIMAL") == 3.14
 
         # Booleans
-        assert convert_python_to_db(True) is True
-        assert convert_python_to_db(False) is False
+        assert convert_python_to_db(True, "BOOLEAN") is True
+        assert convert_python_to_db(False, "BOOLEAN") is False
 
     def test_convert_record_for_db(self):
         """Test converting entire records for database writing."""
@@ -88,7 +88,15 @@ class TestDatabaseTypeConversion:
             "is_active": True
         }
 
-        result = convert_record_for_db(record)
+        column_types = {
+            "id": "INTEGER",
+            "name": "TEXT",
+            "created_at": "TIMESTAMPTZ",
+            "metadata": "JSONB",
+            "is_active": "BOOLEAN"
+        }
+
+        result = convert_record_for_db(record, column_types)
 
         assert result["id"] == 1
         assert result["name"] == "Test User"
@@ -122,8 +130,14 @@ class TestDatabaseTypeConversion:
             "metadata": {"key": "value"}
         }
         columns = ["id", "name", "created_at", "metadata"]
+        column_types = {
+            "id": "INTEGER",
+            "name": "TEXT",
+            "created_at": "TIMESTAMPTZ",
+            "metadata": "JSONB"
+        }
 
-        values = extract_values_for_columns(record, columns)
+        values = extract_values_for_columns(record, columns, column_types)
 
         assert len(values) == 4
         assert values[0] == 1  # id
@@ -147,22 +161,22 @@ class TestDatabaseTypeConversion:
 
     def test_edge_cases(self):
         """Test edge cases and error handling."""
-        # Invalid datetime string should return as-is
+        # Invalid datetime string should return as-is for non-timestamp columns
         invalid_dt = "not-a-datetime-2025-01-15"
-        result = convert_python_to_db(invalid_dt)
+        result = convert_python_to_db(invalid_dt, "TEXT")
         assert result == invalid_dt
 
         # Short strings should not be processed as datetime
         short_string = "2025"
-        result = convert_python_to_db(short_string)
+        result = convert_python_to_db(short_string, "TEXT")
         assert result == short_string
 
         # Empty values
-        assert convert_python_to_db("") == ""
+        assert convert_python_to_db("", "TEXT") == ""
         assert convert_db_to_python("") == ""
 
     def test_preserve_existing_datetime_objects(self):
         """Test that existing datetime objects are preserved."""
         dt = datetime(2025, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
-        result = convert_python_to_db(dt)
+        result = convert_python_to_db(dt, "TIMESTAMPTZ")
         assert result is dt  # Should be the same object

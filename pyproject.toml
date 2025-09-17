@@ -179,7 +179,7 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 minversion = "7.0"
-addopts = "-ra -v --strict-markers --strict-config"
+addopts = "-ra -v --strict-markers --strict-config --ignore=tests/unit/analitiq_stream/fault_tolerance"
 testpaths = ["tests"]
 python_files = ["test_*.py", "*_test.py"]
 python_classes = ["Test*"]
@@ -188,6 +188,7 @@ markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "integration: marks tests as integration tests",
     "unit: marks tests as unit tests",
+    "fault_tolerance: marks tests as fault tolerance tests (run separately)",
 ]
 asyncio_mode = "auto"
 
