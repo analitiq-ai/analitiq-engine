@@ -32,7 +32,7 @@ class CircuitBreaker:
         self,
         failure_threshold: int = 5,
         recovery_timeout: int = 60,
-        success_threshold: int = 1,
+        success_threshold: int = 2,
         expected_exception: type = Exception,
         name: Optional[str] = None,
     ):
@@ -112,9 +112,10 @@ class CircuitBreaker:
             # Expected failure - handle state transitions
             self._on_failure()
             raise
-        except Exception as e:
-            # Unexpected exception - don't count as failure
-            logger.warning(f"Unexpected exception in {self.name}: {str(e)}")
+        except BaseException as e:
+            # Handle exceptions that don't inherit from Exception (like aiohttp.ClientTimeout)
+            # For circuit breaker purposes, treat all failures the same
+            self._on_failure()
             raise
 
     def _should_attempt_reset(self) -> bool:
@@ -179,6 +180,7 @@ class CircuitBreaker:
         self.state = CircuitState.CLOSED
         self.state_transitions[CircuitState.CLOSED] += 1
         self.failure_count = 0
+        self.success_count = 0
 
     def get_state(self) -> CircuitState:
         """Get current circuit state."""
@@ -259,9 +261,9 @@ class DatabaseCircuitBreaker(CircuitBreaker):
 
     def __init__(self, name: str = "DatabaseCircuitBreaker"):
         super().__init__(
-            failure_threshold=5,
+            failure_threshold=5,  # Database-specific default
             recovery_timeout=30,
-            expected_exception=Exception,  # Customize with database exceptions
+            expected_exception=Exception,  # Keep generic for now
             name=name,
         )
 
@@ -270,11 +272,16 @@ class APICircuitBreaker(CircuitBreaker):
     """Specialized circuit breaker for API operations."""
 
     def __init__(self, name: str = "APICircuitBreaker"):
-        import aiohttp
+        try:
+            import aiohttp
+            # Include specific aiohttp exceptions that inherit from Exception or BaseException
+            api_exceptions = (aiohttp.ClientError, ConnectionError, TimeoutError, OSError, Exception)
+        except ImportError:
+            api_exceptions = (ConnectionError, TimeoutError, OSError, Exception)
 
         super().__init__(
             failure_threshold=3,
             recovery_timeout=60,
-            expected_exception=(aiohttp.ClientError, ConnectionError, TimeoutError),
+            expected_exception=api_exceptions,
             name=name,
         )

@@ -49,6 +49,7 @@ class RetryHandler:
         # Metrics
         self.retry_counts = {}
         self.total_retries = 0
+        self.attempt_count = 0  # Track current attempt count
 
     def _calculate_delay(self, attempt: int) -> float:
         """Calculate delay for retry attempt with exponential backoff and jitter."""
@@ -82,8 +83,10 @@ class RetryHandler:
         """
         func_name = getattr(func, "__name__", str(func))
         last_exception = None
+        self.attempt_count = 0
 
         for attempt in range(self.max_retries + 1):
+            self.attempt_count = attempt + 1
             try:
                 # Execute function (handle both sync and async)
                 if asyncio.iscoroutinefunction(func):
@@ -155,17 +158,18 @@ class RetryHandler:
         """Reset retry metrics."""
         self.retry_counts = {}
         self.total_retries = 0
+        self.attempt_count = 0
 
 
 class ExponentialBackoffRetry(RetryHandler):
     """Specialized retry handler with exponential backoff."""
 
-    def __init__(self, max_retries: int = 5, base_delay: float = 0.5):
+    def __init__(self, max_retries: int = 5, base_delay: float = 0.5, multiplier: float = 2.0):
         super().__init__(
             max_retries=max_retries,
             base_delay=base_delay,
             max_delay=300.0,  # 5 minutes max
-            backoff_multiplier=2.0,
+            backoff_multiplier=multiplier,
             jitter=True,
         )
 
