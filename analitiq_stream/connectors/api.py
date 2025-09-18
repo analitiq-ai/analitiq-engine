@@ -118,7 +118,7 @@ class APIConnector(BaseConnector):
 
             # Load state from state manager
             # Use the complete config passed to read_batches, which contains merged source configuration
-            state = self._load_state_from_sharded_manager(
+            state = self._load_state_from_state_manager(
                 state_manager, stream_name, partition, config
             )
             
@@ -277,7 +277,7 @@ class APIConnector(BaseConnector):
             self.metrics["errors"] += 1
             raise ReadError(f"API {method} connection to {full_url} failed: {str(e)}")
 
-    def _load_state_from_sharded_manager(
+    def _load_state_from_state_manager(
         self, 
         state_manager: StateManager,
         stream_name: str, 
@@ -306,8 +306,8 @@ class APIConnector(BaseConnector):
             bookmarks = []
             
         cursor_field = config.get("cursor_field")
-        logger.debug(f"API Connector _load_state_from_sharded_manager: received config keys = {list(config.keys())}")
-        logger.debug(f"API Connector _load_state_from_sharded_manager: cursor_field = {cursor_field}")
+        logger.debug(f"API Connector _load_state_from_state_manager: received config keys = {list(config.keys())}")
+        logger.debug(f"API Connector _load_state_from_state_manager: cursor_field = {cursor_field}")
         
         return {
             "bookmarks": bookmarks,

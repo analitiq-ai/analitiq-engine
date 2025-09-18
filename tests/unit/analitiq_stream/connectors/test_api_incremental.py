@@ -186,7 +186,7 @@ class TestAPIIncrementalReplication:
         # Should not modify config filters when no cursor
         assert config["filters"] == {}
 
-    def test_load_state_from_sharded_manager(self):
+    def test_load_state_from_manager(self):
         """Test loading state from state manager."""
         # Create mock state manager
         mock_state_manager = MagicMock(spec=StateManager)
@@ -201,7 +201,7 @@ class TestAPIIncrementalReplication:
             "safety_window_seconds": 300
         }
 
-        state = self.connector._load_state_from_sharded_manager(
+        state = self.connector._load_state_from_state_manager(
             mock_state_manager, "test_stream", {}, config
         )
 

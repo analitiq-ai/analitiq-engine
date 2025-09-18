@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from datetime import datetime, timezone
 
 from analitiq_stream.connectors.api import APIConnector
-from analitiq_stream.fault_tolerance.sharded_state_manager import StateManager
+from analitiq_stream.fault_tolerance.state_manager import StateManager
 
 
 class TestDuplicateRecordsIntegration:
@@ -418,7 +418,7 @@ class TestDuplicateRecordsIntegration:
             "tie_breaker_fields": ["id"]
         })
         
-        loaded_state = connector._load_state_from_sharded_manager(
+        loaded_state = connector._load_state_from_state_manager(
             state_manager, "test-stream-1", {}, config
         )
         
@@ -901,7 +901,7 @@ class TestDuplicateRecordsIntegration:
             assert metrics1.records_processed > 0, "First run should process at least 1 record"
             
             # Check that tie-breaker information was saved
-            from analitiq_stream.fault_tolerance.sharded_state_manager import StateManager
+            from analitiq_stream.fault_tolerance.state_manager import StateManager
             state_manager = StateManager("test-integration-pipeline", str(temp_state_dir))
             
             partition_state = state_manager.get_partition_state("stream.test-stream-001", {})

@@ -9,7 +9,7 @@ from aiohttp import ClientTimeout, TCPConnector, ClientSession
 
 from analitiq_stream.connectors.api import APIConnector, RateLimiter
 from analitiq_stream.connectors.base import ConnectionError, ReadError, WriteError
-from analitiq_stream.fault_tolerance.sharded_state_manager import StateManager
+from analitiq_stream.fault_tolerance.state_manager import StateManager
 
 
 @pytest.fixture
