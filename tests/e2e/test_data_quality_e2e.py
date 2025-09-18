@@ -22,41 +22,25 @@ def _configure_pipeline_directories(pipeline: Pipeline, temp_dirs: Dict[str, Pat
 
 def test_invalid_records_routed_to_dlq(
     temp_dirs,
-    mock_pipeline_id,
     source_config,
     destination_config,
+    e2e_data_quality_pipeline_config,
 ):
     """Ensure invalid records are rejected and written to the DLQ while valid ones persist."""
 
-    stream_id = "quality-stream"
-    source_endpoint = "quality-source"
-    destination_endpoint = "quality-destination"
+    pipeline_config, stream_id, source_endpoint_id, dest_endpoint_id = e2e_data_quality_pipeline_config
 
-    pipeline_config = {
-        "pipeline_id": mock_pipeline_id,
-        "name": "Data Quality Pipeline",
-        "version": "1.0",
-        "engine_config": {"batch_size": 1, "max_concurrent_batches": 1},
-        "streams": {
-            stream_id: {
-                "name": "Data quality checks",
-                "src": {"endpoint_id": source_endpoint},
-                "dst": {"endpoint_id": destination_endpoint},
-            }
-        },
-    }
-
-    source_config["endpoint_id"] = source_endpoint
-    source_config["records_by_endpoint"][source_endpoint] = [
+    source_config["endpoint_id"] = source_endpoint_id
+    source_config["records_by_endpoint"][source_endpoint_id] = [
         {"id": 1, "email": "valid@example.com", "name": "Valid One"},
         {"id": 2, "email": None, "name": "Invalid"},
         {"id": 3, "email": "valid2@example.com", "name": "Valid Two"},
     ]
-    source_config["records_by_endpoint"][stream_id] = source_config["records_by_endpoint"][source_endpoint]
+    source_config["records_by_endpoint"][stream_id] = source_config["records_by_endpoint"][source_endpoint_id]
 
-    destination_config["endpoint_id"] = destination_endpoint
-    destination_config["failure_scenarios"][destination_endpoint] = {
-        "reject_if_missing": ["email"],
+    destination_config["endpoint_id"] = dest_endpoint_id
+    destination_config["failure_scenarios"][dest_endpoint_id] = {
+        "reject_if_missing": ["email_address"],  # Updated to match field mapping in fixture
     }
 
     pipeline = Pipeline(
@@ -76,10 +60,10 @@ def test_invalid_records_routed_to_dlq(
     assert metrics.batches_processed == 3
     assert metrics.batches_failed == 1
 
-    stored_records = destination_config["storage_by_endpoint"][destination_endpoint]
-    assert [record["id"] for record in stored_records] == [1, 3]
+    stored_records = destination_config["storage_by_endpoint"][dest_endpoint_id]
+    assert [record["user_id"] for record in stored_records] == [1, 3]  # Updated to match field mapping
 
-    attempt_log = destination_config["attempt_log"][destination_endpoint]
+    attempt_log = destination_config["attempt_log"][dest_endpoint_id]
     assert len(attempt_log) == 3  # one attempt per batch/record
 
     dlq_files = sorted(dlq_dir.rglob("dlq_*.jsonl"))
@@ -98,47 +82,58 @@ def test_invalid_records_routed_to_dlq(
 
 def test_field_transformations_apply_to_valid_records(
     temp_dirs,
-    mock_pipeline_id,
     source_config,
     destination_config,
+    e2e_pipeline_config_base,
 ):
     """Validate that configured field mappings and transformations run end to end."""
 
-    stream_id = "transformation-stream"
-    source_endpoint = "transform-source"
-    destination_endpoint = "transform-destination"
+    import uuid
+    stream_id = str(uuid.uuid4())
+    source_endpoint_id = str(uuid.uuid4())
+    dest_endpoint_id = str(uuid.uuid4())
 
-    pipeline_config = {
-        "pipeline_id": mock_pipeline_id,
-        "name": "Transformation Pipeline",
-        "version": "1.0",
-        "engine_config": {"batch_size": 2, "max_concurrent_batches": 1},
-        "streams": {
-            stream_id: {
-                "name": "Transformation stream",
-                "src": {"endpoint_id": source_endpoint},
-                "dst": {"endpoint_id": destination_endpoint},
-                "mapping": {
-                    "field_mappings": {
-                        "name": {"target": "full_name", "transformations": ["uppercase"]},
-                        "amount": {"target": "amount", "transformations": ["to_float"]},
-                    },
-                    "computed_fields": {
-                        "status": "processed",
+    # Create custom config for transformation testing
+    pipeline_config = e2e_pipeline_config_base.copy()
+    pipeline_config["name"] = "Transformation Pipeline"
+    pipeline_config["engine_config"]["batch_size"] = 2
+    pipeline_config["streams"] = {
+        stream_id: {
+            "name": "transformation-stream",
+            "description": "Stream for testing field transformations",
+            "src": {
+                "endpoint_id": source_endpoint_id,
+                "replication_method": "full_refresh",
+                "primary_key": ["id"]
+            },
+            "dst": {
+                "endpoint_id": dest_endpoint_id,
+                "refresh_mode": "insert",
+                "batch_support": True,
+                "batch_size": 2
+            },
+            "mapping": {
+                "field_mappings": {
+                    "name": {"target": "full_name", "transformations": ["uppercase"]},
+                    "amount": {"target": "amount", "transformations": ["to_float"]},
+                },
+                "computed_fields": {
+                    "status": {
+                        "expression": "processed"
                     },
                 },
-            }
-        },
+            },
+        }
     }
 
-    source_config["endpoint_id"] = source_endpoint
-    source_config["records_by_endpoint"][source_endpoint] = [
+    source_config["endpoint_id"] = source_endpoint_id
+    source_config["records_by_endpoint"][source_endpoint_id] = [
         {"id": 10, "name": "alice", "amount": "5.5"},
         {"id": 11, "name": "Bob", "amount": "7"},
     ]
-    source_config["records_by_endpoint"][stream_id] = source_config["records_by_endpoint"][source_endpoint]
+    source_config["records_by_endpoint"][stream_id] = source_config["records_by_endpoint"][source_endpoint_id]
 
-    destination_config["endpoint_id"] = destination_endpoint
+    destination_config["endpoint_id"] = dest_endpoint_id
 
     pipeline = Pipeline(
         pipeline_config=pipeline_config,
@@ -156,7 +151,7 @@ def test_field_transformations_apply_to_valid_records(
     assert metrics.records_failed == 0
     assert metrics.batches_processed == 1
 
-    stored_records = destination_config["storage_by_endpoint"][destination_endpoint]
+    stored_records = destination_config["storage_by_endpoint"][dest_endpoint_id]
     assert stored_records == [
         {"full_name": "ALICE", "amount": 5.5, "status": "processed"},
         {"full_name": "BOB", "amount": 7.0, "status": "processed"},

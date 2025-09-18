@@ -1,11 +1,11 @@
 # Analitiq Stream
 
-A high-performance, fault-tolerant data streaming framework for Python 3.11+ that enables reliable data movement between various sources and destinations with **sharded state management**, **strong input validation**, **pipeline orchestration**, and **comprehensive observability**.
+A high-performance, fault-tolerant data streaming framework for Python 3.11+ that enables reliable data movement between various sources and destinations with **state management**, **strong input validation**, **pipeline orchestration**, and **comprehensive observability**.
 
 ## 🚀 Features
 
 ### Core Architecture
-- **Sharded State Management** - Separate state files per stream/partition for scalability
+- **State Management** - Separate state files per stream/partition for scalability
 - **Pydantic v2 Validation** - Strong input validation and type safety throughout
 - **Config Immutability** - Pipeline configurations are validated and fingerprinted
 - **Safe Deserialization** - Protected JSON parsing with comprehensive error handling
@@ -102,9 +102,9 @@ The framework uses a **layered architecture** with clear separation of concerns:
 - **`PipelineOrchestrator`** - Concurrent stream execution with Python 3.11+ exception handling
 - **`StreamingEngine`** - Core stream processing with factory patterns
 - **`APIConnector`** - Abstract API connector for sources and destinations
-- **`ShardedStateManager`** - Scalable state management per stream/partition
+- **`StateManager`** - Scalable state management per stream/partition
 
-### Modern Sharded State Management
+### Modern State Management
 
 The framework separates **immutable configuration** from **mutable state** with **concurrent worker support** for horizontal scaling:
 
@@ -366,7 +366,7 @@ await pipeline.run()
 ```python
 from analitiq_stream.core.engine import StreamingEngine
 from analitiq_stream.models.engine import EngineConfig, PipelineMetricsSnapshot
-from analitiq_stream.fault_tolerance.sharded_state_manager import ShardedStateManager
+from analitiq_stream.fault_tolerance.state_manager import StateManager
 
 # Create engine with validated configuration
 engine_config = EngineConfig(
@@ -473,7 +473,7 @@ poetry run pre-commit run --all-files
 - ✅ **Engine Configuration** - Pydantic validation, factory methods, type safety
 - ✅ **Pipeline Orchestration** - Concurrent execution, exception handling, metrics
 - ✅ **API Connector** - Deduplication, incremental replication, error handling  
-- ✅ **State Management** - Sharded state, cursor tracking, tie-breaker logic
+- ✅ **State Management** - State persistence, cursor tracking, tie-breaker logic
 - ✅ **Exception Handling** - Python 3.11+ patterns, contextual errors
 - ✅ **Metrics & Monitoring** - Performance tracking, structured logging
 
@@ -582,7 +582,7 @@ For detailed technical specifications:
 - `run` - Current execution metadata
 - `config_fingerprint` - Auto-generated
 - `updated_at` - Auto-managed timestamp
-- `state_file` - Replaced with sharded state
+- `state_file` - Replaced with state management
 
 **What remains in pipeline config:**
 - Pipeline identity (`pipeline_id`, `name`, `version`)
@@ -635,7 +635,7 @@ analitiq_stream/
 │   ├── api.py             # API connector with validation & deduplication
 │   └── database.py        # Database connectors
 ├── fault_tolerance/        # Comprehensive fault tolerance
-│   ├── sharded_state_manager.py  # Per-partition state management
+│   ├── state_manager.py  # Per-partition state management
 │   ├── retry_handler.py   # Exponential backoff retry logic
 │   ├── circuit_breaker.py # Failure detection/recovery
 │   └── dead_letter_queue.py # Poison record isolation  

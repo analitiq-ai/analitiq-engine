@@ -1,8 +1,8 @@
 """Pydantic models for state management validation."""
-
+import orjson
+import hashlib
 from datetime import datetime
 from typing import Any, Dict, List, Optional
-
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -145,14 +145,31 @@ class DestinationConfig(BaseModel):
             raise ValueError("refresh_mode must be 'insert', 'upsert', or 'truncate_insert'")
         return v
 
+class PipelineBase(BaseModel):
+    """Base pipeline model with common fields and utilities."""
 
-class PipelineConfig(BaseModel):
-    """Complete multi-stream pipeline configuration with validation."""
-    
-    pipeline_id: str = Field(..., description="Unique pipeline identifier")
-    name: str = Field(..., description="Human-readable pipeline name")
-    version: str = Field("1.0", description="Pipeline version")
+    pipeline_id: str = Field(..., description="Unique identifier for the pipeline")
+    version: str = Field(..., description="Pipeline version string")
+    src: Dict[str, Any] = Field(..., description="Pipeline-level source configuration")
+    dst: Dict[str, Any] = Field(..., description="Pipeline-level destination configuration")
     streams: Dict[str, Any] = Field(..., description="Multi-stream configurations")
-    engine_config: Optional[Dict[str, Any]] = Field(None, description="Engine configuration")
-    error_handling: Optional[Dict[str, Any]] = Field(None, description="Error handling configuration")
+
+
+class PipelineFingerprint(PipelineBase):
+    """Canonical pipeline configuration for fingerprinting."""
+
+    def fingerprint(self) -> str:
+        """Return a deterministic SHA256 fingerprint of the config subset."""
+        data = self.model_dump(mode="json", exclude_unset=True)
+        raw = orjson.dumps(data, option=orjson.OPT_SORT_KEYS)
+
+        return f"sha256:{hashlib.sha256(raw).hexdigest()}"
+
+class PipelineConfig(PipelineBase):
+    """Complete multi-stream pipeline configuration with validation."""
+
+    name: str = Field(..., description="Human-readable pipeline name")
+
+    engine_config: Dict[str, Any] = Field(None, description="Engine configuration")
+    error_handling: Dict[str, Any] = Field(None, description="Error handling configuration")
     monitoring: Optional[Dict[str, Any]] = Field(None, description="Monitoring configuration")

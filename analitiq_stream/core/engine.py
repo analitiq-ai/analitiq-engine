@@ -1,4 +1,4 @@
-"""Modern multi-stream engine with sharded state management and improved architecture."""
+"""Modern multi-stream engine with state management and improved architecture."""
 
 import asyncio
 import logging
@@ -13,7 +13,7 @@ from ..connectors.base import BaseConnector
 from ..fault_tolerance.circuit_breaker import CircuitBreaker
 from ..fault_tolerance.dead_letter_queue import DeadLetterQueue
 from ..fault_tolerance.retry_handler import RetryHandler
-from ..fault_tolerance.sharded_state_manager import ShardedStateManager
+from ..fault_tolerance.state_manager import StateManager
 from ..config import DIRECTORIES
 from ..models.metrics import PipelineMetrics
 from ..models.state import PipelineConfig
@@ -33,11 +33,11 @@ logger = logging.getLogger(__name__)
 
 class StreamingEngine:
     """
-    High-performance async multi-stream engine with sharded state management.
+    High-performance async multi-stream engine with state management.
 
     Features:
     - Multi-stream concurrent processing
-    - Sharded state management for scalability
+    - State management for scalability
     - Pydantic validation for configuration
     - Async/await pattern for non-blocking I/O
     - Fault tolerance with retries, circuit breakers, and DLQ
@@ -78,8 +78,8 @@ class StreamingEngine:
         # Pipeline orchestration
         self.orchestrator = PipelineOrchestrator(pipeline_id)
 
-        # Fault tolerance components with sharded state
-        self.sharded_state_manager = ShardedStateManager(pipeline_id, str(DIRECTORIES["state"]))
+        # Fault tolerance components with state management
+        self.sharded_state_manager = StateManager(pipeline_id, str(DIRECTORIES["state"]))
         self.retry_handler = RetryHandler()
         self.circuit_breaker = CircuitBreaker()
         self.dlq = DeadLetterQueue(self.engine_config.dlq_path)
@@ -94,7 +94,7 @@ class StreamingEngine:
         self.stage_configs = PipelineStagesConfig()
 
     async def stream_data(self, pipeline_config: Dict[str, Any]) -> None:
-        """Process all streams concurrently with sharded state management."""
+        """Process all streams concurrently with state management."""
         
         # Validate configuration using Pydantic
         try:
@@ -115,7 +115,7 @@ class StreamingEngine:
             
         # Start new run
         run_id = self.sharded_state_manager.start_run(pipeline_config)
-        logger.info(f"Started sharded state run: {run_id}")
+        logger.info(f"Started state run: {run_id}")
 
         stream_exceptions = []
         stream_tasks = []
@@ -277,7 +277,7 @@ class StreamingEngine:
     async def _extract_stage(
         self, source_connector: BaseConnector, queue: Queue, config: Dict[str, Any]
     ):
-        """Extract data from source in batches with sharded state management."""
+        """Extract data from source in batches with state management."""
         stream_name = config["stream_name"]
         logger.debug(f"Starting extract stage for stream {stream_name}")
 
@@ -302,7 +302,7 @@ class StreamingEngine:
 
             batch_count = 0
             
-            # Use sharded state management with API connector
+            # Use state management with API connector
             async for batch in source_connector.read_batches(
                 source_config,
                 state_manager=self.sharded_state_manager,
@@ -399,7 +399,7 @@ class StreamingEngine:
             raise
 
     async def _checkpoint_stage(self, input_queue: Queue, config: Dict[str, Any]):
-        """Checkpoint processing progress with sharded state management."""
+        """Checkpoint processing progress with state management."""
         stream_name = config["stream_name"]
         logger.debug(f"Starting checkpoint stage for stream {stream_name}")
 
@@ -491,6 +491,6 @@ class StreamingEngine:
         """Get pipeline execution metrics as a validated Pydantic model."""
         return self.metrics
 
-    def get_state_manager(self) -> ShardedStateManager:
-        """Get the sharded state manager instance."""
+    def get_state_manager(self) -> StateManager:
+        """Get the state manager instance."""
         return self.sharded_state_manager

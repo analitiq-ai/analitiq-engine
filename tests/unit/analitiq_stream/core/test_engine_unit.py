@@ -63,7 +63,7 @@ class TestStreamingEngine:
     async def test_single_stream_success(self, engine, sample_pipeline_config, mock_state_manager):
         """Test successful processing of a single stream."""
         with patch.object(engine, '_process_stream') as mock_process:
-            with patch.object(engine, 'sharded_state_manager', mock_state_manager):
+            with patch.object(engine, 'state_manager', mock_state_manager):
                 mock_process.return_value = None  # Successful processing
                 
                 await engine.stream_data(sample_pipeline_config)
@@ -76,7 +76,7 @@ class TestStreamingEngine:
     async def test_single_stream_failure(self, engine, sample_pipeline_config, mock_state_manager):
         """Test handling of single stream failure."""
         with patch.object(engine, '_process_stream') as mock_process:
-            with patch.object(engine, 'sharded_state_manager', mock_state_manager):
+            with patch.object(engine, 'state_manager', mock_state_manager):
                 # Mock stream processing failure
                 mock_process.side_effect = RuntimeError("Stream processing failed")
                 
@@ -112,7 +112,7 @@ class TestStreamingEngine:
             return None  # Success for other streams
         
         with patch.object(engine, '_process_stream') as mock_process:
-            with patch.object(engine, 'sharded_state_manager', mock_state_manager):
+            with patch.object(engine, 'state_manager', mock_state_manager):
                 mock_process.side_effect = mock_process_side_effect
                 
                 # Should not raise exception for partial failure
@@ -125,7 +125,7 @@ class TestStreamingEngine:
     async def test_exception_group_handling(self, engine, sample_pipeline_config, mock_state_manager):
         """Test Python 3.11+ ExceptionGroup handling."""
         with patch.object(engine, '_process_stream') as mock_process:
-            with patch.object(engine, 'sharded_state_manager', mock_state_manager):
+            with patch.object(engine, 'state_manager', mock_state_manager):
                 # All streams fail
                 mock_process.side_effect = RuntimeError("All streams fail")
                 
@@ -170,7 +170,7 @@ class TestStreamingEngine:
                 raise RuntimeError("Second stream fails")
         
         with patch.object(engine, '_process_stream', side_effect=mock_process_stream):
-            with patch.object(engine, 'sharded_state_manager', mock_state_manager):
+            with patch.object(engine, 'state_manager', mock_state_manager):
                 with patch('asyncio.create_task') as mock_create_task:
                     # Return mock tasks
                     mock_create_task.side_effect = lambda coro, name=None: AsyncMock()

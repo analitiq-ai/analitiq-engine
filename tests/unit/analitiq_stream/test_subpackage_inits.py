@@ -107,13 +107,13 @@ class TestFaultTolerancePackageInit:
         """Test that fault tolerance modules are accessible."""
         from analitiq_stream.fault_tolerance import (
             circuit_breaker, dead_letter_queue, retry_handler,
-            sharded_state_manager
+            state_manager
         )
 
         assert circuit_breaker is not None
         assert dead_letter_queue is not None
         assert retry_handler is not None
-        assert sharded_state_manager is not None
+        assert state_manager is not None
 
 
 class TestSchemaPackageInit:

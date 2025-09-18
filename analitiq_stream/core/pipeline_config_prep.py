@@ -254,8 +254,8 @@ class PipelineConfigPrep:
         if not config_section:
             raise ValueError(f"pipeline_config must contain '{config_type}' section")
 
-        # For the new structure, we expect host_id to be at the pipeline level
-        host_id = getattr(config_section, 'host_id', None)
+        # we expect host_id to be at the pipeline level
+        host_id = config_section.get('host_id')
         if not host_id:
             raise ValueError(f"pipeline_config.{config_type} must contain 'host_id'")
 
@@ -277,8 +277,7 @@ class PipelineConfigPrep:
         merged_config = endpoint_config.copy()
         merged_config.update(host_config)
 
-        config_name = "source" if config_type == "src" else "destination"
-        logger.debug(f"Merged {config_name} config from endpoint {endpoint_id} and host {host_id}")
+        logger.debug(f"Merged {config_type} config from endpoint {endpoint_id} and host {host_id}")
         return merged_config
 
     def create_pipeline(self) -> Pipeline:
