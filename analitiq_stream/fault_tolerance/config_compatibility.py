@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple, Set
 from enum import Enum
 
 from pydantic import BaseModel, Field
-from ..models.config import PipelineFingerprint
+from ..models.state import PipelineFingerprint
 
 logger = logging.getLogger(__name__)
 

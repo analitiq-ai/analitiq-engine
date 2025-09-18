@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from datetime import datetime, timezone
 
 from analitiq_stream.connectors.api import APIConnector
-from analitiq_stream.fault_tolerance.sharded_state_manager import ShardedStateManager
+from analitiq_stream.fault_tolerance.sharded_state_manager import StateManager
 
 
 class TestDuplicateRecordsIntegration:
@@ -256,7 +256,7 @@ class TestDuplicateRecordsIntegration:
         })
         
         # Create state manager
-        state_manager = ShardedStateManager("test-pipeline", str(temp_state_dir))
+        state_manager = StateManager("test-pipeline", str(temp_state_dir))
         
         # Mock the HTTP requests to return the same record each time
         with patch('aiohttp.ClientSession.request') as mock_request:
@@ -330,7 +330,7 @@ class TestDuplicateRecordsIntegration:
         })
         
         # Create state manager
-        state_manager = ShardedStateManager("test-pipeline", str(temp_state_dir))
+        state_manager = StateManager("test-pipeline", str(temp_state_dir))
         
         # Mock the HTTP requests to return the sample record
         with patch('aiohttp.ClientSession.request') as mock_request:
@@ -376,7 +376,7 @@ class TestDuplicateRecordsIntegration:
         """Test that state loading correctly includes tie-breaker information for deduplication."""
         
         # Create a state file with tie-breaker information
-        state_manager = ShardedStateManager("test-pipeline", str(temp_state_dir))
+        state_manager = StateManager("test-pipeline", str(temp_state_dir))
         
         # Simulate a previously saved state with tie-breaker
         from analitiq_stream.models.state import PartitionCursor, CursorField, PartitionStats
@@ -468,7 +468,7 @@ class TestDuplicateRecordsIntegration:
             "timeout": 30
         })
         
-        state_manager = ShardedStateManager("test-pipeline", str(temp_state_dir))
+        state_manager = StateManager("test-pipeline", str(temp_state_dir))
         
         with patch('aiohttp.ClientSession.request') as mock_request:
             mock_response = AsyncMock()
@@ -519,7 +519,7 @@ class TestDuplicateRecordsIntegration:
             "timeout": 30
         })
         
-        state_manager = ShardedStateManager("test-pipeline", str(temp_state_dir))
+        state_manager = StateManager("test-pipeline", str(temp_state_dir))
         
         # First, simulate having processed some records previously
         from analitiq_stream.models.state import PartitionCursor, CursorField, PartitionStats
@@ -595,7 +595,7 @@ class TestDuplicateRecordsIntegration:
             "timeout": 30
         })
         
-        state_manager = ShardedStateManager("test-pipeline", str(temp_state_dir))
+        state_manager = StateManager("test-pipeline", str(temp_state_dir))
         
         # First run - process all records with same timestamp
         with patch('aiohttp.ClientSession.request') as mock_request:
@@ -662,7 +662,7 @@ class TestDuplicateRecordsIntegration:
             "timeout": 30
         })
         
-        state_manager = ShardedStateManager("test-pipeline", str(temp_state_dir))
+        state_manager = StateManager("test-pipeline", str(temp_state_dir))
         
         with patch('aiohttp.ClientSession.request') as mock_request:
             # First API call
@@ -730,7 +730,7 @@ class TestDuplicateRecordsIntegration:
             "timeout": 30
         })
         
-        state_manager = ShardedStateManager("test-pipeline", str(temp_state_dir))
+        state_manager = StateManager("test-pipeline", str(temp_state_dir))
         
         # First API call - should save state with tie-breaker
         with patch('aiohttp.ClientSession.request') as mock_request:
@@ -901,8 +901,8 @@ class TestDuplicateRecordsIntegration:
             assert metrics1.records_processed > 0, "First run should process at least 1 record"
             
             # Check that tie-breaker information was saved
-            from analitiq_stream.fault_tolerance.sharded_state_manager import ShardedStateManager
-            state_manager = ShardedStateManager("test-integration-pipeline", str(temp_state_dir))
+            from analitiq_stream.fault_tolerance.sharded_state_manager import StateManager
+            state_manager = StateManager("test-integration-pipeline", str(temp_state_dir))
             
             partition_state = state_manager.get_partition_state("stream.test-stream-001", {})
             assert partition_state is not None, "State should be saved after first run"

@@ -1,4 +1,4 @@
-"""Sharded state management for pipeline checkpointing and recovery."""
+"""State management for pipeline checkpointing and recovery."""
 
 import hashlib
 import json
@@ -9,15 +9,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
-from ..models.config import PipelineFingerprint
+from ..models.state import PipelineFingerprint
 
 logger = logging.getLogger(__name__)
 
 
-class ShardedStateManager:
+class StateManager:
     """
-    Manages sharded per-stream/partition state for scalable pipeline recovery.
-    
+    Manages per-stream/partition state for scalable pipeline recovery.
+
     Features:
     - Separate state files per stream/partition for concurrency
     - Config immutability validation via fingerprint
@@ -28,7 +28,7 @@ class ShardedStateManager:
 
     def __init__(self, pipeline_id: str, base_dir: str = "state"):
         """
-        Initialize sharded state manager.
+        Initialize state manager.
 
         Args:
             pipeline_id: Unique pipeline identifier
