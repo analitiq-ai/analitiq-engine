@@ -19,6 +19,12 @@ if env_file.exists():
 # Import specific fixtures from modules
 from tests.fixtures.database import postgres_driver, mock_database_connector, sample_database_config
 from tests.fixtures.api import mock_api_connector, sample_api_config, mock_http_responses, sample_api_response
+from tests.fixtures.pipeline_config_prep import (
+    sample_wise_host_config, sample_sevdesk_host_config, sample_database_host_config,
+    sample_wise_endpoint_config, sample_sevdesk_endpoint_config, sample_database_endpoint_config,
+    sample_invalid_pipeline_config, sample_s3_error_responses, environment_variables,
+    multi_stream_pipeline_config
+)
 
 
 @pytest.fixture(scope="session")
@@ -57,47 +63,66 @@ def sample_wise_record():
 
 @pytest.fixture
 def sample_pipeline_config():
-    """Sample pipeline configuration for testing."""
+    """Sample pipeline configuration for testing - mimics real-world complexity."""
     return {
-        "pipeline_id": "test-pipeline",
-        "name": "Test Pipeline",
+        "pipeline_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        "name": "Wise Multi-Stream to SevDesk Integration",
         "version": "1.0",
         "src": {
-            "host_id": "test-src-host",
-            "name": "Test Source"
+            "host_id": "0e8b1731-479a-4bc0-b056-244cc5d6a53c",
+            "name": "Wise Platform"
         },
         "dst": {
-            "host_id": "test-dst-host", 
-            "name": "Test Destination"
+            "host_id": "7c1a69eb-239f-45d4-b6c2-3ad4c6e89cfa",
+            "name": "SevDesk Platform"
         },
         "engine_config": {
-            "batch_size": 10,
-            "max_concurrent_batches": 2,
-            "buffer_size": 100
+            "batch_size": 100,
+            "max_concurrent_batches": 3,
+            "buffer_size": 5000,
+            "schedule": {
+                "type": "interval",
+                "interval_minutes": 60,
+                "timezone": "UTC"
+            }
         },
         "streams": {
-            "test-stream-1": {
-                "name": "test-stream",
+            "f1a2b3c4-d5e6-7890-abcd-ef1234567891": {
+                "name": "wise-transactions",
+                "description": "Wise bank transactions sync",
                 "src": {
-                    "endpoint_id": "test-src-endpoint",
+                    "endpoint_id": "5a4b9e21-441f-4bc7-9d5e-41917b4357e6",
                     "replication_method": "incremental",
-                    "replication_key": "created"
+                    "cursor_field": "created",
+                    "cursor_mode": "inclusive",
+                    "safety_window_seconds": 120,
+                    "primary_key": ["id"],
+                    "tie_breaker_fields": ["id"]
                 },
                 "dst": {
-                    "endpoint_id": "test-dst-endpoint",
+                    "endpoint_id": "1e63d782-4b67-4b7e-b845-4b4de5e4f46e",
                     "refresh_mode": "upsert",
-                    "batch_support": False
+                    "batch_support": False,
+                    "batch_size": 1
                 },
                 "mapping": {
                     "field_mappings": {
                         "created": {
                             "target": "valueDate",
-                            "transformations": ["iso_to_date"]
+                            "transformations": ["iso_to_date"],
+                            "validation": {
+                                "rules": [{"type": "not_null"}],
+                                "error_action": "dlq"
+                            }
                         },
                         "targetValue": {
-                            "target": "amount"
+                            "target": "amount",
+                            "validation": {
+                                "rules": [{"type": "not_null"}],
+                                "error_action": "dlq"
+                            }
                         },
-                        "id": {
+                        "details.reference": {
                             "target": "paymtPurpose"
                         }
                     },
@@ -106,7 +131,7 @@ def sample_pipeline_config():
                             "expression": "CheckAccountTransaction"
                         },
                         "checkAccount": {
-                            "expression": '{"id": "5936402", "objectName": "CheckAccount"}'
+                            "expression": "{\"id\": \"5936402\", \"objectName\": \"CheckAccount\"}"
                         },
                         "status": {
                             "expression": "100"
@@ -114,6 +139,25 @@ def sample_pipeline_config():
                     }
                 }
             }
+        },
+        "error_handling": {
+            "strategy": "dlq",
+            "retry_failed_records": True,
+            "max_retries": 3,
+            "retry_delay": 5,
+            "error_categories": {
+                "validation_error": "dlq",
+                "transformation_error": "dlq",
+                "api_error": "retry",
+                "rate_limit_error": "retry_with_backoff"
+            }
+        },
+        "monitoring": {
+            "metrics_enabled": True,
+            "log_level": "DEBUG",
+            "checkpoint_interval": 50,
+            "health_check_interval": 300,
+            "progress_monitoring": "enabled"
         }
     }
 

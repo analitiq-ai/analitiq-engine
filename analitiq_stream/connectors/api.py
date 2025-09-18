@@ -1,4 +1,4 @@
-"""Modern API connector with sharded state management."""
+"""Modern API connector with state management."""
 
 import asyncio
 import json
@@ -8,7 +8,7 @@ from typing import Any, AsyncIterator, Dict, List, Optional
 from urllib.parse import urljoin, urlparse, urlencode
 
 from .base import BaseConnector, ConnectionError, ReadError, WriteError
-from ..fault_tolerance.sharded_state_manager import ShardedStateManager
+from ..fault_tolerance.state_manager import StateManager
 from ..models.state import PartitionCursor, CursorField, PartitionStats
 from ..models.api import (
     APIConnectionConfig, APIReadConfig, APIWriteConfig, 
@@ -20,10 +20,10 @@ logger = logging.getLogger(__name__)
 
 class APIConnector(BaseConnector):
     """
-    Modern API connector with sharded state management.
-    
+    Modern API connector with state management.
+
     Features:
-    - Sharded state management for scalability
+    - State management for scalability
     - Pydantic validation for type safety
     - Incremental replication with cursor tracking
     - Rate limiting and fault tolerance
@@ -90,19 +90,19 @@ class APIConnector(BaseConnector):
         self,
         config: Dict[str, Any],
         *,
-        state_manager: ShardedStateManager,
+        state_manager: StateManager,
         stream_name: str,
         partition: Optional[Dict[str, Any]] = None,
         batch_size: int = 1000
     ) -> AsyncIterator[List[Dict[str, Any]]]:
         """
-        Read data in batches with sharded state management.
+        Read data in batches with state management.
 
         Args:
-            config: Read configuration 
-            state_manager: Sharded state manager
+            config: Read configuration
+            state_manager: State manager
             stream_name: Name of the stream for state tracking
-            partition: Partition key for sharded processing
+            partition: Partition key for processing
             batch_size: Number of records per batch
 
         Yields:
@@ -116,7 +116,7 @@ class APIConnector(BaseConnector):
             method = config.get("method", "GET")
             full_url = urljoin(self.base_url, endpoint)
 
-            # Load state from sharded manager
+            # Load state from state manager
             # Use the complete config passed to read_batches, which contains merged source configuration
             state = self._load_state_from_sharded_manager(
                 state_manager, stream_name, partition, config
@@ -279,16 +279,16 @@ class APIConnector(BaseConnector):
 
     def _load_state_from_sharded_manager(
         self, 
-        state_manager: ShardedStateManager,
+        state_manager: StateManager,
         stream_name: str, 
         partition: Dict[str, Any],
         config: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """Load state from sharded state manager."""
+        """Load state from state manager."""
         partition_state = state_manager.get_partition_state(stream_name, partition)
         
         if partition_state:
-            # Convert sharded state format to internal format
+            # Convert state format to internal format
             cursor_info = partition_state.get("cursor", {})
             primary_cursor = cursor_info.get("primary", {})
             

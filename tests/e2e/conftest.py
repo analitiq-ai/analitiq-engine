@@ -21,6 +21,9 @@ if str(REPO_ROOT) not in sys.path:
 from analitiq_stream.connectors.base import BaseConnector
 from analitiq_stream.config import DIRECTORIES
 
+# Import new e2e fixtures
+from tests.e2e.fixtures_e2e import *
+
 
 class InMemorySourceConnector(BaseConnector):
     """Simple in-memory source connector used for end-to-end tests."""
@@ -454,11 +457,15 @@ def source_config():
     """Source configuration backed by predefined in-memory records."""
     return {
         "type": "in_memory_source",
+        "base_url": "http://test-source.local",
         "endpoint_id": "test-src-endpoint",
         "host_id": "test-src-host",
         "records": [],
         "records_by_endpoint": {},
         "read_log": {},
+        "headers": {
+            "Content-Type": "application/json"
+        }
     }
 
 
@@ -467,11 +474,15 @@ def destination_config():
     """Destination configuration backed by in-memory storage."""
     return {
         "type": "in_memory_destination",
+        "base_url": "http://test-destination.local",
         "endpoint_id": "test-dst-endpoint",
         "host_id": "test-dst-host",
         "storage_by_endpoint": {},
         "failure_scenarios": {},
         "attempt_log": {},
+        "headers": {
+            "Content-Type": "application/json"
+        }
     }
 
 

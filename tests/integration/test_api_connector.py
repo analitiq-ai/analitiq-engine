@@ -9,7 +9,7 @@ from aiohttp import ClientTimeout, TCPConnector, ClientSession
 
 from analitiq_stream.connectors.api import APIConnector, RateLimiter
 from analitiq_stream.connectors.base import ConnectionError, ReadError, WriteError
-from analitiq_stream.fault_tolerance.sharded_state_manager import ShardedStateManager
+from analitiq_stream.fault_tolerance.sharded_state_manager import StateManager
 
 
 @pytest.fixture
@@ -44,8 +44,8 @@ def valid_read_config():
 
 @pytest.fixture
 def mock_state_manager():
-    """Mock sharded state manager."""
-    manager = MagicMock(spec=ShardedStateManager)
+    """Mock state manager."""
+    manager = MagicMock(spec=StateManager)
     manager.get_partition_state.return_value = None
     manager.get_run_info.return_value = {}
     return manager

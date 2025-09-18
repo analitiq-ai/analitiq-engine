@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest.mock import patch, mock_open, AsyncMock, MagicMock
 from aiohttp import ClientSession
 from analitiq_stream.connectors.api import APIConnector
-from analitiq_stream.fault_tolerance.sharded_state_manager import ShardedStateManager
+from analitiq_stream.fault_tolerance.state_manager import StateManager
 
 
 class TestAPIIncrementalIntegration:
@@ -27,7 +27,7 @@ class TestAPIIncrementalIntegration:
         self.connector.session = self.mock_session
 
         # Mock state manager
-        self.mock_state_manager = AsyncMock(spec=ShardedStateManager)
+        self.mock_state_manager = AsyncMock(spec=StateManager)
         self.stream_name = "test_stream"
 
         # Sample endpoint schema matching wise_to_sevdesk example

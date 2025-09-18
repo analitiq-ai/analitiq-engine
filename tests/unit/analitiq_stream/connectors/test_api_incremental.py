@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch, mock_open, MagicMock, AsyncMock
 from analitiq_stream.connectors.api import APIConnector, ReadError
-from analitiq_stream.fault_tolerance.sharded_state_manager import ShardedStateManager
+from analitiq_stream.fault_tolerance.state_manager import StateManager
 
 
 class TestAPIIncrementalReplication:
@@ -187,9 +187,9 @@ class TestAPIIncrementalReplication:
         assert config["filters"] == {}
 
     def test_load_state_from_sharded_manager(self):
-        """Test loading state from sharded state manager."""
+        """Test loading state from state manager."""
         # Create mock state manager
-        mock_state_manager = MagicMock(spec=ShardedStateManager)
+        mock_state_manager = MagicMock(spec=StateManager)
         mock_state_manager.get_partition_state.return_value = None  # No existing state
         mock_state_manager.get_run_info.return_value = {"run_id": "test-run"}
 

@@ -167,7 +167,7 @@ analitiq_stream/
 │       ├── postgresql_driver.py   # PostgreSQL-specific implementation
 │       └── driver_factory.py      # Driver factory pattern
 ├── fault_tolerance/        # Comprehensive fault tolerance system
-│   ├── sharded_state_manager.py  # Sharded checkpoint persistence
+│   ├── state_manager.py  # Checkpoint persistence
 │   ├── retry_handler.py   # Exponential backoff retry logic
 │   ├── circuit_breaker.py # Automatic failure detection/recovery
 │   └── dead_letter_queue.py # Poison record isolation
@@ -219,7 +219,7 @@ The framework follows a modular architecture with clear separation of concerns:
 
 The framework implements comprehensive fault tolerance through multiple components:
 
-- **ShardedStateManager**: Persists sharded per-stream/partition checkpoints for scalable recovery
+- **StateManager**: Persists per-stream/partition checkpoints for scalable recovery
 - **RetryHandler**: Exponential backoff retry logic for transient failures
 - **CircuitBreaker**: Prevents cascading failures with automatic recovery
 - **DeadLetterQueue**: Isolates poison records for separate handling
