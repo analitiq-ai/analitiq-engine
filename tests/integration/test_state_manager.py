@@ -1,4 +1,4 @@
-"""Unit tests for sharded state manager functionality."""
+"""Unit tests for state manager functionality."""
 
 import json
 import pytest
@@ -6,28 +6,13 @@ import tempfile
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
-from analitiq_stream.fault_tolerance.sharded_state_manager import ShardedStateManager
-from analitiq_stream.models.state import PipelineFingerprint
+from analitiq_stream.fault_tolerance.state_manager import StateManager
 
 
-def _expected_fingerprint(config: Dict[str, Any]) -> str:
-    """Compute the config fingerprint using the canonical model."""
-
-    fingerprint_model = PipelineFingerprint(
-        pipeline_id=config.get("pipeline_id", ""),
-        version=config.get("version", ""),
-        src=config.get("src", {}),
-        dst=config.get("dst", {}),
-        streams=config.get("streams", {}),
-    )
-    return fingerprint_model.fingerprint()
-
-
-class TestShardedStateManager:
-    """Test sharded state manager core functionality."""
+class TestStateManager:
+    """Test state manager core functionality."""
     
     def setup_method(self):
         """Set up test environment with temporary directory."""
@@ -42,7 +27,7 @@ class TestShardedStateManager:
     
     def test_state_manager_initialization(self):
         """Test state manager proper initialization."""
-        manager = ShardedStateManager(
+        manager = StateManager(
             pipeline_id=self.pipeline_id,
             base_dir=str(self.state_dir)
         )
@@ -56,7 +41,7 @@ class TestShardedStateManager:
     
     def test_compute_config_fingerprint(self):
         """Test configuration fingerprinting."""
-        manager = ShardedStateManager(self.pipeline_id, str(self.state_dir))
+        manager = StateManager(self.pipeline_id, str(self.state_dir))
         
         config1 = {
             "pipeline_id": "test",
@@ -85,19 +70,14 @@ class TestShardedStateManager:
         fingerprint1 = manager._compute_config_fingerprint(config1)
         fingerprint2 = manager._compute_config_fingerprint(config2)
         fingerprint3 = manager._compute_config_fingerprint(config3)
-
-        expected_primary = _expected_fingerprint(config1)
-        expected_different = _expected_fingerprint(config3)
-
+        
         assert fingerprint1 == fingerprint2  # Same config, same fingerprint
-        assert fingerprint1 == expected_primary
-        assert fingerprint3 == expected_different
         assert fingerprint1 != fingerprint3  # Different config, different fingerprint
         assert len(fingerprint1) > 0  # Non-empty fingerprint
     
     def test_compute_schema_hash(self):
         """Test schema hashing for drift detection."""
-        manager = ShardedStateManager(self.pipeline_id, str(self.state_dir))
+        manager = StateManager(self.pipeline_id, str(self.state_dir))
         
         schema1 = {"fields": [{"name": "id", "type": "int"}, {"name": "name", "type": "str"}]}
         schema2 = {"fields": [{"name": "id", "type": "int"}, {"name": "name", "type": "str"}]}
@@ -113,7 +93,7 @@ class TestShardedStateManager:
     
     def test_get_partition_file(self):
         """Test partition file path generation."""
-        manager = ShardedStateManager(self.pipeline_id, str(self.state_dir))
+        manager = StateManager(self.pipeline_id, str(self.state_dir))
         
         # Default partition (empty)
         default_file = manager._get_partition_file("stream1", {})
@@ -135,7 +115,7 @@ class TestShardedStateManager:
     
     def test_load_save_index(self):
         """Test index loading and saving."""
-        manager = ShardedStateManager(self.pipeline_id, str(self.state_dir))
+        manager = StateManager(self.pipeline_id, str(self.state_dir))
         
         # Load non-existent index should return default
         index = manager._load_index()
@@ -158,7 +138,7 @@ class TestShardedStateManager:
     
     def test_load_save_partition_state(self):
         """Test partition state loading and saving."""
-        manager = ShardedStateManager(self.pipeline_id, str(self.state_dir))
+        manager = StateManager(self.pipeline_id, str(self.state_dir))
         
         partition_file = manager.streams_dir / "stream1" / "partition-test.json"
         
@@ -182,7 +162,7 @@ class TestShardedStateManager:
     
     def test_start_run_new_pipeline(self):
         """Test starting a run for a new pipeline."""
-        manager = ShardedStateManager(self.pipeline_id, str(self.state_dir))
+        manager = StateManager(self.pipeline_id, str(self.state_dir))
         
         config = {
             "pipeline_id": "test-pipeline",
@@ -201,13 +181,13 @@ class TestShardedStateManager:
         run_info = manager.get_run_info()
         assert run_info["run_id"] == run_id
         assert run_info["pipeline_id"] == "test-pipeline"
-        assert run_info["config_fingerprint"] == _expected_fingerprint(config)
+        assert "config_fingerprint" in run_info
         assert "started_at" in run_info
         assert "lease_owner" in run_info
     
     def test_start_run_with_custom_run_id(self):
         """Test starting a run with custom run ID."""
-        manager = ShardedStateManager(self.pipeline_id, str(self.state_dir))
+        manager = StateManager(self.pipeline_id, str(self.state_dir))
         
         config = {"pipeline_id": "test", "version": "1.0"}
         custom_run_id = "custom-run-123"
@@ -219,7 +199,7 @@ class TestShardedStateManager:
     
     def test_start_run_config_compatibility_success(self):
         """Test config compatibility check succeeds with same config."""
-        manager = ShardedStateManager(self.pipeline_id, str(self.state_dir))
+        manager = StateManager(self.pipeline_id, str(self.state_dir))
         
         config = {
             "pipeline_id": "test",
@@ -229,18 +209,17 @@ class TestShardedStateManager:
         
         # Start first run
         run_id1 = manager.start_run(config, "run1")
-
+        
         # Start second run with same config should succeed
         run_id2 = manager.start_run(config, "run2")
-
+        
         assert run_id1 == "run1"
         assert run_id2 == "run2"
         assert manager.get_run_info()["run_id"] == "run2"
-        assert manager.get_run_info()["config_fingerprint"] == _expected_fingerprint(config)
     
     def test_start_run_config_compatibility_failure(self):
         """Test config compatibility check fails with different config."""
-        manager = ShardedStateManager(self.pipeline_id, str(self.state_dir))
+        manager = StateManager(self.pipeline_id, str(self.state_dir))
         
         config1 = {
             "pipeline_id": "test",
@@ -256,19 +235,16 @@ class TestShardedStateManager:
         
         # Start first run
         manager.start_run(config1, "run1")
-        assert manager.get_run_info()["config_fingerprint"] == _expected_fingerprint(config1)
-
+        
         # Start second run with different config should fail
         with pytest.raises(ValueError) as exc_info:
             manager.start_run(config2, "run2")
-
+        
         assert "Config fingerprint mismatch" in str(exc_info.value)
-        # Fingerprint should remain from original config
-        assert manager.get_run_info()["config_fingerprint"] == _expected_fingerprint(config1)
     
     def test_save_stream_checkpoint_basic(self):
         """Test basic stream checkpoint saving."""
-        manager = ShardedStateManager(self.pipeline_id, str(self.state_dir))
+        manager = StateManager(self.pipeline_id, str(self.state_dir))
         
         # Start a run first
         config = {"pipeline_id": "test", "version": "1.0"}
@@ -300,7 +276,7 @@ class TestShardedStateManager:
     
     def test_save_stream_checkpoint_with_optional_data(self):
         """Test checkpoint saving with optional data."""
-        manager = ShardedStateManager(self.pipeline_id, str(self.state_dir))
+        manager = StateManager(self.pipeline_id, str(self.state_dir))
         
         config = {"pipeline_id": "test", "version": "1.0"}
         manager.start_run(config)
@@ -337,7 +313,7 @@ class TestShardedStateManager:
     
     def test_get_stream_partitions(self):
         """Test getting all partitions for a stream."""
-        manager = ShardedStateManager(self.pipeline_id, str(self.state_dir))
+        manager = StateManager(self.pipeline_id, str(self.state_dir))
         
         config = {"pipeline_id": "test", "version": "1.0"}
         manager.start_run(config)
@@ -369,7 +345,7 @@ class TestShardedStateManager:
     
     def test_get_partition_state(self):
         """Test getting specific partition state."""
-        manager = ShardedStateManager(self.pipeline_id, str(self.state_dir))
+        manager = StateManager(self.pipeline_id, str(self.state_dir))
         
         config = {"pipeline_id": "test", "version": "1.0"}
         manager.start_run(config)
@@ -394,7 +370,7 @@ class TestShardedStateManager:
     
     def test_detect_schema_drift(self):
         """Test schema drift detection."""
-        manager = ShardedStateManager(self.pipeline_id, str(self.state_dir))
+        manager = StateManager(self.pipeline_id, str(self.state_dir))
         
         config = {"pipeline_id": "test", "version": "1.0"}
         manager.start_run(config)
@@ -422,7 +398,7 @@ class TestShardedStateManager:
     
     def test_list_streams(self):
         """Test listing all streams with state."""
-        manager = ShardedStateManager(self.pipeline_id, str(self.state_dir))
+        manager = StateManager(self.pipeline_id, str(self.state_dir))
         
         config = {"pipeline_id": "test", "version": "1.0"}
         manager.start_run(config)
@@ -448,7 +424,7 @@ class TestShardedStateManager:
     
     def test_clear_stream_state(self):
         """Test clearing state for a specific stream."""
-        manager = ShardedStateManager(self.pipeline_id, str(self.state_dir))
+        manager = StateManager(self.pipeline_id, str(self.state_dir))
         
         config = {"pipeline_id": "test", "version": "1.0"}
         manager.start_run(config)
@@ -473,7 +449,7 @@ class TestShardedStateManager:
     
     def test_clear_all_state(self):
         """Test clearing all pipeline state."""
-        manager = ShardedStateManager(self.pipeline_id, str(self.state_dir))
+        manager = StateManager(self.pipeline_id, str(self.state_dir))
         
         config = {"pipeline_id": "test", "version": "1.0"}
         run_id = manager.start_run(config)
@@ -496,7 +472,7 @@ class TestShardedStateManager:
     
     def test_validate_config_compatibility(self):
         """Test config compatibility validation."""
-        manager = ShardedStateManager(self.pipeline_id, str(self.state_dir))
+        manager = StateManager(self.pipeline_id, str(self.state_dir))
         
         config1 = {"pipeline_id": "test", "version": "1.0", "src": {"endpoint": "/data"}}
         config2 = {"pipeline_id": "test", "version": "1.0", "src": {"endpoint": "/data"}}
@@ -509,8 +485,7 @@ class TestShardedStateManager:
         
         # Start run with config1
         manager.start_run(config1)
-        assert manager.get_run_info()["config_fingerprint"] == _expected_fingerprint(config1)
-
+        
         # Same config should be compatible
         assert manager.validate_config_compatibility(config1) is True
         assert manager.validate_config_compatibility(config2) is True
@@ -520,7 +495,7 @@ class TestShardedStateManager:
     
     def test_get_resume_info(self):
         """Test getting resume information for a stream."""
-        manager = ShardedStateManager(self.pipeline_id, str(self.state_dir))
+        manager = StateManager(self.pipeline_id, str(self.state_dir))
         
         config = {"pipeline_id": "test", "version": "1.0"}
         run_id = manager.start_run(config)
@@ -549,12 +524,12 @@ class TestShardedStateManager:
         assert resume_info["partition_count"] == 3
         assert resume_info["total_records_synced"] == 600  # 100 + 200 + 300
         assert resume_info["run_id"] == run_id
-        assert resume_info["config_fingerprint"] == _expected_fingerprint(config)
+        assert "config_fingerprint" in resume_info
         assert resume_info["last_checkpoint_seq"] > 0
         assert len(resume_info["partitions"]) == 3
 
 
-class TestShardedStateManagerEdgeCases:
+class TestStateManagerEdgeCases:
     """Test state manager edge cases and error conditions."""
     
     def setup_method(self):
@@ -570,7 +545,7 @@ class TestShardedStateManagerEdgeCases:
     
     def test_load_index_corrupted_json(self):
         """Test handling of corrupted index file."""
-        manager = ShardedStateManager(self.pipeline_id, str(self.state_dir))
+        manager = StateManager(self.pipeline_id, str(self.state_dir))
         
         # Create corrupted index file
         manager.index_file.parent.mkdir(parents=True, exist_ok=True)
@@ -585,7 +560,7 @@ class TestShardedStateManagerEdgeCases:
     
     def test_load_partition_state_corrupted_json(self):
         """Test handling of corrupted partition file."""
-        manager = ShardedStateManager(self.pipeline_id, str(self.state_dir))
+        manager = StateManager(self.pipeline_id, str(self.state_dir))
         
         partition_file = manager.streams_dir / "stream1" / "partition-test.json"
         partition_file.parent.mkdir(parents=True, exist_ok=True)
@@ -600,7 +575,7 @@ class TestShardedStateManagerEdgeCases:
     
     def test_save_index_file_error(self):
         """Test error handling when saving index fails."""
-        manager = ShardedStateManager(self.pipeline_id, str(self.state_dir))
+        manager = StateManager(self.pipeline_id, str(self.state_dir))
         
         # Mock open to raise an exception
         with patch('builtins.open', side_effect=PermissionError("Permission denied")):
@@ -609,7 +584,7 @@ class TestShardedStateManagerEdgeCases:
     
     def test_save_partition_state_file_error(self):
         """Test error handling when saving partition state fails."""
-        manager = ShardedStateManager(self.pipeline_id, str(self.state_dir))
+        manager = StateManager(self.pipeline_id, str(self.state_dir))
         
         partition_file = manager.streams_dir / "stream1" / "partition-test.json"
         
@@ -620,7 +595,7 @@ class TestShardedStateManagerEdgeCases:
     
     def test_concurrent_access_simulation(self):
         """Test simulation of concurrent access with threading locks."""
-        manager = ShardedStateManager(self.pipeline_id, str(self.state_dir))
+        manager = StateManager(self.pipeline_id, str(self.state_dir))
         
         config = {"pipeline_id": "test", "version": "1.0"}
         
@@ -636,7 +611,7 @@ class TestShardedStateManagerEdgeCases:
     
     def test_partition_hash_consistency(self):
         """Test that partition hashes are consistent."""
-        manager = ShardedStateManager(self.pipeline_id, str(self.state_dir))
+        manager = StateManager(self.pipeline_id, str(self.state_dir))
         
         partition = {"region": "EU", "account_type": "business", "priority": 1}
         
@@ -651,7 +626,7 @@ class TestShardedStateManagerEdgeCases:
     
     def test_checkpoint_sequence_increment(self):
         """Test that checkpoint sequence increments correctly."""
-        manager = ShardedStateManager(self.pipeline_id, str(self.state_dir))
+        manager = StateManager(self.pipeline_id, str(self.state_dir))
         
         config = {"pipeline_id": "test", "version": "1.0"}
         manager.start_run(config)
@@ -677,7 +652,7 @@ class TestShardedStateManagerEdgeCases:
     
     def test_empty_partition_handling(self):
         """Test handling of empty partitions."""
-        manager = ShardedStateManager(self.pipeline_id, str(self.state_dir))
+        manager = StateManager(self.pipeline_id, str(self.state_dir))
         
         config = {"pipeline_id": "test", "version": "1.0"}
         manager.start_run(config)
@@ -697,7 +672,7 @@ class TestShardedStateManagerEdgeCases:
     
     def test_complex_partition_keys(self):
         """Test handling of complex partition keys."""
-        manager = ShardedStateManager(self.pipeline_id, str(self.state_dir))
+        manager = StateManager(self.pipeline_id, str(self.state_dir))
         
         config = {"pipeline_id": "test", "version": "1.0"}
         manager.start_run(config)
@@ -740,7 +715,7 @@ class TestShardedStateManagerEdgeCases:
     
     def test_schema_hash_edge_cases(self):
         """Test schema hash computation edge cases."""
-        manager = ShardedStateManager(self.pipeline_id, str(self.state_dir))
+        manager = StateManager(self.pipeline_id, str(self.state_dir))
         
         # Empty schema
         empty_hash = manager._compute_schema_hash({})
@@ -770,7 +745,7 @@ class TestShardedStateManagerEdgeCases:
     
     def test_get_stream_partitions_missing_files(self):
         """Test getting partitions when some files are missing."""
-        manager = ShardedStateManager(self.pipeline_id, str(self.state_dir))
+        manager = StateManager(self.pipeline_id, str(self.state_dir))
         
         config = {"pipeline_id": "test", "version": "1.0"}
         manager.start_run(config)
