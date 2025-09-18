@@ -6,9 +6,24 @@ import tempfile
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from typing import Any, Dict
+from unittest.mock import patch
 
 from analitiq_stream.fault_tolerance.sharded_state_manager import ShardedStateManager
+from analitiq_stream.models.state import PipelineFingerprint
+
+
+def _expected_fingerprint(config: Dict[str, Any]) -> str:
+    """Compute the config fingerprint using the canonical model."""
+
+    fingerprint_model = PipelineFingerprint(
+        pipeline_id=config.get("pipeline_id", ""),
+        version=config.get("version", ""),
+        src=config.get("src", {}),
+        dst=config.get("dst", {}),
+        streams=config.get("streams", {}),
+    )
+    return fingerprint_model.fingerprint()
 
 
 class TestShardedStateManager:
@@ -70,8 +85,13 @@ class TestShardedStateManager:
         fingerprint1 = manager._compute_config_fingerprint(config1)
         fingerprint2 = manager._compute_config_fingerprint(config2)
         fingerprint3 = manager._compute_config_fingerprint(config3)
-        
+
+        expected_primary = _expected_fingerprint(config1)
+        expected_different = _expected_fingerprint(config3)
+
         assert fingerprint1 == fingerprint2  # Same config, same fingerprint
+        assert fingerprint1 == expected_primary
+        assert fingerprint3 == expected_different
         assert fingerprint1 != fingerprint3  # Different config, different fingerprint
         assert len(fingerprint1) > 0  # Non-empty fingerprint
     
@@ -181,7 +201,7 @@ class TestShardedStateManager:
         run_info = manager.get_run_info()
         assert run_info["run_id"] == run_id
         assert run_info["pipeline_id"] == "test-pipeline"
-        assert "config_fingerprint" in run_info
+        assert run_info["config_fingerprint"] == _expected_fingerprint(config)
         assert "started_at" in run_info
         assert "lease_owner" in run_info
     
@@ -209,13 +229,14 @@ class TestShardedStateManager:
         
         # Start first run
         run_id1 = manager.start_run(config, "run1")
-        
+
         # Start second run with same config should succeed
         run_id2 = manager.start_run(config, "run2")
-        
+
         assert run_id1 == "run1"
         assert run_id2 == "run2"
         assert manager.get_run_info()["run_id"] == "run2"
+        assert manager.get_run_info()["config_fingerprint"] == _expected_fingerprint(config)
     
     def test_start_run_config_compatibility_failure(self):
         """Test config compatibility check fails with different config."""
@@ -235,12 +256,15 @@ class TestShardedStateManager:
         
         # Start first run
         manager.start_run(config1, "run1")
-        
+        assert manager.get_run_info()["config_fingerprint"] == _expected_fingerprint(config1)
+
         # Start second run with different config should fail
         with pytest.raises(ValueError) as exc_info:
             manager.start_run(config2, "run2")
-        
+
         assert "Config fingerprint mismatch" in str(exc_info.value)
+        # Fingerprint should remain from original config
+        assert manager.get_run_info()["config_fingerprint"] == _expected_fingerprint(config1)
     
     def test_save_stream_checkpoint_basic(self):
         """Test basic stream checkpoint saving."""
@@ -485,7 +509,8 @@ class TestShardedStateManager:
         
         # Start run with config1
         manager.start_run(config1)
-        
+        assert manager.get_run_info()["config_fingerprint"] == _expected_fingerprint(config1)
+
         # Same config should be compatible
         assert manager.validate_config_compatibility(config1) is True
         assert manager.validate_config_compatibility(config2) is True
@@ -524,7 +549,7 @@ class TestShardedStateManager:
         assert resume_info["partition_count"] == 3
         assert resume_info["total_records_synced"] == 600  # 100 + 200 + 300
         assert resume_info["run_id"] == run_id
-        assert "config_fingerprint" in resume_info
+        assert resume_info["config_fingerprint"] == _expected_fingerprint(config)
         assert resume_info["last_checkpoint_seq"] > 0
         assert len(resume_info["partitions"]) == 3
 
