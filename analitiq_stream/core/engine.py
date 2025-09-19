@@ -3,6 +3,7 @@
 import asyncio
 import logging
 from asyncio import Queue, Semaphore
+from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, AsyncIterator, Tuple
 from uuid import uuid4
@@ -29,6 +30,23 @@ from .exceptions import (
 from .orchestrator import PipelineOrchestrator
 
 logger = logging.getLogger(__name__)
+
+
+def _deep_merge_dicts(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    """Recursively merge two dictionaries without mutating inputs."""
+
+    merged = deepcopy(base)
+
+    for key, value in override.items():
+        if (
+            isinstance(value, dict)
+            and isinstance(merged.get(key), dict)
+        ):
+            merged[key] = _deep_merge_dicts(merged[key], value)
+        else:
+            merged[key] = deepcopy(value)
+
+    return merged
 
 
 class StreamingEngine:
@@ -80,6 +98,7 @@ class StreamingEngine:
 
         # Fault tolerance components with state management
         self.sharded_state_manager = StateManager(pipeline_id, str(DIRECTORIES["state"]))
+        self._state_manager = self.sharded_state_manager
         self.retry_handler = RetryHandler()
         self.circuit_breaker = CircuitBreaker()
         self.dlq = DeadLetterQueue(self.engine_config.dlq_path)
@@ -114,7 +133,7 @@ class StreamingEngine:
         logger.info(f"Processing {len(streams)} streams concurrently")
             
         # Start new run
-        run_id = self.sharded_state_manager.start_run(pipeline_config)
+        run_id = self.state_manager.start_run(pipeline_config)
         logger.info(f"Started state run: {run_id}")
 
         stream_exceptions = []
@@ -208,21 +227,30 @@ class StreamingEngine:
         tasks = []
         
         try:
+            pipeline_src_config = pipeline_config.get("src", {})
+            pipeline_dst_config = pipeline_config.get("dst", {})
+
+            stream_src_config = stream_config.get("src", {})
+            stream_dst_config = stream_config.get("dst", {})
+
+            merged_src_config = _deep_merge_dicts(pipeline_src_config, stream_src_config)
+            merged_dst_config = _deep_merge_dicts(pipeline_dst_config, stream_dst_config)
+
             # Get connectors for this stream using factory methods
-            source_connector = self._create_source_connector(stream_config["source"])
-            dest_connector = self._create_destination_connector(stream_config["destination"])
+            source_connector = self._create_source_connector(merged_src_config)
+            dest_connector = self._create_destination_connector(merged_dst_config)
             
             # Create stream-specific DLQ
             stream_dlq_path = f"{self.dlq.dlq_path}/{stream_id}"
             stream_dlq = DeadLetterQueue(stream_dlq_path)
             
-            # Connect to source and destination
-            await source_connector.connect(stream_config["source"])
-            await dest_connector.connect(stream_config["destination"])
-            
+            # Connect to source and destination using merged configs
+            await source_connector.connect(merged_src_config)
+            await dest_connector.connect(merged_dst_config)
+
             # Configure destination if it supports configuration (e.g., DatabaseConnector)
             if hasattr(dest_connector, 'configure'):
-                await dest_connector.configure(stream_config["destination"])
+                await dest_connector.configure(merged_dst_config)
             
             # Create async queues for pipeline stages
             extract_queue = Queue(maxsize=self.buffer_size)
@@ -236,6 +264,8 @@ class StreamingEngine:
                 "stream_id": stream_id,
                 "stream_name": stream_name,
                 "stream_config": stream_config,  # Keep original for reference
+                "src": merged_src_config,
+                "dst": merged_dst_config,
             }
 
             # Start pipeline stages for this stream using factory method
@@ -282,7 +312,7 @@ class StreamingEngine:
         logger.debug(f"Starting extract stage for stream {stream_name}")
 
         try:
-            source_config = config["source"].copy()
+            source_config = config["src"].copy()
             # Add full config for state access
             source_config["pipeline_config"] = config
             
@@ -305,7 +335,7 @@ class StreamingEngine:
             # Use state management with API connector
             async for batch in source_connector.read_batches(
                 source_config,
-                state_manager=self.sharded_state_manager,
+                state_manager=self.state_manager,
                 stream_name=state_stream_name,
                 partition=partition,
                 batch_size=self.batch_size
@@ -374,7 +404,7 @@ class StreamingEngine:
                     logger.debug(f"Stream {stream_name}: Starting write_batch for batch {batch_count + 1} with {len(batch)} records")
                     # Apply semaphore for concurrency control
                     async with self.semaphore:
-                        await dest_connector.write_batch(batch, config["destination"])
+                        await dest_connector.write_batch(batch, config["dst"])
                     logger.debug(f"Stream {stream_name}: Completed write_batch for batch {batch_count + 1}")
                     
                     await output_queue.put(batch)  # Forward for checkpointing
@@ -482,8 +512,8 @@ class StreamingEngine:
     def _get_stream_name(self, config: Dict[str, Any]) -> str:
         """Generate stream name for state management."""
         # Use endpoint ID as stream name
-        if "source" in config and "endpoint_id" in config["source"]:
-            return f"endpoint.{config['source']['endpoint_id']}"
+        if "src" in config and "endpoint_id" in config["src"]:
+            return f"endpoint.{config['src']['endpoint_id']}"
         else:
             return config.get("pipeline_id", "unknown-stream")
 
@@ -493,4 +523,20 @@ class StreamingEngine:
 
     def get_state_manager(self) -> StateManager:
         """Get the state manager instance."""
-        return self.sharded_state_manager
+        return self.state_manager
+
+    @property
+    def state_manager(self) -> StateManager:
+        """State manager accessor for backward compatibility with legacy tests."""
+        return self._state_manager
+
+    @state_manager.setter
+    def state_manager(self, value: StateManager) -> None:
+        """Allow tests to override the state manager and keep aliases in sync."""
+        self._state_manager = value
+        self.sharded_state_manager = value
+
+    @state_manager.deleter
+    def state_manager(self) -> None:
+        """Restore the default state manager when patched contexts exit."""
+        self._state_manager = self.sharded_state_manager
