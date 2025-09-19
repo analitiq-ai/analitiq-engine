@@ -297,8 +297,8 @@ class Pipeline:
         for stream_id, stream_config in self.config["streams"].items():
             streams_info[stream_id] = {
                 "name": stream_config.get("name", stream_id),
-                "source": stream_config.get("source", {}).get("endpoint_id", "unknown"),
-                "destination": stream_config.get("destination", {}).get("endpoint_id", "unknown"),
+                "source": stream_config.get("src", {}).get("endpoint_id", "unknown"),
+                "destination": stream_config.get("dst", {}).get("endpoint_id", "unknown"),
             }
         
         return {

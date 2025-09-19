@@ -3,7 +3,7 @@
 from unittest.mock import AsyncMock, Mock, patch
 import pytest
 
-from analitiq_stream.core.engine import StreamingEngine
+from analitiq_stream.core.engine import StreamingEngine, _deep_merge_dicts
 from analitiq_stream.core.exceptions import ConfigurationError, StreamProcessingError
 
 
@@ -174,14 +174,106 @@ class TestStreamingEngine:
                 with patch('asyncio.create_task') as mock_create_task:
                     # Return mock tasks
                     mock_create_task.side_effect = lambda coro, name=None: AsyncMock()
-                    
+
                     try:
                         await engine.stream_data(config)
                     except (ExceptionGroup, Exception):
                         pass  # We expect exceptions
-                    
+
                     # Verify create_task was called for each stream
                     assert mock_create_task.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_process_stream_uses_merged_credentials(self, engine):
+        """Connector creation should receive deep-merged src/dst credentials."""
+
+        pipeline_config = {
+            "pipeline_id": "test-pipeline",
+            "name": "Test Pipeline",
+            "version": "1.0",
+            "src": {
+                "type": "api",
+                "base_url": "https://root.example.com",
+                "headers": {
+                    "Authorization": "Bearer root-token",
+                    "User-Agent": "root-agent",
+                    "nested": {"base": True},
+                },
+                "auth": {"token": "root-token"},
+            },
+            "dst": {
+                "type": "database",
+                "driver": "postgresql",
+                "host": "root.db.local",
+                "port": 5432,
+                "database": "analytics",
+                "user": "pipeline",
+                "password": "secret",
+                "options": {
+                    "sslmode": "require",
+                    "pool": {"min": 1, "max": 5},
+                },
+            },
+            "streams": {},
+        }
+
+        stream_config = {
+            "name": "users",
+            "src": {
+                "endpoint_id": "endpoint-123",
+                "headers": {
+                    "User-Agent": "stream-agent",
+                    "X-Stream": "value",
+                    "nested": {"override": True},
+                },
+                "pagination": {"type": "page"},
+            },
+            "dst": {
+                "endpoint_id": "endpoint-456",
+                "table": "users",
+                "options": {
+                    "pool": {"max": 10},
+                    "schema": "public",
+                },
+            },
+            "mapping": {},
+        }
+
+        pipeline_config["streams"]["users"] = stream_config
+
+        expected_src = _deep_merge_dicts(pipeline_config["src"], stream_config["src"])
+        expected_dst = _deep_merge_dicts(pipeline_config["dst"], stream_config["dst"])
+
+        source_connector = Mock()
+        source_connector.connect = AsyncMock()
+        source_connector.disconnect = AsyncMock()
+
+        dest_connector = Mock()
+        dest_connector.connect = AsyncMock()
+        dest_connector.configure = AsyncMock()
+        dest_connector.disconnect = AsyncMock()
+
+        with (
+            patch.object(engine, "_create_source_connector", return_value=source_connector) as mock_create_src,
+            patch.object(engine, "_create_destination_connector", return_value=dest_connector) as mock_create_dst,
+            patch.object(engine, "_create_pipeline_stages", return_value=[]) as mock_create_stages,
+        ):
+
+            await engine._process_stream("users", stream_config, pipeline_config)
+
+        mock_create_src.assert_called_once_with(expected_src)
+        mock_create_dst.assert_called_once_with(expected_dst)
+        source_connector.connect.assert_awaited_once_with(expected_src)
+        dest_connector.connect.assert_awaited_once_with(expected_dst)
+        dest_connector.configure.assert_awaited_once_with(expected_dst)
+
+        assert mock_create_stages.call_count == 1
+        stage_kwargs = mock_create_stages.call_args.kwargs
+        assert stage_kwargs["stream_processing_config"]["src"] == expected_src
+        assert stage_kwargs["stream_processing_config"]["dst"] == expected_dst
+
+        source_connector.disconnect.assert_awaited_once()
+        dest_connector.disconnect.assert_awaited_once()
 
     def test_get_connector_api(self, engine):
         """Test connector creation for API type."""
@@ -231,7 +323,7 @@ class TestStreamingEngine:
     def test_get_stream_name(self, engine):
         """Test stream name generation."""
         # With endpoint ID
-        config = {"source": {"endpoint_id": "test-endpoint-123"}}
+        config = {"src": {"endpoint_id": "test-endpoint-123"}}
         result = engine._get_stream_name(config)
         assert result == "endpoint.test-endpoint-123"
         
