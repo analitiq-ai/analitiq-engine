@@ -10,14 +10,13 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Literal
 from urllib.parse import urlparse
-
+import re
 import boto3
 from botocore.exceptions import ClientError, NoCredentialsError
 from pydantic import BaseModel, Field, field_validator, ValidationInfo
 
-from analitiq_stream import Pipeline
 from analitiq_stream.core.credentials import CredentialsManager
 from analitiq_stream.models.state import PipelineConfig, SourceConfig, DestinationConfig
 
@@ -63,6 +62,122 @@ class PipelineConfigPrepSettings(BaseModel):
 
     model_config = {"validate_assignment": True}
 
+def validate_pipeline_config(config) -> bool:
+    """Validate pipeline-level configuration fields."""
+    required_fields = ["pipeline_id"]
+
+    for field in required_fields:
+        if field not in config:
+            logger.error(f"Missing required pipeline field: {field}")
+            return False
+
+    # Validate pipeline_id format
+    pipeline_id = config["pipeline_id"]
+    if not isinstance(pipeline_id, str) or not pipeline_id.strip():
+        logger.error("pipeline_id must be a non-empty string")
+        return False
+
+    # Validate engine_config if present
+    if "engine_config" in config:
+        engine_config = config["engine_config"]
+        if not isinstance(engine_config, dict):
+            logger.error("engine_config must be a dictionary")
+            return False
+
+        # Validate numeric values in engine config
+        numeric_fields = ["batch_size", "max_concurrent_batches", "buffer_size"]
+        for field in numeric_fields:
+            if field in engine_config and not isinstance(engine_config[field], int):
+                logger.error(f"engine_config.{field} must be an integer")
+                return False
+
+    def _validate_src_dest(key: str) -> bool:
+        config_value = config[key]
+        if not isinstance(config_value, dict):
+            logger.error(f"{key} must be a dictionary")
+            return False
+
+        # For data destinations, validate refresh_mode if present
+        if key == "dst" and "refresh_mode" in config_value:
+            valid_refresh_modes = ["insert", "upsert", "truncate_insert"]
+            if config_value["refresh_mode"] not in valid_refresh_modes:
+                logger.error(f"Invalid dst.refresh_mode: {config_value['refresh_mode']}. Must be one of: {valid_refresh_modes}")
+                return False
+
+        # Validate batch_size if present
+        if "batch_size" in config_value:
+            if not isinstance(config_value["batch_size"], int) or config_value["batch_size"] <= 0:
+                logger.error("dst.batch_size must be a positive integer")
+                return False
+
+        return True
+
+    # Validate src and dst sections if present
+    for section in ("src", "dst"):
+        if section in config:
+            if not _validate_src_dest(section):
+                return False
+
+    return True
+
+def validate_transformations(transformations) -> bool:
+    """Validate transformation configurations."""
+
+    if not isinstance(transformations, list):
+        logger.error("transformations must be a list")
+        return False
+
+    valid_transformation_types = [ # TODO make sure these match the Pydantic definitions
+        "field_mapping",
+        "value_transformation",
+        "computed_field",
+        "conditional_transformation",
+    ]
+
+    for i, transformation in enumerate(transformations):
+        if not isinstance(transformation, dict):
+            logger.error(f"Transformation {i} must be a dictionary")
+            return False
+
+        if "type" not in transformation:
+            logger.error(f"Transformation {i} missing required field: type")
+            return False
+
+        if transformation["type"] not in valid_transformation_types:
+            logger.error(f"Invalid transformation type: {transformation['type']}")
+            return False
+
+        # Validate specific transformation types
+        if transformation["type"] == "field_mapping":
+            if "mappings" not in transformation:
+                logger.error(f"Field mapping transformation {i} missing mappings")
+                return False
+
+        elif transformation["type"] in ["value_transformation", "computed_field"]:
+            if "field" not in transformation:
+                logger.error(f"Transformation {i} missing required field: field")
+                return False
+
+    return True
+
+def expand_required_vars(config: dict) -> dict:
+    """
+    Expands ${VAR} in values using environment variables.
+    Fails if any variable is missing.
+    """
+    pattern = re.compile(r"\${([^}]+)}")
+
+    expanded = {}
+    for key, value in config.items():
+        if isinstance(value, str):
+            matches = pattern.findall(value)
+            for var in matches:
+                if var not in os.environ:
+                    raise EnvironmentError(f"Missing required environment variable: {var}")
+            expanded[key] = os.path.expandvars(value)
+        else:
+            expanded[key] = value
+    return expanded
 
 class PipelineConfigPrep:
     """
@@ -85,6 +200,9 @@ class PipelineConfigPrep:
         # Initialize AWS clients if needed (only for non-local environments)
         self._s3_client: Optional[boto3.client] = None
         self._secrets_client: Optional[boto3.client] = None
+
+        # Validate environment
+        self.validate_environment()
 
         logger.info(f"Initialized PipelineConfigPrep for environment: {self.settings.env}")
         logger.info(f"Pipeline ID: {self.settings.pipeline_id}")
@@ -138,19 +256,12 @@ class PipelineConfigPrep:
         else:
             return f"s3://{self.settings.s3_config_bucket}/pipelines/{self.settings.pipeline_id}.json"
 
-    def _get_host_config_path(self, host_id: str) -> str:
-        """Get path to host configuration file."""
+    def _get_config_path(self, config_type: str, id: str) -> str:
+        """Get path to host or endpoints configuration file."""
         if self.is_local_mode:
-            return f"{self.settings.local_config_mount}/hosts/{host_id}.json"
+            return f"{self.settings.local_config_mount}/{config_type}/{id}.json"
         else:
-            return f"s3://{self.settings.s3_config_bucket}/hosts/{host_id}.json"
-
-    def _get_endpoint_config_path(self, endpoint_id: str) -> str:
-        """Get path to endpoint configuration file."""
-        if self.is_local_mode:
-            return f"{self.settings.local_config_mount}/endpoints/{endpoint_id}.json"
-        else:
-            return f"s3://{self.settings.s3_config_bucket}/endpoints/{endpoint_id}.json"
+            return f"s3://{self.settings.s3_config_bucket}/{config_type}/{id}.json"
 
     def _load_local_json(self, file_path: str, expand_env_vars: bool = False) -> Dict[str, Any]:
         """Load JSON from local filesystem."""
@@ -166,7 +277,6 @@ class PipelineConfigPrep:
             if expand_env_vars:
                 config = self.credentials_manager._expand_environment_variables(config)
 
-            logger.debug(f"Loaded local config from {file_path}")
             return config
 
         except json.JSONDecodeError as e:
@@ -223,66 +333,87 @@ class PipelineConfigPrep:
         """Load and validate the main pipeline configuration."""
         path = self._get_pipeline_config_path()
         logger.info(f"Loading pipeline config from: {path}")
-        config_data = self.load_json_config(path)
-        return PipelineConfig(**config_data)
+        config_dict = self.load_json_config(path)
+        return config_dict
 
-    def load_host_config(self, host_id: str) -> Dict[str, Any]:
+    def load_config(self, config_type: Literal["hosts", "endpoints"], id: str) -> Dict[str, Any]:
         """Load host configuration by ID."""
-        path = self._get_host_config_path(host_id)
+        path = self._get_config_path(config_type, id)
         logger.debug(f"Loading host config from: {path}")
         return self.load_json_config(path, expand_env_vars=True)
 
-    def load_endpoint_config(self, endpoint_id: str) -> Dict[str, Any]:
-        """Load endpoint configuration by ID."""
-        path = self._get_endpoint_config_path(endpoint_id)
-        logger.debug(f"Loading endpoint config from: {path}")
-        return self.load_json_config(path)
+    def validate_config(self) -> bool:
+        """Validate pipeline configuration."""
+        try:
+            # Validate pipeline-level configuration
+            if not validate_pipeline_config():
+                return False
 
-    def merge_config(self, pipeline_config: PipelineConfig, config_type: str) -> Dict[str, Any]:
+            # Validate transformations if present
+            if "transformations" in self.config:
+                if not validate_transformations(self.config["transformations"]):
+                    return False
+
+            # Validate validation rules if present
+            if "validation" in self.config:
+                if not validate_validation_rules(self.config["validation"]):
+                    return False
+
+            logger.info("Configuration validation passed")
+            return True
+
+        except Exception as e:
+            logger.error(f"Configuration validation failed: {str(e)}")
+            return False
+
+    def load_and_merge_config(self, pipeline_config: Dict) -> Dict[str, Any]:
         """
         Load and merge endpoint schema with host credentials.
 
         Args:
             pipeline_config: The validated pipeline configuration
-            config_type: Either 'src' or 'dst' to specify source or destination
 
         Returns:
             Merged configuration dictionary
         """
         # Get pipeline-level host_id from the source/destination config
-        config_section = getattr(pipeline_config, config_type, None)
-        if not config_section:
-            raise ValueError(f"pipeline_config must contain '{config_type}' section")
 
-        # we expect host_id to be at the pipeline level
-        host_id = config_section.get('host_id')
-        if not host_id:
-            raise ValueError(f"pipeline_config.{config_type} must contain 'host_id'")
+        for config_type in ["src", "dst"]:
+            config_section = pipeline_config[config_type]
 
-        # Get endpoint_id from the first stream (assuming all streams use same endpoint)
-        if not pipeline_config.streams:
-            raise ValueError("No streams configured")
+            if not config_section:
+                raise ValueError(f"pipeline_config must contain '{config_type}' section")
 
-        first_stream = next(iter(pipeline_config.streams.values()))
-        stream_config = first_stream.get(config_type, {})
-        endpoint_id = stream_config.get("endpoint_id")
-        if not endpoint_id:
-            raise ValueError(f"First stream must contain '{config_type}.endpoint_id'")
+            # we expect host_id to be at the section level
+            host_id = config_section.get('host_id')
 
-        # Load endpoint schema and host credentials
-        endpoint_config = self.load_endpoint_config(endpoint_id)
-        host_config = self.load_host_config(host_id)
+            #load the host config
+            host_config = self.load_config('hosts', host_id)
+            if not host_config:
+                raise ValueError(f"Could not load host config for host '{host_id}'.")
 
-        # Merge configurations (host credentials take precedence)
-        merged_config = endpoint_config.copy()
-        merged_config.update(host_config)
+            # merge it into main config
+            pipeline_config[config_type].update(host_config)
 
-        logger.debug(f"Merged {config_type} config from endpoint {endpoint_id} and host {host_id}")
-        return merged_config
+            logger.debug(f"Merged {config_type} config for host {host_id}.")
 
-    def create_pipeline(self) -> Pipeline:
+            for stream_id, steam_config in pipeline_config['streams'].items():
+                # we expect endpoint_id to be at the section level
+                endpoint_id = steam_config.get(config_type).get('endpoint_id')
+
+                # Load endpoint schema and host credentials
+                endpoint_config = self.load_config('endpoints', endpoint_id)
+
+                # merge it into main config
+                pipeline_config["streams"][stream_id][config_type].update(endpoint_config)
+
+                logger.debug(f"Merged {config_type} config for stream {stream_id} for endpoint {endpoint_id}.")
+
+        return pipeline_config
+
+    def create_config(self):
         """
-        Load configuration and create pipeline instance.
+        Load configuration.
 
         Returns:
             Configured Pipeline instance
@@ -290,24 +421,22 @@ class PipelineConfigPrep:
         # Load and validate pipeline configuration
         pipeline_config = self.load_pipeline_config()
 
+        validate_pipeline_config(pipeline_config)
+
         # Load and merge configurations
-        source_config = self.merge_config(pipeline_config, "src")
-        destination_config = self.merge_config(pipeline_config, "dst")
+        pipeline_config = self.load_and_merge_config(pipeline_config)
 
         # Log pipeline information
-        streams = pipeline_config.streams
+        streams = pipeline_config.get("streams", {})
 
-        logger.info(f"Starting {pipeline_config.name} (ID: {pipeline_config.pipeline_id})")
+        logger.info(f"Source: {pipeline_config.get('src').get('host')}")
+        logger.info(f"Destination: {pipeline_config.get('dst').get('host')}")
         logger.info(f"Configured streams: {len(streams)}")
-        logger.info(f"Source: {source_config.get('base_url', 'unknown')}")
-        logger.info(f"Destination: {destination_config.get('base_url', 'unknown')}")
 
-        # Create and return pipeline with dictionary config
-        return Pipeline(
-            pipeline_config=pipeline_config.model_dump(),
-            source_config=source_config,
-            destination_config=destination_config
-        )
+        expanded_config = expand_required_vars(pipeline_config)
+
+        return PipelineConfig(**expanded_config
+                              )
 
     def validate_environment(self) -> None:
         """
@@ -335,27 +464,15 @@ class PipelineConfigPrep:
                 raise RuntimeError(f"Local config mount point does not exist: {mount_path}")
             logger.debug(f"Local config mount validated: {mount_path}")
 
-    def get_pipeline_info(self) -> Dict[str, Any]:
-        """
-        Get basic pipeline information without fully loading configs.
 
-        Returns:
-            Dictionary with pipeline metadata
-        """
-        try:
-            pipeline_config = self.load_pipeline_config()
-            return {
-                "pipeline_id": pipeline_config.pipeline_id,
-                "name": pipeline_config.name,
-                "version": pipeline_config.version,
-                "stream_count": len(pipeline_config.streams),
-                "environment": self.settings.env,
-                "config_source": "local" if self.is_local_mode else "s3"
-            }
-        except Exception as e:
-            logger.error(f"Failed to load pipeline info: {e}")
-            return {
-                "pipeline_id": self.settings.pipeline_id,
-                "environment": self.settings.env,
-                "error": str(e)
-            }
+
+if __name__ == "__main__":
+    # Test basic functionality
+    import os
+    os.environ["PIPELINE_ID"] = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+    os.environ["ENV"] = "local"
+    os.environ["LOCAL_CONFIG_MOUNT"] = "/Users/kirillandriychuk/Documents/Projects/analitiq-core/examples/wise_to_sevdesk"
+
+    prep = PipelineConfigPrep()
+    pipeline_config = prep.create_config()
+    print(json.dumps(pipeline_config.__dict__, indent=4, default=str))

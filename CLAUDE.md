@@ -8,27 +8,68 @@ Analitiq Stream is a high-performance, fault-tolerant data streaming framework f
 
 ## Configuration Management
 
-The framework uses a modular configuration approach where pipeline configuration is split into separate JSON files for better organization and reusability:
+The framework uses a modular configuration approach where pipeline configuration is split into separate JSON files for better organization and reusability. It supports both local filesystem and AWS S3 backends for multi-environment deployment.
 
-### UUID-Based Configuration
+### Multi-Environment Configuration Loading
+
+The `PipelineConfigPrep` class orchestrates configuration loading across different environments:
+
 ```python
+from analitiq_stream.core.pipeline_config_prep import PipelineConfigPrep, PipelineConfigPrepSettings
+
+# Local environment (default)
+settings = PipelineConfigPrepSettings(
+    env="local",
+    pipeline_id="my-pipeline-uuid",
+    local_config_mount="/path/to/config"
+)
+
+# AWS environment (dev/prod)
+settings = PipelineConfigPrepSettings(
+    env="prod",
+    pipeline_id="my-pipeline-uuid",
+    aws_region="eu-central-1",
+    s3_config_bucket="analitiq-config",
+    use_secrets_manager=True
+)
+
+# Initialize and load configuration
+prep = PipelineConfigPrep(settings)
+pipeline_config = prep.create_config()  # Returns validated PipelineConfig object
+```
+
+### Environment-Based Configuration Loading
+
+**Local Environment (`env="local"`):**
+- Loads from local filesystem mount point
+- Environment variables: `LOCAL_CONFIG_MOUNT`, `PIPELINE_ID`
+- Default mount point: `/config`
+- Direct file access with path validation
+
+**AWS Environments (`env="dev"` or `env="prod"`):**
+- Loads from S3 bucket with automatic AWS credential detection
+- Environment variables: `S3_CONFIG_BUCKET`, `AWS_REGION`, `PIPELINE_ID`
+- Default S3 bucket: `analitiq-config`
+- Optional AWS Secrets Manager integration
+- Automatic retry and error handling for S3 operations
+
+### UUID-Based Configuration Structure
+
+```python
+# Using PipelineConfigPrep (recommended for production)
+from analitiq_stream.core.pipeline_config_prep import PipelineConfigPrep
+
+prep = PipelineConfigPrep()  # Loads settings from environment variables
+pipeline_config = prep.create_config()
+
+# Direct Pipeline usage (for local development)
 import json
 from analitiq_stream import Pipeline
 
-# Load pipeline configuration (contains UUID references to source/destination)
 with open("pipeline_config.json") as f:
     pipeline_config = json.load(f)
 
-# Optional: Load additional configurations
-with open("validation_config.json") as f:
-    validation_config = json.load(f)
-
-# Create pipeline with UUID-based configuration
-# Source and destination configurations loaded automatically from UUID files
-pipeline = Pipeline(
-    pipeline_config=pipeline_config,
-    validation_config=validation_config # Optional
-)
+pipeline = Pipeline(pipeline_config=pipeline_config)
 ```
 
 ### Credentials File Formats
@@ -69,6 +110,28 @@ pipeline = Pipeline(
 - Credentials support `${VAR_NAME}` syntax for environment variables
 - Variables are expanded at runtime for security
 - Use this pattern for sensitive values like passwords and tokens
+
+### Required Environment Variables
+
+**Local Environment (`ENV=local`):**
+```bash
+export ENV="local"
+export PIPELINE_ID="your-pipeline-uuid"
+export LOCAL_CONFIG_MOUNT="/path/to/config"
+```
+
+**AWS Environment (`ENV=dev` or `ENV=prod`):**
+```bash
+export ENV="prod"  # or "dev"
+export PIPELINE_ID="your-pipeline-uuid"
+export AWS_REGION="eu-central-1"
+export S3_CONFIG_BUCKET="analitiq-config"
+export USE_SECRETS_MANAGER="true"  # Optional
+
+# AWS credentials (use AWS CLI, IAM roles, or environment variables)
+export AWS_ACCESS_KEY_ID="your-access-key"
+export AWS_SECRET_ACCESS_KEY="your-secret-key"
+```
 
 ### Generate Templates
 ```bash
@@ -157,6 +220,7 @@ analitiq_stream/
 ├── core/                    # Core framework components
 │   ├── engine.py           # StreamingEngine - main ETL pipeline processor
 │   ├── pipeline.py         # Pipeline - high-level configuration interface
+│   ├── pipeline_config_prep.py # PipelineConfigPrep - multi-environment config loading
 │   └── credentials.py      # CredentialsManager - secure authentication
 ├── connectors/             # Data source/destination connectors
 │   ├── base.py            # BaseConnector - abstract interface
@@ -372,25 +436,50 @@ The framework supports splitting configuration into separate, focused files:
 }
 ```
 
-#### UUID-Based Destination Configuration
+#### Directory-Based Configuration Structure
 
-The framework uses UUID-based files to separate endpoint schemas from host credentials:
+The framework uses a directory-based structure to organize endpoint schemas and host credentials:
 
-**API Endpoint Schema File** (`ep_{endpoint_id}.json`):
+```
+config-directory/
+├── pipelines/
+│   └── {pipeline_id}.json
+├── hosts/
+│   ├── {host_id}.json
+│   └── {host_id}.json
+└── endpoints/
+    ├── {endpoint_id}.json
+    └── {endpoint_id}.json
+```
+
+**API Endpoint Schema File** (`endpoints/{endpoint_id}.json`):
 ```json
 {
-  "endpoint": "/api/v1/CheckAccountTransaction",
-  "method": "POST",
+  "endpoint": "/v1/transfers",
+  "method": "GET",
+  "replication_filter_mapping": {
+    "created": "createdDateStart"
+  },
+  "pagination": {
+    "type": "offset",
+    "params": {
+      "limit_param": "limit",
+      "offset_param": "offset"
+    }
+  },
   "response_schema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "title": "API Response Schema",
-    "type": "object",
-    "properties": { ... }
+    "type": "array",
+    "items": {
+      "type": "object",
+      "properties": { ... }
+    }
   }
 }
 ```
 
-**Database Endpoint Schema File** (`ep_{endpoint_id}.json`):
+**Database Endpoint Schema File** (`endpoints/{endpoint_id}.json`):
 ```json
 {
   "schema": "wise_data",
@@ -437,29 +526,31 @@ The framework uses UUID-based files to separate endpoint schemas from host crede
 }
 ```
 
-**API Host Credentials File** (`hst_{host_id}.json`):
+**API Host Credentials File** (`hosts/{host_id}.json`):
 ```json
 {
-  "base_url": "https://my.sevdesk.de",
+  "host": "https://api.wise.com",
+  "type": "api",
   "headers": {
     "Content-Type": "application/json",
-    "Authorization": "${API_TOKEN}"
+    "Authorization": "Bearer ${WISE_API_TOKEN}"
   },
   "rate_limit": {
-    "max_requests": 10,
+    "max_requests": 60,
     "time_window": 60
   }
 }
 ```
 
-**Database Host Credentials File** (`hst_{host_id}.json`):
+**Database Host Credentials File** (`hosts/{host_id}.json`):
 ```json
 {
+  "type": "database",
   "driver": "postgresql",
-  "host": "localhost",
-  "port": 5432,
-  "database": "analytics",
-  "user": "postgres",
+  "host": "${DB_HOST}",
+  "port": "${DB_PORT}",
+  "database": "${DB_NAME}",
+  "user": "${DB_USER}",
   "password": "${DB_PASSWORD}",
   "ssl_mode": "prefer",
   "connection_pool": {
@@ -531,12 +622,12 @@ Both `src` and `dst` sections support incremental replication parameters for eff
   - **Logs Path**: `logs/{pipeline_id}/`
 - **Schedule**: Defined in pipeline config (applies to entire pipeline)
 - **Error Handling & Monitoring**: Part of pipeline-level configuration
-- **Source Configuration**: Automatically loaded from UUID-based files:
-  - `src.endpoint_id`: UUID referencing `ep_{endpoint_id}.json` for source schema
-  - `src.host_id`: UUID referencing `hst_{host_id}.json` for source connection details
-- **Destination Configuration**: Automatically loaded from UUID-based files:
-  - `dst.endpoint_id`: UUID referencing `ep_{endpoint_id}.json` for destination schema  
-  - `dst.host_id`: UUID referencing `hst_{host_id}.json` for destination connection details
+- **Source Configuration**: Automatically loaded from directory-based structure:
+  - `src.endpoint_id`: UUID referencing `endpoints/{endpoint_id}.json` for source schema
+  - `src.host_id`: UUID referencing `hosts/{host_id}.json` for source connection details
+- **Destination Configuration**: Automatically loaded from directory-based structure:
+  - `dst.endpoint_id`: UUID referencing `endpoints/{endpoint_id}.json` for destination schema
+  - `dst.host_id`: UUID referencing `hosts/{host_id}.json` for destination connection details
 - **Destination Behavior**: Controlled by fields in pipeline_config.json's `dst` section:
   - `refresh_mode`: Controls write behavior (`insert`, `upsert`, `truncate_insert`)
   - `batch_support`: Boolean flag for API batch vs individual record sending

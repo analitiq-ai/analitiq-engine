@@ -10,7 +10,7 @@ import logging
 import os
 from datetime import datetime
 from typing import Optional, Dict, Any
-
+from analitiq_stream import Pipeline
 from .core.pipeline_config_prep import PipelineConfigPrep
 
 
@@ -31,31 +31,6 @@ class PipelineRunner:
         if not self.pipeline_id:
             raise ValueError("Pipeline ID must be provided or set via PIPELINE_ID env var")
 
-    def validate_environment(self) -> Dict[str, Any]:
-        """
-        Validate environment configuration.
-
-        Returns:
-            Dictionary with environment information.
-        """
-        env = os.getenv("ENV", "local")
-
-        env_info = {
-            "env": env,
-            "pipeline_id": self.pipeline_id
-        }
-
-        if env != "local":
-            env_info.update({
-                "aws_region": os.getenv("AWS_REGION", "eu-central-1"),
-                "s3_bucket": os.getenv("S3_CONFIG_BUCKET", "analitiq-config")
-            })
-        else:
-            env_info["local_mount"] = os.getenv("LOCAL_CONFIG_MOUNT", "/config")
-
-        logger.info(f"Environment validated: {env_info}")
-        return env_info
-
     async def run(self) -> bool:
         """
         Execute the pipeline.
@@ -64,24 +39,19 @@ class PipelineRunner:
             True if successful, False if failed.
         """
         try:
-            # Validate environment
-            self.validate_environment()
 
             # Create pipeline config prep instance
             logger.info("Initializing PipelineConfigPrep...")
-            config_prep = PipelineConfigPrep()
-
-            # Validate environment setup
-            logger.info("Validating environment configuration...")
-            config_prep.validate_environment()
-
-            # Get pipeline info
-            pipeline_info = config_prep.get_pipeline_info()
-            logger.info(f"Pipeline Info: {pipeline_info}")
+            pipeline_config_prep = PipelineConfigPrep()
+            pipeline_config = pipeline_config_prep.create_config()
 
             # Create and run pipeline
-            logger.info("Creating pipeline...")
-            pipeline = config_prep.create_pipeline()
+            logger.info(f"Starting {pipeline_config.name} (ID: {pipeline_config.pipeline_id})")
+
+            # Create pipeline with dictionary config
+            pipeline = Pipeline(
+                pipeline_config=pipeline_config.model_dump()
+            )
 
             logger.info("Starting pipeline execution...")
             start_time = datetime.now()
