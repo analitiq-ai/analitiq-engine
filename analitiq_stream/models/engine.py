@@ -2,7 +2,12 @@
 
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Union
-from pydantic import BaseModel, Field, field_validator, ConfigDict
+from pydantic import (
+    BaseModel,
+    Field,
+    field_validator,
+    ConfigDict,
+)
 
 
 class EngineConfig(BaseModel):
@@ -41,8 +46,8 @@ class PipelineStagesConfig(BaseModel):
 
 class StreamProcessingConfig(BaseModel):
     """Complete configuration for stream processing."""
-    
-    model_config = ConfigDict(extra='allow')
+
+    model_config = ConfigDict(extra='allow', populate_by_name=True)
     
     stream_id: str = Field(..., description="Unique stream identifier")
     stream_name: str = Field(..., description="Human-readable stream name")
@@ -53,8 +58,14 @@ class StreamProcessingConfig(BaseModel):
     stages: PipelineStagesConfig = Field(default_factory=PipelineStagesConfig)
     
     # Source and destination configurations
-    source: Dict[str, Any] = Field(..., description="Source connector configuration")
-    destination: Dict[str, Any] = Field(..., description="Destination connector configuration")
+    src: Dict[str, Any] = Field(
+        ...,
+        description="Source endpoint configuration with merged host credentials",
+    )
+    dst: Dict[str, Any] = Field(
+        ...,
+        description="Destination endpoint configuration with merged host credentials",
+    )
     
     # Data transformation
     mapping: Dict[str, Any] = Field(default_factory=dict, description="Field mappings and transformations")
@@ -91,6 +102,24 @@ class StreamProcessingConfig(BaseModel):
         if v not in ["insert", "upsert", "truncate_insert"]:
             raise ValueError("refresh_mode must be 'insert', 'upsert', or 'truncate_insert'")
         return v
+
+    @field_validator("src", "dst")
+    @classmethod
+    def validate_endpoint_configs(cls, value: Dict[str, Any], info):
+        """Ensure endpoint configs include merged credential metadata."""
+        if not isinstance(value, dict):
+            raise TypeError("must be a dictionary of endpoint configuration values")
+
+        required_keys = ["endpoint_id", "host_id"]
+        missing = [key for key in required_keys if key not in value]
+        if missing:
+            display = info.field_name
+            missing_keys = ", ".join(missing)
+            raise ValueError(
+                f"{display} configuration missing required keys: {missing_keys}"
+            )
+
+        return value
 
 
 class PipelineMetricsSnapshot(BaseModel):

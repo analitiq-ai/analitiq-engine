@@ -251,11 +251,22 @@ def pipeline_factory(temp_directories):
         src = copy.deepcopy(source_config)
         dst = copy.deepcopy(destination_config)
 
+        cfg["src"] = copy.deepcopy(src)
+        cfg["dst"] = copy.deepcopy(dst)
+
+        for stream in cfg.get("streams", {}).values():
+            stream_src = copy.deepcopy(stream.get("src", {})) or {}
+            stream_dst = copy.deepcopy(stream.get("dst", {})) or {}
+
+            merged_src = {**src, **stream_src}
+            merged_dst = {**dst, **stream_dst}
+
+            stream["src"] = merged_src
+            stream["dst"] = merged_dst
+
         state_path = temp_directories["state"] / cfg["pipeline_id"]
         pipeline = Pipeline(
-            pipeline_config=cfg,
-            source_config=src,
-            destination_config=dst,
+            cfg,
             state_dir=str(state_path),
         )
 

@@ -124,11 +124,11 @@ class TestConfigurationError:
         """Test configuration error with field path."""
         error = ConfigurationError(
             "Invalid value",
-            field_path="pipeline.source.config"
+            field_path="pipeline.src.config"
         )
         
         assert str(error) == "Invalid value"
-        assert error.field_path == "pipeline.source.config"
+        assert error.field_path == "pipeline.src.config"
     
     def test_with_validation_errors(self):
         """Test configuration error with validation errors."""
@@ -146,12 +146,12 @@ class TestConfigurationError:
         validation_errors = ["Required field missing"]
         error = ConfigurationError(
             "Configuration invalid",
-            field_path="source.database",
+            field_path="src.database",
             validation_errors=validation_errors
         )
         
         assert str(error) == "Configuration invalid"
-        assert error.field_path == "source.database"
+        assert error.field_path == "src.database"
         assert error.validation_errors == validation_errors
 
 
@@ -181,13 +181,13 @@ class TestStreamConfigurationError:
         error = StreamConfigurationError(
             "Stream validation failed",
             stream_id="stream_789",
-            field_path="stream.source.config",
+            field_path="stream.src.config",
             validation_errors=validation_errors
         )
         
         assert str(error) == "Stream validation failed"
         assert error.stream_id == "stream_789"
-        assert error.field_path == "stream.source.config"
+        assert error.field_path == "stream.src.config"
         assert error.validation_errors == validation_errors
 
 
@@ -211,8 +211,8 @@ class TestPipelineValidationError:
     def test_with_errors_dict(self):
         """Test pipeline validation error with errors dictionary."""
         errors = {
-            "source": ["Missing host", "Invalid port"],
-            "destination": ["Missing credentials"]
+            "src": ["Missing host", "Invalid port"],
+            "dst": ["Missing credentials"]
         }
         error = PipelineValidationError("Multiple validation errors", errors=errors)
         
