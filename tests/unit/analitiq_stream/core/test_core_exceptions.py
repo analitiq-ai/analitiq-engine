@@ -211,8 +211,8 @@ class TestPipelineValidationError:
     def test_with_errors_dict(self):
         """Test pipeline validation error with errors dictionary."""
         errors = {
-            "source": ["Missing host", "Invalid port"],
-            "destination": ["Missing credentials"]
+            "src": ["Missing host", "Invalid port"],
+            "dst": ["Missing credentials"]
         }
         error = PipelineValidationError("Multiple validation errors", errors=errors)
         

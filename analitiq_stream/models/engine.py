@@ -3,7 +3,6 @@
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Union
 from pydantic import (
-    AliasChoices,
     BaseModel,
     Field,
     field_validator,
@@ -62,14 +61,10 @@ class StreamProcessingConfig(BaseModel):
     src: Dict[str, Any] = Field(
         ...,
         description="Source endpoint configuration with merged host credentials",
-        validation_alias=AliasChoices("src", "source"),
-        serialization_alias="src",
     )
     dst: Dict[str, Any] = Field(
         ...,
         description="Destination endpoint configuration with merged host credentials",
-        validation_alias=AliasChoices("dst", "destination"),
-        serialization_alias="dst",
     )
     
     # Data transformation

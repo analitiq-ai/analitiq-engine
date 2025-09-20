@@ -233,19 +233,11 @@ class PipelineOrchestrator:
         """Build and validate stream processing configuration."""
         try:
             # Merge pipeline and stream configurations
-            pipeline_src_config = (
-                pipeline_config.get("src")
-                or pipeline_config.get("source")
-                or {}
-            )
-            pipeline_dst_config = (
-                pipeline_config.get("dst")
-                or pipeline_config.get("destination")
-                or {}
-            )
+            pipeline_src_config = pipeline_config.get("src") or {}
+            pipeline_dst_config = pipeline_config.get("dst") or {}
 
-            stream_src_config = stream_config.get("src") or stream_config.get("source")
-            stream_dst_config = stream_config.get("dst") or stream_config.get("destination")
+            stream_src_config = stream_config.get("src")
+            stream_dst_config = stream_config.get("dst")
 
             merged_src = _deep_merge_dicts(pipeline_src_config, stream_src_config or {})
             merged_dst = _deep_merge_dicts(pipeline_dst_config, stream_dst_config or {})
@@ -259,10 +251,6 @@ class PipelineOrchestrator:
                 "src": merged_src,
                 "dst": merged_dst,
             }
-
-            # Remove legacy keys if present to avoid confusion during validation
-            processing_config.pop("source", None)
-            processing_config.pop("destination", None)
 
             # Validate using Pydantic
             return StreamProcessingConfig(**processing_config)
