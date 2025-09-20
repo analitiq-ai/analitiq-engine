@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
@@ -18,6 +19,22 @@ from ..models.engine import (
 from ..models.state import PipelineConfig
 
 logger = logging.getLogger(__name__)
+
+
+def _deep_merge_dicts(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    """Recursively merge dictionaries without mutating the originals."""
+
+    base = base or {}
+    override = override or {}
+    merged = deepcopy(base)
+
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge_dicts(merged[key], value)
+        else:
+            merged[key] = deepcopy(value)
+
+    return merged
 
 
 class PipelineOrchestrator:
@@ -216,14 +233,37 @@ class PipelineOrchestrator:
         """Build and validate stream processing configuration."""
         try:
             # Merge pipeline and stream configurations
+            pipeline_src_config = (
+                pipeline_config.get("src")
+                or pipeline_config.get("source")
+                or {}
+            )
+            pipeline_dst_config = (
+                pipeline_config.get("dst")
+                or pipeline_config.get("destination")
+                or {}
+            )
+
+            stream_src_config = stream_config.get("src") or stream_config.get("source")
+            stream_dst_config = stream_config.get("dst") or stream_config.get("destination")
+
+            merged_src = _deep_merge_dicts(pipeline_src_config, stream_src_config or {})
+            merged_dst = _deep_merge_dicts(pipeline_dst_config, stream_dst_config or {})
+
             processing_config = {
                 **pipeline_config,
                 **stream_config,
                 "stream_id": stream_id,
                 "stream_name": stream_config.get("name", stream_id),
                 "pipeline_id": self.pipeline_id,
+                "src": merged_src,
+                "dst": merged_dst,
             }
-            
+
+            # Remove legacy keys if present to avoid confusion during validation
+            processing_config.pop("source", None)
+            processing_config.pop("destination", None)
+
             # Validate using Pydantic
             return StreamProcessingConfig(**processing_config)
             
