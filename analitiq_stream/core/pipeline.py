@@ -1,14 +1,11 @@
 """Pipeline management and configuration."""
 
-import json
 import logging
-import os
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from dotenv import load_dotenv
 
-from .credentials import credentials_manager
 from .engine import StreamingEngine
 from ..fault_tolerance.config_compatibility import (
     ConfigStateValidator, ConfigStateRecoveryManager, ConfigCompatibilityError
@@ -34,7 +31,7 @@ class Pipeline:
         Initialize pipeline with pre-merged configurations.
 
         Args:
-            pipeline_config: Pipeline configuration (id, name, streams, engine_config)
+            config: Pipeline configuration (id, name, streams, engine_config)
             state_dir: Optional directory for state files (if None, uses default)
             validation_config: Validation configuration (optional)
         """
@@ -43,7 +40,7 @@ class Pipeline:
         
         # Validate required configurations
         if not config:
-            raise ValueError("pipeline_config is required")
+            raise ValueError("config is required")
         self.config = config
 
         # Extract configuration values

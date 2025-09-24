@@ -5,11 +5,10 @@ This module provides the core pipeline execution logic that can be used
 both in containerized environments and for testing purposes.
 """
 
-import asyncio
 import logging
 import os
 from datetime import datetime
-from typing import Optional, Dict, Any
+from typing import Optional
 from analitiq_stream import Pipeline
 from .core.pipeline_config_prep import PipelineConfigPrep
 
@@ -43,14 +42,14 @@ class PipelineRunner:
             # Create pipeline config prep instance
             logger.info("Initializing PipelineConfigPrep...")
             pipeline_config_prep = PipelineConfigPrep()
-            pipeline_config = pipeline_config_prep.create_config()
+            config = pipeline_config_prep.create_config()
 
             # Create and run pipeline
-            logger.info(f"Starting {pipeline_config.name} (ID: {pipeline_config.pipeline_id})")
+            logger.info(f"Starting {config.name} (ID: {config.pipeline_id})")
 
             # Create pipeline with dictionary config
             pipeline = Pipeline(
-                pipeline_config=pipeline_config.model_dump()
+                config=config.model_dump()
             )
 
             logger.info("Starting pipeline execution...")

@@ -8,7 +8,6 @@ the deployment environment.
 
 import json
 import logging
-import os
 from pathlib import Path
 from typing import Dict, Any, Optional, Literal
 from urllib.parse import urlparse
