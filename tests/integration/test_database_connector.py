@@ -5,13 +5,13 @@ import os
 from unittest.mock import AsyncMock, MagicMock, patch
 from typing import Any, Dict, List
 
-from analitiq_stream.connectors.database.database_connector import (
+from src.connectors.database.database_connector import (
     DatabaseConnector,
     DatabaseConfig,
     EndpointConfig,
     ConfigureConfig
 )
-from analitiq_stream.connectors.base import ConnectionError, ReadError, WriteError
+from src.connectors.base import ConnectionError, ReadError, WriteError
 
 
 @pytest.fixture
@@ -171,7 +171,7 @@ class TestDatabaseConnector:
         mock_driver = AsyncMock()
         mock_driver.name = "PostgreSQL"
         
-        with patch('analitiq_stream.connectors.database.database_connector.DriverFactory.create_driver') as mock_factory:
+        with patch('src.connectors.database.database_connector.DriverFactory.create_driver') as mock_factory:
             mock_factory.return_value = mock_driver
             
             await connector.connect(database_config)
@@ -193,7 +193,7 @@ class TestDatabaseConnector:
     @pytest.mark.asyncio
     async def test_connect_driver_error(self, connector, database_config):
         """Test connection failure at driver level."""
-        with patch('analitiq_stream.connectors.database.database_connector.DriverFactory.create_driver') as mock_factory:
+        with patch('src.connectors.database.database_connector.DriverFactory.create_driver') as mock_factory:
             mock_factory.side_effect = Exception("Driver creation failed")
             
             with pytest.raises(ConnectionError) as exc_info:
@@ -432,7 +432,7 @@ class TestDatabaseConnectorEdgeCases:
     
     def test_import_database_connector(self):
         """Test importing DatabaseConnector and related classes."""
-        from analitiq_stream.connectors.database.database_connector import (
+        from src.connectors.database.database_connector import (
             DatabaseConnector, DatabaseConfig, EndpointConfig, ConfigureConfig
         )
         

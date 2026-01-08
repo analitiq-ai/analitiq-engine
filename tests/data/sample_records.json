@@ -51,12 +51,12 @@
     "pipeline_id": "test-pipeline",
     "name": "Test Pipeline",
     "version": "1.0",
-    "src": {
-      "host_id": "src-host-123",
+    "source": {
+      "connection_id": "src-connection-123",
       "endpoint_id": "src-endpoint-456"
     },
-    "dst": {
-      "host_id": "dst-host-789",
+    "destination": {
+      "connection_id": "dst-connection-789",
       "endpoint_id": "dst-endpoint-012"
     },
     "engine_config": {

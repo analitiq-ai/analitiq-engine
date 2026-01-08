@@ -1,0 +1,46 @@
+# Analitiq Stream Configuration
+# This file configures the Analitiq Stream framework settings
+
+# Path Configuration for Decoupled Architecture
+paths:
+  # Configuration directories (populated by config_fetcher in cloud environments)
+  connectors: "./connectors"
+  connections: "./connections"
+  endpoints: "./endpoints"
+  streams: "./streams"
+  pipelines: "./pipelines"
+  secrets: "./.secrets"
+
+  # Runtime directories (state, logs, deadletter, metrics)
+  state: "./state"
+  logs: "./logs"
+  deadletter: "./deadletter"
+  metrics: "./metrics"
+
+# Connector Repository Configuration
+connectors:
+  # GitHub repository URL for connectors catalog
+  repository: "https://github.com/analitiq-ai/analitiq-connectors"
+
+  # List of connectors to download/sync from the repository
+  # Each connector can optionally specify a version (default: latest)
+  sync:
+    - name: wise
+      version: latest  # Use 'latest' or specific version like '1.0.0'
+
+    - name: sevdesk
+      version: latest
+
+    - name: postgres
+      version: latest
+
+# Pipeline defaults (optional)
+defaults:
+  # Default environment for pipeline execution
+  env: local
+
+  # Default log level
+  log_level: INFO
+
+  # Default monitoring interval in seconds
+  monitoring_interval_seconds: 5

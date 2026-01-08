@@ -6,7 +6,7 @@ from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 from typing import Any, Dict, List
 
-from analitiq_stream.connectors.database.postgresql_driver import PostgreSQLDriver
+from src.connectors.database.postgresql_driver import PostgreSQLDriver
 
 
 @pytest.fixture
@@ -711,7 +711,7 @@ class TestPostgreSQLDriverImports:
     
     def test_import_postgresql_driver(self):
         """Test importing PostgreSQL driver and related components."""
-        from analitiq_stream.connectors.database.postgresql_driver import PostgreSQLDriver
+        from src.connectors.database.postgresql_driver import PostgreSQLDriver
         
         assert PostgreSQLDriver is not None
         

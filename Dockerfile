@@ -28,20 +28,35 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY --chown=appuser:appuser . .
 
 # Create required directories with proper permissions
-RUN mkdir -p /config /app/state /app/logs /app/deadletter && \
-    chown -R appuser:appuser /config /app/state /app/logs /app/deadletter
+# These directories match paths defined in analitiq.yaml (single source of truth)
+RUN mkdir -p \
+    /app/connectors \
+    /app/connections \
+    /app/streams \
+    /app/pipelines \
+    /app/.secrets \
+    /app/state \
+    /app/logs \
+    /app/deadletter \
+    /app/metrics && \
+    chown -R appuser:appuser /app/connectors /app/connections /app/streams /app/pipelines /app/.secrets /app/state /app/logs /app/deadletter /app/metrics
 
 # Default environment variables (can be overridden at runtime)
+# Note: Config paths are determined by analitiq.yaml, not environment variables
 ENV ENV=local \
     PIPELINE_ID="" \
     AWS_REGION=eu-central-1 \
-    S3_CONFIG_BUCKET=analitiq-config \
-    LOCAL_CONFIG_MOUNT=/config \
-    PYTHONPATH=/app
+    PYTHONPATH=/app \
+    PIPELINES_TABLE=pipelines \
+    CONNECTIONS_TABLE=connections \
+    CONNECTORS_TABLE=connectors \
+    ENDPOINTS_TABLE=connectors_endpoints \
+    STREAMS_TABLE=streams \
+    ROW_COUNT_BUCKET=analitiq-client-pipeline-row-count
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD python -c "from analitiq_stream.core.pipeline_config_prep import PipelineConfigPrep; print('Health check passed')" || exit 1
+    CMD python -c "from src.core.pipeline_config_prep import PipelineConfigPrep; print('Health check passed')" || exit 1
 
 # Switch to non-root user
 USER appuser

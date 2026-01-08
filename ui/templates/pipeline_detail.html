@@ -1,0 +1,448 @@
+{% extends "base.html" %}
+
+{% block title %}Pipeline Configuration: {{ pipeline_name }}{% endblock %}
+
+{% block content %}
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <h2>Pipeline Configuration: {{ pipeline_name }}</h2>
+        <a href="{{ url_for('index', pipeline=pipeline_name) }}" class="btn btn-outline-secondary">
+            <i class="bi bi-arrow-left"></i> Back
+        </a>
+    </div>
+
+    {% if pipeline_config %}
+        <div class="row">
+            
+            <!-- Streams Configuration -->
+            {% if pipeline_config.get('streams') %}
+            <div class="col-12 mb-4">
+                <div class="card">
+                    <div class="card-header">
+                        <h5 class="mb-0">Streams</h5>
+                    </div>
+                    <div class="card-body">
+                        <ul class="nav nav-tabs" id="streamsTab" role="tablist">
+                            {% for stream_id, stream in pipeline_config.get('streams', {}).items() %}
+                            <li class="nav-item">
+                                <a class="nav-link {% if loop.first %}active{% endif %}" 
+                                   id="stream-{{ loop.index }}-tab" 
+                                   data-bs-toggle="tab" 
+                                   href="#stream-{{ loop.index }}" 
+                                   role="tab">
+                                    {{ stream.get('name', 'Stream ' + loop.index|string) }}
+                                </a>
+                            </li>
+                            {% endfor %}
+                        </ul>
+                        
+                        <div class="tab-content pt-3" id="streamsTabContent">
+                            {% for stream_id, stream in pipeline_config.get('streams', {}).items() %}
+                            <div class="tab-pane fade {% if loop.first %}show active{% endif %}" 
+                                 id="stream-{{ loop.index }}" 
+                                 role="tabpanel">
+                                
+                                <div class="row">
+                                    <!-- Stream Source -->
+                                    <div class="col-md-6 mb-3">
+                                        <div class="card">
+                                            <div class="card-header bg-light">
+                                                <h6 class="mb-0">Source Configuration</h6>
+                                            </div>
+                                            <div class="card-body">
+                                                {% if stream.get('src') %}
+                                                <dl class="row mb-0">
+                                                    {% if stream.get('src', {}).get('endpoint_id') %}
+                                                    <dt class="col-sm-5">Endpoint ID</dt>
+                                                    <dd class="col-sm-7">
+                                                        {{ stream.get('src', {}).get('endpoint_id') }}
+                                                        {% for endpoint_file in endpoint_files %}
+                                                            {% if endpoint_file == 'ep_' + stream.get('src', {}).get('endpoint_id') + '.json' %}
+                                                            <a href="{{ url_for('view_endpoint', pipeline_name=pipeline_name, endpoint_file=endpoint_file) }}" class="btn btn-sm btn-outline-info ms-2">
+                                                                <i class="bi bi-eye"></i> View
+                                                            </a>
+                                                            {% endif %}
+                                                        {% endfor %}
+                                                    </dd>
+                                                    {% endif %}
+                                                    
+                                                    {% if stream.get('src', {}).get('replication_method') %}
+                                                    <dt class="col-sm-5">Replication Method</dt>
+                                                    <dd class="col-sm-7">{{ stream.get('src', {}).get('replication_method') }}</dd>
+                                                    {% endif %}
+                                                    
+                                                    {% if stream.get('src', {}).get('cursor_field') %}
+                                                    <dt class="col-sm-5">Cursor Field</dt>
+                                                    <dd class="col-sm-7">{{ stream.get('src', {}).get('cursor_field') }}</dd>
+                                                    {% endif %}
+                                                    
+                                                    {% if stream.get('src', {}).get('cursor_mode') %}
+                                                    <dt class="col-sm-5">Cursor Mode</dt>
+                                                    <dd class="col-sm-7">{{ stream.get('src', {}).get('cursor_mode') }}</dd>
+                                                    {% endif %}
+                                                    
+                                                    {% if stream.get('src', {}).get('safety_window_seconds') %}
+                                                    <dt class="col-sm-5">Safety Window</dt>
+                                                    <dd class="col-sm-7">{{ stream.get('src', {}).get('safety_window_seconds') }} seconds</dd>
+                                                    {% endif %}
+                                                    
+                                                    {% if stream.get('src', {}).get('primary_key') %}
+                                                    <dt class="col-sm-5">Primary Key</dt>
+                                                    <dd class="col-sm-7">{{ stream.get('src', {}).get('primary_key')|join(', ') }}</dd>
+                                                    {% endif %}
+                                                    
+                                                    {% if stream.get('src', {}).get('tie_breaker_fields') %}
+                                                    <dt class="col-sm-5">Tie Breaker Fields</dt>
+                                                    <dd class="col-sm-7">{{ stream.get('src', {}).get('tie_breaker_fields')|join(', ') }}</dd>
+                                                    {% endif %}
+                                                </dl>
+                                                {% else %}
+                                                <p class="text-muted">No source configuration defined.</p>
+                                                {% endif %}
+                                            </div>
+                                        </div>
+                                    </div>
+                                    
+                                    <!-- Stream Destination -->
+                                    <div class="col-md-6 mb-3">
+                                        <div class="card">
+                                            <div class="card-header bg-light">
+                                                <h6 class="mb-0">Destination Configuration</h6>
+                                            </div>
+                                            <div class="card-body">
+                                                {% if stream.get('dst') %}
+                                                <dl class="row mb-0">
+                                                    {% if stream.get('dst', {}).get('endpoint_id') %}
+                                                    <dt class="col-sm-5">Endpoint ID</dt>
+                                                    <dd class="col-sm-7">
+                                                        {{ stream.get('dst', {}).get('endpoint_id') }}
+                                                        {% for endpoint_file in endpoint_files %}
+                                                            {% if endpoint_file == 'ep_' + stream.get('dst', {}).get('endpoint_id') + '.json' %}
+                                                            <a href="{{ url_for('view_endpoint', pipeline_name=pipeline_name, endpoint_file=endpoint_file) }}" class="btn btn-sm btn-outline-info ms-2">
+                                                                <i class="bi bi-eye"></i> View
+                                                            </a>
+                                                            {% endif %}
+                                                        {% endfor %}
+                                                    </dd>
+                                                    {% endif %}
+                                                    
+                                                    {% if stream.get('dst', {}).get('refresh_mode') %}
+                                                    <dt class="col-sm-5">Refresh Mode</dt>
+                                                    <dd class="col-sm-7">{{ stream.get('dst', {}).get('refresh_mode') }}</dd>
+                                                    {% endif %}
+                                                    
+                                                    {% if stream.get('dst', {}).get('batch_support') is defined %}
+                                                    <dt class="col-sm-5">Batch Support</dt>
+                                                    <dd class="col-sm-7">{{ stream.get('dst', {}).get('batch_support')|string }}</dd>
+                                                    {% endif %}
+                                                    
+                                                    {% if stream.get('dst', {}).get('batch_size') %}
+                                                    <dt class="col-sm-5">Batch Size</dt>
+                                                    <dd class="col-sm-7">{{ stream.get('dst', {}).get('batch_size') }}</dd>
+                                                    {% endif %}
+                                                </dl>
+                                                {% else %}
+                                                <p class="text-muted">No destination configuration defined.</p>
+                                                {% endif %}
+                                            </div>
+                                        </div>
+                                    </div>
+                                    
+                                    <!-- Field Mappings -->
+                                    <div class="col-12">
+                                        <div class="card">
+                                            <div class="card-header bg-light">
+                                                <h6 class="mb-0">Field Mappings</h6>
+                                            </div>
+                                            <div class="card-body p-0">
+                                                {% if stream.get('mapping', {}).get('field_mappings') %}
+                                                <div class="p-3">
+                                                    <div class="table-responsive">
+                                                        <table class="table table-striped table-bordered mb-0">
+                                                            <thead>
+                                                                <tr>
+                                                                    <th class="text-center" style="width: 50%">Source</th>
+                                                                    <th class="text-center" style="width: 50%">Destination</th>
+                                                                </tr>
+                                                            </thead>
+                                                            <tbody>
+                                                                {% if mapping_data_by_stream and stream_id in mapping_data_by_stream %}
+                                                                    <!-- First add regular field mappings -->
+                                                                    {% for source_field, mapping in mapping_data_by_stream[stream_id].get('mappings', {}).items() %}
+                                                                    <tr>
+                                                                        <td>
+                                                                            <strong>{{ source_field }}</strong>
+                                                                            {% set source_info = mapping_data_by_stream[stream_id].get('source_fields', {}).get(source_field, {}) %}
+                                                                            {% if source_info.get('type') %}
+                                                                                <span class="badge bg-secondary">{{ source_info.get('type') }}</span>
+                                                                            {% endif %}
+                                                                            {% if mapping.get('transformations') %}
+                                                                                <div class="small text-muted mt-1">
+                                                                                    <i class="bi bi-arrow-right-circle"></i> 
+                                                                                    Transformations: {{ mapping.get('transformations')|join(', ') }}
+                                                                                </div>
+                                                                            {% endif %}
+                                                                        </td>
+                                                                        <td>
+                                                                            <strong>{{ mapping.get('target') }}</strong>
+                                                                            {% set target_field = mapping.get('target') %}
+                                                                            {% set dest_info = mapping_data_by_stream[stream_id].get('destination_fields', {}).get(target_field, {}) %}
+                                                                            {% if dest_info.get('type') %}
+                                                                                <span class="badge bg-secondary">{{ dest_info.get('type') }}</span>
+                                                                                {% if dest_info.get('required') %}
+                                                                                    <span class="badge bg-danger">Required</span>
+                                                                                {% endif %}
+                                                                            {% endif %}
+                                                                        </td>
+                                                                    </tr>
+                                                                    {% endfor %}
+                                                                    
+                                                                    <!-- Then add computed fields -->
+                                                                    {% for field_name, field_config in mapping_data_by_stream[stream_id].get('computed_fields', {}).items() %}
+                                                                    <tr class="table-success">
+                                                                        <td>
+                                                                            <span class="badge bg-success">COMPUTED</span>
+                                                                            <code>{{ field_config.get('expression') }}</code>
+                                                                        </td>
+                                                                        <td>
+                                                                            <strong>{{ field_name }}</strong>
+                                                                            {% set dest_info = mapping_data_by_stream[stream_id].get('destination_fields', {}).get(field_name, {}) %}
+                                                                            {% if dest_info.get('type') %}
+                                                                                <span class="badge bg-secondary">{{ dest_info.get('type') }}</span>
+                                                                                {% if dest_info.get('required') %}
+                                                                                    <span class="badge bg-danger">Required</span>
+                                                                                {% endif %}
+                                                                            {% endif %}
+                                                                        </td>
+                                                                    </tr>
+                                                                    {% endfor %}
+                                                                    
+                                                                    <!-- Unmapped source fields -->
+                                                                    {% for field_name, field_info in mapping_data_by_stream[stream_id].get('source_fields', {}).items() %}
+                                                                        {% set is_mapped = false %}
+                                                                        {% for source_field, mapping in mapping_data_by_stream[stream_id].get('mappings', {}).items() %}
+                                                                            {% if source_field == field_name %}
+                                                                                {% set is_mapped = true %}
+                                                                            {% endif %}
+                                                                        {% endfor %}
+                                                                        {% if not is_mapped %}
+                                                                        <tr class="table-warning">
+                                                                            <td>
+                                                                                <strong>{{ field_name }}</strong>
+                                                                                {% if field_info.get('type') %}
+                                                                                    <span class="badge bg-secondary">{{ field_info.get('type') }}</span>
+                                                                                {% endif %}
+                                                                                {% if field_info.get('required') %}
+                                                                                    <span class="badge bg-info">Available</span>
+                                                                                {% endif %}
+                                                                            </td>
+                                                                            <td>
+                                                                                <span class="badge bg-warning text-dark">NOT MAPPED</span>
+                                                                            </td>
+                                                                        </tr>
+                                                                        {% endif %}
+                                                                    {% endfor %}
+                                                                    
+                                                                    <!-- Unmapped destination fields (not from computed fields) -->
+                                                                    {% for field_name, field_info in mapping_data_by_stream[stream_id].get('destination_fields', {}).items() %}
+                                                                        {% set is_mapped = false %}
+                                                                        {% for source_field, mapping in mapping_data_by_stream[stream_id].get('mappings', {}).items() %}
+                                                                            {% if mapping.get('target') == field_name %}
+                                                                                {% set is_mapped = true %}
+                                                                            {% endif %}
+                                                                        {% endfor %}
+                                                                        {% set is_computed = false %}
+                                                                        {% for computed_field in mapping_data_by_stream[stream_id].get('computed_fields', {}).keys() %}
+                                                                            {% if computed_field == field_name %}
+                                                                                {% set is_computed = true %}
+                                                                            {% endif %}
+                                                                        {% endfor %}
+                                                                        {% if not is_mapped and not is_computed %}
+                                                                        <tr class="table-danger">
+                                                                            <td>
+                                                                                <span class="badge bg-danger">NO DATA SOURCE</span>
+                                                                            </td>
+                                                                            <td>
+                                                                                <strong>{{ field_name }}</strong>
+                                                                                {% if field_info.get('type') %}
+                                                                                    <span class="badge bg-secondary">{{ field_info.get('type') }}</span>
+                                                                                {% endif %}
+                                                                                {% if field_info.get('required') %}
+                                                                                    <span class="badge bg-danger">Required</span>
+                                                                                {% endif %}
+                                                                            </td>
+                                                                        </tr>
+                                                                        {% endif %}
+                                                                    {% endfor %}
+                                                                {% endif %}
+                                                            </tbody>
+                                                        </table>
+                                                    </div>
+                                                </div>
+                                                {% else %}
+                                                <p class="text-muted">No field mappings defined.</p>
+                                                {% endif %}
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            {% endfor %}
+                        </div>
+                    </div>
+                </div>
+            </div>
+            {% endif %}
+            
+            <!-- Mapping and Transformations -->
+            {% if pipeline_config.get('mapping') and not pipeline_config.get('streams') %}
+            <div class="col-12 mb-4">
+                <div class="card">
+                    <div class="card-header">
+                        <h5 class="mb-0">Mapping & Transformations</h5>
+                    </div>
+                    <div class="card-body">
+                        {% if pipeline_config.get('mapping', {}).get('transformations') %}
+                            {% for transformation in pipeline_config.get('mapping', {}).get('transformations', []) %}
+                                <div class="card mb-3">
+                                    <div class="card-header bg-light">
+                                        <h6 class="mb-0">{{ transformation.get('type')|title }} {% if transformation.get('description') %}- {{ transformation.get('description') }}{% endif %}</h6>
+                                    </div>
+                                    <div class="card-body">
+                                        {% if transformation.get('type') == 'field_mapping' %}
+                                            <table class="table table-sm">
+                                                <thead>
+                                                    <tr>
+                                                        <th>Source</th>
+                                                        <th>Target</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    {% for source, target in transformation.get('mappings', {}).items() %}
+                                                    <tr>
+                                                        <td><code>{{ source }}</code></td>
+                                                        <td><code>{{ target }}</code></td>
+                                                    </tr>
+                                                    {% endfor %}
+                                                </tbody>
+                                            </table>
+                                        {% elif transformation.get('type') == 'value_transformation' %}
+                                            <dl class="row mb-0">
+                                                <dt class="col-sm-3">Field</dt>
+                                                <dd class="col-sm-9"><code>{{ transformation.get('field') }}</code></dd>
+                                                
+                                                <dt class="col-sm-3">Function</dt>
+                                                <dd class="col-sm-9"><code>{{ transformation.get('function') }}</code></dd>
+                                            </dl>
+                                        {% elif transformation.get('type') == 'computed_field' %}
+                                            <dl class="row mb-0">
+                                                <dt class="col-sm-3">Field</dt>
+                                                <dd class="col-sm-9"><code>{{ transformation.get('field') }}</code></dd>
+                                                
+                                                <dt class="col-sm-3">Expression</dt>
+                                                <dd class="col-sm-9"><code>{{ transformation.get('expression') }}</code></dd>
+                                            </dl>
+                                        {% endif %}
+                                    </div>
+                                </div>
+                            {% endfor %}
+                        {% else %}
+                            <p class="text-muted">No transformations defined.</p>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+            {% endif %}
+            
+            <!-- Full JSON Config -->
+            <div class="col-12">
+                <div class="card">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0">Full Configuration</h5>
+                        <button class="btn btn-sm btn-outline-secondary" type="button" data-bs-toggle="collapse" data-bs-target="#fullConfigContent">
+                            <i class="bi bi-code"></i> Toggle View
+                        </button>
+                    </div>
+                    <div class="collapse" id="fullConfigContent">
+                        <div class="card-body">
+                            <div class="json-display" id="jsonViewer"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    {% else %}
+        <div class="alert alert-danger">
+            Could not load pipeline configuration or the file does not exist.
+        </div>
+    {% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('serve_static_js', filename='fieldMappingVisualizer.bundle.js') }}"></script>
+<script>
+    document.addEventListener('DOMContentLoaded', function() {
+        // Setup full config JSON viewer
+        const container = document.getElementById('jsonViewer');
+        if (container) {
+            const options = {
+                mode: 'view',
+                modes: ['view', 'tree'],
+                indentation: 2
+            };
+            
+            const editor = new JSONEditor(container, options);
+            editor.set({{ pipeline_config|tojson }});
+        }
+        
+        // Initialize field mapping visualizers for each stream
+        {% if mapping_data_by_stream %}
+            {% for stream_id, stream_data in mapping_data_by_stream.items() %}
+                // Prepare data for visualization
+                const sourceFields{{ loop.index }} = [];
+                const destFields{{ loop.index }} = [];
+                const mappings{{ loop.index }} = {};
+                const computedFields{{ loop.index }} = {};
+                
+                // Source fields
+                {% for field_name, field_info in stream_data.get('source_fields', {}).items() %}
+                    sourceFields{{ loop.index }}.push({
+                        name: "{{ field_name }}",
+                        type: "{{ field_info.get('type', 'unknown') }}"
+                    });
+                {% endfor %}
+                
+                // Destination fields
+                {% for field_name, field_info in stream_data.get('destination_fields', {}).items() %}
+                    destFields{{ loop.index }}.push({
+                        name: "{{ field_name }}",
+                        type: "{{ field_info.get('type', 'unknown') }}"
+                    });
+                {% endfor %}
+                
+                // Mappings
+                {% for source_field, mapping in stream_data.get('mappings', {}).items() %}
+                    mappings{{ loop.index }}["{{ source_field }}"] = "{{ mapping.get('target', '') }}";
+                {% endfor %}
+                
+                // Computed Fields
+                {% for field_name, field_config in stream_data.get('computed_fields', {}).items() %}
+                    computedFields{{ loop.index }}["{{ field_name }}"] = "{{ field_config.get('expression', '') }}";
+                {% endfor %}
+                
+                // Initialize visualizer
+                const visualizerContainer{{ loop.index }} = document.getElementById('fieldMappingVisualizer-{{ loop.index }}');
+                if (visualizerContainer{{ loop.index }}) {
+                    const visualizer{{ loop.index }} = new FieldMappingVisualizer('fieldMappingVisualizer-{{ loop.index }}');
+                    visualizer{{ loop.index }}.setData(
+                        sourceFields{{ loop.index }},
+                        destFields{{ loop.index }},
+                        mappings{{ loop.index }},
+                        computedFields{{ loop.index }}
+                    );
+                    visualizer{{ loop.index }}.initResizeHandler();
+                }
+            {% endfor %}
+        {% endif %}
+    });
+</script>
+{% endblock %}

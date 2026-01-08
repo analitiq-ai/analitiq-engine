@@ -16,7 +16,11 @@ services:
       - ENV=dev  # or 'prod' for production
       - PIPELINE_ID=${PIPELINE_ID}  # Must be provided at runtime
       - AWS_REGION=eu-central-1
-      - S3_CONFIG_BUCKET=analitiq-config
+      # DynamoDB table names (required for dev/prod environments)
+      - PIPELINES_TABLE=${PIPELINES_TABLE:-pipelines}
+      - CONNECTIONS_TABLE=${CONNECTIONS_TABLE:-connections}
+      - CONNECTORS_TABLE=${CONNECTORS_TABLE:-connectors}
+      - ENDPOINTS_TABLE=${ENDPOINTS_TABLE:-connectors_endpoints}
 
     # ECS-equivalent resource configuration
     deploy:
@@ -39,7 +43,7 @@ services:
 
     # Health check (ECS equivalent)
     healthcheck:
-      test: ["CMD", "python", "-c", "from analitiq_stream.core.pipeline_config_prep import PipelineConfigPrep; print('Health check passed')"]
+      test: ["CMD", "python", "-c", "from src.core.pipeline_config_prep import PipelineConfigPrep; print('Health check passed')"]
       interval: 30s
       timeout: 10s
       retries: 3

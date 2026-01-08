@@ -11,10 +11,9 @@ from typing import Any, Dict, Iterable, List, Optional
 
 import pytest
 
-from analitiq_stream.core.pipeline import Pipeline
-from analitiq_stream.core.engine import StreamingEngine
-from analitiq_stream.connectors.base import BaseConnector
-from analitiq_stream.fault_tolerance.config_compatibility import ConfigCompatibilityError
+from src.core.pipeline import Pipeline
+from src.core.engine import StreamingEngine
+from src.connectors.base import BaseConnector
 
 
 class InMemorySourceConnector(BaseConnector):
@@ -99,8 +98,8 @@ class InMemoryDestinationConnector(BaseConnector):
 def in_memory_connectors(monkeypatch):
     """Patch engine connectors to use the in-memory implementations."""
 
-    from analitiq_stream.connectors import api as api_module
-    from analitiq_stream.connectors import database as db_module
+    from src.connectors import api as api_module
+    from src.connectors import database as db_module
 
     InMemorySourceConnector.instances.clear()
     InMemoryDestinationConnector.instances.clear()
@@ -118,7 +117,7 @@ def in_memory_connectors(monkeypatch):
 def temp_directories(tmp_path, monkeypatch):
     """Use an isolated filesystem layout for stateful components."""
 
-    from analitiq_stream import config as global_config
+    from src import config as global_config
 
     state_dir = tmp_path / "state"
     deadletter_dir = tmp_path / "deadletter"
@@ -155,14 +154,14 @@ def base_pipeline_config() -> Dict[str, Any]:
             "users": {
                 "name": "User Stream",
                 "description": "Simple user sync",
-                "src": {
+                "source": {
                     "endpoint_id": "source-endpoint-123",
                     "replication_key": "updated_at",
                     "cursor_field": "updated_at",
                     "cursor_mode": "inclusive",
                     "safety_window_seconds": 60,
                 },
-                "dst": {
+                "destination": {
                     "endpoint_id": "dest-endpoint-456",
                     "refresh_mode": "upsert",
                     "batch_size": 50,
@@ -185,11 +184,11 @@ def valid_source_config() -> Dict[str, Any]:
         "type": "api",
         "endpoint": "/users",
         "method": "GET",
-        "base_url": "https://api.example.com",
+        "host": "https://api.example.com",
         "headers": {},
         "pagination": {"type": "page"},
         "endpoint_id": "source-endpoint-123",
-        "host_id": "source-host-456",
+        "connection_id": "source-connection-456",
         "replication_method": "incremental",
         "cursor_field": "updated_at",
         "cursor_mode": "inclusive",
@@ -227,7 +226,7 @@ def valid_destination_config() -> Dict[str, Any]:
         "user": "user",
         "password": "pass",
         "endpoint_id": "dest-endpoint-456",
-        "host_id": "dest-host-789",
+        "connection_id": "dest-connection-789",
         "refresh_mode": "upsert",
         "batch_support": True,
         "batch_size": 50,
@@ -248,21 +247,21 @@ def pipeline_factory(temp_directories):
         destination_config: Dict[str, Any],
     ) -> Pipeline:
         cfg = copy.deepcopy(pipeline_config)
-        src = copy.deepcopy(source_config)
-        dst = copy.deepcopy(destination_config)
+        source = copy.deepcopy(source_config)
+        destination = copy.deepcopy(destination_config)
 
-        cfg["src"] = copy.deepcopy(src)
-        cfg["dst"] = copy.deepcopy(dst)
+        cfg["source"] = copy.deepcopy(source)
+        cfg["destination"] = copy.deepcopy(destination)
 
         for stream in cfg.get("streams", {}).values():
-            stream_src = copy.deepcopy(stream.get("src", {})) or {}
-            stream_dst = copy.deepcopy(stream.get("dst", {})) or {}
+            stream_src = copy.deepcopy(stream.get("source", {})) or {}
+            stream_dst = copy.deepcopy(stream.get("destination", {})) or {}
 
-            merged_src = {**src, **stream_src}
-            merged_dst = {**dst, **stream_dst}
+            merged_src = {**source, **stream_src}
+            merged_dst = {**destination, **stream_dst}
 
-            stream["src"] = merged_src
-            stream["dst"] = merged_dst
+            stream["source"] = merged_src
+            stream["destination"] = merged_dst
 
         state_path = temp_directories["state"] / cfg["pipeline_id"]
         pipeline = Pipeline(
@@ -353,94 +352,3 @@ def test_pipeline_run_processes_batches_and_updates_metrics(
     assert run_info.get("pipeline_id") == "run-pipeline"
 
 
-def test_config_state_validation_without_previous_run(
-    pipeline_factory,
-    base_pipeline_config,
-    valid_source_config,
-    valid_destination_config,
-):
-    """Compatibility validation should be a no-op when no state exists."""
-
-    config = copy.deepcopy(base_pipeline_config)
-    config["pipeline_id"] = "first-run"
-
-    pipeline = pipeline_factory(
-        config,
-        source_config=valid_source_config,
-        destination_config=valid_destination_config,
-    )
-
-    # No exception should be raised even though no state has been recorded yet.
-    pipeline._validate_config_state_compatibility()
-    assert pipeline.engine.get_state_manager().get_run_info() == {}
-
-
-def test_config_state_validation_recovers_breaking_changes(
-    pipeline_factory,
-    base_pipeline_config,
-    valid_source_config,
-    valid_destination_config,
-):
-    """Breaking changes should trigger the real recovery manager."""
-
-    initial_config = copy.deepcopy(base_pipeline_config)
-    initial_config["pipeline_id"] = "recoverable-pipeline"
-
-    first_pipeline = pipeline_factory(
-        initial_config,
-        source_config=valid_source_config,
-        destination_config=valid_destination_config,
-    )
-    asyncio.run(first_pipeline.run())
-    first_index = json.loads(first_pipeline.engine.get_state_manager().index_file.read_text())
-
-    updated_config = copy.deepcopy(initial_config)
-    updated_config["streams"]["users"]["src"]["replication_key"] = "created_at"
-    updated_config["streams"]["users"]["src"]["cursor_field"] = "created_at"
-
-    second_pipeline = pipeline_factory(
-        updated_config,
-        source_config=valid_source_config,
-        destination_config=valid_destination_config,
-    )
-
-    # Should not raise because ConfigStateRecoveryManager can handle the change.
-    second_pipeline._validate_config_state_compatibility()
-
-    second_index = json.loads(second_pipeline.engine.get_state_manager().index_file.read_text())
-    assert second_index.get("streams", {}) == {}
-    assert second_index.get("run", {}).get("config_fingerprint") == first_index.get("run", {}).get("config_fingerprint")
-
-
-def test_config_state_validation_raises_on_pipeline_id_mismatch(
-    pipeline_factory,
-    base_pipeline_config,
-    valid_source_config,
-    valid_destination_config,
-):
-    """Critical compatibility issues should propagate real exceptions."""
-
-    config = copy.deepcopy(base_pipeline_config)
-    config["pipeline_id"] = "critical-pipeline"
-
-    first_pipeline = pipeline_factory(
-        config,
-        source_config=valid_source_config,
-        destination_config=valid_destination_config,
-    )
-    asyncio.run(first_pipeline.run())
-
-    state_manager = first_pipeline.engine.get_state_manager()
-    index_path = state_manager.index_file
-    index_data = json.loads(index_path.read_text())
-    index_data["run"]["pipeline_id"] = "different-pipeline"
-    index_path.write_text(json.dumps(index_data))
-
-    second_pipeline = pipeline_factory(
-        config,
-        source_config=valid_source_config,
-        destination_config=valid_destination_config,
-    )
-
-    with pytest.raises(ConfigCompatibilityError):
-        second_pipeline._validate_config_state_compatibility()

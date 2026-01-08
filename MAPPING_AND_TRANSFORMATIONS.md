@@ -1,535 +1,339 @@
-# Field Mapping, Transformations & Validation Guide
+# Field Mapping, Transformations & Validation Guide (Aligned Model)
 
-This guide explains the **Field-Centric Mapping** system in Analitiq Stream, which consolidates field mapping, transformations, and validation into a single, efficient configuration structure.
+This guide documents the **assignment-based mapping system** used in Analitiq Stream for low-code SaaS integrations. It consolidates **field mapping, transformations, and validation** into a single, schema-aware structure that is safe for end users to edit.
+
+---
 
 ## Overview
 
-The field-centric approach provides:
-- **Unified Configuration**: Map, transform, and validate fields in one place
-- **Processing Efficiency**: Single pass through data with all operations
-- **Better Maintainability**: Complete field lifecycle visibility
-- **Integrated Validation**: Validation rules applied after transformations
+This approach provides:
+
+- **Unified configuration**: every target field is built by a single rule (“assignment”).
+- **UI-friendly editing**: tokenized paths, typed targets, safe expression AST (no code strings).
+- **Schema-aware validation**: field pickers, type checks, required-field enforcement.
+- **Stable behavior over time**: versioned transforms/functions and explicit policies.
+
+---
+
+## Core Concepts
+
+### 1) Assignments (field-centric mapping)
+
+A mapping is an **ordered list of assignments**, each producing exactly one target field/path in the destination payload.
+
+Conceptually:
+
+```
+Target Field (path + type) ← Value (const or expression AST) ← Optional validation/error handling
+```
+
+### 2) Expressions are structured AST (JSON), not strings
+
+End users should not edit raw script strings. Expressions are represented as a constrained AST with a small set of `op` nodes (e.g., `get`, `fn`, `pipe`, `if`).
+
+### 3) Schemas are explicit (or pinned via endpoint versioning)
+
+- If your `endpoint_id` is versioned and immutable, it effectively pins schema.
+- Otherwise, include `source_schema_id` and `target_schema_id` to drive the UI and validation.
+
+### 4) Transforms are catalog functions (typed + versioned)
+
+Transformations are implemented via `op: fn` nodes referencing a **function catalog** with strict typing, parameter metadata, and versioning.
+
+---
 
 ## Configuration Structure
 
-### Basic Structure
+### Stream mapping structure (recommended)
 
 ```json
 {
-  "field_mappings": {
-    "source_field_name": {
-      "target": "destination_field_name",
-      "transformations": ["transform1", "transform2"],
-      "validation": {
-        "rules": [{"type": "validation_type", "param": "value"}],
-        "error_action": "dlq|skip|fail"
+  "mapping": {
+    "source_schema_id": "wise.transactions.v3",
+    "target_schema_id": "sevdesk.checkAccountTransaction.v2",
+    "assignments": [
+      {
+        "target": { "path": ["valueDate"], "type": "date", "nullable": false },
+        "value": {
+          "kind": "expr",
+          "expr": {
+            "op": "pipe",
+            "args": [
+              { "op": "get", "path": ["created"] },
+              { "op": "fn", "name": "iso_to_date", "version": 1, "args": [] }
+            ]
+          }
+        },
+        "validate": {
+          "rules": [{ "type": "not_null" }],
+          "on_error": "dlq"
+        }
       }
-    }
-  },
-  "computed_fields": {
-    "new_field_name": {
-      "expression": "computed_value_or_expression",
-      "validation": {
-        "rules": [...],
-        "error_action": "dlq|skip|fail"
-      }
-    }
-  },
-  "default_error_action": "fail"
-}
-```
-
-### Field Mappings
-
-Field mappings define how source fields are mapped to destination fields with optional transformations and validation.
-
-#### Simple Direct Mapping
-```json
-{
-  "field_mappings": {
-    "source_field": {
-      "target": "destination_field"
-    }
-  }
-}
-```
-
-#### Default Target Name
-If no `target` is specified, the source field name is used:
-```json
-{
-  "field_mappings": {
-    "field_name": {}  // Maps to "field_name" in destination
-  }
-}
-```
-
-#### Nested Field Access
-Use dot notation to access nested fields:
-```json
-{
-  "field_mappings": {
-    "user.profile.name": {
-      "target": "full_name"
-    },
-    "details.merchant.category": {
-      "target": "merchant_category"
-    }
-  }
-}
-```
-
-### Computed Fields
-
-Computed fields create new fields using expressions that can reference source data, environment variables, or function calls.
-
-#### Static Values
-```json
-{
-  "computed_fields": {
-    "source_system": {
-      "expression": "wise"
-    }
-  }
-}
-```
-
-#### Environment Variables
-```json
-{
-  "computed_fields": {
-    "account_id": {
-      "expression": "${BANK_ACCOUNT_ID}"
-    }
-  }
-}
-```
-
-#### Field References
-```json
-{
-  "computed_fields": {
-    "transaction_key": {
-      "expression": "txn_${id}_${date}"
-    }
-  }
-}
-```
-
-#### Function Calls
-```json
-{
-  "computed_fields": {
-    "created_at": {
-      "expression": "now()"
-    },
-    "unique_id": {
-      "expression": "uuid()"
-    }
-  }
-}
-```
-
-## Available Transformations
-
-### String Transformations
-
-| Transformation | Description | Example |
-|---------------|-------------|---------|
-| `strip` | Remove whitespace | `"  hello  "` → `"hello"` |
-| `upper` | Convert to uppercase | `"Hello"` → `"HELLO"` |
-| `lower` | Convert to lowercase | `"Hello"` → `"hello"` |
-| `truncate` | Limit string length | `"very long text"` → `"very long te"` (default: 50 chars) |
-| `regex_replace` | Replace using regex | Requires parameters |
-
-### Numeric Transformations
-
-| Transformation | Description | Example |
-|---------------|-------------|---------|
-| `abs` | Absolute value | `-123.45` → `123.45` |
-| `number_format` | Format with decimals | `3.14159` → `"3.14"` (default: 2 decimals) |
-
-### Date/Time Transformations
-
-| Transformation | Description | Example |
-|---------------|-------------|---------|
-| `iso_to_date` | ISO datetime to date | `"2023-12-25T10:30:00Z"` → `"2023-12-25"` |
-| `iso_to_datetime` | ISO to formatted datetime | `"2023-12-25T10:30:00Z"` → `"2023-12-25 10:30:00"` |
-| `now` | Current timestamp | Any input → `"2023-12-25T10:30:00.123456"` |
-
-### Utility Transformations
-
-| Transformation | Description | Example |
-|---------------|-------------|---------|
-| `uuid` | Generate UUID4 | Any input → `"550e8400-e29b-41d4-a716-446655440000"` |
-| `md5` | MD5 hash | `"hello"` → `"5d41402abc4b2a76b9719d911017c592"` |
-| `boolean` | Convert to boolean | `"true"`, `"1"`, `"yes"` → `true` |
-| `coalesce` | First non-null value | Multiple inputs → First valid value |
-
-### Transformation Chaining
-
-Transformations are applied in order:
-```json
-{
-  "field_mappings": {
-    "messy_amount": {
-      "target": "clean_amount",
-      "transformations": ["strip", "abs", "number_format"]
-    }
-  }
-}
-```
-
-Processing flow: `"  -123.456  "` → `"-123.456"` → `123.456` → `"123.46"`
-
-## Validation Rules
-
-### Rule Types
-
-#### 1. `not_null` - Required Field Validation
-Ensures field is not null or empty.
-
-```json
-{
-  "validation": {
-    "rules": [{"type": "not_null"}],
-    "error_action": "dlq"
-  }
-}
-```
-
-**Enum Attributes**: None
-**Valid Values**: Any non-null, non-empty value
-
-#### 2. `enum` - Enumerated Values Validation
-Restricts field to specific allowed values.
-
-```json
-{
-  "validation": {
-    "rules": [{
-      "type": "enum",
-      "values": ["active", "inactive", "pending"]
-    }],
-    "error_action": "skip"
-  }
-}
-```
-
-**Enum Attributes**: 
-- `values` (required): Array of allowed values
-
-**Valid Values**: Exactly one of the values in the `values` array
-
-#### 3. `range` - Numeric Range Validation
-Validates numeric values within specified bounds.
-
-```json
-{
-  "validation": {
-    "rules": [{
-      "type": "range",
-      "min": 0,
-      "max": 1000
-    }],
-    "error_action": "fail"
-  }
-}
-```
-
-**Enum Attributes**: 
-- `min` (optional): Minimum allowed value (inclusive)
-- `max` (optional): Maximum allowed value (inclusive)
-
-**Valid Values**: Any numeric value within the specified range
-
-#### 4. `regex` - Pattern Matching Validation
-Validates field against regular expression pattern.
-
-```json
-{
-  "validation": {
-    "rules": [{
-      "type": "regex",
-      "pattern": "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$"
-    }],
-    "error_action": "dlq"
-  }
-}
-```
-
-**Enum Attributes**:
-- `pattern` (required): Regular expression pattern as string
-
-**Valid Values**: Any string matching the regex pattern
-
-#### 5. `custom` - Custom Validation (Future)
-Reserved for future custom validation functions.
-
-### Error Actions
-
-Error actions determine how validation failures are handled:
-
-#### `fail` - Stop Processing
-Raises exception and stops pipeline processing.
-```json
-{
-  "validation": {
-    "rules": [{"type": "not_null"}],
-    "error_action": "fail"
-  }
-}
-```
-
-**Use When**: Critical fields that must be valid for processing to continue
-
-#### `dlq` - Dead Letter Queue
-Logs error and excludes field, but continues processing. Failed records can be reviewed later.
-```json
-{
-  "validation": {
-    "rules": [{"type": "enum", "values": ["USD", "EUR"]}],
-    "error_action": "dlq"
-  }
-}
-```
-
-**Use When**: Fields that should be valid but processing can continue without them
-
-#### `skip` - Skip Field
-Silently excludes invalid field and continues processing.
-```json
-{
-  "validation": {
-    "rules": [{"type": "range", "min": 0}],
-    "error_action": "skip"
-  }
-}
-```
-
-**Use When**: Optional fields where invalid values should be ignored
-
-### Multiple Validation Rules
-
-Fields can have multiple validation rules that are applied in order:
-```json
-{
-  "validation": {
-    "rules": [
-      {"type": "not_null"},
-      {"type": "range", "min": 0, "max": 100}
     ],
-    "error_action": "fail"
+    "defaults": {
+      "on_error": "dlq"
+    }
   }
 }
 ```
 
-## Processing Flow
+Key points:
+- **No `field_mappings` vs `computed_fields` split**. Constants and computed values are both assignments.
+- `target.path` uses **token arrays** (safe for nesting).
+- `value.kind` is typically `const` or `expr`.
 
-The field mapping processor follows this sequence:
+---
 
-1. **Extract** source field value (including nested fields)
-2. **Transform** value through transformation chain (if specified)
-3. **Validate** transformed value against rules (if specified)
-4. **Handle** validation errors according to error action
-5. **Map** valid value to target field name
+## Assignments
 
-```
-Source Field → Transformations → Validation → Target Field
-     ↓              ↓              ↓           ↓
-  Raw Value → Transformed Value → Validated → Final Value
-```
+### A) Direct mapping (no transforms)
 
-## Complete Example
-
-Here's a comprehensive example showing all features:
+Use `get` to copy a source field to a target field:
 
 ```json
 {
-  "field_mappings": {
-    "id": {
-      "target": "externalId",
-      "validation": {
-        "rules": [{"type": "not_null"}],
-        "error_action": "dlq"
-      }
-    },
-    "amount": {
-      "target": "amount",
-      "transformations": ["abs"],
-      "validation": {
-        "rules": [
-          {"type": "not_null"},
-          {"type": "range", "min": -1000000, "max": 1000000}
-        ],
-        "error_action": "dlq"
-      }
-    },
-    "currency": {
-      "target": "currency",
-      "transformations": ["upper"],
-      "validation": {
-        "rules": [
-          {"type": "not_null"},
-          {"type": "enum", "values": ["EUR", "USD", "GBP", "CHF"]}
-        ],
-        "error_action": "dlq"
-      }
-    },
-    "createdAt": {
-      "target": "valueDate",
-      "transformations": ["iso_to_date"],
-      "validation": {
-        "rules": [{"type": "not_null"}],
-        "error_action": "dlq"
-      }
-    },
-    "description": {
-      "target": "purpose",
-      "transformations": ["strip"],
-      "validation": {
-        "rules": [{"type": "not_null"}],
-        "error_action": "skip"
-      }
-    },
-    "details.merchant.name": {
-      "target": "payeeName",
-      "transformations": ["strip", "truncate"]
-    }
-  },
-  "computed_fields": {
-    "checkAccount": {
-      "expression": "${BANK_ACCOUNT_ID}",
-      "validation": {
-        "rules": [{"type": "not_null"}],
-        "error_action": "dlq"
-      }
-    },
-    "transactionKey": {
-      "expression": "wise_${externalId}_${valueDate}"
-    },
-    "sourceSystem": {
-      "expression": "wise"
-    },
-    "syncedAt": {
-      "expression": "now()"
-    },
-    "uniqueId": {
-      "expression": "uuid()"
-    }
-  },
-  "default_error_action": "fail"
+  "target": { "path": ["amount"], "type": "decimal", "nullable": false },
+  "value": { "kind": "expr", "expr": { "op": "get", "path": ["targetValue"] } }
 }
 ```
 
-## Best Practices
+### B) Constant fields
 
-### 1. Field Organization
-- Group related transformations together
-- Apply validation after transformations
-- Use descriptive target field names
+Set a constant (replaces the need for a separate `computed_fields` section):
 
-### 2. Error Handling Strategy
-- Use `fail` for critical fields that must be present
-- Use `dlq` for important fields that should be reviewed if invalid
-- Use `skip` for optional fields where invalid values can be ignored
-
-### 3. Transformation Ordering
-- Clean data first (strip, normalize)
-- Transform data types (iso_to_date, abs)
-- Format for output (number_format, truncate)
-
-### 4. Performance Considerations
-- Minimize transformation chains where possible
-- Use direct mappings when no transformation is needed
-- Consider computed fields for expensive operations
-
-### 5. Environment Variables
-- Use environment variables for sensitive configuration
-- Provide meaningful names with clear purposes
-- Document required environment variables
-
-## Migration from Legacy Configuration
-
-### Before (Verbose Transformations)
 ```json
 {
-  "transformations": [
+  "target": { "path": ["status"], "type": "string", "nullable": false },
+  "value": { "kind": "const", "const": { "type": "string", "value": "100" } }
+}
+```
+
+### C) Nested object constants
+
+Avoid JSON-in-strings; use typed object constants:
+
+```json
+{
+  "target": { "path": ["checkAccount"], "type": "object", "nullable": false },
+  "value": {
+    "kind": "const",
+    "const": {
+      "type": "object",
+      "value": { "id": "5936402", "objectName": "CheckAccount" }
+    }
+  }
+}
+```
+
+### D) Transform chains (via `pipe` + `fn`)
+
+Example: trim + lowercase:
+
+```json
+{
+  "target": { "path": ["email"], "type": "string", "nullable": true },
+  "value": {
+    "kind": "expr",
+    "expr": {
+      "op": "pipe",
+      "args": [
+        { "op": "get", "path": ["email"] },
+        { "op": "fn", "name": "trim", "version": 1, "args": [] },
+        { "op": "fn", "name": "lower", "version": 1, "args": [] }
+      ]
+    }
+  }
+}
+```
+
+### E) Conditional mapping (optional)
+
+Example: map `is_active` to a status:
+
+```json
+{
+  "target": { "path": ["status"], "type": "string", "nullable": false },
+  "value": {
+    "kind": "expr",
+    "expr": {
+      "op": "if",
+      "args": [
+        {
+          "op": "eq",
+          "args": [
+            { "op": "get", "path": ["is_active"] },
+            { "op": "const", "value": true }
+          ]
+        },
+        { "op": "const", "value": "active" },
+        { "op": "const", "value": "inactive" }
+      ]
+    }
+  }
+}
+```
+
+---
+
+## Validation Rules & Error Handling
+
+### Validation block (per assignment)
+
+```json
+"validate": {
+  "rules": [{ "type": "not_null" }],
+  "on_error": "dlq"
+}
+```
+
+### Recommended error actions (normalized)
+
+- `dlq` — send record to dead-letter processing/storage
+- `skip_record` — drop the record and continue
+- `stop_stream` — fail the stream run immediately
+- `default_value` — substitute a configured fallback value
+- `quarantine` — store record for review and continue
+
+### Defaults + overrides
+
+- Pipeline default: `runtime.error_handling.default_action`
+- Stream override: `runtime_overrides.error_handling.default_action`
+- Field override: `validate.on_error` (or `on_error`)
+
+---
+
+## Execution / Runtime Policies (where they belong)
+
+Execution concerns should live under a dedicated section (pipeline defaults, stream overrides), for example:
+
+- retry/backoff
+- rate limits
+- DLQ/quarantine configuration
+- expression evaluation limits (`max_ops`, `max_depth`, `max_string_len`)
+- batching defaults
+- concurrency
+
+This keeps mapping logic purely declarative and UI-editable.
+
+---
+
+## Function Catalog (Transforms as First-Class, Parameterized)
+
+The UI should render transforms from a catalog with:
+
+- `name`, `label`, `description`
+- `input_types`, `output_type`
+- `params` with metadata (types, defaults, picklists)
+- `version`
+
+Example catalog entry:
+
+```json
+{
+  "name": "iso_to_date",
+  "label": "ISO Timestamp → Date",
+  "description": "Converts an ISO-8601 timestamp into YYYY-MM-DD.",
+  "version": 1,
+  "input_types": ["string", "datetime"],
+  "output_type": "date",
+  "params": []
+}
+```
+
+### Minimum function catalog for most integrations
+
+**Data access**
+- `get(path)` (often represented as an `op`, not a function)
+- `coalesce(a,b,...)`
+- `default(value, fallback)`
+
+**Text**
+- `concat`
+- `trim`, `lower`, `upper`
+- `replace` (restricted)
+- `substring`
+- `format` (limited templates)
+
+**Numbers / money**
+- `to_number`, `round`, `abs`
+- `multiply`, `divide`
+- `currency_convert` (optional; requires service)
+
+**Dates**
+- `parse_date`, `format_date`
+- `add_days`, `start_of_day`
+- `to_timezone`
+
+**Logic**
+- `if(cond, a, b)`
+- comparisons: `eq`, `neq`, `gt`, `gte`, `lt`, `lte`
+- boolean: `and`, `or`, `not`
+- set membership: `in(list)`
+
+---
+
+## Versioning Strategy (Critical for Low-Code)
+
+End-user mappings must remain stable for years.
+
+### 1) Version functions/transforms
+
+Example: `iso_to_date@1` vs `iso_to_date@2`
+
+### 2) Store the function version in each AST node
+
+```json
+{ "op": "fn", "name": "iso_to_date", "version": 1, "args": [] }
+```
+
+### 3) Deprecation and migrations
+
+When deprecating:
+- keep old versions executable for a period
+- provide automatic migration (rewrite AST nodes from v1 → v2)
+- surface migration notes and require fixtures to pass before enabling the updated mapping
+
+---
+
+## Stream Tests / Fixtures (Recommended)
+
+Fixtures are critical because they:
+- catch schema/type drift early
+- reduce regressions when users edit mappings
+- make failures actionable (exact input + expected output)
+- enable CI-style validation when connectors or runtimes change
+
+Recommended structure:
+
+```json
+{
+  "tests": [
     {
-      "type": "field_mapping",
-      "mappings": {"id": "externalId"}
-    },
-    {
-      "type": "value_transformation",
-      "field": "amount",
-      "function": "abs"
+      "name": "maps basic transaction",
+      "input": {
+        "created": "2025-01-01T10:00:00Z",
+        "targetValue": 12.34,
+        "details": { "reference": "X" }
+      },
+      "expect": {
+        "valueDate": "2025-01-01",
+        "amount": 12.34,
+        "paymtPurpose": "X"
+      }
     }
   ]
 }
 ```
 
-### After (Field-Centric)
-```json
-{
-  "field_mappings": {
-    "id": {
-      "target": "externalId"
-    },
-    "amount": {
-      "transformations": ["abs"]
-    }
-  }
-}
-```
+---
 
-**Benefits**:
-- 60% reduction in configuration size
-- Single location for all field-related logic
-- Integrated validation without separate files
-- Faster processing with single data pass
+## Recommended Best Practices (Checklist)
 
-## Error Handling and Debugging
-
-### Common Issues
-
-1. **Transformation Not Found**
-   ```
-   Error: Invalid transformation 'invalid_name'
-   ```
-   **Solution**: Check available transformations with `list_available_transformations()`
-
-2. **Validation Rule Failure**
-   ```
-   Error: Field 'amount' value '150' above maximum 100
-   ```
-   **Solution**: Review validation rules and source data
-
-3. **Missing Environment Variable**
-   ```
-   Warning: Environment variable 'API_TOKEN' not found
-   ```
-   **Solution**: Set required environment variables
-
-### Debugging Tips
-
-1. **Enable Detailed Logging**
-   ```python
-   logging.getLogger('analitiq_stream.mapping').setLevel(logging.DEBUG)
-   ```
-
-2. **Test Field Mappings Individually**
-   ```python
-   processor = FieldMappingProcessor(config)
-   result = processor.process_record(test_record)
-   ```
-
-3. **Validate Configuration**
-   ```python
-   # Configuration is validated during processor initialization
-   try:
-       processor = FieldMappingProcessor(config)
-   except MappingError as e:
-       print(f"Configuration error: {e}")
-   ```
-
-This field-centric mapping system provides a powerful, efficient, and maintainable approach to data transformation and validation in your streaming pipelines.
+1) Prefer **assignments** over split `field_mappings` + `computed_fields`.
+2) Keep expressions as **AST**, not strings.
+3) Use **tokenized paths** for nested fields.
+4) Make schemas explicit (or pin via versioned `endpoint_id`) for UI + validation.
+5) Use a **typed, versioned function catalog**; reference versions in AST nodes.
+6) Centralize execution concerns under `runtime`, with stream/field overrides.
+7) Normalize error actions: `dlq`, `skip_record`, `stop_stream`, `default_value`, `quarantine`.
+8) Add fixtures/tests to catch regressions and speed debugging.  

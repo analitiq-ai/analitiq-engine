@@ -18,8 +18,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from analitiq_stream.connectors.base import BaseConnector
-from analitiq_stream.config import DIRECTORIES
+from src.connectors.base import BaseConnector
+from src.config import DIRECTORIES
 
 # Import new e2e fixtures
 from tests.e2e.fixtures_e2e import *
@@ -457,9 +457,9 @@ def source_config():
     """Source configuration backed by predefined in-memory records."""
     return {
         "type": "in_memory_source",
-        "base_url": "http://test-source.local",
+        "host": "http://test-source.local",
         "endpoint_id": "test-src-endpoint",
-        "host_id": "test-src-host",
+        "connection_id": "test-src-connection",
         "records": [],
         "records_by_endpoint": {},
         "read_log": {},
@@ -474,9 +474,9 @@ def destination_config():
     """Destination configuration backed by in-memory storage."""
     return {
         "type": "in_memory_destination",
-        "base_url": "http://test-destination.local",
+        "host": "http://test-destination.local",
         "endpoint_id": "test-dst-endpoint",
-        "host_id": "test-dst-host",
+        "connection_id": "test-dst-connection",
         "storage_by_endpoint": {},
         "failure_scenarios": {},
         "attempt_log": {},
@@ -497,7 +497,7 @@ def event_loop():
 @pytest.fixture(autouse=True)
 def patch_streaming_engine_connectors(monkeypatch):
     """Use the lightweight in-memory connectors for end-to-end tests."""
-    from analitiq_stream.core.engine import StreamingEngine
+    from src.core.engine import StreamingEngine
 
     original_get_connector = StreamingEngine._get_connector
 

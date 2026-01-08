@@ -1,0 +1,17 @@
+{
+  "category_name": "Other",
+  "client_id": "d7a11991-2795-49d1-a858-c7e58ee5ecc6",
+  "connection_id": "b452b1b2-34f9-4175-a47b-3dd6a4012230",
+  "connection_name": "SevDesk",
+  "connector_id": "acc98990-c633-4005-90ba-f97001367694",
+  "connector_name": "REST API",
+  "created_at": "2025-11-29T12:27:22.564680",
+  "headers": {
+    "Accept": "application/json",
+    "Authorization": "${token}",
+    "Content-Type": "application/json",
+    "User-Agent": "AnalitiqStream/1.0"
+  },
+  "host": "https://my.sevdesk.de",
+  "type": "api"
+}

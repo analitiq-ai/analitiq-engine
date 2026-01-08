@@ -5,34 +5,32 @@ import pytest
 
 class TestCorePackageInit:
     """Test core package __init__ file."""
-    
+
     @pytest.mark.unit
     def test_core_imports(self):
         """Test that core package exports are available."""
-        from analitiq_stream import core
-        
+        from src import core
+
         # Check __all__ exports
         assert hasattr(core, '__all__')
-        expected_exports = ["StreamingEngine", "Pipeline", "credentials_manager", "CredentialsManager", "DIRECTORIES"]
-        
+        expected_exports = ["StreamingEngine", "Pipeline", "credentials_manager", "CredentialsManager"]
+
         for export in expected_exports:
             assert export in core.__all__
             assert hasattr(core, export)
-    
+
     @pytest.mark.unit
     def test_core_direct_imports(self):
         """Test direct imports from core package."""
-        from analitiq_stream.core import (
-            StreamingEngine, Pipeline, credentials_manager, 
-            CredentialsManager, DIRECTORIES
+        from src.core import (
+            StreamingEngine, Pipeline, credentials_manager,
+            CredentialsManager
         )
-        
+
         assert StreamingEngine is not None
         assert Pipeline is not None
         assert credentials_manager is not None
         assert CredentialsManager is not None
-        assert DIRECTORIES is not None
-        assert isinstance(DIRECTORIES, dict)
 
 
 class TestConnectorsPackageInit:
@@ -41,7 +39,7 @@ class TestConnectorsPackageInit:
     @pytest.mark.unit
     def test_connectors_imports(self):
         """Test that connectors package can be imported."""
-        import analitiq_stream.connectors as connectors
+        import src.connectors as connectors
         
         # Check if __all__ is defined
         if hasattr(connectors, '__all__'):
@@ -51,14 +49,14 @@ class TestConnectorsPackageInit:
     @pytest.mark.unit
     def test_connectors_submodules(self):
         """Test that connector submodules are accessible."""
-        from analitiq_stream.connectors import api, base
+        from src.connectors import api, base
         
         assert api is not None
         assert base is not None
         
         # Test that main classes can be imported
-        from analitiq_stream.connectors.api import APIConnector
-        from analitiq_stream.connectors.base import BaseConnector
+        from src.connectors.api import APIConnector
+        from src.connectors.base import BaseConnector
         
         assert APIConnector is not None
         assert BaseConnector is not None
@@ -70,7 +68,7 @@ class TestDatabasePackageInit:
     @pytest.mark.unit
     def test_database_imports(self):
         """Test that database package exports are available."""
-        from analitiq_stream.connectors import database
+        from src.connectors import database
         
         # Check __all__ exports if defined
         if hasattr(database, '__all__'):
@@ -80,7 +78,7 @@ class TestDatabasePackageInit:
     @pytest.mark.unit
     def test_database_direct_imports(self):
         """Test direct imports from database package."""
-        from analitiq_stream.connectors.database import (
+        from src.connectors.database import (
             DatabaseConnector, BaseDatabaseDriver, DriverFactory
         )
         
@@ -95,7 +93,7 @@ class TestFaultTolerancePackageInit:
     @pytest.mark.unit
     def test_fault_tolerance_imports(self):
         """Test that fault_tolerance package can be imported."""
-        import analitiq_stream.fault_tolerance as ft
+        import src.fault_tolerance as ft
         
         # Check if __all__ is defined
         if hasattr(ft, '__all__'):
@@ -105,7 +103,7 @@ class TestFaultTolerancePackageInit:
     @pytest.mark.unit
     def test_fault_tolerance_modules(self):
         """Test that fault tolerance modules are accessible."""
-        from analitiq_stream.fault_tolerance import (
+        from src.fault_tolerance import (
             circuit_breaker, dead_letter_queue, retry_handler,
             state_manager
         )
@@ -122,7 +120,7 @@ class TestSchemaPackageInit:
     @pytest.mark.unit
     def test_schema_imports(self):
         """Test that schema package can be imported."""
-        import analitiq_stream.schema as schema
+        import src.schema as schema
         
         # Check if __all__ is defined
         if hasattr(schema, '__all__'):
@@ -132,7 +130,7 @@ class TestSchemaPackageInit:
     @pytest.mark.unit
     def test_schema_manager_import(self):
         """Test that SchemaManager can be imported from schema package."""
-        from analitiq_stream.schema.schema_manager import SchemaManager
+        from src.schema.schema_manager import SchemaManager
         
         assert SchemaManager is not None
 
@@ -143,7 +141,7 @@ class TestMappingPackageInit:
     @pytest.mark.unit
     def test_mapping_imports(self):
         """Test that mapping package can be imported."""
-        import analitiq_stream.mapping as mapping
+        import src.mapping as mapping
         
         # Package should be importable
         assert mapping is not None
@@ -151,7 +149,7 @@ class TestMappingPackageInit:
     @pytest.mark.unit
     def test_mapping_processor_import(self):
         """Test that processor can be imported from mapping package."""
-        from analitiq_stream.mapping.processor import FieldMappingProcessor
+        from src.mapping.processor import FieldMappingProcessor
 
         assert FieldMappingProcessor is not None
 
@@ -162,7 +160,7 @@ class TestTransformationsPackageInit:
     @pytest.mark.unit
     def test_transformations_imports(self):
         """Test that transformations package can be imported."""
-        import analitiq_stream.transformations as transformations
+        import src.transformations as transformations
         
         # Package should be importable
         assert transformations is not None
@@ -170,7 +168,7 @@ class TestTransformationsPackageInit:
     @pytest.mark.unit
     def test_transformations_registry_import(self):
         """Test that transformations can be imported from registry."""
-        from analitiq_stream.transformations.registry import (
+        from src.transformations.registry import (
             TransformationRegistry, transformation_registry, TransformationError
         )
 
@@ -186,7 +184,7 @@ class TestModelsPackageInit:
     @pytest.mark.unit
     def test_models_imports(self):
         """Test that models package can be imported."""
-        import analitiq_stream.models as models
+        import src.models as models
         
         # Package should be importable
         assert models is not None
@@ -194,7 +192,7 @@ class TestModelsPackageInit:
     @pytest.mark.unit
     def test_models_api_import(self):
         """Test that API models can be imported."""
-        from analitiq_stream.models.api import (
+        from src.models.api import (
             EndpointConfig, HostConfig, APIConfig
         )
         
@@ -209,15 +207,15 @@ class TestPackageNamespaceConsistency:
     @pytest.mark.unit
     def test_no_namespace_collisions(self):
         """Test that there are no naming collisions between packages."""
-        import analitiq_stream
-        import analitiq_stream.core
-        import analitiq_stream.connectors
-        import analitiq_stream.fault_tolerance
-        import analitiq_stream.schema
+        import src
+        import src.core
+        import src.connectors
+        import src.fault_tolerance
+        import src.schema
         
         # Get exports from each
-        main_exports = set(analitiq_stream.__all__) if hasattr(analitiq_stream, '__all__') else set()
-        core_exports = set(analitiq_stream.core.__all__) if hasattr(analitiq_stream.core, '__all__') else set()
+        main_exports = set(src.__all__) if hasattr(src, '__all__') else set()
+        core_exports = set(src.core.__all__) if hasattr(src.core, '__all__') else set()
         
         # Main package should re-export core items, so overlap is expected
         overlap = main_exports & core_exports
@@ -229,13 +227,13 @@ class TestPackageNamespaceConsistency:
     def test_import_paths_consistency(self):
         """Test that classes can be imported from multiple paths consistently."""
         # Import from main package
-        from analitiq_stream import Pipeline as MainPipeline
+        from src import Pipeline as MainPipeline
         
         # Import from subpackage
-        from analitiq_stream.core import Pipeline as CorePipeline
+        from src.core import Pipeline as CorePipeline
         
         # Import from module directly
-        from analitiq_stream.core.pipeline import Pipeline as ModulePipeline
+        from src.core.pipeline import Pipeline as ModulePipeline
         
         # All should be the same class
         assert MainPipeline is CorePipeline
@@ -245,7 +243,7 @@ class TestPackageNamespaceConsistency:
     def test_re_export_consistency(self):
         """Test that re-exported items maintain their identity."""
         # Test with SchemaManager
-        from analitiq_stream import SchemaManager as MainSchemaManager
-        from analitiq_stream.schema.schema_manager import SchemaManager as DirectSchemaManager
+        from src import SchemaManager as MainSchemaManager
+        from src.schema.schema_manager import SchemaManager as DirectSchemaManager
 
         assert MainSchemaManager is DirectSchemaManager

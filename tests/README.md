@@ -42,22 +42,22 @@ All fault tolerance components are fully functional, but running these tests wit
 
 ```bash
 # Rate Limiter Tests
-poetry run pytest tests/unit/analitiq_stream/fault_tolerance/test_rate_limiter.py
+poetry run pytest tests/unit/src/fault_tolerance/test_rate_limiter.py
 
 # Retry Handler Tests
-poetry run pytest tests/unit/analitiq_stream/fault_tolerance/test_retry_handler.py
+poetry run pytest tests/unit/src/fault_tolerance/test_retry_handler.py
 
 # Circuit Breaker Tests
-poetry run pytest tests/unit/analitiq_stream/fault_tolerance/test_circuit_breaker.py
+poetry run pytest tests/unit/src/fault_tolerance/test_circuit_breaker.py
 
 # Dead Letter Queue Tests
-poetry run pytest tests/unit/analitiq_stream/fault_tolerance/test_dead_letter_queue.py
+poetry run pytest tests/unit/src/fault_tolerance/test_dead_letter_queue.py
 ```
 
 ### Run All Fault Tolerance Tests Together:
 
 ```bash
-poetry run pytest tests/unit/analitiq_stream/fault_tolerance/
+poetry run pytest tests/unit/src/fault_tolerance/
 ```
 
 ## Test Status Summary

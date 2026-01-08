@@ -87,12 +87,7 @@ docker-compose*.yml
 .dockerignore
 
 # Example configurations (will be mounted instead)
-analitiq_stream/examples/*/hosts/
-analitiq_stream/examples/*/endpoints/
-analitiq_stream/examples/*/pipelines/
-
-# Configuration templates
-analitiq_stream/config/
+src/examples/*
 
 # CI/CD
 .github/

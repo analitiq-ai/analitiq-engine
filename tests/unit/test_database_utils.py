@@ -4,7 +4,7 @@ import pytest
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from analitiq_stream.connectors.database.utils import (
+from src.connectors.database.utils import (
     convert_python_to_db,
     convert_db_to_python,
     convert_record_for_db,

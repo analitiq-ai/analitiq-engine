@@ -6,8 +6,8 @@ import asyncio
 from pathlib import Path
 from typing import Dict
 
-from analitiq_stream.core.pipeline import Pipeline
-from analitiq_stream.fault_tolerance.dead_letter_queue import DeadLetterQueue
+from src.core.pipeline import Pipeline
+from src.fault_tolerance.dead_letter_queue import DeadLetterQueue
 
 
 def _hook_pipeline(pipeline: Pipeline, temp_dirs: Dict[str, Path]) -> None:
@@ -36,13 +36,13 @@ def test_db_to_db_pipeline_moves_multiple_tables(
         "streams": {
             orders_stream: {
                 "name": "orders",
-                "src": {"endpoint_id": "orders-source"},
-                "dst": {"endpoint_id": "orders-destination"},
+                "source": {"endpoint_id": "orders-source"},
+                "destination": {"endpoint_id": "orders-destination"},
             },
             users_stream: {
                 "name": "users",
-                "src": {"endpoint_id": "users-source"},
-                "dst": {"endpoint_id": "users-destination"},
+                "source": {"endpoint_id": "users-source"},
+                "destination": {"endpoint_id": "users-destination"},
             },
         },
     }

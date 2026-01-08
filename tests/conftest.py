@@ -68,12 +68,12 @@ def sample_pipeline_config():
         "pipeline_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
         "name": "Wise Multi-Stream to SevDesk Integration",
         "version": "1.0",
-        "src": {
-            "host_id": "0e8b1731-479a-4bc0-b056-244cc5d6a53c",
+        "source": {
+            "connection_id": "0e8b1731-479a-4bc0-b056-244cc5d6a53c",
             "name": "Wise Platform"
         },
-        "dst": {
-            "host_id": "7c1a69eb-239f-45d4-b6c2-3ad4c6e89cfa",
+        "destination": {
+            "connection_id": "7c1a69eb-239f-45d4-b6c2-3ad4c6e89cfa",
             "name": "SevDesk Platform"
         },
         "engine_config": {
@@ -90,7 +90,7 @@ def sample_pipeline_config():
             "f1a2b3c4-d5e6-7890-abcd-ef1234567891": {
                 "name": "wise-transactions",
                 "description": "Wise bank transactions sync",
-                "src": {
+                "source": {
                     "endpoint_id": "5a4b9e21-441f-4bc7-9d5e-41917b4357e6",
                     "replication_method": "incremental",
                     "cursor_field": "created",
@@ -99,7 +99,7 @@ def sample_pipeline_config():
                     "primary_key": ["id"],
                     "tie_breaker_fields": ["id"]
                 },
-                "dst": {
+                "destination": {
                     "endpoint_id": "1e63d782-4b67-4b7e-b845-4b4de5e4f46e",
                     "refresh_mode": "upsert",
                     "batch_support": False,
@@ -201,7 +201,7 @@ def database_cleanup():
     if cleanup_tables and os.getenv("POSTGRES_PASSWORD"):
         try:
             import asyncio
-            from analitiq_stream.connectors.database.postgresql_driver import PostgreSQLDriver
+            from src.connectors.database.postgresql_driver import PostgreSQLDriver
             
             async def cleanup():
                 driver = PostgreSQLDriver()

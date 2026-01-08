@@ -22,7 +22,7 @@ The Analitiq Stream framework now supports external credentials files for secure
 
 ```python
 import json
-from analitiq_stream import Pipeline
+from src import Pipeline
 
 # Load modular configuration files
 with open("pipeline_config.json") as f:
@@ -219,7 +219,7 @@ credentials/
 ### Direct CredentialsManager Usage
 
 ```python
-from analitiq_stream import credentials_manager
+from src import credentials_manager
 
 # Load and validate credentials
 creds = credentials_manager.load_credentials("api_creds.json")
@@ -235,7 +235,7 @@ config = credentials_manager.merge_credentials_with_config(
 ### Custom Validation
 
 ```python
-from analitiq_stream import CredentialsManager
+from src import CredentialsManager
 
 # Create custom credentials manager
 cm = CredentialsManager()

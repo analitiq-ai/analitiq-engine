@@ -1,0 +1,274 @@
+{% extends "base.html" %}
+
+{% block title %}Endpoint Configuration: {{ endpoint_file }}{% endblock %}
+
+{% block content %}
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <h2>Endpoint Configuration: {{ endpoint_file }}</h2>
+        <a href="{{ url_for('index', pipeline=pipeline_name) }}" class="btn btn-outline-secondary">
+            <i class="bi bi-arrow-left"></i> Back
+        </a>
+    </div>
+
+    {% if endpoint_config %}
+        <div class="row">
+            <!-- Basic Endpoint Information -->
+            <div class="col-12">
+                <div class="card mb-4">
+                    <div class="card-header">
+                        <h5 class="mb-0">Basic Information</h5>
+                    </div>
+                    <div class="card-body">
+                        <div class="row">
+                            <div class="col-md-6">
+                                <dl class="row">
+                                    {% if endpoint_config.get('type') %}
+                                    <dt class="col-sm-5">Type</dt>
+                                    <dd class="col-sm-7">{{ endpoint_config.get('type') }}</dd>
+                                    {% endif %}
+
+                                    {% if endpoint_config.get('endpoint') %}
+                                    <dt class="col-sm-5">Endpoint</dt>
+                                    <dd class="col-sm-7">{{ endpoint_config.get('endpoint') }}</dd>
+                                    {% endif %}
+
+                                    {% if endpoint_config.get('method') %}
+                                    <dt class="col-sm-5">Method</dt>
+                                    <dd class="col-sm-7">{{ endpoint_config.get('method') }}</dd>
+                                    {% endif %}
+
+                                    {% if endpoint_config.get('schema') %}
+                                    <dt class="col-sm-5">Schema</dt>
+                                    <dd class="col-sm-7">{{ endpoint_config.get('schema') }}</dd>
+                                    {% endif %}
+                                </dl>
+                            </div>
+                            <div class="col-md-6">
+                                <dl class="row">
+                                    {% if endpoint_config.get('table') %}
+                                    <dt class="col-sm-5">Table</dt>
+                                    <dd class="col-sm-7">{{ endpoint_config.get('table') }}</dd>
+                                    {% endif %}
+
+                                    {% if endpoint_config.get('write_mode') %}
+                                    <dt class="col-sm-5">Write Mode</dt>
+                                    <dd class="col-sm-7">{{ endpoint_config.get('write_mode') }}</dd>
+                                    {% endif %}
+                                    
+                                    {% if endpoint_config.get('primary_key') %}
+                                    <dt class="col-sm-5">Primary Key</dt>
+                                    <dd class="col-sm-7">{{ endpoint_config.get('primary_key')|join(', ') }}</dd>
+                                    {% endif %}
+
+                                    {% if endpoint_config.get('unique_constraints') %}
+                                    <dt class="col-sm-5">Unique Constraints</dt>
+                                    <dd class="col-sm-7">{{ endpoint_config.get('unique_constraints')|join(', ') }}</dd>
+                                    {% endif %}
+                                </dl>
+                            </div>
+                        </div>
+                        
+                        {% if endpoint_config.get('configure') %}
+                        <div class="mt-4">
+                            <h6 class="mb-3">Auto-Configuration</h6>
+                            <dl class="row">
+                                <dt class="col-sm-3">Auto Create Schema</dt>
+                                <dd class="col-sm-9">{{ endpoint_config.get('configure').get('auto_create_schema', False)|string }}</dd>
+                                
+                                <dt class="col-sm-3">Auto Create Table</dt>
+                                <dd class="col-sm-9">{{ endpoint_config.get('configure').get('auto_create_table', False)|string }}</dd>
+                                
+                                {% if endpoint_config.get('configure').get('auto_create_indexes') %}
+                                <dt class="col-sm-3 mb-2">Auto Create Indexes</dt>
+                                <dd class="col-sm-9">
+                                    <ul class="list-group">
+                                        {% for index in endpoint_config.get('configure').get('auto_create_indexes') %}
+                                        <li class="list-group-item">
+                                            <strong>{{ index.get('name') }}</strong> - 
+                                            Type: {{ index.get('type') }}, 
+                                            Columns: {{ index.get('columns')|join(', ') }}
+                                        </li>
+                                        {% endfor %}
+                                    </ul>
+                                </dd>
+                                {% endif %}
+                            </dl>
+                        </div>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+            
+        </div>
+
+        <!-- Schema Visualization -->
+        {% if endpoint_config.get('table_schema') or endpoint_config.get('response_schema') %}
+        <div class="card mb-4">
+            <div class="card-header">
+                <h5 class="mb-0">Schema</h5>
+            </div>
+            <div class="card-body">
+                <ul class="nav nav-tabs" id="schemaTab" role="tablist">
+                    <li class="nav-item">
+                        <a class="nav-link active" id="visual-tab" data-bs-toggle="tab" href="#visual" role="tab">
+                            Visual
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" id="json-tab" data-bs-toggle="tab" href="#json" role="tab">
+                            JSON
+                        </a>
+                    </li>
+                </ul>
+                <div class="tab-content pt-3" id="schemaTabContent">
+                    <div class="tab-pane fade show active" id="visual" role="tabpanel">
+                        {% set schema = endpoint_config.get('table_schema') or endpoint_config.get('response_schema') %}
+                        
+                        <!-- For database endpoint with table_schema -->
+                        {% if endpoint_config.get('table_schema') %}
+                        <div class="table-responsive">
+                            <table class="table table-striped table-bordered">
+                                <thead class="table-light">
+                                    <tr>
+                                        <th>Field</th>
+                                        <th>Type</th>
+                                        <th>Database Type</th>
+                                        <th>Nullable</th>
+                                        <th>Description</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {% for field_name, field in schema.get('properties', {}).items() %}
+                                    <tr>
+                                        <td>
+                                            {{ field_name }}
+                                            {% if field.get('primary_key') %}
+                                            <span class="badge bg-primary ms-1">PK</span>
+                                            {% endif %}
+                                            {% if field_name in schema.get('required', []) %}
+                                            <span class="badge bg-danger ms-1">Required</span>
+                                            {% endif %}
+                                        </td>
+                                        <td>{{ field.get('type') }}</td>
+                                        <td>{{ field.get('database_type', 'N/A') }}</td>
+                                        <td>{{ field.get('nullable', True)|string }}</td>
+                                        <td>{{ field.get('description', '') }}</td>
+                                    </tr>
+                                    {% endfor %}
+                                </tbody>
+                            </table>
+                        </div>
+                        {% endif %}
+
+                        <!-- For API endpoint with response_schema -->
+                        {% if endpoint_config.get('response_schema') and not endpoint_config.get('table_schema') %}
+                        <div id="schema-tree-view"></div>
+                        {% endif %}
+                    </div>
+                    <div class="tab-pane fade" id="json" role="tabpanel">
+                        <div id="schema-json-viewer"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        {% endif %}
+
+        <!-- Full JSON Config -->
+        <div class="card">
+            <div class="card-header">
+                <h5 class="mb-0">Full Configuration</h5>
+            </div>
+            <div class="card-body">
+                <div class="json-display" id="jsonViewer"></div>
+            </div>
+        </div>
+    {% else %}
+        <div class="alert alert-danger">
+            Could not load endpoint configuration or the file does not exist.
+        </div>
+    {% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+    document.addEventListener('DOMContentLoaded', function() {
+        // Setup full config JSON viewer
+        const container = document.getElementById('jsonViewer');
+        const options = {
+            mode: 'view',
+            modes: ['view', 'tree'],
+            indentation: 2
+        };
+        
+        const editor = new JSONEditor(container, options);
+        editor.set({{ endpoint_config|tojson }});
+
+        // Setup schema JSON viewer if applicable
+        const schemaContainer = document.getElementById('schema-json-viewer');
+        if (schemaContainer) {
+            const schemaEditor = new JSONEditor(schemaContainer, options);
+            {% if endpoint_config.get('table_schema') %}
+            schemaEditor.set({{ endpoint_config.get('table_schema')|tojson }});
+            {% elif endpoint_config.get('response_schema') %}
+            schemaEditor.set({{ endpoint_config.get('response_schema')|tojson }});
+            {% endif %}
+        }
+        
+        // Setup schema tree view for API endpoints
+        const treeViewContainer = document.getElementById('schema-tree-view');
+        if (treeViewContainer) {
+            {% if endpoint_config.get('response_schema') %}
+            // This would render a more visual representation of the schema
+            // For simplicity, we'll just display it in a different format
+            const schema = {{ endpoint_config.get('response_schema')|tojson }};
+            let html = '';
+            
+            if (schema.type === 'array' && schema.items) {
+                html += '<div class="mb-3"><span class="badge bg-secondary">Array of:</span></div>';
+                const items = schema.items;
+                if (items.type === 'object' && items.properties) {
+                    html += renderObjectProperties(items.properties, items.required || []);
+                }
+            } else if (schema.type === 'object' && schema.properties) {
+                html += renderObjectProperties(schema.properties, schema.required || []);
+            }
+            
+            treeViewContainer.innerHTML = html;
+            {% endif %}
+        }
+        
+        function renderObjectProperties(properties, required) {
+            let html = '<ul class="list-group">';
+            for (const [key, prop] of Object.entries(properties)) {
+                const isRequired = required.includes(key);
+                html += `
+                    <li class="list-group-item">
+                        <strong>${key}</strong>
+                        ${isRequired ? '<span class="badge bg-danger ms-1">Required</span>' : ''}
+                        <span class="badge bg-info ms-1">${prop.type}</span>
+                        ${prop.format ? `<span class="badge bg-secondary ms-1">${prop.format}</span>` : ''}
+                        ${prop.description ? `<div class="mt-1 text-muted small">${prop.description}</div>` : ''}
+                `;
+                
+                if (prop.type === 'object' && prop.properties) {
+                    html += '<div class="ms-3 mt-2">';
+                    html += renderObjectProperties(prop.properties, prop.required || []);
+                    html += '</div>';
+                } else if (prop.type === 'array' && prop.items) {
+                    html += '<div class="ms-3 mt-2"><span class="badge bg-secondary">Array items:</span>';
+                    if (prop.items.type === 'object' && prop.items.properties) {
+                        html += renderObjectProperties(prop.items.properties, prop.items.required || []);
+                    } else {
+                        html += `<span class="badge bg-info ms-1">${prop.items.type}</span>`;
+                    }
+                    html += '</div>';
+                }
+                
+                html += '</li>';
+            }
+            html += '</ul>';
+            return html;
+        }
+    });
+</script>
+{% endblock %}

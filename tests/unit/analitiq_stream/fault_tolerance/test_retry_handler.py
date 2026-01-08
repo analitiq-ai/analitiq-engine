@@ -5,7 +5,7 @@ import pytest
 from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from analitiq_stream.fault_tolerance.retry_handler import (
+from src.fault_tolerance.retry_handler import (
     RetryHandler, ExponentialBackoffRetry, LinearBackoffRetry,
     DatabaseRetry, APIRetry
 )

@@ -1,0 +1,172 @@
+{% extends "base.html" %}
+
+{% block title %}Analitiq Stream Configuration Viewer{% endblock %}
+
+{% block content %}
+
+    {% if selected %}
+        <div class="row">
+            <!-- Pipeline Configuration -->
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0">Pipeline Configuration</h5>
+                        <a href="{{ url_for('view_pipeline', pipeline_name=selected) }}" class="btn btn-sm btn-primary">
+                            <i class="bi bi-eye"></i> View Streams
+                        </a>
+                    </div>
+                    <div class="card-body">
+                        <dl class="row">
+                            <dt class="col-sm-4">Pipeline ID</dt>
+                            <dd class="col-sm-8">{{ pipeline_config.get('pipeline_id', 'N/A') }}</dd>
+                            
+                            <dt class="col-sm-4">Name</dt>
+                            <dd class="col-sm-8">{{ pipeline_config.get('name', 'N/A') }}</dd>
+                            
+                            <dt class="col-sm-4">Version</dt>
+                            <dd class="col-sm-8">{{ pipeline_config.get('version', 'N/A') }}</dd>
+                        </dl>
+                        
+                        {% if pipeline_config.get('src') %}
+                        <h6 class="mt-4 mb-2 text-primary">
+                            Source Configuration 
+                            {% if src_host_type %}
+                            <small class="text-muted">({{ src_host_type }})</small>
+                            {% endif %}
+                        </h6>
+                        <dl class="row">
+                            {% if pipeline_config.get('src', {}).get('host_id') %}
+                            <dt class="col-sm-4">Host ID</dt>
+                            <dd class="col-sm-8">
+                                {{ pipeline_config.get('src', {}).get('host_id') }}
+                                {% for host in host_files %}
+                                    {% if host.file == 'hst_' + pipeline_config.get('src', {}).get('host_id') + '.json' %}
+                                    <a href="{{ url_for('view_host', pipeline_name=selected, host_file=host.file) }}" class="btn btn-sm btn-outline-info ms-2">
+                                        <i class="bi bi-eye"></i> View
+                                    </a>
+                                    {% endif %}
+                                {% endfor %}
+                            </dd>
+                            {% endif %}
+                            
+                            {% if pipeline_config.get('src', {}).get('name') %}
+                            <dt class="col-sm-4">Name</dt>
+                            <dd class="col-sm-8">{{ pipeline_config.get('src', {}).get('name') }}</dd>
+                            {% endif %}
+                        </dl>
+                        {% endif %}
+                        
+                        {% if pipeline_config.get('dst') %}
+                        <h6 class="mt-4 mb-2 text-primary">
+                            Destination Configuration 
+                            {% if dst_host_type %}
+                            <small class="text-muted">({{ dst_host_type }})</small>
+                            {% endif %}
+                        </h6>
+                        <dl class="row">
+                            {% if pipeline_config.get('dst', {}).get('host_id') %}
+                            <dt class="col-sm-4">Host ID</dt>
+                            <dd class="col-sm-8">
+                                {{ pipeline_config.get('dst', {}).get('host_id') }}
+                                {% for host in host_files %}
+                                    {% if host.file == 'hst_' + pipeline_config.get('dst', {}).get('host_id') + '.json' %}
+                                    <a href="{{ url_for('view_host', pipeline_name=selected, host_file=host.file) }}" class="btn btn-sm btn-outline-info ms-2">
+                                        <i class="bi bi-eye"></i> View
+                                    </a>
+                                    {% endif %}
+                                {% endfor %}
+                            </dd>
+                            {% endif %}
+                            
+                            {% if pipeline_config.get('dst', {}).get('name') %}
+                            <dt class="col-sm-4">Name</dt>
+                            <dd class="col-sm-8">{{ pipeline_config.get('dst', {}).get('name') }}</dd>
+                            {% endif %}
+                        </dl>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Engine Configuration -->
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-header">
+                        <h5 class="mb-0">Engine Configuration</h5>
+                    </div>
+                    <div class="card-body">
+                        {% if pipeline_config.get('engine_config') %}
+                        <dl class="row">
+                            {% if pipeline_config.get('engine_config', {}).get('batch_size') %}
+                            <dt class="col-sm-6">Batch Size</dt>
+                            <dd class="col-sm-6">{{ pipeline_config.get('engine_config', {}).get('batch_size') }}</dd>
+                            {% endif %}
+                            
+                            {% if pipeline_config.get('engine_config', {}).get('max_concurrent_batches') %}
+                            <dt class="col-sm-6">Max Concurrent Batches</dt>
+                            <dd class="col-sm-6">{{ pipeline_config.get('engine_config', {}).get('max_concurrent_batches') }}</dd>
+                            {% endif %}
+                            
+                            {% if pipeline_config.get('engine_config', {}).get('buffer_size') %}
+                            <dt class="col-sm-6">Buffer Size</dt>
+                            <dd class="col-sm-6">{{ pipeline_config.get('engine_config', {}).get('buffer_size') }}</dd>
+                            {% endif %}
+                            
+                            {% if pipeline_config.get('engine_config', {}).get('state_file') %}
+                            <dt class="col-sm-6">State File</dt>
+                            <dd class="col-sm-6">{{ pipeline_config.get('engine_config', {}).get('state_file') }}</dd>
+                            {% endif %}
+                        </dl>
+                        
+                        {% if pipeline_config.get('engine_config', {}).get('schedule') %}
+                        <h6 class="mt-4 mb-2 text-primary">Schedule Configuration</h6>
+                        <dl class="row">
+                            <dt class="col-sm-6">Type</dt>
+                            <dd class="col-sm-6">{{ pipeline_config.get('engine_config', {}).get('schedule', {}).get('type') }}</dd>
+                            
+                            {% if pipeline_config.get('engine_config', {}).get('schedule', {}).get('interval_minutes') %}
+                            <dt class="col-sm-6">Interval</dt>
+                            <dd class="col-sm-6">{{ pipeline_config.get('engine_config', {}).get('schedule', {}).get('interval_minutes') }} minutes</dd>
+                            {% endif %}
+                            
+                            {% if pipeline_config.get('engine_config', {}).get('schedule', {}).get('timezone') %}
+                            <dt class="col-sm-6">Timezone</dt>
+                            <dd class="col-sm-6">{{ pipeline_config.get('engine_config', {}).get('schedule', {}).get('timezone') }}</dd>
+                            {% endif %}
+                        </dl>
+                        {% endif %}
+                        {% endif %}
+                        
+                        {% if pipeline_config.get('error_handling') %}
+                        <h6 class="mt-4 mb-2 text-primary">Error Handling</h6>
+                        <dl class="row">
+                            <dt class="col-sm-6">Strategy</dt>
+                            <dd class="col-sm-6">{{ pipeline_config.get('error_handling', {}).get('strategy', 'N/A') }}</dd>
+                            
+                            <dt class="col-sm-6">Retry Failed Records</dt>
+                            <dd class="col-sm-6">{{ pipeline_config.get('error_handling', {}).get('retry_failed_records', False)|string }}</dd>
+                            
+                            <dt class="col-sm-6">Max Retries</dt>
+                            <dd class="col-sm-6">{{ pipeline_config.get('error_handling', {}).get('max_retries', 'N/A') }}</dd>
+                        </dl>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+            
+            
+            <!-- Footer Actions -->
+            <div class="col-12 mt-3">
+                <div class="d-flex justify-content-center">
+                    <a href="{{ url_for('create_host', pipeline_name=selected) }}" class="btn btn-success">
+                        <i class="bi bi-plus-circle"></i> Add New Host
+                    </a>
+                </div>
+            </div>
+        </div>
+    {% else %}
+        <div class="alert alert-warning">
+            No pipelines found in the examples directory.
+        </div>
+    {% endif %}
+{% endblock %}

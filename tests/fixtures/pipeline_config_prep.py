@@ -8,7 +8,7 @@ from typing import Dict, Any
 def sample_wise_host_config():
     """Sample Wise API host configuration."""
     return {
-        "base_url": "https://api.sandbox.transferwise.tech",
+        "host": "https://api.sandbox.transferwise.tech",
         "headers": {
             "Authorization": "Bearer ${WISE_API_TOKEN}",
             "Content-Type": "application/json",
@@ -34,7 +34,7 @@ def sample_wise_host_config():
 def sample_sevdesk_host_config():
     """Sample SevDesk API host configuration."""
     return {
-        "base_url": "https://my.sevdesk.de",
+        "host": "https://my.sevdesk.de",
         "headers": {
             "Authorization": "${SEVDESK_API_TOKEN}",
             "Content-Type": "application/json"
@@ -348,7 +348,7 @@ def sample_invalid_pipeline_config():
     return {
         "pipeline_id": "invalid-pipeline",
         "name": "Invalid Pipeline",
-        # Missing required fields like src, dst, streams
+        # Missing required fields like source, destination, streams
         "engine_config": {
             "batch_size": "not_a_number"  # Invalid type
         }
@@ -399,12 +399,12 @@ def multi_stream_pipeline_config():
         "pipeline_id": "multi-stream-pipeline",
         "name": "Multi-Stream Pipeline Test",
         "version": "1.0",
-        "src": {
-            "host_id": "wise-host-id",
+        "source": {
+            "connection_id": "wise-host-id",
             "name": "Wise Platform"
         },
-        "dst": {
-            "host_id": "database-host-id",
+        "destination": {
+            "connection_id": "database-host-id",
             "name": "Analytics Database"
         },
         "engine_config": {
@@ -421,7 +421,7 @@ def multi_stream_pipeline_config():
             "transfers-stream": {
                 "name": "wise-transfers",
                 "description": "Wise transfer transactions",
-                "src": {
+                "source": {
                     "endpoint_id": "wise-transfers-endpoint",
                     "replication_method": "incremental",
                     "cursor_field": "created",
@@ -430,7 +430,7 @@ def multi_stream_pipeline_config():
                     "primary_key": ["id"],
                     "tie_breaker_fields": ["id"]
                 },
-                "dst": {
+                "destination": {
                     "endpoint_id": "db-transfers-endpoint",
                     "refresh_mode": "upsert",
                     "batch_support": True,
@@ -440,12 +440,12 @@ def multi_stream_pipeline_config():
             "accounts-stream": {
                 "name": "wise-accounts",
                 "description": "Wise account information",
-                "src": {
+                "source": {
                     "endpoint_id": "wise-accounts-endpoint",
                     "replication_method": "full_refresh",
                     "primary_key": ["id"]
                 },
-                "dst": {
+                "destination": {
                     "endpoint_id": "db-accounts-endpoint",
                     "refresh_mode": "truncate_insert",
                     "batch_support": True,

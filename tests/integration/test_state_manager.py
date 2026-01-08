@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
-from analitiq_stream.fault_tolerance.state_manager import StateManager
+from src.fault_tolerance.state_manager import StateManager
 
 
 class TestStateManager:
@@ -31,65 +31,12 @@ class TestStateManager:
             pipeline_id=self.pipeline_id,
             base_dir=str(self.state_dir)
         )
-        
+
         assert manager.pipeline_id == self.pipeline_id
         assert manager.base_dir == self.state_dir
-        assert manager.pipeline_dir == self.state_dir / self.pipeline_id / "v1"
-        assert manager.streams_dir.exists()
-        assert manager.index_file == manager.pipeline_dir / "index.json"
+        assert manager.pipeline_dir == self.state_dir / self.pipeline_id
+        assert manager.state_file == manager.pipeline_dir / "state.json"
         assert manager.lock_file == manager.pipeline_dir / "lock"
-    
-    def test_compute_config_fingerprint(self):
-        """Test configuration fingerprinting."""
-        manager = StateManager(self.pipeline_id, str(self.state_dir))
-        
-        config1 = {
-            "pipeline_id": "test",
-            "version": "1.0",
-            "src": {"type": "api", "endpoint": "/data"},
-            "dst": {"type": "api", "endpoint": "/output"},
-            "streams": {"stream1": {"table": "users"}}
-        }
-        
-        config2 = {
-            "pipeline_id": "test",
-            "version": "1.0", 
-            "src": {"type": "api", "endpoint": "/data"},
-            "dst": {"type": "api", "endpoint": "/output"},
-            "streams": {"stream1": {"table": "users"}}
-        }
-        
-        config3 = {
-            "pipeline_id": "test",
-            "version": "1.0",
-            "src": {"type": "api", "endpoint": "/different"},  # Different endpoint
-            "dst": {"type": "api", "endpoint": "/output"},
-            "streams": {"stream1": {"table": "users"}}
-        }
-        
-        fingerprint1 = manager._compute_config_fingerprint(config1)
-        fingerprint2 = manager._compute_config_fingerprint(config2)
-        fingerprint3 = manager._compute_config_fingerprint(config3)
-        
-        assert fingerprint1 == fingerprint2  # Same config, same fingerprint
-        assert fingerprint1 != fingerprint3  # Different config, different fingerprint
-        assert len(fingerprint1) > 0  # Non-empty fingerprint
-    
-    def test_compute_schema_hash(self):
-        """Test schema hashing for drift detection."""
-        manager = StateManager(self.pipeline_id, str(self.state_dir))
-        
-        schema1 = {"fields": [{"name": "id", "type": "int"}, {"name": "name", "type": "str"}]}
-        schema2 = {"fields": [{"name": "id", "type": "int"}, {"name": "name", "type": "str"}]}
-        schema3 = {"fields": [{"name": "id", "type": "int"}, {"name": "age", "type": "int"}]}
-        
-        hash1 = manager._compute_schema_hash(schema1)
-        hash2 = manager._compute_schema_hash(schema2)
-        hash3 = manager._compute_schema_hash(schema3)
-        
-        assert hash1 == hash2  # Same schema, same hash
-        assert hash1 != hash3  # Different schema, different hash
-        assert hash1.startswith("sha256:")
     
     def test_get_partition_file(self):
         """Test partition file path generation."""
@@ -113,28 +60,27 @@ class TestStateManager:
         partition_file2 = manager._get_partition_file("stream1", partition)
         assert partition_file == partition_file2
     
-    def test_load_save_index(self):
-        """Test index loading and saving."""
+    def test_load_save_state(self):
+        """Test state loading and saving."""
         manager = StateManager(self.pipeline_id, str(self.state_dir))
-        
-        # Load non-existent index should return default
-        index = manager._load_index()
-        assert index["version"] == 1
-        assert index["streams"] == {}
-        assert index["run"] == {}
-        
-        # Save and load index
-        test_index = {
+
+        # Load non-existent state should return default
+        state = manager._load_state()
+        assert state["version"] == 1
+        assert state["streams"] == {}
+        assert state["run"] == {}
+
+        # Save and load state
+        test_state = {
             "version": 1,
-            "streams": {"stream1": {"schema_hash": "abc123"}},
+            "streams": {"stream1": {"partitions": []}},
             "run": {"run_id": "test-run"}
         }
-        
-        manager._save_index(test_index)
-        loaded_index = manager._load_index()
-        
-        assert loaded_index == test_index
-        assert manager.index_file.exists()
+
+        manager._save_state(test_state)
+        loaded_state = manager._load_state()
+
+        assert loaded_state == test_state
     
     def test_load_save_partition_state(self):
         """Test partition state loading and saving."""
@@ -163,25 +109,24 @@ class TestStateManager:
     def test_start_run_new_pipeline(self):
         """Test starting a run for a new pipeline."""
         manager = StateManager(self.pipeline_id, str(self.state_dir))
-        
+
         config = {
             "pipeline_id": "test-pipeline",
             "version": "1.0",
-            "src": {"type": "api", "endpoint": "/data"},
-            "dst": {"type": "api", "endpoint": "/output"}
+            "source": {"type": "api", "endpoint": "/data"},
+            "destination": {"type": "api", "endpoint": "/output"}
         }
-        
+
         run_id = manager.start_run(config)
-        
+
         # Should generate a run ID
         assert run_id is not None
         assert len(run_id) > 0
-        
+
         # Should save run info to index
         run_info = manager.get_run_info()
         assert run_info["run_id"] == run_id
         assert run_info["pipeline_id"] == "test-pipeline"
-        assert "config_fingerprint" in run_info
         assert "started_at" in run_info
         assert "lease_owner" in run_info
     
@@ -197,51 +142,32 @@ class TestStateManager:
         assert returned_run_id == custom_run_id
         assert manager.get_run_info()["run_id"] == custom_run_id
     
-    def test_start_run_config_compatibility_success(self):
-        """Test config compatibility check succeeds with same config."""
+    def test_start_run_multiple_runs(self):
+        """Test starting multiple runs with same or different configs."""
         manager = StateManager(self.pipeline_id, str(self.state_dir))
-        
-        config = {
-            "pipeline_id": "test",
-            "version": "1.0",
-            "src": {"type": "api", "endpoint": "/data"}
-        }
-        
-        # Start first run
-        run_id1 = manager.start_run(config, "run1")
-        
-        # Start second run with same config should succeed
-        run_id2 = manager.start_run(config, "run2")
-        
-        assert run_id1 == "run1"
-        assert run_id2 == "run2"
-        assert manager.get_run_info()["run_id"] == "run2"
-    
-    def test_start_run_config_compatibility_failure(self):
-        """Test config compatibility check fails with different config."""
-        manager = StateManager(self.pipeline_id, str(self.state_dir))
-        
+
         config1 = {
             "pipeline_id": "test",
             "version": "1.0",
-            "src": {"type": "api", "endpoint": "/data"}
+            "source": {"type": "api", "endpoint": "/data"}
         }
-        
+
         config2 = {
-            "pipeline_id": "test", 
+            "pipeline_id": "test",
             "version": "1.0",
-            "src": {"type": "api", "endpoint": "/different"}  # Different endpoint
+            "source": {"type": "api", "endpoint": "/different"}
         }
-        
+
         # Start first run
-        manager.start_run(config1, "run1")
-        
-        # Start second run with different config should fail
-        with pytest.raises(ValueError) as exc_info:
-            manager.start_run(config2, "run2")
-        
-        assert "Config fingerprint mismatch" in str(exc_info.value)
-    
+        run_id1 = manager.start_run(config1, "run1")
+
+        # Start second run with different config should succeed (no validation)
+        run_id2 = manager.start_run(config2, "run2")
+
+        assert run_id1 == "run1"
+        assert run_id2 == "run2"
+        assert manager.get_run_info()["run_id"] == "run2"
+
     def test_save_stream_checkpoint_basic(self):
         """Test basic stream checkpoint saving."""
         manager = StateManager(self.pipeline_id, str(self.state_dir))
@@ -277,39 +203,32 @@ class TestStateManager:
     def test_save_stream_checkpoint_with_optional_data(self):
         """Test checkpoint saving with optional data."""
         manager = StateManager(self.pipeline_id, str(self.state_dir))
-        
+
         config = {"pipeline_id": "test", "version": "1.0"}
         manager.start_run(config)
-        
+
         cursor = {"primary": {"field": "id", "value": 100}}
         hwm = "2025-08-18T13:00:00Z"
         partition = {"region": "EU"}
-        schema = {"fields": [{"name": "id", "type": "int"}]}
         page_state = {"next_token": "abc123", "offset": 1000}
         http_conditionals = {"etag": "xyz789"}
         stats = {"records_synced": 500, "batches_written": 5}
-        
+
         manager.save_stream_checkpoint(
             stream_name="stream1",
             partition=partition,
             cursor=cursor,
             hwm=hwm,
-            schema=schema,
             page_state=page_state,
             http_conditionals=http_conditionals,
             stats=stats
         )
-        
+
         # Verify all data was saved
         partition_state = manager.get_partition_state("stream1", partition)
         assert partition_state["page_state"] == page_state
         assert partition_state["http_conditionals"] == http_conditionals
         assert partition_state["stats"] == stats
-        
-        # Verify schema hash was saved in index
-        schema_hash = manager.get_stream_schema_hash("stream1")
-        assert schema_hash is not None
-        assert schema_hash.startswith("sha256:")
     
     def test_get_stream_partitions(self):
         """Test getting all partitions for a stream."""
@@ -367,34 +286,6 @@ class TestStateManager:
         # Non-existent partition should return None
         state = manager.get_partition_state("stream1", {"account_id": "99999"})
         assert state is None
-    
-    def test_detect_schema_drift(self):
-        """Test schema drift detection."""
-        manager = StateManager(self.pipeline_id, str(self.state_dir))
-        
-        config = {"pipeline_id": "test", "version": "1.0"}
-        manager.start_run(config)
-        
-        schema1 = {"fields": [{"name": "id", "type": "int"}]}
-        schema2 = {"fields": [{"name": "id", "type": "int"}, {"name": "name", "type": "str"}]}
-        
-        # No schema stored yet - should not be drift
-        assert manager.detect_schema_drift("stream1", schema1) is False
-        
-        # Save checkpoint with schema
-        manager.save_stream_checkpoint(
-            stream_name="stream1",
-            partition={},
-            cursor={"primary": {"field": "id", "value": 1}},
-            hwm="2025-08-18T12:00:00Z",
-            schema=schema1
-        )
-        
-        # Same schema - no drift
-        assert manager.detect_schema_drift("stream1", schema1) is False
-        
-        # Different schema - drift detected
-        assert manager.detect_schema_drift("stream1", schema2) is True
     
     def test_list_streams(self):
         """Test listing all streams with state."""
@@ -468,44 +359,21 @@ class TestStateManager:
         # All state should be gone
         assert len(manager.list_streams()) == 0
         assert manager.get_run_info() == {}
-        assert not manager.index_file.exists()
-    
-    def test_validate_config_compatibility(self):
-        """Test config compatibility validation."""
-        manager = StateManager(self.pipeline_id, str(self.state_dir))
-        
-        config1 = {"pipeline_id": "test", "version": "1.0", "src": {"endpoint": "/data"}}
-        config2 = {"pipeline_id": "test", "version": "1.0", "src": {"endpoint": "/data"}}
-        config3 = {"pipeline_id": "test", "version": "1.0", "src": {"endpoint": "/other"}}
-        
-        # No existing state - should be compatible
-        assert manager.validate_config_compatibility(config1) is True
-        assert manager.validate_config_compatibility(config2) is True
-        assert manager.validate_config_compatibility(config3) is True
-        
-        # Start run with config1
-        manager.start_run(config1)
-        
-        # Same config should be compatible
-        assert manager.validate_config_compatibility(config1) is True
-        assert manager.validate_config_compatibility(config2) is True
-        
-        # Different config should not be compatible
-        assert manager.validate_config_compatibility(config3) is False
+        assert not manager.state_file.exists()
     
     def test_get_resume_info(self):
         """Test getting resume information for a stream."""
         manager = StateManager(self.pipeline_id, str(self.state_dir))
-        
+
         config = {"pipeline_id": "test", "version": "1.0"}
         run_id = manager.start_run(config)
-        
+
         # No checkpoints yet
         resume_info = manager.get_resume_info("stream1")
         assert resume_info["can_resume"] is False
         assert resume_info["partition_count"] == 0
         assert resume_info["total_records_synced"] == 0
-        
+
         # Save checkpoints for multiple partitions
         partitions = [{}, {"region": "US"}, {"region": "EU"}]
         for i, partition in enumerate(partitions):
@@ -517,14 +385,13 @@ class TestStateManager:
                 hwm=f"2025-08-18T{12+i:02d}:00:00Z",
                 stats=stats
             )
-        
+
         # Now should have resume info
         resume_info = manager.get_resume_info("stream1")
         assert resume_info["can_resume"] is True
         assert resume_info["partition_count"] == 3
         assert resume_info["total_records_synced"] == 600  # 100 + 200 + 300
         assert resume_info["run_id"] == run_id
-        assert "config_fingerprint" in resume_info
         assert resume_info["last_checkpoint_seq"] > 0
         assert len(resume_info["partitions"]) == 3
 
@@ -543,20 +410,20 @@ class TestStateManagerEdgeCases:
         if Path(self.temp_dir).exists():
             shutil.rmtree(self.temp_dir)
     
-    def test_load_index_corrupted_json(self):
-        """Test handling of corrupted index file."""
+    def test_load_state_corrupted_json(self):
+        """Test handling of corrupted state file."""
         manager = StateManager(self.pipeline_id, str(self.state_dir))
-        
-        # Create corrupted index file
-        manager.index_file.parent.mkdir(parents=True, exist_ok=True)
-        with open(manager.index_file, "w") as f:
+
+        # Create corrupted state file
+        manager.state_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(manager.state_file, "w") as f:
             f.write("invalid json content")
-        
-        # Should return default index
-        index = manager._load_index()
-        assert index["version"] == 1
-        assert index["streams"] == {}
-        assert index["run"] == {}
+
+        # Should return default state
+        state = manager._load_state()
+        assert state["version"] == 1
+        assert state["streams"] == {}
+        assert state["run"] == {}
     
     def test_load_partition_state_corrupted_json(self):
         """Test handling of corrupted partition file."""
@@ -573,14 +440,14 @@ class TestStateManagerEdgeCases:
         state = manager._load_partition_state(partition_file)
         assert state is None
     
-    def test_save_index_file_error(self):
-        """Test error handling when saving index fails."""
+    def test_save_state_file_error(self):
+        """Test error handling when saving state fails."""
         manager = StateManager(self.pipeline_id, str(self.state_dir))
-        
+
         # Mock open to raise an exception
         with patch('builtins.open', side_effect=PermissionError("Permission denied")):
             with pytest.raises(PermissionError):
-                manager._save_index({"test": "data"})
+                manager._save_state({"test": "data"})
     
     def test_save_partition_state_file_error(self):
         """Test error handling when saving partition state fails."""
@@ -713,56 +580,26 @@ class TestStateManagerEdgeCases:
         assert state2 is not None
         assert state2["partition"] == complex_partition
     
-    def test_schema_hash_edge_cases(self):
-        """Test schema hash computation edge cases."""
-        manager = StateManager(self.pipeline_id, str(self.state_dir))
-        
-        # Empty schema
-        empty_hash = manager._compute_schema_hash({})
-        assert empty_hash.startswith("sha256:")
-        
-        # Very large schema
-        large_schema = {
-            "fields": [
-                {"name": f"field_{i}", "type": "str", "description": f"Field {i}" * 100}
-                for i in range(1000)
-            ]
-        }
-        large_hash = manager._compute_schema_hash(large_schema)
-        assert large_hash.startswith("sha256:")
-        assert len(large_hash) > 0
-        
-        # Schema with special characters
-        special_schema = {
-            "fields": [
-                {"name": "field_with_åccénts", "type": "str"},
-                {"name": "field_with_emoji_🚀", "type": "str"},
-                {"name": "field_with_quotes_\"'", "type": "str"}
-            ]
-        }
-        special_hash = manager._compute_schema_hash(special_schema)
-        assert special_hash.startswith("sha256:")
-    
     def test_get_stream_partitions_missing_files(self):
         """Test getting partitions when some files are missing."""
         manager = StateManager(self.pipeline_id, str(self.state_dir))
-        
+
         config = {"pipeline_id": "test", "version": "1.0"}
         manager.start_run(config)
-        
+
         # Save a checkpoint
         manager.save_stream_checkpoint(
             "stream1", {}, {"primary": {"field": "id", "value": 1}}, "2025-08-18T12:00:00Z"
         )
-        
-        # Manually corrupt the index to reference a non-existent file
-        index = manager._load_index()
-        index["streams"]["stream1"]["partitions"].append({
+
+        # Manually corrupt the state to reference a non-existent file
+        state = manager._load_state()
+        state["streams"]["stream1"]["partitions"].append({
             "partition": {"region": "missing"},
             "file": "nonexistent/partition-missing.json"
         })
-        manager._save_index(index)
-        
+        manager._save_state(state)
+
         # Should only return partitions with existing files
         partitions = manager.get_stream_partitions("stream1")
         assert len(partitions) == 1  # Only the valid one

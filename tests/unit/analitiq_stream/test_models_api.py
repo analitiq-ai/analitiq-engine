@@ -3,7 +3,7 @@
 import pytest
 from pydantic import ValidationError
 
-from analitiq_stream.models.api import (
+from src.models.api import (
     RateLimitConfig,
     PaginationParams,
     TimeWindowParams,
@@ -212,121 +212,121 @@ class TestFilterConfig:
 
 class TestAPIConnectionConfig:
     """Test APIConnectionConfig model."""
-    
+
     def test_api_connection_config_minimal(self):
         """Test minimal API connection config."""
-        config = APIConnectionConfig(base_url="https://api.example.com")
-        
-        assert config.base_url == "https://api.example.com"
+        config = APIConnectionConfig(host="https://api.example.com")
+
+        assert config.host == "https://api.example.com"
         assert config.headers == {}
         assert config.timeout == 30
         assert config.max_connections == 10
         assert config.max_connections_per_host == 2
         assert config.rate_limit is None
-    
+
     def test_api_connection_config_full(self):
         """Test full API connection config."""
         rate_limit = RateLimitConfig(max_requests=200, time_window=120)
         config = APIConnectionConfig(
-            base_url="https://api.example.com",
+            host="https://api.example.com",
             headers={"Authorization": "Bearer token"},
             timeout=60,
             max_connections=20,
             max_connections_per_host=5,
             rate_limit=rate_limit
         )
-        
-        assert config.base_url == "https://api.example.com"
+
+        assert config.host == "https://api.example.com"
         assert config.headers["Authorization"] == "Bearer token"
         assert config.timeout == 60
         assert config.max_connections == 20
         assert config.max_connections_per_host == 5
         assert config.rate_limit.max_requests == 200
-    
-    def test_base_url_validation_empty(self):
-        """Test base_url validation with empty string."""
+
+    def test_host_validation_empty(self):
+        """Test host validation with empty string."""
         with pytest.raises(ValidationError) as exc_info:
-            APIConnectionConfig(base_url="")
-        assert "base_url cannot be empty" in str(exc_info.value)
-    
-    def test_base_url_validation_invalid_format(self):
-        """Test base_url validation with invalid format."""
+            APIConnectionConfig(host="")
+        assert "host cannot be empty" in str(exc_info.value)
+
+    def test_host_validation_invalid_format(self):
+        """Test host validation with invalid format."""
         with pytest.raises(ValidationError) as exc_info:
-            APIConnectionConfig(base_url="not-a-url")
+            APIConnectionConfig(host="not-a-url")
         assert "must be a valid URL with scheme and host" in str(exc_info.value)
-    
-    def test_base_url_validation_invalid_scheme(self):
-        """Test base_url validation with invalid scheme."""
+
+    def test_host_validation_invalid_scheme(self):
+        """Test host validation with invalid scheme."""
         with pytest.raises(ValidationError) as exc_info:
-            APIConnectionConfig(base_url="ftp://example.com")
+            APIConnectionConfig(host="ftp://example.com")
         assert "must use http or https scheme" in str(exc_info.value)
-    
-    def test_base_url_validation_valid_formats(self):
-        """Test base_url validation with valid formats."""
+
+    def test_host_validation_valid_formats(self):
+        """Test host validation with valid formats."""
         valid_urls = [
             "https://api.example.com",
             "http://localhost:8080",
             "https://api.example.com:443/v1",
             "http://192.168.1.1:3000"
         ]
-        
+
         for url in valid_urls:
-            config = APIConnectionConfig(base_url=url)
-            assert config.base_url == url
-    
+            config = APIConnectionConfig(host=url)
+            assert config.host == url
+
     def test_headers_validation_empty_name(self):
         """Test headers validation with empty header name."""
         with pytest.raises(ValidationError) as exc_info:
             APIConnectionConfig(
-                base_url="https://api.example.com",
+                host="https://api.example.com",
                 headers={"": "value"}
             )
         assert "Header names must be non-empty strings" in str(exc_info.value)
-    
+
     def test_headers_validation_non_string_value(self):
         """Test headers validation with non-string header value."""
         with pytest.raises(ValidationError) as exc_info:
             APIConnectionConfig(
-                base_url="https://api.example.com",
+                host="https://api.example.com",
                 headers={"Content-Type": 123}
             )
         assert "Input should be a valid string" in str(exc_info.value)
-    
+
     def test_headers_validation_whitespace_handling(self):
         """Test headers validation handles whitespace correctly."""
         config = APIConnectionConfig(
-            base_url="https://api.example.com",
+            host="https://api.example.com",
             headers={" Authorization ": " Bearer token "}
         )
-        
+
         assert config.headers["Authorization"] == "Bearer token"
         assert " Authorization " not in config.headers
-    
+
     def test_timeout_validation_range(self):
         """Test timeout validation within valid range."""
         # Valid values
-        APIConnectionConfig(base_url="https://api.example.com", timeout=1)
-        APIConnectionConfig(base_url="https://api.example.com", timeout=300)
-        
+        APIConnectionConfig(host="https://api.example.com", timeout=1)
+        APIConnectionConfig(host="https://api.example.com", timeout=300)
+
         # Invalid values
         with pytest.raises(ValidationError):
-            APIConnectionConfig(base_url="https://api.example.com", timeout=0)
-        
+            APIConnectionConfig(host="https://api.example.com", timeout=0)
+
         with pytest.raises(ValidationError):
-            APIConnectionConfig(base_url="https://api.example.com", timeout=301)
-    
+            APIConnectionConfig(host="https://api.example.com", timeout=301)
+
     def test_connection_limits_validation(self):
         """Test connection limits validation."""
         # Valid values
-        APIConnectionConfig(base_url="https://api.example.com", max_connections=100)
-        APIConnectionConfig(base_url="https://api.example.com", max_connections_per_host=50)
-        
+        APIConnectionConfig(host="https://api.example.com", max_connections=100)
+        APIConnectionConfig(host="https://api.example.com", max_connections_per_host=50)
+
         # Invalid values
         with pytest.raises(ValidationError):
-            APIConnectionConfig(base_url="https://api.example.com", max_connections=101)
-        
+            APIConnectionConfig(host="https://api.example.com", max_connections=101)
+
         with pytest.raises(ValidationError):
-            APIConnectionConfig(base_url="https://api.example.com", max_connections_per_host=51)
+            APIConnectionConfig(host="https://api.example.com", max_connections_per_host=51)
 
 
 class TestAPIReadConfig:
@@ -482,7 +482,7 @@ class TestAPIModelsIntegration:
         """Test that models can be properly nested."""
         rate_limit = RateLimitConfig(max_requests=500, time_window=300)
         connection_config = APIConnectionConfig(
-            base_url="https://api.example.com",
+            host="https://api.example.com",
             rate_limit=rate_limit
         )
         

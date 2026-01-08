@@ -6,12 +6,12 @@ from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 from typing import Dict, Any
 
-from analitiq_stream.core.orchestrator import PipelineOrchestrator
-from analitiq_stream.core.exceptions import (
+from src.core.orchestrator import PipelineOrchestrator
+from src.core.exceptions import (
     PipelineOrchestrationError, StreamExecutionError, 
     PipelineValidationError, StreamConfigurationError
 )
-from analitiq_stream.models.engine import (
+from src.models.engine import (
     StreamProcessingConfig, PipelineMetricsSnapshot, TaskExecutionInfo
 )
 
@@ -61,13 +61,13 @@ class TestConfigurationValidation:
             "pipeline_id": "test-pipeline",
             "name": "Test Pipeline",
             "version": "1.0",
-            "src": {"host_id": "src-host"},
-            "dst": {"host_id": "dst-host"},
+            "source": {"connection_id": "src-host"},
+            "destination": {"connection_id": "dst-host"},
             "streams": {
                 "stream1": {
                     "name": "Stream 1",
-                    "src": {"endpoint_id": "endpoint-src-1"},
-                    "dst": {"endpoint_id": "endpoint-dst-1"}
+                    "source": {"endpoint_id": "endpoint-src-1"},
+                    "destination": {"endpoint_id": "endpoint-dst-1"}
                 }
             }
         }
@@ -102,12 +102,12 @@ class TestStreamProcessingConfig:
         """Test successful stream processing config building."""
         stream_config = {
             "name": "Test Stream",
-            "src": {
+            "source": {
                 "endpoint_id": "src-endpoint",
                 "endpoint": "/test",
                 "pagination": {"type": "offset"},
             },
-            "dst": {
+            "destination": {
                 "endpoint_id": "dst-endpoint",
                 "endpoint": "/dest",
             },
@@ -118,8 +118,8 @@ class TestStreamProcessingConfig:
 
         pipeline_config = {
             "pipeline_id": "test-pipeline",
-            "src": {"host_id": "root-src", "type": "api"},
-            "dst": {"host_id": "root-dst", "type": "api"},
+            "source": {"connection_id": "root-src", "type": "api"},
+            "destination": {"connection_id": "root-dst", "type": "api"},
         }
 
         result = orchestrator._build_stream_processing_config(
@@ -130,24 +130,24 @@ class TestStreamProcessingConfig:
         assert result.stream_id == "stream1"
         assert result.stream_name == "Test Stream"
         assert result.pipeline_id == "test-pipeline"
-        assert result.src["endpoint_id"] == "src-endpoint"
-        assert result.src["host_id"] == "root-src"
-        assert result.dst["endpoint_id"] == "dst-endpoint"
-        assert result.dst["host_id"] == "root-dst"
+        assert result.source["endpoint_id"] == "src-endpoint"
+        assert result.source["connection_id"] == "root-src"
+        assert result.destination["endpoint_id"] == "dst-endpoint"
+        assert result.destination["connection_id"] == "root-dst"
     
     def test_build_stream_processing_config_failure(self, orchestrator):
         """Test stream processing config building failure."""
         invalid_stream_config = {
             "name": "Test Stream",
-            "src": {"endpoint_id": "src-endpoint"},
-            "dst": {"endpoint_id": "dst-endpoint"},
+            "source": {"endpoint_id": "src-endpoint"},
+            "destination": {"endpoint_id": "dst-endpoint"},
             "replication_method": "invalid_method"  # Invalid
         }
 
         pipeline_config = {
             "pipeline_id": "test-pipeline",
-            "src": {"host_id": "root-src"},
-            "dst": {"host_id": "root-dst"},
+            "source": {"connection_id": "root-src"},
+            "destination": {"connection_id": "root-dst"},
         }
 
         with pytest.raises(StreamConfigurationError) as exc_info:
@@ -206,8 +206,8 @@ class TestStreamTaskCreation:
         streams = {
             "stream1": {
                 "name": "Stream 1",
-                "src": {"endpoint_id": "src-endpoint"},
-                "dst": {"endpoint_id": "dst-endpoint"},
+                "source": {"endpoint_id": "src-endpoint"},
+                "destination": {"endpoint_id": "dst-endpoint"},
                 "replication_method": "incremental",
                 "cursor_mode": "inclusive",
                 "refresh_mode": "upsert"
@@ -216,10 +216,10 @@ class TestStreamTaskCreation:
 
         pipeline_config = {
             "pipeline_id": "test-pipeline",
-            "src": {"host_id": "root-src"},
-            "dst": {"host_id": "root-dst"},
+            "source": {"connection_id": "root-src"},
+            "destination": {"connection_id": "root-dst"},
         }
-        
+
         stream_tasks = await orchestrator._create_stream_tasks(
             streams, pipeline_config, mock_stream_processor_factory
         )

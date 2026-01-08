@@ -4,12 +4,12 @@ import pytest
 from datetime import datetime
 from decimal import Decimal
 
-from analitiq_stream.transformations.registry import (
+from src.transformations.registry import (
     TransformationError,
     TransformationRegistry,
     transformation_registry,
 )
-from analitiq_stream.models.transformations import TransformationType, TransformationConfig
+from src.models.transformations import TransformationType, TransformationConfig
 
 
 class TestTransformationFunctions:

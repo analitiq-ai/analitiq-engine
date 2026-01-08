@@ -4,24 +4,24 @@ import pytest
 
 
 class TestMainPackageInit:
-    """Test main analitiq_stream package initialization."""
+    """Test main src package initialization."""
     
     def test_package_imports(self):
         """Test that main package imports work correctly."""
-        import analitiq_stream
+        import src
         
         # Test basic package attributes
-        assert hasattr(analitiq_stream, '__version__')
-        assert hasattr(analitiq_stream, '__author__')
-        assert hasattr(analitiq_stream, '__all__')
+        assert hasattr(src, '__version__')
+        assert hasattr(src, '__author__')
+        assert hasattr(src, '__all__')
         
         # Test version and author
-        assert analitiq_stream.__version__ == "0.1.0"
-        assert analitiq_stream.__author__ == "Analitiq Core Team"
+        assert src.__version__ == "0.1.0"
+        assert src.__author__ == "Analitiq Core Team"
     
     def test_package_exports(self):
         """Test that all declared exports are available."""
-        import analitiq_stream
+        import src
         
         # Check that __all__ contains expected items
         expected_exports = [
@@ -39,12 +39,12 @@ class TestMainPackageInit:
         ]
         
         for export in expected_exports:
-            assert export in analitiq_stream.__all__, f"Missing export: {export}"
-            assert hasattr(analitiq_stream, export), f"Export not available: {export}"
+            assert export in src.__all__, f"Missing export: {export}"
+            assert hasattr(src, export), f"Export not available: {export}"
     
     def test_core_classes_importable(self):
         """Test that core classes can be imported directly."""
-        from analitiq_stream import (
+        from src import (
             StreamingEngine, Pipeline, CredentialsManager, credentials_manager,
             RetryHandler, CircuitBreaker, DeadLetterQueue,
             SchemaManager, BaseConnector, DatabaseConnector, APIConnector
@@ -69,48 +69,48 @@ class TestSubPackageInits:
     
     def test_connectors_init(self):
         """Test connectors package initialization."""
-        import analitiq_stream.connectors
+        import src.connectors
         
         # Should be able to import the package
-        assert analitiq_stream.connectors is not None
+        assert src.connectors is not None
     
     def test_core_init(self):
         """Test core package initialization."""
-        import analitiq_stream.core
+        import src.core
         
         # Should be able to import the package
-        assert analitiq_stream.core is not None
+        assert src.core is not None
     
     def test_fault_tolerance_init(self):
         """Test fault_tolerance package initialization."""
-        import analitiq_stream.fault_tolerance
+        import src.fault_tolerance
         
         # Should be able to import the package
-        assert analitiq_stream.fault_tolerance is not None
+        assert src.fault_tolerance is not None
     
     def test_models_init(self):
         """Test models package initialization."""
-        import analitiq_stream.models
+        import src.models
         
         # Should be able to import the package
-        assert analitiq_stream.models is not None
+        assert src.models is not None
     
     def test_schema_init(self):
         """Test schema package initialization."""
-        import analitiq_stream.schema
+        import src.schema
         
         # Should be able to import the package  
-        assert analitiq_stream.schema is not None
+        assert src.schema is not None
     
     def test_database_init_already_covered(self):
         """Test database package init (covered in test_database_init.py)."""
         # This is already tested in test_database_init.py
-        import analitiq_stream.connectors.database
+        import src.connectors.database
         
-        assert analitiq_stream.connectors.database is not None
+        assert src.connectors.database is not None
         
         # Verify main exports from database package
-        from analitiq_stream.connectors.database import (
+        from src.connectors.database import (
             BaseDatabaseDriver, DriverFactory, DatabaseConnector
         )
         
@@ -126,27 +126,27 @@ class TestImportErrors:
         """Test that the package handles missing optional imports gracefully."""
         # The main __init__.py should import successfully even if some optional
         # dependencies are missing (this tests the import structure)
-        import analitiq_stream
+        import src
         
         # Should complete without raising ImportError
-        assert analitiq_stream is not None
+        assert src is not None
     
     def test_circular_import_prevention(self):
         """Test that imports don't create circular dependencies."""
         # Import in different orders to test for circular imports
-        import analitiq_stream.core.pipeline
-        import analitiq_stream.core.engine
-        import analitiq_stream.connectors.api
-        import analitiq_stream.connectors.database
-        import analitiq_stream
+        import src.core.pipeline
+        import src.core.engine
+        import src.connectors.api
+        import src.connectors.database
+        import src
         
         # All imports should succeed
         assert all([
-            analitiq_stream.core.pipeline,
-            analitiq_stream.core.engine,
-            analitiq_stream.connectors.api,
-            analitiq_stream.connectors.database,
-            analitiq_stream
+            src.core.pipeline,
+            src.core.engine,
+            src.connectors.api,
+            src.connectors.database,
+            src
         ])
 
 
@@ -155,20 +155,20 @@ class TestPackageStructure:
     
     def test_version_consistency(self):
         """Test that version is consistently defined."""
-        import analitiq_stream
+        import src
         
-        version = analitiq_stream.__version__
+        version = src.__version__
         assert isinstance(version, str)
         assert len(version) > 0
         assert version.count('.') >= 2  # At least major.minor.patch
     
     def test_all_exports_exist(self):
         """Test that all __all__ exports actually exist and are importable."""
-        import analitiq_stream
+        import src
         
-        for export_name in analitiq_stream.__all__:
+        for export_name in src.__all__:
             # Should be able to get the attribute
-            export_obj = getattr(analitiq_stream, export_name)
+            export_obj = getattr(src, export_name)
             assert export_obj is not None
             
             # Should be a class or callable (not a string or other primitive)
@@ -176,17 +176,17 @@ class TestPackageStructure:
     
     def test_no_unexpected_exports(self):
         """Test that there are no unexpected public exports."""
-        import analitiq_stream
+        import src
         
         # Get all public attributes (not starting with _)
-        public_attrs = [name for name in dir(analitiq_stream) if not name.startswith('_')]
+        public_attrs = [name for name in dir(src) if not name.startswith('_')]
         
         # Remove expected metadata attributes
         metadata_attrs = ['__version__', '__author__', '__all__']
         code_attrs = [name for name in public_attrs if name not in metadata_attrs]
         
         # All public code attributes should be in __all__ (except submodules)
-        submodules = ['cli', 'config', 'connectors', 'core', 'fault_tolerance', 'schema', 'models', 'mapping', 'transformations']  # These are modules, not classes to export
+        submodules = ['cli', 'config', 'connectors', 'core', 'fault_tolerance', 'schema', 'models', 'mapping', 'transformations', 'secrets']  # These are modules, not classes to export
         for attr in code_attrs:
             if attr not in submodules:
-                assert attr in analitiq_stream.__all__, f"Unexpected public export: {attr}"
+                assert attr in src.__all__, f"Unexpected public export: {attr}"

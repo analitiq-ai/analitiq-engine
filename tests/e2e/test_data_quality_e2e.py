@@ -7,8 +7,8 @@ import json
 from pathlib import Path
 from typing import Dict, List
 
-from analitiq_stream.core.pipeline import Pipeline
-from analitiq_stream.fault_tolerance.dead_letter_queue import DeadLetterQueue
+from src.core.pipeline import Pipeline
+from src.fault_tolerance.dead_letter_queue import DeadLetterQueue
 
 
 def _configure_pipeline_directories(pipeline: Pipeline, temp_dirs: Dict[str, Path]) -> Path:
@@ -101,12 +101,12 @@ def test_field_transformations_apply_to_valid_records(
         stream_id: {
             "name": "transformation-stream",
             "description": "Stream for testing field transformations",
-            "src": {
+            "source": {
                 "endpoint_id": source_endpoint_id,
                 "replication_method": "full_refresh",
                 "primary_key": ["id"]
             },
-            "dst": {
+            "destination": {
                 "endpoint_id": dest_endpoint_id,
                 "refresh_mode": "insert",
                 "batch_support": True,

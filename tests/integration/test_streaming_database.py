@@ -7,9 +7,9 @@ from typing import List, Dict, Any
 from datetime import datetime, timezone
 import json
 
-from analitiq_stream.connectors.database.database_connector import DatabaseConnector
-from analitiq_stream.core.engine import StreamingEngine
-from analitiq_stream.core.pipeline import Pipeline
+from src.connectors.database.database_connector import DatabaseConnector
+from src.core.engine import StreamingEngine
+from src.core.pipeline import Pipeline
 
 
 @pytest.fixture

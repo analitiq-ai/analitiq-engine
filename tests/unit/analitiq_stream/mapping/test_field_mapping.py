@@ -4,7 +4,7 @@ import os
 import pytest
 from unittest.mock import patch
 
-from analitiq_stream.mapping.processor import (
+from src.mapping.processor import (
     FieldMappingProcessor,
     MappingError,
     ValidationError,

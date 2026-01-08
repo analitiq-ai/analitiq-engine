@@ -4,7 +4,7 @@ import pytest
 from unittest.mock import AsyncMock
 from typing import Any, Dict, List
 
-from analitiq_stream.connectors.database.base_driver import BaseDatabaseDriver
+from src.connectors.database.base_driver import BaseDatabaseDriver
 
 
 class MockDatabaseDriver(BaseDatabaseDriver):

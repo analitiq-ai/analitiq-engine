@@ -3,9 +3,9 @@
 import pytest
 from unittest.mock import MagicMock
 
-from analitiq_stream.connectors.database.driver_factory import DriverFactory
-from analitiq_stream.connectors.database.base_driver import BaseDatabaseDriver
-from analitiq_stream.connectors.database.postgresql_driver import PostgreSQLDriver
+from src.connectors.database.driver_factory import DriverFactory
+from src.connectors.database.base_driver import BaseDatabaseDriver
+from src.connectors.database.postgresql_driver import PostgreSQLDriver
 
 
 class MockDriver(BaseDatabaseDriver):
@@ -61,8 +61,8 @@ class TestDriverFactory:
     
     def test_factory_imports_and_registration(self):
         """Test that factory can be imported and used for registration."""
-        from analitiq_stream.connectors.database.driver_factory import DriverFactory
-        from analitiq_stream.connectors.database.base_driver import BaseDatabaseDriver
+        from src.connectors.database.driver_factory import DriverFactory
+        from src.connectors.database.base_driver import BaseDatabaseDriver
         
         # Test importing the factory
         assert DriverFactory is not None

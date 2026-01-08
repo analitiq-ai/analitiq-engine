@@ -9,7 +9,7 @@ from typing import Dict, Any
 def e2e_api_source_host_config():
     """API source host configuration for e2e tests."""
     return {
-        "base_url": "http://test-api-source.local",
+        "host": "http://test-api-source.local",
         "headers": {
             "Authorization": "Bearer test-source-token",
             "Content-Type": "application/json"
@@ -29,7 +29,7 @@ def e2e_api_source_host_config():
 def e2e_api_destination_host_config():
     """API destination host configuration for e2e tests."""
     return {
-        "base_url": "http://test-api-destination.local",
+        "host": "http://test-api-destination.local",
         "headers": {
             "Authorization": "Bearer test-destination-token",
             "Content-Type": "application/json"
@@ -220,12 +220,12 @@ def e2e_pipeline_config_base(mock_pipeline_id):
         "pipeline_id": mock_pipeline_id,
         "name": "E2E Test Pipeline",
         "version": "1.0",
-        "src": {
-            "host_id": "test-source-host-id",
+        "source": {
+            "connection_id": "test-source-connection-id",
             "name": "Test Source Platform"
         },
-        "dst": {
-            "host_id": "test-destination-host-id",
+        "destination": {
+            "connection_id": "test-destination-connection-id",
             "name": "Test Destination Platform"
         },
         "engine_config": {
@@ -273,7 +273,7 @@ def e2e_api_to_api_pipeline_config(e2e_pipeline_config_base):
         stream_id: {
             "name": "api-to-api-stream",
             "description": "API to API data sync with transformations",
-            "src": {
+            "source": {
                 "endpoint_id": source_endpoint_id,
                 "replication_method": "incremental",
                 "cursor_field": "created_at",
@@ -281,7 +281,7 @@ def e2e_api_to_api_pipeline_config(e2e_pipeline_config_base):
                 "safety_window_seconds": 60,
                 "primary_key": ["id"]
             },
-            "dst": {
+            "destination": {
                 "endpoint_id": dest_endpoint_id,
                 "refresh_mode": "upsert",
                 "batch_support": False,
@@ -338,7 +338,7 @@ def e2e_db_to_api_pipeline_config(e2e_pipeline_config_base):
         stream_id: {
             "name": "db-to-api-stream",
             "description": "Database to API data sync",
-            "src": {
+            "source": {
                 "endpoint_id": source_endpoint_id,
                 "replication_method": "incremental",
                 "cursor_field": "updated_at",
@@ -346,7 +346,7 @@ def e2e_db_to_api_pipeline_config(e2e_pipeline_config_base):
                 "safety_window_seconds": 120,
                 "primary_key": ["id"]
             },
-            "dst": {
+            "destination": {
                 "endpoint_id": dest_endpoint_id,
                 "refresh_mode": "upsert",
                 "batch_support": False,
@@ -379,7 +379,7 @@ def e2e_api_to_db_pipeline_config(e2e_pipeline_config_base):
         stream_id: {
             "name": "api-to-db-stream",
             "description": "API to Database data sync with auto-table creation",
-            "src": {
+            "source": {
                 "endpoint_id": source_endpoint_id,
                 "replication_method": "incremental",
                 "cursor_field": "created_at",
@@ -387,7 +387,7 @@ def e2e_api_to_db_pipeline_config(e2e_pipeline_config_base):
                 "safety_window_seconds": 60,
                 "primary_key": ["id"]
             },
-            "dst": {
+            "destination": {
                 "endpoint_id": dest_endpoint_id,
                 "refresh_mode": "upsert",
                 "batch_support": True,
@@ -428,7 +428,7 @@ def e2e_db_to_db_pipeline_config(e2e_pipeline_config_base):
         users_stream_id: {
             "name": "users-stream",
             "description": "Users table sync",
-            "src": {
+            "source": {
                 "endpoint_id": users_source_endpoint_id,
                 "replication_method": "incremental",
                 "cursor_field": "updated_at",
@@ -436,7 +436,7 @@ def e2e_db_to_db_pipeline_config(e2e_pipeline_config_base):
                 "safety_window_seconds": 120,
                 "primary_key": ["id"]
             },
-            "dst": {
+            "destination": {
                 "endpoint_id": users_dest_endpoint_id,
                 "refresh_mode": "upsert",
                 "batch_support": True,
@@ -455,7 +455,7 @@ def e2e_db_to_db_pipeline_config(e2e_pipeline_config_base):
         orders_stream_id: {
             "name": "orders-stream",
             "description": "Orders table sync",
-            "src": {
+            "source": {
                 "endpoint_id": orders_source_endpoint_id,
                 "replication_method": "incremental",
                 "cursor_field": "updated_at",
@@ -463,7 +463,7 @@ def e2e_db_to_db_pipeline_config(e2e_pipeline_config_base):
                 "safety_window_seconds": 120,
                 "primary_key": ["id"]
             },
-            "dst": {
+            "destination": {
                 "endpoint_id": orders_dest_endpoint_id,
                 "refresh_mode": "upsert",
                 "batch_support": True,
@@ -505,12 +505,12 @@ def e2e_fault_tolerance_pipeline_config(e2e_pipeline_config_base):
         stream_id: {
             "name": "fault-tolerance-stream",
             "description": "Stream for testing fault tolerance mechanisms",
-            "src": {
+            "source": {
                 "endpoint_id": source_endpoint_id,
                 "replication_method": "full_refresh",
                 "primary_key": ["id"]
             },
-            "dst": {
+            "destination": {
                 "endpoint_id": dest_endpoint_id,
                 "refresh_mode": "insert",
                 "batch_support": False,
@@ -541,12 +541,12 @@ def e2e_data_quality_pipeline_config(e2e_pipeline_config_base):
         stream_id: {
             "name": "data-quality-stream",
             "description": "Stream for testing data quality and validation",
-            "src": {
+            "source": {
                 "endpoint_id": source_endpoint_id,
                 "replication_method": "full_refresh",
                 "primary_key": ["id"]
             },
-            "dst": {
+            "destination": {
                 "endpoint_id": dest_endpoint_id,
                 "refresh_mode": "insert",
                 "batch_support": False,
@@ -594,12 +594,12 @@ def e2e_performance_pipeline_config(e2e_pipeline_config_base):
         stream_id: {
             "name": "performance-stream",
             "description": "Stream for performance and throughput testing",
-            "src": {
+            "source": {
                 "endpoint_id": source_endpoint_id,
                 "replication_method": "full_refresh",
                 "primary_key": ["id"]
             },
-            "dst": {
+            "destination": {
                 "endpoint_id": dest_endpoint_id,
                 "refresh_mode": "insert",
                 "batch_support": True,

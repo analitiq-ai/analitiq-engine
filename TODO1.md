@@ -12,7 +12,7 @@ After durable write to source, update the bookmark in the stream state
 last = records[-1]
 state.update_bookmark(cursor=last[rk], aux={"last_id": last["id"]})
 state.commit()
-That’s it: bookmark gives “where,” replication_key gives “by what,” cursor_mode picks the operator, and safety_window_seconds pulls the start back slightly to avoid misses.
+That's it: bookmark gives "where," replication_key gives "by what," inclusive mode (>=) is always used for safety, and safety_window_seconds pulls the start back slightly to avoid misses.
 
 
 # API-Connector Checklist (✅/❌)

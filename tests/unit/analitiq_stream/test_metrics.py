@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 import pytest
 from pydantic import ValidationError
 
-from analitiq_stream.models.metrics import PipelineMetrics
+from src.models.metrics import PipelineMetrics
 
 
 class TestPipelineMetrics:

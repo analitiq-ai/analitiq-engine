@@ -7,8 +7,8 @@ import json
 from pathlib import Path
 from typing import Dict
 
-from analitiq_stream.core.pipeline import Pipeline
-from analitiq_stream.fault_tolerance.dead_letter_queue import DeadLetterQueue
+from src.core.pipeline import Pipeline
+from src.fault_tolerance.dead_letter_queue import DeadLetterQueue
 
 
 def _setup_pipeline_dlq(pipeline: Pipeline, temp_dirs: Dict[str, Path]) -> Path:
@@ -39,8 +39,8 @@ def test_destination_failures_are_captured_in_dlq(
         "streams": {
             stream_id: {
                 "name": "Failure stream",
-                "src": {"endpoint_id": source_endpoint},
-                "dst": {"endpoint_id": destination_endpoint},
+                "source": {"endpoint_id": source_endpoint},
+                "destination": {"endpoint_id": destination_endpoint},
             }
         },
     }
@@ -111,13 +111,13 @@ def test_failing_stream_does_not_block_successful_stream(
         "streams": {
             failing_stream: {
                 "name": "always failing",
-                "src": {"endpoint_id": failing_source},
-                "dst": {"endpoint_id": failing_destination},
+                "source": {"endpoint_id": failing_source},
+                "destination": {"endpoint_id": failing_destination},
             },
             success_stream: {
                 "name": "always succeeds",
-                "src": {"endpoint_id": success_source},
-                "dst": {"endpoint_id": success_destination},
+                "source": {"endpoint_id": success_source},
+                "destination": {"endpoint_id": success_destination},
             },
         },
     }

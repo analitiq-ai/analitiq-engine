@@ -2,7 +2,7 @@
 
 import pytest
 
-from analitiq_stream.core.exceptions import (
+from src.core.exceptions import (
     StreamProcessingError,
     TransformationError,
     ConnectorError,
@@ -124,11 +124,11 @@ class TestConfigurationError:
         """Test configuration error with field path."""
         error = ConfigurationError(
             "Invalid value",
-            field_path="pipeline.src.config"
+            field_path="pipeline.source.config"
         )
         
         assert str(error) == "Invalid value"
-        assert error.field_path == "pipeline.src.config"
+        assert error.field_path == "pipeline.source.config"
     
     def test_with_validation_errors(self):
         """Test configuration error with validation errors."""
@@ -146,12 +146,12 @@ class TestConfigurationError:
         validation_errors = ["Required field missing"]
         error = ConfigurationError(
             "Configuration invalid",
-            field_path="src.database",
+            field_path="source.database",
             validation_errors=validation_errors
         )
         
         assert str(error) == "Configuration invalid"
-        assert error.field_path == "src.database"
+        assert error.field_path == "source.database"
         assert error.validation_errors == validation_errors
 
 
@@ -181,13 +181,13 @@ class TestStreamConfigurationError:
         error = StreamConfigurationError(
             "Stream validation failed",
             stream_id="stream_789",
-            field_path="stream.src.config",
+            field_path="stream.source.config",
             validation_errors=validation_errors
         )
         
         assert str(error) == "Stream validation failed"
         assert error.stream_id == "stream_789"
-        assert error.field_path == "stream.src.config"
+        assert error.field_path == "stream.source.config"
         assert error.validation_errors == validation_errors
 
 
@@ -211,8 +211,8 @@ class TestPipelineValidationError:
     def test_with_errors_dict(self):
         """Test pipeline validation error with errors dictionary."""
         errors = {
-            "src": ["Missing host", "Invalid port"],
-            "dst": ["Missing credentials"]
+            "source": ["Missing host", "Invalid port"],
+            "destination": ["Missing credentials"]
         }
         error = PipelineValidationError("Multiple validation errors", errors=errors)
         

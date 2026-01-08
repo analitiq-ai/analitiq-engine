@@ -23,7 +23,7 @@ def mock_api_connector():
 def sample_api_config():
     """Sample API configuration for testing."""
     return {
-        "base_url": "https://api.example.com",
+        "host": "https://api.example.com",
         "headers": {
             "Content-Type": "application/json",
             "Authorization": "Bearer test-token"

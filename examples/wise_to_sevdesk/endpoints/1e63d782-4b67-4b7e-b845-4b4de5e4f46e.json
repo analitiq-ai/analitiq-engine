@@ -1,210 +1,27 @@
 {
+  "endpoint_id": "1e63d782-4b67-4b7e-b845-4b4de5e4f46e",
+  "connector": "sevdesk",
+  "name": "CheckAccountTransaction",
   "endpoint": "/api/v1/CheckAccountTransaction",
   "method": "POST",
   "pagination": null,
   "response_schema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "title": "CheckAccountTransaction Response",
-    "description": "Response for creating a new check account transaction",
     "type": "object",
     "properties": {
-      "id": {
-        "type": "string",
-        "description": "The check account transaction id",
-        "example": "1"
-      },
-      "objectName": {
-        "type": "string",
-        "description": "The check account transaction object name",
-        "example": "CheckAccountTransaction"
-      },
-      "create": {
-        "type": "string",
-        "format": "date-time",
-        "description": "Date of check account transaction creation"
-      },
-      "update": {
-        "type": "string",
-        "format": "date-time",
-        "description": "Date of last check account transaction update"
-      },
-      "sevClient": {
-        "type": "object",
-        "description": "Client to which check account transaction belongs",
-        "properties": {
-          "id": {
-            "type": "string",
-            "example": "0"
-          },
-          "objectName": {
-            "type": "string",
-            "example": "SevClient"
-          }
-        },
-        "required": [
-          "id",
-          "objectName"
-        ]
-      },
-      "valueDate": {
-        "type": "string",
-        "format": "date-time",
-        "description": "Date the check account transaction was imported",
-        "example": "2024-05-10T00:00:00+02:00"
-      },
-      "entryDate": {
-        "type": "string",
-        "format": "date-time",
-        "description": "Date the check account transaction was booked",
-        "nullable": true,
-        "example": "2024-05-10T00:00:00+02:00"
-      },
-      "paymtPurpose": {
-        "type": "string",
-        "description": "The purpose of the transaction",
-        "nullable": true,
-        "example": "salary"
-      },
-      "amount": {
-        "type": "string",
-        "description": "Amount of the transaction",
-        "example": "-100.32"
-      },
-      "payeePayerName": {
-        "type": "string",
-        "description": "Name of the other party",
-        "nullable": true,
-        "example": "Cercei Lannister"
-      },
-      "payeePayerAcctNo": {
-        "type": "string",
-        "description": "IBAN or account number of the other party",
-        "nullable": true
-      },
-      "payeePayerBankCode": {
-        "type": "string",
-        "description": "BIC or bank code of the other party",
-        "nullable": true
-      },
+      "id": {"type": "string"},
+      "objectName": {"type": "string"},
+      "valueDate": {"type": "string", "format": "date-time"},
+      "amount": {"type": "string"},
       "checkAccount": {
         "type": "object",
-        "description": "The check account to which the transaction belongs",
         "properties": {
-          "id": {
-            "type": "string",
-            "example": "0"
-          },
-          "objectName": {
-            "type": "string",
-            "example": "CheckAccount"
-          }
-        },
-        "required": [
-          "id",
-          "objectName"
-        ]
+          "id": {"type": "string"},
+          "objectName": {"type": "string"}
+        }
       },
-      "status": {
-        "type": "string",
-        "description": "Status of the check account transaction",
-        "enum": [
-          "100",
-          "200",
-          "300",
-          "350",
-          "400"
-        ]
-      },
-      "enshrined": {
-        "type": "string",
-        "format": "date-time",
-        "description": "Timepoint when the transaction was enshrined",
-        "nullable": true
-      }
-    },
-    "required": [
-      "id",
-      "objectName",
-      "valueDate",
-      "amount",
-      "checkAccount",
-      "status"
-    ]
-  },
-  "filters": {
-    "checkAccount[id]": {
-      "type": "integer",
-      "required": false,
-      "operators": [
-        "eq"
-      ],
-      "description": "Retrieve all transactions on this check account. Must be provided with checkAccount[objectName]"
-    },
-    "checkAccount[objectName]": {
-      "type": "string",
-      "required": false,
-      "operators": [
-        "eq"
-      ],
-      "description": "Only required if checkAccount[id] was provided. 'CheckAccount' should be used as value"
-    },
-    "isBooked": {
-      "type": "boolean",
-      "required": false,
-      "operators": [
-        "eq"
-      ],
-      "description": "Only retrieve booked transactions"
-    },
-    "paymtPurpose": {
-      "type": "string",
-      "required": false,
-      "operators": [
-        "eq"
-      ],
-      "description": "Only retrieve transactions with this payment purpose"
-    },
-    "startDate": {
-      "type": "string",
-      "required": false,
-      "operators": [
-        "gte"
-      ],
-      "description": "Only retrieve transactions from this date on",
-      "example": "2024-01-01T00:00:00+02:00"
-    },
-    "endDate": {
-      "type": "string",
-      "required": false,
-      "operators": [
-        "lte"
-      ],
-      "description": "Only retrieve transactions up to this date",
-      "example": "2024-12-31T23:59:59+02:00"
-    },
-    "payeePayerName": {
-      "type": "string",
-      "required": false,
-      "operators": [
-        "like"
-      ],
-      "description": "Only retrieve transactions with this payee / payer"
-    },
-    "onlyCredit": {
-      "type": "boolean",
-      "required": false,
-      "operators": [
-        "eq"
-      ],
-      "description": "Only retrieve credit transactions"
-    },
-    "onlyDebit": {
-      "type": "boolean",
-      "required": false,
-      "operators": [
-        "eq"
-      ],
-      "description": "Only retrieve debit transactions"
+      "status": {"type": "string"}
     }
   }
 }

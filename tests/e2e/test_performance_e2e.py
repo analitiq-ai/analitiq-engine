@@ -5,8 +5,8 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from analitiq_stream.core.pipeline import Pipeline
-from analitiq_stream.fault_tolerance.dead_letter_queue import DeadLetterQueue
+from src.core.pipeline import Pipeline
+from src.fault_tolerance.dead_letter_queue import DeadLetterQueue
 
 
 def _configure_pipeline(pipeline: Pipeline, temp_dirs) -> Path:
@@ -37,8 +37,8 @@ def test_large_batch_processing_generates_expected_metrics(
         "streams": {
             stream_id: {
                 "name": "Throughput test",
-                "src": {"endpoint_id": source_endpoint},
-                "dst": {"endpoint_id": destination_endpoint},
+                "source": {"endpoint_id": source_endpoint},
+                "destination": {"endpoint_id": destination_endpoint},
             }
         },
     }

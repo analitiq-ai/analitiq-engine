@@ -1,403 +1,282 @@
-# State File Specification
+# State File Specification (Local / File-Based Runtime, Non-Partitioned)
 
-**Version**: 1.0  
-**Last Updated**: 2025-08-15  
-**Framework**: Analitiq Stream  
+**Version:** 1.0 (Aligned)  
+**Last Updated:** 2025-12-27  
+**Framework:** Analitiq Stream
 
-This document provides the complete technical specification for Analitiq Stream's sharded state management system.
+This document specifies the **file-based state format** for local execution **without partitioning**. Configuration (pipelines/streams/mappings) is stored separately; **state tracks execution progress** (cursor, checkpoints, retries, pagination tokens, etc.).
 
-## 📁 File Structure Overview
+Key design goals:
 
-```
-state/
-  {pipeline-id}/
-    v1/                              # State format version
-    ├── streams/
-    │   └── {stream-name}/
-    │       ├── partition-default.json      # Single partition (empty {})
-    │       ├── partition-a1b2c3d4.json     # Hashed partition identifier
-    │       └── partition-e5f6g7h8.json     # Another partition
-    ├── index.json                   # Master manifest and metadata
-    └── lock                        # File-based coordination (optional)
-```
-
-## 🔍 Partition State File Schema
-
-### File Naming Convention
-- **Pattern**: `partition-{identifier}.json`
-- **Default Partition**: `partition-default.json` (when partition = `{}`)
-- **Hash Generation**: MD5 hash of `JSON.stringify(partition, {sort: true})` truncated to 8 characters
-
-### Complete Schema
-
-```json
-{
-  "partition": {
-    "description": "Partition key identifying the data subset",
-    "type": "object",
-    "examples": [
-      {},
-      {"account_id": "12345"},
-      {"region": "EU", "account_type": "business"}
-    ]
-  },
-  "cursor": {
-    "description": "Current position within the data stream",
-    "type": "object",
-    "required": true,
-    "properties": {
-      "primary": {
-        "description": "Primary cursor field for ordering and filtering",
-        "type": "object",
-        "required": true,
-        "properties": {
-          "field": {
-            "description": "Name of the replication key field",
-            "type": "string",
-            "examples": ["created", "updated", "id", "timestamp"]
-          },
-          "value": {
-            "description": "Current cursor value (timestamp, ID, etc.)",
-            "type": ["string", "number", "null"],
-            "examples": ["2025-08-14T11:58:03Z", 431245, null]
-          },
-          "inclusive": {
-            "description": "Whether next query includes (>=) or excludes (>) this value",
-            "type": "boolean",
-            "default": true
-          }
-        }
-      },
-      "tiebreaker": {
-        "description": "Secondary field to handle ties in primary cursor",
-        "type": "object",
-        "optional": true,
-        "properties": {
-          "field": {
-            "description": "Tiebreaker field name (often 'id')",
-            "type": "string"
-          },
-          "value": {
-            "description": "Last processed tiebreaker value",
-            "type": ["string", "number"]
-          },
-          "inclusive": {
-            "description": "Tiebreaker inclusion mode",
-            "type": "boolean",
-            "default": true
-          }
-        }
-      }
-    }
-  },
-  "hwm": {
-    "description": "High-water mark - highest cursor value seen",
-    "type": ["string", "number"],
-    "purpose": "Used for safety window calculations and resume validation"
-  },
-  "page_state": {
-    "description": "Pagination continuation state",
-    "type": "object",
-    "optional": true,
-    "properties": {
-      "next_token": {
-        "description": "Opaque pagination token from API",
-        "type": "string"
-      },
-      "offset": {
-        "description": "Numeric offset for offset-based pagination",
-        "type": "integer"
-      },
-      "page": {
-        "description": "Current page number for page-based pagination",
-        "type": "integer"
-      },
-      "cursor": {
-        "description": "Cursor value for cursor-based pagination",
-        "type": "string"
-      }
-    }
-  },
-  "http_conditionals": {
-    "description": "HTTP conditional headers for efficient polling",
-    "type": "object",
-    "optional": true,
-    "properties": {
-      "etag": {
-        "description": "ETag header value for conditional requests",
-        "type": "string",
-        "format": "quoted-string"
-      },
-      "last_modified": {
-        "description": "Last-Modified header value",
-        "type": "string",
-        "format": "RFC-2822"
-      },
-      "if_none_match": {
-        "description": "If-None-Match header for next request",
-        "type": "string"
-      },
-      "if_modified_since": {
-        "description": "If-Modified-Since header for next request",
-        "type": "string"
-      }
-    }
-  },
-  "stats": {
-    "description": "Processing statistics for monitoring",
-    "type": "object",
-    "required": true,
-    "properties": {
-      "records_synced": {
-        "description": "Total records processed in this partition",
-        "type": "integer",
-        "minimum": 0
-      },
-      "batches_written": {
-        "description": "Number of batches successfully written",
-        "type": "integer",
-        "minimum": 0
-      },
-      "last_checkpoint_at": {
-        "description": "Timestamp of last successful checkpoint",
-        "type": "string",
-        "format": "ISO-8601"
-      },
-      "errors_since_checkpoint": {
-        "description": "Number of errors since last successful checkpoint",
-        "type": "integer",
-        "minimum": 0
-      }
-    }
-  },
-  "last_updated": {
-    "description": "Timestamp when this partition state was last modified",
-    "type": "string",
-    "format": "ISO-8601",
-    "required": true
-  }
-}
-```
-
-## 📋 Index Manifest Schema
-
-### File Location
-- **Path**: `{pipeline-id}/v1/index.json`
-- **Purpose**: Master registry and coordination point
-- **Concurrency**: Protected by RLock during updates
-
-### Complete Schema
-
-```json
-{
-  "version": {
-    "description": "State format version number",
-    "type": "integer",
-    "current": 1,
-    "purpose": "Schema evolution and backward compatibility"
-  },
-  "streams": {
-    "description": "Registry of all streams and their partitions",
-    "type": "object",
-    "patternProperties": {
-      "^[a-zA-Z0-9._-]+$": {
-        "description": "Stream name (often endpoint.{uuid})",
-        "type": "object",
-        "properties": {
-          "schema_hash": {
-            "description": "SHA256 hash of current schema for drift detection",
-            "type": "string",
-            "pattern": "^sha256:[a-f0-9]{16}$",
-            "purpose": "Detect schema changes that might break processing"
-          },
-          "partitions": {
-            "description": "List of all partitions in this stream",
-            "type": "array",
-            "items": {
-              "type": "object",
-              "properties": {
-                "partition": {
-                  "description": "Partition key (same as in partition state file)",
-                  "type": "object"
-                },
-                "file": {
-                  "description": "Relative path to partition state file",
-                  "type": "string",
-                  "pattern": ".*partition-[a-f0-9]{8}\\.json$"
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-  },
-  "run": {
-    "description": "Current execution metadata",
-    "type": "object",
-    "properties": {
-      "run_id": {
-        "description": "Unique identifier for current execution",
-        "type": "string",
-        "format": "ISO-8601-timestamp-uuid",
-        "example": "2025-08-14T11:55:00Z-d04f"
-      },
-      "lease_owner": {
-        "description": "Identifier of worker/process holding the execution lease",
-        "type": "string",
-        "format": "worker-{thread-id}",
-        "purpose": "Detect stale processes and coordinate leadership"
-      },
-      "started_at": {
-        "description": "When the current run began",
-        "type": "string",
-        "format": "ISO-8601"
-      },
-      "checkpoint_seq": {
-        "description": "Monotonic sequence number incremented on each checkpoint",
-        "type": "integer",
-        "minimum": 0,
-        "purpose": "Detect checkpoint ordering and progress"
-      },
-      "config_fingerprint": {
-        "description": "SHA256 hash of immutable pipeline configuration",
-        "type": "string",
-        "pattern": "^sha256:[a-f0-9]{16}$",
-        "purpose": "Ensure state compatibility with current config"
-      }
-    }
-  }
-}
-```
-
-## 🔄 Concurrent Access Patterns
-
-### Worker Isolation Strategy
-
-1. **Partition Assignment**: Each worker processes distinct partitions
-2. **File Isolation**: Each partition writes to separate state file
-3. **Atomic Updates**: Temporary files + atomic replace operations
-4. **Minimal Coordination**: Only index.json requires synchronization
-
-### Concurrency Safety Guarantees
-
-| Operation | Concurrency Level | Protection Method |
-|-----------|-------------------|------------------|
-| Partition checkpoint | **Full parallelism** | Separate files |
-| Index manifest update | **Sequential** | RLock protection |
-| Schema hash validation | **Read-parallel** | Immutable during run |
-| Config fingerprint check | **Read-parallel** | Validated at startup |
-
-### Performance Characteristics
-
-- **Checkpoint Latency**: O(1) per partition, independent of other partitions
-- **Storage Overhead**: ~500-2000 bytes per partition state file
-- **Coordination Cost**: Single index.json update per checkpoint batch
-- **Recovery Time**: O(partitions) to scan all state files
-
-## 🛠 Implementation Details
-
-### Hash Generation Algorithm
-```python
-def _get_partition_file(self, stream_name: str, partition: Dict[str, Any]) -> Path:
-    if not partition:
-        partition_id = "default"
-    else:
-        partition_str = json.dumps(partition, sort_keys=True)
-        partition_id = hashlib.md5(partition_str.encode()).hexdigest()[:8]
-    return self.streams_dir / stream_name / f"partition-{partition_id}.json"
-```
-
-### Atomic Write Pattern
-```python
-def _save_partition_state(self, partition_file: Path, state: Dict[str, Any]):
-    partition_file.parent.mkdir(parents=True, exist_ok=True)
-    temp_file = partition_file.with_suffix(".tmp")
-    
-    try:
-        with open(temp_file, "w") as f:
-            json.dump(state, f, indent=2)
-        temp_file.replace(partition_file)  # Atomic on most filesystems
-    except Exception as e:
-        if temp_file.exists():
-            temp_file.unlink()
-        raise e
-```
-
-### Configuration Fingerprint Calculation
-```python
-def _compute_config_fingerprint(self, config: Dict[str, Any]) -> str:
-    immutable_config = {
-        "pipeline_id": config.get("pipeline_id"),
-        "src": config.get("src", {}),
-        "dst": config.get("dst", {}),
-        "mapping": config.get("mapping", {}),
-        "engine_config": config.get("engine_config", {})
-    }
-    config_str = json.dumps(immutable_config, sort_keys=True)
-    return f"sha256:{hashlib.sha256(config_str.encode()).hexdigest()[:16]}"
-```
-
-## 🔧 Operational Procedures
-
-### Resume After Crash
-1. Load index.json to discover all partitions
-2. Validate config fingerprint matches current configuration
-3. Load each partition state file for cursor positions
-4. Continue processing from last recorded cursors
-
-### Scale-Out (Add Workers)
-1. Assign different partition keys to new workers
-2. Workers automatically create new partition state files
-3. No coordination required between workers processing different partitions
-
-### Scale-Down (Remove Workers) 
-1. Ensure all partition checkpoints are saved
-2. Remaining workers can pick up abandoned partitions
-3. State files remain valid for future resume
-
-### Schema Evolution
-1. Schema hash changes trigger drift detection
-2. Can choose to continue (with warning) or halt pipeline
-3. New schema hash recorded in index.json on first successful batch
-
-## 📊 Monitoring & Debugging
-
-### Key Metrics to Track
-- `checkpoint_seq`: Progress indicator
-- `records_synced`: Throughput per partition  
-- `errors_since_checkpoint`: Error rate
-- `last_checkpoint_at`: Staleness detection
-
-### Troubleshooting Commands
-```bash
-# List all partitions for a stream
-find state/wise-to-sevdesk/v1/streams/ -name "partition-*.json" | head -10
-
-# Check partition state
-cat state/wise-to-sevdesk/v1/streams/endpoint.123/partition-default.json | jq '.cursor'
-
-# Validate index consistency
-cat state/wise-to-sevdesk/v1/index.json | jq '.streams | keys[]'
-
-# Monitor checkpoint progress  
-watch -n 5 'cat state/wise-to-sevdesk/v1/index.json | jq ".run.checkpoint_seq"'
-```
-
-## ⚠️ Limitations & Considerations
-
-### Current Limitations
-1. **Single partition per worker**: Each worker should process distinct partitions
-2. **File system dependency**: Requires shared filesystem for multi-node deployment
-3. **JSON overhead**: Text format has higher storage overhead than binary
-4. **Schema evolution**: Breaking changes require manual intervention
-
-### Best Practices
-1. **Partition by time/geography/account**: Ensures natural work distribution
-2. **Monitor partition sizes**: Avoid highly skewed partition distributions  
-3. **Regular cleanup**: Archive old state files periodically
-4. **Backup strategy**: Include state files in disaster recovery procedures
+- Keep **config** and **state** separate.
+- Keep state **stream-scoped** (one state file per stream).
+- Represent incremental progress with **cursor + optional tie-breakers**.
+- Guard compatibility using **full SHA-256 fingerprints** of source and destination configurations.
+- Keep state **versioned** (format evolution via `v1/`).
 
 ---
 
-**Note**: This specification covers Analitiq Stream State Format Version 1. Future versions will maintain backward compatibility or provide migration tools.
+## 1) Directory Layout
+
+```
+state/
+  {pipeline_id}/
+    v1/
+      index.json                      # Manifest + lightweight per-stream operational metadata
+      streams/
+        {stream_id}.json              # Single state file per stream
+      locks/
+        pipeline.lock.json            # Optional: lease/lock record for multi-process coordination
+```
+
+### Naming
+- **Stream file:** `streams/{stream_id}.json` where `{stream_id}` is a UUID.
+- Do not use display names for identity.
+
+---
+
+## 2) Stream State File: `streams/{stream_id}.json`
+
+Each stream state file contains the execution position for the stream and minimal operational state.
+
+### 2.1 Stream State JSON (recommended shape)
+
+```json
+{
+  "pipeline_id": "b0c2f9d0-3b2a-4a7e-8c86-1b9c6c2d7b15",
+  "stream_id": "f1a2b3c4-d5e6-7890-abcd-ef1234567891",
+
+  "status": "idle",
+
+  "config": {
+    "config_revision": 17,
+
+    "source": {
+      "endpoint_id": "wise.transactions.v3",
+      "config_fingerprint": "sha256:3b6d2f8e2a1b4c9f0d9e6a1f7a1d2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c"
+    },
+
+    "destinations": [
+      {
+        "endpoint_id": "sevdesk.checkAccountTransaction.v2",
+        "config_fingerprint": "sha256:9a0b1c2d3e4f5061728394a5b6c7d8e9f00112233445566778899aabbccddeef"
+      }
+    ]
+  },
+
+  "replication_state": {
+    "method": "incremental",
+
+    "cursor": {
+      "field_path": ["created"],
+      "mode": "inclusive",
+      "value": "2025-12-25T10:30:15Z",
+      "tie_breakers": [
+        { "field_path": ["id"], "value": "tr_9f3c2a" }
+      ]
+    },
+
+    "hwm": {
+      "value": "2025-12-25T10:31:00Z",
+      "purpose": "Highest cursor value observed (optional; useful for safety-window and resume validation)"
+    },
+
+    "page_state": {
+      "next_token": null,
+      "offset": null,
+      "page": null,
+      "cursor": null
+    },
+
+    "http_conditionals": {
+      "etag": null,
+      "last_modified": null
+    }
+  },
+
+  "checkpoint": {
+    "seq": 42,
+    "last_checkpoint_at": "2025-12-25T10:31:00Z",
+    "records_processed_since_checkpoint": 500,
+    "errors_since_checkpoint": 0
+  },
+
+  "retry_state": {
+    "consecutive_failures": 0,
+    "next_retry_at": null
+  },
+
+  "stats": {
+    "records_synced_total": 18420,
+    "batches_written_total": 215,
+    "dlq_total": 12
+  },
+
+  "last_run": {
+    "run_id": "run_20251225_103000_abc123",
+    "started_at": "2025-12-25T10:30:00Z",
+    "finished_at": "2025-12-25T10:31:10Z",
+    "outcome": "success",
+    "error_summary": null
+  },
+
+  "last_updated": "2025-12-25T10:31:02Z"
+}
+```
+
+### 2.2 Field meanings (stream state file)
+
+- `status`: `idle | running | paused | error`.
+- `config.config_revision`: stream config revision used when this state was produced (recommended for reproducibility).
+- `config.source|destinations.*.config_fingerprint`:
+    - full SHA-256 of the *effective immutable* source/destination configuration.
+    - used to detect incompatibilities (e.g., config changed but state did not reset/migrate).
+- `replication_state.cursor`:
+    - `field_path`: token array for cursor field.
+    - `mode`: `"inclusive"` or `"exclusive"` (equivalent to `>=` or `>`).
+    - `value`: last committed cursor value.
+    - `tie_breakers`: optional list to disambiguate ties.
+- `replication_state.page_state`: continuation info for APIs (use only one mechanism depending on the connector).
+- `replication_state.http_conditionals`: `ETag` / `Last-Modified` for polling sources.
+- `checkpoint`: crash-recovery progress markers. Keep semantics consistent with cursor advancement rules.
+- `retry_state`: backoff metadata for transient failures.
+- `last_run`: compact summary; detailed logs belong elsewhere.
+- `last_updated`: last modified timestamp.
+
+**Fingerprint requirements:**
+- Use **full SHA-256** (64 hex chars): `sha256:<64-hex>` or `sha256:<base64url>`.
+- Fingerprint must be deterministic and based on canonical JSON serialization.
+
+---
+
+## 3) Manifest: `index.json` (Pipeline-level registry + quick introspection)
+
+### Purpose
+- Discover streams for a pipeline quickly.
+- Provide quick status summary without opening every stream file (optional optimization).
+- Track active run metadata and leasing (if used).
+
+### 3.1 Manifest JSON (recommended shape)
+
+```json
+{
+  "state_format_version": 1,
+  "pipeline_id": "b0c2f9d0-3b2a-4a7e-8c86-1b9c6c2d7b15",
+
+  "streams": {
+    "f1a2b3c4-d5e6-7890-abcd-ef1234567891": {
+      "file": "streams/f1a2b3c4-d5e6-7890-abcd-ef1234567891.json",
+      "status": "idle",
+      "last_run_outcome": "success",
+      "last_updated": "2025-12-25T10:31:02Z"
+    }
+  },
+
+  "run": {
+    "run_id": null,
+    "lease_owner": null,
+    "started_at": null,
+    "checkpoint_seq": 0
+  },
+
+  "last_updated": "2025-12-25T10:31:02Z"
+}
+```
+
+---
+
+## 4) Concurrency & Locking (Local / File-Based)
+
+This format supports:
+- **Single-process** execution (simplest)
+- **Multi-process workers** on a shared filesystem (requires a real lock/lease)
+
+### 4.1 Updates
+- Stream state files are independent: `streams/{stream_id}.json`.
+- If multiple processes might update the same stream file, you must coordinate (lease/lock or single-writer).
+
+### 4.2 Optional pipeline lease file
+If you run multiple processes that might contend, use a lease record:
+
+`state/{pipeline_id}/v1/locks/pipeline.lock.json`
+```json
+{
+  "lease_owner": "worker-7f2a",
+  "lease_acquired_at": "2025-12-25T10:30:00Z",
+  "lease_expires_at": "2025-12-25T10:30:30Z"
+}
+```
+
+Rules:
+- Only the lease owner may start a run and update stream state for that pipeline.
+- Renew the lease periodically.
+- If the lease expires, another worker may take over.
+
+---
+
+## 5) Crash Recovery
+
+Recommended recovery sequence:
+
+1. Read `index.json` (optional) to discover stream files.
+2. For each stream:
+    - load `streams/{stream_id}.json`
+    - validate fingerprints against current effective configs
+    - resume from `replication_state.cursor`
+    - use `page_state` if mid-page continuation is supported
+3. Continue processing and checkpoint periodically.
+
+Cursor advancement rules (recommended):
+- Advance `cursor.value` only when you have a **durable commit** (e.g., destination batch acknowledged).
+- If you overlap via safety window, rely on **upsert/idempotency** to absorb duplicates.
+
+---
+
+## 6) Atomic Write Pattern
+
+Use atomic replace semantics:
+
+```python
+import json, os, tempfile
+
+def atomic_write_json(path: str, obj: dict):
+    directory = os.path.dirname(path)
+    fd, tmp = tempfile.mkstemp(dir=directory, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(obj, f, ensure_ascii=False, separators=(",", ":"))
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)  # atomic on most local filesystems
+    finally:
+        try:
+            os.remove(tmp)
+        except FileNotFoundError:
+            pass
+```
+
+---
+
+## 7) Notes on Resets
+
+A reset is functionally a **cursor change** (and optionally clearing `checkpoint`, `page_state`, and `retry_state`).
+
+If you require auditability, record reset events separately (recommended), for example under:
+
+```
+state/{pipeline_id}/v1/events/resets/{stream_id}/reset-{timestamp}-{uuid}.json
+```
+
+This keeps the stream state minimal and preserves an append-only reset history.
+
+---
+
+## 8) Validation Checklist
+
+A state implementation is considered compliant if it:
+
+- Uses `streams/{stream_id}.json` (UUID identity).
+- Stores **full** SHA-256 fingerprints for source and destinations in the stream state.
+- Uses token arrays for cursor `field_path` and tie-breaker `field_path`.
+- Updates files using atomic replace.
+- Coordinates multi-process updates via a lock/lease or single-writer rule.

@@ -136,12 +136,12 @@ Core fixtures coordinate configuration, runtime services, and cleanup:
 - `mock_pipeline_id`: Provides unique pipeline identifiers for concurrent runs (name retained for backward compatibility).
 - `data_generator`: Builds synthetic record sets that are fed into real sources.
 - `fault_tolerance_config`: Supplies shared retry/circuit breaker defaults.
-- **Pipeline runner fixtures**: Helpers that instantiate `analitiq_stream.core.pipeline.Pipeline`, await `pipeline.run()`, and
+- **Pipeline runner fixtures**: Helpers that instantiate `src.core.pipeline.Pipeline`, await `pipeline.run()`, and
   return collected metrics for assertions. These fixtures guarantee the actual `StreamingEngine` is used and handle
   teardown of engine background tasks.
 - **Stub connector/service fixtures**: Async factories that spin up lightweight HTTP and database services (using
   `aiohttp`, `sqlite`, or disposable containers) so connectors interact with real endpoints. Each fixture returns
-  connection dictionaries compatible with the production connectors bundled in `analitiq_stream.connectors`.
+  connection dictionaries compatible with the production connectors bundled in `src.connectors`.
 
 ### Stub Services and Data Contracts
 - **HTTP/API stubs** expose deterministic paginated responses, throttling hooks, and failure toggles for testing
@@ -183,8 +183,8 @@ async def test_retry_exhaustion(
         "streams": {
             "orders": {
                 "name": "orders",
-                "src": {"endpoint_id": source_config["endpoint_id"], "fault_tolerance": fault_tolerance_config},
-                "dst": {"endpoint_id": destination_config["endpoint_id"]},
+                "source": {"endpoint_id": source_config["endpoint_id"], "fault_tolerance": fault_tolerance_config},
+                "destination": {"endpoint_id": destination_config["endpoint_id"]},
             }
         },
         "error_handling": {"strategy": "dlq", "max_retries": 3},

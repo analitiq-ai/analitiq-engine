@@ -6,8 +6,8 @@ import asyncio
 from pathlib import Path
 from typing import Dict
 
-from analitiq_stream.core.pipeline import Pipeline
-from analitiq_stream.fault_tolerance.dead_letter_queue import DeadLetterQueue
+from src.core.pipeline import Pipeline
+from src.fault_tolerance.dead_letter_queue import DeadLetterQueue
 
 
 def _prepare_pipeline(pipeline: Pipeline, temp_dirs: Dict[str, Path]) -> None:
@@ -37,8 +37,8 @@ def test_api_to_api_stream_applies_nested_field_mapping(
         "streams": {
             stream_id: {
                 "name": "API stream",
-                "src": {"endpoint_id": source_endpoint},
-                "dst": {"endpoint_id": destination_endpoint},
+                "source": {"endpoint_id": source_endpoint},
+                "destination": {"endpoint_id": destination_endpoint},
                 "mapping": {
                     "field_mappings": {
                         "created": {"target": "date", "transformations": ["iso_to_date"]},

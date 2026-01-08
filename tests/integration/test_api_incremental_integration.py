@@ -8,8 +8,8 @@ import pytest
 from pathlib import Path
 from unittest.mock import patch, mock_open, AsyncMock, MagicMock
 from aiohttp import ClientSession
-from analitiq_stream.connectors.api import APIConnector
-from analitiq_stream.fault_tolerance.state_manager import StateManager
+from src.connectors.api import APIConnector
+from src.fault_tolerance.state_manager import StateManager
 
 
 class TestAPIIncrementalIntegration:
@@ -66,7 +66,7 @@ class TestAPIIncrementalIntegration:
                     "endpoint": "/v1/transfers",
                     "method": "GET",
                     "pipeline_config": {
-                        "src": {
+                        "source": {
                             "endpoint_id": "test-endpoint-123",
                             "replication_method": "incremental", 
                             "replication_key": "createdDateStart",
@@ -149,7 +149,7 @@ class TestAPIIncrementalIntegration:
                     "endpoint": "/v1/transfers",
                     "method": "GET", 
                     "pipeline_config": {
-                        "src": {
+                        "source": {
                             "endpoint_id": "test-endpoint-456",
                             "replication_method": "incremental",
                             "replication_key": "id",
@@ -201,7 +201,7 @@ class TestAPIIncrementalIntegration:
                     "endpoint": "/v1/transfers",
                     "method": "GET",
                     "pipeline_config": {
-                        "src": {
+                        "source": {
                             "endpoint_id": "test-endpoint-789",
                             "replication_method": "incremental",
                             "replication_key": "createdDateStart", 
@@ -245,7 +245,7 @@ class TestAPIIncrementalIntegration:
             "endpoint": "/v1/transfers",
             "method": "GET",
             "pipeline_config": {
-                "src": {
+                "source": {
                     "endpoint_id": "test-endpoint-000",
                     "replication_method": "full",  # Full replication
                     "bookmarks": [

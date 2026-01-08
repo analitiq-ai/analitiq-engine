@@ -22,7 +22,7 @@ classifiers = [
     "Topic :: Internet :: WWW/HTTP",
     "Topic :: System :: Distributed Computing",
 ]
-packages = [{include = "analitiq_stream"}]
+packages = [{include = "src"}]
 
 [tool.poetry.dependencies]
 python = "^3.11"
@@ -52,6 +52,7 @@ prometheus-client = "^0.17.0"
 # Configuration and utilities
 python-dotenv = "^1.0.0"
 click = "^8.0.0"
+pyyaml = "^6.0.0"
 
 # Optional dependencies
 kafka-python = {version = "^2.0.0", optional = true}
@@ -113,10 +114,10 @@ all = [
 
 [tool.poetry.scripts]
 # Scripts removed for Docker deployment - using entrypoint.py directly
-# analitiq-stream = "analitiq_stream.cli:main"
+# analitiq-stream = "src.cli:main"
 # test = "pytest"
-# coverage = "analitiq_stream.cli:coverage_html"
-# coverage-html = "analitiq_stream.cli:coverage_html"
+# coverage = "src.cli:coverage_html"
+# coverage-html = "src.cli:coverage_html"
 
 [build-system]
 requires = ["poetry-core"]
@@ -179,7 +180,7 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 minversion = "7.0"
-addopts = "-ra -v --strict-markers --strict-config --ignore=tests/unit/analitiq_stream/fault_tolerance"
+addopts = "-ra -v --strict-markers --strict-config --ignore=tests/unit/src/fault_tolerance"
 testpaths = ["tests"]
 python_files = ["test_*.py", "*_test.py"]
 python_classes = ["Test*"]
@@ -193,9 +194,9 @@ markers = [
 asyncio_mode = "auto"
 
 [tool.coverage.run]
-source = ["analitiq_stream"]
+source = ["src"]
 omit = [
-    "*/analitiq_stream/models/*",
+    "*/src/models/*",
     "*/examples/*",
     "*/tests/*",
     "*/test_*",

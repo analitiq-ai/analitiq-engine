@@ -128,8 +128,8 @@ class StreamProcessingConfig(BaseModel):
     
     # Replication settings with validation
     replication_method: str = Field("incremental")
-    cursor_field: Optional[str] = Field(None)
-    cursor_mode: str = Field("inclusive") 
+    cursor_field: Optional[List[str]] = Field(None)
+    # Note: cursor_mode removed - always uses inclusive (>=) for safety
     tie_breaker_fields: Optional[List[str]] = Field(None)
     
     @field_validator("replication_method")
@@ -374,15 +374,15 @@ class StreamingEngine:
 ### Log Format Examples
 
 ```
-2025-08-18 15:34:27 - analitiq_stream.core.orchestrator.test-pipeline - INFO - Starting pipeline orchestration
+2025-08-18 15:34:27 - src.core.orchestrator.test-pipeline - INFO - Starting pipeline orchestration
   {"pipeline_id": "test-pipeline", "run_id": "2025-08-18T15:34:27-a1b2", "stream_count": 3}
 
-2025-08-18 15:34:28 - analitiq_stream.core.engine.test-pipeline - INFO - Processing stream
+2025-08-18 15:34:28 - src.core.engine.test-pipeline - INFO - Processing stream
   {"stream_id": "transactions", "stream_name": "Transaction Stream", "correlation_id": "2025-08-18T15:34:27-a1b2"}
 
-2025-08-18 15:34:29 - analitiq_stream.connectors.api - DEBUG - Making API request: GET https://api.wise.com/v1/transfers?limit=1000&offset=0
+2025-08-18 15:34:29 - src.connectors.api - DEBUG - Making API request: GET https://api.wise.com/v1/transfers?limit=1000&offset=0
 
-2025-08-18 15:34:30 - analitiq_stream.core.orchestrator.test-pipeline - INFO - Pipeline orchestration completed
+2025-08-18 15:34:30 - src.core.orchestrator.test-pipeline - INFO - Pipeline orchestration completed
   {"success_rate": 100.0, "total_records": 1250, "correlation_id": "2025-08-18T15:34:27-a1b2"}
 ```
 

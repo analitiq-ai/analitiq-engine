@@ -33,12 +33,12 @@ def assert_record_has_expected_structure(record: Dict[str, Any], expected_fields
 
 def assert_pipeline_config_valid(config: Dict[str, Any]):
     """Assert that a pipeline configuration has required structure."""
-    required_top_level = ["pipeline_id", "name", "version", "src", "dst"]
+    required_top_level = ["pipeline_id", "name", "version", "source", "destination"]
     for field in required_top_level:
         assert field in config, f"Pipeline config missing required field: {field}"
     
-    assert "host_id" in config["src"], "src config missing host_id"
-    assert "host_id" in config["dst"], "dst config missing host_id"
+    assert "connection_id" in config["source"], "source config missing connection_id"
+    assert "connection_id" in config["destination"], "destination config missing connection_id"
 
 
 def assert_batch_data_types_match_schema(batch: List[Dict[str, Any]], schema_fields: Dict[str, str]):

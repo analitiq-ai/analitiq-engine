@@ -10,10 +10,10 @@ import logging
 import sys
 from pathlib import Path
 
-# Add the parent directory to the path so we can import analitiq_stream
+# Add the parent directory to the path so we can import src
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from analitiq_stream import credentials_manager
+from src import credentials_manager
 
 # Set up logging
 logging.basicConfig(

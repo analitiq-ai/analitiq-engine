@@ -1,0 +1,97 @@
+# Pipeline JSON (YAML representation)
+version: "1"
+
+client_id: ""
+pipeline_id: "b0c2f9d0-3b2a-4a7e-8c86-1b9c6c2d7b15"
+name: "Wise Multi-Stream to SevDesk Integration"
+is_active: true
+tags:
+  - finance
+  - wise
+  - sevdesk
+
+# Connection aliases are generated/managed by the product (UI/back-end),
+# users simply select connections in the UI.
+connections:
+  - conn_1: "b4904c77-0a4a-4a8d-a768-4a8b5f2f2414"
+  - conn_2: "b452b1b2-34f9-4175-a47b-3dd6a4012230"
+  # optional future:
+  # - dlq: "deadletter-connection-uuid"
+
+runtime:
+  # Default expression configuration for all streams in this pipeline.
+  # Streams may optionally override (rare).
+  expression:
+    lang: "jsonata"
+    policy:
+      max_ops: 200
+      max_depth: 20
+      max_string_len: 10000
+
+  logging:
+    log_level: DEBUG
+    progress_monitoring: enabled
+    health_check_interval: "300"
+    checkpoint_interval: "50"
+    metrics_enabled: true
+
+  # Default error-handling policy; streams and individual field assignments
+  # may override on a case-by-case basis.
+  error_handling:
+    retry_failed_records: true
+    strategy: dlq
+    max_retries: "3"
+    retry_delay: "5"
+    error_categories:
+      api_error: retry
+      validation_error: dlq
+      transformation_error: dlq
+      rate_limit_error: retry_with_backoff
+      default_action: dlq
+
+    supported_actions:
+      - dlq
+      - skip_record
+      - stop_stream
+      - default_value
+      - quarantine
+
+  retry:
+    max_attempts: 5
+    backoff: "exponential"
+    base_delay_ms: 500
+
+  batching:
+    batch_size: "100" # If not defined, then batching is not supported.
+    max_concurrent_batches: "3"
+
+  engine:
+    # Optional pipeline-wide rate limiting; can be overridden per stream.
+    requests_per_second: 10
+    buffer_size: "5000"
+    vcpu: 1
+    memory: 8192
+
+  schedule:
+    type: interval # can be one of: manual, interval, cron
+    timezone: UTC
+    interval_minutes: "1440"
+
+# Optional: declare which function catalogs (and versions) the pipeline uses.
+# Your UI uses this to present transforms/functions and your runtime uses it
+# to validate and execute mapping AST nodes.
+function_catalog:
+  catalog_id: "core"
+  version: 1.0
+  # Optional: pin/allow-list specific functions for governance
+  # allow:
+  #   - get
+  #   - coalesce
+  #   - default
+  #   - concat
+  #   - trim
+  #   - lower
+  #   - iso_to_date
+
+created_at: "2025-12-25T10:15:00Z"
+updated_at: "2025-12-25T10:20:00Z"

@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
-from analitiq_stream.fault_tolerance.dead_letter_queue import DeadLetterQueue
+from src.fault_tolerance.dead_letter_queue import DeadLetterQueue
 
 
 class TestDeadLetterQueue:
@@ -33,14 +33,15 @@ class TestDeadLetterQueue:
             max_files=50,
             retention_days=7
         )
-        
+
         assert dlq.dlq_path == self.dlq_path
         assert dlq.max_file_size == 1024 * 1024
         assert dlq.max_files == 50
         assert dlq.retention_days == 7
         assert dlq.dlq_path.exists()  # Directory should be created
-        assert dlq.current_file is None
-        assert dlq.current_file_size == 0
+        # Storage backend attributes are accessed via the storage property
+        assert dlq.storage.current_file is None
+        assert dlq.storage.current_file_size == 0
     
     def test_dlq_default_values(self):
         """Test DLQ default configuration."""
@@ -81,7 +82,7 @@ class TestDeadLetterQueue:
     async def test_send_to_dlq_with_context(self):
         """Test sending record to DLQ with additional context."""
         dlq = DeadLetterQueue(dlq_path=str(self.dlq_path))
-        
+
         record = {"user_id": 456, "email": "test@example.com"}
         error = Exception("Database connection lost")
         pipeline_id = "email-processor"
@@ -90,14 +91,14 @@ class TestDeadLetterQueue:
             "batch_id": 7,
             "retry_attempt": 2
         }
-        
-        await dlq.send_to_dlq(record, error, pipeline_id, additional_context)
-        
+
+        await dlq.send_to_dlq(record, error, pipeline_id, additional_context=additional_context)
+
         # Read and validate the record
         dlq_files = list(dlq.dlq_path.glob("dlq_*.jsonl"))
         with open(dlq_files[0], 'r', encoding='utf-8') as f:
             dlq_record = json.loads(f.readline().strip())
-        
+
         assert dlq_record["additional_context"] == additional_context
         assert dlq_record["additional_context"]["stage"] == "transform"
         assert dlq_record["additional_context"]["batch_id"] == 7
@@ -106,7 +107,7 @@ class TestDeadLetterQueue:
     async def test_send_batch_to_dlq(self):
         """Test sending a batch of records to DLQ."""
         dlq = DeadLetterQueue(dlq_path=str(self.dlq_path))
-        
+
         batch = [
             {"id": 1, "name": "record1"},
             {"id": 2, "name": "record2"},
@@ -115,20 +116,20 @@ class TestDeadLetterQueue:
         error_message = "Batch validation failed"
         pipeline_id = "batch-processor"
         context = {"batch_size": 3, "stage": "validate"}
-        
-        await dlq.send_batch(batch, error_message, pipeline_id, context)
-        
+
+        await dlq.send_batch(batch, error_message, pipeline_id, additional_context=context)
+
         # Check that all records were written
         dlq_files = list(dlq.dlq_path.glob("dlq_*.jsonl"))
         assert len(dlq_files) == 1
-        
+
         # Read all records
         records = []
         with open(dlq_files[0], 'r', encoding='utf-8') as f:
             for line in f:
                 if line.strip():
                     records.append(json.loads(line.strip()))
-        
+
         assert len(records) == 3
         for i, dlq_record in enumerate(records):
             assert dlq_record["pipeline_id"] == pipeline_id
@@ -177,37 +178,38 @@ class TestDeadLetterQueue:
     def test_need_new_file_logic(self):
         """Test need new file logic."""
         dlq = DeadLetterQueue(dlq_path=str(self.dlq_path), max_file_size=1000)
-        
+
         # Initially should need new file (no current file)
         assert dlq._need_new_file() is True
-        
-        # Set current file but make it large
-        dlq.current_file = self.dlq_path / "test.jsonl"
-        dlq.current_file.touch()  # Create the file
-        dlq.current_file_size = 1500  # Over limit
-        
+
+        # Set current file but make it large - access through storage backend
+        dlq.storage.current_file = self.dlq_path / "test.jsonl"
+        dlq.storage.current_file.touch()  # Create the file
+        dlq.storage.current_file_size = 1500  # Over limit
+
         assert dlq._need_new_file() is True
-        
+
         # Set reasonable size
-        dlq.current_file_size = 500
+        dlq.storage.current_file_size = 500
         assert dlq._need_new_file() is False
-        
+
         # Remove the file (simulate deletion)
-        dlq.current_file.unlink()
+        dlq.storage.current_file.unlink()
         assert dlq._need_new_file() is True
     
     @pytest.mark.asyncio
     async def test_create_new_file(self):
         """Test new file creation."""
         dlq = DeadLetterQueue(dlq_path=str(self.dlq_path))
-        
+
         await dlq._create_new_file()
-        
-        assert dlq.current_file is not None
-        assert dlq.current_file.exists()
-        assert dlq.current_file_size == 0
-        assert dlq.current_file.name.startswith("dlq_")
-        assert dlq.current_file.name.endswith(".jsonl")
+
+        # Access storage backend for file tracking
+        assert dlq.storage.current_file is not None
+        assert dlq.storage.current_file.exists()
+        assert dlq.storage.current_file_size == 0
+        assert dlq.storage.current_file.name.startswith("dlq_")
+        assert dlq.storage.current_file.name.endswith(".jsonl")
     
     @pytest.mark.asyncio
     async def test_cleanup_old_files_max_files(self):
@@ -320,7 +322,7 @@ class TestDeadLetterQueue:
         dlq = DeadLetterQueue(dlq_path=str(self.dlq_path))
         
         # Basic test - should return True and log
-        with patch('analitiq_stream.fault_tolerance.dead_letter_queue.logger') as mock_logger:
+        with patch('src.fault_tolerance.dead_letter_queue.logger') as mock_logger:
             result = await dlq.retry_failed_record("test-record-id")
             
             assert result is True
@@ -392,17 +394,17 @@ class TestDeadLetterQueue:
     async def test_clear_dlq_specific_pipeline(self):
         """Test clearing DLQ records for specific pipeline."""
         dlq = DeadLetterQueue(dlq_path=str(self.dlq_path))
-        
+
         # Add records for different pipelines
         await dlq.send_to_dlq({"id": 1}, Exception("Error 1"), "pipeline1")
         await dlq.send_to_dlq({"id": 2}, Exception("Error 2"), "pipeline2")
-        
-        with patch('analitiq_stream.fault_tolerance.dead_letter_queue.logger') as mock_logger:
+
+        with patch('src.fault_tolerance.dead_letter_queue.logger') as mock_logger:
             # This should log that it's not implemented
             await dlq.clear_dlq("pipeline1")
-            
+
             mock_logger.info.assert_called_once_with(
-                "Clearing DLQ records for pipeline pipeline1 not implemented"
+                "Selective DLQ clearing for pipeline pipeline1 not implemented"
             )
 
 
@@ -525,7 +527,7 @@ class TestDeadLetterQueueEdgeCases:
         
         # Mock glob to raise an exception
         with patch('pathlib.Path.glob', side_effect=Exception("Glob error")):
-            with patch('analitiq_stream.fault_tolerance.dead_letter_queue.logger') as mock_logger:
+            with patch('src.fault_tolerance.dead_letter_queue.logger') as mock_logger:
                 # Should not raise but log error
                 await dlq._cleanup_old_files()
                 
@@ -540,7 +542,7 @@ class TestDeadLetterQueueEdgeCases:
         
         # Mock glob to raise an exception
         with patch('pathlib.Path.glob', side_effect=Exception("Read error")):
-            with patch('analitiq_stream.fault_tolerance.dead_letter_queue.logger') as mock_logger:
+            with patch('src.fault_tolerance.dead_letter_queue.logger') as mock_logger:
                 # Should return empty list and log error
                 result = await dlq.get_failed_records()
                 
@@ -555,7 +557,7 @@ class TestDeadLetterQueueEdgeCases:
         
         # Mock glob to raise an exception
         with patch('pathlib.Path.glob', side_effect=Exception("Stats error")):
-            with patch('analitiq_stream.fault_tolerance.dead_letter_queue.logger') as mock_logger:
+            with patch('src.fault_tolerance.dead_letter_queue.logger') as mock_logger:
                 # Should return default stats and log error
                 stats = await dlq.get_dlq_stats()
                 

@@ -4,7 +4,7 @@ import json
 import os
 import pytest
 
-from analitiq_stream.core.expression_evaluator import SecureExpressionEvaluator
+from src.core.expression_evaluator import SecureExpressionEvaluator
 
 
 class TestSecureExpressionEvaluator:

@@ -1,10 +1,9 @@
-"""Unit tests for DataTransformer."""
+"""Unit tests for DataTransformer - NO MOCKING, real functionality only."""
 
-from unittest.mock import AsyncMock, patch
 import pytest
 
-from analitiq_stream.core.data_transformer import DataTransformer
-from analitiq_stream.core.exceptions import TransformationError
+from src.core.data_transformer import DataTransformer
+from src.core.exceptions import TransformationError
 
 
 class TestDataTransformer:
@@ -228,23 +227,28 @@ class TestDataTransformer:
 
     @pytest.mark.asyncio
     async def test_transformation_error_handling(self, transformer):
-        """Test error handling in transformations."""
-        batch = [{"field": "invalid_data"}]
-        
-        # Mock the expression evaluator to raise an exception
-        with patch.object(transformer.expression_evaluator, 'evaluate') as mock_eval:
-            mock_eval.side_effect = ValueError("Evaluation failed")
-            
-            config = {
-                "mapping": {
-                    "computed_fields": {
-                        "bad_field": {"expression": "bad_expression"}
-                    }
+        """Test error handling in transformations using real expression evaluator."""
+        # Use a record that will cause real errors during transformation
+        batch = [{"field": "test_value"}]
+
+        # Create a custom transformer with a broken expression evaluator
+        class BrokenExpressionEvaluator:
+            async def evaluate(self, expression, record, context):
+                raise ValueError("Evaluation failed")
+
+        broken_transformer = DataTransformer()
+        broken_transformer.expression_evaluator = BrokenExpressionEvaluator()
+
+        config = {
+            "mapping": {
+                "computed_fields": {
+                    "bad_field": {"expression": "any_expression"}
                 }
             }
-            
-            with pytest.raises(TransformationError, match="Data transformation failed"):
-                await transformer.apply_transformations(batch, config)
+        }
+
+        with pytest.raises(TransformationError, match="Data transformation failed"):
+            await broken_transformer.apply_transformations(batch, config)
 
     @pytest.mark.asyncio
     async def test_iso_date_transformation_edge_cases(self, transformer):

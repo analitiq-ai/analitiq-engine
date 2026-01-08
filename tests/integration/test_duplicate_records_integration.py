@@ -13,8 +13,8 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 from datetime import datetime, timezone
 
-from analitiq_stream.connectors.api import APIConnector
-from analitiq_stream.fault_tolerance.state_manager import StateManager
+from src.connectors.api import APIConnector
+from src.fault_tolerance.state_manager import StateManager
 
 
 class TestDuplicateRecordsIntegration:
@@ -37,7 +37,7 @@ class TestDuplicateRecordsIntegration:
                 "test-stream-1": {
                     "name": "test-stream",
                     "description": "Test stream for duplicate detection",
-                    "src": {
+                    "source": {
                         "endpoint_id": "test-endpoint",
                         "replication_method": "incremental",
                         "cursor_field": "created",
@@ -46,7 +46,7 @@ class TestDuplicateRecordsIntegration:
                         "primary_key": ["id"],
                         "tie_breaker_fields": ["id"]
                     },
-                    "dst": {
+                    "destination": {
                         "endpoint_id": "test-dest-endpoint",
                         "refresh_mode": "upsert",
                         "batch_support": False,
@@ -74,7 +74,7 @@ class TestDuplicateRecordsIntegration:
             "endpoint": "/api/test",
             "type": "api",
             "method": "GET",
-            "base_url": "https://api.test.com",
+            "host": "https://api.test.com",
             "headers": {"Authorization": "Bearer test-token"},
             "pagination": {
                 "type": "offset",
@@ -102,7 +102,7 @@ class TestDuplicateRecordsIntegration:
             "endpoint": "/api/dest",
             "type": "api", 
             "method": "POST",
-            "base_url": "https://api.dest.com",
+            "host": "https://api.dest.com",
             "headers": {"Authorization": "Bearer dest-token"}
         }
 
@@ -218,7 +218,7 @@ class TestDuplicateRecordsIntegration:
         config = {
             "endpoint": "/api/test",
             "method": "GET",
-            "base_url": "https://api.test.com",
+            "host": "https://api.test.com",
             "replication_method": "incremental",
             "cursor_field": "created", 
             "cursor_mode": "inclusive",
@@ -250,7 +250,7 @@ class TestDuplicateRecordsIntegration:
         
         # Connect the API connector to initialize session  
         await connector.connect({
-            "base_url": "https://api.test.com",
+            "host": "https://api.test.com",
             "headers": {"Authorization": "Bearer test-token"},
             "timeout": 30
         })
@@ -292,7 +292,7 @@ class TestDuplicateRecordsIntegration:
         config = {
             "endpoint": "/api/test",
             "method": "GET", 
-            "base_url": "https://api.test.com",
+            "host": "https://api.test.com",
             "replication_method": "incremental",
             "cursor_field": "created",
             "cursor_mode": "inclusive",
@@ -324,7 +324,7 @@ class TestDuplicateRecordsIntegration:
         
         # Connect the API connector to initialize session
         await connector.connect({
-            "base_url": "https://api.test.com",
+            "host": "https://api.test.com",
             "headers": {"Authorization": "Bearer test-token"},
             "timeout": 30
         })
@@ -379,7 +379,7 @@ class TestDuplicateRecordsIntegration:
         state_manager = StateManager("test-pipeline", str(temp_state_dir))
         
         # Simulate a previously saved state with tie-breaker
-        from analitiq_stream.models.state import PartitionCursor, CursorField, PartitionStats
+        from src.models.state import PartitionCursor, CursorField, PartitionStats
         from datetime import datetime, timezone
         
         cursor = PartitionCursor(
@@ -404,7 +404,7 @@ class TestDuplicateRecordsIntegration:
         )
         
         # Now test that the API connector loads this state correctly
-        from analitiq_stream.connectors.api import APIConnector
+        from src.connectors.api import APIConnector
         
         connector = APIConnector("test")
         
@@ -450,7 +450,7 @@ class TestDuplicateRecordsIntegration:
         config = {
             "endpoint": "/api/test",
             "method": "GET",
-            "base_url": "https://api.test.com",
+            "host": "https://api.test.com",
             "replication_method": "incremental",
             "cursor_field": "created",
             "cursor_mode": "inclusive",
@@ -463,7 +463,7 @@ class TestDuplicateRecordsIntegration:
 
         connector = APIConnector("test-api")
         await connector.connect({
-            "base_url": "https://api.test.com",
+            "host": "https://api.test.com",
             "headers": {"Authorization": "Bearer test-token"},
             "timeout": 30
         })
@@ -501,7 +501,7 @@ class TestDuplicateRecordsIntegration:
         config = {
             "endpoint": "/api/test",
             "method": "GET",
-            "base_url": "https://api.test.com",
+            "host": "https://api.test.com",
             "replication_method": "incremental",
             "cursor_field": "created",
             "cursor_mode": "inclusive",
@@ -514,7 +514,7 @@ class TestDuplicateRecordsIntegration:
 
         connector = APIConnector("test-api")
         await connector.connect({
-            "base_url": "https://api.test.com",
+            "host": "https://api.test.com",
             "headers": {"Authorization": "Bearer test-token"},
             "timeout": 30
         })
@@ -522,7 +522,7 @@ class TestDuplicateRecordsIntegration:
         state_manager = StateManager("test-pipeline", str(temp_state_dir))
         
         # First, simulate having processed some records previously
-        from analitiq_stream.models.state import PartitionCursor, CursorField, PartitionStats
+        from src.models.state import PartitionCursor, CursorField, PartitionStats
         from datetime import datetime, timezone
         
         # Set up state as if we've already processed records up to 12346
@@ -577,7 +577,7 @@ class TestDuplicateRecordsIntegration:
         config = {
             "endpoint": "/api/test",
             "method": "GET",
-            "base_url": "https://api.test.com",
+            "host": "https://api.test.com",
             "replication_method": "incremental",
             "cursor_field": "created",
             "cursor_mode": "inclusive",
@@ -590,7 +590,7 @@ class TestDuplicateRecordsIntegration:
 
         connector = APIConnector("test-api")
         await connector.connect({
-            "base_url": "https://api.test.com",
+            "host": "https://api.test.com",
             "headers": {"Authorization": "Bearer test-token"},
             "timeout": 30
         })
@@ -644,7 +644,7 @@ class TestDuplicateRecordsIntegration:
         config = {
             "endpoint": "/api/test",
             "method": "GET",
-            "base_url": "https://api.test.com",
+            "host": "https://api.test.com",
             "replication_method": "incremental",
             "cursor_field": "created",
             "cursor_mode": "inclusive",
@@ -657,7 +657,7 @@ class TestDuplicateRecordsIntegration:
 
         connector = APIConnector("test-api")
         await connector.connect({
-            "base_url": "https://api.test.com",
+            "host": "https://api.test.com",
             "headers": {"Authorization": "Bearer test-token"},
             "timeout": 30
         })
@@ -712,7 +712,7 @@ class TestDuplicateRecordsIntegration:
         config = {
             "endpoint": "/api/test",
             "method": "GET",
-            "base_url": "https://api.test.com",
+            "host": "https://api.test.com",
             "replication_method": "incremental",
             "cursor_field": "created",
             "cursor_mode": "inclusive", 
@@ -725,7 +725,7 @@ class TestDuplicateRecordsIntegration:
 
         connector = APIConnector("test-api")
         await connector.connect({
-            "base_url": "https://api.test.com", 
+            "host": "https://api.test.com", 
             "headers": {"Authorization": "Bearer test-token"},
             "timeout": 30
         })
@@ -796,7 +796,7 @@ class TestDuplicateRecordsIntegration:
         4. APIConnector receives it and uses it for deduplication
         5. State is saved with proper tie-breaker information
         """
-        from analitiq_stream import Pipeline
+        from src import Pipeline
         
         # Create a full pipeline configuration that matches the wise_to_sevdesk structure
         pipeline_config = {
@@ -812,7 +812,7 @@ class TestDuplicateRecordsIntegration:
                 "test-stream-001": {
                     "name": "test-integration-stream", 
                     "description": "Test stream for pipeline integration",
-                    "src": {
+                    "source": {
                         "endpoint_id": "test-endpoint",
                         "replication_method": "incremental",
                         "cursor_field": "created",
@@ -821,7 +821,7 @@ class TestDuplicateRecordsIntegration:
                         "primary_key": ["id"],
                         "tie_breaker_fields": ["id"]  # This is the key setting being tested
                     },
-                    "dst": {
+                    "destination": {
                         "endpoint_id": "test-dest-endpoint",
                         "refresh_mode": "upsert",
                         "batch_support": False,
@@ -842,7 +842,7 @@ class TestDuplicateRecordsIntegration:
             "endpoint": "/api/test",
             "type": "api",
             "method": "GET", 
-            "base_url": "https://api.test.com",
+            "host": "https://api.test.com",
             "headers": {"Authorization": "Bearer test-token"},
             "replication_filter_mapping": {"created": "createdDateStart"},
             "filters": {"createdDateStart": {"type": "string", "required": False, "operators": ["gte"]}},
@@ -854,7 +854,7 @@ class TestDuplicateRecordsIntegration:
             "endpoint": "/api/dest",
             "type": "api",
             "method": "POST",
-            "base_url": "https://api.dest.com", 
+            "host": "https://api.dest.com", 
             "headers": {"Authorization": "Bearer dest-token"}
         }
         
@@ -901,7 +901,7 @@ class TestDuplicateRecordsIntegration:
             assert metrics1.records_processed > 0, "First run should process at least 1 record"
             
             # Check that tie-breaker information was saved
-            from analitiq_stream.fault_tolerance.state_manager import StateManager
+            from src.fault_tolerance.state_manager import StateManager
             state_manager = StateManager("test-integration-pipeline", str(temp_state_dir))
             
             partition_state = state_manager.get_partition_state("stream.test-stream-001", {})

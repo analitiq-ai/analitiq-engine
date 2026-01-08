@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch, call
 import pytest
 
-from analitiq_stream.schema.schema_manager import SchemaManager
+from src.schema.schema_manager import SchemaManager
 
 
 class TestSchemaManager:
@@ -107,7 +107,7 @@ class TestSchemaManager:
     @pytest.mark.unit
     def test_generate_schema_hash_error_handling(self, schema_manager):
         """Test error handling in schema hash generation."""
-        with patch("analitiq_stream.schema.schema_manager.logger") as mock_logger:
+        with patch("src.schema.schema_manager.logger") as mock_logger:
             # Pass non-serializable object
             result = schema_manager.generate_schema_hash({"func": lambda x: x})
 
@@ -185,7 +185,7 @@ class TestSchemaManager:
         """Test drift detection when no previous schema exists."""
         mock_state_manager.get_checkpoint.return_value = {}
         
-        with patch("analitiq_stream.schema.schema_manager.logger") as mock_logger:
+        with patch("src.schema.schema_manager.logger") as mock_logger:
             drift = schema_manager.detect_schema_drift("pipeline-1", sample_schema)
             
             assert drift is False
@@ -213,7 +213,7 @@ class TestSchemaManager:
         old_hash = schema_manager.generate_schema_hash(sample_schema)
         mock_state_manager.get_checkpoint.return_value = {"schema_hash": old_hash}
         
-        with patch("analitiq_stream.schema.schema_manager.logger") as mock_logger:
+        with patch("src.schema.schema_manager.logger") as mock_logger:
             drift = schema_manager.detect_schema_drift("pipeline-1", modified_schema)
             
             assert drift is True

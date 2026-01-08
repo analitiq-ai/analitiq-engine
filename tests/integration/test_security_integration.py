@@ -4,8 +4,8 @@ import json
 import os
 import pytest
 
-from analitiq_stream.core.data_transformer import DataTransformer
-from analitiq_stream.core.expression_evaluator import SecureExpressionEvaluator
+from src.core.data_transformer import DataTransformer
+from src.core.expression_evaluator import SecureExpressionEvaluator
 
 
 class TestSecurityIntegration:

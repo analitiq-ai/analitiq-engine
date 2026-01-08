@@ -7,9 +7,9 @@ from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 from aiohttp import ClientTimeout, TCPConnector, ClientSession
 
-from analitiq_stream.connectors.api import APIConnector, RateLimiter
-from analitiq_stream.connectors.base import ConnectionError, ReadError, WriteError
-from analitiq_stream.fault_tolerance.state_manager import StateManager
+from src.connectors.api import APIConnector, RateLimiter
+from src.connectors.base import ConnectionError, ReadError, WriteError
+from src.fault_tolerance.state_manager import StateManager
 
 
 @pytest.fixture
@@ -21,7 +21,7 @@ def connector():
 def valid_connection_config():
     """Valid connection configuration."""
     return {
-        "base_url": "https://api.example.com",
+        "host": "https://api.example.com",
         "headers": {"Authorization": "Bearer token"},
         "timeout": 30,
         "max_connections": 5,
@@ -86,7 +86,7 @@ class TestConnection:
     async def test_connect_with_rate_limit(self, connector):
         """Test connection with rate limiting configuration."""
         config = {
-            "base_url": "https://api.example.com",
+            "host": "https://api.example.com",
             "headers": {},
             "timeout": 30,
             "max_connections": 5,

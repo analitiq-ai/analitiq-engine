@@ -1,0 +1,15 @@
+reset_id: "9f0d2c1a-..."
+pipeline_id: "..."
+stream_id: "..."
+occurred_at: "2025-12-27T12:00:00Z"
+actor: "user#123"              # or service name
+mode: "to_timestamp"           # now | to_timestamp | full_resync | replay_window
+reason: "Backfill after mapping change"
+
+previous_cursor:
+  value: "2025-12-01T00:00:00Z"
+  tie_breakers: [{ field_path: [id], value: "tr_123" }]
+
+new_cursor:
+  value: "2025-01-01T00:00:00Z"
+  tie_breakers: []

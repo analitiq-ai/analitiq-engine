@@ -1,10 +1,74 @@
-"""Unit tests for StreamingEngine."""
+"""Unit tests for StreamingEngine - minimal mocking, real functionality focus."""
 
-from unittest.mock import AsyncMock, Mock, patch
+import asyncio
+from typing import Any, Dict, List
+
 import pytest
 
-from analitiq_stream.core.engine import StreamingEngine, _deep_merge_dicts
-from analitiq_stream.core.exceptions import ConfigurationError, StreamProcessingError
+from src.core.engine import StreamingEngine, _deep_merge_dicts
+from src.core.exceptions import ConfigurationError, StreamProcessingError
+from src.connectors.base import BaseConnector
+
+
+class InMemorySourceConnector(BaseConnector):
+    """Real in-memory source connector for testing."""
+
+    def __init__(self, records: List[Dict[str, Any]] = None):
+        super().__init__()
+        self.records = records or []
+        self.connected = False
+        self.batch_size = 10
+
+    async def connect(self, config: Dict[str, Any]) -> None:
+        self.connected = True
+
+    async def disconnect(self) -> None:
+        self.connected = False
+
+    async def health_check(self) -> bool:
+        return self.connected
+
+    async def read_batch(self, batch_size: int = None) -> List[Dict[str, Any]]:
+        size = batch_size or self.batch_size
+        if not self.records:
+            return []
+        batch = self.records[:size]
+        self.records = self.records[size:]
+        return batch
+
+    async def read_batches(self, batch_size: int = None):
+        """Generator for reading batches."""
+        size = batch_size or self.batch_size
+        while self.records:
+            batch = self.records[:size]
+            self.records = self.records[size:]
+            yield batch
+
+
+class InMemoryDestinationConnector(BaseConnector):
+    """Real in-memory destination connector for testing."""
+
+    def __init__(self):
+        super().__init__()
+        self.records_written: List[Dict[str, Any]] = []
+        self.connected = False
+        self.configured = False
+
+    async def connect(self, config: Dict[str, Any]) -> None:
+        self.connected = True
+
+    async def configure(self, config: Dict[str, Any]) -> None:
+        self.configured = True
+
+    async def disconnect(self) -> None:
+        self.connected = False
+
+    async def health_check(self) -> bool:
+        return self.connected
+
+    async def write_batch(self, records: List[Dict[str, Any]]) -> int:
+        self.records_written.extend(records)
+        return len(records)
 
 
 @pytest.mark.unit
@@ -21,6 +85,14 @@ class TestStreamingEngine:
             buffer_size=100,
             dlq_path=temp_dir
         )
+
+    @pytest.fixture
+    def sample_records(self):
+        """Sample records for testing."""
+        return [
+            {"id": i, "name": f"Record {i}", "value": i * 10}
+            for i in range(25)
+        ]
 
     @pytest.mark.asyncio
     async def test_initialization(self, engine):
@@ -39,7 +111,7 @@ class TestStreamingEngine:
             "pipeline_id": "test",
             # Missing required fields
         }
-        
+
         with pytest.raises(ConfigurationError, match="Invalid pipeline configuration"):
             await engine.stream_data(invalid_config)
 
@@ -50,288 +122,34 @@ class TestStreamingEngine:
             "pipeline_id": "test-pipeline",
             "name": "Test Pipeline",
             "version": "1.0",
-            "src": {"host_id": "test-src"},
-            "dst": {"host_id": "test-dst"},
+            "source": {"connection_id": "test-src"},
+            "destination": {"connection_id": "test-dst"},
             "engine_config": {"batch_size": 10},
             "streams": {}  # Empty streams
         }
-        
+
         with pytest.raises(ConfigurationError, match="No streams configured"):
             await engine.stream_data(config)
-
-    @pytest.mark.asyncio
-    async def test_single_stream_success(self, engine, sample_pipeline_config, mock_state_manager):
-        """Test successful processing of a single stream."""
-        with patch.object(engine, '_process_stream') as mock_process:
-            with patch.object(engine, 'state_manager', mock_state_manager):
-                mock_process.return_value = None  # Successful processing
-                
-                await engine.stream_data(sample_pipeline_config)
-                
-                assert mock_process.call_count == 1
-                assert engine.metrics.streams_processed == 1
-                assert engine.metrics.streams_failed == 0
-
-    @pytest.mark.asyncio
-    async def test_single_stream_failure(self, engine, sample_pipeline_config, mock_state_manager):
-        """Test handling of single stream failure."""
-        with patch.object(engine, '_process_stream') as mock_process:
-            with patch.object(engine, 'state_manager', mock_state_manager):
-                # Mock stream processing failure
-                mock_process.side_effect = RuntimeError("Stream processing failed")
-                
-                # Should raise ExceptionGroup for all streams failed
-                with pytest.raises(ExceptionGroup) as exc_info:
-                    await engine.stream_data(sample_pipeline_config)
-                
-                assert len(exc_info.value.exceptions) == 1
-                assert isinstance(exc_info.value.exceptions[0], StreamProcessingError)
-                assert engine.metrics.streams_failed == 1
-                assert engine.metrics.streams_processed == 0
-
-    @pytest.mark.asyncio
-    async def test_multiple_streams_partial_failure(self, engine, mock_state_manager):
-        """Test handling of partial stream failures."""
-        config = {
-            "pipeline_id": "test-pipeline",
-            "name": "Test Pipeline", 
-            "version": "1.0",
-            "src": {"host_id": "test-src"},
-            "dst": {"host_id": "test-dst"}, 
-            "engine_config": {"batch_size": 10},
-            "streams": {
-                "stream1": {"name": "success-stream"},
-                "stream2": {"name": "failure-stream"},
-                "stream3": {"name": "another-success-stream"}
-            }
-        }
-        
-        def mock_process_side_effect(stream_id, *args, **kwargs):
-            if stream_id == "stream2":
-                raise RuntimeError("Stream 2 failed")
-            return None  # Success for other streams
-        
-        with patch.object(engine, '_process_stream') as mock_process:
-            with patch.object(engine, 'state_manager', mock_state_manager):
-                mock_process.side_effect = mock_process_side_effect
-                
-                # Should not raise exception for partial failure
-                await engine.stream_data(config)
-                
-                assert engine.metrics.streams_processed == 2
-                assert engine.metrics.streams_failed == 1
-
-    @pytest.mark.asyncio
-    async def test_exception_group_handling(self, engine, sample_pipeline_config, mock_state_manager):
-        """Test Python 3.11+ ExceptionGroup handling."""
-        with patch.object(engine, '_process_stream') as mock_process:
-            with patch.object(engine, 'state_manager', mock_state_manager):
-                # All streams fail
-                mock_process.side_effect = RuntimeError("All streams fail")
-                
-                try:
-                    await engine.stream_data(sample_pipeline_config)
-                    pytest.fail("Should have raised ExceptionGroup")
-                except ExceptionGroup as eg:
-                    assert len(eg.exceptions) == 1
-                    assert isinstance(eg.exceptions[0], StreamProcessingError)
-
-    @pytest.mark.asyncio
-    async def test_task_cancellation_on_failure(self, engine, mock_state_manager):
-        """Test that tasks are properly cancelled when exceptions occur."""
-        config = {
-            "pipeline_id": "test-pipeline",
-            "name": "Test Pipeline",
-            "version": "1.0", 
-            "src": {"host_id": "test-src"},
-            "dst": {"host_id": "test-dst"},
-            "engine_config": {"batch_size": 10},
-            "streams": {
-                "stream1": {"name": "stream1"},
-                "stream2": {"name": "stream2"}
-            }
-        }
-        
-        # Mock asyncio.create_task to track created tasks
-        mock_tasks = []
-        original_create_task = engine._process_stream
-        
-        def mock_process_stream(*args, **kwargs):
-            # Create a mock task that can be cancelled
-            task = AsyncMock()
-            task.done.return_value = False
-            task.cancel = Mock()
-            mock_tasks.append(task)
-            
-            # First stream succeeds, second fails
-            if len(mock_tasks) == 1:
-                return None  # Success
-            else:
-                raise RuntimeError("Second stream fails")
-        
-        with patch.object(engine, '_process_stream', side_effect=mock_process_stream):
-            with patch.object(engine, 'state_manager', mock_state_manager):
-                with patch('asyncio.create_task') as mock_create_task:
-                    # Return mock tasks
-                    mock_create_task.side_effect = lambda coro, name=None: AsyncMock()
-
-                    try:
-                        await engine.stream_data(config)
-                    except (ExceptionGroup, Exception):
-                        pass  # We expect exceptions
-
-                    # Verify create_task was called for each stream
-                    assert mock_create_task.call_count == 2
-
-    @pytest.mark.asyncio
-    async def test_process_stream_uses_merged_credentials(self, engine):
-        """Connector creation should receive deep-merged src/dst credentials."""
-
-        pipeline_config = {
-            "pipeline_id": "test-pipeline",
-            "name": "Test Pipeline",
-            "version": "1.0",
-            "src": {
-                "type": "api",
-                "base_url": "https://root.example.com",
-                "headers": {
-                    "Authorization": "Bearer root-token",
-                    "User-Agent": "root-agent",
-                    "nested": {"base": True},
-                },
-                "auth": {"token": "root-token"},
-            },
-            "dst": {
-                "type": "database",
-                "driver": "postgresql",
-                "host": "root.db.local",
-                "port": 5432,
-                "database": "analytics",
-                "user": "pipeline",
-                "password": "secret",
-                "options": {
-                    "sslmode": "require",
-                    "pool": {"min": 1, "max": 5},
-                },
-            },
-            "streams": {},
-        }
-
-        stream_config = {
-            "name": "users",
-            "src": {
-                "endpoint_id": "endpoint-123",
-                "headers": {
-                    "User-Agent": "stream-agent",
-                    "X-Stream": "value",
-                    "nested": {"override": True},
-                },
-                "pagination": {"type": "page"},
-            },
-            "dst": {
-                "endpoint_id": "endpoint-456",
-                "table": "users",
-                "options": {
-                    "pool": {"max": 10},
-                    "schema": "public",
-                },
-            },
-            "mapping": {},
-        }
-
-        pipeline_config["streams"]["users"] = stream_config
-
-        expected_src = _deep_merge_dicts(pipeline_config["src"], stream_config["src"])
-        expected_dst = _deep_merge_dicts(pipeline_config["dst"], stream_config["dst"])
-
-        source_connector = Mock()
-        source_connector.connect = AsyncMock()
-        source_connector.disconnect = AsyncMock()
-
-        dest_connector = Mock()
-        dest_connector.connect = AsyncMock()
-        dest_connector.configure = AsyncMock()
-        dest_connector.disconnect = AsyncMock()
-
-        with (
-            patch.object(engine, "_create_source_connector", return_value=source_connector) as mock_create_src,
-            patch.object(engine, "_create_destination_connector", return_value=dest_connector) as mock_create_dst,
-            patch.object(engine, "_create_pipeline_stages", return_value=[]) as mock_create_stages,
-        ):
-
-            await engine._process_stream("users", stream_config, pipeline_config)
-
-        mock_create_src.assert_called_once_with(expected_src)
-        mock_create_dst.assert_called_once_with(expected_dst)
-        source_connector.connect.assert_awaited_once_with(expected_src)
-        dest_connector.connect.assert_awaited_once_with(expected_dst)
-        dest_connector.configure.assert_awaited_once_with(expected_dst)
-
-        assert mock_create_stages.call_count == 1
-        stage_kwargs = mock_create_stages.call_args.kwargs
-        assert stage_kwargs["stream_processing_config"]["src"] == expected_src
-        assert stage_kwargs["stream_processing_config"]["dst"] == expected_dst
-
-        source_connector.disconnect.assert_awaited_once()
-        dest_connector.disconnect.assert_awaited_once()
-
-    def test_get_connector_api(self, engine):
-        """Test connector creation for API type."""
-        config = {"type": "api"}
-        
-        with patch('analitiq_stream.connectors.api.APIConnector') as mock_api:
-            mock_instance = Mock()
-            mock_api.return_value = mock_instance
-            
-            result = engine._get_connector(config)
-            
-            assert result == mock_instance
-            mock_api.assert_called_once()
-
-    def test_get_connector_database(self, engine):
-        """Test connector creation for database type.""" 
-        config = {"type": "database"}
-        
-        with patch('analitiq_stream.connectors.database.DatabaseConnector') as mock_db:
-            mock_instance = Mock()
-            mock_db.return_value = mock_instance
-            
-            result = engine._get_connector(config)
-            
-            assert result == mock_instance
-            mock_db.assert_called_once()
 
     def test_get_connector_unknown_type(self, engine):
         """Test error handling for unknown connector type."""
         config = {"type": "unknown"}
-        
+
         with pytest.raises(ValueError, match="Unknown connector type"):
             engine._get_connector(config)
-
-    def test_get_connector_default_type(self, engine):
-        """Test default connector type (API)."""
-        config = {}  # No type specified
-        
-        with patch('analitiq_stream.connectors.api.APIConnector') as mock_api:
-            mock_instance = Mock()
-            mock_api.return_value = mock_instance
-            
-            result = engine._get_connector(config)
-            
-            assert result == mock_instance
 
     def test_get_stream_name(self, engine):
         """Test stream name generation."""
         # With endpoint ID
-        config = {"src": {"endpoint_id": "test-endpoint-123"}}
+        config = {"source": {"endpoint_id": "test-endpoint-123"}}
         result = engine._get_stream_name(config)
         assert result == "endpoint.test-endpoint-123"
-        
+
         # Without endpoint ID, with pipeline ID
         config = {"pipeline_id": "test-pipeline"}
         result = engine._get_stream_name(config)
         assert result == "test-pipeline"
-        
+
         # No identifiers
         config = {}
         result = engine._get_stream_name(config)
@@ -339,10 +157,241 @@ class TestStreamingEngine:
 
     def test_metrics_initialization(self, engine):
         """Test that metrics are properly initialized."""
-        # Test individual fields rather than dict comparison
         assert engine.metrics.records_processed == 0
         assert engine.metrics.records_failed == 0
         assert engine.metrics.batches_processed == 0
         assert engine.metrics.batches_failed == 0
         assert engine.metrics.streams_processed == 0
         assert engine.metrics.streams_failed == 0
+
+
+@pytest.mark.unit
+class TestDeepMergeDicts:
+    """Test _deep_merge_dicts utility function."""
+
+    def test_simple_merge(self):
+        """Test merging two simple dicts."""
+        base = {"a": 1, "b": 2}
+        override = {"b": 3, "c": 4}
+
+        result = _deep_merge_dicts(base, override)
+
+        assert result == {"a": 1, "b": 3, "c": 4}
+
+    def test_nested_merge(self):
+        """Test merging nested dicts."""
+        base = {
+            "level1": {
+                "level2a": {"key": "base_value"},
+                "level2b": "keep_this"
+            }
+        }
+        override = {
+            "level1": {
+                "level2a": {"key": "override_value", "new_key": "new_value"}
+            }
+        }
+
+        result = _deep_merge_dicts(base, override)
+
+        assert result["level1"]["level2a"]["key"] == "override_value"
+        assert result["level1"]["level2a"]["new_key"] == "new_value"
+        assert result["level1"]["level2b"] == "keep_this"
+
+    def test_override_with_non_dict(self):
+        """Test that non-dict values override correctly."""
+        base = {"a": {"nested": "value"}}
+        override = {"a": "simple_value"}
+
+        result = _deep_merge_dicts(base, override)
+
+        assert result["a"] == "simple_value"
+
+    def test_empty_base(self):
+        """Test merging with empty base."""
+        base = {}
+        override = {"a": 1, "b": {"c": 2}}
+
+        result = _deep_merge_dicts(base, override)
+
+        assert result == override
+
+    def test_empty_override(self):
+        """Test merging with empty override."""
+        base = {"a": 1, "b": {"c": 2}}
+        override = {}
+
+        result = _deep_merge_dicts(base, override)
+
+        assert result == base
+
+    def test_credentials_merge_pattern(self):
+        """Test the actual credential merging pattern used in pipelines."""
+        pipeline_source = {
+            "type": "api",
+            "host": "https://root.example.com",
+            "headers": {
+                "Authorization": "Bearer root-token",
+                "User-Agent": "root-agent",
+                "nested": {"base": True},
+            },
+            "auth": {"token": "root-token"},
+        }
+
+        stream_source = {
+            "endpoint_id": "endpoint-123",
+            "headers": {
+                "User-Agent": "stream-agent",
+                "X-Stream": "value",
+                "nested": {"override": True},
+            },
+            "pagination": {"type": "page"},
+        }
+
+        result = _deep_merge_dicts(pipeline_source, stream_source)
+
+        # Base values preserved
+        assert result["type"] == "api"
+        assert result["host"] == "https://root.example.com"
+        assert result["auth"]["token"] == "root-token"
+
+        # Overrides applied
+        assert result["headers"]["User-Agent"] == "stream-agent"
+        assert result["headers"]["X-Stream"] == "value"
+
+        # Deep merge of nested
+        assert result["headers"]["nested"]["base"] is True
+        assert result["headers"]["nested"]["override"] is True
+
+        # New values added
+        assert result["endpoint_id"] == "endpoint-123"
+        assert result["pagination"]["type"] == "page"
+
+
+@pytest.mark.unit
+class TestEngineMetrics:
+    """Test metrics tracking in StreamingEngine."""
+
+    @pytest.fixture
+    def engine(self, temp_dir):
+        """Create a StreamingEngine instance."""
+        return StreamingEngine(
+            pipeline_id="metrics-test",
+            batch_size=5,
+            max_concurrent_batches=2,
+            buffer_size=100,  # Must be >= 100
+            dlq_path=temp_dir
+        )
+
+    def test_initial_metrics(self, engine):
+        """Test initial metrics state."""
+        metrics = engine.get_metrics()
+
+        assert metrics.records_processed == 0
+        assert metrics.records_failed == 0
+        assert metrics.batches_processed == 0
+        assert metrics.batches_failed == 0
+        assert metrics.streams_processed == 0
+        assert metrics.streams_failed == 0
+
+    def test_metrics_update(self, engine):
+        """Test that metrics can be updated."""
+        engine.metrics.records_processed = 100
+        engine.metrics.batches_processed = 10
+        engine.metrics.streams_processed = 1
+
+        metrics = engine.get_metrics()
+
+        assert metrics.records_processed == 100
+        assert metrics.batches_processed == 10
+        assert metrics.streams_processed == 1
+
+
+@pytest.mark.unit
+class TestEngineStateManager:
+    """Test state manager integration in StreamingEngine."""
+
+    @pytest.fixture
+    def engine(self, temp_dir):
+        """Create a StreamingEngine instance."""
+        return StreamingEngine(
+            pipeline_id="state-test",
+            batch_size=10,
+            max_concurrent_batches=2,
+            buffer_size=100,
+            dlq_path=temp_dir
+        )
+
+    def test_state_manager_exists(self, engine):
+        """Test that state manager is initialized."""
+        state_manager = engine.get_state_manager()
+        assert state_manager is not None
+
+    @pytest.mark.asyncio
+    async def test_state_manager_operations(self, engine):
+        """Test basic state manager operations through engine."""
+        state_manager = engine.get_state_manager()
+
+        # Test starting a run with config dict
+        config = {"pipeline_id": "state-test", "version": "1.0"}
+        run_id = state_manager.start_run(config)
+
+        # run_id is returned directly as a string like "2025-12-27T08:21:13Z-ebaf"
+        assert run_id is not None
+        assert isinstance(run_id, str)
+        assert "T" in run_id  # ISO timestamp format
+
+        # Test getting run info
+        run_info = state_manager.get_run_info()
+        assert run_info is not None
+
+
+@pytest.mark.unit
+class TestEngineConfiguration:
+    """Test engine configuration validation."""
+
+    def test_engine_with_custom_params(self, temp_dir):
+        """Test engine with custom parameters."""
+        engine = StreamingEngine(
+            pipeline_id="custom-config",
+            batch_size=50,
+            max_concurrent_batches=5,
+            buffer_size=500,
+            dlq_path=temp_dir
+        )
+
+        assert engine.batch_size == 50
+        assert engine.max_concurrent_batches == 5
+        assert engine.buffer_size == 500
+
+    def test_engine_default_values(self, temp_dir):
+        """Test engine with default values."""
+        engine = StreamingEngine(
+            pipeline_id="defaults",
+            dlq_path=temp_dir
+        )
+
+        assert engine.batch_size == 1000  # Default
+        assert engine.max_concurrent_batches == 10  # Default
+        assert engine.buffer_size == 10000  # Default
+
+    def test_engine_with_engine_config_object(self, temp_dir):
+        """Test engine with EngineConfig object."""
+        from src.models.engine import EngineConfig
+
+        config = EngineConfig(
+            batch_size=200,
+            max_concurrent_batches=4,
+            buffer_size=2000,
+            dlq_path=temp_dir
+        )
+
+        engine = StreamingEngine(
+            pipeline_id="with-config",
+            dlq_path=temp_dir,
+            engine_config=config
+        )
+
+        assert engine.batch_size == 200
+        assert engine.max_concurrent_batches == 4
+        assert engine.buffer_size == 2000

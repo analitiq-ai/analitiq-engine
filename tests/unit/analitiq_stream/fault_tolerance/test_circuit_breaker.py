@@ -5,7 +5,7 @@ import pytest
 from datetime import datetime, timezone, timedelta
 from unittest.mock import AsyncMock, patch
 
-from analitiq_stream.fault_tolerance.circuit_breaker import (
+from src.fault_tolerance.circuit_breaker import (
     CircuitBreaker, CircuitState, CircuitBreakerOpenError,
     DatabaseCircuitBreaker, APICircuitBreaker
 )

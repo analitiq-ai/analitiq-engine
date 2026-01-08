@@ -7,7 +7,7 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch, mock_open
 
-from analitiq_stream.core.credentials import CredentialsManager, credentials_manager
+from src.core.credentials import CredentialsManager, credentials_manager
 
 
 @pytest.fixture
@@ -47,7 +47,7 @@ class TestCredentialsManagerInit:
     
     def test_global_instance(self):
         """Test that global credentials_manager instance exists."""
-        from analitiq_stream.core.credentials import credentials_manager
+        from src.core.credentials import credentials_manager
         
         assert credentials_manager is not None
         assert isinstance(credentials_manager, CredentialsManager)

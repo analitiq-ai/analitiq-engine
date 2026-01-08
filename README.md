@@ -204,28 +204,44 @@ partition_us = {"region": "US", "account_type": "business"}
 **Pipeline Configuration** (Immutable):
 ```json
 {
+  "version": 1,
   "pipeline_id": "wise-to-sevdesk-transactions",
-  "name": "Wise Transactions to SevDesk Bank Transactions", 
-  "version": "1.0",
-  "src": {
-    "host_id": "0e8b1731-479a-4bc0-b056-244cc5d6a53c",
-    "endpoint_id": "5a4b9e21-441f-4bc7-9d5e-41917b4357e6",
-    "replication_method": "incremental",
-    "replication_key": "created",
-    "cursor_mode": "inclusive",
-    "safety_window_seconds": 120
+  "client_id": "your-client-id",
+  "name": "Wise Transactions to SevDesk Bank Transactions",
+  "status": "active",
+  "is_active": true,
+  "connections": {
+    "source": { "conn_wise": "0e8b1731-479a-4bc0-b056-244cc5d6a53c" },
+    "destinations": [{ "conn_sevdesk": "7c1a69eb-239f-45d4-b6c2-3ad4c6e89cfa" }]
   },
-  "dst": {
-    "host_id": "7c1a69eb-239f-45d4-b6c2-3ad4c6e89cfa", 
-    "endpoint_id": "1e63d782-4b67-4b7e-b845-4b4de5e4f46e",
-    "refresh_mode": "upsert",
-    "batch_support": false,
-    "batch_size": 1
-  },
-  "mapping": {
-    "field_mappings": { "...": "..." },
-    "computed_fields": { "...": "..." }
+  "runtime": {
+    "batching": { "batch_size": 100 },
+    "error_handling": { "strategy": "dlq" },
+    "schedule": { "type": "interval", "interval_minutes": 60 }
   }
+}
+```
+
+**Stream Configuration** (`streams/{stream_id}.json`):
+```json
+{
+  "version": 1,
+  "stream_id": "transfers-stream",
+  "pipeline_id": "wise-to-sevdesk-transactions",
+  "status": "active",
+  "is_enabled": true,
+  "source": {
+    "connection_ref": "conn_wise",
+    "endpoint_id": "5a4b9e21-441f-4bc7-9d5e-41917b4357e6",
+    "primary_key": ["id"],
+    "replication": { "method": "incremental", "cursor_field": ["created"] }
+  },
+  "destinations": [{
+    "connection_ref": "conn_sevdesk",
+    "endpoint_id": "1e63d782-4b67-4b7e-b845-4b4de5e4f46e",
+    "write": { "mode": "upsert" }
+  }],
+  "mapping": { "assignments": [] }
 }
 ```
 
@@ -350,7 +366,7 @@ except* Exception as eg:
 
 ```python
 import json
-from analitiq_stream import Pipeline
+from src import Pipeline
 
 # Load pipeline configuration
 with open("pipeline_config.json") as f:
@@ -364,9 +380,9 @@ await pipeline.run()
 ### Advanced Usage with Modern Engine
 
 ```python
-from analitiq_stream.core.engine import StreamingEngine
-from analitiq_stream.models.engine import EngineConfig, PipelineMetricsSnapshot
-from analitiq_stream.fault_tolerance.state_manager import StateManager
+from src.core.engine import StreamingEngine
+from src.models.engine import EngineConfig, PipelineMetricsSnapshot
+from src.fault_tolerance.state_manager import StateManager
 
 # Create engine with validated configuration
 engine_config = EngineConfig(
@@ -398,7 +414,7 @@ print(f"Total records synced: {resume_info['total_records_synced']}")
 ### Pipeline Orchestration
 
 ```python
-from analitiq_stream.core.orchestrator import PipelineOrchestrator
+from src.core.orchestrator import PipelineOrchestrator
 
 # Direct orchestrator usage for custom workflows
 orchestrator = PipelineOrchestrator("custom-pipeline")
@@ -440,7 +456,7 @@ python examples/generate_credentials_template.py api dst_credentials.json
 poetry run pytest
 
 # Run with coverage
-poetry run pytest --cov=analitiq_stream --cov-report=html
+poetry run pytest --cov=src --cov-report=html
 
 # Run specific test modules
 poetry run pytest tests/test_engine_improvements.py     # Engine architecture (18 tests)
@@ -460,10 +476,10 @@ poetry run pytest -k "orchestrator"   # Run orchestration tests
 
 ```bash
 # Format and lint code
-poetry run black analitiq_stream/
-poetry run isort analitiq_stream/
-poetry run mypy analitiq_stream/      # Enhanced with comprehensive type annotations
-poetry run flake8 analitiq_stream/
+poetry run black src/
+poetry run isort src/
+poetry run mypy src/      # Enhanced with comprehensive type annotations
+poetry run flake8 src/
 
 # Run all pre-commit hooks
 poetry run pre-commit run --all-files
@@ -499,8 +515,8 @@ poetry run pre-commit run --all-files
 
 ```python
 # Pipeline-level monitoring with structured logging
-from analitiq_stream.core.engine import StreamingEngine
-from analitiq_stream.models.engine import PipelineMetricsSnapshot
+from src.core.engine import StreamingEngine
+from src.models.engine import PipelineMetricsSnapshot
 
 engine = StreamingEngine("production-pipeline")
 
@@ -535,9 +551,9 @@ logging.basicConfig(
 )
 
 # Log entries include correlation context:
-# 2025-08-18 15:34:27 - analitiq_stream.core.orchestrator - INFO - Pipeline started
+# 2025-08-18 15:34:27 - src.core.orchestrator - INFO - Pipeline started
 #   {"pipeline_id": "prod-sync", "run_id": "2025-08-18T15:34:27-a1b2", "stream_count": 3}
-# 2025-08-18 15:34:28 - analitiq_stream.core.engine - INFO - Stream processing started  
+# 2025-08-18 15:34:28 - src.core.engine - INFO - Stream processing started  
 #   {"stream_id": "transactions", "correlation_id": "2025-08-18T15:34:27-a1b2"}
 ```
 
@@ -545,6 +561,7 @@ logging.basicConfig(
 
 For detailed technical specifications:
 - **[State File Specification](STATE_SPECIFICATION.md)** - Complete parameter documentation and concurrent worker architecture
+- **[Pipeline Metrics & Athena Setup](docs/PIPELINE_METRICS_ATHENA.md)** - Athena table creation, Lambda integration, and example queries for pipeline metrics
 - **Parameter meanings**: Every state file field documented with types, examples, and purposes
 - **Concurrency model**: How multiple workers coordinate without contention
 - **Operational procedures**: Resume, scale-out, troubleshooting
@@ -555,9 +572,10 @@ For detailed technical specifications:
 
 | Parameter | Description | Example |
 |-----------|-------------|---------|
-| `replication_key` | Field used for incremental sync | `"created"` |
-| `cursor_mode` | Boundary semantics | `"inclusive"` / `"exclusive"` |
-| `safety_window_seconds` | Overlap window for late data | `120` |
+| `cursor_field` | Field(s) used for incremental sync | `["created"]` |
+| `safety_window_seconds` | Overlap window for late data (optional) | `120` |
+
+**Note**: The engine always uses **inclusive mode** (`>=`) for cursor comparison. This is safer when timestamps can repeat or arrive late. Duplicates are handled via upsert/idempotency.
 
 ### Engine Configuration
 
@@ -600,7 +618,7 @@ Working examples are available in the `examples/` directory:
 
 Run the Wise to SevDesk example:
 ```bash
-python analitiq_stream/examples/wise_to_sevdesk/run_pipeline.py
+python src/examples/wise_to_sevdesk/run_pipeline.py
 ```
 
 ## 📋 Development Commands
@@ -611,18 +629,18 @@ poetry install
 pre-commit install
 
 # Run example pipelines  
-python analitiq_stream/examples/basic-pipeline/simple_pipeline.py
-python analitiq_stream/examples/wise_to_sevdesk/pipeline.py
+python src/examples/basic-pipeline/simple_pipeline.py
+python src/examples/wise_to_sevdesk/pipeline.py
 
 # Testing and validation
 python test_credentials.py
-poetry run pytest --cov=analitiq_stream
+poetry run pytest --cov=src
 ```
 
 ## 🏛 Project Structure
 
 ```
-analitiq_stream/
+src/
 ├── core/                    # Core framework components
 │   ├── engine.py           # StreamingEngine with modern architecture
 │   ├── orchestrator.py     # PipelineOrchestrator for concurrent execution
@@ -668,18 +686,301 @@ analitiq_stream/
 - **Exception sanitization** to prevent information leakage in error messages
 - **Configuration fingerprinting** for state consistency validation
 
-## Contributing
+## Docker Deployment
 
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+This section covers Docker configuration for deploying Analitiq Stream pipelines in containers.
 
-## License
+### Docker Files Overview
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+- `Dockerfile` - Multi-stage Docker build for the application
+- `docker/docker-compose.yml` - Local development and testing configuration
+- `docker/docker-compose.aws.yml` - AWS ECS-compatible configuration
+- `docker/entrypoint.py` - Container entrypoint script for pipeline execution
+- `docker/.env.example` - Example environment variables configuration
 
----
+### Quick Start
 
-**Analitiq Stream** - Built for production data pipelines with enterprise-grade reliability, monitoring, and security. 🚀
+#### Local Development
+
+```bash
+# Copy environment template
+cp docker/.env.example docker/.env
+
+# Edit base environment variables (AWS config, table names, etc.)
+nano docker/.env
+
+# Build the image (for ARM machines like Apple Silicon, specify platform)
+docker buildx build --platform linux/amd64 -t analitiq-stream:latest .
+
+# Or use docker compose
+docker compose -f docker/docker-compose.yml build
+
+# Run with per-invocation variables
+docker compose -f docker/docker-compose.yml run --rm \
+  -e PIPELINE_ID=your-pipeline-uuid \
+  analitiq-stream
+```
+
+#### Using dev.env for AWS Development
+
+```bash
+# Copy dev.env to .env for AWS dev environment
+cp docker/dev.env docker/.env
+
+# Run with per-invocation variables
+docker compose -f docker/docker-compose.yml run --rm \
+  -e PIPELINE_ID=your-pipeline-uuid \
+  analitiq-stream
+```
+
+#### AWS ECS Simulation
+
+```bash
+# Use AWS-compatible configuration
+docker compose -f docker/docker-compose.aws.yml run --rm \
+  -e PIPELINE_ID=your-pipeline-uuid \
+  analitiq-stream
+```
+
+### Environment Variables
+
+Environment variables are split into two categories:
+
+#### Base Variables (set in .env file or ECS Task Definition)
+
+| Variable | Required | Default                | Description                                    |
+|----------|----------|------------------------|------------------------------------------------|
+| `ENV` | Yes | `local`                | Deployment environment: `local`, `dev`, `prod` |
+| `AWS_REGION` | No | `eu-central-1`         | AWS region for all services                    |
+| `LOCAL_CONFIG_MOUNT` | No | `/config`              | Local mount point for configs                  |
+| `LOG_LEVEL` | No | `INFO`                 | Logging level                                  |
+| `PIPELINES_TABLE` | Yes (dev/prod) | `pipelines`            | DynamoDB table for pipeline configs            |
+| `CONNECTIONS_TABLE` | Yes (dev/prod) | `connections`          | DynamoDB table for client connections          |
+| `CONNECTORS_TABLE` | Yes (dev/prod) | `connectors`           | DynamoDB table for connector definitions       |
+| `ENDPOINTS_TABLE` | Yes (dev/prod) | `connectors_endpoints` | DynamoDB table for connector endpoints         |
+| `STREAMS_TABLE` | Yes (dev/prod) | `streams`              | DynamoDB table for streams                     |
+
+#### Per-Invocation Variables (passed at runtime)
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `PIPELINE_ID` | Yes | UUID of the pipeline to execute |
+
+### Configuration Sources
+
+#### Local Mode (`ENV=local`)
+- Configurations loaded from mounted volume at `/config`
+- Directory structure: `/config/pipelines/`, `/config/connections/`, `/config/connectors_endpoints/`
+- Secrets loaded from environment variables
+
+#### AWS Mode (`ENV=dev` or `ENV=prod`)
+- Configurations loaded from DynamoDB tables
+- Secrets loaded from S3 bucket
+- AWS credentials from IAM roles (in ECS) or environment variables
+
+### Resource Configuration
+
+Docker Compose configurations include resource limits that mirror ECS task definitions:
+
+- **CPU**: 0.5-1.0 cores (512-1024 CPU units in ECS)
+- **Memory**: 1-2 GB RAM
+- **Storage**: Persistent volumes for state, logs, and dead letter queue
+
+### Volume Management
+
+Persistent data is stored in named volumes:
+- `analitiq_state`: Pipeline state and checkpoints
+- `analitiq_logs`: Application logs
+- `analitiq_deadletter`: Failed records for manual review
+
+In ECS, these would typically map to EFS volumes for shared access across tasks.
+
+### Health Checks
+
+The container includes health checks that verify:
+- Python environment is working
+- Core modules can be imported
+- Basic configuration validation
+
+### Logging
+
+- **Local**: JSON file logs with rotation
+- **AWS**: CloudWatch logs integration
+- **Format**: Structured JSON logs with timestamps, levels, and context
+
+### Debug Mode
+
+Run with debug logging:
+```bash
+docker compose -f docker/docker-compose.yml run --rm \
+  -e PIPELINE_ID=your-pipeline-uuid \
+  -e LOG_LEVEL=DEBUG \
+  analitiq-stream
+```
+
+### Security Considerations
+
+- Container runs as non-root user (`appuser`)
+- Secrets should be passed via environment variables in ECS task definitions
+- Use IAM roles instead of access keys in ECS
+- Network policies should restrict outbound connections to required services
+
+### Troubleshooting
+
+**Configuration Not Found**
+- Verify `PIPELINE_ID` exists in the specified config source
+- Check mount paths for local mode
+- Verify S3 bucket access for AWS mode
+
+**AWS Credentials**
+- Ensure IAM roles are properly configured for ECS
+- For local AWS testing, verify AWS credentials are set
+
+**Network Connectivity**
+- Verify external API endpoints are accessible
+- Check security groups and NAT gateway configuration for ECS
+
+## AWS Deployment
+
+Infrastructure (Batch compute environment, job queue, IAM roles) is managed by the Terraform team. This section covers Docker image deployment and integration.
+
+### Build and Push Docker Image
+
+**Important:** When building on Apple Silicon (M1/M2/M3) or other ARM-based machines, you must specify the target platform for AWS compatibility:
+
+```bash
+# Build for linux/amd64 (required for AWS ECS/Batch)
+docker buildx build --platform linux/amd64 -t analitiq-stream:latest .
+
+# Login to ECR
+AWS_PROFILE=your-profile aws ecr get-login-password --region eu-central-1 | \
+    docker login --username AWS --password-stdin <account-id>.dkr.ecr.eu-central-1.amazonaws.com
+
+# Tag and push
+docker tag analitiq-stream:latest <account-id>.dkr.ecr.eu-central-1.amazonaws.com/analitiq-stream:latest
+docker push <account-id>.dkr.ecr.eu-central-1.amazonaws.com/analitiq-stream:latest
+```
+
+**Using deploy script:**
+
+```bash
+# Deploy to dev (default)
+./scripts/deploy-ecr.sh
+
+# Deploy to dev with specific tag
+./scripts/deploy-ecr.sh dev v1.2.3
+
+# Deploy to prod
+./scripts/deploy-ecr.sh prod latest
+```
+
+ECR repository naming convention: `analitiq-stream-{env}` (e.g., `analitiq-stream-dev`, `analitiq-stream-prod`)
+
+### Container Requirements for Batch Job Definition
+
+The Terraform team needs to create a Batch Job Definition with these specifications:
+
+**Runtime Environment Variables (via `containerOverrides`):**
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `PIPELINE_ID` | Yes | UUID of the pipeline to execute |
+
+**Static Environment Variables (baked into job definition):**
+
+| Variable            | Required | Description | Example                |
+|---------------------|----------|-------------|------------------------|
+| `ENV`               | Yes | Environment name | `dev`, `prod`          |
+| `AWS_REGION`        | No | AWS region (default: eu-central-1) | `eu-central-1`         |
+| `PIPELINES_TABLE`   | Yes | DynamoDB table for pipeline configs | `pipelines`            |
+| `CONNECTIONS_TABLE` | Yes | DynamoDB table for client connections | `client_connections`   |
+| `CONNECTORS_TABLE`  | Yes | DynamoDB table for connector definitions | `connectors`           |
+| `ENDPOINTS_TABLE`   | Yes | DynamoDB table for service endpoints | `connectors_endpoints` |
+| `STREAMS_TABLE`     | Yes | DynamoDB table for service endpoints | `streams`              |
+| `LOG_LEVEL`         | No | Logging verbosity (default: INFO) | `INFO`                 |
+
+S3 bucket names are automatically constructed as `analitiq-{purpose}-{env}` (e.g., `analitiq-secrets-dev`, `analitiq-client-pipeline-state-dev`).
+
+**Resource Requirements:**
+
+| Resource | Recommended |
+|----------|-------------|
+| vCPU | 0.5 - 1.0 |
+| Memory | 1024 - 2048 MB |
+| Timeout | 3600 seconds |
+
+**IAM Permissions Required (Task Role):**
+
+- `s3:GetObject`, `s3:PutObject`, `s3:ListBucket` on secrets, state, logs, and DLQ buckets
+- `dynamodb:GetItem`, `dynamodb:Query`, `dynamodb:Scan` on `pipelines`, `connections`, `connectors`, `connectors_endpoints` tables
+- `logs:CreateLogGroup`, `logs:CreateLogStream`, `logs:PutLogEvents`
+
+### Invoking the Container
+
+The Lambda that triggers pipeline runs should call `batch:SubmitJob` with:
+
+- **Job Queue**: Existing Terraform-managed queue (e.g., `analitiq-pipelines`)
+- **Job Definition**: Points to this container image
+- **Container Overrides**: Pass `PIPELINE_ID` as environment variable
+
+Example:
+```python
+import boto3
+
+batch = boto3.client('batch', region_name='eu-central-1')
+
+batch.submit_job(
+    jobName='pipeline-run-2025-01-15',
+    jobQueue='analitiq-pipelines',
+    jobDefinition='analitiq-stream-dev',
+    containerOverrides={
+        'environment': [
+            {'name': 'PIPELINE_ID', 'value': 'a1b2c3d4-e5f6-7890-abcd-ef1234567890'}
+        ]
+    }
+)
+```
+
+### Production Deployment (ECS)
+
+For production ECS deployment, the `docker/docker-compose.aws.yml` serves as a reference. Create an ECS task definition with:
+
+1. **Container Definition**:
+   - Image: `analitiq-stream:latest`
+   - CPU: 1024 units
+   - Memory: 2048 MB
+   - Base environment variables (ENV, AWS_REGION, table names) in task definition
+
+2. **Container Overrides** (per-invocation):
+   - Pass `PIPELINE_ID` when starting tasks via RunTask API or EventBridge
+
+3. **IAM Role**: Attach policy with permissions for:
+   - DynamoDB: Read access to configuration tables
+   - S3: Read/write access to secrets, state, logs, and DLQ buckets
+   - CloudWatch: Write access for logging
+
+4. **VPC Configuration**: Deploy in private subnets with NAT gateway for external API access
+
+5. **Storage**: Use EFS volumes for persistent state if needed
+
+### Local Docker Testing
+
+```shell
+docker run --rm -it \
+    -e ENV=dev \
+    -e PIPELINE_ID=a1b2c3d4-e5f6-7890-abcd-ef1234567890 \
+    -e AWS_REGION=eu-central-1 \
+    -e AWS_ACCESS_KEY_ID="$(aws configure get aws_access_key_id)" \
+    -e AWS_SECRET_ACCESS_KEY="$(aws configure get aws_secret_access_key)" \
+    -e AWS_SESSION_TOKEN="$(aws configure get aws_session_token)" \
+    -e PIPELINES_TABLE=pipelines \
+    -e CONNECTIONS_TABLE=connections \
+    -e CONNECTORS_TABLE=connectors \
+    -e ENDPOINTS_TABLE=connectors_endpoints \
+    -e STREAMS_TABLE=streams \
+    -e LOG_LEVEL=DEBUG \
+    -v analitiq_state:/app/state \
+    -v analitiq_logs:/app/logs \
+    -v analitiq_deadletter:/app/deadletter \
+    analitiq-stream:latest
+```

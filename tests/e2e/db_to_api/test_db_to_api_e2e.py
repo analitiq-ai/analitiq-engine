@@ -6,8 +6,8 @@ import asyncio
 from pathlib import Path
 from typing import Dict
 
-from analitiq_stream.core.pipeline import Pipeline
-from analitiq_stream.fault_tolerance.dead_letter_queue import DeadLetterQueue
+from src.core.pipeline import Pipeline
+from src.fault_tolerance.dead_letter_queue import DeadLetterQueue
 
 
 def _configure(pipeline: Pipeline, temp_dirs: Dict[str, Path]) -> None:
@@ -37,8 +37,8 @@ def test_db_to_api_pipeline_formats_payload_for_destination(
         "streams": {
             stream_id: {
                 "name": "DB to API",
-                "src": {"endpoint_id": source_endpoint},
-                "dst": {"endpoint_id": destination_endpoint},
+                "source": {"endpoint_id": source_endpoint},
+                "destination": {"endpoint_id": destination_endpoint},
                 "mapping": {
                     "field_mappings": {
                         "id": "id",

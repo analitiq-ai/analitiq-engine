@@ -1,0 +1,26 @@
+
+name: "Wise Multi-Stream to SevDesk Integration"
+description: "Wise Multi-Stream to SevDesk Integration"
+tags:
+  - finance
+  - wise
+  - sevdesk
+
+# Connection aliases are generated/managed by the product (UI/back-end),
+# users simply select connections in the UI.
+connections:
+  - conn_1: "b4904c77-0a4a-4a8d-a768-4a8b5f2f2414"
+  - conn_2: "b452b1b2-34f9-4175-a47b-3dd6a4012230"
+  # optional future:
+  # - dlq: "deadletter-connection-uuid"
+
+runtime:
+  # Default error-handling policy; streams and individual field assignments
+  # may override on a case-by-case basis.
+  error_handling:
+    strategy: dlq
+
+  schedule:
+    type: interval # can be one of: manual, interval, cron
+    timezone: UTC
+    interval_minutes: "1440"

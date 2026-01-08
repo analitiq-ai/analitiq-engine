@@ -4,17 +4,20 @@ import json
 import os
 import tempfile
 from pathlib import Path
-from typing import Dict, Any
+from typing import Any, Dict
+from unittest.mock import patch
 
 import pytest
 from pydantic import ValidationError
 
-from analitiq_stream.core.pipeline_config_prep import (
+from src.core.pipeline_config_prep import (
     PipelineConfigPrep,
     PipelineConfigPrepSettings,
     validate_pipeline_config,
-    validate_transformations,
-    expand_required_vars
+    validate_stream_config,
+    expand_required_vars,
+    find_unexpanded_placeholders,
+    validate_no_unexpanded_placeholders,
 )
 
 
@@ -22,44 +25,104 @@ from analitiq_stream.core.pipeline_config_prep import (
 def temp_config_dir():
     """Create temporary directory with config structure."""
     with tempfile.TemporaryDirectory() as temp_dir:
-        # Create subdirectories
+        # Create subdirectories for new structure
         Path(temp_dir, "pipelines").mkdir()
-        Path(temp_dir, "hosts").mkdir()
+        Path(temp_dir, "streams").mkdir()
+        Path(temp_dir, "connections").mkdir()
         Path(temp_dir, "endpoints").mkdir()
+        Path(temp_dir, "secrets").mkdir()
+        # Create connectors directory structure (for path-based endpoints)
+        Path(temp_dir, "connectors", "source_api", "endpoints").mkdir(parents=True)
+        Path(temp_dir, "connectors", "dest_api", "endpoints").mkdir(parents=True)
+        Path(temp_dir, "connectors", "dest_db", "endpoints").mkdir(parents=True)
         yield temp_dir
 
 
 @pytest.fixture
+def mock_analitiq_config(temp_config_dir):
+    """Fixture that patches load_analitiq_config to use the temp directory paths."""
+    mock_config = {
+        "paths": {
+            "connectors": f"{temp_config_dir}/connectors",
+            "connections": f"{temp_config_dir}/connections",
+            "endpoints": f"{temp_config_dir}/endpoints",
+            "streams": f"{temp_config_dir}/streams",
+            "pipelines": f"{temp_config_dir}/pipelines",
+            "secrets": f"{temp_config_dir}/secrets",
+        }
+    }
+    with patch("src.core.pipeline_config_prep.load_analitiq_config", return_value=mock_config):
+        yield mock_config
+
+
+@pytest.fixture
 def valid_pipeline_config():
-    """Valid pipeline configuration for testing."""
+    """Valid pipeline configuration for testing (new ID-based format)."""
     return {
+        "version": 1,
+        "client_id": "client-123",
         "pipeline_id": "test-pipeline-123",
         "name": "Test Pipeline",
-        "version": "1.0",
-        "engine_config": {
-            "batch_size": 1000,
-            "max_concurrent_batches": 10,
-            "buffer_size": 10000
-        },
-        "src": {
-            "host_id": "src-host-123",
-            "endpoint_id": "src-endpoint-456"
-        },
-        "dst": {
-            "host_id": "dst-host-789",
-            "endpoint_id": "dst-endpoint-012",
-            "refresh_mode": "upsert",
-            "batch_size": 100
-        },
-        "streams": {
-            "test-stream": {
-                "src": {
-                    "endpoint_id": "src-endpoint-456"
-                },
-                "dst": {
-                    "endpoint_id": "dst-endpoint-012"
+        "status": "active",
+        "is_active": True,
+        "tags": ["test"],
+        "connections": {
+            "source": {
+                "conn_src": "source-connection-id"
+            },
+            "destinations": [
+                {
+                    "conn_dst": "dest-connection-id"
                 }
+            ]
+        },
+        "runtime": {
+            "expression": {"lang": "jsonata"},
+            "logging": {"log_level": "INFO"},
+            "error_handling": {"max_retries": 3},
+            "retry": {"max_attempts": 5},
+            "batching": {"batch_size": 100},
+            "engine": {"buffer_size": 5000},
+            "schedule": {"type": "interval", "interval_minutes": 60}
+        },
+        "function_catalog": {"catalog_id": "core", "version": 1}
+    }
+
+
+@pytest.fixture
+def valid_stream_config():
+    """Valid stream configuration for testing (new path-based format)."""
+    return {
+        "version": 1,
+        "stream_id": "stream-456",
+        "pipeline_id": "test-pipeline-123",
+        "client_id": "client-123",
+        "status": "active",
+        "is_enabled": True,
+        "source": {
+            "connection_ref": "conn_src",
+            "endpoint": "source_api/endpoints/data.json",
+            "primary_key": ["id"],
+            "replication": {
+                "method": "incremental",
+                "cursor_field": ["created_at"]
             }
+        },
+        "destinations": [
+            {
+                "connection_ref": "conn_dst",
+                "endpoint": "dest_api/endpoints/data.json",
+                "write": {"mode": "upsert"},
+                "batching": {"supported": True, "size": 100}
+            }
+        ],
+        "mapping": {
+            "assignments": [
+                {
+                    "target": {"path": ["id"], "type": "string", "nullable": False},
+                    "value": {"kind": "expr", "expr": {"op": "get", "path": ["id"]}}
+                }
+            ]
         }
     }
 
@@ -71,20 +134,6 @@ def incomplete_pipeline_config():
         "name": "Incomplete Pipeline",
         "version": "1.0"
         # Missing pipeline_id
-    }
-
-
-@pytest.fixture
-def invalid_structure_config():
-    """Pipeline config with wrong structure types."""
-    return {
-        "pipeline_id": "test-pipeline",
-        "engine_config": "should_be_dict_not_string",  # Wrong type
-        "src": ["should", "be", "dict"],  # Wrong type
-        "dst": {
-            "refresh_mode": "invalid_mode",  # Invalid value
-            "batch_size": "not_an_integer"  # Wrong type
-        }
     }
 
 
@@ -102,8 +151,8 @@ def config_with_env_vars():
 
 
 @pytest.fixture
-def valid_host_config():
-    """Valid host configuration."""
+def valid_connection_config():
+    """Valid connection configuration."""
     return {
         "type": "api",
         "host": "https://api.example.com",
@@ -138,53 +187,6 @@ def valid_endpoint_config():
     }
 
 
-@pytest.fixture
-def invalid_transformations():
-    """Invalid transformation configurations."""
-    return [
-        {
-            # Missing required 'type' field
-            "mappings": {"old": "new"}
-        },
-        {
-            "type": "invalid_type",  # Invalid transformation type
-            "field": "test"
-        },
-        {
-            "type": "field_mapping"
-            # Missing required 'mappings' field
-        },
-        {
-            "type": "computed_field"
-            # Missing required 'field' field
-        }
-    ]
-
-
-@pytest.fixture
-def valid_transformations():
-    """Valid transformation configurations."""
-    return [
-        {
-            "type": "field_mapping",
-            "mappings": {
-                "old_field": "new_field",
-                "another_old": "another_new"
-            }
-        },
-        {
-            "type": "computed_field",
-            "field": "computed_value",
-            "expression": "now()"
-        },
-        {
-            "type": "value_transformation",
-            "field": "status",
-            "transformation": "uppercase"
-        }
-    ]
-
-
 class TestPipelineConfigPrepSettings:
     """Test PipelineConfigPrepSettings validation and behavior."""
 
@@ -195,21 +197,18 @@ class TestPipelineConfigPrepSettings:
         assert settings.env == "local"
         assert settings.pipeline_id == "test-pipeline"
         assert settings.aws_region == "eu-central-1"
-        assert settings.s3_config_bucket is None
-        assert settings.local_config_mount is None  # Default not applied until validation
-        assert settings.use_secrets_manager is False
 
     def test_custom_local_settings(self):
         """Test custom settings for local environment."""
         settings = PipelineConfigPrepSettings(
             env="local",
             pipeline_id="custom-pipeline",
-            local_config_mount="/custom/config"
+            client_id="client-123"
         )
 
         assert settings.env == "local"
         assert settings.pipeline_id == "custom-pipeline"
-        assert settings.local_config_mount == "/custom/config"
+        assert settings.client_id == "client-123"
 
     def test_missing_pipeline_id_raises_validation_error(self):
         """Test that missing pipeline_id raises ValidationError."""
@@ -221,19 +220,8 @@ class TestPipelineConfigPrepSettings:
 
     def test_empty_pipeline_id_validation(self):
         """Test validation of empty pipeline_id."""
-        # Empty string should be allowed by Pydantic but caught by our validation
         settings = PipelineConfigPrepSettings(pipeline_id="")
         assert settings.pipeline_id == ""
-
-    def test_aws_environment_defaults(self):
-        """Test AWS environment gets default bucket."""
-        settings = PipelineConfigPrepSettings(
-            env="prod",
-            pipeline_id="prod-pipeline"
-        )
-
-        assert settings.env == "prod"
-        assert settings.s3_config_bucket is None  # Default not applied automatically
 
 
 class TestValidatePipelineConfig:
@@ -263,145 +251,64 @@ class TestValidatePipelineConfig:
         config = {"pipeline_id": None}
         assert validate_pipeline_config(config) is False
 
-    def test_invalid_engine_config_type_fails(self):
-        """Test that invalid engine_config type fails validation."""
+
+class TestValidateStreamConfig:
+    """Test validate_stream_config function."""
+
+    def test_valid_config_passes(self, valid_stream_config):
+        """Test that valid stream configuration passes validation."""
+        assert validate_stream_config(valid_stream_config) is True
+
+    def test_missing_stream_id_fails(self):
+        """Test that missing stream_id fails validation."""
         config = {
-            "pipeline_id": "test",
-            "engine_config": "should_be_dict"
+            "source": {"connection_ref": "conn", "endpoint": "api/endpoints/data.json"},
+            "destinations": [{"connection_ref": "conn", "endpoint": "api/endpoints/data.json"}]
         }
-        assert validate_pipeline_config(config) is False
+        assert validate_stream_config(config) is False
 
-    def test_invalid_engine_config_numeric_fields_fail(self):
-        """Test that invalid numeric fields in engine_config fail validation."""
+    def test_missing_source_fails(self):
+        """Test that missing source fails validation."""
         config = {
-            "pipeline_id": "test",
-            "engine_config": {
-                "batch_size": "not_an_integer",
-                "max_concurrent_batches": 10.5,  # Should be int, not float
-                "buffer_size": None
-            }
+            "stream_id": "test",
+            "destinations": [{"connection_ref": "conn", "endpoint": "api/endpoints/data.json"}]
         }
-        assert validate_pipeline_config(config) is False
+        assert validate_stream_config(config) is False
 
-    def test_invalid_src_dst_type_fails(self):
-        """Test that invalid src/dst types fail validation."""
+    def test_missing_destinations_fails(self):
+        """Test that missing destinations fails validation."""
         config = {
-            "pipeline_id": "test",
-            "src": "should_be_dict",
-            "dst": ["should", "be", "dict"]
+            "stream_id": "test",
+            "source": {"connection_ref": "conn", "endpoint": "api/endpoints/data.json"}
         }
-        assert validate_pipeline_config(config) is False
+        assert validate_stream_config(config) is False
 
-    def test_invalid_refresh_mode_fails(self):
-        """Test that invalid refresh_mode fails validation."""
+    def test_empty_destinations_fails(self):
+        """Test that empty destinations array fails validation."""
         config = {
-            "pipeline_id": "test",
-            "dst": {
-                "refresh_mode": "invalid_mode"
-            }
+            "stream_id": "test",
+            "source": {"connection_ref": "conn", "endpoint": "api/endpoints/data.json"},
+            "destinations": []
         }
-        assert validate_pipeline_config(config) is False
+        assert validate_stream_config(config) is False
 
-    def test_valid_refresh_modes_pass(self):
-        """Test that valid refresh_modes pass validation."""
-        valid_modes = ["insert", "upsert", "truncate_insert"]
-
-        for mode in valid_modes:
-            config = {
-                "pipeline_id": "test",
-                "dst": {
-                    "refresh_mode": mode
-                }
-            }
-            assert validate_pipeline_config(config) is True
-
-    def test_invalid_batch_size_fails(self):
-        """Test that invalid batch_size fails validation."""
+    def test_missing_source_connection_ref_fails(self):
+        """Test that missing source.connection_ref fails validation."""
         config = {
-            "pipeline_id": "test",
-            "dst": {
-                "batch_size": 0  # Should be positive
-            }
+            "stream_id": "test",
+            "source": {"endpoint": "api/endpoints/data.json"},
+            "destinations": [{"connection_ref": "conn", "endpoint": "api/endpoints/data.json"}]
         }
-        assert validate_pipeline_config(config) is False
+        assert validate_stream_config(config) is False
 
+    def test_missing_destination_endpoint_fails(self):
+        """Test that missing destination endpoint fails validation."""
         config = {
-            "pipeline_id": "test",
-            "dst": {
-                "batch_size": -10  # Should be positive
-            }
+            "stream_id": "test",
+            "source": {"connection_ref": "conn", "endpoint": "api/endpoints/data.json"},
+            "destinations": [{"connection_ref": "conn"}]
         }
-        assert validate_pipeline_config(config) is False
-
-        config = {
-            "pipeline_id": "test",
-            "dst": {
-                "batch_size": "not_an_integer"
-            }
-        }
-        assert validate_pipeline_config(config) is False
-
-
-class TestValidateTransformations:
-    """Test validate_transformations function."""
-
-    def test_valid_transformations_pass(self, valid_transformations):
-        """Test that valid transformations pass validation."""
-        assert validate_transformations(valid_transformations) is True
-
-    def test_non_list_transformations_fail(self):
-        """Test that non-list transformations fail validation."""
-        assert validate_transformations("not_a_list") is False
-        assert validate_transformations({"type": "field_mapping"}) is False
-        assert validate_transformations(None) is False
-
-    def test_non_dict_transformation_items_fail(self):
-        """Test that non-dict transformation items fail validation."""
-        transformations = [
-            "not_a_dict",
-            {"type": "field_mapping", "mappings": {}},  # Valid one
-            123  # Invalid one
-        ]
-        assert validate_transformations(transformations) is False
-
-    def test_missing_type_field_fails(self):
-        """Test that missing type field fails validation."""
-        transformations = [
-            {"mappings": {"old": "new"}}  # Missing 'type'
-        ]
-        assert validate_transformations(transformations) is False
-
-    def test_invalid_transformation_type_fails(self):
-        """Test that invalid transformation type fails validation."""
-        transformations = [
-            {"type": "invalid_type", "field": "test"}
-        ]
-        assert validate_transformations(transformations) is False
-
-    def test_field_mapping_missing_mappings_fails(self):
-        """Test that field_mapping without mappings fails validation."""
-        transformations = [
-            {"type": "field_mapping"}  # Missing 'mappings'
-        ]
-        assert validate_transformations(transformations) is False
-
-    def test_computed_field_missing_field_fails(self):
-        """Test that computed_field without field fails validation."""
-        transformations = [
-            {"type": "computed_field", "expression": "now()"}  # Missing 'field'
-        ]
-        assert validate_transformations(transformations) is False
-
-    def test_value_transformation_missing_field_fails(self):
-        """Test that value_transformation without field fails validation."""
-        transformations = [
-            {"type": "value_transformation", "transformation": "uppercase"}  # Missing 'field'
-        ]
-        assert validate_transformations(transformations) is False
-
-    def test_empty_transformations_list_passes(self):
-        """Test that empty transformations list passes validation."""
-        assert validate_transformations([]) is True
+        assert validate_stream_config(config) is False
 
 
 class TestExpandRequiredVars:
@@ -409,7 +316,6 @@ class TestExpandRequiredVars:
 
     def test_expand_existing_env_vars(self, config_with_env_vars):
         """Test expansion of existing environment variables."""
-        # Set required environment variables
         os.environ["DATABASE_URL"] = "postgresql://localhost:5432/test"
         os.environ["API_KEY"] = "test-api-key"
         os.environ["NESTED_SECRET"] = "secret-value"
@@ -419,28 +325,37 @@ class TestExpandRequiredVars:
 
             assert expanded["database_url"] == "postgresql://localhost:5432/test"
             assert expanded["api_key"] == "test-api-key"
-            # Note: expand_required_vars only handles top-level keys, not nested dicts
-            assert expanded["nested"] == {"secret": "${NESTED_SECRET}"}  # Not expanded
-            assert expanded["pipeline_id"] == "env-test-pipeline"  # No var expansion
+            assert expanded["nested"]["secret"] == "secret-value"
+            assert expanded["pipeline_id"] == "env-test-pipeline"
         finally:
-            # Clean up environment variables
             for var in ["DATABASE_URL", "API_KEY", "NESTED_SECRET"]:
                 os.environ.pop(var, None)
 
     def test_missing_env_var_raises_error(self):
-        """Test that missing environment variable raises EnvironmentError."""
+        """Test that missing environment variable raises EnvironmentError in strict mode."""
         config = {
             "pipeline_id": "test",
             "missing_var": "${NONEXISTENT_VAR}"
         }
 
-        # Ensure the variable doesn't exist
         os.environ.pop("NONEXISTENT_VAR", None)
 
         with pytest.raises(EnvironmentError) as exc_info:
-            expand_required_vars(config)
+            expand_required_vars(config, strict=True)
 
         assert "Missing required environment variable: NONEXISTENT_VAR" in str(exc_info.value)
+
+    def test_missing_env_var_kept_non_strict(self):
+        """Test that missing environment variable is kept in non-strict mode."""
+        config = {
+            "pipeline_id": "test",
+            "missing_var": "${NONEXISTENT_VAR}"
+        }
+
+        os.environ.pop("NONEXISTENT_VAR", None)
+
+        expanded = expand_required_vars(config, strict=False)
+        assert expanded["missing_var"] == "${NONEXISTENT_VAR}"
 
     def test_no_vars_to_expand(self):
         """Test config with no environment variables to expand."""
@@ -455,109 +370,128 @@ class TestExpandRequiredVars:
         expanded = expand_required_vars(config)
         assert expanded == config
 
-    def test_malformed_var_syntax_ignored(self):
-        """Test that malformed variable syntax is ignored (not expanded)."""
-        config = {
-            "pipeline_id": "test",
-            "malformed1": "$MISSING_BRACES",
-            "malformed2": "${UNCLOSED_BRACE",
-            "malformed3": "${}",  # Empty variable name
-            "normal": "normal_value"
-        }
 
-        expanded = expand_required_vars(config)
-        # Malformed syntax should be left as-is
-        assert expanded["malformed1"] == "$MISSING_BRACES"
-        assert expanded["malformed2"] == "${UNCLOSED_BRACE"
-        assert expanded["malformed3"] == "${}"
-        assert expanded["normal"] == "normal_value"
+class TestFindUnexpandedPlaceholders:
+    """Test find_unexpanded_placeholders function."""
+
+    def test_finds_simple_placeholder(self):
+        """Test finding simple placeholder."""
+        config = {"key": "${VALUE}"}
+        unexpanded = find_unexpanded_placeholders(config)
+        assert len(unexpanded) == 1
+        assert unexpanded[0][0] == "key"
+        assert unexpanded[0][1] == "${VALUE}"
+
+    def test_finds_nested_placeholder(self):
+        """Test finding nested placeholder."""
+        config = {"outer": {"inner": "${VALUE}"}}
+        unexpanded = find_unexpanded_placeholders(config)
+        assert len(unexpanded) == 1
+        assert "inner" in unexpanded[0][0]
+
+    def test_finds_multiple_placeholders(self):
+        """Test finding multiple placeholders."""
+        config = {
+            "key1": "${VALUE1}",
+            "key2": "${VALUE2}",
+            "nested": {"key3": "${VALUE3}"}
+        }
+        unexpanded = find_unexpanded_placeholders(config)
+        assert len(unexpanded) == 3
+
+    def test_no_placeholders_returns_empty(self):
+        """Test that config without placeholders returns empty list."""
+        config = {"key": "value", "number": 123}
+        unexpanded = find_unexpanded_placeholders(config)
+        assert len(unexpanded) == 0
+
+
+class TestValidateNoUnexpandedPlaceholders:
+    """Test validate_no_unexpanded_placeholders function."""
+
+    def test_valid_config_passes(self):
+        """Test that config without placeholders passes."""
+        config = {"key": "value"}
+        validate_no_unexpanded_placeholders(config, "test")
+
+    def test_config_with_placeholders_raises(self):
+        """Test that config with placeholders raises ValueError."""
+        config = {"key": "${VALUE}"}
+        with pytest.raises(ValueError) as exc_info:
+            validate_no_unexpanded_placeholders(config, "test")
+        assert "unexpanded placeholder" in str(exc_info.value).lower()
 
 
 class TestPipelineConfigPrepLocal:
     """Test PipelineConfigPrep class with local filesystem operations."""
 
-    def test_initialization_local_mode(self, temp_config_dir):
+    def test_initialization_local_mode(self, temp_config_dir, mock_analitiq_config):
         """Test initialization in local mode."""
         settings = PipelineConfigPrepSettings(
             env="local",
-            pipeline_id="test-pipeline",
-            local_config_mount=temp_config_dir
+            pipeline_id="test-pipeline"
         )
 
         prep = PipelineConfigPrep(settings)
 
         assert prep.settings == settings
-        assert prep.is_local_mode is True
+        assert prep.is_cloud_env is False  # local mode = not cloud
         assert prep.credentials_manager is not None
 
-    def test_load_settings_from_env(self):
-        """Test loading settings from environment variables."""
-        # Set environment variables
-        os.environ["ENV"] = "local"
-        os.environ["PIPELINE_ID"] = "env-pipeline"
-        os.environ["LOCAL_CONFIG_MOUNT"] = "/custom/mount"
-
-        try:
-            settings = PipelineConfigPrep._load_settings_from_env()
-
-            assert settings.env == "local"
-            assert settings.pipeline_id == "env-pipeline"
-            assert settings.local_config_mount == "/custom/mount"
-        finally:
-            # Clean up environment variables
-            for var in ["ENV", "PIPELINE_ID", "LOCAL_CONFIG_MOUNT"]:
-                os.environ.pop(var, None)
-
-    def test_validate_environment_success(self, temp_config_dir):
+    def test_validate_environment_success(self, temp_config_dir, mock_analitiq_config):
         """Test successful environment validation."""
         settings = PipelineConfigPrepSettings(
             env="local",
-            pipeline_id="test-pipeline",
-            local_config_mount=temp_config_dir
+            pipeline_id="test-pipeline"
         )
 
         prep = PipelineConfigPrep(settings)
-        # Should not raise any exception
         prep.validate_environment()
 
-    def test_validate_environment_missing_pipeline_id(self, temp_config_dir):
+    def test_validate_environment_missing_pipeline_id(self, temp_config_dir, mock_analitiq_config):
         """Test environment validation with missing pipeline ID."""
         settings = PipelineConfigPrepSettings(
             env="local",
-            pipeline_id="",
-            local_config_mount=temp_config_dir
+            pipeline_id=""
         )
 
-        # Constructor should fail because it calls validate_environment
         with pytest.raises(RuntimeError) as exc_info:
             PipelineConfigPrep(settings)
 
         assert "PIPELINE_ID environment variable is required" in str(exc_info.value)
 
-    def test_validate_environment_missing_mount_point(self):
-        """Test environment validation with missing mount point."""
-        settings = PipelineConfigPrepSettings(
-            env="local",
-            pipeline_id="test-pipeline",
-            local_config_mount="/nonexistent/path"
-        )
+    def test_validate_environment_missing_pipelines_directory(self, temp_config_dir):
+        """Test environment validation with missing pipelines directory."""
+        # Create mock config pointing to non-existent pipelines directory
+        mock_config = {
+            "paths": {
+                "connectors": f"{temp_config_dir}/connectors",
+                "connections": f"{temp_config_dir}/connections",
+                "endpoints": f"{temp_config_dir}/endpoints",
+                "streams": f"{temp_config_dir}/streams",
+                "pipelines": "/nonexistent/pipelines",
+                "secrets": f"{temp_config_dir}/secrets",
+            }
+        }
+        with patch("src.core.pipeline_config_prep.load_analitiq_config", return_value=mock_config):
+            settings = PipelineConfigPrepSettings(
+                env="local",
+                pipeline_id="test-pipeline"
+            )
 
-        # Constructor should fail because it calls validate_environment
-        with pytest.raises(RuntimeError) as exc_info:
-            PipelineConfigPrep(settings)
+            with pytest.raises(RuntimeError) as exc_info:
+                PipelineConfigPrep(settings)
 
-        assert "Local config mount point does not exist" in str(exc_info.value)
+            assert "Pipelines directory not found" in str(exc_info.value)
 
-    def test_load_local_json_success(self, temp_config_dir):
+    def test_load_local_json_success(self, temp_config_dir, mock_analitiq_config):
         """Test successful local JSON loading."""
         settings = PipelineConfigPrepSettings(
             env="local",
-            pipeline_id="test-pipeline",
-            local_config_mount=temp_config_dir
+            pipeline_id="test-pipeline"
         )
         prep = PipelineConfigPrep(settings)
 
-        # Create test file
         test_config = {"test": "value", "nested": {"key": "value"}}
         test_file = Path(temp_config_dir, "test.json")
         with open(test_file, "w") as f:
@@ -566,12 +500,11 @@ class TestPipelineConfigPrepLocal:
         result = prep._load_local_json(str(test_file))
         assert result == test_config
 
-    def test_load_local_json_file_not_found(self, temp_config_dir):
+    def test_load_local_json_file_not_found(self, temp_config_dir, mock_analitiq_config):
         """Test local JSON loading with missing file."""
         settings = PipelineConfigPrepSettings(
             env="local",
-            pipeline_id="test-pipeline",
-            local_config_mount=temp_config_dir
+            pipeline_id="test-pipeline"
         )
         prep = PipelineConfigPrep(settings)
 
@@ -580,16 +513,14 @@ class TestPipelineConfigPrepLocal:
 
         assert "Configuration file not found" in str(exc_info.value)
 
-    def test_load_local_json_invalid_json(self, temp_config_dir):
+    def test_load_local_json_invalid_json(self, temp_config_dir, mock_analitiq_config):
         """Test local JSON loading with invalid JSON."""
         settings = PipelineConfigPrepSettings(
             env="local",
-            pipeline_id="test-pipeline",
-            local_config_mount=temp_config_dir
+            pipeline_id="test-pipeline"
         )
         prep = PipelineConfigPrep(settings)
 
-        # Create invalid JSON file
         test_file = Path(temp_config_dir, "invalid.json")
         with open(test_file, "w") as f:
             f.write("{ invalid json content")
@@ -599,286 +530,439 @@ class TestPipelineConfigPrepLocal:
 
         assert "Invalid JSON" in str(exc_info.value)
 
-    def test_load_local_json_empty_file(self, temp_config_dir):
-        """Test local JSON loading with empty file."""
-        settings = PipelineConfigPrepSettings(
-            env="local",
-            pipeline_id="test-pipeline",
-            local_config_mount=temp_config_dir
-        )
-        prep = PipelineConfigPrep(settings)
 
-        # Create empty JSON file
-        test_file = Path(temp_config_dir, "empty.json")
-        with open(test_file, "w") as f:
-            f.write("")
+class TestConfigurationLoading:
+    """Test configuration loading functionality with ID-based connections."""
 
-        with pytest.raises(ValueError) as exc_info:
-            prep._load_local_json(str(test_file))
+    def write_config_files(
+        self,
+        temp_dir: str,
+        pipeline_config: Dict[str, Any],
+        stream_configs: list = None,
+        connection_configs: Dict[str, Dict[str, Any]] = None,
+        endpoint_configs: Dict[str, Dict[str, Any]] = None,
+        secret_configs: Dict[str, Dict[str, Any]] = None
+    ):
+        """Helper to write configuration files to temporary directory.
 
-        assert "Invalid JSON" in str(exc_info.value)
-
-    def test_load_config_host_success(self, temp_config_dir, valid_host_config):
-        """Test successful host config loading."""
-        # Ensure API_TOKEN is not set from other tests
-        os.environ.pop("API_TOKEN", None)
-
-        settings = PipelineConfigPrepSettings(
-            env="local",
-            pipeline_id="test-pipeline",
-            local_config_mount=temp_config_dir
-        )
-        prep = PipelineConfigPrep(settings)
-
-        # Create host config without environment variables to avoid expansion issues
-        host_config = {
-            "type": "api",
-            "host": "https://api.example.com",
-            "headers": {
-                "Authorization": "Bearer static-token",
-                "Content-Type": "application/json"
-            },
-            "rate_limit": {
-                "max_requests": 100,
-                "time_window": 60
-            }
-        }
-
-        # Write host config file
-        host_id = "test-host-123"
-        host_file = Path(temp_config_dir, "hosts", f"{host_id}.json")
-        with open(host_file, "w") as f:
-            json.dump(host_config, f)
-
-        result = prep.load_config("hosts", host_id)
-        assert result == host_config
-
-    def test_load_config_endpoint_success(self, temp_config_dir, valid_endpoint_config):
-        """Test successful endpoint config loading."""
-        settings = PipelineConfigPrepSettings(
-            env="local",
-            pipeline_id="test-pipeline",
-            local_config_mount=temp_config_dir
-        )
-        prep = PipelineConfigPrep(settings)
-
-        # Write endpoint config file
-        endpoint_id = "test-endpoint-456"
-        endpoint_file = Path(temp_config_dir, "endpoints", f"{endpoint_id}.json")
-        with open(endpoint_file, "w") as f:
-            json.dump(valid_endpoint_config, f)
-
-        result = prep.load_config("endpoints", endpoint_id)
-        assert result == valid_endpoint_config
-
-    def test_load_config_missing_file(self, temp_config_dir):
-        """Test loading config with missing file."""
-        settings = PipelineConfigPrepSettings(
-            env="local",
-            pipeline_id="test-pipeline",
-            local_config_mount=temp_config_dir
-        )
-        prep = PipelineConfigPrep(settings)
-
-        with pytest.raises(FileNotFoundError):
-            prep.load_config("hosts", "nonexistent-host")
-
-    def test_path_generation(self, temp_config_dir):
-        """Test path generation for local mode."""
-        settings = PipelineConfigPrepSettings(
-            env="local",
-            pipeline_id="test-pipeline",
-            local_config_mount=temp_config_dir
-        )
-        prep = PipelineConfigPrep(settings)
-
-        assert prep._get_pipeline_config_path() == f"{temp_config_dir}/pipelines/test-pipeline.json"
-        assert prep._get_config_path("hosts", "host-123") == f"{temp_config_dir}/hosts/host-123.json"
-        assert prep._get_config_path("endpoints", "ep-456") == f"{temp_config_dir}/endpoints/ep-456.json"
-
-
-class TestConfigurationMerging:
-    """Test configuration merging functionality."""
-
-    def write_config_files(self, temp_dir: str, pipeline_config: Dict[str, Any],
-                          host_configs: Dict[str, Dict[str, Any]] = None,
-                          endpoint_configs: Dict[str, Dict[str, Any]] = None):
-        """Helper to write configuration files to temporary directory."""
+        Args:
+            temp_dir: Temporary directory path
+            pipeline_config: Pipeline configuration dict
+            stream_configs: List of stream configuration dicts
+            connection_configs: Dict mapping connection_id to connection config
+            endpoint_configs: Dict mapping "connector_name/endpoints/file.json" to endpoint config
+            secret_configs: Dict mapping connection_id to secret content
+        """
         # Write pipeline config
         pipeline_path = Path(temp_dir, "pipelines", f"{pipeline_config['pipeline_id']}.json")
         with open(pipeline_path, "w") as f:
             json.dump(pipeline_config, f)
 
-        # Write host configs
-        if host_configs:
-            for host_id, config in host_configs.items():
-                host_path = Path(temp_dir, "hosts", f"{host_id}.json")
-                with open(host_path, "w") as f:
+        # Write stream configs
+        if stream_configs:
+            for stream in stream_configs:
+                stream_path = Path(temp_dir, "streams", f"{stream['stream_id']}.json")
+                with open(stream_path, "w") as f:
+                    json.dump(stream, f)
+
+        # Write connection configs (connections/{connection_id}.json)
+        if connection_configs:
+            for connection_id, config in connection_configs.items():
+                connection_path = Path(temp_dir, "connections", f"{connection_id}.json")
+                with open(connection_path, "w") as f:
                     json.dump(config, f)
 
-        # Write endpoint configs
+        # Write endpoint configs (connectors/{name}/endpoints/{file}.json)
         if endpoint_configs:
-            for endpoint_id, config in endpoint_configs.items():
-                endpoint_path = Path(temp_dir, "endpoints", f"{endpoint_id}.json")
-                with open(endpoint_path, "w") as f:
+            for endpoint_path, config in endpoint_configs.items():
+                full_path = Path(temp_dir, "connectors", endpoint_path)
+                full_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(full_path, "w") as f:
                     json.dump(config, f)
 
-    def test_load_pipeline_config_success(self, temp_config_dir, valid_pipeline_config):
-        """Test successful pipeline config loading."""
+        # Write secret configs (secrets/{connection_id}.json)
+        if secret_configs:
+            for connection_id, config in secret_configs.items():
+                secret_path = Path(temp_dir, "secrets", f"{connection_id}.json")
+                with open(secret_path, "w") as f:
+                    json.dump(config, f)
+
+    def test_load_pipeline_and_streams(
+        self,
+        temp_config_dir,
+        mock_analitiq_config,
+        valid_pipeline_config,
+        valid_stream_config,
+        valid_connection_config,
+        valid_endpoint_config
+    ):
+        """Test loading pipeline and stream configurations."""
+        # Create connection configs (ID-based format)
+        connection_configs = {
+            "source-connection-id": {
+                "connection_id": "source-connection-id",
+                "type": "api",
+                "host": "https://api.source.com",
+                "headers": {"Content-Type": "application/json"}
+            },
+            "dest-connection-id": {
+                "connection_id": "dest-connection-id",
+                "type": "api",
+                "host": "https://api.dest.com",
+                "headers": {"Content-Type": "application/json"}
+            }
+        }
+
+        endpoint_configs = {
+            "source_api/endpoints/data.json": valid_endpoint_config,
+            "dest_api/endpoints/data.json": valid_endpoint_config
+        }
+
+        secret_configs = {
+            "source-connection-id": {"token": "source-token"},
+            "dest-connection-id": {"token": "dest-token"}
+        }
+
+        self.write_config_files(
+            temp_config_dir,
+            valid_pipeline_config,
+            [valid_stream_config],
+            connection_configs,
+            endpoint_configs,
+            secret_configs
+        )
+
         settings = PipelineConfigPrepSettings(
             env="local",
-            pipeline_id="test-pipeline-123",
-            local_config_mount=temp_config_dir
+            pipeline_id="test-pipeline-123"
         )
         prep = PipelineConfigPrep(settings)
 
-        # Write pipeline config file
-        self.write_config_files(temp_config_dir, valid_pipeline_config)
+        pipeline, streams, _, _ = prep.create_config()
 
-        result = prep.load_pipeline_config()
-        assert result == valid_pipeline_config
+        assert pipeline.pipeline_id == "test-pipeline-123"
+        assert pipeline.name == "Test Pipeline"
+        # Check new nested connections structure
+        assert "conn_src" in pipeline.connections.source
+        assert any("conn_dst" in d for d in pipeline.connections.destinations)
+        assert len(streams) == 1
+        assert streams[0].stream_id == "stream-456"
 
-    def test_load_pipeline_config_validation_error(self, temp_config_dir):
-        """Test pipeline config loading with validation errors."""
+    def test_connection_resolution(self, temp_config_dir, mock_analitiq_config, valid_pipeline_config):
+        """Test that connections are properly resolved."""
+        connection_configs = {
+            "source-connection-id": {
+                "connection_id": "source-connection-id",
+                "type": "api",
+                "host": "https://api.source.com"
+            },
+            "dest-connection-id": {
+                "connection_id": "dest-connection-id",
+                "provider": "postgresql",
+                "host": "localhost",
+                "port": "5432",
+                "dbname": "test",
+                "username": "user",
+                "password": "pass"
+            }
+        }
+
+        secret_configs = {
+            "source-connection-id": {},
+            "dest-connection-id": {}
+        }
+
+        self.write_config_files(
+            temp_config_dir,
+            valid_pipeline_config,
+            connection_configs=connection_configs,
+            secret_configs=secret_configs
+        )
+
         settings = PipelineConfigPrepSettings(
             env="local",
-            pipeline_id="incomplete-pipeline",
-            local_config_mount=temp_config_dir
+            pipeline_id="test-pipeline-123"
         )
         prep = PipelineConfigPrep(settings)
 
-        # Write incomplete config manually (without pipeline_id)
-        incomplete_config = {"name": "Incomplete Pipeline", "version": "1.0"}
-        pipeline_path = Path(temp_config_dir, "pipelines", "incomplete-pipeline.json")
-        with open(pipeline_path, "w") as f:
-            json.dump(incomplete_config, f)
+        # Load pipeline (this resolves connections)
+        pipeline, _ = prep.load_pipeline_config()
 
-        # This should load the file successfully since it exists
-        result = prep.load_pipeline_config()
-        assert result == incomplete_config
-        assert "pipeline_id" not in result
+        # Check resolved connections (now keyed by "id:connection_id")
+        src_resolved = prep._resolved_connections.get("id:source-connection-id")
+        assert src_resolved is not None
+        assert src_resolved.connection_type == "api"
+
+        dst_resolved = prep._resolved_connections.get("id:dest-connection-id")
+        assert dst_resolved is not None
+        assert dst_resolved.connection_type == "database"
+        # Check database normalization (provider -> driver)
+        assert dst_resolved.config.get("driver") == "postgresql"
+        assert dst_resolved.config.get("database") == "test"
+        assert dst_resolved.config.get("username") == "user"
 
 
-class TestEndToEndScenarios:
-    """Test complete end-to-end scenarios with real file operations."""
+class TestEnvironmentVariableExpansion:
+    """Test environment variable expansion in configurations."""
 
-    def test_complete_config_with_env_vars(self, temp_config_dir):
-        """Test complete configuration loading with environment variable expansion."""
-        # Set up environment variables
-        os.environ["API_TOKEN"] = "test-token-123"
-        os.environ["DATABASE_PASSWORD"] = "secret-password"
+    def test_env_var_expansion_in_connection(self, temp_config_dir, mock_analitiq_config):
+        """Test that environment variables are expanded in connections."""
+        os.environ["TEST_API_TOKEN"] = "expanded-token-123"
 
         try:
-            # Create complete configuration
             pipeline_config = {
-                "pipeline_id": "complete-test",
-                "name": "Complete Test Pipeline",
-                "version": "1.0",
-                "src": {
-                    "host_id": "api-host",
-                    "endpoint_id": "api-endpoint"
-                },
-                "dst": {
-                    "host_id": "db-host",
-                    "endpoint_id": "db-endpoint"
-                },
-                "streams": {
-                    "test-stream": {
-                        "src": {"endpoint_id": "api-endpoint"},
-                        "dst": {"endpoint_id": "db-endpoint"}
-                    }
+                "pipeline_id": "test-pipeline",
+                "name": "Test",
+                "connections": {
+                    "source": {
+                        "conn": "test-api-connection"
+                    },
+                    "destinations": []
                 }
             }
 
-            host_configs = {
-                "api-host": {
-                    "type": "api",
-                    "host": "https://api.example.com",
-                    "headers": {
-                        "Authorization": "Bearer ${API_TOKEN}"
-                    }
-                },
-                "db-host": {
-                    "type": "database",
-                    "host": "localhost",
-                    "password": "${DATABASE_PASSWORD}"
-                }
+            connection_config = {
+                "connection_id": "test-api-connection",
+                "type": "api",
+                "host": "https://api.example.com",
+                "headers": {"Authorization": "Bearer ${token}"}
             }
 
-            endpoint_configs = {
-                "api-endpoint": {
-                    "endpoint": "/data",
-                    "method": "GET"
-                },
-                "db-endpoint": {
-                    "table": "target_table",
-                    "schema": "public"
-                }
-            }
+            secret_config = {"token": "${TEST_API_TOKEN}"}
 
-            # Write all config files
-            for config_type, configs in [
-                ("pipelines", {pipeline_config["pipeline_id"]: pipeline_config}),
-                ("hosts", host_configs),
-                ("endpoints", endpoint_configs)
-            ]:
-                dir_path = Path(temp_config_dir, config_type)
-                for config_id, config_data in configs.items():
-                    file_path = dir_path / f"{config_id}.json"
-                    with open(file_path, "w") as f:
-                        json.dump(config_data, f)
+            # Write pipeline config
+            pipeline_path = Path(temp_config_dir, "pipelines", "test-pipeline.json")
+            with open(pipeline_path, "w") as f:
+                json.dump(pipeline_config, f)
 
-            # Test the complete flow
+            # Write connection config
+            connection_path = Path(temp_config_dir, "connections", "test-api-connection.json")
+            with open(connection_path, "w") as f:
+                json.dump(connection_config, f)
+
+            # Write secret config
+            with open(Path(temp_config_dir, "secrets", "test-api-connection.json"), "w") as f:
+                json.dump(secret_config, f)
+
             settings = PipelineConfigPrepSettings(
                 env="local",
-                pipeline_id="complete-test",
-                local_config_mount=temp_config_dir
+                pipeline_id="test-pipeline"
             )
-
             prep = PipelineConfigPrep(settings)
 
-            # Load individual components
-            loaded_pipeline = prep.load_pipeline_config()
-            assert loaded_pipeline["pipeline_id"] == "complete-test"
+            pipeline, _ = prep.load_pipeline_config()
 
-            api_host = prep.load_config("hosts", "api-host")
-            # load_config uses CredentialsManager._expand_environment_variables which expands variables
-            assert "Bearer test-token-123" == api_host["headers"]["Authorization"]
-
-            db_host = prep.load_config("hosts", "db-host")
-            assert "secret-password" == db_host["password"]
+            resolved = prep._resolved_connections.get("id:test-api-connection")
+            assert resolved is not None
+            assert resolved.config["headers"]["Authorization"] == "Bearer expanded-token-123"
 
         finally:
-            # Clean up environment variables
-            for var in ["API_TOKEN", "DATABASE_PASSWORD"]:
-                os.environ.pop(var, None)
+            os.environ.pop("TEST_API_TOKEN", None)
 
-    def test_config_with_permission_errors(self, temp_config_dir):
-        """Test handling of file permission errors."""
+    def test_unexpanded_placeholder_warning(self, temp_config_dir, mock_analitiq_config):
+        """Test that unexpanded placeholders raise ValueError when create_config validates."""
+        pipeline_config = {
+            "pipeline_id": "test-pipeline",
+            "name": "Test",
+            "connections": {
+                "source": {
+                    "conn": "test-api-connection"
+                },
+                "destinations": []
+            }
+        }
+
+        connection_config = {
+            "connection_id": "test-api-connection",
+            "type": "api",
+            "host": "https://api.example.com",
+            "headers": {"Authorization": "Bearer ${token}"}
+        }
+
+        # Secret with placeholder that won't be expanded
+        secret_config = {"token": "${MISSING_VAR}"}
+
+        # Write pipeline config
+        pipeline_path = Path(temp_config_dir, "pipelines", "test-pipeline.json")
+        with open(pipeline_path, "w") as f:
+            json.dump(pipeline_config, f)
+
+        # Write connection config
+        connection_path = Path(temp_config_dir, "connections", "test-api-connection.json")
+        with open(connection_path, "w") as f:
+            json.dump(connection_config, f)
+
+        # Write secret config
+        with open(Path(temp_config_dir, "secrets", "test-api-connection.json"), "w") as f:
+            json.dump(secret_config, f)
+
         settings = PipelineConfigPrepSettings(
             env="local",
-            pipeline_id="permission-test",
-            local_config_mount=temp_config_dir
+            pipeline_id="test-pipeline"
         )
         prep = PipelineConfigPrep(settings)
 
-        # Create a file and make it unreadable
-        config_file = Path(temp_config_dir, "pipelines", "permission-test.json")
-        config_file.write_text('{"pipeline_id": "permission-test"}')
+        # Ensure var is not set
+        os.environ.pop("MISSING_VAR", None)
 
-        # Make file unreadable (if supported by OS)
-        try:
-            config_file.chmod(0o000)
+        # This should raise ValueError due to unexpanded placeholder validation
+        with pytest.raises(ValueError) as exc_info:
+            prep.create_config()
 
-            with pytest.raises((PermissionError, OSError)):
-                prep.load_pipeline_config()
+        assert "unexpanded placeholder" in str(exc_info.value).lower()
 
-        except (OSError, NotImplementedError):
-            # Skip test if chmod is not supported (e.g., on Windows)
-            pytest.skip("chmod not supported on this platform")
-        finally:
-            # Restore permissions for cleanup
-            try:
-                config_file.chmod(0o644)
-            except (OSError, FileNotFoundError):
-                pass
+
+class TestKeyNormalization:
+    """Test that create_config returns clean keys without internal prefixes."""
+
+    @staticmethod
+    def write_minimal_config(temp_config_dir):
+        """Write minimal valid configuration for testing."""
+        pipeline_config = {
+            "version": 1,
+            "client_id": "client-123",
+            "pipeline_id": "test-pipeline",
+            "name": "Test Pipeline",
+            "is_active": True,
+            "connections": {
+                "source": {"conn_src": "src-conn-uuid"},
+                "destinations": [{"conn_dst": "dst-conn-uuid"}]
+            },
+            "streams": [{"stream_id": "stream-uuid", "version": 1}],
+        }
+
+        # Use path-based endpoints that reference connectors directory
+        stream_config = {
+            "version": 1,
+            "stream_id": "stream-uuid",
+            "pipeline_id": "test-pipeline",
+            "client_id": "client-123",
+            "is_enabled": True,
+            "source": {
+                "connection_ref": "conn_src",
+                "endpoint": "source_api/endpoints/transfers.json",
+                "primary_key": ["id"],
+                "replication": {"method": "incremental", "cursor_field": ["created"]}
+            },
+            "destinations": [{
+                "connection_ref": "conn_dst",
+                "endpoint": "dest_api/endpoints/records.json",
+                "write": {"mode": "upsert"}
+            }]
+        }
+
+        src_connection = {
+            "connection_id": "src-conn-uuid",
+            "connector_type": "api",
+            "host": "https://api.source.com",
+            "headers": {"Authorization": "Bearer test"}
+        }
+
+        dst_connection = {
+            "connection_id": "dst-conn-uuid",
+            "connector_type": "api",
+            "host": "https://api.dest.com",
+            "headers": {}
+        }
+
+        src_endpoint = {
+            "endpoint_id": "transfers",
+            "endpoint": "/v1/transfers",
+            "method": "GET"
+        }
+
+        dst_endpoint = {
+            "endpoint_id": "records",
+            "endpoint": "/v1/records",
+            "method": "POST"
+        }
+
+        # Write all files
+        with open(Path(temp_config_dir, "pipelines", "test-pipeline.json"), "w") as f:
+            json.dump(pipeline_config, f)
+        with open(Path(temp_config_dir, "streams", "stream-uuid.json"), "w") as f:
+            json.dump(stream_config, f)
+        with open(Path(temp_config_dir, "connections", "src-conn-uuid.json"), "w") as f:
+            json.dump(src_connection, f)
+        with open(Path(temp_config_dir, "connections", "dst-conn-uuid.json"), "w") as f:
+            json.dump(dst_connection, f)
+        with open(Path(temp_config_dir, "secrets", "src-conn-uuid.json"), "w") as f:
+            json.dump({}, f)
+        with open(Path(temp_config_dir, "secrets", "dst-conn-uuid.json"), "w") as f:
+            json.dump({}, f)
+        # Write endpoints to connectors directory (path-based endpoint resolution)
+        with open(Path(temp_config_dir, "connectors", "source_api", "endpoints", "transfers.json"), "w") as f:
+            json.dump(src_endpoint, f)
+        with open(Path(temp_config_dir, "connectors", "dest_api", "endpoints", "records.json"), "w") as f:
+            json.dump(dst_endpoint, f)
+
+    def test_create_config_strips_id_prefix_from_connections(self, temp_config_dir, mock_analitiq_config):
+        """Verify connection keys are plain UUIDs, not prefixed."""
+        self.write_minimal_config(temp_config_dir)
+
+        settings = PipelineConfigPrepSettings(
+            env="local",
+            pipeline_id="test-pipeline"
+        )
+        prep = PipelineConfigPrep(settings)
+        _, _, resolved_connections, _ = prep.create_config()
+
+        # Keys should NOT have "id:" prefix
+        for key in resolved_connections.keys():
+            assert not key.startswith("id:"), f"Key should not have 'id:' prefix: {key}"
+            assert ":" not in key, f"Key should not contain colon: {key}"
+
+        # Should be able to look up by plain UUID
+        assert "src-conn-uuid" in resolved_connections
+        assert "dst-conn-uuid" in resolved_connections
+
+    def test_create_config_strips_path_prefix_from_endpoints(self, temp_config_dir, mock_analitiq_config):
+        """Verify endpoint keys are plain paths, not prefixed."""
+        self.write_minimal_config(temp_config_dir)
+
+        settings = PipelineConfigPrepSettings(
+            env="local",
+            pipeline_id="test-pipeline"
+        )
+        prep = PipelineConfigPrep(settings)
+        _, _, _, resolved_endpoints = prep.create_config()
+
+        # Keys should NOT have "path:" prefix
+        for key in resolved_endpoints.keys():
+            assert not key.startswith("path:"), f"Key should not have 'path:' prefix: {key}"
+
+    def test_internal_cache_uses_prefixed_keys(self, temp_config_dir, mock_analitiq_config):
+        """Verify internal caches still use prefixed keys."""
+        self.write_minimal_config(temp_config_dir)
+
+        settings = PipelineConfigPrepSettings(
+            env="local",
+            pipeline_id="test-pipeline"
+        )
+        prep = PipelineConfigPrep(settings)
+        prep.load_pipeline_config()
+
+        # Internal cache should use "id:" prefix
+        assert any(k.startswith("id:") for k in prep._resolved_connections.keys()), (
+            "Internal cache should use 'id:' prefix"
+        )
+
+    def test_resolved_connection_validates_against_connector_model(self, temp_config_dir, mock_analitiq_config):
+        """Verify resolved connection config can be validated by connector models."""
+        from src.models.api import APIConnectionConfig
+
+        self.write_minimal_config(temp_config_dir)
+
+        settings = PipelineConfigPrepSettings(
+            env="local",
+            pipeline_id="test-pipeline"
+        )
+        prep = PipelineConfigPrep(settings)
+        _, _, resolved_connections, _ = prep.create_config()
+
+        # Get source connection config
+        src_conn = resolved_connections["src-conn-uuid"]
+
+        # Should validate against APIConnectionConfig
+        validated = APIConnectionConfig(**src_conn.config)
+        assert validated.host == "https://api.source.com"

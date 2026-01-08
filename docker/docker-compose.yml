@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   analitiq-stream:
     build:
@@ -8,14 +6,23 @@ services:
     image: analitiq-stream:latest
     container_name: analitiq-stream-pipeline
 
-    # Environment variables - configure these for your deployment
+    # Base environment variables - these are set at service/image level
+    # Per-invocation variables (PIPELINE_ID, CLIENT_ID) must be passed at runtime:
+    #   docker compose run -e PIPELINE_ID=xxx -e CLIENT_ID=yyy analitiq-stream
     env_file: .env
     environment:
-      - ENV=local  # Change to 'dev' or 'prod' for AWS deployments
-      - PIPELINE_ID=a1b2c3d4-e5f6-7890-abcd-ef1234567890  # Replace with your pipeline ID
-      - AWS_REGION=eu-central-1
-      - S3_CONFIG_BUCKET=analitiq-config
-      - LOCAL_CONFIG_MOUNT=/config
+      - ENV=${ENV:-local}
+      - AWS_REGION=${AWS_REGION:-eu-central-1}
+      - LOCAL_CONFIG_MOUNT=${LOCAL_CONFIG_MOUNT:-/config}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      # DynamoDB table names (required for dev/prod environments)
+      - PIPELINES_TABLE=${PIPELINES_TABLE:-pipelines}
+      - CONNECTIONS_TABLE=${CONNECTIONS_TABLE:-connections}
+      - CONNECTORS_TABLE=${CONNECTORS_TABLE:-connectors}
+      - ENDPOINTS_TABLE=${ENDPOINTS_TABLE:-connectors_endpoints}
+      - ENDPOINTS_TABLE=${ENDPOINTS_TABLE:-connectors_endpoints}
+      # S3 bucket for row count metrics
+      - ROW_COUNT_BUCKET=${ROW_COUNT_BUCKET:-analitiq-client-pipeline-row-count}
 
     # Volume mounts for local development
     volumes:
@@ -37,12 +44,13 @@ services:
           cpus: '0.5'
           memory: 512M
 
-    # Restart policy
-    restart: unless-stopped
+    # Restart policy - "no" for one-shot pipeline jobs that should exit after completion
+    # Use "unless-stopped" only for long-running services
+    restart: "no"
 
     # Health check
     healthcheck:
-      test: ["CMD", "python", "-c", "from analitiq_stream.core.pipeline_config_prep import PipelineConfigPrep; print('Health check passed')"]
+      test: ["CMD", "python", "-c", "from src.core.pipeline_config_prep import PipelineConfigPrep; print('Health check passed')"]
       interval: 30s
       timeout: 10s
       retries: 3

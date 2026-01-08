@@ -7,8 +7,8 @@ import pytest
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch, mock_open, MagicMock, AsyncMock
-from analitiq_stream.connectors.api import APIConnector, ReadError
-from analitiq_stream.fault_tolerance.state_manager import StateManager
+from src.connectors.api import APIConnector, ReadError
+from src.fault_tolerance.state_manager import StateManager
 
 
 class TestAPIIncrementalReplication:
@@ -62,22 +62,20 @@ class TestAPIIncrementalReplication:
         assert effective_start == cursor  # Return original if parsing fails
 
     def test_build_replication_filter_inclusive(self):
-        """Test building replication filter in inclusive mode."""
+        """Test building replication filter (always inclusive mode)."""
         filter_param = "updatedAt"
-        cursor_mode = "inclusive"
         effective_start = "2025-08-14T11:56:03Z"
 
-        filter_params = self.connector._build_replication_filter(filter_param, cursor_mode, effective_start)
+        filter_params = self.connector._build_replication_filter(filter_param, effective_start)
 
         assert filter_params == {"updatedAt": "2025-08-14T11:56:03Z"}
 
-    def test_build_replication_filter_exclusive(self):
-        """Test building replication filter in exclusive mode."""
+    def test_build_replication_filter_numeric(self):
+        """Test building replication filter with numeric cursor."""
         filter_param = "id"
-        cursor_mode = "exclusive"
         effective_start = "950"
 
-        filter_params = self.connector._build_replication_filter(filter_param, cursor_mode, effective_start)
+        filter_params = self.connector._build_replication_filter(filter_param, effective_start)
 
         assert filter_params == {"id": "950"}
 
@@ -197,7 +195,6 @@ class TestAPIIncrementalReplication:
         config = {
             "replication_method": "incremental",
             "cursor_field": "updated_at",
-            "cursor_mode": "inclusive",
             "safety_window_seconds": 300
         }
 
@@ -207,7 +204,7 @@ class TestAPIIncrementalReplication:
 
         assert state["replication_method"] == "incremental"
         assert state["cursor_field"] == "updated_at"
-        assert state["cursor_mode"] == "inclusive"
+        # cursor_mode is always "inclusive" now, no longer in config
         assert state["safety_window_seconds"] == 300
         assert state["bookmarks"] == []  # No existing state
         assert "run" in state
@@ -271,13 +268,9 @@ class TestAPITieBreakerDeduplication:
             }
         }
 
-        # In inclusive mode, equal values should be treated as duplicate
-        result = self.connector._compare_tie_breakers(record, tie_breaker_fields, bookmark, inclusive=True)
+        # In inclusive mode (always used now), equal values should be treated as duplicate
+        result = self.connector._compare_tie_breakers(record, tie_breaker_fields, bookmark)
         assert result is False  # Equal in inclusive mode = duplicate
-
-        # In exclusive mode, equal values should be treated as new
-        result = self.connector._compare_tie_breakers(record, tie_breaker_fields, bookmark, inclusive=False)
-        assert result is True  # Equal in exclusive mode = new
 
     def test_compare_tie_breakers_single_field_greater(self):
         """Test tie-breaker comparison with single field that is greater."""
@@ -292,11 +285,8 @@ class TestAPITieBreakerDeduplication:
             }
         }
 
-        # Greater value should always be treated as new
-        result = self.connector._compare_tie_breakers(record, tie_breaker_fields, bookmark, inclusive=True)
-        assert result is True
-
-        result = self.connector._compare_tie_breakers(record, tie_breaker_fields, bookmark, inclusive=False)
+        # Greater value should be treated as new
+        result = self.connector._compare_tie_breakers(record, tie_breaker_fields, bookmark)
         assert result is True
 
     def test_compare_tie_breakers_single_field_lesser(self):
@@ -312,11 +302,8 @@ class TestAPITieBreakerDeduplication:
             }
         }
 
-        # Lesser value should always be treated as duplicate
-        result = self.connector._compare_tie_breakers(record, tie_breaker_fields, bookmark, inclusive=True)
-        assert result is False
-
-        result = self.connector._compare_tie_breakers(record, tie_breaker_fields, bookmark, inclusive=False)
+        # Lesser value should be treated as duplicate
+        result = self.connector._compare_tie_breakers(record, tie_breaker_fields, bookmark)
         assert result is False
 
     def test_compare_tie_breakers_multiple_fields(self):
@@ -338,7 +325,7 @@ class TestAPITieBreakerDeduplication:
         }
 
         # Same account_id, but greater transaction_id = new record
-        result = self.connector._compare_tie_breakers(record, tie_breaker_fields, bookmark, inclusive=True)
+        result = self.connector._compare_tie_breakers(record, tie_breaker_fields, bookmark)
         assert result is True
 
     def test_compare_tie_breakers_multiple_fields_all_equal(self):
@@ -359,13 +346,9 @@ class TestAPITieBreakerDeduplication:
             }
         }
 
-        # All tie-breakers equal in inclusive mode = duplicate
-        result = self.connector._compare_tie_breakers(record, tie_breaker_fields, bookmark, inclusive=True)
+        # All tie-breakers equal in inclusive mode (always used now) = duplicate
+        result = self.connector._compare_tie_breakers(record, tie_breaker_fields, bookmark)
         assert result is False
-
-        # All tie-breakers equal in exclusive mode = new
-        result = self.connector._compare_tie_breakers(record, tie_breaker_fields, bookmark, inclusive=False)
-        assert result is True
 
     def test_compare_tie_breakers_numeric_string_comparison(self):
         """Test tie-breaker comparison with numeric strings."""
@@ -381,7 +364,7 @@ class TestAPITieBreakerDeduplication:
         }
 
         # 1000 > 999 should be treated as new
-        result = self.connector._compare_tie_breakers(record, tie_breaker_fields, bookmark, inclusive=True)
+        result = self.connector._compare_tie_breakers(record, tie_breaker_fields, bookmark)
         assert result is True
 
     def test_compare_tie_breakers_nested_fields(self):
@@ -401,7 +384,7 @@ class TestAPITieBreakerDeduplication:
         }
 
         # String comparison: "TXN-789" > "TXN-788"
-        result = self.connector._compare_tie_breakers(record, tie_breaker_fields, bookmark, inclusive=True)
+        result = self.connector._compare_tie_breakers(record, tie_breaker_fields, bookmark)
         assert result is True
 
     def test_compare_tie_breakers_missing_record_value(self):
@@ -418,7 +401,7 @@ class TestAPITieBreakerDeduplication:
         }
 
         # Missing record value should be treated as new
-        result = self.connector._compare_tie_breakers(record, tie_breaker_fields, bookmark, inclusive=True)
+        result = self.connector._compare_tie_breakers(record, tie_breaker_fields, bookmark)
         assert result is True
 
     def test_compare_tie_breakers_no_stored_tiebreakers(self):
@@ -427,13 +410,9 @@ class TestAPITieBreakerDeduplication:
         tie_breaker_fields = ["id"]
         bookmark = {"cursor": "2025-08-14T12:00:00Z"}  # No aux data
 
-        # No stored tie-breakers in inclusive mode should be treated as duplicate
-        result = self.connector._compare_tie_breakers(record, tie_breaker_fields, bookmark, inclusive=True)
+        # No stored tie-breakers in inclusive mode (always used now) should be treated as duplicate
+        result = self.connector._compare_tie_breakers(record, tie_breaker_fields, bookmark)
         assert result is False
-
-        # No stored tie-breakers in exclusive mode should be treated as new
-        result = self.connector._compare_tie_breakers(record, tie_breaker_fields, bookmark, inclusive=False)
-        assert result is True
 
     def test_is_record_new_newer_cursor(self):
         """Test record newness check with newer cursor value."""
@@ -442,7 +421,7 @@ class TestAPITieBreakerDeduplication:
         cursor_field = "created"
         tie_breaker_fields = ["id"]
 
-        result = self.connector._is_record_new(record, bookmark, cursor_field, tie_breaker_fields, "inclusive")
+        result = self.connector._is_record_new(record, bookmark, cursor_field, tie_breaker_fields)
         assert result is True
 
     def test_is_record_new_older_cursor(self):
@@ -452,7 +431,7 @@ class TestAPITieBreakerDeduplication:
         cursor_field = "created"
         tie_breaker_fields = ["id"]
 
-        result = self.connector._is_record_new(record, bookmark, cursor_field, tie_breaker_fields, "inclusive")
+        result = self.connector._is_record_new(record, bookmark, cursor_field, tie_breaker_fields)
         assert result is False
 
     def test_is_record_new_same_cursor_with_tie_breaker(self):
@@ -469,7 +448,7 @@ class TestAPITieBreakerDeduplication:
         cursor_field = "created"
         tie_breaker_fields = ["id"]
 
-        result = self.connector._is_record_new(record, bookmark, cursor_field, tie_breaker_fields, "inclusive")
+        result = self.connector._is_record_new(record, bookmark, cursor_field, tie_breaker_fields)
         assert result is True  # Greater tie-breaker value = new
 
     def test_is_record_new_missing_cursor_field(self):
@@ -479,7 +458,7 @@ class TestAPITieBreakerDeduplication:
         cursor_field = "created"
         tie_breaker_fields = ["id"]
 
-        result = self.connector._is_record_new(record, bookmark, cursor_field, tie_breaker_fields, "inclusive")
+        result = self.connector._is_record_new(record, bookmark, cursor_field, tie_breaker_fields)
         assert result is True  # Missing cursor field = treat as new
 
     def test_deduplicate_records_empty_batch(self):
