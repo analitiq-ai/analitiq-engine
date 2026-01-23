@@ -29,44 +29,43 @@ COPY --chown=appuser:appuser . .
 
 # Create required directories with proper permissions
 # These directories match paths defined in analitiq.yaml (single source of truth)
+# Consolidated config: pipelines/{pipeline_id}.json + .secrets/{connection_id}.json
 RUN mkdir -p \
-    /app/connectors \
-    /app/connections \
-    /app/streams \
     /app/pipelines \
     /app/.secrets \
     /app/state \
     /app/logs \
     /app/deadletter \
     /app/metrics && \
-    chown -R appuser:appuser /app/connectors /app/connections /app/streams /app/pipelines /app/.secrets /app/state /app/logs /app/deadletter /app/metrics
+    chown -R appuser:appuser /app/pipelines /app/.secrets /app/state /app/logs /app/deadletter /app/metrics
 
 # Default environment variables (can be overridden at runtime)
 # Note: Config paths are determined by analitiq.yaml, not environment variables
+#
+# RUN_MODE determines container behavior:
+#   - "engine" (default): Runs the data pipeline engine
+#   - "destination": Runs the gRPC destination server
 ENV ENV=local \
+    RUN_MODE=engine \
     PIPELINE_ID="" \
     AWS_REGION=eu-central-1 \
     PYTHONPATH=/app \
-    PIPELINES_TABLE=pipelines \
-    CONNECTIONS_TABLE=connections \
-    CONNECTORS_TABLE=connectors \
-    ENDPOINTS_TABLE=connectors_endpoints \
-    STREAMS_TABLE=streams \
-    ROW_COUNT_BUCKET=analitiq-client-pipeline-row-count
+    ROW_COUNT_BUCKET=analitiq-client-pipeline-row-count \
+    GRPC_PORT=50051 \
+    DESTINATION_GRPC_HOST="" \
+    DESTINATION_GRPC_PORT=50051
 
-# Health check
+# Health check - works for both modes
+# For destination mode, this verifies the gRPC module is available
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD python -c "from src.core.pipeline_config_prep import PipelineConfigPrep; print('Health check passed')" || exit 1
+    CMD python -c "from src.main import main; print('Health check passed')" || exit 1
 
 # Switch to non-root user
 USER appuser
 
-# Create a generic entrypoint script that can run any pipeline
-COPY --chown=appuser:appuser docker/entrypoint.py /app/entrypoint.py
-RUN chmod +x /app/entrypoint.py
-
-# Default entrypoint
-ENTRYPOINT ["python", "/app/entrypoint.py"]
+# Default entrypoint uses unified main module
+# RUN_MODE env var determines whether to run as engine or destination
+ENTRYPOINT ["python", "-m", "src.main"]
 
 # Labels for metadata
 LABEL org.opencontainers.image.title="Analitiq Stream" \

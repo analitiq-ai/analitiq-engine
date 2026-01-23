@@ -265,7 +265,7 @@ class EndpointConfig(BaseModel):
 
     endpoint: str = Field(..., description="API endpoint path")
     method: Literal["GET", "POST", "PUT", "PATCH", "DELETE"] = Field("GET", description="HTTP method")
-    response_schema: Optional[Dict[str, Any]] = Field(None, description="JSON Schema for response validation")
+    endpoint_schema: Optional[Dict[str, Any]] = Field(None, description="JSON Schema for endpoint data")
 
     @field_validator("endpoint")
     @classmethod

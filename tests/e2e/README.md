@@ -136,12 +136,12 @@ Core fixtures coordinate configuration, runtime services, and cleanup:
 - `mock_pipeline_id`: Provides unique pipeline identifiers for concurrent runs (name retained for backward compatibility).
 - `data_generator`: Builds synthetic record sets that are fed into real sources.
 - `fault_tolerance_config`: Supplies shared retry/circuit breaker defaults.
-- **Pipeline runner fixtures**: Helpers that instantiate `src.core.pipeline.Pipeline`, await `pipeline.run()`, and
+- **Pipeline runner fixtures**: Helpers that instantiate `src.engine.pipeline.Pipeline`, await `pipeline.run()`, and
   return collected metrics for assertions. These fixtures guarantee the actual `StreamingEngine` is used and handle
   teardown of engine background tasks.
 - **Stub connector/service fixtures**: Async factories that spin up lightweight HTTP and database services (using
   `aiohttp`, `sqlite`, or disposable containers) so connectors interact with real endpoints. Each fixture returns
-  connection dictionaries compatible with the production connectors bundled in `src.connectors`.
+  connection dictionaries compatible with the production connectors bundled in `src.source.connectors`.
 
 ### Stub Services and Data Contracts
 - **HTTP/API stubs** expose deterministic paginated responses, throttling hooks, and failure toggles for testing

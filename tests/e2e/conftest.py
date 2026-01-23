@@ -18,7 +18,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from src.connectors.base import BaseConnector
+from src.source.connectors.base import BaseConnector
 from src.config import DIRECTORIES
 
 # Import new e2e fixtures
@@ -497,7 +497,7 @@ def event_loop():
 @pytest.fixture(autouse=True)
 def patch_streaming_engine_connectors(monkeypatch):
     """Use the lightweight in-memory connectors for end-to-end tests."""
-    from src.core.engine import StreamingEngine
+    from src.engine.engine import StreamingEngine
 
     original_get_connector = StreamingEngine._get_connector
 

@@ -1,13 +1,11 @@
 # Analitiq Stream Configuration
 # This file configures the Analitiq Stream framework settings
 
-# Path Configuration for Decoupled Architecture
+# Path Configuration
 paths:
-  # Configuration directories (populated by config_fetcher in cloud environments)
-  connectors: "./connectors"
-  connections: "./connections"
-  endpoints: "./endpoints"
-  streams: "./streams"
+  # Configuration paths (populated by config_fetcher in cloud environments)
+  # Each pipeline is a single consolidated file: {pipelines}/{pipeline_id}.json
+  # Secrets are kept separate: {secrets}/{connection_id}.json
   pipelines: "./pipelines"
   secrets: "./.secrets"
 
@@ -16,23 +14,6 @@ paths:
   logs: "./logs"
   deadletter: "./deadletter"
   metrics: "./metrics"
-
-# Connector Repository Configuration
-connectors:
-  # GitHub repository URL for connectors catalog
-  repository: "https://github.com/analitiq-ai/analitiq-connectors"
-
-  # List of connectors to download/sync from the repository
-  # Each connector can optionally specify a version (default: latest)
-  sync:
-    - name: wise
-      version: latest  # Use 'latest' or specific version like '1.0.0'
-
-    - name: sevdesk
-      version: latest
-
-    - name: postgres
-      version: latest
 
 # Pipeline defaults (optional)
 defaults:
@@ -44,3 +25,8 @@ defaults:
 
   # Default monitoring interval in seconds
   monitoring_interval_seconds: 5
+
+params:
+  PROFILE_ID: 2496403
+  BALANCE_ID: 5305253
+  SEVDESK_BANK_ACCOUNT_ID: 5936402

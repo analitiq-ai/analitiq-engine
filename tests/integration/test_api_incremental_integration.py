@@ -8,8 +8,8 @@ import pytest
 from pathlib import Path
 from unittest.mock import patch, mock_open, AsyncMock, MagicMock
 from aiohttp import ClientSession
-from src.connectors.api import APIConnector
-from src.fault_tolerance.state_manager import StateManager
+from src.source.connectors.api import APIConnector
+from src.state.state_manager import StateManager
 
 
 class TestAPIIncrementalIntegration:

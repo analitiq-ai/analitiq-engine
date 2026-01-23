@@ -8,15 +8,15 @@ and destinations with comprehensive fault tolerance and observability.
 __version__ = "0.1.0"
 __author__ = "Analitiq Core Team"
 
-from .connectors.api import APIConnector
-from .connectors.base import BaseConnector
-from .connectors.database import DatabaseConnector
-from .core.credentials import CredentialsManager, credentials_manager
-from .core.engine import StreamingEngine
-from .core.pipeline import Pipeline
-from .fault_tolerance.circuit_breaker import CircuitBreaker
-from .fault_tolerance.dead_letter_queue import DeadLetterQueue
-from .fault_tolerance.retry_handler import RetryHandler
+from .source.connectors.api import APIConnector
+from .source.connectors.base import BaseConnector
+from .source.connectors.database import DatabaseConnector
+from .engine.credentials import CredentialsManager, credentials_manager
+from .engine.engine import StreamingEngine
+from .engine.pipeline import Pipeline
+from .state.circuit_breaker import CircuitBreaker
+from .state.dead_letter_queue import DeadLetterQueue
+from .state.retry_handler import RetryHandler
 from .schema.schema_manager import SchemaManager
 
 __all__ = [

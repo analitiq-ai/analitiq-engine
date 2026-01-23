@@ -2,7 +2,7 @@
 
 import pytest
 
-from src.core.exceptions import (
+from src.engine.exceptions import (
     StreamProcessingError,
     TransformationError,
     ConnectorError,

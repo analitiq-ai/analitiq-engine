@@ -4,7 +4,7 @@ import pytest
 import os
 from datetime import datetime
 
-from src.connectors.database.postgresql_driver import PostgreSQLDriver
+from src.source.drivers.postgresql import PostgreSQLDriver
 
 
 @pytest.mark.integration

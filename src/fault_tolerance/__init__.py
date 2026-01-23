@@ -1,59 +1,15 @@
-"""Fault tolerance components for reliable data streaming."""
+"""Backward compatibility alias for src.state.
 
-from .circuit_breaker import CircuitBreaker
-from .dead_letter_queue import (
-    DeadLetterQueue,
-    DLQStorageSettings,
-    DLQStorageBackend,
-    LocalDLQStorage,
-    S3DLQStorage,
-    create_dlq_storage,
-)
-from .retry_handler import RetryHandler
-from .state_manager import StateManager
-from .state_storage import (
-    LocalStateStorage,
-    S3StateStorage,
-    StateStorageBackend,
-    StateStorageSettings,
-    create_storage_backend,
-)
-from .log_storage import (
-    LogStorageSettings,
-    S3LogHandler,
-    BufferedS3LogHandler,
-    create_log_handler,
-)
-from .metrics_storage import (
-    MetricsStorageSettings,
-    MetricsStorage,
-    PipelineMetricsRecord,
-    create_metrics_record,
-    save_pipeline_metrics,
+This module is deprecated. Please use src.state instead.
+"""
+import warnings
+
+warnings.warn(
+    "src.fault_tolerance is deprecated, use src.state instead",
+    DeprecationWarning,
+    stacklevel=2
 )
 
-__all__ = [
-    "RetryHandler",
-    "CircuitBreaker",
-    "DeadLetterQueue",
-    "DLQStorageSettings",
-    "DLQStorageBackend",
-    "LocalDLQStorage",
-    "S3DLQStorage",
-    "create_dlq_storage",
-    "StateManager",
-    "StateStorageBackend",
-    "StateStorageSettings",
-    "LocalStateStorage",
-    "S3StateStorage",
-    "create_storage_backend",
-    "LogStorageSettings",
-    "S3LogHandler",
-    "BufferedS3LogHandler",
-    "create_log_handler",
-    "MetricsStorageSettings",
-    "MetricsStorage",
-    "PipelineMetricsRecord",
-    "create_metrics_record",
-    "save_pipeline_metrics",
-]
+# Re-export everything from state for backwards compatibility
+from ..state import *
+from ..state import __all__

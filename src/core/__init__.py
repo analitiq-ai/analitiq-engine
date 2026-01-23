@@ -1,7 +1,15 @@
-"""Core streaming engine components."""
+"""Backward compatibility alias for src.engine.
 
-from .credentials import CredentialsManager, credentials_manager
-from .engine import StreamingEngine
-from .pipeline import Pipeline
+This module is deprecated. Please use src.engine instead.
+"""
+import warnings
 
-__all__ = ["StreamingEngine", "Pipeline", "credentials_manager", "CredentialsManager"]
+warnings.warn(
+    "src.core is deprecated, use src.engine instead",
+    DeprecationWarning,
+    stacklevel=2
+)
+
+# Re-export everything from engine for backwards compatibility
+from ..engine import *
+from ..engine import __all__

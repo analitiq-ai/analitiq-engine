@@ -89,6 +89,10 @@ docker-compose*.yml
 # Example configurations (will be mounted instead)
 src/examples/*
 
+# Sensitive configuration (mounted at runtime, never baked into image)
+.secrets/
+pipelines/
+
 # CI/CD
 .github/
 .gitlab-ci.yml

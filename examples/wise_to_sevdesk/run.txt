@@ -1,8 +1,0 @@
-  # Run with environment file
-docker run --rm \
---env-file .env \
--v ../examples/wise_to_sevdesk:/config:ro \
--v ../state:/app/state \
--v ../logs:/app/logs \
--v ../deadletter:/app/deadletter \
-analitiq-stream:latest

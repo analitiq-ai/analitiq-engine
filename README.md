@@ -11,6 +11,7 @@ A high-performance, fault-tolerant data streaming framework for Python 3.11+ tha
 - **Safe Deserialization** - Protected JSON parsing with comprehensive error handling
 - **Pipeline Orchestration** - Modern concurrent execution with Python 3.11+ exception handling
 - **Modular Design** - Factory patterns and dependency injection for testability
+- **gRPC Streaming** - Decoupled destination services via bidirectional gRPC streaming
 
 ### Data Pipeline Capabilities  
 - **Async/await streaming** with configurable batch processing
@@ -380,9 +381,9 @@ await pipeline.run()
 ### Advanced Usage with Modern Engine
 
 ```python
-from src.core.engine import StreamingEngine
+from src.engine.engine import StreamingEngine
 from src.models.engine import EngineConfig, PipelineMetricsSnapshot
-from src.fault_tolerance.state_manager import StateManager
+from src.state.state_manager import StateManager
 
 # Create engine with validated configuration
 engine_config = EngineConfig(
@@ -414,7 +415,7 @@ print(f"Total records synced: {resume_info['total_records_synced']}")
 ### Pipeline Orchestration
 
 ```python
-from src.core.orchestrator import PipelineOrchestrator
+from src.engine.orchestrator import PipelineOrchestrator
 
 # Direct orchestrator usage for custom workflows
 orchestrator = PipelineOrchestrator("custom-pipeline")
@@ -515,7 +516,7 @@ poetry run pre-commit run --all-files
 
 ```python
 # Pipeline-level monitoring with structured logging
-from src.core.engine import StreamingEngine
+from src.engine.engine import StreamingEngine
 from src.models.engine import PipelineMetricsSnapshot
 
 engine = StreamingEngine("production-pipeline")
@@ -637,41 +638,86 @@ python test_credentials.py
 poetry run pytest --cov=src
 ```
 
-## 🏛 Project Structure
+## Project Structure
 
 ```
 src/
-├── core/                    # Core framework components
-│   ├── engine.py           # StreamingEngine with modern architecture
+├── shared/                  # Shared utilities for source and destination
+│   ├── database_utils.py   # SSL mode, identifier validation, table names
+│   ├── rate_limiter.py     # Token bucket rate limiter
+│   └── type_mapping/       # Unified type mapping system
+│       ├── base.py         # BaseTypeMapper ABC
+│       ├── postgresql.py   # PostgreSQL: JSONB, TIMESTAMPTZ, arrays
+│       ├── mysql.py        # MySQL: JSON, DATETIME
+│       ├── snowflake.py    # Snowflake: VARIANT, TIMESTAMP_TZ
+│       └── generic.py      # Safe fallback for unknown DBs
+├── source/                  # Source connectors (data extraction)
+│   ├── connectors/         # Protocol implementations
+│   │   ├── base.py         # BaseConnector interface
+│   │   ├── api.py          # API connector with validation & deduplication
+│   │   └── database.py     # Database connector using driver delegation
+│   └── drivers/            # Database-specific drivers
+│       ├── base.py         # BaseDatabaseDriver ABC
+│       ├── postgresql.py   # PostgreSQL driver
+│       └── factory.py      # Driver factory
+├── destination/             # gRPC destination service components
+│   ├── base_handler.py     # Abstract handler interface
+│   ├── server.py           # gRPC server implementation
+│   ├── connectors/         # Destination handler implementations
+│   │   ├── database.py     # SQLAlchemy-based handler (PostgreSQL, MySQL, SQLite)
+│   │   ├── file.py         # File destination (local, S3)
+│   │   ├── api.py          # REST API destination
+│   │   └── stream.py       # Stdout destination (testing)
+│   ├── formatters/         # Output format serializers
+│   │   ├── jsonl.py        # JSON Lines formatter
+│   │   ├── csv.py          # CSV formatter
+│   │   └── parquet.py      # Parquet formatter (requires -E analytics)
+│   ├── storage/            # Storage backends
+│   │   └── local.py        # Local filesystem storage
+│   └── idempotency/        # Idempotency tracking
+│       └── manifest.py     # File-based manifest tracker
+├── engine/                  # Core framework components (renamed from core/)
+│   ├── engine.py           # StreamingEngine with gRPC support
 │   ├── orchestrator.py     # PipelineOrchestrator for concurrent execution
-│   ├── pipeline.py         # High-level configuration interface  
+│   ├── pipeline.py         # High-level configuration interface
 │   ├── exceptions.py       # Enhanced exception hierarchy
 │   ├── credentials.py      # Secure authentication management
 │   └── data_transformer.py # Field mapping and transformations
-├── connectors/             # Data source/destination connectors
-│   ├── base.py            # BaseConnector interface
-│   ├── api.py             # API connector with validation & deduplication
-│   └── database.py        # Database connectors
-├── fault_tolerance/        # Comprehensive fault tolerance
-│   ├── state_manager.py  # Per-partition state management
-│   ├── retry_handler.py   # Exponential backoff retry logic
-│   ├── circuit_breaker.py # Failure detection/recovery
-│   └── dead_letter_queue.py # Poison record isolation  
-├── models/                 # Pydantic v2 validation models
-│   ├── state.py           # State management models
-│   ├── engine.py          # Engine configuration models
-│   ├── api.py             # API connector models
-│   └── metrics.py         # Metrics and monitoring models
-├── schema/                # Schema management and evolution
-│   └── schema_manager.py  # Schema drift detection
-├── examples/              # Working examples
-│   ├── basic-pipeline/    # Simple integration
-│   └── wise_to_sevdesk/   # Production example with tie-breaker deduplication
-└── tests/                 # Comprehensive test suite
-    ├── test_engine_improvements.py  # Engine architecture tests
-    ├── test_orchestrator.py         # Pipeline orchestration tests
-    ├── test_api_incremental*.py     # API connector tests
-    └── test_duplicate_records*.py   # Deduplication tests
+├── state/                   # Fault tolerance (renamed from fault_tolerance/)
+│   ├── state_manager.py    # Per-partition state management
+│   ├── retry_handler.py    # Exponential backoff retry logic
+│   ├── circuit_breaker.py  # Failure detection/recovery
+│   └── dead_letter_queue.py # Poison record isolation
+├── grpc/                    # gRPC client and protocol
+│   ├── client.py           # DestinationGRPCClient for engine
+│   ├── cursor.py           # Opaque cursor utilities
+│   └── generated/          # Generated protobuf code
+├── models/                  # Pydantic v2 validation models
+│   ├── state.py            # State management models
+│   ├── engine.py           # Engine configuration models
+│   ├── api.py              # API connector models
+│   └── metrics.py          # Metrics and monitoring models
+├── schema/                  # Schema management and evolution
+│   └── schema_manager.py   # Schema drift detection
+├── main.py                  # Unified entrypoint (RUN_MODE dispatch)
+└── runner.py                # Pipeline runner
+
+proto/                      # Protocol Buffer definitions
+└── analitiq/v1/
+    ├── stream.proto       # Message definitions
+    └── destination_service.proto  # gRPC service definition
+
+docker/
+├── docker-compose.yml     # Engine + Destination + PostgreSQL
+├── entrypoint.py          # Container entrypoint
+└── .env.example           # Environment template
+
+tests/
+├── unit/
+│   ├── grpc_tests/        # gRPC client and cursor tests
+│   └── ...
+├── integration/           # Integration tests
+└── e2e/                   # End-to-end tests
 ```
 
 ## 🔐 Security Features
@@ -685,6 +731,122 @@ src/
 - **Protected file operations** with encoding specification and path validation
 - **Exception sanitization** to prevent information leakage in error messages
 - **Configuration fingerprinting** for state consistency validation
+
+## gRPC Streaming Architecture
+
+Analitiq Stream supports decoupled destination services via gRPC bidirectional streaming. This enables:
+
+- **Independent scaling** of engine and destination services
+- **Easy addition** of new destinations (MySQL, Snowflake, etc.) without engine changes
+- **Language-agnostic** destinations (any language with gRPC support)
+- **Container isolation** with separate failure domains
+
+### Dual-Mode Docker Image
+
+The same Docker image runs as either engine or destination based on `RUN_MODE`:
+
+```bash
+# Engine mode (default) - runs data pipeline
+RUN_MODE=engine python -m src.main
+
+# Destination mode - runs gRPC server
+RUN_MODE=destination python -m src.main
+```
+
+### Architecture Overview
+
+```
++-------------------------------------------------------------+
+|                    ENGINE CONTAINER                          |
+|  Extract -> Transform -> GrpcLoadStage -> Checkpoint        |
+|                    DestinationGRPCClient                    |
++-----------------------------+-------------------------------+
+                              | gRPC Bidirectional Stream
++-----------------------------+-------------------------------+
+|               DESTINATION CONTAINER                          |
+|                    DestinationGRPCServer                    |
+|              BaseDestinationHandler (abstract)              |
+|         PostgreSQLHandler / MySQLHandler / etc.             |
++-------------------------------------------------------------+
+```
+
+### Key Protocol Features
+
+| Feature | Description |
+|---------|-------------|
+| **Opaque Cursor** | Engine produces cursor, destination stores/returns it unchanged |
+| **Batch Idempotency** | `(run_id, stream_id, batch_seq)` uniquely identifies each batch |
+| **All-or-Nothing** | No partial success - entire batch succeeds or fails |
+| **Record IDs** | Stable IDs for DLQ correlation across retries |
+| **ACK Status** | SUCCESS, ALREADY_COMMITTED, RETRYABLE_FAILURE, FATAL_FAILURE |
+
+### Quick Start with gRPC
+
+```bash
+# Start destination and database
+cd docker
+docker compose up -d postgres destination
+
+# Run pipeline with gRPC destination
+docker compose run -e PIPELINE_ID=<uuid> engine
+```
+
+### Environment Variables
+
+**Engine Mode:**
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DESTINATION_GRPC_HOST` | - | Hostname of destination service (enables gRPC mode) |
+| `DESTINATION_GRPC_PORT` | `50051` | Port of destination service |
+| `GRPC_TIMEOUT_SECONDS` | `300` | ACK timeout |
+| `MAX_RETRIES` | `3` | Retries for RETRYABLE_FAILURE |
+
+**Destination Mode:**
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `GRPC_PORT` | `50051` | Port to listen on |
+| `CONNECTOR_TYPE` | `postgresql` | Handler type (postgresql, mysql, etc.) |
+| `DB_HOST`, `DB_PORT`, etc. | - | Database connection details |
+
+### Adding New Destinations
+
+The destination system is **config-driven** - most new destinations require zero code:
+
+| Destination Type | Code Required | What You Need |
+|------------------|---------------|---------------|
+| New SQL database (MySQL, SQLite, etc.) | 0 lines | Connection config with `connector_type: "db"` |
+| New API endpoint | 0 lines | Connection config with `connector_type: "api"` |
+| New file output | 0 lines | Connection config with `connector_type: "file"` |
+| New storage backend (GCS) | ~100 lines | Implement `BaseStorageBackend` |
+| New output format (Avro) | ~50 lines | Implement `BaseFormatter` |
+
+**Config-only example (MySQL):**
+```json
+{
+  "connector_type": "db",
+  "driver": "mysql",
+  "host": "localhost",
+  "port": 3306,
+  "database": "mydb",
+  "username": "${DB_USER}",
+  "password": "${DB_PASSWORD}"
+}
+```
+
+**For custom handlers**, implement `BaseDestinationHandler`:
+```python
+class CustomHandler(BaseDestinationHandler):
+    @property
+    def connector_type(self) -> str:
+        return "custom"
+
+    async def write_batch(self, run_id, stream_id, batch_seq, records, record_ids, cursor):
+        # Implement idempotent batch write
+        ...
+```
+
+**See [Destination Config](docs/DESTINATION_CONFIG.md) for full configuration reference.**
+**See [gRPC Streaming Architecture](docs/GRPC_STREAMING_ARCHITECTURE.md) for protocol details.**
 
 ## Docker Deployment
 
@@ -973,11 +1135,6 @@ docker run --rm -it \
     -e AWS_ACCESS_KEY_ID="$(aws configure get aws_access_key_id)" \
     -e AWS_SECRET_ACCESS_KEY="$(aws configure get aws_secret_access_key)" \
     -e AWS_SESSION_TOKEN="$(aws configure get aws_session_token)" \
-    -e PIPELINES_TABLE=pipelines \
-    -e CONNECTIONS_TABLE=connections \
-    -e CONNECTORS_TABLE=connectors \
-    -e ENDPOINTS_TABLE=connectors_endpoints \
-    -e STREAMS_TABLE=streams \
     -e LOG_LEVEL=DEBUG \
     -v analitiq_state:/app/state \
     -v analitiq_logs:/app/logs \

@@ -4,14 +4,12 @@ Analitiq Stream CLI.
 
 Commands:
     run       Run a pipeline
-    sync      Sync connectors from repository
     coverage  Run tests with coverage reporting
 """
 
 import argparse
 import asyncio
 import sys
-from pathlib import Path
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -26,40 +24,6 @@ def cmd_run(args: argparse.Namespace) -> int:
         )
     )
     return 0 if success else 1
-
-
-def cmd_sync(args: argparse.Namespace) -> int:
-    """Sync connectors from repository."""
-    from src.config import ConnectorSync
-
-    try:
-        syncer = ConnectorSync(
-            config_path=args.config_file,
-            base_path=Path.cwd() if not args.base_path else Path(args.base_path),
-        )
-
-        if args.status:
-            # Just show status
-            status = syncer.check_status()
-            for name, info in status.items():
-                local_v = info.get("local_version", "not installed")
-                needs_update = info.get("needs_update", False)
-                update_marker = " (update available)" if needs_update else ""
-                print(f"  {name}: v{local_v}{update_marker}")
-            return 0
-        else:
-            # Sync connectors
-            results = syncer.sync_all()
-            for name, result in results.items():
-                print(f"  {name}: {result}")
-            return 0
-
-    except FileNotFoundError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        return 1
-    except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
-        return 1
 
 
 def cmd_coverage(args: argparse.Namespace) -> int:
@@ -105,29 +69,6 @@ def main() -> int:
         help="Path to configuration directory",
     )
     run_parser.set_defaults(func=cmd_run)
-
-    # sync command
-    sync_parser = subparsers.add_parser(
-        "sync",
-        help="Sync connectors from repository",
-        description="Download or update connectors from the configured repository",
-    )
-    sync_parser.add_argument(
-        "--config-file",
-        type=str,
-        help="Path to analitiq.yaml configuration file",
-    )
-    sync_parser.add_argument(
-        "--base-path",
-        type=str,
-        help="Base path for resolving relative paths",
-    )
-    sync_parser.add_argument(
-        "--status",
-        action="store_true",
-        help="Show connector status without syncing",
-    )
-    sync_parser.set_defaults(func=cmd_sync)
 
     # coverage command
     coverage_parser = subparsers.add_parser(

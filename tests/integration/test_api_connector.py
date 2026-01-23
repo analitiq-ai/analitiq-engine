@@ -7,9 +7,9 @@ from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 from aiohttp import ClientTimeout, TCPConnector, ClientSession
 
-from src.connectors.api import APIConnector, RateLimiter
-from src.connectors.base import ConnectionError, ReadError, WriteError
-from src.fault_tolerance.state_manager import StateManager
+from src.source.connectors.api import APIConnector, RateLimiter
+from src.source.connectors.base import ConnectionError, ReadError, WriteError
+from src.state.state_manager import StateManager
 
 
 @pytest.fixture

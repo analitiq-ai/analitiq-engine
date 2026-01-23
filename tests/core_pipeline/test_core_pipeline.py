@@ -11,9 +11,9 @@ from typing import Any, Dict, Iterable, List, Optional
 
 import pytest
 
-from src.core.pipeline import Pipeline
-from src.core.engine import StreamingEngine
-from src.connectors.base import BaseConnector
+from src.engine.pipeline import Pipeline
+from src.engine.engine import StreamingEngine
+from src.source.connectors.base import BaseConnector
 
 
 class InMemorySourceConnector(BaseConnector):
@@ -60,57 +60,19 @@ class InMemorySourceConnector(BaseConnector):
         raise NotImplementedError
 
 
-class InMemoryDestinationConnector(BaseConnector):
-    """Connector used in tests to capture written batches."""
-
-    instances: List["InMemoryDestinationConnector"] = []
-
-    def __init__(self, name: str = "InMemoryDestinationConnector"):
-        super().__init__(name)
-        self.written_batches: List[List[Dict[str, Any]]] = []
-        self.is_connected = False
-        self.last_config: Optional[Dict[str, Any]] = None
-        InMemoryDestinationConnector.instances.append(self)
-
-    async def connect(self, config: Dict[str, Any]):
-        self.is_connected = True
-        self.last_config = dict(config)
-
-    async def disconnect(self):
-        self.is_connected = False
-
-    async def configure(self, config: Dict[str, Any]):  # pragma: no cover - configuration is a no-op for the fake connector
-        self.last_config = dict(config)
-
-    async def read_batches(self, config: Dict[str, Any], batch_size: int = 1000, **_: Any):  # pragma: no cover - destination only
-        if False:
-            yield []
-
-    async def write_batch(self, batch: List[Dict[str, Any]], config: Dict[str, Any]):
-        current_batch = [dict(record) for record in batch]
-        self.written_batches.append(current_batch)
-        self.metrics["records_written"] += len(current_batch)
-        self.metrics["batches_written"] += 1
-        self.last_config = dict(config)
-
-
 @pytest.fixture(autouse=True)
 def in_memory_connectors(monkeypatch):
-    """Patch engine connectors to use the in-memory implementations."""
+    """Patch engine source connector to use the in-memory implementation."""
 
-    from src.connectors import api as api_module
-    from src.connectors import database as db_module
+    from src.source.connectors import api as api_module
 
     InMemorySourceConnector.instances.clear()
-    InMemoryDestinationConnector.instances.clear()
 
     monkeypatch.setattr(api_module, "APIConnector", InMemorySourceConnector)
-    monkeypatch.setattr(db_module, "DatabaseConnector", InMemoryDestinationConnector)
 
     yield
 
     InMemorySourceConnector.instances.clear()
-    InMemoryDestinationConnector.instances.clear()
 
 
 @pytest.fixture
@@ -304,51 +266,9 @@ def test_pipeline_initializes_real_engine(
     assert Path(pipeline.dlq_dir).exists()
 
 
-def test_pipeline_run_processes_batches_and_updates_metrics(
-    pipeline_factory,
-    base_pipeline_config,
-    valid_source_config,
-    valid_destination_config,
-):
-    """Running the pipeline should stream data and update metrics."""
-
-    config = copy.deepcopy(base_pipeline_config)
-    config["pipeline_id"] = "run-pipeline"
-
-    pipeline = pipeline_factory(
-        config,
-        source_config=valid_source_config,
-        destination_config=valid_destination_config,
-    )
-
-    asyncio.run(pipeline.run())
-
-    metrics = pipeline.get_metrics()
-    assert metrics.records_processed == 2
-    assert metrics.batches_processed == 1
-    assert metrics.records_failed == 0
-
-    assert InMemoryDestinationConnector.instances, "Destination connector was not instantiated"
-    dest_connector = InMemoryDestinationConnector.instances[-1]
-    assert dest_connector.written_batches == [
-        [
-            {
-                "id": 1,
-                "name": "Alice",
-                "updated_at": "2024-01-01T00:00:00Z",
-                "created_at": "2023-12-31T23:55:00Z",
-            },
-            {
-                "id": 2,
-                "name": "Bob",
-                "updated_at": "2024-01-02T00:00:00Z",
-                "created_at": "2024-01-01T08:00:00Z",
-            },
-        ]
-    ]
-
-    run_info = pipeline.engine.get_state_manager().get_run_info()
-    assert run_info.get("run_id")
-    assert run_info.get("pipeline_id") == "run-pipeline"
+# NOTE: test_pipeline_run_processes_batches_and_updates_metrics was removed
+# because it tested direct mode which is no longer supported.
+# Pipeline now always uses gRPC for destination writes.
+# gRPC-based integration tests should be added in tests/integration/
 
 

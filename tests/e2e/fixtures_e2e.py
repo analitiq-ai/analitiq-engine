@@ -95,7 +95,7 @@ def e2e_api_source_endpoint_config():
             "limit": 1000,
             "offset": 0
         },
-        "response_schema": {
+        "endpoint_schema": {
             "$schema": "https://json-schema.org/draft/2020-12/schema",
             "title": "Users API Response",
             "type": "array",
@@ -133,7 +133,7 @@ def e2e_api_destination_endpoint_config():
             },
             "required": ["user_id", "email_address", "full_name"]
         },
-        "response_schema": {
+        "endpoint_schema": {
             "$schema": "https://json-schema.org/draft/2020-12/schema",
             "type": "object",
             "properties": {
@@ -152,7 +152,7 @@ def e2e_database_source_endpoint_config():
         "table": "users",
         "primary_key": ["id"],
         "incremental_column": "updated_at",
-        "table_schema": {
+        "endpoint_schema": {
             "$schema": "https://json-schema.org/draft/2020-12/schema",
             "type": "object",
             "properties": {
@@ -197,7 +197,7 @@ def e2e_database_destination_endpoint_config():
                 }
             ]
         },
-        "table_schema": {
+        "endpoint_schema": {
             "$schema": "https://json-schema.org/draft/2020-12/schema",
             "type": "object",
             "properties": {

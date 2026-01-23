@@ -102,7 +102,7 @@
         </div>
 
         <!-- Schema Visualization -->
-        {% if endpoint_config.get('table_schema') or endpoint_config.get('response_schema') %}
+        {% if endpoint_config.get('endpoint_schema') or endpoint_config.get('endpoint_schema') %}
         <div class="card mb-4">
             <div class="card-header">
                 <h5 class="mb-0">Schema</h5>
@@ -122,10 +122,10 @@
                 </ul>
                 <div class="tab-content pt-3" id="schemaTabContent">
                     <div class="tab-pane fade show active" id="visual" role="tabpanel">
-                        {% set schema = endpoint_config.get('table_schema') or endpoint_config.get('response_schema') %}
+                        {% set schema = endpoint_config.get('endpoint_schema') or endpoint_config.get('endpoint_schema') %}
                         
-                        <!-- For database endpoint with table_schema -->
-                        {% if endpoint_config.get('table_schema') %}
+                        <!-- For database endpoint with endpoint_schema -->
+                        {% if endpoint_config.get('endpoint_schema') %}
                         <div class="table-responsive">
                             <table class="table table-striped table-bordered">
                                 <thead class="table-light">
@@ -160,8 +160,8 @@
                         </div>
                         {% endif %}
 
-                        <!-- For API endpoint with response_schema -->
-                        {% if endpoint_config.get('response_schema') and not endpoint_config.get('table_schema') %}
+                        <!-- For API endpoint with endpoint_schema -->
+                        {% if endpoint_config.get('endpoint_schema') and not endpoint_config.get('endpoint_schema') %}
                         <div id="schema-tree-view"></div>
                         {% endif %}
                     </div>
@@ -207,20 +207,20 @@
         const schemaContainer = document.getElementById('schema-json-viewer');
         if (schemaContainer) {
             const schemaEditor = new JSONEditor(schemaContainer, options);
-            {% if endpoint_config.get('table_schema') %}
-            schemaEditor.set({{ endpoint_config.get('table_schema')|tojson }});
-            {% elif endpoint_config.get('response_schema') %}
-            schemaEditor.set({{ endpoint_config.get('response_schema')|tojson }});
+            {% if endpoint_config.get('endpoint_schema') %}
+            schemaEditor.set({{ endpoint_config.get('endpoint_schema')|tojson }});
+            {% elif endpoint_config.get('endpoint_schema') %}
+            schemaEditor.set({{ endpoint_config.get('endpoint_schema')|tojson }});
             {% endif %}
         }
         
         // Setup schema tree view for API endpoints
         const treeViewContainer = document.getElementById('schema-tree-view');
         if (treeViewContainer) {
-            {% if endpoint_config.get('response_schema') %}
+            {% if endpoint_config.get('endpoint_schema') %}
             // This would render a more visual representation of the schema
             // For simplicity, we'll just display it in a different format
-            const schema = {{ endpoint_config.get('response_schema')|tojson }};
+            const schema = {{ endpoint_config.get('endpoint_schema')|tojson }};
             let html = '';
             
             if (schema.type === 'array' && schema.items) {

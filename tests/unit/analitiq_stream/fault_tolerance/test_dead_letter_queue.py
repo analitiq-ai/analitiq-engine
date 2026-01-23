@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
-from src.fault_tolerance.dead_letter_queue import DeadLetterQueue
+from src.state.dead_letter_queue import DeadLetterQueue
 
 
 class TestDeadLetterQueue:
@@ -322,7 +322,7 @@ class TestDeadLetterQueue:
         dlq = DeadLetterQueue(dlq_path=str(self.dlq_path))
         
         # Basic test - should return True and log
-        with patch('src.fault_tolerance.dead_letter_queue.logger') as mock_logger:
+        with patch('src.state.dead_letter_queue.logger') as mock_logger:
             result = await dlq.retry_failed_record("test-record-id")
             
             assert result is True
@@ -399,7 +399,7 @@ class TestDeadLetterQueue:
         await dlq.send_to_dlq({"id": 1}, Exception("Error 1"), "pipeline1")
         await dlq.send_to_dlq({"id": 2}, Exception("Error 2"), "pipeline2")
 
-        with patch('src.fault_tolerance.dead_letter_queue.logger') as mock_logger:
+        with patch('src.state.dead_letter_queue.logger') as mock_logger:
             # This should log that it's not implemented
             await dlq.clear_dlq("pipeline1")
 
@@ -527,7 +527,7 @@ class TestDeadLetterQueueEdgeCases:
         
         # Mock glob to raise an exception
         with patch('pathlib.Path.glob', side_effect=Exception("Glob error")):
-            with patch('src.fault_tolerance.dead_letter_queue.logger') as mock_logger:
+            with patch('src.state.dead_letter_queue.logger') as mock_logger:
                 # Should not raise but log error
                 await dlq._cleanup_old_files()
                 
@@ -542,7 +542,7 @@ class TestDeadLetterQueueEdgeCases:
         
         # Mock glob to raise an exception
         with patch('pathlib.Path.glob', side_effect=Exception("Read error")):
-            with patch('src.fault_tolerance.dead_letter_queue.logger') as mock_logger:
+            with patch('src.state.dead_letter_queue.logger') as mock_logger:
                 # Should return empty list and log error
                 result = await dlq.get_failed_records()
                 
@@ -557,7 +557,7 @@ class TestDeadLetterQueueEdgeCases:
         
         # Mock glob to raise an exception
         with patch('pathlib.Path.glob', side_effect=Exception("Stats error")):
-            with patch('src.fault_tolerance.dead_letter_queue.logger') as mock_logger:
+            with patch('src.state.dead_letter_queue.logger') as mock_logger:
                 # Should return default stats and log error
                 stats = await dlq.get_dlq_stats()
                 

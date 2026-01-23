@@ -4,8 +4,8 @@ import json
 import os
 import pytest
 
-from src.core.data_transformer import DataTransformer
-from src.core.expression_evaluator import SecureExpressionEvaluator
+from src.engine.data_transformer import DataTransformer
+from src.engine.expression_evaluator import SecureExpressionEvaluator
 
 
 class TestSecurityIntegration:

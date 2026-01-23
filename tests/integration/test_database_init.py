@@ -5,7 +5,7 @@ import pytest
 
 def test_database_package_imports():
     """Test that database package imports work correctly."""
-    from src.connectors.database import BaseDatabaseDriver, DriverFactory, DatabaseConnector
+    from src.source.connectors.database import BaseDatabaseDriver, DriverFactory, DatabaseConnector
     
     # Verify classes are importable
     assert BaseDatabaseDriver is not None
@@ -32,7 +32,7 @@ def test_database_package_all_exports():
 
 def test_database_package_class_availability():
     """Test that main database classes are available."""
-    from src.connectors.database import BaseDatabaseDriver, DriverFactory, DatabaseConnector
+    from src.source.connectors.database import BaseDatabaseDriver, DriverFactory, DatabaseConnector
     
     # Test that classes have expected attributes
     assert hasattr(BaseDatabaseDriver, '__abstractmethods__')  # Abstract class

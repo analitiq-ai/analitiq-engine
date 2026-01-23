@@ -1,38 +1,122 @@
 services:
-  analitiq-stream:
+  # ===========================================================================
+  # Destination Service (gRPC server for data ingestion)
+  # ===========================================================================
+  # This service receives streamed data from the source_engine via gRPC and writes
+  # it to the destination database. Same image as source_engine, different RUN_MODE.
+  # Both services use PIPELINE_ID to load configuration via PipelineConfigPrep.
+  destination:
     build:
       context: ..
-      dockerfile: Dockerfile
-    image: analitiq-stream:latest
-    container_name: analitiq-stream-pipeline
+      dockerfile: Dockerfile.cloud
+    image: analitiq-stream-cloud:latest
+    container_name: analitiq-destination
 
-    # Base environment variables - these are set at service/image level
-    # Per-invocation variables (PIPELINE_ID, CLIENT_ID) must be passed at runtime:
-    #   docker compose run -e PIPELINE_ID=xxx -e CLIENT_ID=yyy analitiq-stream
-    env_file: .env
+    # Base environment variables - per-invocation vars (PIPELINE_ID, CLIENT_ID)
+    # must be passed at runtime: docker compose run -e PIPELINE_ID=xxx destination
+    env_file:
+      - .env
     environment:
+      - RUN_MODE=destination
+      - ENV=${ENV:-local}
+      - GRPC_PORT=50051
+      - LOG_LEVEL=${LOG_LEVEL:-DEBUG}
+      # DESTINATION_INDEX selects which destination from pipeline config (default: 0)
+      - DESTINATION_INDEX=${DESTINATION_INDEX:-0}
+      # Pipeline identification (required at runtime)
+      - PIPELINE_ID=${PIPELINE_ID}
+      - CLIENT_ID=${CLIENT_ID}
+      # AWS configuration
+      - AWS_PROFILE=${AWS_PROFILE:-}
+      - AWS_REGION=${AWS_REGION:-eu-central-1}
+
+    # Volume mounts for consolidated config files - match analitiq.yaml paths
+    # Note: pipelines and .secrets are writable for cloud_entrypoint/config_fetcher
+    volumes:
+      - ../src:/app/src  # Live code changes without rebuild
+      - ../pipelines:/app/pipelines
+      - ../.secrets:/app/.secrets
+      - ~/.aws:/home/appuser/.aws:ro
+
+    # Expose gRPC port to other containers
+    expose:
+      - "50051"
+
+    # Health check using gRPC health protocol
+    healthcheck:
+      test: ["CMD", "python", "-c", "import grpc; print('gRPC available')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+
+    # Long-running server - restart on failure
+    restart: unless-stopped
+
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+    networks:
+      - analitiq-net
+
+  # ===========================================================================
+  # Source Engine Service (Pipeline orchestrator)
+  # ===========================================================================
+  # This service runs the data pipeline: extract -> transform -> stream to destination.
+  # Same image as destination, different RUN_MODE.
+  source_engine:
+    build:
+      context: ..
+      dockerfile: Dockerfile.cloud
+    image: analitiq-stream-cloud:latest
+    container_name: analitiq-source-engine
+
+    # Base environment variables - per-invocation vars (PIPELINE_ID, CLIENT_ID)
+    # must be passed at runtime: docker compose run -e PIPELINE_ID=xxx source_engine
+    env_file:
+      - .env
+    environment:
+      - RUN_MODE=engine
       - ENV=${ENV:-local}
       - AWS_REGION=${AWS_REGION:-eu-central-1}
-      - LOCAL_CONFIG_MOUNT=${LOCAL_CONFIG_MOUNT:-/config}
+      - LOCAL_CONFIG_MOUNT=/config
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
-      # DynamoDB table names (required for dev/prod environments)
-      - PIPELINES_TABLE=${PIPELINES_TABLE:-pipelines}
-      - CONNECTIONS_TABLE=${CONNECTIONS_TABLE:-connections}
-      - CONNECTORS_TABLE=${CONNECTORS_TABLE:-connectors}
-      - ENDPOINTS_TABLE=${ENDPOINTS_TABLE:-connectors_endpoints}
-      - ENDPOINTS_TABLE=${ENDPOINTS_TABLE:-connectors_endpoints}
+      # gRPC destination connection
+      - DESTINATION_GRPC_HOST=destination
+      - DESTINATION_GRPC_PORT=50051
       # S3 bucket for row count metrics
       - ROW_COUNT_BUCKET=${ROW_COUNT_BUCKET:-analitiq-client-pipeline-row-count}
+      # Pipeline identification (required at runtime)
+      - PIPELINE_ID=${PIPELINE_ID}
+      - CLIENT_ID=${CLIENT_ID}
+      # AWS configuration
+      - AWS_PROFILE=${AWS_PROFILE:-}
 
-    # Volume mounts for local development
+    # Volume mounts for consolidated config files - match analitiq.yaml paths
+    # Note: pipelines and .secrets are writable for cloud_entrypoint/config_fetcher
     volumes:
-      # Mount local config directory for testing
-      - ../examples/wise_to_sevdesk:/config:ro
-
+      - ../src:/app/src  # Live code changes without rebuild
+      - ../pipelines:/app/pipelines
+      - ../.secrets:/app/.secrets
+      - ~/.aws:/home/appuser/.aws:ro
       # Mount state, logs, and deadletter directories for persistence
-      - analitiq_state:/app/state
-      - analitiq_logs:/app/logs
-      - analitiq_deadletter:/app/deadletter
+      - ../state:/app/state
+      - ../logs:/app/logs
+      - ../deadletter:/app/deadletter
 
     # Resource limits (similar to ECS task definition)
     deploy:
@@ -44,13 +128,12 @@ services:
           cpus: '0.5'
           memory: 512M
 
-    # Restart policy - "no" for one-shot pipeline jobs that should exit after completion
-    # Use "unless-stopped" only for long-running services
+    # One-shot pipeline job - exit after completion
     restart: "no"
 
     # Health check
     healthcheck:
-      test: ["CMD", "python", "-c", "from src.core.pipeline_config_prep import PipelineConfigPrep; print('Health check passed')"]
+      test: ["CMD", "python", "-c", "from src.core.pipeline_config_prep import PipelineConfigPrep; print('OK')"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -63,16 +146,23 @@ services:
         max-size: "100m"
         max-file: "3"
 
+    depends_on:
+      destination:
+        condition: service_healthy
+
+    networks:
+      - analitiq-net
+
+# ===========================================================================
 # Named volumes for data persistence
+# ===========================================================================
 volumes:
-  analitiq_state:
-    driver: local
-  analitiq_logs:
-    driver: local
-  analitiq_deadletter:
+  postgres_data:
     driver: local
 
-# Example network configuration (if needed)
+# ===========================================================================
+# Network configuration
+# ===========================================================================
 networks:
-  default:
+  analitiq-net:
     driver: bridge

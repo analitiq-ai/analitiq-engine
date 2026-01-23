@@ -1,5 +1,13 @@
-Agents need to obtain API time zone from documentation
-Agents need to determine tie breakers
+
 Schema migration
 
 How does state work and what if state does not match?
+
+wpuld it be best to use factory methods for loading dbs?
+
+This should be in database, probably? Versioned? src/transformations/registry.py
+in Destination _prepare_records method 
+
+How is partial failure is treated? If some records failed on destination?
+
+Seem like writing to API is not failing if record cannot be written

@@ -7,9 +7,9 @@ from typing import List, Dict, Any
 from datetime import datetime, timezone
 import json
 
-from src.connectors.database.database_connector import DatabaseConnector
-from src.core.engine import StreamingEngine
-from src.core.pipeline import Pipeline
+from src.source.connectors.database import DatabaseConnector
+from src.engine.engine import StreamingEngine
+from src.engine.pipeline import Pipeline
 
 
 @pytest.fixture
@@ -59,7 +59,7 @@ def test_table_config():
                 }
             ]
         },
-        "table_schema": {
+        "endpoint_schema": {
             "$schema": "https://json-schema.org/draft/2020-12/schema",
             "title": "Streaming Test Data Schema",
             "type": "object",

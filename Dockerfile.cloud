@@ -1,0 +1,88 @@
+# Dockerfile.cloud - For AWS Batch deployments
+# Includes cloud_entrypoint.py and config_fetcher.py
+#
+# This Dockerfile is used by docker/deploy-ecr.sh for cloud deployments.
+# For local development, use the standard Dockerfile instead.
+
+FROM python:3.11-slim
+
+# Set environment variables for Python
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# Install system dependencies required for building Python packages
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user for security
+RUN groupadd --gid 1000 appuser && \
+    useradd --uid 1000 --gid appuser --shell /bin/bash --create-home appuser
+
+# Set working directory
+WORKDIR /app
+
+# Copy requirements and install dependencies first (for better caching)
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application code
+COPY --chown=appuser:appuser . .
+
+# Create required directories with proper permissions
+# These directories match paths defined in analitiq.yaml (single source of truth)
+# Consolidated config: pipelines/{pipeline_id}.json + .secrets/{connection_id}.json
+RUN mkdir -p \
+    /app/pipelines \
+    /app/.secrets \
+    /app/state \
+    /app/logs \
+    /app/deadletter \
+    /app/metrics && \
+    chown -R appuser:appuser /app/pipelines /app/.secrets /app/state /app/logs /app/deadletter /app/metrics
+
+# Cloud environment variables
+# Note: Config paths are determined by analitiq.yaml, not environment variables
+#
+# RUN_MODE determines container behavior:
+#   - "engine" (default): Runs the data pipeline engine
+#   - "destination": Runs the gRPC destination server
+ENV ENV=dev \
+    RUN_MODE=engine \
+    PIPELINE_ID="" \
+    AWS_REGION=eu-central-1 \
+    PYTHONPATH=/app \
+    ROW_COUNT_BUCKET=analitiq-client-pipeline-row-count \
+    GRPC_PORT=50051 \
+    DESTINATION_GRPC_HOST="" \
+    DESTINATION_GRPC_PORT=50051
+
+# Switch to non-root user
+USER appuser
+
+# Cloud-specific: Include cloud entrypoint scripts
+COPY --chown=appuser:appuser docker/cloud_entrypoint.py /app/cloud_entrypoint.py
+COPY --chown=appuser:appuser docker/config_fetcher.py /app/docker/config_fetcher.py
+COPY --chown=appuser:appuser docker/grpc_health_check.py /app/docker/grpc_health_check.py
+RUN chmod +x /app/cloud_entrypoint.py /app/docker/grpc_health_check.py
+
+# Health check is configured in ECS task definition (not here)
+# For destination container, add healthCheck in task definition:
+#   "healthCheck": {
+#     "command": ["CMD-SHELL", "python /app/docker/grpc_health_check.py"],
+#     "interval": 5, "timeout": 10, "startPeriod": 30, "retries": 3
+#   }
+# Then use dependsOn: HEALTHY for engine container
+
+# Cloud entrypoint: fetches config from Lambda/S3, then delegates to src.main
+ENTRYPOINT ["python", "/app/cloud_entrypoint.py"]
+
+# Labels for metadata
+LABEL org.opencontainers.image.title="Analitiq Stream (Cloud)" \
+      org.opencontainers.image.description="High-performance, fault-tolerant data streaming framework - Cloud deployment" \
+      org.opencontainers.image.version="0.1.0" \
+      org.opencontainers.image.vendor="Analitiq" \
+      org.opencontainers.image.source="https://github.com/analitiq/analitiq-stream"

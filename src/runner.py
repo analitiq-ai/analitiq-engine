@@ -26,8 +26,8 @@ from pathlib import Path
 from typing import Optional
 
 from src import Pipeline
-from .core.pipeline_config_prep import PipelineConfigPrep, PipelineConfigPrepSettings
-from .fault_tolerance.metrics_storage import (
+from .engine.pipeline_config_prep import PipelineConfigPrep, PipelineConfigPrepSettings
+from .state.metrics_storage import (
     MetricsStorageSettings,
     save_pipeline_metrics,
 )

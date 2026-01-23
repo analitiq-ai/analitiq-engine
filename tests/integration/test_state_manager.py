@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
-from src.fault_tolerance.state_manager import StateManager
+from src.state.state_manager import StateManager
 
 
 class TestStateManager:

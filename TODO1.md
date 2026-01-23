@@ -61,12 +61,3 @@ Add source and destination schema hash that are defi and on changes invalidate s
     )
 
 
-Medium Priority Issues:
-4. API Connector: 25/65 failed - REST API connectivity issues
-5. Database Connector: 19/43 failed - Database operations partially failing
-6. Core Engine: 8/14 failed - Main streaming engine has issues
-7. Data Transformer: 11/11 failed - ETL transformation pipeline broken
-
-
-
-

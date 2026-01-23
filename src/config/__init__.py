@@ -1,7 +1,11 @@
 """Configuration management for Analitiq Stream."""
 
-# Export connector sync utilities
-from .connector_sync import ConnectorSync, ConnectorConfig, load_analitiq_config
+# Export config loader and validators
+from .analitiq_config import (
+    load_analitiq_config,
+    validate_consolidated_config,
+    ConsolidatedConfigValidator,
+)
 
 # Export path-based config loader
 from .loader import PathBasedConfigLoader
@@ -17,10 +21,11 @@ from .exceptions import (
 )
 
 __all__ = [
-    # Connector sync
-    "ConnectorSync",
-    "ConnectorConfig",
+    # Config loader
     "load_analitiq_config",
+    # Consolidated config validation
+    "validate_consolidated_config",
+    "ConsolidatedConfigValidator",
     # Path-based loader
     "PathBasedConfigLoader",
     # Exceptions

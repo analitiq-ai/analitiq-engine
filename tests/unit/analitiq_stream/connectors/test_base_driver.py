@@ -4,7 +4,7 @@ import pytest
 from unittest.mock import AsyncMock
 from typing import Any, Dict, List
 
-from src.connectors.database.base_driver import BaseDatabaseDriver
+from src.source.drivers.base import BaseDatabaseDriver
 
 
 class MockDatabaseDriver(BaseDatabaseDriver):
@@ -32,7 +32,7 @@ class MockDatabaseDriver(BaseDatabaseDriver):
         self, 
         schema_name: str, 
         table_name: str, 
-        table_schema: Dict[str, Any],
+        endpoint_schema: Dict[str, Any],
         primary_key: List[str],
         unique_constraints: List[str] = None
     ):

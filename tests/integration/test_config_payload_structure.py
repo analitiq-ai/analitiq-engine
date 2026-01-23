@@ -16,10 +16,10 @@ from unittest.mock import patch
 
 import pytest
 
-from src.core.pipeline_config_prep import PipelineConfigPrep, PipelineConfigPrepSettings
-from src.core.pipeline import Pipeline
-from src.connectors.api import APIConnector
-from src.connectors.database.database_connector import DatabaseConfig
+from src.engine.pipeline_config_prep import PipelineConfigPrep, PipelineConfigPrepSettings
+from src.engine.pipeline import Pipeline
+from src.source.connectors.api import APIConnector
+from src.source.connectors.database import DatabaseConfig
 from src.models.api import APIConnectionConfig
 from src.models.enriched import (
     EnrichedAPIDestinationConfig,
@@ -61,7 +61,7 @@ class TestResolvedConnectionKeys:
             pipeline_id="22ab7b76-b4df-4c68-8b27-82c307436661",
         )
 
-        with patch("src.core.pipeline_config_prep.load_analitiq_config", return_value=mock_config):
+        with patch("src.engine.pipeline_config_prep.load_analitiq_config", return_value=mock_config):
             prep = PipelineConfigPrep(settings)
             _, _, resolved_connections, resolved_endpoints = prep.create_config()
 
@@ -90,7 +90,7 @@ class TestAPIToAPIConfigStructure:
             pipeline_id="22ab7b76-b4df-4c68-8b27-82c307436661",
         )
 
-        with patch("src.core.pipeline_config_prep.load_analitiq_config", return_value=mock_config):
+        with patch("src.engine.pipeline_config_prep.load_analitiq_config", return_value=mock_config):
             prep = PipelineConfigPrep(settings)
             return prep.create_config()
 
@@ -210,7 +210,7 @@ class TestAPIToDatabaseConfigStructure:
         )
 
         try:
-            with patch("src.core.pipeline_config_prep.load_analitiq_config", return_value=mock_config):
+            with patch("src.engine.pipeline_config_prep.load_analitiq_config", return_value=mock_config):
                 prep = PipelineConfigPrep(settings)
                 return prep.create_config()
         except FileNotFoundError as e:
@@ -281,7 +281,7 @@ class TestEndToEndConfigFlow:
             pipeline_id="22ab7b76-b4df-4c68-8b27-82c307436661",
         )
 
-        with patch("src.core.pipeline_config_prep.load_analitiq_config", return_value=mock_config):
+        with patch("src.engine.pipeline_config_prep.load_analitiq_config", return_value=mock_config):
             prep = PipelineConfigPrep(settings)
             pipeline_config, stream_configs, resolved_connections, resolved_endpoints = prep.create_config()
 
@@ -319,7 +319,7 @@ class TestEndToEndConfigFlow:
         )
 
         try:
-            with patch("src.core.pipeline_config_prep.load_analitiq_config", return_value=mock_config):
+            with patch("src.engine.pipeline_config_prep.load_analitiq_config", return_value=mock_config):
                 prep = PipelineConfigPrep(settings)
                 pipeline_config, _, resolved_connections, _ = prep.create_config()
         except FileNotFoundError as e:
@@ -353,7 +353,7 @@ class TestEndToEndConfigFlow:
             pipeline_id="22ab7b76-b4df-4c68-8b27-82c307436661",
         )
 
-        with patch("src.core.pipeline_config_prep.load_analitiq_config", return_value=mock_config):
+        with patch("src.engine.pipeline_config_prep.load_analitiq_config", return_value=mock_config):
             prep = PipelineConfigPrep(settings)
             pipeline_config, stream_configs, resolved_connections, resolved_endpoints = prep.create_config()
 

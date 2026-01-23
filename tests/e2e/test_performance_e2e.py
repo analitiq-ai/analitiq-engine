@@ -5,8 +5,8 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from src.core.pipeline import Pipeline
-from src.fault_tolerance.dead_letter_queue import DeadLetterQueue
+from src.engine.pipeline import Pipeline
+from src.state.dead_letter_queue import DeadLetterQueue
 
 
 def _configure_pipeline(pipeline: Pipeline, temp_dirs) -> Path:

@@ -6,8 +6,8 @@ import asyncio
 from pathlib import Path
 from typing import Dict
 
-from src.core.pipeline import Pipeline
-from src.fault_tolerance.dead_letter_queue import DeadLetterQueue
+from src.engine.pipeline import Pipeline
+from src.state.dead_letter_queue import DeadLetterQueue
 
 
 def _wire_pipeline(pipeline: Pipeline, temp_dirs: Dict[str, Path]) -> None:

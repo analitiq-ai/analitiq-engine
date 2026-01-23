@@ -4,7 +4,7 @@ import pytest
 import os
 from unittest.mock import AsyncMock, Mock
 
-from src.connectors.database.postgresql_driver import PostgreSQLDriver
+from src.source.drivers.postgresql import PostgreSQLDriver
 
 
 @pytest.fixture

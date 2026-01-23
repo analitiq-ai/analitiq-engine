@@ -201,7 +201,7 @@ def database_cleanup():
     if cleanup_tables and os.getenv("POSTGRES_PASSWORD"):
         try:
             import asyncio
-            from src.connectors.database.postgresql_driver import PostgreSQLDriver
+            from src.source.drivers.postgresql import PostgreSQLDriver
             
             async def cleanup():
                 driver = PostgreSQLDriver()

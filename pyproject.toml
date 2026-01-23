@@ -34,6 +34,9 @@ aiofiles = "^23.0.0"
 asyncpg = "^0.28.0"
 aiomysql = "^0.2.0"
 
+# SQLAlchemy for database abstraction
+sqlalchemy = {version = "^2.0.0", extras = ["asyncio"]}
+
 # API connectors
 aiohttp = "^3.8.0"
 aiohttp-retry = "^2.8.3"
@@ -53,6 +56,14 @@ prometheus-client = "^0.17.0"
 python-dotenv = "^1.0.0"
 click = "^8.0.0"
 pyyaml = "^6.0.0"
+
+# gRPC for destination streaming
+grpcio = "^1.60.0"
+grpcio-tools = "^1.60.0"
+protobuf = "^4.25.0"
+
+# Serialization formats for gRPC payloads
+msgpack = "^1.0.0"
 
 # Optional dependencies
 kafka-python = {version = "^2.0.0", optional = true}
@@ -175,6 +186,9 @@ module = [
     "boto3.*",
     "azure.*",
     "google.*",
+    "grpc.*",
+    "google.protobuf.*",
+    "msgpack.*",
 ]
 ignore_missing_imports = true
 

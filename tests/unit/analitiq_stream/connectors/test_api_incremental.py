@@ -7,8 +7,8 @@ import pytest
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch, mock_open, MagicMock, AsyncMock
-from src.connectors.api import APIConnector, ReadError
-from src.fault_tolerance.state_manager import StateManager
+from src.source.connectors.api import APIConnector, ReadError
+from src.state.state_manager import StateManager
 
 
 class TestAPIIncrementalReplication:

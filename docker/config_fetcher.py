@@ -6,8 +6,18 @@ This script fetches all configuration via a single Lambda call and secrets from 
 - Pipeline, streams, connectors, connections, endpoints via Lambda (_batch-job-data)
 - Secrets from S3
 
-It writes configuration to local filesystem using directory paths defined in
-analitiq.yaml (single source of truth for all directory paths).
+It writes a SINGLE consolidated configuration file per pipeline:
+- Consolidated file: {paths.pipelines}/{pipeline_id}.json
+- Secrets: {paths.secrets}/{connection_id}.json (kept separate for security)
+
+The consolidated file format:
+{
+    "pipeline": { ... },        # Pipeline object
+    "connections": [ ... ],     # List of connection objects (no secrets)
+    "connectors": [ ... ],      # List of connector metadata
+    "endpoints": [ ... ],       # List of endpoint definitions
+    "streams": [ ... ]          # List of stream configurations
+}
 
 This script runs as the first step in AWS Batch container execution,
 before the main pipeline runner is invoked.
@@ -16,9 +26,11 @@ Usage:
     python docker/config_fetcher.py
 
 Environment Variables:
-    PIPELINE_ID: UUID of the pipeline to fetch (optionally with version: uuid:v1.2.3)
+    PIPELINE_ID: UUID of the pipeline to fetch (optionally with version: uuid_v1)
     CLIENT_ID: UUID of the client
     STREAM_ID: UUID of the stream to process
+    INVOCATION_ID: UUID of the batch job invocation (passed to Lambda)
+    AWS_BATCH_JOB_ID: AWS Batch job ID (auto-injected by AWS Batch, passed to Lambda)
     ENV: Environment name (dev, prod)
     AWS_REGION: AWS region (default: eu-central-1)
     SECRETS_BUCKET: S3 bucket for secrets (default: analitiq-secrets-{ENV})
@@ -51,12 +63,13 @@ class ConfigFetcher:
     """
     Fetches configuration via Lambda and secrets from S3.
 
-    Writes configuration to local filesystem using directory structure defined
-    in analitiq.yaml (single source of truth for all directory paths).
+    Writes a SINGLE consolidated configuration file per pipeline containing
+    all related data (pipeline, connections, connectors, endpoints, streams).
+    Secrets are written separately to the secrets directory.
 
-    Stream endpoint paths are transformed from UUID to file paths:
-    - source.endpoint_id (UUID) -> source.endpoint (e.g., "{connector_id}/endpoints/{endpoint_id}.json")
-    - destinations[].endpoint_id (UUID) -> destinations[].endpoint (path)
+    Output structure:
+    - {paths.pipelines}/{pipeline_id}.json  (consolidated config)
+    - {paths.secrets}/{connection_id}.json  (secrets, kept separate)
     """
 
     def __init__(
@@ -67,7 +80,8 @@ class ConfigFetcher:
         """
         Initialize config fetcher.
 
-        All output paths are determined by analitiq.yaml (single source of truth).
+        Output paths are determined by analitiq.yaml (single source of truth).
+        Only 'pipelines' and 'secrets' paths are required.
 
         Args:
             region: AWS region
@@ -79,6 +93,8 @@ class ConfigFetcher:
         self.pipeline_id = os.getenv("PIPELINE_ID")
         self.client_id = os.getenv("CLIENT_ID")
         self.stream_id = os.getenv("STREAM_ID")
+        self.invocation_id = os.getenv("INVOCATION_ID")
+        self.batch_job_id = os.getenv("AWS_BATCH_JOB_ID")
 
         # Lambda function name
         self.batch_job_data_lambda = os.getenv(
@@ -98,9 +114,6 @@ class ConfigFetcher:
         self.paths = self._load_paths_from_analitiq_yaml()
 
         # Convert paths to Path objects for easier manipulation
-        self.connectors_path = Path(self.paths["connectors"])
-        self.connections_path = Path(self.paths["connections"])
-        self.streams_path = Path(self.paths["streams"])
         self.pipelines_path = Path(self.paths["pipelines"])
         self.secrets_path = Path(self.paths["secrets"])
 
@@ -108,8 +121,11 @@ class ConfigFetcher:
         """
         Load directory paths from analitiq.yaml at project root.
 
+        Only requires 'pipelines' and 'secrets' paths since configuration
+        is now written as a single consolidated file.
+
         Returns:
-            Dict with paths for connectors, streams, pipelines, secrets
+            Dict with paths for pipelines and secrets
 
         Raises:
             FileNotFoundError: If analitiq.yaml is not found
@@ -125,7 +141,7 @@ class ConfigFetcher:
 
         paths_config = config.get("paths", {})
 
-        required_paths = ["connectors", "connections", "streams", "pipelines", "secrets"]
+        required_paths = ["pipelines", "secrets"]
         missing = [p for p in required_paths if p not in paths_config]
         if missing:
             raise ValueError(f"analitiq.yaml missing required paths: {missing}")
@@ -185,11 +201,19 @@ class ConfigFetcher:
                 "pipeline_id": self.pipeline_id,
             }
 
+            if self.invocation_id:
+                payload["invocation_id"] = self.invocation_id
+
+            if self.batch_job_id:
+                payload["batch_job_id"] = self.batch_job_id
+
             if self.stream_id:
                 payload["stream_id"] = self.stream_id
 
             if stream_ids:
                 payload["stream_ids"] = stream_ids
+
+            logger.info(f"Lambda payload: {json.dumps(payload)}")
 
             response = self.lambda_client.invoke(
                 FunctionName=self.batch_job_data_lambda,
@@ -215,10 +239,6 @@ class ConfigFetcher:
             logger.info(
                 f"Fetched batch job data for pipeline: {self.pipeline_id}"
             )
-            logger.info(f"  Connections: {len(data.get('connections', []))}")
-            logger.info(f"  Connectors: {len(data.get('connectors', []))}")
-            logger.info(f"  Endpoints: {len(data.get('endpoints', []))}")
-            logger.info(f"  Streams: {len(data.get('streams', []))}")
 
             return data
 
@@ -291,122 +311,19 @@ class ConfigFetcher:
             json.dump(data, f, indent=2)
         logger.debug(f"Wrote: {path}")
 
-    def _build_connection_to_connector_map(
-        self, connections: List[Dict[str, Any]]
-    ) -> Dict[str, str]:
-        """
-        Build map from connection_id to connector_id.
-
-        Args:
-            connections: List of connection configs from batch-job-data
-
-        Returns:
-            Dict mapping connection_id -> connector_id
-        """
-        return {
-            c["connection_id"]: c["connector_id"]
-            for c in connections
-            if c.get("connection_id") and c.get("connector_id")
-        }
-
-    def _write_connectors(
-        self,
-        connectors: List[Dict[str, Any]],
-    ) -> set:
-        """
-        Write connector configs to disk using connector_id as directory name.
-
-        Directory structure: {paths.connectors}/{connector_id}/connector.json
-
-        Args:
-            connectors: List of connector configs from batch-job-data
-
-        Returns:
-            Set of connector_ids that were written
-        """
-        written_connector_ids: set = set()
-
-        for connector in connectors:
-            connector_id = connector.get("connector_id")
-
-            if not connector_id:
-                logger.warning("Skipping connector: missing connector_id")
-                continue
-
-            written_connector_ids.add(connector_id)
-
-            # Write connector config using connector_id as directory name
-            connector_dir = self.connectors_path / connector_id
-            connector_dir.mkdir(parents=True, exist_ok=True)
-            connector_path = connector_dir / "connector.json"
-            self.write_json(connector_path, connector)
-            logger.info(f"Wrote connector: {connector_path}")
-
-        return written_connector_ids
-
-    def _write_endpoints(
-        self,
-        endpoints: List[Dict[str, Any]],
-        written_connector_ids: set,
-    ) -> Dict[str, str]:
-        """
-        Write endpoint configs to disk using connector_id and endpoint_id.
-
-        Directory structure: {paths.connectors}/{connector_id}/endpoints/{endpoint_id}.json
-
-        The returned path map contains paths relative to the connectors directory,
-        which is what pipeline_config_prep.py expects for source.endpoint and
-        destinations[].endpoint fields.
-
-        Args:
-            endpoints: List of endpoint configs from batch-job-data
-            written_connector_ids: Set of connector_ids that were written
-
-        Returns:
-            Dict mapping endpoint_id -> relative path (e.g., "{connector_id}/endpoints/{endpoint_id}.json")
-        """
-        endpoint_path_map: Dict[str, str] = {}
-
-        for endpoint in endpoints:
-            endpoint_id = endpoint.get("endpoint_id")
-            connector_id = endpoint.get("connector_id")
-
-            if not endpoint_id or not connector_id:
-                logger.warning(
-                    f"Skipping endpoint {endpoint_id}: missing endpoint_id or connector_id"
-                )
-                continue
-
-            if connector_id not in written_connector_ids:
-                logger.warning(
-                    f"Skipping endpoint {endpoint_id}: "
-                    f"connector {connector_id} not found in written connectors"
-                )
-                continue
-
-            # Build relative path for endpoint (relative to connectors directory)
-            # This format matches what pipeline_config_prep.py expects
-            relative_path = f"{connector_id}/endpoints/{endpoint_id}.json"
-            endpoint_path_map[endpoint_id] = relative_path
-
-            # Write endpoint config
-            endpoints_dir = self.connectors_path / connector_id / "endpoints"
-            endpoints_dir.mkdir(parents=True, exist_ok=True)
-            endpoint_path = endpoints_dir / f"{endpoint_id}.json"
-            self.write_json(endpoint_path, endpoint)
-            logger.info(f"Wrote endpoint: {endpoint_path}")
-
-        return endpoint_path_map
-
-    def _write_credentials(
+    def _write_secrets(
         self,
         connections: List[Dict[str, Any]],
         all_secrets: Dict[str, Dict[str, Any]],
     ) -> None:
         """
-        Write merged credentials (connection config + secrets) to disk.
+        Write secrets to disk.
 
         Directory structure: {paths.secrets}/{connection_id}.json
+
+        Secrets are kept separate from the consolidated config for security.
+        PipelineConfigPrep will load secrets from here and merge with
+        connection configs from the consolidated file.
 
         Args:
             connections: List of connection configs from batch-job-data
@@ -417,102 +334,16 @@ class ConfigFetcher:
             if not connection_id:
                 continue
 
-            # Get secrets and merge with connection config
+            # Get secrets for this connection
             secrets = all_secrets.get(connection_id, {})
-            credentials = {
-                "host": connection.get("host"),
-                "type": connection.get("type"),
-            }
-            # Include any additional config from connection
-            if connection.get("config"):
-                credentials.update(connection["config"])
-            # Overlay with secrets (secrets take precedence)
-            credentials.update(secrets)
-            # Remove None values
-            credentials = {k: v for k, v in credentials.items() if v is not None}
-
-            # Write credentials file
-            cred_path = self.secrets_path / f"{connection_id}.json"
-            self.write_json(cred_path, credentials)
-            logger.info(f"Wrote credentials: {cred_path}")
-
-    def _write_connection_files(
-        self,
-        connections: List[Dict[str, Any]],
-    ) -> None:
-        """
-        Write connection configs to disk using connection_id as filename.
-
-        Directory structure: {paths.connections}/{connection_id}.json
-
-        This is the ID-based format that PipelineConfigPrep expects.
-        PipelineConfigPrep will merge these with secrets from {paths.secrets}.
-
-        Args:
-            connections: List of connection configs from batch-job-data
-        """
-        self.connections_path.mkdir(parents=True, exist_ok=True)
-
-        for connection in connections:
-            connection_id = connection.get("connection_id")
-            if not connection_id:
-                logger.warning("Skipping connection: missing connection_id")
+            if not secrets:
+                logger.debug(f"No secrets found for connection: {connection_id}")
                 continue
 
-            # Write connection config
-            conn_path = self.connections_path / f"{connection_id}.json"
-            self.write_json(conn_path, connection)
-            logger.info(f"Wrote connection: {conn_path}")
-
-    def _transform_streams_with_endpoint_paths(
-        self,
-        streams: List[Dict[str, Any]],
-        endpoint_path_map: Dict[str, str],
-    ) -> None:
-        """
-        Transform streams from endpoint_id to endpoint path format.
-
-        Modifies streams in-place.
-
-        Args:
-            streams: List of stream configs (modified in-place)
-            endpoint_path_map: Map of endpoint_id -> relative path
-        """
-        for stream in streams:
-            # Transform source endpoint
-            source = stream.get("source", {})
-            source_endpoint_id = source.get("endpoint_id")
-
-            if source_endpoint_id:
-                endpoint_path = endpoint_path_map.get(source_endpoint_id)
-                if endpoint_path:
-                    source["endpoint"] = endpoint_path
-                    del source["endpoint_id"]
-                    logger.info(
-                        f"Transformed source endpoint {source_endpoint_id} -> {endpoint_path}"
-                    )
-                else:
-                    logger.warning(
-                        f"No path found for source endpoint: {source_endpoint_id}"
-                    )
-
-            # Transform destination endpoints
-            destinations = stream.get("destinations", [])
-            for dest in destinations:
-                dest_endpoint_id = dest.get("endpoint_id")
-
-                if dest_endpoint_id:
-                    endpoint_path = endpoint_path_map.get(dest_endpoint_id)
-                    if endpoint_path:
-                        dest["endpoint"] = endpoint_path
-                        del dest["endpoint_id"]
-                        logger.info(
-                            f"Transformed dest endpoint {dest_endpoint_id} -> {endpoint_path}"
-                        )
-                    else:
-                        logger.warning(
-                            f"No path found for dest endpoint: {dest_endpoint_id}"
-                        )
+            # Write secrets file
+            secrets_path = self.secrets_path / f"{connection_id}.json"
+            self.write_json(secrets_path, secrets)
+            logger.info(f"Wrote secrets: {secrets_path}")
 
     def _collect_connection_ids(
         self, connections: List[Dict[str, Any]]
@@ -526,44 +357,37 @@ class ConfigFetcher:
 
     def _get_pipeline_id_without_version(self) -> str:
         """Extract pipeline ID without version suffix."""
-        if ":" in self.pipeline_id:
-            return self.pipeline_id.split(":")[0]
+        if "_" in self.pipeline_id:
+            return self.pipeline_id.split("_")[0]
         return self.pipeline_id
 
     def fetch_and_write_all(
         self, stream_ids: Optional[List[str]] = None
     ) -> Path:
         """
-        Fetch all configuration and write to directories defined in analitiq.yaml.
+        Fetch all configuration and write consolidated file + secrets.
 
         Fetches via single batch-job-data Lambda call:
-        - Pipeline config
-        - Connection configs
-        - Connector configs
-        - Endpoint configs
-        - Stream configs
+        - Pipeline, connections, connectors, endpoints, streams
 
         Fetches from S3:
         - Secrets for each connection
 
-        Transforms:
-        - Connections from UUID format to path-based format
-        - Streams endpoint_id to endpoint path format
+        Writes:
+        - Consolidated config: {paths.pipelines}/{pipeline_id}.json
+        - Secrets: {paths.secrets}/{connection_id}.json
 
         Args:
             stream_ids: Optional list of specific stream IDs to fetch
 
         Returns:
-            Path to the pipeline config file
+            Path to the consolidated pipeline config file
         """
         self.validate_environment()
 
-        # Create output directories (paths from analitiq.yaml)
+        # Create output directories
         self.pipelines_path.mkdir(parents=True, exist_ok=True)
-        self.streams_path.mkdir(parents=True, exist_ok=True)
-        self.connections_path.mkdir(parents=True, exist_ok=True)
         self.secrets_path.mkdir(parents=True, exist_ok=True)
-        self.connectors_path.mkdir(parents=True, exist_ok=True)
 
         # Fetch all data via single Lambda call
         data = self.fetch_batch_job_data(stream_ids)
@@ -574,48 +398,32 @@ class ConfigFetcher:
         endpoints = data.get("endpoints", [])
         streams = data.get("streams", [])
 
-        # Write connectors and get set of written connector_ids
-        written_connector_ids = self._write_connectors(connectors)
-
-        # Write endpoints and get path map (endpoint_id -> relative path)
-        endpoint_path_map = self._write_endpoints(endpoints, written_connector_ids)
-
         # Fetch all secrets in parallel from S3
         connection_ids = self._collect_connection_ids(connections)
         all_secrets = self.fetch_secrets_parallel(connection_ids)
 
-        # Write credentials (connection config + secrets merged)
-        self._write_credentials(connections, all_secrets)
+        # Write secrets files (separate from consolidated config)
+        self._write_secrets(connections, all_secrets)
 
-        # Write connection files (ID-based format for PipelineConfigPrep)
-        # Pipeline connections remain as plain UUIDs, PipelineConfigPrep resolves them
-        self._write_connection_files(connections)
-
-        # Write transformed pipeline config
+        # Write consolidated pipeline config
         pipeline_id = self._get_pipeline_id_without_version()
+        consolidated = {
+            "pipeline": pipeline,
+            "connections": connections,
+            "connectors": connectors,
+            "endpoints": endpoints,
+            "streams": streams,
+        }
         pipeline_path = self.pipelines_path / f"{pipeline_id}.json"
-        self.write_json(pipeline_path, pipeline)
-        logger.info(f"Wrote pipeline: {pipeline_path}")
+        self.write_json(pipeline_path, consolidated)
 
-        # Transform streams: endpoint_id -> endpoint path
-        self._transform_streams_with_endpoint_paths(streams, endpoint_path_map)
-
-        # Write transformed stream configs
-        for stream in streams:
-            stream_id = stream.get("stream_id")
-            stream_path = self.streams_path / f"{stream_id}.json"
-            self.write_json(stream_path, stream)
-
-        logger.info(f"Configuration written using paths from analitiq.yaml:")
-        logger.info(f"  Pipelines: {self.pipelines_path}")
-        logger.info(f"  Streams: {self.streams_path}")
-        logger.info(f"  Connections: {self.connections_path}")
-        logger.info(f"  Secrets: {self.secrets_path}")
-        logger.info(f"  Connectors: {self.connectors_path}")
-        logger.info(f"  Total streams: {len(streams)}")
-        logger.info(f"  Total connections: {len(connections)}")
-        logger.info(f"  Total connectors: {len(written_connector_ids)}")
-        logger.info(f"  Total endpoints: {len(endpoint_path_map)}")
+        logger.info(f"Wrote consolidated config: {pipeline_path}")
+        logger.info(f"  Pipeline: {pipeline.get('name', pipeline_id)}")
+        logger.info(f"  Connections: {len(connections)}")
+        logger.info(f"  Connectors: {len(connectors)}")
+        logger.info(f"  Endpoints: {len(endpoints)}")
+        logger.info(f"  Streams: {len(streams)}")
+        logger.info(f"  Secrets: {len(all_secrets)}")
 
         return pipeline_path
 

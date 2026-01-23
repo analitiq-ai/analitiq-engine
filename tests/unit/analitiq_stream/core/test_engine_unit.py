@@ -5,9 +5,9 @@ from typing import Any, Dict, List
 
 import pytest
 
-from src.core.engine import StreamingEngine, _deep_merge_dicts
-from src.core.exceptions import ConfigurationError, StreamProcessingError
-from src.connectors.base import BaseConnector
+from src.engine.engine import StreamingEngine, _deep_merge_dicts
+from src.engine.exceptions import ConfigurationError, StreamProcessingError
+from src.source.connectors.base import BaseConnector
 
 
 class InMemorySourceConnector(BaseConnector):

@@ -303,11 +303,11 @@ def view_pipeline(pipeline_name):
                 if source_endpoint_file in endpoint_files:
                     source_endpoint_config = get_endpoint_config(pipeline_name, source_endpoint_file)
                     
-                    # For database endpoints with table_schema
-                    if source_endpoint_config and 'table_schema' in source_endpoint_config and 'properties' in source_endpoint_config['table_schema']:
-                        required_fields = source_endpoint_config['table_schema'].get('required', [])
+                    # For database endpoints with endpoint_schema
+                    if source_endpoint_config and 'endpoint_schema' in source_endpoint_config and 'properties' in source_endpoint_config['endpoint_schema']:
+                        required_fields = source_endpoint_config['endpoint_schema'].get('required', [])
                         
-                        for field_name, field_info in source_endpoint_config['table_schema']['properties'].items():
+                        for field_name, field_info in source_endpoint_config['endpoint_schema']['properties'].items():
                             field_type = {
                                 'type': field_info.get('database_type') or field_info.get('type', 'unknown'),
                                 'format': field_info.get('format', ''),
@@ -316,9 +316,9 @@ def view_pipeline(pipeline_name):
                             field_types[field_name] = field_type
                             mapping_data_by_stream[stream_id]['source_fields'][field_name] = field_type
                     
-                    # For API endpoints with response_schema
-                    elif source_endpoint_config and 'response_schema' in source_endpoint_config:
-                        schema = source_endpoint_config['response_schema']
+                    # For API endpoints with endpoint_schema
+                    elif source_endpoint_config and 'endpoint_schema' in source_endpoint_config:
+                        schema = source_endpoint_config['endpoint_schema']
                         
                         # Handle array schema
                         if schema.get('type') == 'array' and 'items' in schema:
@@ -345,11 +345,11 @@ def view_pipeline(pipeline_name):
                 if dest_endpoint_file in endpoint_files:
                     dest_endpoint_config = get_endpoint_config(pipeline_name, dest_endpoint_file)
                     
-                    # For database endpoints with table_schema
-                    if dest_endpoint_config and 'table_schema' in dest_endpoint_config and 'properties' in dest_endpoint_config['table_schema']:
-                        required_fields = dest_endpoint_config['table_schema'].get('required', [])
+                    # For database endpoints with endpoint_schema
+                    if dest_endpoint_config and 'endpoint_schema' in dest_endpoint_config and 'properties' in dest_endpoint_config['endpoint_schema']:
+                        required_fields = dest_endpoint_config['endpoint_schema'].get('required', [])
                         
-                        for field_name, field_info in dest_endpoint_config['table_schema']['properties'].items():
+                        for field_name, field_info in dest_endpoint_config['endpoint_schema']['properties'].items():
                             field_type = {
                                 'type': field_info.get('database_type') or field_info.get('type', 'unknown'),
                                 'format': field_info.get('format', ''),

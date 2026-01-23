@@ -2,8 +2,8 @@
 
 import pytest
 
-from src.core.data_transformer import DataTransformer
-from src.core.exceptions import TransformationError
+from src.engine.data_transformer import DataTransformer
+from src.engine.exceptions import TransformationError
 
 
 class TestDataTransformer:

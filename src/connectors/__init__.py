@@ -1,7 +1,15 @@
-"""Data source and destination connectors."""
+"""Backward compatibility alias for src.source.connectors.
 
-from .api import APIConnector
-from .base import BaseConnector
-from .database import DatabaseConnector
+This module is deprecated. Please use src.source.connectors instead.
+"""
+import warnings
 
-__all__ = ["BaseConnector", "DatabaseConnector", "APIConnector"]
+warnings.warn(
+    "src.connectors is deprecated, use src.source.connectors instead",
+    DeprecationWarning,
+    stacklevel=2
+)
+
+# Re-export everything from source.connectors for backwards compatibility
+from ..source.connectors import *
+from ..source.connectors import __all__

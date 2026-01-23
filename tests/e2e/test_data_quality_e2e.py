@@ -7,8 +7,8 @@ import json
 from pathlib import Path
 from typing import Dict, List
 
-from src.core.pipeline import Pipeline
-from src.fault_tolerance.dead_letter_queue import DeadLetterQueue
+from src.engine.pipeline import Pipeline
+from src.state.dead_letter_queue import DeadLetterQueue
 
 
 def _configure_pipeline_directories(pipeline: Pipeline, temp_dirs: Dict[str, Path]) -> Path:

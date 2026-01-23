@@ -6,8 +6,8 @@ from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 from typing import Dict, Any
 
-from src.core.orchestrator import PipelineOrchestrator
-from src.core.exceptions import (
+from src.engine.orchestrator import PipelineOrchestrator
+from src.engine.exceptions import (
     PipelineOrchestrationError, StreamExecutionError, 
     PipelineValidationError, StreamConfigurationError
 )

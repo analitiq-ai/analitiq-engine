@@ -87,8 +87,9 @@ if ! aws ecr describe-repositories --repository-names "$ECR_REPO" --region "$AWS
 fi
 
 # Build Docker image for x86_64/amd64 (required for AWS)
-log_info "Building Docker image for linux/amd64..."
-docker build --platform linux/amd64 -t "$ECR_REPO:$TAG" .
+# Uses Dockerfile.cloud which includes cloud_entrypoint.py and config_fetcher.py
+log_info "Building Docker image for linux/amd64 using Dockerfile.cloud..."
+docker build --platform linux/amd64 -f Dockerfile.cloud -t "$ECR_REPO:$TAG" .
 
 # Tag for ECR
 log_info "Tagging image for ECR..."

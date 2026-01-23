@@ -1,0 +1,186 @@
+// Protocol definitions for Analitiq Stream gRPC communication
+// Engine -> Destination bidirectional streaming
+
+syntax = "proto3";
+
+package analitiq.v1;
+
+option java_multiple_files = true;
+option java_package = "com.analitiq.v1";
+
+// Payload encoding format for record batches
+enum PayloadFormat {
+  PAYLOAD_FORMAT_UNSPECIFIED = 0;
+  PAYLOAD_FORMAT_JSONL = 1;      // Newline-delimited JSON (default, human-readable)
+  PAYLOAD_FORMAT_MSGPACK = 2;    // MessagePack (compact binary)
+  PAYLOAD_FORMAT_AVRO = 3;       // Apache Avro (schema evolution)
+}
+
+// Opaque cursor - produced by engine, stored/returned by destination
+// Destination does NOT interpret this; only stores and returns it
+message Cursor {
+  // Opaque bytes encoding the cursor position
+  // Engine-defined format (timestamp + tie-breaker, LSN, composite key, etc.)
+  bytes token = 1;
+}
+
+// Write mode for destination operations
+enum WriteMode {
+  WRITE_MODE_UNSPECIFIED = 0;
+  WRITE_MODE_INSERT = 1;           // Insert only, fail on conflict
+  WRITE_MODE_UPSERT = 2;           // Upsert (insert or update on conflict)
+  WRITE_MODE_TRUNCATE_INSERT = 3;  // Truncate table before insert (full refresh)
+}
+
+// Schema message - sent once at stream start
+message SchemaMessage {
+  // Stream identification
+  string stream_id = 1;
+
+  // Schema version for evolution tracking
+  uint32 version = 2;
+
+  // JSON Schema encoded as string
+  string json_schema = 3;
+
+  // Primary key fields for upsert operations
+  repeated string primary_key = 4;
+
+  // Write mode for this stream
+  WriteMode write_mode = 5;
+
+  // Destination-specific configuration
+  DestinationConfig destination_config = 6;
+
+  // Hash of schema for drift detection
+  string schema_hash = 7;
+}
+
+// Destination-specific configuration (sent with schema)
+message DestinationConfig {
+  // Type of destination connector (postgresql, mysql, api, etc.)
+  string connector_type = 1;
+
+  // Database-specific config
+  DatabaseConfig database = 10;
+
+  // API-specific config (future)
+  ApiConfig api = 11;
+}
+
+message DatabaseConfig {
+  string schema_name = 1;
+  string table_name = 2;
+  repeated string unique_constraints = 3;
+
+  // Conflict resolution for upserts
+  ConflictResolution conflict_resolution = 4;
+
+  // Auto-configuration options
+  AutoConfigureOptions auto_configure = 5;
+}
+
+message ConflictResolution {
+  string on_conflict = 1;              // Column(s) for conflict detection
+  string action = 2;                   // "update" or "nothing"
+  repeated string update_columns = 3;  // Columns to update on conflict
+}
+
+message AutoConfigureOptions {
+  bool auto_create_schema = 1;
+  bool auto_create_table = 2;
+  repeated IndexDefinition auto_create_indexes = 3;
+}
+
+message IndexDefinition {
+  string name = 1;
+  repeated string columns = 2;
+  string type = 3;  // btree, hash, gin, gist, etc.
+  bool unique = 4;
+}
+
+message ApiConfig {
+  string endpoint = 1;
+  string method = 2;
+  bool batch_support = 3;
+  uint32 batch_size = 4;
+  string idempotency_header = 5;
+}
+
+// Record batch message - contains a batch of data records
+message RecordBatch {
+  // Idempotency keys (for exactly-once semantics)
+  string run_id = 1;
+  string stream_id = 2;
+  uint64 batch_seq = 3;  // Monotonically increasing per stream within run
+
+  // Payload encoding
+  PayloadFormat format = 4;
+  bytes payload = 5;       // Encoded records (JSONL, MessagePack, or Avro)
+  uint32 record_count = 6;
+
+  // Per-record identifiers for stable DLQ correlation
+  // Each record in payload has corresponding ID at same index
+  // Format: counter within batch or sha1(pk + cursor + run_id)
+  repeated string record_ids = 7;
+
+  // Opaque cursor representing MAX watermark in this batch
+  // Engine computes this as max(cursor_field) across all records
+  // Destination stores and returns in ACK
+  Cursor cursor = 8;
+}
+
+// ACK status values
+enum AckStatus {
+  ACK_STATUS_UNSPECIFIED = 0;
+  ACK_STATUS_SUCCESS = 1;            // All records written, cursor advanced
+  ACK_STATUS_ALREADY_COMMITTED = 2;  // Idempotent replay, batch already committed
+  ACK_STATUS_RETRYABLE_FAILURE = 3;  // No commit occurred, safe to retry entire batch
+  ACK_STATUS_FATAL_FAILURE = 4;      // No commit occurred, do not retry, send to DLQ
+  // Note: No PARTIAL_SUCCESS - all-or-nothing per batch for simpler semantics
+}
+
+// Batch acknowledgment from destination to engine
+message BatchAck {
+  // Echo back idempotency keys for correlation
+  string run_id = 1;
+  string stream_id = 2;
+  uint64 batch_seq = 3;
+
+  // Result status
+  AckStatus status = 4;
+  uint32 records_written = 5;
+
+  // Committed cursor (engine persists this)
+  // Returned on SUCCESS and ALREADY_COMMITTED
+  Cursor committed_cursor = 6;
+
+  // OPTIONAL diagnostic info for FATAL_FAILURE
+  // May be incomplete (DB errors often can't identify specific record)
+  // Engine sends ENTIRE batch to DLQ regardless of this field
+  repeated string failed_record_ids = 7;
+  string failure_summary = 8;  // Human-readable summary: "constraint violation on column X"
+}
+
+// Request wrapper for bidirectional stream (engine -> destination)
+message StreamRequest {
+  oneof message {
+    SchemaMessage schema = 1;
+    RecordBatch batch = 2;
+  }
+}
+
+// Response wrapper for bidirectional stream (destination -> engine)
+message StreamResponse {
+  oneof message {
+    BatchAck ack = 1;
+    SchemaAck schema_ack = 2;
+  }
+}
+
+// Schema acknowledgment (sent after SchemaMessage)
+message SchemaAck {
+  string stream_id = 1;
+  bool accepted = 2;
+  string message = 3;  // Error message if not accepted
+}

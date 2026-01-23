@@ -13,8 +13,8 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 from datetime import datetime, timezone
 
-from src.connectors.api import APIConnector
-from src.fault_tolerance.state_manager import StateManager
+from src.source.connectors.api import APIConnector
+from src.state.state_manager import StateManager
 
 
 class TestDuplicateRecordsIntegration:
@@ -404,7 +404,7 @@ class TestDuplicateRecordsIntegration:
         )
         
         # Now test that the API connector loads this state correctly
-        from src.connectors.api import APIConnector
+        from src.source.connectors.api import APIConnector
         
         connector = APIConnector("test")
         
@@ -901,7 +901,7 @@ class TestDuplicateRecordsIntegration:
             assert metrics1.records_processed > 0, "First run should process at least 1 record"
             
             # Check that tie-breaker information was saved
-            from src.fault_tolerance.state_manager import StateManager
+            from src.state.state_manager import StateManager
             state_manager = StateManager("test-integration-pipeline", str(temp_state_dir))
             
             partition_state = state_manager.get_partition_state("stream.test-stream-001", {})

@@ -3,9 +3,9 @@
 import pytest
 from unittest.mock import MagicMock
 
-from src.connectors.database.driver_factory import DriverFactory
-from src.connectors.database.base_driver import BaseDatabaseDriver
-from src.connectors.database.postgresql_driver import PostgreSQLDriver
+from src.source.drivers.factory import DriverFactory
+from src.source.drivers.base import BaseDatabaseDriver
+from src.source.drivers.postgresql import PostgreSQLDriver
 
 
 class MockDriver(BaseDatabaseDriver):
@@ -23,7 +23,7 @@ class MockDriver(BaseDatabaseDriver):
     async def create_schema_if_not_exists(self, schema_name):
         pass
     
-    async def create_table_if_not_exists(self, schema_name, table_name, table_schema, primary_key, unique_constraints=None):
+    async def create_table_if_not_exists(self, schema_name, table_name, endpoint_schema, primary_key, unique_constraints=None):
         pass
     
     async def create_indexes_if_not_exist(self, schema_name, table_name, indexes):
@@ -61,8 +61,8 @@ class TestDriverFactory:
     
     def test_factory_imports_and_registration(self):
         """Test that factory can be imported and used for registration."""
-        from src.connectors.database.driver_factory import DriverFactory
-        from src.connectors.database.base_driver import BaseDatabaseDriver
+        from src.source.drivers.factory import DriverFactory
+        from src.source.drivers.base import BaseDatabaseDriver
         
         # Test importing the factory
         assert DriverFactory is not None
@@ -410,7 +410,7 @@ class TestDriverFactoryInheritance:
             async def create_schema_if_not_exists(self, schema_name):
                 pass
             
-            async def create_table_if_not_exists(self, schema_name, table_name, table_schema, primary_key, unique_constraints=None):
+            async def create_table_if_not_exists(self, schema_name, table_name, endpoint_schema, primary_key, unique_constraints=None):
                 pass
             
             async def create_indexes_if_not_exist(self, schema_name, table_name, indexes):

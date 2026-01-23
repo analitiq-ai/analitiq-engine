@@ -5,7 +5,7 @@ import time
 import pytest
 from unittest.mock import patch, AsyncMock
 
-from src.connectors.api import RateLimiter
+from src.source.connectors.api import RateLimiter
 
 
 class TestRateLimiter:
@@ -193,7 +193,7 @@ class TestRateLimiter:
         limiter = RateLimiter(max_requests=1, time_window=1)
         
         # Mock time to create edge case
-        with patch('src.connectors.api.datetime') as mock_datetime:
+        with patch('src.source.connectors.api.datetime') as mock_datetime:
             # First call returns current time
             mock_datetime.now.return_value.timestamp.return_value = 1000.0
             await limiter.acquire()

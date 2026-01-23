@@ -4,7 +4,7 @@ import json
 import os
 import pytest
 
-from src.core.expression_evaluator import SecureExpressionEvaluator
+from src.engine.expression_evaluator import SecureExpressionEvaluator
 
 
 class TestSecureExpressionEvaluator:

@@ -110,7 +110,7 @@ class TestSubPackageInits:
         assert src.connectors.database is not None
         
         # Verify main exports from database package
-        from src.connectors.database import (
+        from src.source.connectors.database import (
             BaseDatabaseDriver, DriverFactory, DatabaseConnector
         )
         

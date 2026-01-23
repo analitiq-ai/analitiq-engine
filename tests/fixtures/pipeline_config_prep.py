@@ -89,7 +89,7 @@ def sample_wise_endpoint_config():
         "path_params": {
             "profile_id": "${WISE_PROFILE_ID}"
         },
-        "response_schema": {
+        "endpoint_schema": {
             "$schema": "https://json-schema.org/draft/2020-12/schema",
             "title": "Wise Transfers Response",
             "type": "array",
@@ -189,7 +189,7 @@ def sample_sevdesk_endpoint_config():
             },
             "required": ["valueDate", "amount", "objectName", "checkAccount", "status"]
         },
-        "response_schema": {
+        "endpoint_schema": {
             "$schema": "https://json-schema.org/draft/2020-12/schema",
             "title": "SevDesk API Response",
             "type": "object",
@@ -260,7 +260,7 @@ def sample_database_endpoint_config():
                 }
             ]
         },
-        "table_schema": {
+        "endpoint_schema": {
             "$schema": "https://json-schema.org/draft/2020-12/schema",
             "title": "Wise Transactions Table Schema",
             "type": "object",
