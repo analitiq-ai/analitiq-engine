@@ -179,15 +179,32 @@ pipeline_config, stream_configs, connections, endpoints = prep.create_config()
 }
 ```
 
-### Connection Credentials
+### Connectors
 
-Credentials support `${VAR_NAME}` syntax for environment variable expansion. The `connector_type` field determines which handler processes the connection.
+Connectors define the type and metadata for each integration. The `connector_type` field determines which handler processes connections using this connector.
 
-**Database (connector_type: db):**
 ```json
 {
-  "connector_type": "db",
-  "driver": "postgresql",
+  "connectors": [
+    {"connector_id": "pg-connector", "connector_name": "PostgreSQL", "connector_type": "database", "slug": "postgresql"},
+    {"connector_id": "mysql-connector", "connector_name": "MySQL", "connector_type": "database", "slug": "mysql"},
+    {"connector_id": "api-connector", "connector_name": "REST API", "connector_type": "api"},
+    {"connector_id": "file-connector", "connector_name": "File Export", "connector_type": "file"},
+    {"connector_id": "s3-connector", "connector_name": "S3 Export", "connector_type": "s3"},
+    {"connector_id": "stdout-connector", "connector_name": "Stdout", "connector_type": "stdout"}
+  ]
+}
+```
+
+### Connection Credentials
+
+Connections reference a connector via `connector_id` and contain credentials. Credentials support `${VAR_NAME}` syntax for environment variable expansion.
+
+**Database connection:**
+```json
+{
+  "connection_id": "prod-postgres",
+  "connector_id": "pg-connector",
   "host": "${DB_HOST}",
   "port": 5432,
   "database": "${DB_NAME}",
@@ -196,10 +213,11 @@ Credentials support `${VAR_NAME}` syntax for environment variable expansion. The
 }
 ```
 
-**API (connector_type: api):**
+**API connection:**
 ```json
 {
-  "connector_type": "api",
+  "connection_id": "external-api",
+  "connector_id": "api-connector",
   "host": "https://api.example.com",
   "headers": { "Authorization": "Bearer ${API_TOKEN}" },
   "timeout": 30,
@@ -207,19 +225,21 @@ Credentials support `${VAR_NAME}` syntax for environment variable expansion. The
 }
 ```
 
-**File (connector_type: file):**
+**File connection:**
 ```json
 {
-  "connector_type": "file",
+  "connection_id": "local-export",
+  "connector_id": "file-connector",
   "file_format": "jsonl",
   "path": "/data/exports"
 }
 ```
 
-**S3 (connector_type: s3):**
+**S3 connection:**
 ```json
 {
-  "connector_type": "s3",
+  "connection_id": "s3-export",
+  "connector_id": "s3-connector",
   "file_format": "parquet",
   "bucket": "data-lake",
   "prefix": "exports",
@@ -228,10 +248,11 @@ Credentials support `${VAR_NAME}` syntax for environment variable expansion. The
 }
 ```
 
-**Stdout (connector_type: stdout):**
+**Stdout connection:**
 ```json
 {
-  "connector_type": "stdout",
+  "connection_id": "debug-output",
+  "connector_id": "stdout-connector",
   "file_format": "jsonl"
 }
 ```
@@ -274,7 +295,7 @@ See [gRPC Architecture](docs/GRPC_STREAMING_ARCHITECTURE.md) for details.
 
 ## Destination Architecture
 
-Configuration-driven destination system with layered abstractions. Single Docker image handles all destination types based on `connector_type` in connection config.
+Configuration-driven destination system with layered abstractions. Single Docker image handles all destination types based on `connector_type` defined in the connector (looked up via `connector_id` on the connection).
 
 **Handlers:** `db` (SQLAlchemy), `postgresql` (legacy asyncpg), `api`, `file`, `s3`, `stdout`
 
