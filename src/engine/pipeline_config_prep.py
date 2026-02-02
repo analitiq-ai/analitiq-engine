@@ -616,13 +616,7 @@ class PipelineConfigPrep:
 
     def _determine_connection_type(self, config: Dict[str, Any], connection_id: str) -> str:
         """
-        Determine connection type from config fields.
-
-        Rules:
-        - If 'connector_type' or 'type' equals 'api' -> API connection
-        - If 'connector_type' or 'type' equals 'database' -> Database connection
-        - If 'provider' or 'driver' field exists -> Database connection
-        - Otherwise raise ValueError
+        Determine connection type by looking up connector_type from connectors array.
 
         Args:
             config: Connection configuration dictionary
@@ -634,19 +628,28 @@ class PipelineConfigPrep:
         Raises:
             ValueError: If connection type cannot be determined
         """
-        # Check connector_type first (new standard), then type (legacy)
-        conn_type = config.get("connector_type") or config.get("type")
-        if conn_type == "api":
-            return "api"
-        if conn_type == "database":
-            return "database"
-        # Legacy: database connections identified by provider or driver field
-        if "provider" in config or "driver" in config:
-            return "database"
+        connector_id = config.get("connector_id")
+        if not connector_id:
+            raise ValueError(
+                f"Connection '{connection_id}' is missing 'connector_id' field."
+            )
+
+        consolidated = self._load_consolidated_config()
+        connectors = consolidated.get("connectors", [])
+
+        for connector in connectors:
+            if connector.get("connector_id") == connector_id:
+                conn_type = connector.get("connector_type")
+                if conn_type in ("api", "database"):
+                    return conn_type
+                raise ValueError(
+                    f"Connector '{connector_id}' has invalid or missing 'connector_type'. "
+                    f"Expected 'api' or 'database', got: {conn_type!r}"
+                )
+
         raise ValueError(
-            f"Cannot determine connection type for '{connection_id}'. "
-            f"Connections must have 'connector_type' (api or database) or "
-            f"'type' field, or database connections must have 'driver' field."
+            f"Connector not found for connection '{connection_id}' "
+            f"with connector_id '{connector_id}'."
         )
 
     def _normalize_database_connection(self, config: Dict[str, Any]) -> Dict[str, Any]:

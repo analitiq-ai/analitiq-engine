@@ -179,32 +179,15 @@ pipeline_config, stream_configs, connections, endpoints = prep.create_config()
 }
 ```
 
-### Connectors
-
-Connectors define the type and metadata for each integration. The `connector_type` field determines which handler processes connections using this connector.
-
-```json
-{
-  "connectors": [
-    {"connector_id": "pg-connector", "connector_name": "PostgreSQL", "connector_type": "database", "slug": "postgresql"},
-    {"connector_id": "mysql-connector", "connector_name": "MySQL", "connector_type": "database", "slug": "mysql"},
-    {"connector_id": "api-connector", "connector_name": "REST API", "connector_type": "api"},
-    {"connector_id": "file-connector", "connector_name": "File Export", "connector_type": "file"},
-    {"connector_id": "s3-connector", "connector_name": "S3 Export", "connector_type": "s3"},
-    {"connector_id": "stdout-connector", "connector_name": "Stdout", "connector_type": "stdout"}
-  ]
-}
-```
-
 ### Connection Credentials
 
-Connections reference a connector via `connector_id` and contain credentials. Credentials support `${VAR_NAME}` syntax for environment variable expansion.
+Credentials support `${VAR_NAME}` syntax for environment variable expansion. The `connector_type` field determines which handler processes the connection.
 
-**Database connection:**
+**Database (connector_type: db):**
 ```json
 {
-  "connection_id": "prod-postgres",
-  "connector_id": "pg-connector",
+  "connector_type": "db",
+  "driver": "postgresql",
   "host": "${DB_HOST}",
   "port": 5432,
   "database": "${DB_NAME}",
@@ -213,11 +196,10 @@ Connections reference a connector via `connector_id` and contain credentials. Cr
 }
 ```
 
-**API connection:**
+**API (connector_type: api):**
 ```json
 {
-  "connection_id": "external-api",
-  "connector_id": "api-connector",
+  "connector_type": "api",
   "host": "https://api.example.com",
   "headers": { "Authorization": "Bearer ${API_TOKEN}" },
   "timeout": 30,
@@ -225,21 +207,19 @@ Connections reference a connector via `connector_id` and contain credentials. Cr
 }
 ```
 
-**File connection:**
+**File (connector_type: file):**
 ```json
 {
-  "connection_id": "local-export",
-  "connector_id": "file-connector",
+  "connector_type": "file",
   "file_format": "jsonl",
   "path": "/data/exports"
 }
 ```
 
-**S3 connection:**
+**S3 (connector_type: s3):**
 ```json
 {
-  "connection_id": "s3-export",
-  "connector_id": "s3-connector",
+  "connector_type": "s3",
   "file_format": "parquet",
   "bucket": "data-lake",
   "prefix": "exports",
@@ -248,11 +228,10 @@ Connections reference a connector via `connector_id` and contain credentials. Cr
 }
 ```
 
-**Stdout connection:**
+**Stdout (connector_type: stdout):**
 ```json
 {
-  "connection_id": "debug-output",
-  "connector_id": "stdout-connector",
+  "connector_type": "stdout",
   "file_format": "jsonl"
 }
 ```
@@ -295,7 +274,7 @@ See [gRPC Architecture](docs/GRPC_STREAMING_ARCHITECTURE.md) for details.
 
 ## Destination Architecture
 
-Configuration-driven destination system with layered abstractions. Single Docker image handles all destination types based on `connector_type` defined in the connector (looked up via `connector_id` on the connection).
+Configuration-driven destination system with layered abstractions. Single Docker image handles all destination types based on `connector_type` in connection config.
 
 **Handlers:** `db` (SQLAlchemy), `postgresql` (legacy asyncpg), `api`, `file`, `s3`, `stdout`
 

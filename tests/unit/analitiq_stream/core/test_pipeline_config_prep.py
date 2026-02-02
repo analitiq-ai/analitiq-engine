@@ -65,6 +65,7 @@ def valid_pipeline_config():
                 }
             ]
         },
+        "streams": ["stream-456"],
         "runtime": {
             "expression": {"lang": "jsonata"},
             "logging": {"log_level": "INFO"},
@@ -144,7 +145,7 @@ def valid_connection_config():
     """Valid connection configuration."""
     return {
         "connection_id": "source-connection-id",
-        "type": "api",
+        "connector_id": "connector-1",
         "host": "https://api.example.com",
         "headers": {
             "Authorization": "Bearer ${API_TOKEN}",
@@ -524,8 +525,8 @@ class TestConfigurationLoading:
         """
         # Provide default connectors if none specified (validation requires at least 2)
         default_connectors = [
-            {"connector_id": "connector-1", "name": "Test Connector 1"},
-            {"connector_id": "connector-2", "name": "Test Connector 2"},
+            {"connector_id": "connector-1", "connector_name": "Test Connector 1", "connector_type": "api"},
+            {"connector_id": "connector-2", "connector_name": "Test Connector 2", "connector_type": "api"},
         ]
 
         # Build consolidated config
@@ -561,13 +562,13 @@ class TestConfigurationLoading:
         connection_configs = [
             {
                 "connection_id": "source-connection-id",
-                "type": "api",
+                "connector_id": "connector-1",
                 "host": "https://api.source.com",
                 "headers": {"Content-Type": "application/json"}
             },
             {
                 "connection_id": "dest-connection-id",
-                "type": "api",
+                "connector_id": "connector-2",
                 "host": "https://api.dest.com",
                 "headers": {"Content-Type": "application/json"}
             }
@@ -627,12 +628,12 @@ class TestConfigurationLoading:
         connection_configs = [
             {
                 "connection_id": "source-connection-id",
-                "type": "api",
+                "connector_id": "connector-1",
                 "host": "https://api.source.com"
             },
             {
                 "connection_id": "dest-connection-id",
-                "type": "api",
+                "connector_id": "connector-2",
                 "host": "https://api.dest.com"
             }
         ]
@@ -677,8 +678,8 @@ class TestConfigurationLoading:
     ):
         """Test that endpoints are resolved from consolidated config."""
         connection_configs = [
-            {"connection_id": "source-connection-id", "type": "api", "host": "https://src.com"},
-            {"connection_id": "dest-connection-id", "type": "api", "host": "https://dst.com"}
+            {"connection_id": "source-connection-id", "connector_id": "connector-1", "host": "https://src.com"},
+            {"connection_id": "dest-connection-id", "connector_id": "connector-2", "host": "https://dst.com"}
         ]
 
         endpoint_configs = [
@@ -721,12 +722,12 @@ class TestConsolidatedConfigLoading:
         return {
             "pipeline": {"pipeline_id": pipeline_id, "name": "Test"},
             "connections": [
-                {"connection_id": "conn-1", "type": "api", "host": "https://example1.com"},
-                {"connection_id": "conn-2", "type": "api", "host": "https://example2.com"},
+                {"connection_id": "conn-1", "connector_id": "connector-1", "host": "https://example1.com"},
+                {"connection_id": "conn-2", "connector_id": "connector-2", "host": "https://example2.com"},
             ],
             "connectors": [
-                {"connector_id": "connector-1", "name": "Connector 1"},
-                {"connector_id": "connector-2", "name": "Connector 2"},
+                {"connector_id": "connector-1", "connector_name": "Connector 1", "connector_type": "api"},
+                {"connector_id": "connector-2", "connector_name": "Connector 2", "connector_type": "api"},
             ],
             "endpoints": [
                 {"endpoint_id": "ep-1", "endpoint": "/v1/data", "method": "GET"},
