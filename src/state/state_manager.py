@@ -5,11 +5,11 @@ import json
 import logging
 import os
 import threading
-import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
+from ..shared.run_id import get_or_generate_run_id
 from .state_storage import (
     LocalStateStorage,
     StateStorageBackend,
@@ -191,9 +191,9 @@ class StateManager:
             The run ID for this execution
         """
         with self.lock:
-            # Priority: explicit run_id param > env var RUN_ID > generate new
+            # Priority: explicit run_id param > env var RUN_ID (via get_or_generate_run_id)
             if not run_id:
-                run_id = self.current_run_id or f"{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}-{uuid.uuid4().hex[:4]}"
+                run_id = self.current_run_id or get_or_generate_run_id()
 
             # Store as current run ID
             self.current_run_id = run_id

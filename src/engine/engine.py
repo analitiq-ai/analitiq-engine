@@ -7,13 +7,15 @@ from asyncio import Queue, Semaphore
 from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, AsyncIterator, Tuple
-from uuid import uuid4
 
 from pydantic import ValidationError
 
 from ..source.connectors.base import BaseConnector
+from ..shared.connector_utils import get_connector_type_from_list
+from ..shared.run_id import get_or_generate_run_id
 from ..state.circuit_breaker import CircuitBreaker
 from ..state.dead_letter_queue import DeadLetterQueue
+from ..state.metrics_storage import emit_metrics_log
 from ..state.retry_handler import RetryHandler
 from ..state.state_manager import StateManager
 from ..config import load_analitiq_config
@@ -120,13 +122,16 @@ class StreamingEngine:
 
         # Metrics tracking with Pydantic validation
         self.metrics = PipelineMetrics()
-        
+
         # Stage configurations
         self.stage_configs = PipelineStagesConfig()
 
+        # Connectors array for connector_type lookup (populated by stream_data)
+        self._connectors: List[Dict[str, Any]] = []
+
     async def stream_data(self, pipeline_config: Dict[str, Any]) -> None:
         """Process all streams concurrently with state management."""
-        
+
         # Validate configuration using Pydantic
         try:
             config = PipelineConfig(**pipeline_config)
@@ -137,6 +142,9 @@ class StreamingEngine:
 
         pipeline_id = pipeline_config["pipeline_id"]
         streams = pipeline_config.get("streams", {})
+
+        # Store connectors for connector_type lookup
+        self._connectors = pipeline_config.get("connectors", [])
         
         if not streams:
             raise ConfigurationError("No streams configured in pipeline")
@@ -261,8 +269,8 @@ class StreamingEngine:
             # Connect to source
             await source_connector.connect(src_connection_config)
 
-            # Get current run_id from state manager
-            run_id = self.state_manager.current_run_id or f"{datetime.now(timezone.utc).isoformat()}-{uuid4().hex[:8]}"
+            # Get current run_id from centralized source
+            run_id = self.state_manager.current_run_id or get_or_generate_run_id()
 
             # Connect to destination via gRPC
             grpc_client = self._create_grpc_client(merged_dst_config)
@@ -522,6 +530,21 @@ class StreamingEngine:
                             f"{result.records_written} records written"
                         )
                         self.metrics.increment_records_processed(result.records_written)
+
+                        # Emit per-batch metrics
+                        emit_metrics_log({
+                            "type": "batch",
+                            "run_id": run_id,
+                            "pipeline_id": self.pipeline_id,
+                            "stream_id": stream_id,
+                            "batch_seq": batch_seq,
+                            "records_written": result.records_written,
+                            "cumulative_records_processed": self.metrics.records_processed,
+                            "cumulative_records_failed": self.metrics.records_failed,
+                            "cumulative_batches_processed": self.metrics.batches_processed,
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                        })
+
                         await output_queue.put(batch)
                         break
 
@@ -719,23 +742,46 @@ class StreamingEngine:
         )
 
     def _get_connector(self, config: Dict[str, Any]) -> BaseConnector:
-        """Get appropriate connector based on configuration."""
-        # Check connector_type first, then type, then driver as fallback
-        connector_type = (
-            config.get("connector_type")
-            or config.get("type")
-            or config.get("driver")
-            or "api"
-        )
+        """Get appropriate connector based on configuration.
+
+        Looks up connector_type from the connectors array using connector_id
+        from the connection configuration.
+
+        Args:
+            config: Source configuration containing _connection with connector_id
+
+        Returns:
+            Appropriate connector instance (APIConnector or DatabaseConnector)
+
+        Raises:
+            ValueError: If connector_id is missing or connector_type cannot be determined
+        """
+        # Get connection config (stored under _connection key by pipeline_config_prep)
+        connection_config = config.get("_connection", config)
+
+        # Get connector_id from connection config
+        connector_id = connection_config.get("connector_id")
+        if not connector_id:
+            raise ValueError(
+                "Connection configuration is missing 'connector_id'. "
+                "Cannot determine connector type."
+            )
+
+        # Look up connector_type from connectors array using shared utility
+        connectors = getattr(self, "_connectors", [])
+        connector_type = get_connector_type_from_list(connectors, connector_id)
 
         if connector_type == "api":
             from ..source.connectors.api import APIConnector
             return APIConnector()
-        elif connector_type in ("db", "database", "postgresql", "postgres", "mysql"):
+        elif connector_type == "database":
             from ..source.connectors.database import DatabaseConnector
             return DatabaseConnector()
         else:
-            raise ValueError(f"Unknown connector type: {connector_type}")
+            raise ValueError(
+                f"Unknown connector_type '{connector_type}' for connector_id '{connector_id}'. "
+                f"Expected 'api' or 'database'."
+            )
 
     def _get_stream_name(self, config: Dict[str, Any]) -> str:
         """Generate stream name for state management."""

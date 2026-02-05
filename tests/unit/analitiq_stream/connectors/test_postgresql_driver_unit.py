@@ -477,35 +477,6 @@ class TestPostgreSQLDriverSchemaOperations:
         assert "Invalid table name" in str(exc_info.value)
 
 
-class TestPostgreSQLDriverTypeMapping:
-    """Test JSON schema to SQL type mapping."""
-
-    def test_map_explicit_database_type(self, driver):
-        """Test that explicit database_type is used."""
-        field_def = {"type": "string", "database_type": "CUSTOM_TYPE"}
-        result = driver.map_json_schema_to_sql_type(field_def)
-        assert result == "CUSTOM_TYPE"
-
-    def test_map_string_types(self, driver):
-        """Test string type mappings."""
-        assert driver.map_json_schema_to_sql_type({"type": "string", "maxLength": 100}) == "VARCHAR(100)"
-        assert driver.map_json_schema_to_sql_type({"type": "string"}) == "VARCHAR(255)"
-        assert driver.map_json_schema_to_sql_type({"type": "string", "format": "date-time"}) == "TIMESTAMPTZ"
-        assert driver.map_json_schema_to_sql_type({"type": "string", "format": "date"}) == "DATE"
-
-    def test_map_numeric_types(self, driver):
-        """Test numeric type mappings."""
-        assert driver.map_json_schema_to_sql_type({"type": "integer"}) == "BIGINT"
-        assert driver.map_json_schema_to_sql_type({"type": "number", "precision": 8, "scale": 3}) == "DECIMAL(8,3)"
-        assert driver.map_json_schema_to_sql_type({"type": "number"}) == "DECIMAL(15,2)"
-
-    def test_map_complex_types(self, driver):
-        """Test complex type mappings."""
-        assert driver.map_json_schema_to_sql_type({"type": "boolean"}) == "BOOLEAN"
-        assert driver.map_json_schema_to_sql_type({"type": "object"}) == "JSONB"
-        assert driver.map_json_schema_to_sql_type({"type": "array", "items": {"type": "string"}}) == "TEXT[]"
-
-
 class TestPostgreSQLDriverDataOperations:
     """Test data operations (insert, upsert, query)."""
 

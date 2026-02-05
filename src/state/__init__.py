@@ -25,9 +25,9 @@ from .log_storage import (
     create_log_handler,
 )
 from .metrics_storage import (
-    MetricsStorageSettings,
-    MetricsStorage,
+    METRICS_MARKER,
     PipelineMetricsRecord,
+    emit_metrics_log,
     create_metrics_record,
     save_pipeline_metrics,
 )
@@ -51,9 +51,9 @@ __all__ = [
     "S3LogHandler",
     "BufferedS3LogHandler",
     "create_log_handler",
-    "MetricsStorageSettings",
-    "MetricsStorage",
+    "METRICS_MARKER",
     "PipelineMetricsRecord",
+    "emit_metrics_log",
     "create_metrics_record",
     "save_pipeline_metrics",
 ]

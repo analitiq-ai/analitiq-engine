@@ -20,17 +20,14 @@ import asyncio
 import logging
 import os
 import sys
-import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 from src import Pipeline
 from .engine.pipeline_config_prep import PipelineConfigPrep, PipelineConfigPrepSettings
-from .state.metrics_storage import (
-    MetricsStorageSettings,
-    save_pipeline_metrics,
-)
+from .shared.run_id import get_run_id
+from .state.metrics_storage import save_pipeline_metrics
 
 
 logger = logging.getLogger(__name__)
@@ -78,8 +75,8 @@ class PipelineRunner:
         Returns:
             True if successful, False if failed.
         """
-        # Generate unique run ID for this execution
-        run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + str(uuid.uuid4())[:8]
+        # Get run_id from centralized source (already initialized at startup)
+        run_id = get_run_id()
         start_time = datetime.now(timezone.utc)
 
         # Initialize variables for metrics
@@ -103,7 +100,7 @@ class PipelineRunner:
             )
 
             pipeline_config_prep = PipelineConfigPrep(settings)
-            pipeline_config, stream_configs, resolved_connections, resolved_endpoints = pipeline_config_prep.create_config()
+            pipeline_config, stream_configs, resolved_connections, resolved_endpoints, connectors = pipeline_config_prep.create_config()
 
             # Create and run pipeline
             logger.info(f"Starting {pipeline_config.name} (ID: {pipeline_config.pipeline_id})")
@@ -114,6 +111,7 @@ class PipelineRunner:
                 stream_configs=stream_configs,
                 resolved_connections=resolved_connections,
                 resolved_endpoints=resolved_endpoints,
+                connectors=connectors,
             )
 
             logger.info("Starting pipeline execution...")
@@ -151,21 +149,15 @@ class PipelineRunner:
             return False
 
         finally:
-            # Always save metrics, even on failure
+            # Always emit metrics, even on failure
             end_time = datetime.now(timezone.utc)
             try:
-                # Build metrics settings
-                metrics_settings = MetricsStorageSettings(
-                    env=os.getenv("ENV", "local"),
-                    pipeline_id=self.pipeline_id,
-                    pipeline_name=pipeline_config.name if pipeline_config else None,
-                    client_id=os.getenv("CLIENT_ID") or (pipeline_config.client_id if pipeline_config else None),
-                    aws_region=os.getenv("AWS_REGION", "eu-central-1"),
-                    row_count_bucket=os.getenv("ROW_COUNT_BUCKET"),
-                )
+                client_id = os.getenv("CLIENT_ID") or (pipeline_config.client_id if pipeline_config else self.pipeline_id)
 
-                location = save_pipeline_metrics(
+                save_pipeline_metrics(
                     run_id=run_id,
+                    pipeline_id=self.pipeline_id,
+                    client_id=client_id,
                     start_time=start_time,
                     end_time=end_time,
                     records_processed=records_processed,
@@ -173,12 +165,12 @@ class PipelineRunner:
                     batches_processed=batches_processed,
                     status=status,
                     error_message=error_message,
-                    settings=metrics_settings,
+                    pipeline_name=pipeline_config.name if pipeline_config else None,
                 )
-                logger.info(f"Saved pipeline metrics to: {location}")
+                logger.info("Emitted pipeline metrics to logs")
 
             except Exception as metrics_error:
-                logger.error(f"Failed to save pipeline metrics: {metrics_error}")
+                logger.error(f"Failed to emit pipeline metrics: {metrics_error}")
 
 
 async def run_pipeline(

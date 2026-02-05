@@ -37,6 +37,37 @@ class TargetType(str, Enum):
     ARRAY = "array"
 
 
+class GenericTypeMapping(BaseModel):
+    """Mapping of a field to its generic type representation."""
+    model_config = ConfigDict(extra="forbid")
+
+    generic_type: TargetType = Field(
+        ...,
+        description="Generic type name (string, integer, decimal, boolean, datetime, date, object, array)"
+    )
+
+
+class DestinationTypeMapping(BaseModel):
+    """Mapping of a field to its destination-specific type."""
+    model_config = ConfigDict(extra="forbid")
+
+    destination_type: str = Field(
+        ...,
+        description="Native SQL/destination type string (e.g., 'BIGINT', 'VARCHAR(255)')"
+    )
+    nullable: bool = Field(
+        True,
+        description="Whether the field is nullable at the destination"
+    )
+
+    @field_validator("destination_type")
+    @classmethod
+    def validate_destination_type(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("destination_type cannot be empty")
+        return v.strip()
+
+
 class ExpressionOp(str, Enum):
     """Expression AST operation types."""
     GET = "get"
@@ -160,7 +191,11 @@ class AssignmentTarget(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     path: List[str] = Field(..., min_length=1, description="Token array path to target field")
-    type: TargetType = Field(..., description="Target field type")
+    type: TargetType = Field(..., description="Target field type (generic)")
+    dest_type: Optional[str] = Field(
+        None,
+        description="Destination-specific SQL type override (optional)"
+    )
     nullable: bool = Field(True, description="Whether null values are allowed")
 
 
@@ -212,6 +247,20 @@ class MappingConfig(BaseModel):
     source_schema_id: Optional[str] = Field(None, description="Source schema identifier")
     target_schema_id: Optional[str] = Field(None, description="Target schema identifier")
     defaults: Optional[Dict[str, Any]] = Field(None, description="Default values for mapping")
+    assignments_hash: Optional[str] = Field(None, description="Hash of assignments for cache invalidation")
+
+    source_to_generic: Optional[Dict[str, GenericTypeMapping]] = Field(
+        None,
+        description="Mapping from source field paths (dot-joined) to generic types"
+    )
+    generic_to_destination: Optional[Dict[str, Dict[str, DestinationTypeMapping]]] = Field(
+        None,
+        description="Mapping from generic to destination types, keyed by connection_ref"
+    )
+    type_mapping_assignments_hash: Optional[str] = Field(
+        None,
+        description="Hash tracking when type mappings were generated"
+    )
 
 
 # Source/Destination Configuration Models

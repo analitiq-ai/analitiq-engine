@@ -54,15 +54,10 @@ class BaseDatabaseDriver(ABC):
     async def create_indexes_if_not_exist(
         self,
         schema_name: str,
-        table_name: str, 
+        table_name: str,
         indexes: List[Dict[str, Any]]
     ):
         """Create indexes if they don't exist."""
-        pass
-
-    @abstractmethod
-    def map_json_schema_to_sql_type(self, field_def: Dict[str, Any]) -> str:
-        """Map JSON schema field definition to database-specific SQL type."""
         pass
 
     @abstractmethod

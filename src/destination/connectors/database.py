@@ -3,9 +3,8 @@
 This handler provides a unified interface for all SQL databases supported by SQLAlchemy.
 The specific database is determined by the `driver` field in the connection config.
 
-Type coercion is handled by the shared type_mapping module based on the database dialect.
-This ensures proper type handling for each database's requirements (e.g., PostgreSQL
-asyncpg needs datetime objects, not strings).
+Type casting is handled by the Arrow-based DestinationSchemaContract which provides
+efficient columnar type conversion for batch operations.
 """
 
 import logging
@@ -31,13 +30,13 @@ from sqlalchemy.dialects.mysql import insert as mysql_insert
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine, AsyncConnection
 
 from ..base_handler import BaseDestinationHandler, BatchWriteResult
+from ..schema_contract import DestinationSchemaContract
 from ...grpc.generated.analitiq.v1 import (
     AckStatus,
     Cursor,
     SchemaMessage,
 )
 from ...shared.database_utils import convert_ssl_mode
-from ...shared.type_mapping import get_type_mapper
 
 
 logger = logging.getLogger(__name__)
@@ -103,8 +102,8 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         # Batch commits table for idempotency
         self._batch_commits_table: Table | None = None
 
-        # Type coercer for destination-specific type conversion (lazy loaded)
-        self._type_coercer = None
+        # Arrow-based schema contract for vectorized type casting (built on schema configure)
+        self._schema_contract: Optional[DestinationSchemaContract] = None
 
     @property
     def connector_type(self) -> str:
@@ -188,9 +187,6 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
 
         self._connected = True
 
-        # Lazy load the type coercer based on driver/dialect
-        self._init_type_coercer()
-
         logger.info(f"DatabaseDestinationHandler connected to {self._driver}")
 
     async def disconnect(self) -> None:
@@ -249,6 +245,13 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
 
             # Create tables
             await self._ensure_tables_exist()
+
+            # Build schema contract for Arrow-based type casting
+            if self._json_schema:
+                self._schema_contract = DestinationSchemaContract(self._json_schema)
+                logger.debug(
+                    f"Built schema contract with {len(self._schema_contract.column_types)} columns"
+                )
 
             logger.info(
                 f"Schema configured: {self._schema_name}.{self._table_name}, "
@@ -703,32 +706,27 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         # Insert
         await self._insert_records(conn, records)
 
-    def _init_type_coercer(self) -> None:
-        """
-        Initialize the type mapper based on database driver.
-
-        Lazy loads the appropriate mapper for this database dialect.
-        """
-        try:
-            self._type_coercer = get_type_mapper(self._driver)
-            logger.debug(f"Initialized type mapper for {self._driver}")
-        except Exception as e:
-            logger.warning(f"Failed to initialize type mapper: {e}, using fallback")
-            self._type_coercer = None
-
     def _prepare_records(self, records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
-        Prepare records for insertion.
+        Prepare records for insertion using Arrow-based vectorized casting.
 
-        Uses the destination-specific type mapper to convert JSON-deserialized
-        values to the proper types for this database (e.g., datetime objects
-        for PostgreSQL TIMESTAMP columns).
+        Uses the DestinationSchemaContract to efficiently cast all records
+        to the proper types for this database in a single columnar operation.
+
+        Args:
+            records: Raw records from transformation
+
+        Returns:
+            Prepared records with proper types for database insertion
         """
-        # Apply type coercion based on JSON schema
-        if self._type_coercer and self._json_schema:
-            records = self._type_coercer.coerce_records(records, self._json_schema)
+        if not records:
+            return records
 
-        # Handle any remaining complex types (dicts/lists that weren't coerced)
+        # Use Arrow-based schema contract for vectorized type casting
+        if self._schema_contract:
+            records = self._schema_contract.prepare_records(records)
+
+        # Handle any remaining complex types (dicts/lists)
         # For non-PostgreSQL databases, complex types need to be JSON-serialized
         import json
         if self._driver not in ("postgresql", "postgres"):
