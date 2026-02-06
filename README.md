@@ -4,11 +4,13 @@ Analitiq Stream is a fault-tolerant, async-first data streaming framework for Py
 
 ## Highlights
 - Async/await streaming with configurable batching and backpressure
-- Fault tolerance with retries, circuit breaker, dead letter queue, and state checkpoints
+- Fault tolerance with retries, circuit breaker, dead letter queue, and stream-level state checkpoints
 - Pydantic v2 validation for all configs and runtime models
 - Consolidated configuration model with secrets expansion
 - gRPC streaming to decouple engine and destination services
 - Deterministic, idempotent batch writes
+- In-run batch commit tracking for engine-side idempotency
+- State emission to logs for cross-run observability
 
 ## Requirements
 - Python 3.11+
@@ -176,46 +178,130 @@ The `run_id` is a unique identifier for each pipeline execution, used for idempo
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                     ENTRY POINTS                               │
-├──────────────────────────────────────────────────────────────────┤
+├─────────────────────────────────────────────────────────────────┤
 │ cloud_entrypoint.py / main.py                                  │
 │ initialize_run_id()                                            │
 │ Priority: RUN_ID env > AWS_BATCH_JOB_ID > generate new         │
-└──────────────────────────────────────────────────────────────────┘
-                      │
-                      ▼
-            ┌─────────────────────┐
-            │   StateManager      │
-            │  start_run()        │
-            │  (engine.py:155)    │
-            └──────────┬──────────┘
-                       │
-         ┌─────────────┼─────────────────────────────────┐
-         │             │                                 │
-         ▼             ▼                                 ▼
-    ┌─────────┐  ┌──────────────────┐  ┌─────────────────────────┐
-    │  STATE  │  │  gRPC CLIENT     │  │ METRICS EMISSION        │
-    │  FILES  │  │  (engine sends)  │  │ (log-based)             │
-    └────┬────┘  └──────────┬───────┘  └──────────┬──────────────┘
-         │                  │                      │
-         │                  ▼                      ▼
-         │           ┌──────────────────┐   ANALITIQ_METRICS::{}
-         │           │ gRPC SERVER      │   
-         │           │ (destination)    │
-         │           └──────────┬───────┘
-         │                      │
-         │                      ▼
-         │            ┌─────────────────────────┐
-         │            │  DESTINATION HANDLER    │
-         │            │  (database/file/api)    │
-         │            └──────────┬──────────────┘
-         │                       │
-         ├───────────┬───────────┴─────────────┐
-         │           │                         │
-         ▼           ▼                         ▼
-    state.json  DB BATCH COMMITS      FILE MANIFEST
-                _batch_commits_table  _manifest.json
-                (run_id, stream_id,   (run_id, stream_id,
-                 batch_seq)            batch_seq)
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+                    ┌─────────────────────┐
+                    │   StateManager      │
+                    │   start_run()       │
+                    └──────────┬──────────┘
+                               │
+      ┌────────────────────────┼────────────────────────┐
+      │                        │                        │
+      ▼                        ▼                        ▼
+┌──────────────────────────────┐    ┌──────────────────┐    ┌─────────────────────┐
+│ STREAM STATE                  │    │  gRPC CLIENT     │    │ LOG EMISSIONS       │
+│ streams/{stream_id}/state.json│    │  (sends batches) │    │                     │
+└───────────────┬──────────────┘    └────────┬─────────┘    └──────────┬──────────┘
+                │                            │                         │
+                ▼                            │                         ▼
+        (cursor resume)                      │              ANALITIQ_METRICS::{}
+                                             │              ANALITIQ_STATE::{}
+                                             │
+                ▼                            ▼
+        ┌───────────────┐           ┌──────────────────┐
+        │ ENGINE BATCH  │           │ gRPC SERVER      │
+        │ COMMITS       │           │ (destination)    │
+        │ (in-run only) │           └────────┬─────────┘
+        └───────────────┘                    │
+         commits/{run_id}/                   ▼
+         {stream_id}/                 ┌─────────────────────────┐
+         batch_seq=N.json             │  DESTINATION HANDLER    │
+                                      │  (database/file/api)    │
+                                      └──────────┬──────────────┘
+                                                 │
+                                 ┌───────────────┴───────────────┐
+                                 │ Destination idempotency       │
+                                 │ (upsert / external keys)       │
+                                 │ Best-effort across runs        │
+                                 └───────────────────────────────┘
+```
+
+**Idempotency layers:**
+- **Engine-side (in-run)**: `commits/{run_id}/{stream_id}/batch_seq=N.json` - prevents duplicate sends within same run
+- **Destination-side (cross-run)**: upsert / external idempotency keys (best-effort across runs)
+
+### Stream State (Canonical)
+
+State is stored per stream at:
+
+```
+state/{pipeline_id}/streams/{stream_id}/state.json
+```
+
+This file is the single source of truth for the resume cursor. No partition files are used.
+
+### Stream State File Format
+
+```json
+{
+  "version": 1,
+  "stream_id": "stream-uuid",
+  "cursor": {
+    "primary": {
+      "field": "replication_key",
+      "value": "2026-02-06T12:00:00Z",
+      "inclusive": true
+    }
+  },
+  "hwm": "2026-02-06T12:00:00Z",
+  "last_updated": "2026-02-06T12:00:00+00:00",
+  "stats": {
+    "records_synced": 0,
+    "batches_written": 0,
+    "last_checkpoint_at": "2026-02-06T12:00:00+00:00",
+    "errors_since_checkpoint": 0
+  }
+}
+```
+
+Notes:
+- `partition` is ignored. The engine writes a single stream state file per `stream_id`.
+
+### In-Run Batch Commit Tracking
+
+The engine tracks committed batches locally to provide in-run idempotency. This prevents duplicate batch sends if a batch needs to be retried within the same run.
+
+```
+Storage: state/{pipeline_id}/commits/{run_id}/{stream_id}/batch_seq=000001.json
+```
+
+Each batch commit file contains:
+```json
+{
+  "batch_seq": 1,
+  "records_written": 1000,
+  "committed_cursor_hex": "7b2266696564...",
+  "committed_at": "2025-02-05T10:30:15+00:00"
+}
+```
+
+**Key semantics:**
+- Batch commits are **in-run only** and **local-only**
+- State cursor remains the **cross-run resume authority**
+- One file per batch ensures atomic writes without concurrency issues
+
+### Log Emissions
+
+The engine emits structured logs for observability:
+
+**ANALITIQ_METRICS** (batch metrics, includes cursor context):
+```
+ANALITIQ_METRICS::{"type":"batch","run_id":"...","pipeline_id":"...","client_id":"...","stream_id":"...","batch_seq":1,"records_written":1000,"cursor":"hex...","cursor_value":"2025-02-05T10:30:15Z",...}
+```
+
+**ANALITIQ_METRICS** (stream metrics, emitted on stream completion):
+```
+ANALITIQ_METRICS::{"type":"stream","run_id":"...","pipeline_id":"...","stream_id":"...","client_id":"...","start_time":"...","end_time":"...","duration_seconds":123.4,"records_processed":1000,"records_failed":0,"records_total":1000,"batches_processed":10,"status":"success","error_message":null,"records_per_second":8.1,"environment":"local"}
+```
+
+**ANALITIQ_STATE** (state advances; emitted after each checkpoint save):
+```
+ANALITIQ_STATE::{"type":"state","run_id":"...","pipeline_id":"...","client_id":"...","stream_id":"...","cursor":"hex...","cursor_value":"2025-02-05T10:30:15Z","timestamp":"..."}
 ```
 
 Details:

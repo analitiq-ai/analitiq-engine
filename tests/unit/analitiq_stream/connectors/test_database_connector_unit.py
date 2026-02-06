@@ -30,8 +30,7 @@ def database_config():
 def endpoint_config():
     """Sample endpoint configuration."""
     return {
-        "schema": "test_schema",
-        "table": "test_table",
+        "endpoint": "test_schema/test_table",
         "primary_key": ["id"],
         "unique_constraints": ["email"],
         "endpoint_schema": {
@@ -152,9 +151,8 @@ class TestEndpointConfig:
 
     def test_default_values(self):
         """Test default endpoint configuration values."""
-        config = EndpointConfig(table="test_table")
-        assert config.schema_name == "public"
-        assert config.table == "test_table"
+        config = EndpointConfig(endpoint="test_table")
+        assert config.endpoint == "test_table"
         assert config.primary_key == []
         assert config.unique_constraints == []
         assert config.endpoint_schema == {}
@@ -165,8 +163,7 @@ class TestEndpointConfig:
     def test_full_configuration(self, endpoint_config):
         """Test full endpoint configuration."""
         config = EndpointConfig(**endpoint_config)
-        assert config.schema_name == "test_schema"
-        assert config.table == "test_table"
+        assert config.endpoint == "test_schema/test_table"
         assert config.primary_key == ["id"]
         assert config.unique_constraints == ["email"]
         assert config.write_mode == "upsert"
@@ -175,15 +172,13 @@ class TestEndpointConfig:
     def test_endpoint_config_extra_fields(self):
         """Test that EndpointConfig allows extra fields."""
         config_data = {
-            "table": "test_table",
-            "schema": "public",
+            "endpoint": "public/test_table",
             # Extra field should be allowed
             "custom_setting": "value"
         }
 
         config = EndpointConfig(**config_data)
-        assert config.table == "test_table"
-        assert config.schema_name == "public"
+        assert config.endpoint == "public/test_table"
 
 
 class TestDatabaseConnectorInit:
@@ -274,7 +269,7 @@ class TestDatabaseConnectorConfigure:
     @pytest.mark.asyncio
     async def test_configure_no_configure_section(self, connector):
         """Test configuration without configure section."""
-        config = {"schema": "test_schema", "table": "test_table"}
+        config = {"endpoint": "test_schema/test_table"}
         connector._initialized = True
 
         await connector.configure(config)

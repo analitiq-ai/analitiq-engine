@@ -121,21 +121,17 @@ from .enriched import (
     EnrichedSourceConfig,
 )
 
-# Legacy state models (for compatibility during transition)
 from .state import (
     CursorField,
     HttpConditionals,
     PageState,
-    PartitionCursor,
-    PartitionState,
-    PartitionStats,
-    PipelineConfig as LegacyPipelineConfig,
-    RunMetadata,
-    ShardedStateIndex,
-    DestinationConfig as LegacyDestinationConfig,
-    ReplicationConfig as LegacyReplicationConfig,
-    SourceConfig as LegacySourceConfig,
-    StreamState as LegacyStreamState,
+    StreamCursor,
+    StreamStats,
+    StreamState as SimpleStreamState,
+    PipelineConfig as StatePipelineConfig,
+    DestinationConfig as StateDestinationConfig,
+    ReplicationConfig as StateReplicationConfig,
+    SourceConfig as StateSourceConfig,
 )
 
 __all__ = [
@@ -240,18 +236,15 @@ __all__ = [
     "EnrichedDatabaseSourceConfig",
     "EnrichedDestinationConfig",
     "EnrichedSourceConfig",
-    # Legacy models (for compatibility)
+    # Stream-only state models
     "CursorField",
     "HttpConditionals",
     "PageState",
-    "PartitionCursor",
-    "PartitionState",
-    "PartitionStats",
-    "RunMetadata",
-    "ShardedStateIndex",
-    "LegacyDestinationConfig",
-    "LegacyPipelineConfig",
-    "LegacyReplicationConfig",
-    "LegacySourceConfig",
-    "LegacyStreamState",
+    "StreamCursor",
+    "StreamStats",
+    "SimpleStreamState",
+    "StateDestinationConfig",
+    "StatePipelineConfig",
+    "StateReplicationConfig",
+    "StateSourceConfig",
 ]

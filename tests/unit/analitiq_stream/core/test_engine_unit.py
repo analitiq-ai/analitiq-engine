@@ -132,10 +132,10 @@ class TestStreamingEngine:
             await engine.stream_data(config)
 
     def test_get_connector_unknown_type(self, engine):
-        """Test error handling for unknown connector type."""
+        """Test error handling for missing connector_id."""
         config = {"type": "unknown"}
 
-        with pytest.raises(ValueError, match="Unknown connector type"):
+        with pytest.raises(ValueError, match="missing 'connector_id'"):
             engine._get_connector(config)
 
     def test_get_stream_name(self, engine):

@@ -1,6 +1,7 @@
 """Modern multi-stream engine with state management and improved architecture."""
 
 import asyncio
+import json
 import logging
 import os
 from asyncio import Queue, Semaphore
@@ -15,7 +16,7 @@ from ..shared.connector_utils import get_connector_type_from_list
 from ..shared.run_id import get_or_generate_run_id
 from ..state.circuit_breaker import CircuitBreaker
 from ..state.dead_letter_queue import DeadLetterQueue
-from ..state.metrics_storage import emit_metrics_log
+from ..state.metrics_storage import emit_metrics_log, create_metrics_record
 from ..state.retry_handler import RetryHandler
 from ..state.state_manager import StateManager
 from ..config import load_analitiq_config
@@ -156,6 +157,9 @@ class StreamingEngine:
         run_id = self.state_manager.start_run(pipeline_config)
         logger.info(f"Started state run: {run_id}")
 
+        # Initialize in-run commit tracker
+        self.state_manager.init_commit_tracker(run_id)
+
         stream_exceptions = []
         stream_tasks = []
         
@@ -245,6 +249,15 @@ class StreamingEngine:
         grpc_client = None
         stream_dlq = None
         tasks = []
+        stream_start_time = datetime.now(timezone.utc)
+        stream_metrics = {
+            "records_processed": 0,
+            "records_failed": 0,
+            "batches_processed": 0,
+            "batches_failed": 0,
+        }
+        status = "success"
+        error_message: Optional[str] = None
 
         try:
             pipeline_src_config = pipeline_config.get("source", {})
@@ -321,6 +334,7 @@ class StreamingEngine:
                 stream_dlq=stream_dlq,
                 stream_name=stream_name,
                 run_id=run_id,
+                stream_metrics=stream_metrics,
             )
 
             # Wait for all stream stages to complete
@@ -329,6 +343,8 @@ class StreamingEngine:
             logger.info(f"Stream {stream_name} completed successfully")
 
         except Exception as e:
+            status = "failed"
+            error_message = str(e)
             logger.error(f"Stream {stream_name} processing failed: {str(e)}")
             # Cancel any running tasks for this stream
             for task in tasks:
@@ -337,6 +353,7 @@ class StreamingEngine:
             raise
 
         finally:
+            end_time = datetime.now(timezone.utc)
             # Clean up connections for this stream
             try:
                 if source_connector:
@@ -346,6 +363,36 @@ class StreamingEngine:
                 logger.debug(f"Stream {stream_name} connectors disconnected successfully")
             except Exception as e:
                 logger.warning(f"Failed to disconnect connectors for stream {stream_name}: {str(e)}")
+
+            try:
+                client_id = (
+                    os.getenv("CLIENT_ID")
+                    or pipeline_config.get("client_id")
+                    or pipeline_config.get("pipeline", {}).get("client_id")
+                    or ""
+                )
+                pipeline_name = pipeline_config.get("name") or pipeline_config.get("pipeline", {}).get("name")
+                record = create_metrics_record(
+                    run_id=self.state_manager.current_run_id or get_or_generate_run_id(),
+                    pipeline_id=self.pipeline_id,
+                    client_id=client_id,
+                    start_time=stream_start_time,
+                    end_time=end_time,
+                    records_processed=stream_metrics["records_processed"],
+                    records_failed=stream_metrics["records_failed"],
+                    batches_processed=stream_metrics["batches_processed"],
+                    status=status,
+                    error_message=error_message,
+                    pipeline_name=pipeline_name,
+                )
+                emit_metrics_log({
+                    "type": "stream",
+                    "stream_id": stream_id,
+                    **record.model_dump(),
+                })
+                logger.info(f"Emitted stream metrics for {stream_name}")
+            except Exception as metrics_error:
+                logger.error(f"Failed to emit stream metrics for {stream_name}: {metrics_error}")
 
     async def _extract_stage(
         self, source_connector: BaseConnector, queue: Queue, config: Dict[str, Any]
@@ -370,7 +417,7 @@ class StreamingEngine:
             logger.debug(f"Stream {stream_name}: Source config cursor_field = {source_config.get('cursor_field')}")
             
             # Use stream_id as the stream name for state management
-            state_stream_name = f"stream.{config['stream_id']}"
+            state_stream_name = config["stream_id"]
             partition = {}  # Single partition per stream for now
 
             batch_count = 0
@@ -397,7 +444,11 @@ class StreamingEngine:
             raise
 
     async def _transform_stage(
-        self, input_queue: Queue, output_queue: Queue, config: Dict[str, Any]
+        self,
+        input_queue: Queue,
+        output_queue: Queue,
+        config: Dict[str, Any],
+        stream_metrics: Dict[str, int],
     ):
         """Transform data with field mappings and validation."""
         stream_name = config["stream_name"]
@@ -417,6 +468,7 @@ class StreamingEngine:
                 batch_count += 1
 
                 self.metrics.increment_batches_processed()
+                stream_metrics["batches_processed"] += 1
 
             # Signal end of stream
             await output_queue.put(None)
@@ -426,6 +478,7 @@ class StreamingEngine:
             logger.error(f"Stream {stream_name}: Transform stage failed: {str(e)}")
             await output_queue.put(None)  # Signal end even on error
             self.metrics.increment_batches_failed()
+            stream_metrics["batches_failed"] += 1
             raise
 
     async def _load_stage(
@@ -436,6 +489,7 @@ class StreamingEngine:
         config: Dict[str, Any],
         stream_dlq: 'DeadLetterQueue',
         run_id: str,
+        stream_metrics: Dict[str, int],
     ) -> None:
         """
         Load transformed data to destination via gRPC streaming.
@@ -498,6 +552,22 @@ class StreamingEngine:
                         tie_breaker_fields=tie_breaker_fields,
                     )
 
+                # In-run idempotency check (skip send, don't re-count)
+                if self.state_manager.commit_tracker:
+                    existing = self.state_manager.commit_tracker.check_committed(
+                        stream_id=stream_id,
+                        batch_seq=batch_seq,
+                    )
+                    if existing:
+                        logger.info(
+                            f"Stream {stream_name}: Batch {batch_seq} already committed "
+                            f"(in-run), skipping send"
+                        )
+                        # Skip metrics increment and output_queue - batch was already counted
+                        # when first committed. Checkpoint stage will show unique batches
+                        # written this run, not total send attempts.
+                        continue
+
                 # Retry loop for RETRYABLE_FAILURE
                 retry_count = 0
                 while True:
@@ -513,9 +583,11 @@ class StreamingEngine:
 
                     if result.status == AckStatus.ACK_STATUS_SUCCESS:
                         # Batch committed, persist cursor
+                        cursor_data = {}
+                        hwm = ""
                         if result.committed_cursor:
                             state_dict = cursor_to_state_dict(result.committed_cursor)
-                            state_stream_name = f"stream.{stream_id}"
+                            state_stream_name = stream_id
                             cursor_data = state_dict.get("cursor", {})
                             primary = cursor_data.get("primary", {})
                             hwm = primary.get("value", datetime.now(timezone.utc).isoformat())
@@ -530,18 +602,31 @@ class StreamingEngine:
                             f"{result.records_written} records written"
                         )
                         self.metrics.increment_records_processed(result.records_written)
+                        stream_metrics["records_processed"] += result.records_written
+
+                        # Record batch commit for in-run idempotency
+                        if self.state_manager.commit_tracker:
+                            self.state_manager.commit_tracker.record_commit(
+                                stream_id=stream_id,
+                                batch_seq=batch_seq,
+                                records_written=result.records_written,
+                                cursor_bytes=result.committed_cursor.token if result.committed_cursor else b"",
+                            )
 
                         # Emit per-batch metrics
                         emit_metrics_log({
                             "type": "batch",
                             "run_id": run_id,
                             "pipeline_id": self.pipeline_id,
+                            "client_id": os.getenv("CLIENT_ID", ""),
                             "stream_id": stream_id,
                             "batch_seq": batch_seq,
                             "records_written": result.records_written,
                             "cumulative_records_processed": self.metrics.records_processed,
                             "cumulative_records_failed": self.metrics.records_failed,
                             "cumulative_batches_processed": self.metrics.batches_processed,
+                            "cursor": json.dumps(cursor_data).encode().hex() if cursor_data else "",
+                            "cursor_value": hwm,
                             "timestamp": datetime.now(timezone.utc).isoformat(),
                         })
 
@@ -550,9 +635,11 @@ class StreamingEngine:
 
                     elif result.status == AckStatus.ACK_STATUS_ALREADY_COMMITTED:
                         # Idempotent replay - batch was already processed
+                        cursor_data = {}
+                        hwm = ""
                         if result.committed_cursor:
                             state_dict = cursor_to_state_dict(result.committed_cursor)
-                            state_stream_name = f"stream.{stream_id}"
+                            state_stream_name = stream_id
                             cursor_data = state_dict.get("cursor", {})
                             primary = cursor_data.get("primary", {})
                             hwm = primary.get("value", datetime.now(timezone.utc).isoformat())
@@ -562,6 +649,16 @@ class StreamingEngine:
                                 cursor=cursor_data,
                                 hwm=hwm,
                             )
+
+                        # Record batch commit for in-run idempotency (prevents re-send on retry)
+                        if self.state_manager.commit_tracker:
+                            self.state_manager.commit_tracker.record_commit(
+                                stream_id=stream_id,
+                                batch_seq=batch_seq,
+                                records_written=result.records_written,
+                                cursor_bytes=result.committed_cursor.token if result.committed_cursor else b"",
+                            )
+
                         logger.info(
                             f"Stream {stream_name}: Batch {batch_seq} already committed "
                             "(idempotent replay)"
@@ -578,6 +675,8 @@ class StreamingEngine:
                             )
                             self.metrics.increment_records_failed(len(batch))
                             self.metrics.increment_batches_failed()
+                            stream_metrics["records_failed"] += len(batch)
+                            stream_metrics["batches_failed"] += 1
                             await stream_dlq.send_batch(
                                 batch, result.failure_summary, self.pipeline_id
                             )
@@ -600,6 +699,8 @@ class StreamingEngine:
                         )
                         self.metrics.increment_records_failed(len(batch))
                         self.metrics.increment_batches_failed()
+                        stream_metrics["records_failed"] += len(batch)
+                        stream_metrics["batches_failed"] += 1
 
                         # Send entire batch to DLQ with record_ids for correlation
                         await stream_dlq.send_batch(
@@ -619,6 +720,8 @@ class StreamingEngine:
                         )
                         self.metrics.increment_records_failed(len(batch))
                         self.metrics.increment_batches_failed()
+                        stream_metrics["records_failed"] += len(batch)
+                        stream_metrics["batches_failed"] += 1
                         await stream_dlq.send_batch(
                             batch, f"Unknown ACK status: {result.status}", self.pipeline_id
                         )
@@ -673,6 +776,7 @@ class StreamingEngine:
         stream_dlq,
         stream_name: str,
         run_id: str,
+        stream_metrics: Dict[str, int],
     ) -> List[asyncio.Task]:
         """Create all pipeline stage tasks using factory pattern."""
         return [
@@ -684,7 +788,10 @@ class StreamingEngine:
             ),
             asyncio.create_task(
                 self._transform_stage(
-                    extract_queue, transform_queue, stream_processing_config
+                    extract_queue,
+                    transform_queue,
+                    stream_processing_config,
+                    stream_metrics,
                 ),
                 name=f"transform-{stream_name}"
             ),
@@ -696,6 +803,7 @@ class StreamingEngine:
                     config=stream_processing_config,
                     stream_dlq=stream_dlq,
                     run_id=run_id,
+                    stream_metrics=stream_metrics,
                 ),
                 name=f"load-{stream_name}"
             ),
