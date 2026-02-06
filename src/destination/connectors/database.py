@@ -108,7 +108,7 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
     @property
     def connector_type(self) -> str:
         """Return the connector type identifier."""
-        return "db"
+        return "database"
 
     @property
     def supports_transactions(self) -> bool:

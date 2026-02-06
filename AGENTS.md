@@ -183,10 +183,10 @@ pipeline_config, stream_configs, connections, endpoints = prep.create_config()
 
 Credentials support `${VAR_NAME}` syntax for environment variable expansion. The `connector_type` field determines which handler processes the connection.
 
-**Database (connector_type: db):**
+**Database (connector_type: database):**
 ```json
 {
-  "connector_type": "db",
+  "connector_type": "database",
   "driver": "postgresql",
   "host": "${DB_HOST}",
   "port": 5432,

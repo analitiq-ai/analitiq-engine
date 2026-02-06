@@ -162,12 +162,12 @@ file_format = connection.get("file_format", "jsonl")
 # -> "parquet", "csv", "jsonl"
 ```
 
-### Database Connection (connector_type: db)
+### Database Connection (connector_type: database)
 
 ```json
 {
   "connection_id": "f1bc3489-...",
-  "connector_type": "db",
+  "connector_type": "database",
   "driver": "postgresql",
   "host": "localhost",
   "port": 5432,
@@ -183,7 +183,7 @@ file_format = connection.get("file_format", "jsonl")
 
 | Field | Required | Description                                          |
 |-------|----------|------------------------------------------------------|
-| `connector_type` | Yes | `db`                                                 |
+| `connector_type` | Yes | `database`                                             |
 | `driver` | Yes | `postgresql`, `mysql`, `sqlite`, `mariadb`           |
 | `host` | Yes | Database hostname                                    |
 | `port` | Yes | Database port                                        |

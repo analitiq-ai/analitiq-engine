@@ -654,8 +654,8 @@ class PipelineConfigPrep:
 
         This is a convenience method that looks up the connector and returns
         its connector_type. Unlike _determine_connection_type(), this method
-        does not validate the type - it returns whatever connector_type is
-        defined, making it suitable for both source and destination lookups.
+        does not validate the type against VALID_CONNECTOR_TYPES - it returns
+        whatever connector_type is defined.
 
         Args:
             config: Connection configuration dictionary containing connector_id
@@ -685,7 +685,7 @@ class PipelineConfigPrep:
             connection_id: Connection identifier (for error messages)
 
         Returns:
-            Connection type: "api" or "database"
+            Connection type: "api", "database", "file", "s3", or "stdout"
 
         Raises:
             ValueError: If connection type cannot be determined
@@ -693,13 +693,13 @@ class PipelineConfigPrep:
         connector = self.get_connector_for_connection(config, connection_id)
         conn_type = connector.get("connector_type")
 
-        if conn_type in ("api", "database"):
+        if conn_type in self.VALID_CONNECTOR_TYPES:
             return conn_type
 
         connector_id = config.get("connector_id")
         raise ValueError(
             f"Connector '{connector_id}' has invalid or missing 'connector_type'. "
-            f"Expected 'api' or 'database', got: {conn_type!r}"
+            f"Expected one of {sorted(self.VALID_CONNECTOR_TYPES)}, got: {conn_type!r}"
         )
 
     def _normalize_database_connection(
@@ -726,6 +726,8 @@ class PipelineConfigPrep:
             result["port"] = int(result["port"])
 
         return result
+
+    VALID_CONNECTOR_TYPES = {"api", "database", "file", "s3", "stdout"}
 
     def _resolve_connection_by_id(
         self,
@@ -758,10 +760,10 @@ class PipelineConfigPrep:
         connector = self.get_connector_for_connection(config, connection_id)
         connection_type = connector.get("connector_type")
 
-        if connection_type not in ("api", "database"):
+        if connection_type not in self.VALID_CONNECTOR_TYPES:
             raise ValueError(
                 f"Connector has invalid connector_type: {connection_type!r}. "
-                f"Expected 'api' or 'database'."
+                f"Expected one of: {sorted(self.VALID_CONNECTOR_TYPES)}"
             )
 
         # Normalize database connections (adds driver from connector)
