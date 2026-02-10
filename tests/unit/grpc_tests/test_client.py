@@ -194,8 +194,7 @@ class TestClientSchemaBuilder:
         config = {
             "type": "database",
             "driver": "postgresql",
-            "schema": "public",
-            "table": "users",
+            "endpoint": "public/users",
             "primary_key": ["id"],
             "write_mode": "upsert",
             "endpoint_schema": {

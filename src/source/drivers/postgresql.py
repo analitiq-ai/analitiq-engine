@@ -6,7 +6,6 @@ from typing import Any, Dict, List
 from .base import BaseDatabaseDriver
 from .utils import extract_values_for_columns, convert_record_from_db
 from ...shared.database_utils import convert_ssl_mode, get_default_clause
-from ...shared.type_mapping import get_type_mapper
 
 logger = logging.getLogger(__name__)
 
@@ -179,11 +178,6 @@ class PostgreSQLDriver(BaseDatabaseDriver):
                 except Exception as e:
                     logger.warning(f"Failed to create index '{index_name}': {e}")
 
-    def map_json_schema_to_sql_type(self, field_def: Dict[str, Any]) -> str:
-        """Map JSON schema to PostgreSQL-specific types."""
-        type_mapper = get_type_mapper("postgresql")
-        return type_mapper.json_schema_to_native(field_def)
-    
     def _build_column_type_mapping(self, endpoint_schema: Dict[str, Any]):
         """Build mapping of column names to database types for schema-aware conversions."""
         columns = endpoint_schema.get("columns", [])

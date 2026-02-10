@@ -663,7 +663,7 @@ class TestConfigurationLoading:
         )
         prep = PipelineConfigPrep(settings)
 
-        pipeline, streams, connections, endpoints = prep.create_config()
+        pipeline, streams, connections, endpoints, connectors = prep.create_config()
 
         # Check connections are resolved
         assert "source-connection-id" in connections
@@ -707,7 +707,7 @@ class TestConfigurationLoading:
         )
         prep = PipelineConfigPrep(settings)
 
-        pipeline, streams, connections, endpoints = prep.create_config()
+        pipeline, streams, connections, endpoints, connectors = prep.create_config()
 
         # Check endpoints are resolved
         assert "source-endpoint-id" in endpoints

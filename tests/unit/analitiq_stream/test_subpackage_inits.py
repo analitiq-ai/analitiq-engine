@@ -159,21 +159,6 @@ class TestSharedPackageInit:
         assert get_full_table_name is not None
         assert RateLimiter is not None
 
-    @pytest.mark.unit
-    def test_shared_type_mapping(self):
-        """Test type mapping imports from shared package."""
-        from src.shared.type_mapping import (
-            get_type_mapper, BaseTypeMapper
-        )
-
-        assert get_type_mapper is not None
-        assert BaseTypeMapper is not None
-
-        # Test that we can get a mapper
-        mapper = get_type_mapper("postgresql")
-        assert mapper is not None
-        assert mapper.dialect == "postgresql"
-
 
 class TestSchemaPackageInit:
     """Test schema package __init__ file."""

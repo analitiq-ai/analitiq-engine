@@ -105,15 +105,16 @@ class TestSubPackageInits:
     def test_database_init_already_covered(self):
         """Test database package init (covered in test_database_init.py)."""
         # This is already tested in test_database_init.py
-        import src.connectors.database
-        
-        assert src.connectors.database is not None
-        
+        # Use new module path (src.source.connectors.database)
+        import src.source.connectors.database
+
+        assert src.source.connectors.database is not None
+
         # Verify main exports from database package
-        from src.source.connectors.database import (
-            BaseDatabaseDriver, DriverFactory, DatabaseConnector
-        )
-        
+        from src.source.connectors.database import DatabaseConnector
+        from src.source.drivers.base import BaseDatabaseDriver
+        from src.source.drivers.factory import DriverFactory
+
         assert BaseDatabaseDriver is not None
         assert DriverFactory is not None
         assert DatabaseConnector is not None
@@ -134,18 +135,19 @@ class TestImportErrors:
     def test_circular_import_prevention(self):
         """Test that imports don't create circular dependencies."""
         # Import in different orders to test for circular imports
-        import src.core.pipeline
-        import src.core.engine
-        import src.connectors.api
-        import src.connectors.database
+        # Use new module paths (src.engine, src.source.connectors)
+        import src.engine.pipeline
+        import src.engine.engine
+        import src.source.connectors.api
+        import src.source.connectors.database
         import src
-        
+
         # All imports should succeed
         assert all([
-            src.core.pipeline,
-            src.core.engine,
-            src.connectors.api,
-            src.connectors.database,
+            src.engine.pipeline,
+            src.engine.engine,
+            src.source.connectors.api,
+            src.source.connectors.database,
             src
         ])
 
@@ -186,7 +188,12 @@ class TestPackageStructure:
         code_attrs = [name for name in public_attrs if name not in metadata_attrs]
         
         # All public code attributes should be in __all__ (except submodules)
-        submodules = ['cli', 'config', 'connectors', 'core', 'fault_tolerance', 'schema', 'models', 'mapping', 'transformations', 'secrets']  # These are modules, not classes to export
+        # These are modules, not classes to export
+        submodules = [
+            'cli', 'config', 'connectors', 'core', 'destination', 'engine',
+            'fault_tolerance', 'grpc', 'mapping', 'models', 'schema', 'secrets',
+            'shared', 'source', 'state', 'transformations'
+        ]
         for attr in code_attrs:
             if attr not in submodules:
                 assert attr in src.__all__, f"Unexpected public export: {attr}"

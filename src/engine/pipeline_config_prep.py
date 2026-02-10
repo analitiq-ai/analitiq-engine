@@ -614,19 +614,21 @@ class PipelineConfigPrep:
             f"Connection not found in consolidated config: {connection_id}"
         )
 
-    def _determine_connection_type(self, config: Dict[str, Any], connection_id: str) -> str:
+    def get_connector_for_connection(
+        self, config: Dict[str, Any], connection_id: str
+    ) -> Dict[str, Any]:
         """
-        Determine connection type by looking up connector_type from connectors array.
+        Get the connector definition for a connection.
 
         Args:
             config: Connection configuration dictionary
             connection_id: Connection identifier (for error messages)
 
         Returns:
-            Connection type: "api" or "database"
+            Connector definition dict with connector_type, driver, etc.
 
         Raises:
-            ValueError: If connection type cannot be determined
+            ValueError: If connector cannot be found
         """
         connector_id = config.get("connector_id")
         if not connector_id:
@@ -639,53 +641,93 @@ class PipelineConfigPrep:
 
         for connector in connectors:
             if connector.get("connector_id") == connector_id:
-                conn_type = connector.get("connector_type")
-                if conn_type in ("api", "database"):
-                    return conn_type
-                raise ValueError(
-                    f"Connector '{connector_id}' has invalid or missing 'connector_type'. "
-                    f"Expected 'api' or 'database', got: {conn_type!r}"
-                )
+                return connector
 
         raise ValueError(
             f"Connector not found for connection '{connection_id}' "
             f"with connector_id '{connector_id}'."
         )
 
-    def _normalize_database_connection(self, config: Dict[str, Any]) -> Dict[str, Any]:
+    def get_connector_type(self, config: Dict[str, Any], connection_id: str) -> str:
+        """
+        Get the connector_type for a connection.
+
+        This is a convenience method that looks up the connector and returns
+        its connector_type. Unlike _determine_connection_type(), this method
+        does not validate the type against VALID_CONNECTOR_TYPES - it returns
+        whatever connector_type is defined.
+
+        Args:
+            config: Connection configuration dictionary containing connector_id
+            connection_id: Connection identifier (for error messages)
+
+        Returns:
+            The connector_type string (e.g., "api", "database", "file", "s3", "stdout")
+
+        Raises:
+            ValueError: If connector_id is missing or connector not found
+        """
+        connector = self.get_connector_for_connection(config, connection_id)
+        connector_type = connector.get("connector_type")
+        if not connector_type:
+            connector_id = config.get("connector_id")
+            raise ValueError(
+                f"Connector '{connector_id}' is missing 'connector_type' field."
+            )
+        return connector_type
+
+    def _determine_connection_type(self, config: Dict[str, Any], connection_id: str) -> str:
+        """
+        Determine connection type by looking up connector_type from connectors array.
+
+        Args:
+            config: Connection configuration dictionary
+            connection_id: Connection identifier (for error messages)
+
+        Returns:
+            Connection type: "api", "database", "file", "s3", or "stdout"
+
+        Raises:
+            ValueError: If connection type cannot be determined
+        """
+        connector = self.get_connector_for_connection(config, connection_id)
+        conn_type = connector.get("connector_type")
+
+        if conn_type in self.VALID_CONNECTOR_TYPES:
+            return conn_type
+
+        connector_id = config.get("connector_id")
+        raise ValueError(
+            f"Connector '{connector_id}' has invalid or missing 'connector_type'. "
+            f"Expected one of {sorted(self.VALID_CONNECTOR_TYPES)}, got: {conn_type!r}"
+        )
+
+    def _normalize_database_connection(
+        self, config: Dict[str, Any], connector: Dict[str, Any]
+    ) -> Dict[str, Any]:
         """
         Normalize database connection fields to match expected schema.
 
-        Transformations:
-        - provider -> driver
-        - dbname -> database
-        - port (string) -> port (int)
-
-        Note: username is kept as-is (not renamed to user) since
-        DatabaseConfig now uses 'username' as the standard field name.
-
         Args:
             config: Raw database connection configuration
+            connector: Connector definition with driver field
 
         Returns:
             Normalized configuration dictionary
         """
         result = config.copy()
 
-        # Rename legacy field names
-        if "provider" in result and "driver" not in result:
-            result["driver"] = result.pop("provider")
-        if "dbname" in result and "database" not in result:
-            result["database"] = result.pop("dbname")
+        # Get driver from connector (authoritative source)
+        if "driver" not in result:
+            result["driver"] = connector.get("driver")
 
-        # Convert port to integer (required, no default)
+        # Convert port to integer
         if "port" in result and isinstance(result["port"], str):
-            try:
-                result["port"] = int(result["port"])
-            except ValueError:
-                raise ValueError(f"Invalid port value: {result['port']}")
+            result["port"] = int(result["port"])
 
         return result
+
+    VALID_CONNECTOR_TYPES = {"api", "database", "file", "s3", "stdout"}
 
     def _resolve_connection_by_id(
         self,
@@ -714,12 +756,19 @@ class PipelineConfigPrep:
         # Load connection config from connections directory
         config = self._load_connection_config(connection_id)
 
-        # Determine connection type
-        connection_type = self._determine_connection_type(config, connection_id)
+        # Get connector and determine connection type
+        connector = self.get_connector_for_connection(config, connection_id)
+        connection_type = connector.get("connector_type")
 
-        # Normalize database connections
+        if connection_type not in self.VALID_CONNECTOR_TYPES:
+            raise ValueError(
+                f"Connector has invalid connector_type: {connection_type!r}. "
+                f"Expected one of: {sorted(self.VALID_CONNECTOR_TYPES)}"
+            )
+
+        # Normalize database connections (adds driver from connector)
         if connection_type == "database":
-            config = self._normalize_database_connection(config)
+            config = self._normalize_database_connection(config, connector)
 
         # Store secrets directory for the resolver
         self._secrets_dir = self._paths["secrets"]
@@ -896,10 +945,9 @@ class PipelineConfigPrep:
             name=raw_pipeline.get("name", ""),
             description=raw_pipeline.get("description"),
             status=raw_pipeline.get("status", "draft"),
-            is_active=raw_pipeline.get("is_active", False),
             tags=raw_pipeline.get("tags", []),
             connections=connections_config,
-            runtime=RuntimeConfig(**raw_pipeline.get("runtime", {})) if raw_pipeline.get("runtime") else RuntimeConfig(),
+            engine_config=RuntimeConfig(**raw_pipeline.get("engine_config", {})) if raw_pipeline.get("engine_config") else RuntimeConfig(),
             function_catalog=raw_pipeline.get("function_catalog"),
             created_at=raw_pipeline.get("created_at"),
             updated_at=raw_pipeline.get("updated_at"),
@@ -1009,6 +1057,14 @@ class PipelineConfigPrep:
             version = int(float(version))
 
         # Build StreamConfig
+        raw_mapping = raw_stream.get("mapping", {})
+        # Get first destination's connection_ref for type lookup
+        dest_connection_ref = destinations_data[0].get("connection_ref") if destinations_data else None
+        normalized_mapping = (
+            self._normalize_mapping_config(raw_mapping, dest_connection_ref)
+            if raw_mapping
+            else {}
+        )
         return StreamConfig(
             version=version,
             stream_id=stream_id,
@@ -1021,12 +1077,93 @@ class PipelineConfigPrep:
                 DestinationConfig(**self._normalize_destination_config(d))
                 for d in destinations_data
             ],
-            mapping=MappingConfig(**raw_stream.get("mapping", {})) if raw_stream.get("mapping") else MappingConfig(),
+            mapping=MappingConfig(**normalized_mapping) if normalized_mapping else MappingConfig(),
             tags=raw_stream.get("tags"),
             runtime=raw_stream.get("runtime"),
             created_at=raw_stream.get("created_at"),
             updated_at=raw_stream.get("updated_at"),
         )
+
+    def _normalize_mapping_config(
+        self, mapping: Dict[str, Any], dest_connection_ref: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Normalize mapping using provided source_to_generic and generic_to_destination.
+
+        Sets target.type to generic type (for Pydantic validation) and
+        target.dest_type to native destination type (for DDL/casting).
+
+        Args:
+            mapping: Raw mapping configuration with assignments
+            dest_connection_ref: Destination connection reference for type lookup
+                                (e.g., "conn_2"). Used to look up destination types
+                                from generic_to_destination mapping.
+
+        Returns:
+            Normalized mapping with generic types set on target.type
+        """
+        normalized = dict(mapping)
+        assignments = list(normalized.get("assignments", []))
+
+        # Use provided mappings (trust they are correct)
+        source_to_generic = mapping.get("source_to_generic", {}) or {}
+        generic_to_dest = (
+            mapping.get("generic_to_destination", {}).get(dest_connection_ref, {})
+            if dest_connection_ref
+            else {}
+        )
+
+        def _generic_from_source_path(path: List[str]) -> Optional[str]:
+            if not path:
+                return None
+            key = ".".join(path)
+            entry = source_to_generic.get(key, {})
+            return entry.get("generic_type")
+
+        def _resolve_generic_type(assignment: Dict[str, Any]) -> str:
+            """Resolve generic type from source_to_generic mapping."""
+            target = assignment.get("target", {})
+            target_path = target.get("path") or []
+            generic = _generic_from_source_path(target_path)
+            if generic:
+                return generic
+
+            value = assignment.get("value", {})
+            if value.get("kind") == "expr":
+                expr = value.get("expr", {})
+                if expr.get("op") == "get":
+                    generic = _generic_from_source_path(expr.get("path") or [])
+                    if generic:
+                        return generic
+
+            # Preserve existing target.type before falling back to "string"
+            return assignment.get("target", {}).get("type", "string")
+
+        normalized_assignments = []
+        for assignment in assignments:
+            updated = dict(assignment)
+            target = dict(updated.get("target", {}))
+            target_path = target.get("path") or []
+
+            # Get generic type from source_to_generic
+            generic_type = _resolve_generic_type(updated)
+            target["type"] = generic_type
+
+            # Get destination type and nullable from generic_to_destination
+            if target_path:
+                field_name = ".".join(target_path)
+                dest_entry = generic_to_dest.get(field_name, {})
+                dest_type = dest_entry.get("destination_type")
+                if dest_type:
+                    target["dest_type"] = dest_type
+                # Only set nullable from dest mapping if present
+                if "nullable" in dest_entry:
+                    target["nullable"] = dest_entry["nullable"]
+
+            updated["target"] = target
+            normalized_assignments.append(updated)
+
+        normalized["assignments"] = normalized_assignments
+        return normalized
 
     def _normalize_source_config(self, source_data: Dict[str, Any]) -> Dict[str, Any]:
         """Normalize source configuration to match SourceConfig model."""
@@ -1086,20 +1223,37 @@ class PipelineConfigPrep:
 
         return result
 
+    def get_connectors(self) -> List[Dict[str, Any]]:
+        """
+        Get the connectors array from consolidated config.
+
+        Connectors define the type and metadata for each integration.
+        The connector_type field determines which handler processes connections.
+
+        Returns:
+            List of connector definitions with connector_id, connector_name,
+            connector_type, and optional driver/slug fields.
+        """
+        consolidated = self._load_consolidated_config()
+        return consolidated.get("connectors", [])
+
     def create_config(self) -> Tuple[
         PipelineConfig,
         List[StreamConfig],
         Dict[str, "ResolvedConnection"],
-        Dict[str, Dict[str, Any]]
+        Dict[str, Dict[str, Any]],
+        List[Dict[str, Any]],
     ]:
         """
         Load and return validated pipeline and stream configurations.
 
         Returns:
-            Tuple of (PipelineConfig, list of StreamConfig, resolved_connections dict, resolved_endpoints dict)
+            Tuple of (PipelineConfig, list of StreamConfig, resolved_connections dict,
+                      resolved_endpoints dict, connectors list)
             - resolved_connections maps connection_id to ResolvedConnection objects
               (use await resolved.resolve_config() to get fully-expanded config)
             - resolved_endpoints maps endpoint_id to its resolved config dict
+            - connectors is the list of connector definitions from consolidated config
         """
         pipeline_config, stream_configs = self.load_pipeline_config()
 
@@ -1129,7 +1283,10 @@ class PipelineConfigPrep:
         else:
             logger.info("Configuration validation passed - no unexpanded placeholders found")
 
-        return pipeline_config, stream_configs, resolved_connections, resolved_endpoints
+        # Get connectors from consolidated config
+        connectors = self.get_connectors()
+
+        return pipeline_config, stream_configs, resolved_connections, resolved_endpoints, connectors
 
     def validate_environment(self) -> None:
         """Validate that the environment is properly configured.

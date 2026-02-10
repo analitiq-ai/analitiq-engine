@@ -5,18 +5,18 @@ import logging
 from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
-from uuid import uuid4
 
 from pydantic import ValidationError
 
 from .exceptions import (
-    PipelineOrchestrationError, StreamExecutionError, 
+    PipelineOrchestrationError, StreamExecutionError,
     StreamConfigurationError, PipelineValidationError
 )
 from ..models.engine import (
     StreamProcessingConfig, PipelineMetricsSnapshot, TaskExecutionInfo
 )
 from ..models.state import PipelineConfig
+from ..shared.run_id import get_or_generate_run_id
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +53,7 @@ class PipelineOrchestrator:
     
     def __init__(self, pipeline_id: str):
         self.pipeline_id = pipeline_id
-        self.run_id = f"{datetime.now(timezone.utc).isoformat()}-{str(uuid4())[:8]}"
+        self.run_id = get_or_generate_run_id()
         self.started_at = datetime.now(timezone.utc)
         self.logger = logging.getLogger(f"{__name__}.{pipeline_id}")
         

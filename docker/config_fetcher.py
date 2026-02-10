@@ -9,6 +9,7 @@ This script fetches all configuration via a single Lambda call and secrets from 
 It writes a SINGLE consolidated configuration file per pipeline:
 - Consolidated file: {paths.pipelines}/{pipeline_id}.json
 - Secrets: {paths.secrets}/{connection_id}.json (kept separate for security)
+- States: {paths.state}/streams/{stream_id}/state.json (stream state checkpoints)
 
 The consolidated file format:
 {
@@ -17,6 +18,7 @@ The consolidated file format:
     "connectors": [ ... ],      # List of connector metadata
     "endpoints": [ ... ],       # List of endpoint definitions
     "streams": [ ... ]          # List of stream configurations
+    "states": { ... }           # Dict of stream_id -> state record (optional)
 }
 
 This script runs as the first step in AWS Batch container execution,
@@ -70,6 +72,7 @@ class ConfigFetcher:
     Output structure:
     - {paths.pipelines}/{pipeline_id}.json  (consolidated config)
     - {paths.secrets}/{connection_id}.json  (secrets, kept separate)
+    - {paths.state}/streams/{stream_id}/state.json  (stream state checkpoints)
     """
 
     def __init__(
@@ -116,13 +119,13 @@ class ConfigFetcher:
         # Convert paths to Path objects for easier manipulation
         self.pipelines_path = Path(self.paths["pipelines"])
         self.secrets_path = Path(self.paths["secrets"])
+        self.state_path = Path(self.paths["state"])
 
     def _load_paths_from_analitiq_yaml(self) -> Dict[str, str]:
         """
         Load directory paths from analitiq.yaml at project root.
 
-        Only requires 'pipelines' and 'secrets' paths since configuration
-        is now written as a single consolidated file.
+        Requires 'pipelines', 'secrets', and 'state' paths.
 
         Returns:
             Dict with paths for pipelines and secrets
@@ -141,7 +144,7 @@ class ConfigFetcher:
 
         paths_config = config.get("paths", {})
 
-        required_paths = ["pipelines", "secrets"]
+        required_paths = ["pipelines", "secrets", "state"]
         missing = [p for p in required_paths if p not in paths_config]
         if missing:
             raise ValueError(f"analitiq.yaml missing required paths: {missing}")
@@ -345,6 +348,21 @@ class ConfigFetcher:
             self.write_json(secrets_path, secrets)
             logger.info(f"Wrote secrets: {secrets_path}")
 
+    def _write_states(self, states: Dict[str, Dict[str, Any]]) -> None:
+        """
+        Write stream state files to disk.
+
+        Directory structure: {paths.state}/streams/{stream_id}/state.json
+
+        Args:
+            states: Dict mapping stream_id -> state record
+        """
+        for stream_id, state_data in states.items():
+            state_dir = self.state_path / "streams" / stream_id
+            state_file = state_dir / "state.json"
+            self.write_json(state_file, state_data)
+            logger.info(f"Wrote state: {state_file}")
+
     def _collect_connection_ids(
         self, connections: List[Dict[str, Any]]
     ) -> set:
@@ -376,6 +394,7 @@ class ConfigFetcher:
         Writes:
         - Consolidated config: {paths.pipelines}/{pipeline_id}.json
         - Secrets: {paths.secrets}/{connection_id}.json
+        - States: {paths.state}/streams/{stream_id}/state.json
 
         Args:
             stream_ids: Optional list of specific stream IDs to fetch
@@ -397,6 +416,7 @@ class ConfigFetcher:
         connectors = data.get("connectors", [])
         endpoints = data.get("endpoints", [])
         streams = data.get("streams", [])
+        states = data.get("states", {})
 
         # Fetch all secrets in parallel from S3
         connection_ids = self._collect_connection_ids(connections)
@@ -404,6 +424,10 @@ class ConfigFetcher:
 
         # Write secrets files (separate from consolidated config)
         self._write_secrets(connections, all_secrets)
+
+        # Write stream state files
+        if states:
+            self._write_states(states)
 
         # Write consolidated pipeline config
         pipeline_id = self._get_pipeline_id_without_version()
@@ -424,6 +448,7 @@ class ConfigFetcher:
         logger.info(f"  Endpoints: {len(endpoints)}")
         logger.info(f"  Streams: {len(streams)}")
         logger.info(f"  Secrets: {len(all_secrets)}")
+        logger.info(f"  States: {len(states)}")
 
         return pipeline_path
 

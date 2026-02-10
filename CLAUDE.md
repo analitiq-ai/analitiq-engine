@@ -30,13 +30,7 @@ poetry run pre-commit run --all-files           # All hooks
 src/
 ├── shared/                      # Shared utilities used by source and destination
 │   ├── database_utils.py        # SSL mode, identifiers, table names
-│   ├── rate_limiter.py          # Token bucket rate limiter
-│   └── type_mapping/            # Unified type mapping system
-│       ├── base.py              # BaseTypeMapper ABC
-│       ├── postgresql.py        # PostgreSQL: JSONB, TIMESTAMPTZ, arrays
-│       ├── mysql.py             # MySQL: JSON, DATETIME
-│       ├── snowflake.py         # Snowflake: VARIANT, TIMESTAMP_TZ
-│       └── generic.py           # Safe fallback for unknown DBs
+│   └── rate_limiter.py          # Token bucket rate limiter
 │
 ├── source/                      # Source connectors (read operations)
 │   ├── connectors/              # Protocol implementations
@@ -51,8 +45,9 @@ src/
 ├── destination/                 # Destination components (write operations)
 │   ├── base_handler.py          # BaseDestinationHandler ABC
 │   ├── server.py                # gRPC server implementation
+│   ├── schema_contract.py       # Arrow-based type casting (DestinationSchemaContract)
 │   ├── connectors/              # Destination handlers (renamed from handlers/)
-│   │   ├── database.py          # DatabaseDestinationHandler (SQLAlchemy)
+│   │   ├── database.py          # DatabaseDestinationHandler (SQLAlchemy + Arrow)
 │   │   ├── api.py               # ApiDestinationHandler
 │   │   ├── file.py              # FileDestinationHandler
 │   │   └── stream.py            # StreamDestinationHandler
@@ -299,13 +294,44 @@ Configuration-driven destination system with layered abstractions. Single Docker
 
 **Handlers:** `db` (SQLAlchemy), `postgresql` (legacy asyncpg), `api`, `file`, `s3`, `stdout`
 
-**Formatters:** `jsonl`, `csv`, `parquet` (requires `-E analytics`)
+**Formatters:** `jsonl`, `csv`, `parquet`
 
 **Storage:** `local`, `s3`
 
 **Idempotency:** Database handlers use `_batch_commits` table; file handlers use `_manifest.json`
 
 See [Destination Config](docs/DESTINATION_CONFIG.md) for full reference.
+
+## Arrow-Based Type System
+
+Type casting uses PyArrow for efficient columnar conversion instead of row-by-row Python coercion.
+
+**Architecture:**
+```
+Source (native types) -> Arrow Table (canonical schema) -> Destination (native types)
+```
+
+**Key Components:**
+- `DestinationSchemaContract` (`src/destination/schema_contract.py`): Builds Arrow schema from endpoint definition, provides vectorized batch casting
+- `target.type`: Generic type for Pydantic validation (`integer`, `string`, `datetime`, etc.)
+- `target.dest_type`: Native SQL type for DDL/casting (`BIGINT`, `VARCHAR(50)`, `DATETIME`, etc.)
+
+**Type Mapping Flow:**
+1. `source_to_generic` mapping provides generic types from source fields
+2. `generic_to_destination` mapping provides native destination types per connection
+3. `_normalize_mapping_config()` sets both `target.type` and `target.dest_type` on assignments
+4. `DestinationSchemaContract` builds Arrow schema from endpoint columns
+5. `prepare_records()` performs vectorized casting using PyArrow
+
+**Supported Native Types:**
+- Integer: `BIGINT`, `INTEGER`, `SMALLINT`, `TINYINT`
+- Float: `FLOAT`, `DOUBLE`, `REAL`, `DECIMAL(p,s)`
+- String: `VARCHAR(n)`, `TEXT`, `CHAR`
+- Timestamp: `TIMESTAMP`, `TIMESTAMPTZ`, `DATETIME`
+- Date/Time: `DATE`, `TIME`
+- Boolean: `BOOLEAN`, `BOOL`
+- JSON: `JSON`, `JSONB` (stored as string)
+- Binary: `BYTEA`, `BLOB`
 
 ## Incremental Replication
 

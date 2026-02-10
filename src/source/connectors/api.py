@@ -9,7 +9,7 @@ from urllib.parse import urljoin, urlparse, urlencode
 
 from .base import BaseConnector, ConnectionError, ReadError, WriteError
 from ...state.state_manager import StateManager
-from ...models.state import PartitionCursor, CursorField, PartitionStats
+from ...models.state import StreamCursor, CursorField, StreamStats
 from ...models.api import (
     APIConnectionConfig, APIReadConfig, APIWriteConfig,
     HTTPResponse, APIRequestParams, RecordBatch, FilterConfig
@@ -189,7 +189,7 @@ class APIConnector(BaseConnector):
                                 inclusive=True  # Always use inclusive mode
                             )
                             
-                            cursor = PartitionCursor(primary=primary_cursor)
+                            cursor = StreamCursor(primary=primary_cursor)
                             
                             # Add tie-breaker fields from configuration
                             tie_breaker_fields = config.get("tie_breaker_fields", [])
@@ -208,7 +208,7 @@ class APIConnector(BaseConnector):
                                     cursor.tiebreakers = tiebreakers
                                 
                             # Save checkpoint with validation
-                            stats = PartitionStats(
+                            stats = StreamStats(
                                 records_synced=total_records,
                                 batches_written=batch_count,
                                 last_checkpoint_at=datetime.now(timezone.utc),
@@ -252,7 +252,7 @@ class APIConnector(BaseConnector):
                             inclusive=True  # Always use inclusive mode
                         )
                         
-                        cursor = PartitionCursor(primary=primary_cursor)
+                        cursor = StreamCursor(primary=primary_cursor)
                         
                         # Add tie-breaker fields from configuration
                         tie_breaker_fields = config.get("tie_breaker_fields", [])
@@ -270,7 +270,7 @@ class APIConnector(BaseConnector):
                             if tiebreakers:
                                 cursor.tiebreakers = tiebreakers
                             
-                        stats = PartitionStats(
+                        stats = StreamStats(
                             records_synced=total_records,
                             batches_written=1,
                             last_checkpoint_at=datetime.now(timezone.utc),

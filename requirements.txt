@@ -60,7 +60,7 @@ sqlalchemy[asyncio]>=2.0.0
 # For analytics and data processing
 # pandas>=2.0.0
 # numpy>=1.24.0
-# pyarrow>=12.0.0
+pyarrow>=12.0.0
 
 # For NoSQL databases
 # motor>=3.0.0

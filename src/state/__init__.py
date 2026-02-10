@@ -1,5 +1,6 @@
 """Fault tolerance components for reliable data streaming."""
 
+from .batch_commit_tracker import BatchCommitTracker, BatchCommitRecord
 from .circuit_breaker import CircuitBreaker
 from .dead_letter_queue import (
     DeadLetterQueue,
@@ -10,6 +11,7 @@ from .dead_letter_queue import (
     create_dlq_storage,
 )
 from .retry_handler import RetryHandler
+from .state_emission import STATE_MARKER, emit_state_log
 from .state_manager import StateManager
 from .state_storage import (
     LocalStateStorage,
@@ -25,14 +27,16 @@ from .log_storage import (
     create_log_handler,
 )
 from .metrics_storage import (
-    MetricsStorageSettings,
-    MetricsStorage,
+    METRICS_MARKER,
     PipelineMetricsRecord,
+    emit_metrics_log,
     create_metrics_record,
     save_pipeline_metrics,
 )
 
 __all__ = [
+    "BatchCommitTracker",
+    "BatchCommitRecord",
     "RetryHandler",
     "CircuitBreaker",
     "DeadLetterQueue",
@@ -51,9 +55,11 @@ __all__ = [
     "S3LogHandler",
     "BufferedS3LogHandler",
     "create_log_handler",
-    "MetricsStorageSettings",
-    "MetricsStorage",
+    "METRICS_MARKER",
     "PipelineMetricsRecord",
+    "emit_metrics_log",
     "create_metrics_record",
     "save_pipeline_metrics",
+    "STATE_MARKER",
+    "emit_state_log",
 ]

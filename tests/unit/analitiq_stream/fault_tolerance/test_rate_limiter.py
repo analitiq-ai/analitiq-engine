@@ -191,21 +191,21 @@ class TestRateLimiter:
     async def test_zero_wait_time_edge_case(self):
         """Test edge case where calculated wait time is zero or negative."""
         limiter = RateLimiter(max_requests=1, time_window=1)
-        
+
         # Mock time to create edge case
-        with patch('src.source.connectors.api.datetime') as mock_datetime:
+        with patch('src.shared.rate_limiter.datetime') as mock_datetime:
             # First call returns current time
             mock_datetime.now.return_value.timestamp.return_value = 1000.0
             await limiter.acquire()
-            
+
             # Second call - simulate time has passed exactly the window
             mock_datetime.now.return_value.timestamp.return_value = 1001.0
-            
+
             # Should not wait (old request is exactly at window boundary)
             start_time = time.time()
             await limiter.acquire()
             end_time = time.time()
-            
+
             # Should complete quickly
             assert end_time - start_time < 0.1
 

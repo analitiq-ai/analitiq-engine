@@ -31,20 +31,14 @@ class HandlerRegistry:
     _handlers: Dict[str, Type[BaseDestinationHandler]] = {
         # SQLAlchemy-based database handler (unified for all SQL databases)
         # Dialect is selected based on the 'driver' field in connection config
-        "db": DatabaseDestinationHandler,
         "database": DatabaseDestinationHandler,
-        "postgresql": DatabaseDestinationHandler,
-        "postgres": DatabaseDestinationHandler,
-        "mysql": DatabaseDestinationHandler,
-        "mariadb": DatabaseDestinationHandler,
-        "sqlite": DatabaseDestinationHandler,
         # API handler
         "api": ApiDestinationHandler,
         # Stream handlers
         "stdout": StreamDestinationHandler,
         # File handlers
         "file": FileDestinationHandler,
-        "s3": FileDestinationHandler,  # S3 uses FileDestinationHandler with S3 storage backend
+        "s3": FileDestinationHandler,
     }
 
     @classmethod
@@ -115,7 +109,7 @@ def get_handler(connector_type: str) -> BaseDestinationHandler:
     Uses HandlerRegistry internally.
 
     Args:
-        connector_type: Type of connector (db, api, file, s3, stdout, etc.)
+        connector_type: Type of connector (database, api, file, s3, stdout, etc.)
 
     Returns:
         Instance of the appropriate handler

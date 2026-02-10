@@ -40,8 +40,10 @@ def config_fetcher(tmp_path):
     # Create temp directories
     pipelines_dir = tmp_path / "pipelines"
     secrets_dir = tmp_path / ".secrets"
+    state_dir = tmp_path / "state"
     pipelines_dir.mkdir(parents=True, exist_ok=True)
     secrets_dir.mkdir(parents=True, exist_ok=True)
+    state_dir.mkdir(parents=True, exist_ok=True)
 
     try:
         os.chdir(project_root)
@@ -54,6 +56,7 @@ def config_fetcher(tmp_path):
             # Override paths to use temp directory
             fetcher.pipelines_path = pipelines_dir
             fetcher.secrets_path = secrets_dir
+            fetcher.state_path = state_dir
             yield fetcher
     finally:
         os.chdir(original_cwd)
@@ -250,7 +253,7 @@ class TestPipelineIdExtraction:
 
     def test_pipeline_id_with_version(self, config_fetcher):
         """Pipeline ID with version suffix should have version removed."""
-        config_fetcher.pipeline_id = "abc123:v1.2.3"
+        config_fetcher.pipeline_id = "abc123_v1.2.3"
         assert config_fetcher._get_pipeline_id_without_version() == "abc123"
 
 
@@ -268,3 +271,85 @@ class TestConnectionIdCollection:
         result = config_fetcher._collect_connection_ids(connections)
 
         assert result == {"conn-1", "conn-2"}
+
+
+class TestStatesWriting:
+    """Test that stream state files are written correctly."""
+
+    def test_states_written_to_state_dir(
+        self, config_fetcher, sample_batch_job_data
+    ):
+        """States should be written to state/streams/{stream_id}/state.json"""
+        mock_states = {
+            "stream1_v1": {
+                "type": "state",
+                "run_id": "20260206T120000Z-abc123",
+                "pipeline_id": "abc123_v1",
+                "stream_id": "stream1_v1",
+                "client_id": "d7a11991-2795-49d1-a858-c7e58ee5ecc6",
+                "cursor": "hex123",
+                "cursor_value": "2026-02-06T12:00:00Z",
+                "timestamp": "2026-02-06T12:00:00+00:00",
+            },
+            "stream2_v1": {
+                "type": "state",
+                "run_id": "20260206T113000Z-def456",
+                "pipeline_id": "abc123_v1",
+                "stream_id": "stream2_v1",
+                "client_id": "d7a11991-2795-49d1-a858-c7e58ee5ecc6",
+                "cursor": "hex456",
+                "cursor_value": "2026-02-06T11:30:00Z",
+                "timestamp": "2026-02-06T11:30:00+00:00",
+            },
+        }
+
+        # Inject states into the Lambda response
+        data_with_states = {**sample_batch_job_data["data"], "states": mock_states}
+        config_fetcher.fetch_batch_job_data = MagicMock(return_value=data_with_states)
+        config_fetcher.fetch_secrets_parallel = MagicMock(return_value={})
+
+        config_fetcher.fetch_and_write_all()
+
+        # Check state files were written
+        for stream_id, state_data in mock_states.items():
+            state_path = config_fetcher.state_path / "streams" / stream_id / "state.json"
+            assert state_path.exists(), f"State not found at {state_path}"
+
+            with open(state_path) as f:
+                saved_state = json.load(f)
+            assert saved_state == state_data
+
+    def test_no_state_files_when_states_absent(
+        self, config_fetcher, sample_batch_job_data
+    ):
+        """No state files should be written if Lambda response has no states."""
+        config_fetcher.fetch_batch_job_data = MagicMock(
+            return_value=sample_batch_job_data["data"]
+        )
+        config_fetcher.fetch_secrets_parallel = MagicMock(return_value={})
+
+        config_fetcher.fetch_and_write_all()
+
+        # Verify no state stream directories were created
+        streams_dir = config_fetcher.state_path / "streams"
+        if streams_dir.exists():
+            state_files = list(streams_dir.glob("*/state.json"))
+            assert len(state_files) == 0, "No state files should be written when states are absent"
+
+    def test_no_state_files_when_states_empty(
+        self, config_fetcher, sample_batch_job_data
+    ):
+        """No state files should be written if states dict is empty."""
+        data_with_empty_states = {**sample_batch_job_data["data"], "states": {}}
+        config_fetcher.fetch_batch_job_data = MagicMock(
+            return_value=data_with_empty_states
+        )
+        config_fetcher.fetch_secrets_parallel = MagicMock(return_value={})
+
+        config_fetcher.fetch_and_write_all()
+
+        # Verify no state stream directories were created
+        streams_dir = config_fetcher.state_path / "streams"
+        if streams_dir.exists():
+            state_files = list(streams_dir.glob("*/state.json"))
+            assert len(state_files) == 0, "No state files should be written when states are empty"

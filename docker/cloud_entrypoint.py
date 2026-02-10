@@ -13,8 +13,9 @@ import logging
 import os
 import sys
 
+log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
-    level=logging.INFO,
+    level=getattr(logging, log_level, logging.INFO),
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
@@ -41,8 +42,18 @@ def main() -> None:
     logger.info(f"AWS_BATCH_JOB_ID: {os.getenv('AWS_BATCH_JOB_ID')}")
     logger.info("=" * 60)
 
-    # Fetch configs from Lambda/S3 (this script only runs in cloud)
-    fetch_configs()
+    env = os.getenv("ENV", "dev").lower()
+    if env != "local":
+        # Fetch configs from Lambda/S3 (this script only runs in cloud)
+        fetch_configs()
+    else:
+        logger.info(
+            "ENV=local; skipping config fetcher and reusing pipelines/*.json"
+        )
+
+    # Initialize run_id (uses AWS_BATCH_JOB_ID in cloud)
+    from src.shared.run_id import initialize_run_id
+    initialize_run_id()
 
     # Import and run src.main directly (single process, no subprocess overhead)
     logger.info("Running src.main...")

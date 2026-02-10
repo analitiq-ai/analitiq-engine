@@ -134,7 +134,7 @@ async def run_destination_mode() -> None:
     # This uses PIPELINE_ID and CLIENT_ID env vars
     logger.info("Loading pipeline configuration via PipelineConfigPrep")
     config_prep = PipelineConfigPrep()
-    pipeline_config, stream_configs, resolved_connections, resolved_endpoints = config_prep.create_config()
+    pipeline_config, stream_configs, resolved_connections, resolved_endpoints, _connectors = config_prep.create_config()
 
     # Get destination connection from pipeline config
     destinations = pipeline_config.connections.destinations
@@ -170,14 +170,8 @@ async def run_destination_mode() -> None:
     else:
         connection_config = resolved_conn.config
 
-    # Determine connector type from connection config
-    # Check connector_type first (db, api, file, s3, stdout)
-    # The driver field is used by DatabaseDestinationHandler internally for dialect selection
-    connector_type = (
-        connection_config.get("connector_type")
-        or connection_config.get("type")
-        or connection_config.get("driver")  # Fallback for legacy configs
-    )
+    # Look up connector_type from connectors array using connector_id
+    connector_type = config_prep.get_connector_type(connection_config, connection_id)
 
     logger.info(f"Connector type: {connector_type}")
     logger.info(f"gRPC port: {grpc_port}")
@@ -204,6 +198,10 @@ async def main() -> int:
     Returns:
         Exit code (0 for success, 1 for failure)
     """
+    # Initialize run_id if not already set (cloud_entrypoint sets it first)
+    from src.shared.run_id import initialize_run_id
+    initialize_run_id()
+
     logger.info("=" * 60)
     logger.info("Analitiq Stream Starting")
     logger.info("=" * 60)

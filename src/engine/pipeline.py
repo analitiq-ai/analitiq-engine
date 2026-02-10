@@ -12,6 +12,8 @@ from pydantic import ValidationError
 
 from .engine import StreamingEngine
 from .pipeline_config_prep import ResolvedConnection
+from ..shared.connector_utils import get_connector_type_from_list
+from ..shared.run_id import get_or_generate_run_id
 from ..state.log_storage import LogStorageSettings, create_log_handler
 from ..models.enriched import (
     EnrichedAPIDestinationConfig,
@@ -41,6 +43,7 @@ class Pipeline:
         stream_configs: Optional[List[StreamConfig]] = None,
         resolved_connections: Optional[Dict[str, Dict[str, Any]]] = None,
         resolved_endpoints: Optional[Dict[str, Dict[str, Any]]] = None,
+        connectors: Optional[List[Dict[str, Any]]] = None,
         state_dir: Optional[str] = None,
     ):
         """
@@ -51,6 +54,7 @@ class Pipeline:
             stream_configs: List of StreamConfig models (required if using new format)
             resolved_connections: Dict mapping connection_id to resolved config dict
             resolved_endpoints: Dict mapping endpoint_id to resolved endpoint config dict
+            connectors: List of connector definitions (connector_id -> connector_type mapping)
             state_dir: Optional directory for state files (if None, uses default)
         """
         # Load .env file if it exists
@@ -62,6 +66,7 @@ class Pipeline:
             self.stream_configs = stream_configs or []
             self.resolved_connections = resolved_connections or {}
             self.resolved_endpoints = resolved_endpoints or {}
+            self.connectors = connectors or []
             self._legacy_mode = False
         else:
             # Legacy dict format - convert for compatibility
@@ -70,6 +75,7 @@ class Pipeline:
             self.stream_configs = self._convert_legacy_stream_configs(pipeline_config)
             self.resolved_connections = {}
             self.resolved_endpoints = {}
+            self.connectors = []
             self._legacy_mode = True
 
         # Extract configuration values
@@ -282,16 +288,16 @@ class Pipeline:
         self._log_settings = LogStorageSettings.from_env()
         self._log_settings.pipeline_id = pipeline_id
 
-        # Generate run_id for log file naming
-        self._run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        # Get run_id for log file naming (already initialized at startup)
+        self._run_id = get_or_generate_run_id()
 
         # Set log format
         formatter = logging.Formatter(
             '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
         )
 
-        # Set log level from config or environment
-        log_level = self.pipeline_config.runtime.logging.log_level
+        # Set log level from environment (preferred) or config
+        log_level = os.getenv("LOG_LEVEL", self.pipeline_config.runtime.logging.log_level)
 
         # Attach handler to src package logger (parent of all src.* modules)
         root_package_logger = logging.getLogger("src")
@@ -354,8 +360,13 @@ class Pipeline:
 
         # Helper to get resolved endpoint config by endpoint_id
         def get_endpoint_config(endpoint_id: str) -> Dict[str, Any]:
+            logger.debug(f"Looking up endpoint_id: {endpoint_id}")
+            logger.debug(f"Available endpoint keys: {list(self.resolved_endpoints.keys())}")
             if endpoint_id in self.resolved_endpoints:
-                return self.resolved_endpoints[endpoint_id].copy()
+                result = self.resolved_endpoints[endpoint_id].copy()
+                logger.debug(f"Found endpoint with keys: {list(result.keys())}")
+                return result
+            logger.warning(f"Endpoint not found: {endpoint_id}")
             return {}
 
         # Helper to validate source config against enriched model
@@ -397,6 +408,26 @@ class Pipeline:
             source_endpoint = get_endpoint_config(stream.source.endpoint_id)
             dest_endpoint = get_endpoint_config(dest.endpoint_id)
 
+            # Look up connector_type for source and destination
+            source_connector_id = source_conn.get("connector_id")
+            dest_connector_id = dest_conn.get("connector_id")
+            source_connector_type = None
+            dest_connector_type = None
+            if source_connector_id and self.connectors:
+                try:
+                    source_connector_type = get_connector_type_from_list(
+                        self.connectors, source_connector_id
+                    )
+                except ValueError:
+                    logger.warning(f"Could not find connector_type for source connector_id: {source_connector_id}")
+            if dest_connector_id and self.connectors:
+                try:
+                    dest_connector_type = get_connector_type_from_list(
+                        self.connectors, dest_connector_id
+                    )
+                except ValueError:
+                    logger.warning(f"Could not find connector_type for dest connector_id: {dest_connector_id}")
+
             # Build source config with connection and endpoint details
             source_config = {
                 **source_conn,  # Include host, headers, type, etc.
@@ -408,6 +439,7 @@ class Pipeline:
                 "cursor_mode": "inclusive",  # Always use inclusive mode (>= for cursor comparison)
                 "safety_window_seconds": stream.source.replication.safety_window_seconds,
                 "primary_key": stream.source.primary_key,
+                "connector_type": source_connector_type,
             }
 
             # Build destination config with connection and endpoint details
@@ -419,6 +451,7 @@ class Pipeline:
                 "refresh_mode": dest.write.mode.value,
                 "batch_support": dest.batching.supported if dest.batching else False,
                 "batch_size": dest.batching.size if dest.batching else 1,
+                "connector_type": dest_connector_type,
             }
 
             # Validate configs against enriched models (logs warnings on failure)
@@ -488,6 +521,7 @@ class Pipeline:
                 "checkpoint_interval": self.pipeline_config.runtime.logging.checkpoint_interval,
                 "progress_monitoring": self.pipeline_config.runtime.logging.progress_monitoring,
             },
+            "connectors": self.connectors,
         }
 
     async def run(self):

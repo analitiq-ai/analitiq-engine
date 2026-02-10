@@ -122,9 +122,8 @@ class TestBaseDatabaseDriver:
             'create_connection_pool',
             'close_connection_pool',
             'create_schema_if_not_exists',
-            'create_table_if_not_exists', 
+            'create_table_if_not_exists',
             'create_indexes_if_not_exist',
-            'map_json_schema_to_sql_type',
             'execute_upsert',
             'execute_insert',
             'execute_query',
@@ -157,11 +156,10 @@ class TestBaseDatabaseDriver:
             "table123",
             "t",
             "test_table_name",
-            "schema-name",  # Allows hyphens
             "CamelCase",
             "lowercase"
         ]
-        
+
         for identifier in valid_identifiers:
             assert driver.validate_identifier(identifier) is True, f"Failed for: {identifier}"
     
@@ -285,20 +283,21 @@ class TestBaseDatabaseDriverEdgeCases:
         # Test with numeric strings that aren't identifiers
         assert driver.validate_identifier("123") is False
         assert driver.validate_identifier("0table") is False
-        
-        # Test with mixed valid characters
-        assert driver.validate_identifier("a_b-c123") is True
-        
+
+        # Test with mixed valid characters (hyphens are rejected in PostgreSQL)
+        assert driver.validate_identifier("a_b_c123") is True
+        assert driver.validate_identifier("a_b-c123") is False  # Hyphens require quoting
+
         # Test minimum length
         assert driver.validate_identifier("a") is True
         assert driver.validate_identifier("_") is False  # Only underscore fails isalnum()
         assert driver.validate_identifier("-") is False  # Only hyphen fails isalnum()
-        
-        # Test special cases with underscores and hyphens
+
+        # Test special cases with underscores (hyphens rejected)
         assert driver.validate_identifier("_table") is True
-        assert driver.validate_identifier("-table") is True
+        assert driver.validate_identifier("-table") is False  # Hyphens require quoting
         assert driver.validate_identifier("table_") is True
-        assert driver.validate_identifier("table-") is True
+        assert driver.validate_identifier("table-") is False  # Hyphens require quoting
     
     def test_get_full_table_name_edge_cases(self, driver):
         """Test get_full_table_name edge cases."""

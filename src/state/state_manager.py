@@ -1,15 +1,16 @@
 """State management for pipeline checkpointing and recovery."""
 
-import hashlib
 import json
 import logging
 import os
 import threading
-import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 
+from ..shared.run_id import get_or_generate_run_id
+from .batch_commit_tracker import BatchCommitTracker
+from .state_emission import emit_state_log
 from .state_storage import (
     LocalStateStorage,
     StateStorageBackend,
@@ -22,12 +23,11 @@ logger = logging.getLogger(__name__)
 
 class StateManager:
     """
-    Manages per-stream/partition state for scalable pipeline recovery.
+    Manages per-stream state for pipeline recovery.
 
     Features:
-    - Separate state files per stream/partition for concurrency
+    - Single state file per stream
     - Atomic writes with locking
-    - Multi-partition support for parallel processing
     - S3 storage for cloud environments (dev/prod)
     """
 
@@ -80,21 +80,24 @@ class StateManager:
         # For local: paths are relative to base_dir/{pipeline_id}/
         # For S3: paths are relative to {client_id}/{pipeline_id}/ prefix
         self.streams_path = "streams"
-        self.state_path = "state.json"
-        self.lock_path = "lock"
+        self.state_path = None
+        self.lock_path = None
 
         # For local storage compatibility
         self.base_dir = Path(base_dir)
         self.pipeline_dir = self.base_dir / pipeline_id
         self.streams_dir = self.pipeline_dir / "streams"
-        self.state_file = self.pipeline_dir / "state.json"
-        self.lock_file = self.pipeline_dir / "lock"
+        self.state_file = None
+        self.lock_file = None
 
         # Thread safety
         self.lock = threading.RLock()
 
         # Current run ID (from env var RUN_ID if available)
         self.current_run_id: Optional[str] = os.environ.get("RUN_ID")
+
+        # In-run batch commit tracker (initialized by init_commit_tracker)
+        self._commit_tracker: Optional[BatchCommitTracker] = None
 
         # Create directory structure
         self._ensure_directories()
@@ -103,80 +106,33 @@ class StateManager:
         """Create necessary directory structure."""
         self.storage.ensure_directories([self.streams_path])
 
-    def _get_partition_path(self, stream_name: str, partition: Dict[str, Any]) -> str:
-        """Get state file path for a specific stream partition."""
-        if not partition:
-            partition_id = "default"
-        else:
-            partition_str = json.dumps(partition, sort_keys=True)
-            partition_id = hashlib.md5(partition_str.encode()).hexdigest()[:8]
+    def init_commit_tracker(self, run_id: str) -> None:
+        """Initialize batch commit tracker for the current run."""
+        self._commit_tracker = BatchCommitTracker(
+            pipeline_dir=str(self.pipeline_dir),
+            run_id=run_id,
+        )
 
-        return f"{self.streams_path}/{stream_name}/partition-{partition_id}.json"
+    @property
+    def commit_tracker(self) -> Optional[BatchCommitTracker]:
+        """Get the batch commit tracker (if initialized)."""
+        return self._commit_tracker
 
-    def _get_partition_file(self, stream_name: str, partition: Dict[str, Any]) -> Path:
-        """Get state file path for a specific stream partition (legacy compatibility)."""
-        if not partition:
-            partition_id = "default"
-        else:
-            partition_str = json.dumps(partition, sort_keys=True)
-            partition_id = hashlib.md5(partition_str.encode()).hexdigest()[:8]
+    def _get_stream_state_path(self, stream_id: str) -> str:
+        """Get state file path for a specific stream."""
+        return f"{self.streams_path}/{stream_id}/state.json"
 
-        return self.streams_dir / stream_name / f"partition-{partition_id}.json"
-
-    def _load_state(self) -> Dict[str, Any]:
-        """Load the pipeline state manifest."""
+    def _load_stream_state(self, stream_id: str) -> Optional[Dict[str, Any]]:
+        """Load state for a specific stream."""
         try:
-            state = self.storage.read_json(self.state_path)
-            if state:
-                return state
+            return self.storage.read_json(self._get_stream_state_path(stream_id))
         except Exception as e:
-            logger.warning(f"Failed to load pipeline state: {e}")
-
-        return {"version": 1, "streams": {}, "run": {}}
-
-    def _save_state(self, state: Dict[str, Any]):
-        """Atomically save the pipeline state."""
-        self.storage.write_json(self.state_path, state)
-
-    def _load_partition_state(
-        self, partition_path_or_file: Union[str, Path]
-    ) -> Optional[Dict[str, Any]]:
-        """Load state for a specific partition."""
-        try:
-            if isinstance(partition_path_or_file, Path):
-                # Legacy local file path
-                if partition_path_or_file.exists():
-                    with open(partition_path_or_file, "r") as f:
-                        return json.load(f)
-            else:
-                # Storage backend path
-                return self.storage.read_json(partition_path_or_file)
-        except Exception as e:
-            logger.error(f"Failed to load partition state from {partition_path_or_file}: {e}")
-
+            logger.error(f"Failed to load stream state for {stream_id}: {e}")
         return None
 
-    def _save_partition_state(
-        self, partition_path_or_file: Union[str, Path], state: Dict[str, Any]
-    ):
-        """Atomically save partition state."""
-        if isinstance(partition_path_or_file, Path):
-            # Legacy local file handling
-            partition_path_or_file.parent.mkdir(parents=True, exist_ok=True)
-            temp_file = partition_path_or_file.with_suffix(".tmp")
-
-            try:
-                with open(temp_file, "w") as f:
-                    json.dump(state, f, indent=2)
-                temp_file.replace(partition_path_or_file)
-                logger.debug(f"Saved partition state to {partition_path_or_file}")
-            except Exception as e:
-                if temp_file.exists():
-                    temp_file.unlink()
-                raise e
-        else:
-            # Storage backend
-            self.storage.write_json(partition_path_or_file, state)
+    def _save_stream_state(self, stream_id: str, state: Dict[str, Any]) -> None:
+        """Atomically save stream state."""
+        self.storage.write_json(self._get_stream_state_path(stream_id), state)
 
 
     def start_run(self, config: Dict[str, Any], run_id: Optional[str] = None) -> str:
@@ -191,26 +147,13 @@ class StateManager:
             The run ID for this execution
         """
         with self.lock:
-            # Priority: explicit run_id param > env var RUN_ID > generate new
+            # Priority: explicit run_id param > env var RUN_ID (via get_or_generate_run_id)
             if not run_id:
-                run_id = self.current_run_id or f"{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}-{uuid.uuid4().hex[:4]}"
+                run_id = self.current_run_id or get_or_generate_run_id()
 
             # Store as current run ID
             self.current_run_id = run_id
 
-            # Load existing index
-            index = self._load_state()
-
-            # Update run metadata
-            index["run"] = {
-                "run_id": run_id,
-                "pipeline_id": config.get("pipeline_id"),
-                "lease_owner": f"worker-{threading.get_ident()}",
-                "started_at": datetime.now(timezone.utc).isoformat(),
-                "checkpoint_seq": index.get("run", {}).get("checkpoint_seq", 0),
-            }
-
-            self._save_state(index)
             logger.info(f"Started pipeline run {run_id}")
 
             return run_id
@@ -226,11 +169,11 @@ class StateManager:
         stats: Optional[Dict[str, Any]] = None,
     ):
         """
-        Save checkpoint for a specific stream partition.
+        Save checkpoint for a specific stream.
 
         Args:
             stream_name: Name of the stream (e.g., "wise.transactions")
-            partition: Partition key dict (empty {} for single partition)
+            partition: Partition key dict (ignored; single stream state only)
             cursor: Cursor state with primary/tiebreaker fields
             hwm: High-water mark timestamp
             page_state: Optional pagination state
@@ -238,135 +181,91 @@ class StateManager:
             stats: Optional sync statistics
         """
         with self.lock:
-            partition_path = self._get_partition_path(stream_name, partition)
+            if partition:
+                logger.warning(
+                    f"save_stream_checkpoint received non-empty partition for {stream_name}; "
+                    "partitioning is not supported and will be ignored."
+                )
 
-            # Build partition state
-            partition_state = {
-                "partition": partition,
+            stream_state = {
+                "version": 1,
+                "stream_id": stream_name,
                 "cursor": cursor,
                 "hwm": hwm,
                 "last_updated": datetime.now(timezone.utc).isoformat(),
             }
 
             if page_state:
-                partition_state["page_state"] = page_state
+                stream_state["page_state"] = page_state
 
             if http_conditionals:
-                partition_state["http_conditionals"] = http_conditionals
+                stream_state["http_conditionals"] = http_conditionals
 
             if stats:
-                partition_state["stats"] = stats
+                stream_state["stats"] = stats
             else:
-                partition_state["stats"] = {
+                stream_state["stats"] = {
                     "records_synced": 0,
                     "batches_written": 0,
                     "last_checkpoint_at": datetime.now(timezone.utc).isoformat(),
                     "errors_since_checkpoint": 0,
                 }
 
-            # Save partition state
-            self._save_partition_state(partition_path, partition_state)
+            self._save_stream_state(stream_name, stream_state)
+            logger.debug(f"Saved checkpoint for {stream_name}")
 
-            # Update index
-            index = self._load_state()
+            # Emit state advance to logs
+        emit_state_log(
+            run_id=self.current_run_id or "",
+            pipeline_id=self.pipeline_id,
+            stream_id=stream_name,
+            cursor_hex=json.dumps(cursor).encode().hex() if cursor else "",
+            cursor_value=hwm,
+            client_id=os.getenv("CLIENT_ID", ""),
+        )
 
-            if stream_name not in index["streams"]:
-                index["streams"][stream_name] = {"partitions": []}
-
-            # Update partition list in index
-            stream_info = index["streams"][stream_name]
-            partition_exists = False
-
-            for i, p in enumerate(stream_info["partitions"]):
-                if p["partition"] == partition:
-                    stream_info["partitions"][i] = {
-                        "partition": partition,
-                        "file": partition_path,
-                    }
-                    partition_exists = True
-                    break
-
-            if not partition_exists:
-                stream_info["partitions"].append(
-                    {"partition": partition, "file": partition_path}
-                )
-
-            # Increment checkpoint sequence
-            index["run"]["checkpoint_seq"] = index["run"].get("checkpoint_seq", 0) + 1
-
-            self._save_state(index)
-            logger.debug(f"Saved checkpoint for {stream_name} partition {partition}")
-
-    def get_stream_partitions(self, stream_name: str) -> List[Dict[str, Any]]:
-        """
-        Get all partition states for a stream.
-
-        Args:
-            stream_name: Name of the stream
-
-        Returns:
-            List of partition state dictionaries
-        """
+    def get_stream_state(self, stream_id: str) -> Optional[Dict[str, Any]]:
+        """Get state for a specific stream."""
         with self.lock:
-            index = self._load_state()
-            stream_info = index["streams"].get(stream_name, {})
-            partitions = []
-
-            for partition_ref in stream_info.get("partitions", []):
-                partition_path = partition_ref["file"]
-                partition_state = self._load_partition_state(partition_path)
-
-                if partition_state:
-                    partitions.append(partition_state)
-
-            return partitions
+            return self._load_stream_state(stream_id)
 
     def get_partition_state(
         self, stream_name: str, partition: Dict[str, Any]
     ) -> Optional[Dict[str, Any]]:
         """
-        Get state for a specific stream partition.
+        Get state for a specific stream (partitioning not supported).
 
         Args:
             stream_name: Name of the stream
-            partition: Partition key dict
+            partition: Partition key dict (ignored)
 
         Returns:
-            Partition state dict or None if not found
+            Stream state dict or None if not found
         """
         with self.lock:
-            partition_path = self._get_partition_path(stream_name, partition)
-            return self._load_partition_state(partition_path)
+            if partition:
+                logger.warning(
+                    f"get_partition_state received non-empty partition for {stream_name}; "
+                    "partitioning is not supported and will be ignored."
+                )
+            return self._load_stream_state(stream_name)
 
     def get_run_info(self) -> Dict[str, Any]:
         """Get current run information."""
-        with self.lock:
-            index = self._load_state()
-            return index.get("run", {})
+        return {"run_id": self.current_run_id} if self.current_run_id else {}
 
     def list_streams(self) -> List[str]:
         """Get list of all streams with state."""
         with self.lock:
-            index = self._load_state()
-            return list(index.get("streams", {}).keys())
+            streams_dir = self.base_dir / self.pipeline_id / self.streams_path
+            if not streams_dir.exists():
+                return []
+            return [p.name for p in streams_dir.iterdir() if p.is_dir()]
 
     def clear_stream_state(self, stream_name: str):
         """Clear all state for a stream."""
         with self.lock:
-            index = self._load_state()
-
-            # Remove stream from index
-            if stream_name in index["streams"]:
-                stream_info = index["streams"][stream_name]
-
-                # Delete partition files
-                for partition_ref in stream_info.get("partitions", []):
-                    partition_path = partition_ref["file"]
-                    self.storage.delete(partition_path)
-
-                del index["streams"][stream_name]
-                self._save_state(index)
-
+            self.storage.delete_recursive(f"{self.streams_path}/{stream_name}")
             logger.info(f"Cleared state for stream {stream_name}")
 
     def clear_all_state(self):
@@ -374,12 +273,6 @@ class StateManager:
         with self.lock:
             # Remove streams directory
             self.storage.delete_recursive(self.streams_path)
-
-            # Remove index
-            self.storage.delete(self.state_path)
-
-            # Remove lock
-            self.storage.delete(self.lock_path)
 
             logger.warning(f"Cleared all state for pipeline {self.pipeline_id}")
 
@@ -394,43 +287,30 @@ class StateManager:
             Resume information dictionary
         """
         with self.lock:
-            partitions = self.get_stream_partitions(stream_name)
-            run_info = self.get_run_info()
-
-            total_records = sum(
-                p.get("stats", {}).get("records_synced", 0) for p in partitions
-            )
-
-            can_resume = bool(partitions and run_info.get("run_id"))
+            state = self._load_stream_state(stream_name)
+            can_resume = bool(state)
+            records_synced = state.get("stats", {}).get("records_synced", 0) if state else 0
 
             return {
                 "can_resume": can_resume,
-                "partition_count": len(partitions),
-                "total_records_synced": total_records,
-                "run_id": run_info.get("run_id"),
-                "last_checkpoint_seq": run_info.get("checkpoint_seq", 0),
-                "partitions": [
-                    {
-                        "partition": p["partition"],
-                        "cursor": p.get("cursor"),
-                        "hwm": p.get("hwm"),
-                        "records_synced": p.get("stats", {}).get("records_synced", 0),
-                    }
-                    for p in partitions
-                ],
+                "stream_id": stream_name,
+                "records_synced": records_synced,
+                "run_id": self.current_run_id,
+                "cursor": state.get("cursor") if state else None,
+                "hwm": state.get("hwm") if state else None,
             }
 
     async def get_cursor(
         self, stream_name: str, partition: Dict[str, Any]
     ) -> Optional[Dict[str, Any]]:
         """
-        Get cursor state for a specific stream partition.
+        Get cursor state for a specific stream.
 
         Convenience method for database connectors that only need cursor information.
 
         Args:
             stream_name: Name of the stream
-            partition: Partition key dict
+            partition: Partition key dict (ignored)
 
         Returns:
             Cursor state dict with "cursor" key, or None if not found
@@ -455,14 +335,14 @@ class StateManager:
         cursor_state: Dict[str, Any],
     ):
         """
-        Save cursor state for a specific stream partition.
+        Save cursor state for a specific stream.
 
         Convenience method for database connectors. Wraps save_stream_checkpoint
         with simplified cursor-only interface.
 
         Args:
             stream_name: Name of the stream
-            partition: Partition key dict
+            partition: Partition key dict (ignored)
             cursor_state: Dict with "cursor" key containing the cursor value
         """
         cursor_value = cursor_state.get("cursor")
