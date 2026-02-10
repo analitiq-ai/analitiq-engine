@@ -73,9 +73,9 @@ class Pipeline:
             self._legacy_config = pipeline_config
             self.pipeline_config = self._convert_legacy_pipeline_config(pipeline_config)
             self.stream_configs = self._convert_legacy_stream_configs(pipeline_config)
-            self.resolved_connections = {}
-            self.resolved_endpoints = {}
-            self.connectors = []
+            self.resolved_connections = resolved_connections or {}
+            self.resolved_endpoints = resolved_endpoints or {}
+            self.connectors = connectors or []
             self._legacy_mode = True
 
         # Extract configuration values
@@ -93,19 +93,12 @@ class Pipeline:
         # Setup logging for this pipeline
         self._setup_pipeline_logging(pipeline_id)
 
-        # Build engine config from runtime settings
-        runtime = self.pipeline_config.runtime
-        engine_config = {
-            "batch_size": runtime.batching.batch_size,
-            "max_concurrent_batches": runtime.batching.max_concurrent_batches,
-            "buffer_size": runtime.engine.buffer_size,
-        }
-
+        ec = self.pipeline_config.engine_config
         self.engine = StreamingEngine(
             pipeline_id=pipeline_id,
-            batch_size=engine_config.get("batch_size", 1000),
-            max_concurrent_batches=engine_config.get("max_concurrent_batches", 10),
-            buffer_size=engine_config.get("buffer_size", 10000),
+            batch_size=ec.batching.batch_size,
+            max_concurrent_batches=ec.batching.max_concurrent_batches,
+            buffer_size=ec.engine.buffer_size,
             dlq_path=self.dlq_dir,
         )
 
@@ -167,9 +160,9 @@ class Pipeline:
             client_id=config.get("client_id", ""),
             pipeline_id=config["pipeline_id"],
             name=config.get("name", ""),
-            is_active=True,
+            status="active",
             connections=connections,
-            runtime=RuntimeConfig(**runtime_dict),
+            engine_config=RuntimeConfig(**runtime_dict),
         )
 
     def _convert_legacy_stream_configs(self, config: Dict[str, Any]) -> List[StreamConfig]:
@@ -190,12 +183,17 @@ class Pipeline:
             mapping_data = stream_data.get("mapping", {})
 
             # Build source config
+            # Normalize replication method: "full_refresh" -> "full"
+            raw_method = source_data.get("replication_method", "incremental")
+            if raw_method == "full_refresh":
+                raw_method = "full"
+
             source = SourceConfig(
                 connection_ref="conn_src",
                 endpoint_id=source_data.get("endpoint_id", ""),
                 primary_key=source_data.get("primary_key", []),
                 replication=ReplicationConfig(
-                    method=source_data.get("replication_method", "incremental"),
+                    method=raw_method,
                     cursor_field=[source_data["cursor_field"]] if source_data.get("cursor_field") else [],
                     safety_window_seconds=source_data.get("safety_window_seconds"),
                 ),
@@ -217,7 +215,22 @@ class Pipeline:
             # Convert mapping to assignments
             assignments = []
             for source_field, field_config in mapping_data.get("field_mappings", {}).items():
-                if isinstance(field_config, dict):
+                if isinstance(field_config, str):
+                    # String shorthand: "source_field": "target_field"
+                    target_field = field_config
+                    path = source_field.split(".")
+                    assignments.append(Assignment(
+                        target=AssignmentTarget(
+                            path=[target_field],
+                            type=TargetType.STRING,
+                            nullable=True,
+                        ),
+                        value=AssignmentValue(
+                            kind=ValueKind.EXPR,
+                            expr={"op": "get", "path": path},
+                        ),
+                    ))
+                elif isinstance(field_config, dict):
                     target_field = field_config.get("target", source_field)
                     path = source_field.split(".")
 
@@ -234,7 +247,21 @@ class Pipeline:
                     ))
 
             for field_name, computed in mapping_data.get("computed_fields", {}).items():
-                if isinstance(computed, dict):
+                if isinstance(computed, str):
+                    # String shorthand: "field_name": "constant_value"
+                    const_value = ConstValue(type="string", value=computed)
+                    assignments.append(Assignment(
+                        target=AssignmentTarget(
+                            path=[field_name],
+                            type=TargetType.STRING,
+                            nullable=False,
+                        ),
+                        value=AssignmentValue(
+                            kind=ValueKind.CONST,
+                            const=const_value,
+                        ),
+                    ))
+                elif isinstance(computed, dict):
                     expr_value = computed.get("expression", "")
                     try:
                         import json
@@ -297,7 +324,7 @@ class Pipeline:
         )
 
         # Set log level from environment (preferred) or config
-        log_level = os.getenv("LOG_LEVEL", self.pipeline_config.runtime.logging.log_level)
+        log_level = os.getenv("LOG_LEVEL", self.pipeline_config.engine_config.logging.log_level)
 
         # Attach handler to src package logger (parent of all src.* modules)
         root_package_logger = logging.getLogger("src")
@@ -458,13 +485,27 @@ class Pipeline:
             validate_source_config(source_config)
             validate_dest_config(dest_config)
 
+            # Build mapping config for engine
+            if self._legacy_mode:
+                # In legacy mode, pass through the original field_mappings and
+                # computed_fields so the DataTransformer can use the legacy path
+                # which supports transformations like iso_to_date, uppercase, etc.
+                legacy_stream_data = self._legacy_config.get("streams", {}).get(stream.stream_id, {})
+                legacy_mapping = legacy_stream_data.get("mapping", {})
+                mapping_config = {
+                    "field_mappings": legacy_mapping.get("field_mappings", {}),
+                    "computed_fields": legacy_mapping.get("computed_fields", {}),
+                }
+            else:
+                mapping_config = {
+                    "assignments": [a.model_dump() for a in stream.mapping.assignments]
+                }
+
             streams[stream.stream_id] = {
                 "name": stream.stream_id,
                 "source": source_config,
                 "destination": dest_config,
-                "mapping": {
-                    "assignments": [a.model_dump() for a in stream.mapping.assignments]
-                },
+                "mapping": mapping_config,
             }
 
         # Build pipeline-level source/destination from first stream for engine compatibility
@@ -514,12 +555,12 @@ class Pipeline:
             "source": pipeline_source_config,
             "destination": pipeline_dest_config,
             "streams": streams,
-            "runtime": self.pipeline_config.runtime.model_dump(),
+            "engine_config": self.pipeline_config.engine_config.model_dump(),
             "monitoring": {
-                "log_level": self.pipeline_config.runtime.logging.log_level,
-                "metrics_enabled": self.pipeline_config.runtime.logging.metrics_enabled,
-                "checkpoint_interval": self.pipeline_config.runtime.logging.checkpoint_interval,
-                "progress_monitoring": self.pipeline_config.runtime.logging.progress_monitoring,
+                "log_level": self.pipeline_config.engine_config.logging.log_level,
+                "metrics_enabled": self.pipeline_config.engine_config.logging.metrics_enabled,
+                "checkpoint_interval": self.pipeline_config.engine_config.logging.checkpoint_interval,
+                "progress_monitoring": self.pipeline_config.engine_config.logging.progress_monitoring,
             },
             "connectors": self.connectors,
         }
@@ -529,7 +570,7 @@ class Pipeline:
         pipeline_id = self.pipeline_config.pipeline_id
 
         # Check if progress monitoring is enabled
-        progress_monitoring = self.pipeline_config.runtime.logging.progress_monitoring == "enabled"
+        progress_monitoring = self.pipeline_config.engine_config.logging.progress_monitoring == "enabled"
 
         # Build config dict for engine
         config_dict = self._build_config_dict()
@@ -595,22 +636,3 @@ class Pipeline:
         """Get pipeline execution metrics."""
         return self.engine.get_metrics()
 
-    def get_status(self) -> Dict[str, Any]:
-        """Get current pipeline status."""
-        streams_info = {}
-        for stream in self.stream_configs:
-            dest = stream.get_primary_destination()
-            streams_info[stream.stream_id] = {
-                "name": stream.stream_id,
-                "source": stream.source.endpoint_id,
-                "destination": dest.endpoint_id,
-                "enabled": stream.is_enabled,
-            }
-
-        return {
-            "pipeline_id": self.pipeline_config.pipeline_id,
-            "name": self.pipeline_config.name,
-            "enabled": self.pipeline_config.is_active,
-            "streams": streams_info,
-            "metrics": self.get_metrics(),
-        }

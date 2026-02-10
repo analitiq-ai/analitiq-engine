@@ -227,7 +227,6 @@ class PipelineConfig(BaseModel):
     name: str = Field(..., description="Human-readable pipeline name")
     description: Optional[str] = Field(None, description="Pipeline description")
     status: str = Field("draft", description="Pipeline status (draft, active, paused, etc.)")
-    is_active: bool = Field(False, description="Whether the pipeline is active")
     tags: List[str] = Field(default_factory=list, description="Pipeline tags for categorization")
 
     # Connection aliases map to connection UUIDs (nested structure)
@@ -236,8 +235,8 @@ class PipelineConfig(BaseModel):
         description="Connection configuration with source and destinations"
     )
 
-    # Runtime configuration
-    runtime: RuntimeConfig = Field(default_factory=RuntimeConfig, description="Runtime configuration")
+    # Engine configuration
+    engine_config: RuntimeConfig = Field(default_factory=RuntimeConfig, description="Engine configuration")
 
     # Function catalog (optional)
     function_catalog: Optional[FunctionCatalogConfig] = Field(
@@ -277,7 +276,7 @@ class PipelineConfig(BaseModel):
             "version": self.version,
             "pipeline_id": self.pipeline_id,
             "connections": self.connections.model_dump(mode="json"),
-            "runtime": self.runtime.model_dump(mode="json"),
+            "engine_config": self.engine_config.model_dump(mode="json"),
         }
         if self.function_catalog:
             data["function_catalog"] = self.function_catalog.model_dump(mode="json")
@@ -350,7 +349,7 @@ class PipelineConfigLegacy(BaseModel):
             name=self.name,
             is_enabled=True,
             connections=connections,
-            runtime=RuntimeConfig(**runtime_dict) if runtime_dict else RuntimeConfig(),
+            engine_config=RuntimeConfig(**runtime_dict) if runtime_dict else RuntimeConfig(),
         )
 
         # Convert streams to new format
