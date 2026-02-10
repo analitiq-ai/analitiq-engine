@@ -945,10 +945,9 @@ class PipelineConfigPrep:
             name=raw_pipeline.get("name", ""),
             description=raw_pipeline.get("description"),
             status=raw_pipeline.get("status", "draft"),
-            is_active=raw_pipeline.get("is_active", False),
             tags=raw_pipeline.get("tags", []),
             connections=connections_config,
-            runtime=RuntimeConfig(**raw_pipeline.get("runtime", {})) if raw_pipeline.get("runtime") else RuntimeConfig(),
+            engine_config=RuntimeConfig(**raw_pipeline.get("engine_config", {})) if raw_pipeline.get("engine_config") else RuntimeConfig(),
             function_catalog=raw_pipeline.get("function_catalog"),
             created_at=raw_pipeline.get("created_at"),
             updated_at=raw_pipeline.get("updated_at"),
@@ -1136,7 +1135,8 @@ class PipelineConfigPrep:
                     if generic:
                         return generic
 
-            return "string"
+            # Preserve existing target.type before falling back to "string"
+            return assignment.get("target", {}).get("type", "string")
 
         normalized_assignments = []
         for assignment in assignments:
