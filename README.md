@@ -81,7 +81,7 @@ Minimal example:
     "pipeline_id": "<pipeline-id>",
     "client_id": "<client-id>",
     "name": "Example",
-    "is_active": true,
+    "status": "active",
     "connections": {
       "source": {"conn_1": "<connection-id-1>"},
       "destinations": [{"conn_2": "<connection-id-2>"}]

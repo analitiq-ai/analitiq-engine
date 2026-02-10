@@ -53,7 +53,6 @@ def valid_pipeline_config():
         "pipeline_id": "test-pipeline-123",
         "name": "Test Pipeline",
         "status": "active",
-        "is_active": True,
         "tags": ["test"],
         "connections": {
             "source": {
@@ -66,7 +65,7 @@ def valid_pipeline_config():
             ]
         },
         "streams": ["stream-456"],
-        "runtime": {
+        "engine_config": {
             "expression": {"lang": "jsonata"},
             "logging": {"log_level": "INFO"},
             "error_handling": {"max_retries": 3},

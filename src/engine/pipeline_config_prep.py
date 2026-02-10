@@ -1079,7 +1079,7 @@ class PipelineConfigPrep:
             ],
             mapping=MappingConfig(**normalized_mapping) if normalized_mapping else MappingConfig(),
             tags=raw_stream.get("tags"),
-            runtime=raw_stream.get("runtime"),
+            engine_config=raw_stream.get("engine_config"),
             created_at=raw_stream.get("created_at"),
             updated_at=raw_stream.get("updated_at"),
         )
