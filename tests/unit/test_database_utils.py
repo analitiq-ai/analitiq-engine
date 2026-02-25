@@ -1,8 +1,12 @@
 """Unit tests for database utilities."""
 
+import ssl
 import pytest
 from datetime import datetime, timezone
 from decimal import Decimal
+from unittest.mock import MagicMock
+
+from src.shared.database_utils import is_ssl_handshake_error
 
 from src.source.drivers.utils import (
     convert_python_to_db,
@@ -180,3 +184,60 @@ class TestDatabaseTypeConversion:
         dt = datetime(2025, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
         result = convert_python_to_db(dt, "TIMESTAMPTZ")
         assert result is dt  # Should be the same object
+
+
+class TestIsSSLHandshakeError:
+    """Tests for is_ssl_handshake_error() helper."""
+
+    def test_ssl_error_returns_true(self):
+        exc = ssl.SSLError("SSL handshake failed")
+        assert is_ssl_handshake_error(exc) is True
+
+    def test_ssl_cert_verification_error_returns_false(self):
+        exc = ssl.SSLCertVerificationError("certificate verify failed")
+        assert is_ssl_handshake_error(exc) is False
+
+    def test_connection_reset_error_returns_true(self):
+        assert is_ssl_handshake_error(ConnectionResetError()) is True
+
+    def test_connection_refused_error_returns_true(self):
+        assert is_ssl_handshake_error(ConnectionRefusedError()) is True
+
+    def test_generic_os_error_returns_false(self):
+        assert is_ssl_handshake_error(OSError("generic")) is False
+
+    def test_timeout_error_returns_false(self):
+        assert is_ssl_handshake_error(TimeoutError("timed out")) is False
+
+    def test_sqlalchemy_wrapping_ssl_error_via_cause(self):
+        ssl_exc = ssl.SSLError("handshake failed")
+        wrapper = Exception("connection failed")
+        wrapper.__cause__ = ssl_exc
+        assert is_ssl_handshake_error(wrapper) is True
+
+    def test_sqlalchemy_wrapping_ssl_error_via_context(self):
+        ssl_exc = ssl.SSLError("handshake failed")
+        wrapper = Exception("connection failed")
+        wrapper.__context__ = ssl_exc
+        assert is_ssl_handshake_error(wrapper) is True
+
+    def test_sqlalchemy_operational_error_with_orig(self):
+        ssl_exc = ssl.SSLError("handshake failed")
+        wrapper = Exception("operational error")
+        wrapper.orig = ssl_exc
+        assert is_ssl_handshake_error(wrapper) is True
+
+    def test_cert_error_in_chain_returns_false(self):
+        """Cert verification error anywhere in chain should return False."""
+        cert_exc = ssl.SSLCertVerificationError("cert verify failed")
+        wrapper = Exception("connection failed")
+        wrapper.__cause__ = cert_exc
+        assert is_ssl_handshake_error(wrapper) is False
+
+    def test_cycle_in_exception_chain_no_infinite_loop(self):
+        exc_a = Exception("a")
+        exc_b = Exception("b")
+        exc_a.__cause__ = exc_b
+        exc_b.__cause__ = exc_a
+        # Should terminate without hanging
+        assert is_ssl_handshake_error(exc_a) is False

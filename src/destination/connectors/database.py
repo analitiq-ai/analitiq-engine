@@ -36,7 +36,7 @@ from ...grpc.generated.analitiq.v1 import (
     Cursor,
     SchemaMessage,
 )
-from ...shared.database_utils import convert_ssl_mode
+from ...shared.database_utils import convert_ssl_mode, is_ssl_handshake_error
 
 
 logger = logging.getLogger(__name__)
@@ -168,22 +168,34 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
 
         # Build connect_args for SSL
         connect_args: Dict[str, Any] = {}
-        ssl_mode = connection_config.get("ssl_mode")
-        if ssl_mode:
+        ssl_mode = connection_config.get("ssl_mode", "prefer")
+        if ssl_mode and ssl_mode != "disable":
             connect_args["ssl"] = self._convert_ssl_mode(ssl_mode)
 
-        self._engine = create_async_engine(
-            url,
+        engine_kwargs = dict(
             pool_size=pool_config.get("min_connections", 2),
             max_overflow=pool_config.get("max_connections", 10) - pool_config.get("min_connections", 2),
             pool_pre_ping=True,
             echo=connection_config.get("echo_sql", False),
-            connect_args=connect_args,
         )
 
-        # Test connection
-        async with self._engine.connect() as conn:
-            await conn.execute(text("SELECT 1"))
+        self._engine = create_async_engine(url, connect_args=connect_args, **engine_kwargs)
+
+        # Test connection with SSL prefer fallback
+        try:
+            async with self._engine.connect() as conn:
+                await conn.execute(text("SELECT 1"))
+        except Exception as e:
+            if ssl_mode == "prefer" and is_ssl_handshake_error(e):
+                logger.warning("SSL failed with ssl_mode='prefer', retrying without SSL: %s", e)
+                await self._engine.dispose()
+                connect_args.pop("ssl", None)
+                self._engine = create_async_engine(url, connect_args=connect_args, **engine_kwargs)
+                async with self._engine.connect() as conn:
+                    await conn.execute(text("SELECT 1"))
+            else:
+                await self._engine.dispose()
+                raise
 
         self._connected = True
 

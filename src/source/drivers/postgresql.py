@@ -5,7 +5,7 @@ from typing import Any, Dict, List
 
 from .base import BaseDatabaseDriver
 from .utils import extract_values_for_columns, convert_record_from_db
-from ...shared.database_utils import convert_ssl_mode, get_default_clause
+from ...shared.database_utils import convert_ssl_mode, get_default_clause, is_ssl_handshake_error
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +45,16 @@ class PostgreSQLDriver(BaseDatabaseDriver):
             "command_timeout": config.get("command_timeout", 300),
         })
 
-        self.connection_pool = await asyncpg.create_pool(**connection_params)
+        ssl_mode = config.get("ssl_mode", "prefer")
+        try:
+            self.connection_pool = await asyncpg.create_pool(**connection_params)
+        except Exception as e:
+            if ssl_mode == "prefer" and is_ssl_handshake_error(e):
+                logger.warning("SSL failed with ssl_mode='prefer', retrying without SSL: %s", e)
+                connection_params["ssl"] = False
+                self.connection_pool = await asyncpg.create_pool(**connection_params)
+            else:
+                raise
         logger.info(f"PostgreSQL connection pool created with {connection_params['min_size']}-{connection_params['max_size']} connections")
 
     async def close_connection_pool(self):
