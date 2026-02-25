@@ -31,32 +31,10 @@ Add this to SSM and add API endpoint for fetching:
 
 Add transformations to SSM and API endpoint for fetching
 
-
-
-
 ==============
-"ssl": config.get("ssl_mode", "prefer"), Needs to be `prefer`, `require`, `verify-ca` or `verify-full`
+SSL:
+The "prefer" mode still doesn't implement the true libpq "prefer" semantics (try SSL, fall back to non-SSL on failure). It behaves identically to
+"require" — SSL is always used, with no fallback. For most production use cases (especially AWS RDS which always supports SSL), this is fine. But if you need true
+"prefer" behavior with automatic fallback, that would still require the try/catch/retry logic.
 
-This is actually not correct for asyncpg. The asyncpg library does not support libpq-style SSL mode strings like "prefer", "require", etc. directly.
-
-asyncpg's ssl parameter accepts:
-- True - Enable SSL with default context
-- False or None - Disable SSL
-- An ssl.SSLContext object - Use specific SSL context
-
-What happens currently:                                                                                                                                                                                 
-When you pass ssl="prefer" to asyncpg, it treats any truthy string value as enabling SSL (similar to True). It will attempt to connect with SSL. If SSL fails, asyncpg does not automatically retry     
-without SSL - that's a libpq-specific behavior.
-
-The "prefer" mode (try SSL first, fall back to non-SSL) is a PostgreSQL libpq client feature that asyncpg doesn't implement natively. asyncpg either uses SSL or doesn't - there's no automatic         
-fallback.
-
-To properly implement prefer behavior with asyncpg, you would need to:
-1. Try connecting with ssl=True
-2. Catch the SSL-related exception
-3. Retry with ssl=False    
 ===================
-
-Overlaps with
-1. Engine source connector: src/connectors/database/postgresql_driver.py:73
-2. Destination handler: src/destination/handlers/postgresql.py:9

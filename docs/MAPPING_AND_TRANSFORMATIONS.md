@@ -196,7 +196,7 @@ Example: map `is_active` to a status:
 
 ### Defaults + overrides
 
-- Pipeline default: `runtime.error_handling.default_action`
+- Pipeline default: `engine_config.error_handling.default_action`
 - Stream override: `runtime_overrides.error_handling.default_action`
 - Field override: `validate.on_error` (or `on_error`)
 
@@ -334,6 +334,6 @@ Recommended structure:
 3) Use **tokenized paths** for nested fields.
 4) Make schemas explicit (or pin via versioned `endpoint_id`) for UI + validation.
 5) Use a **typed, versioned function catalog**; reference versions in AST nodes.
-6) Centralize execution concerns under `runtime`, with stream/field overrides.
+6) Centralize execution concerns under `engine_config`, with stream/field overrides.
 7) Normalize error actions: `dlq`, `skip_record`, `stop_stream`, `default_value`, `quarantine`.
 8) Add fixtures/tests to catch regressions and speed debugging.  

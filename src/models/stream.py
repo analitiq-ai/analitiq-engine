@@ -340,8 +340,8 @@ class DestinationConfig(BaseModel):
     )
 
 
-class StreamRuntimeConfig(BaseModel):
-    """Stream-specific runtime overrides."""
+class StreamEngineConfig(BaseModel):
+    """Stream-specific engine config overrides."""
     model_config = ConfigDict(extra="allow")
 
     error_handling: Optional[Dict[str, Any]] = Field(None, description="Error handling overrides")
@@ -357,7 +357,7 @@ class StreamConfig(BaseModel):
     - Source configuration (connection, endpoint, replication)
     - Destinations (multi-destination support)
     - Mapping (assignment-based field transformations)
-    - Runtime overrides
+    - Engine config overrides
     """
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
@@ -383,7 +383,7 @@ class StreamConfig(BaseModel):
 
     # Optional fields (not always present in cloud)
     tags: Optional[List[str]] = Field(None, description="Stream tags for categorization")
-    runtime: Optional[StreamRuntimeConfig] = Field(None, description="Stream-specific runtime overrides")
+    engine_config: Optional[StreamEngineConfig] = Field(None, description="Stream-specific engine config overrides")
 
     # Timestamps
     created_at: Optional[str] = Field(None, description="Stream creation timestamp")

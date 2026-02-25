@@ -126,8 +126,8 @@ mapping:
           - type: not_null
         on_error: dlq
 
-# Optional: stream-specific overrides of pipeline runtime defaults
-runtime:
+# Optional: stream-specific overrides of pipeline engine_config defaults
+engine_config:
   # error_handling:
   #   default_action: dlq
   # rate_limits:

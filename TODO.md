@@ -1,3 +1,6 @@
+Adding API post authentication selections in the pipeline definition so the values can be used in the core.
+
+=====
 
 Schema migration
 
@@ -11,3 +14,4 @@ in Destination _prepare_records method
 How is partial failure is treated? If some records failed on destination?
 
 Seem like writing to API is not failing if record cannot be written
+=========

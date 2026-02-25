@@ -14,7 +14,7 @@ connections:
   # optional future:
   # - dlq: "deadletter-connection-uuid"
 
-runtime:
+engine_config:
   # Default error-handling policy; streams and individual field assignments
   # may override on a case-by-case basis.
   error_handling:

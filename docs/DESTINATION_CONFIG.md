@@ -289,7 +289,7 @@ file_format = connection.get("file_format", "jsonl")
       { "<alias>": "<connection_uuid>" }
     ]
   },
-  "runtime": {
+  "engine_config": {
     "batching": { "batch_size": 100, "max_concurrent_batches": 3 },
     "retry": { "max_attempts": 5, "backoff": "exponential" }
   }

@@ -4,7 +4,7 @@ version: "1"
 client_id: ""
 pipeline_id: "b0c2f9d0-3b2a-4a7e-8c86-1b9c6c2d7b15"
 name: "Wise Multi-Stream to SevDesk Integration"
-is_active: true
+status: active
 tags:
   - finance
   - wise
@@ -18,7 +18,7 @@ connections:
   # optional future:
   # - dlq: "deadletter-connection-uuid"
 
-runtime:
+engine_config:
   # Default expression configuration for all streams in this pipeline.
   # Streams may optionally override (rare).
   expression:
