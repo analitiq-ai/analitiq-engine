@@ -14,10 +14,12 @@ def is_ssl_handshake_error(exc: BaseException) -> bool:
     """Check if exception indicates an SSL handshake/protocol failure.
 
     Used exclusively in ssl_mode='prefer' connection paths to decide
-    whether to retry without SSL. ConnectionResetError/RefusedError are
-    treated as handshake failures here because they occur when a
-    non-SSL server rejects the SSL negotiation attempt. Do NOT use
-    this function outside of SSL-prefer fallback logic.
+    whether to retry without SSL. ConnectionError and its subclasses
+    (ConnectionResetError, ConnectionRefusedError) are treated as
+    handshake failures here because they occur when a non-SSL server
+    rejects the SSL negotiation attempt (e.g. asyncpg raises a bare
+    ConnectionError on SSL rejection). Do NOT use this function
+    outside of SSL-prefer fallback logic.
     """
     seen: set[int] = set()
     to_check: list[BaseException] = []
@@ -39,7 +41,7 @@ def is_ssl_handshake_error(exc: BaseException) -> bool:
     for e in to_check:
         if isinstance(e, ssl.SSLCertVerificationError):
             return False
-        if isinstance(e, (ssl.SSLError, ConnectionResetError, ConnectionRefusedError)):
+        if isinstance(e, (ssl.SSLError, ConnectionError)):
             has_handshake_error = True
     return has_handshake_error
 

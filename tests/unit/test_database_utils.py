@@ -203,6 +203,10 @@ class TestIsSSLHandshakeError:
     def test_connection_refused_error_returns_true(self):
         assert is_ssl_handshake_error(ConnectionRefusedError()) is True
 
+    def test_bare_connection_error_returns_true(self):
+        """asyncpg raises bare ConnectionError on SSL rejection."""
+        assert is_ssl_handshake_error(ConnectionError("rejected SSL upgrade")) is True
+
     def test_generic_os_error_returns_false(self):
         assert is_ssl_handshake_error(OSError("generic")) is False
 
