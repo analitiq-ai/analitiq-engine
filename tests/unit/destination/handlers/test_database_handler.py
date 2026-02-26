@@ -164,3 +164,20 @@ class TestDatabaseHandlerSSLPreferFallback:
         connect_args = mock_create.call_args.kwargs.get("connect_args", {})
         assert "ssl" not in connect_args
         assert handler._connected is True
+
+    @pytest.mark.asyncio
+    async def test_ssl_disable_sets_ssl_false(self, handler, base_config):
+        """ssl_mode=disable should explicitly pass ssl=False to the driver."""
+        base_config["ssl_mode"] = "disable"
+
+        engine = _make_engine()
+
+        with patch(
+            "src.destination.connectors.database.create_async_engine",
+            return_value=engine,
+        ) as mock_create:
+            await handler.connect(base_config)
+
+        connect_args = mock_create.call_args.kwargs.get("connect_args", {})
+        assert connect_args["ssl"] is False
+        assert handler._connected is True

@@ -175,7 +175,9 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
             ssl_mode = connection_config.get("ssl_mode", "prefer")
         else:
             ssl_mode = connection_config.get("ssl_mode")
-        if ssl_mode and ssl_mode != "disable":
+        if ssl_mode == "disable":
+            connect_args["ssl"] = False
+        elif ssl_mode:
             connect_args["ssl"] = self._convert_ssl_mode(ssl_mode)
 
         engine_kwargs = dict(
