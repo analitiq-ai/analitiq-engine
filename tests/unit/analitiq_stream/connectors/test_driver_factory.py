@@ -10,42 +10,39 @@ from src.source.drivers.postgresql import PostgreSQLDriver
 
 class MockDriver(BaseDatabaseDriver):
     """Mock driver for testing registration."""
-    
+
     def __init__(self):
         super().__init__("MockDriver")
-    
+
     async def create_connection_pool(self, config):
         pass
-    
+
     async def close_connection_pool(self):
         pass
-    
+
     async def create_schema_if_not_exists(self, schema_name):
         pass
-    
+
     async def create_table_if_not_exists(self, schema_name, table_name, endpoint_schema, primary_key, unique_constraints=None):
         pass
-    
+
     async def create_indexes_if_not_exist(self, schema_name, table_name, indexes):
         pass
-    
+
     def map_json_schema_to_sql_type(self, field_def):
         return "TEXT"
-    
+
     async def execute_upsert(self, conn, schema_name, table_name, batch, conflict_config):
         pass
-    
+
     async def execute_insert(self, conn, schema_name, table_name, batch):
         pass
-    
+
     async def execute_query(self, conn, query, params=None):
         return []
-    
+
     def build_incremental_query(self, schema_name, table_name, config):
         return "SELECT * FROM table", []
-    
-    def get_connection_params(self, config):
-        return {}
 
 
 class TestDriverFactory:
@@ -396,43 +393,40 @@ class TestDriverFactoryInheritance:
         
         class MultipleInheritanceDriver(BaseDatabaseDriver, MixinClass):
             """Driver with multiple inheritance."""
-            
+
             def __init__(self):
                 BaseDatabaseDriver.__init__(self, "MultipleInheritance")
                 MixinClass.__init__(self)
-            
+
             async def create_connection_pool(self, config):
                 pass
-            
+
             async def close_connection_pool(self):
                 pass
-            
+
             async def create_schema_if_not_exists(self, schema_name):
                 pass
-            
+
             async def create_table_if_not_exists(self, schema_name, table_name, endpoint_schema, primary_key, unique_constraints=None):
                 pass
-            
+
             async def create_indexes_if_not_exist(self, schema_name, table_name, indexes):
                 pass
-            
+
             def map_json_schema_to_sql_type(self, field_def):
                 return "TEXT"
-            
+
             async def execute_upsert(self, conn, schema_name, table_name, batch, conflict_config):
                 pass
-            
+
             async def execute_insert(self, conn, schema_name, table_name, batch):
                 pass
-            
+
             async def execute_query(self, conn, query, params=None):
                 return []
-            
+
             def build_incremental_query(self, schema_name, table_name, config):
                 return "SELECT * FROM table", []
-            
-            def get_connection_params(self, config):
-                return {}
         
         original_drivers = DriverFactory._drivers.copy()
         

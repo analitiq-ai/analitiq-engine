@@ -164,11 +164,7 @@ async def run_destination_mode() -> None:
 
     resolved_conn = resolved_connections[connection_id]
 
-    # For late-binding connections, resolve now; otherwise use already-resolved config
-    if resolved_conn.is_late_binding:
-        connection_config = await resolved_conn.resolve_config()
-    else:
-        connection_config = resolved_conn.config
+    connection_config = await resolved_conn.resolve_config()
 
     # Look up connector_type from connectors array using connector_id
     connector_type = config_prep.get_connector_type(connection_config, connection_id)

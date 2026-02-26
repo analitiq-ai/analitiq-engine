@@ -27,8 +27,6 @@ class TestMainPackageInit:
         expected_exports = [
             "StreamingEngine",
             "Pipeline",
-            "credentials_manager",
-            "CredentialsManager",
             "RetryHandler",
             "CircuitBreaker",
             "DeadLetterQueue",
@@ -45,16 +43,14 @@ class TestMainPackageInit:
     def test_core_classes_importable(self):
         """Test that core classes can be imported directly."""
         from src import (
-            StreamingEngine, Pipeline, CredentialsManager, credentials_manager,
+            StreamingEngine, Pipeline,
             RetryHandler, CircuitBreaker, DeadLetterQueue,
             SchemaManager, BaseConnector, DatabaseConnector, APIConnector
         )
-        
+
         # Verify classes are not None
         assert StreamingEngine is not None
         assert Pipeline is not None
-        assert CredentialsManager is not None
-        assert credentials_manager is not None
         assert RetryHandler is not None
         assert CircuitBreaker is not None
         assert DeadLetterQueue is not None

@@ -11,18 +11,6 @@ from ..drivers.factory import DriverFactory
 logger = logging.getLogger(__name__)
 
 
-class DatabaseConfig(BaseModel):
-    """Pydantic model for database configuration validation."""
-    model_config = ConfigDict(extra='allow')
-
-    driver: str = Field(..., description="Database driver (postgresql, mysql, etc.)")
-    host: str = Field(..., description="Database host")
-    port: int = Field(..., description="Database port")
-    database: str = Field(..., description="Database name")
-    username: str = Field(..., description="Database username")
-    password: str = Field(..., description="Database password")
-
-
 class ConfigureConfig(BaseModel):
     """Pydantic model for database configuration settings."""
     model_config = ConfigDict(extra='forbid')
@@ -95,18 +83,16 @@ class DatabaseConnector(BaseConnector):
             config: Connection configuration with driver and credentials
         """
         try:
-            # Validate configuration with Pydantic
-            db_config = DatabaseConfig(**config)
-            
-            # Create driver-specific instance
-            self.driver = DriverFactory.create_driver(db_config.driver)
-            
-            # Create connection pool through driver
+            driver_name = config.get("driver")
+            if not driver_name:
+                raise ValueError("Database config missing required 'driver' field")
+
+            self.driver = DriverFactory.create_driver(driver_name)
             await self.driver.create_connection_pool(config)
-            
+
             self.is_connected = True
             self._initialized = True
-            logger.info(f"Connected to database {db_config.database} on {db_config.host}.")
+            logger.info(f"Connected to database via {driver_name} driver.")
 
         except Exception as e:
             logger.error(f"Failed to connect to database: {str(e)}")
@@ -223,7 +209,7 @@ class DatabaseConnector(BaseConnector):
             )
 
             # Execute query with batching
-            async with self.driver.connection_pool.acquire() as conn:
+            async with self.driver.acquire_connection() as conn:
                 offset = 0
                 last_cursor_value = cursor_value
 
@@ -290,7 +276,7 @@ class DatabaseConnector(BaseConnector):
                 endpoint_config.endpoint, endpoint_config.schema_name
             )
 
-            async with self.driver.connection_pool.acquire() as conn:
+            async with self.driver.acquire_connection() as conn:
                 if endpoint_config.write_mode == "upsert":
                     await self.driver.execute_upsert(
                         conn,

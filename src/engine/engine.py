@@ -276,8 +276,12 @@ class StreamingEngine:
             stream_dlq_path = f"{self.dlq.dlq_path}/{stream_id}"
             stream_dlq = DeadLetterQueue(stream_dlq_path)
 
-            # Extract connection configs (stored under _connection key by pipeline_config_prep)
-            src_connection_config = merged_src_config.get("_connection", merged_src_config)
+            # Resolve source connection config (expand ${placeholder} secrets)
+            connection_wrapper = merged_src_config.get("_connection_wrapper")
+            if connection_wrapper is not None:
+                src_connection_config = await connection_wrapper.resolve()
+            else:
+                src_connection_config = merged_src_config.get("_connection", merged_src_config)
 
             # Connect to source
             await source_connector.connect(src_connection_config)

@@ -1,13 +1,146 @@
 """Shared database utilities for source and destination components.
 
 These utilities are extracted from duplicated code across:
-- src/connectors/database/postgresql_driver.py
-- src/destination/handlers/postgresql.py
-- src/destination/handlers/database.py
+- src/source/drivers/postgresql.py
+- src/destination/connectors/database.py
 """
 
 import ssl
-from typing import Any, Dict, Union
+from dataclasses import dataclass, field
+from typing import Any, Dict, Optional, Union
+
+from sqlalchemy.engine import URL
+
+
+# SQLAlchemy dialect mapping
+DIALECT_MAP = {
+    "postgresql": "postgresql+asyncpg",
+    "postgres": "postgresql+asyncpg",
+    "mysql": "mysql+aiomysql",
+    "mariadb": "mysql+aiomysql",
+    "sqlite": "sqlite+aiosqlite",
+}
+
+# Dialects that support SSL connections
+SSL_DIALECTS = {"postgresql", "postgres", "mysql", "mariadb"}
+
+
+@dataclass(frozen=True)
+class DatabaseConnectionParams:
+    """Immutable container for parsed database connection parameters."""
+
+    driver: str
+    host: str
+    port: Optional[int]
+    username: str
+    password: str
+    database: str
+    ssl_mode: str
+    pool_min: int = 2
+    pool_max: int = 10
+    pool_pre_ping: bool = True
+    echo: bool = False
+    command_timeout: int = 300
+
+    def to_sqlalchemy_url(self) -> URL:
+        """Build a SQLAlchemy URL using URL.create() (handles special characters)."""
+        dialect = DIALECT_MAP.get(self.driver.lower(), f"{self.driver}+asyncpg")
+
+        # SQLite: database-only, no host/port/user
+        if self.driver.lower() == "sqlite":
+            return URL.create(
+                drivername="sqlite+aiosqlite",
+                database=self.database,
+            )
+
+        return URL.create(
+            drivername=dialect,
+            username=self.username,
+            password=self.password,
+            host=self.host,
+            port=self.port,
+            database=self.database,
+        )
+
+    def to_sqlalchemy_connect_args(self) -> Dict[str, Any]:
+        """Build connect_args dict (SSL settings for supported dialects)."""
+        if self.driver.lower() not in SSL_DIALECTS:
+            return {}
+
+        if self.ssl_mode == "disable":
+            return {"ssl": False}
+
+        return {"ssl": convert_ssl_mode(self.ssl_mode)}
+
+    def to_sqlalchemy_engine_kwargs(self) -> Dict[str, Any]:
+        """Build engine keyword arguments (pool, echo, etc.)."""
+        return {
+            "pool_size": self.pool_min,
+            "max_overflow": max(self.pool_max - self.pool_min, 0),
+            "pool_pre_ping": self.pool_pre_ping,
+            "echo": self.echo,
+        }
+
+
+def extract_connection_params(
+    config: Dict[str, Any],
+    *,
+    require_port: bool = True,
+) -> DatabaseConnectionParams:
+    """Extract and validate connection parameters from a config dict.
+
+    Handles field name variations (username/user, database/dbname) and
+    builds a DatabaseConnectionParams with sensible defaults.
+
+    Args:
+        config: Raw connection config dictionary.
+        require_port: If True, raise ValueError when port is missing.
+                      If False, default to 5432.
+
+    Returns:
+        DatabaseConnectionParams frozen dataclass.
+    """
+    driver = config.get("driver", "postgresql")
+
+    host = config.get("host", "localhost")
+    username = config.get("username") or config.get("user", "postgres")
+    password = config.get("password", "")
+    database = config.get("database") or config.get("dbname", "postgres")
+
+    # Port handling
+    port_value = config.get("port")
+    if port_value is None:
+        if require_port:
+            raise ValueError("Database port is required")
+        port = 5432
+    else:
+        port = int(port_value)
+
+    # SSL mode: default to "prefer" for SSL dialects, None for others
+    if driver.lower() in SSL_DIALECTS:
+        ssl_mode = config.get("ssl_mode", "prefer")
+    else:
+        ssl_mode = config.get("ssl_mode", "")
+
+    # Pool configuration
+    pool_config = config.get("connection_pool", {})
+    pool_min = pool_config.get("min_connections", 2)
+    pool_max = pool_config.get("max_connections", 10)
+
+    return DatabaseConnectionParams(
+        driver=driver,
+        host=host,
+        port=port,
+        username=username,
+        password=password,
+        database=database,
+        ssl_mode=ssl_mode,
+        pool_min=pool_min,
+        pool_max=pool_max,
+        pool_pre_ping=True,
+        echo=config.get("echo_sql", False),
+        command_timeout=config.get("command_timeout", 300),
+    )
 
 
 def is_ssl_handshake_error(exc: BaseException) -> bool:

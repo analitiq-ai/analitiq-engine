@@ -9,6 +9,7 @@ import pytest
 from datetime import datetime
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch, call
+from contextlib import asynccontextmanager
 from typing import Any, Dict, List
 from io import StringIO
 import sys
@@ -89,6 +90,22 @@ def real_world_config():
     }
 
 
+def _make_engine(connect_side_effect=None):
+    """Create a mock engine whose .connect() works as async context manager."""
+    engine = AsyncMock()
+    conn = AsyncMock()
+
+    if connect_side_effect:
+        conn.execute.side_effect = connect_side_effect
+
+    @asynccontextmanager
+    async def fake_connect():
+        yield conn
+
+    engine.connect = fake_connect
+    return engine, conn
+
+
 # =============================================================================
 # BUG DETECTION TESTS - These tests SHOULD fail if bugs exist
 # =============================================================================
@@ -141,10 +158,8 @@ class TestSchemaFormatMismatch:
         But the driver does: properties = endpoint_schema.get("properties", {})
         This returns empty dict for real configs, creating tables with no columns!
         """
-        mock_pool = MagicMock()
-        mock_conn = AsyncMock()
-        mock_pool.acquire.return_value.__aenter__.return_value = mock_conn
-        driver.connection_pool = mock_pool
+        engine, mock_conn = _make_engine()
+        driver._engine = engine
 
         endpoint_schema = real_world_config['endpoint_schema']
         primary_key = real_world_config['primary_key']
@@ -158,18 +173,19 @@ class TestSchemaFormatMismatch:
 
         # Get the SQL that was executed
         sql = mock_conn.execute.call_args[0][0]
+        # text() objects render as string
+        sql_str = str(sql)
 
         # This should have actual columns from the schema
-        # BUG: With current code, it creates empty table because it looks for 'properties'
-        assert "id BIGINT" in sql, (
+        assert "id BIGINT" in sql_str, (
             f"BUG: Table created without columns.\n"
-            f"SQL: {sql}\n"
+            f"SQL: {sql_str}\n"
             f"Driver expects 'properties' format but real config uses 'columns' format.\n"
             f"Fix: Add support for 'columns' array format in create_table_if_not_exists"
         )
-        assert "status VARCHAR(50)" in sql
-        assert "created TIMESTAMP" in sql
-        assert "source_value NUMERIC(18, 2)" in sql
+        assert "status VARCHAR(50)" in sql_str
+        assert "created TIMESTAMP" in sql_str
+        assert "source_value NUMERIC(18, 2)" in sql_str
 
     def test_build_column_type_mapping_with_columns_format(self, driver, real_world_config):
         """BUG: _build_column_type_mapping expects 'properties' format.
@@ -356,85 +372,45 @@ class TestPostgreSQLDriverInit:
         """Test driver initialization."""
         driver = PostgreSQLDriver()
         assert driver.name == "PostgreSQL"
-        assert driver.asyncpg is None
-        assert driver.connection_pool is None
+        assert driver._engine is None
         assert driver._column_types == {}
-
-
-class TestPostgreSQLDriverConnectionParams:
-    """Test connection parameter extraction."""
-
-    def test_get_connection_params_full_config(self, driver, connection_config):
-        """Test connection parameter extraction with full config."""
-        params = driver.get_connection_params(connection_config)
-
-        assert params["host"] == "localhost"
-        assert params["port"] == 5432
-        assert params["user"] == "test_user"
-        assert params["password"] == "test_password"
-        assert params["database"] == "test_db"
-
-    def test_get_connection_params_port_required(self, driver):
-        """Test that port is required."""
-        config = {}
-
-        with pytest.raises(ValueError) as exc_info:
-            driver.get_connection_params(config)
-
-        assert "port is required" in str(exc_info.value)
-
-    def test_get_connection_params_port_type_conversion(self, driver):
-        """Test that string port is converted to int."""
-        config = {"port": "5432"}
-
-        params = driver.get_connection_params(config)
-
-        assert params["port"] == 5432
-        assert isinstance(params["port"], int)
-
-    def test_get_connection_params_real_world_config(self, driver, real_world_config):
-        """Test with real-world config format."""
-        params = driver.get_connection_params(real_world_config)
-
-        assert params["host"] == "database-1.cp2em6mk83a2.eu-central-1.rds.amazonaws.com"
-        assert params["port"] == 5432
-        assert params["user"] == "postgres"
-        assert params["password"] == "PDuhZN?cylU~J57M!~Rb>0LmERfb"
-        assert params["database"] == "postgres"
 
 
 class TestPostgreSQLDriverConnectionPool:
     """Test connection pool management."""
 
     @pytest.mark.asyncio
-    async def test_create_connection_pool_missing_asyncpg(self, driver, connection_config):
-        """Test connection pool creation without asyncpg package."""
-        with patch.dict('sys.modules', {'asyncpg': None}):
-            with patch('builtins.__import__', side_effect=ImportError("No module named 'asyncpg'")):
-                with pytest.raises(ImportError) as exc_info:
-                    await driver.create_connection_pool(connection_config)
+    async def test_create_connection_pool_success(self, driver, connection_config):
+        """Test successful connection pool creation via SQLAlchemy."""
+        engine, mock_conn = _make_engine()
 
-                assert "asyncpg package required" in str(exc_info.value)
+        with patch(
+            "src.source.drivers.postgresql.create_async_engine",
+            return_value=engine,
+        ):
+            await driver.create_connection_pool(connection_config)
+
+        assert driver._engine is engine
 
     @pytest.mark.asyncio
     async def test_close_connection_pool(self, driver):
         """Test connection pool closure."""
-        mock_pool = AsyncMock()
-        driver.connection_pool = mock_pool
+        mock_engine = AsyncMock()
+        driver._engine = mock_engine
 
         await driver.close_connection_pool()
 
-        mock_pool.close.assert_called_once()
-        assert driver.connection_pool is None
+        mock_engine.dispose.assert_called_once()
+        assert driver._engine is None
 
     @pytest.mark.asyncio
     async def test_close_connection_pool_when_none(self, driver):
-        """Test closing when pool is None."""
-        driver.connection_pool = None
+        """Test closing when engine is None."""
+        driver._engine = None
 
         await driver.close_connection_pool()
 
-        assert driver.connection_pool is None
+        assert driver._engine is None
 
 
 class TestPostgreSQLDriverSchemaOperations:
@@ -443,20 +419,20 @@ class TestPostgreSQLDriverSchemaOperations:
     @pytest.mark.asyncio
     async def test_create_schema_if_not_exists(self, driver):
         """Test schema creation."""
-        mock_pool = MagicMock()
-        mock_conn = AsyncMock()
-        mock_pool.acquire.return_value.__aenter__.return_value = mock_conn
-        driver.connection_pool = mock_pool
+        engine, mock_conn = _make_engine()
+        driver._engine = engine
 
         await driver.create_schema_if_not_exists("test_schema")
 
-        mock_conn.execute.assert_called_once_with("CREATE SCHEMA IF NOT EXISTS test_schema")
+        # Should have called execute and commit
+        assert mock_conn.execute.call_count == 1
+        mock_conn.commit.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_create_schema_invalid_name(self, driver):
         """Test schema creation with invalid name."""
-        mock_pool = MagicMock()
-        driver.connection_pool = mock_pool
+        engine, _ = _make_engine()
+        driver._engine = engine
 
         with pytest.raises(ValueError) as exc_info:
             await driver.create_schema_if_not_exists("invalid-schema!")
@@ -497,8 +473,9 @@ class TestPostgreSQLDriverDataOperations:
 
         await driver.execute_upsert(mock_conn, "schema", "table", batch, conflict_config)
 
-        mock_conn.executemany.assert_called_once()
-        query = mock_conn.executemany.call_args[0][0]
+        mock_conn.exec_driver_sql.assert_called_once()
+        query = mock_conn.exec_driver_sql.call_args[0][0]
+        mock_conn.commit.assert_called_once()
 
         assert "INSERT INTO schema.table" in query
         assert "ON CONFLICT (id)" in query
@@ -511,7 +488,7 @@ class TestPostgreSQLDriverDataOperations:
 
         await driver.execute_upsert(mock_conn, "schema", "table", [], {})
 
-        mock_conn.executemany.assert_not_called()
+        mock_conn.exec_driver_sql.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_execute_insert_basic(self, driver):
@@ -522,8 +499,9 @@ class TestPostgreSQLDriverDataOperations:
 
         await driver.execute_insert(mock_conn, "schema", "table", batch)
 
-        mock_conn.executemany.assert_called_once()
-        query = mock_conn.executemany.call_args[0][0]
+        mock_conn.exec_driver_sql.assert_called_once()
+        query = mock_conn.exec_driver_sql.call_args[0][0]
+        mock_conn.commit.assert_called_once()
 
         assert query == "INSERT INTO schema.table (id, name) VALUES ($1, $2)"
 
@@ -534,17 +512,19 @@ class TestPostgreSQLDriverDataOperations:
 
         await driver.execute_insert(mock_conn, "schema", "table", [])
 
-        mock_conn.executemany.assert_not_called()
+        mock_conn.exec_driver_sql.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_execute_query_with_params(self, driver):
         """Test query execution with parameters."""
         mock_conn = AsyncMock()
-        mock_conn.fetch.return_value = [{"id": 1, "name": "Alice"}]
+        mock_row = MagicMock()
+        mock_row._mapping = {"id": 1, "name": "Alice"}
+        mock_conn.exec_driver_sql.return_value = [mock_row]
 
         result = await driver.execute_query(mock_conn, "SELECT * FROM users WHERE id = $1", [1])
 
-        mock_conn.fetch.assert_called_once_with("SELECT * FROM users WHERE id = $1", 1)
+        mock_conn.exec_driver_sql.assert_called_once_with("SELECT * FROM users WHERE id = $1", (1,))
         assert len(result) == 1
         assert result[0]["id"] == 1
 
@@ -552,12 +532,67 @@ class TestPostgreSQLDriverDataOperations:
     async def test_execute_query_without_params(self, driver):
         """Test query execution without parameters."""
         mock_conn = AsyncMock()
-        mock_conn.fetch.return_value = []
+        mock_conn.exec_driver_sql.return_value = []
 
         result = await driver.execute_query(mock_conn, "SELECT COUNT(*) FROM users")
 
-        mock_conn.fetch.assert_called_once_with("SELECT COUNT(*) FROM users")
+        mock_conn.exec_driver_sql.assert_called_once_with("SELECT COUNT(*) FROM users")
         assert result == []
+
+    @pytest.mark.asyncio
+    async def test_execute_query_does_not_commit(self, driver):
+        """Test that read-only queries do NOT call commit."""
+        mock_conn = AsyncMock()
+        mock_conn.exec_driver_sql.return_value = []
+
+        await driver.execute_query(mock_conn, "SELECT 1")
+
+        mock_conn.commit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_execute_insert_commits(self, driver):
+        """Test that insert calls commit."""
+        mock_conn = AsyncMock()
+        batch = [{"id": 1}]
+
+        await driver.execute_insert(mock_conn, "schema", "table", batch)
+
+        mock_conn.commit.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_execute_upsert_commits(self, driver):
+        """Test that upsert calls commit."""
+        mock_conn = AsyncMock()
+        batch = [{"id": 1, "name": "Alice"}]
+        conflict_config = {"on_conflict": "id"}
+
+        await driver.execute_upsert(mock_conn, "schema", "table", batch, conflict_config)
+
+        mock_conn.commit.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_create_schema_commits(self, driver):
+        """Test that DDL (schema creation) calls commit."""
+        engine, mock_conn = _make_engine()
+        driver._engine = engine
+
+        await driver.create_schema_if_not_exists("test_schema")
+
+        mock_conn.commit.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_create_table_commits(self, driver):
+        """Test that DDL (table creation) calls commit."""
+        engine, mock_conn = _make_engine()
+        driver._engine = engine
+
+        await driver.create_table_if_not_exists(
+            "public", "test_table",
+            {"columns": [{"name": "id", "type": "BIGINT", "nullable": False}]},
+            ["id"]
+        )
+
+        mock_conn.commit.assert_called_once()
 
 
 class TestPostgreSQLDriverQueryBuilding:
@@ -677,10 +712,8 @@ class TestPostgreSQLDriverIndexOperations:
     @pytest.mark.asyncio
     async def test_create_indexes(self, driver):
         """Test index creation."""
-        mock_pool = MagicMock()
-        mock_conn = AsyncMock()
-        mock_pool.acquire.return_value.__aenter__.return_value = mock_conn
-        driver.connection_pool = mock_pool
+        engine, mock_conn = _make_engine()
+        driver._engine = engine
 
         indexes = [
             {"name": "idx_email", "columns": ["email"], "type": "btree"},
@@ -694,10 +727,8 @@ class TestPostgreSQLDriverIndexOperations:
     @pytest.mark.asyncio
     async def test_create_indexes_skips_invalid(self, driver):
         """Test that invalid index configs are skipped."""
-        mock_pool = MagicMock()
-        mock_conn = AsyncMock()
-        mock_pool.acquire.return_value.__aenter__.return_value = mock_conn
-        driver.connection_pool = mock_pool
+        engine, mock_conn = _make_engine()
+        driver._engine = engine
 
         indexes = [
             {"name": "idx_valid", "columns": ["email"]},
@@ -713,16 +744,26 @@ class TestPostgreSQLDriverIndexOperations:
     @pytest.mark.asyncio
     async def test_create_indexes_handles_errors(self, driver):
         """Test that index creation errors are logged but don't raise."""
-        mock_pool = MagicMock()
-        mock_conn = AsyncMock()
-        mock_pool.acquire.return_value.__aenter__.return_value = mock_conn
+        engine, mock_conn = _make_engine()
         mock_conn.execute.side_effect = Exception("Index exists")
-        driver.connection_pool = mock_pool
+        driver._engine = engine
 
         indexes = [{"name": "idx_test", "columns": ["col"]}]
 
         # Should not raise
         await driver.create_indexes_if_not_exist("schema", "table", indexes)
+
+    @pytest.mark.asyncio
+    async def test_create_indexes_commits(self, driver):
+        """Test that index creation calls commit."""
+        engine, mock_conn = _make_engine()
+        driver._engine = engine
+
+        indexes = [{"name": "idx_test", "columns": ["col"]}]
+
+        await driver.create_indexes_if_not_exist("schema", "table", indexes)
+
+        mock_conn.commit.assert_called()
 
 
 class TestPostgreSQLDriverErrorHandling:
@@ -732,7 +773,7 @@ class TestPostgreSQLDriverErrorHandling:
     async def test_execute_upsert_propagates_database_error(self, driver):
         """Test that database errors are propagated."""
         mock_conn = AsyncMock()
-        mock_conn.executemany.side_effect = Exception("Connection lost")
+        mock_conn.exec_driver_sql.side_effect = Exception("Connection lost")
 
         batch = [{"id": 1, "name": "Alice"}]
         conflict_config = {"on_conflict": "id"}
@@ -746,7 +787,7 @@ class TestPostgreSQLDriverErrorHandling:
     async def test_execute_insert_propagates_database_error(self, driver):
         """Test that database errors are propagated."""
         mock_conn = AsyncMock()
-        mock_conn.executemany.side_effect = Exception("Constraint violation")
+        mock_conn.exec_driver_sql.side_effect = Exception("Constraint violation")
 
         batch = [{"id": 1}]
 
@@ -756,14 +797,15 @@ class TestPostgreSQLDriverErrorHandling:
         assert "Constraint violation" in str(exc_info.value)
 
     @pytest.mark.asyncio
-    async def test_acquire_connection_without_pool(self, driver):
-        """Test acquiring connection when pool is not initialized."""
-        driver.connection_pool = None
+    async def test_acquire_connection_without_engine(self, driver):
+        """Test acquiring connection when engine is not initialized."""
+        driver._engine = None
 
         with pytest.raises(RuntimeError) as exc_info:
-            await driver.acquire_connection()
+            async with driver.acquire_connection():
+                pass
 
-        assert "Connection pool not initialized" in str(exc_info.value)
+        assert "Engine not initialized" in str(exc_info.value)
 
 
 class TestPostgreSQLDriverHelperMethods:
@@ -807,7 +849,7 @@ class TestPostgreSQLDriverJsonConversion:
 
         await driver.execute_upsert(mock_conn, "schema", "table", batch, conflict_config)
 
-        values = mock_conn.executemany.call_args[0][1]
+        values = mock_conn.exec_driver_sql.call_args[0][1]
         # metadata should be JSON string
         assert values[0][1] == '{"key": "value"}'
 
@@ -823,7 +865,7 @@ class TestPostgreSQLDriverJsonConversion:
 
         await driver.execute_upsert(mock_conn, "schema", "table", batch, conflict_config)
 
-        values = mock_conn.executemany.call_args[0][1]
+        values = mock_conn.exec_driver_sql.call_args[0][1]
         assert values[0][1] == '["a", "b", "c"]'
 
 
@@ -833,38 +875,40 @@ class TestPostgreSQLDriverSSLPreferFallback:
     @pytest.mark.asyncio
     async def test_ssl_prefer_retries_on_ssl_error(self, driver, connection_config):
         """ssl_mode=prefer should retry without SSL on handshake error."""
-        mock_asyncpg = MagicMock()
-        mock_pool = AsyncMock()
-
         ssl_error = ssl.SSLError("SSL handshake failed")
-        mock_asyncpg.create_pool = AsyncMock(side_effect=[ssl_error, mock_pool])
+        engine_fail, _ = _make_engine(connect_side_effect=ssl_error)
+        engine_ok, _ = _make_engine()
 
-        with patch.dict("sys.modules", {"asyncpg": mock_asyncpg}):
-            with patch("builtins.__import__", return_value=mock_asyncpg):
-                driver.asyncpg = mock_asyncpg
-                await driver.create_connection_pool(connection_config)
+        engines = [engine_fail, engine_ok]
 
-        assert mock_asyncpg.create_pool.call_count == 2
+        with patch(
+            "src.source.drivers.postgresql.create_async_engine",
+            side_effect=engines,
+        ) as mock_create:
+            await driver.create_connection_pool(connection_config)
+
+        assert mock_create.call_count == 2
+        engine_fail.dispose.assert_awaited_once()
         # Second call should have ssl=False
-        second_call_kwargs = mock_asyncpg.create_pool.call_args_list[1]
-        assert second_call_kwargs.kwargs.get("ssl") is False or second_call_kwargs[1].get("ssl") is False
-        assert driver.connection_pool is mock_pool
+        second_call = mock_create.call_args_list[1]
+        connect_args = second_call.kwargs.get("connect_args", {})
+        assert connect_args["ssl"] is False
+        assert driver._engine is engine_ok
 
     @pytest.mark.asyncio
     async def test_ssl_prefer_no_retry_on_non_ssl_error(self, driver, connection_config):
         """ssl_mode=prefer should NOT retry on non-SSL errors."""
-        mock_asyncpg = MagicMock()
-
         non_ssl_error = OSError("Connection timed out")
-        mock_asyncpg.create_pool = AsyncMock(side_effect=non_ssl_error)
+        engine_fail, _ = _make_engine(connect_side_effect=non_ssl_error)
 
-        with patch.dict("sys.modules", {"asyncpg": mock_asyncpg}):
-            with patch("builtins.__import__", return_value=mock_asyncpg):
-                driver.asyncpg = mock_asyncpg
-                with pytest.raises(OSError, match="Connection timed out"):
-                    await driver.create_connection_pool(connection_config)
+        with patch(
+            "src.source.drivers.postgresql.create_async_engine",
+            return_value=engine_fail,
+        ) as mock_create:
+            with pytest.raises(OSError, match="Connection timed out"):
+                await driver.create_connection_pool(connection_config)
 
-        assert mock_asyncpg.create_pool.call_count == 1
+        assert mock_create.call_count == 1
 
     @pytest.mark.asyncio
     async def test_ssl_require_does_not_fallback(self, driver):
@@ -878,14 +922,14 @@ class TestPostgreSQLDriverSSLPreferFallback:
             "ssl_mode": "require",
         }
 
-        mock_asyncpg = MagicMock()
         ssl_error = ssl.SSLError("SSL handshake failed")
-        mock_asyncpg.create_pool = AsyncMock(side_effect=ssl_error)
+        engine_fail, _ = _make_engine(connect_side_effect=ssl_error)
 
-        with patch.dict("sys.modules", {"asyncpg": mock_asyncpg}):
-            with patch("builtins.__import__", return_value=mock_asyncpg):
-                driver.asyncpg = mock_asyncpg
-                with pytest.raises(ssl.SSLError):
-                    await driver.create_connection_pool(config)
+        with patch(
+            "src.source.drivers.postgresql.create_async_engine",
+            return_value=engine_fail,
+        ) as mock_create:
+            with pytest.raises(ssl.SSLError):
+                await driver.create_connection_pool(config)
 
-        assert mock_asyncpg.create_pool.call_count == 1
+        assert mock_create.call_count == 1

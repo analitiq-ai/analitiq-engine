@@ -193,7 +193,7 @@ Connectors define the type and metadata for each integration. The `connector_typ
 
 ### Connection Credentials
 
-Connections reference a connector via `connector_id` and contain credentials. Credentials support `${VAR_NAME}` syntax for environment variable expansion.
+Connections reference a connector via `connector_id` and contain credentials. Credentials use `${VAR_NAME}` placeholder syntax. Placeholders are expanded at connection time from secrets files (`.secrets/{connection_id}.json`). Missing placeholders raise `PlaceholderExpansionError`. See `docs/CREDENTIALS_GUIDE.md`.
 
 **Database connection:**
 ```json

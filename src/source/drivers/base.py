@@ -2,7 +2,10 @@
 
 import logging
 from abc import ABC, abstractmethod
+from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional, Tuple
+
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +24,7 @@ class BaseDatabaseDriver(ABC):
 
     def __init__(self, name: str):
         self.name = name
-        self.connection_pool = None
+        self._engine: AsyncEngine | None = None
 
     @abstractmethod
     async def create_connection_pool(self, config: Dict[str, Any]):
@@ -140,11 +143,6 @@ class BaseDatabaseDriver(ABC):
             cursor_value=cursor_value
         )
 
-    @abstractmethod
-    def get_connection_params(self, config: Dict[str, Any]) -> Dict[str, Any]:
-        """Extract and validate connection parameters from config."""
-        pass
-
     def get_full_table_name(self, schema_name: str, table_name: str) -> str:
         """Get fully qualified table name."""
         return f"{schema_name}.{table_name}" if schema_name else table_name
@@ -164,8 +162,10 @@ class BaseDatabaseDriver(ABC):
             return False
         return True
 
+    @asynccontextmanager
     async def acquire_connection(self):
-        """Acquire connection from pool."""
-        if not self.connection_pool:
-            raise RuntimeError("Connection pool not initialized")
-        return await self.connection_pool.acquire()
+        """Acquire a connection from the SQLAlchemy engine."""
+        if self._engine is None:
+            raise RuntimeError("Engine not initialized. Call create_connection_pool() first.")
+        async with self._engine.connect() as conn:
+            yield conn

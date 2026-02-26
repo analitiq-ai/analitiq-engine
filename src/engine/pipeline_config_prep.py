@@ -43,7 +43,6 @@ from typing import Any, Dict, List, Optional, Tuple
 from pydantic import BaseModel, Field
 
 from src.config import load_analitiq_config, validate_consolidated_config
-from src.engine.credentials import CredentialsManager
 from src.models.pipeline import PipelineConfig, PipelineConnectionsConfig, RuntimeConfig
 from src.models.stream import StreamConfig, SourceConfig, DestinationConfig, MappingConfig
 from src.models.stream_state import StreamState
@@ -83,13 +82,6 @@ class PipelineConfigPrepSettings(BaseModel):
 
     # AWS region (used for state/logs/DLQ storage in cloud environments)
     aws_region: str = Field(default="eu-central-1", description="AWS region for cloud storage")
-
-    # Late-binding secrets option
-    late_binding_secrets: bool = Field(
-        default=False,
-        description="When True, secrets are resolved at connection time (late-binding). "
-                    "When False, secrets are resolved at config load time (eager)."
-    )
 
     model_config = {"validate_assignment": True}
 
@@ -147,88 +139,12 @@ def validate_stream_config(config: Dict[str, Any]) -> bool:
     return True
 
 
-def expand_required_vars(config: Dict[str, Any], strict: bool = False) -> Dict[str, Any]:
-    """
-    Expands ${VAR} in values using environment variables.
-
-    Args:
-        config: Configuration dict to expand
-        strict: If True, raises error for missing vars. If False, leaves them unexpanded.
-    """
-    pattern = re.compile(r"\${([^}]+)}")
-
-    def expand_value(value: Any) -> Any:
-        if isinstance(value, str):
-            matches = pattern.findall(value)
-            if strict:
-                for var in matches:
-                    if var not in os.environ:
-                        raise EnvironmentError(f"Missing required environment variable: {var}")
-                return os.path.expandvars(value)
-            else:
-                # Non-strict: only expand vars that exist, leave others as-is
-                def replace_if_exists(match: re.Match) -> str:
-                    var = match.group(1)
-                    if var in os.environ:
-                        return os.environ[var]
-                    return match.group(0)  # Keep original placeholder
-                return pattern.sub(replace_if_exists, value)
-        elif isinstance(value, dict):
-            return {k: expand_value(v) for k, v in value.items()}
-        elif isinstance(value, list):
-            return [expand_value(item) for item in value]
-        return value
-
-    return expand_value(config)
-
-
-def find_unexpanded_placeholders(config: Any, path: str = "") -> List[tuple]:
-    """
-    Recursively find all unexpanded ${...} placeholders in a configuration.
-    """
-    pattern = re.compile(r"\$\{([^}]+)\}")
-    unexpanded = []
-
-    if isinstance(config, dict):
-        for key, value in config.items():
-            current_path = f"{path}.{key}" if path else key
-            unexpanded.extend(find_unexpanded_placeholders(value, current_path))
-    elif isinstance(config, list):
-        for i, item in enumerate(config):
-            current_path = f"{path}[{i}]"
-            unexpanded.extend(find_unexpanded_placeholders(item, current_path))
-    elif isinstance(config, str):
-        matches = pattern.findall(config)
-        for match in matches:
-            unexpanded.append((path, f"${{{match}}}", config))
-
-    return unexpanded
-
-
-def validate_no_unexpanded_placeholders(config: Dict[str, Any], config_name: str = "config") -> None:
-    """
-    Validate that a configuration has no unexpanded ${...} placeholders.
-    """
-    unexpanded = find_unexpanded_placeholders(config)
-
-    if unexpanded:
-        error_lines = [
-            f"Found {len(unexpanded)} unexpanded placeholder(s) in {config_name}. "
-        ]
-        for path, placeholder, value in unexpanded:
-            display_value = value if len(value) < 80 else value[:77] + "..."
-            error_lines.append(f"  - {path}: {placeholder} (value: {display_value})")
-
-        raise ValueError("\n".join(error_lines))
-
-
 class ResolvedConnection:
     """
     Container for a resolved connection configuration.
 
-    Supports both eager and late-binding secret resolution:
-    - Eager: config contains fully-expanded secrets, connection_config_wrapper is None
-    - Late-binding: config contains raw template, connection_config_wrapper holds the wrapper
+    Secrets are resolved lazily via the ConnectionConfig wrapper
+    when resolve_config() is called.
     """
 
     def __init__(
@@ -236,31 +152,21 @@ class ResolvedConnection:
         connection_id: str,
         connection_type: str,
         config: Dict[str, Any],
-        connection_config_wrapper: Optional[ConnectionConfig] = None,
+        connection_config_wrapper: ConnectionConfig,
     ):
         self.connection_id = connection_id
         self.connection_type = connection_type  # "api" or "database"
         self.config = config
         self.connection_config_wrapper = connection_config_wrapper
 
-    @property
-    def is_late_binding(self) -> bool:
-        """Check if this connection uses late-binding secrets."""
-        return self.connection_config_wrapper is not None
-
     async def resolve_config(self) -> Dict[str, Any]:
         """
-        Get the fully-resolved configuration.
-
-        For late-binding connections, this resolves secrets just-in-time.
-        For eager connections, this returns the already-resolved config.
+        Resolve secrets and return fully-expanded configuration.
 
         Returns:
             Fully resolved configuration dictionary
         """
-        if self.connection_config_wrapper is not None:
-            return await self.connection_config_wrapper.resolve()
-        return self.config
+        return await self.connection_config_wrapper.resolve()
 
 
 class PipelineConfigPrep:
@@ -297,8 +203,6 @@ class PipelineConfigPrep:
             settings: Configuration settings. If None, loads from environment variables.
         """
         self.settings = settings or self._load_settings_from_env()
-        self.credentials_manager = CredentialsManager()
-
         # Load paths from analitiq.yaml (only pipelines and secrets needed)
         self._paths = self._load_paths_from_analitiq_yaml()
 
@@ -402,30 +306,6 @@ class PipelineConfigPrep:
     # =========================================================================
     # Secrets Methods
     # =========================================================================
-
-    def _expand_secrets_in_config(
-        self,
-        config: Dict[str, Any],
-        secrets: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """Expand secret placeholders in configuration."""
-        pattern = re.compile(r"\$\{([^}]+)\}")
-
-        def expand_value(value: Any) -> Any:
-            if isinstance(value, str):
-                def replace_placeholder(match: re.Match) -> str:
-                    key = match.group(1)
-                    if key in secrets:
-                        return str(secrets[key])
-                    return match.group(0)
-                return pattern.sub(replace_placeholder, value)
-            elif isinstance(value, dict):
-                return {k: expand_value(v) for k, v in value.items()}
-            elif isinstance(value, list):
-                return [expand_value(item) for item in value]
-            return value
-
-        return expand_value(config)
 
     def _merge_configs(self, base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
         """Deep merge two configurations (override takes precedence)."""
@@ -563,28 +443,6 @@ class PipelineConfigPrep:
         streams = consolidated.get("streams", [])
         logger.info(f"Loaded {len(streams)} streams from consolidated config")
         return streams
-
-    def _load_local_secret(self, connection_id: str) -> Optional[Dict[str, Any]]:
-        """
-        Load secret for a connection from local secrets directory.
-
-        Secrets are stored in: {paths.secrets}/{connection_id}.json
-        """
-        secrets_path = self._paths["secrets"] / f"{connection_id}.json"
-        if not secrets_path.exists():
-            # Try without .json extension for backwards compatibility
-            secrets_path = self._paths["secrets"] / connection_id
-            if not secrets_path.exists():
-                logger.debug(f"No local secret found at: {secrets_path}")
-                return None
-
-        try:
-            with open(secrets_path, "r") as f:
-                secrets = json.load(f)
-            logger.debug(f"Loaded local secret from: {secrets_path}")
-            return secrets
-        except json.JSONDecodeError as e:
-            raise ValueError(f"Invalid JSON in secret file {secrets_path}: {e}")
 
     # =========================================================================
     # Connection Loading Methods (from consolidated config)
@@ -773,37 +631,19 @@ class PipelineConfigPrep:
         # Store secrets directory for the resolver
         self._secrets_dir = self._paths["secrets"]
 
-        # Late-binding: return ConnectionConfig wrapper without expanding secrets
-        if self.settings.late_binding_secrets:
-            config_wrapper = ConnectionConfig(
-                raw_config=config,
-                connection_id=connection_id,
-                resolver=self.secrets_resolver,
-                client_id=client_id or None,
-            )
+        config_wrapper = ConnectionConfig(
+            raw_config=config,
+            connection_id=connection_id,
+            resolver=self.secrets_resolver,
+            client_id=client_id or None,
+        )
 
-            resolved = ResolvedConnection(
-                connection_ref,
-                connection_type,
-                config,  # Store raw config (unexpanded)
-                connection_config_wrapper=config_wrapper,
-            )
-            self._resolved_connections[cache_key] = resolved
-
-            logger.info(
-                f"Resolved connection (late-binding): {connection_ref} -> {connection_id}"
-            )
-            return resolved
-
-        # Eager resolution: load secrets and expand placeholders
-        secrets = self._load_local_secret(connection_id)
-        if secrets:
-            config = self._expand_secrets_in_config(config, secrets)
-
-        # Expand any remaining environment variables
-        config = expand_required_vars(config)
-
-        resolved = ResolvedConnection(connection_ref, connection_type, config)
+        resolved = ResolvedConnection(
+            connection_ref,
+            connection_type,
+            config,
+            connection_config_wrapper=config_wrapper,
+        )
         self._resolved_connections[cache_key] = resolved
 
         logger.info(f"Resolved connection: {connection_ref} -> {connection_id}")
@@ -1022,6 +862,7 @@ class PipelineConfigPrep:
         # Build enriched source config
         source_data = raw_stream["source"].copy()
         source_data["_connection"] = source_connection.config
+        source_data["_connection_wrapper"] = source_connection.connection_config_wrapper
         source_data["_endpoint"] = source_endpoint
 
         # Resolve destinations
@@ -1257,14 +1098,6 @@ class PipelineConfigPrep:
         """
         pipeline_config, stream_configs = self.load_pipeline_config()
 
-        # Validate no unexpanded placeholders in connections (only for eager resolution)
-        for conn_id, resolved in self._resolved_connections.items():
-            if not resolved.is_late_binding:
-                validate_no_unexpanded_placeholders(
-                    resolved.config,
-                    f"connection '{conn_id}'"
-                )
-
         # Strip internal key prefixes for external consumers
         # Internal keys use "id:{uuid}" format, but consumers expect plain UUIDs
         resolved_connections = {}
@@ -1278,10 +1111,7 @@ class PipelineConfigPrep:
             clean_key = key.split(":", 1)[1] if ":" in key else key
             resolved_endpoints[clean_key] = endpoint
 
-        if self.settings.late_binding_secrets:
-            logger.info("Configuration loaded with late-binding secrets enabled")
-        else:
-            logger.info("Configuration validation passed - no unexpanded placeholders found")
+        logger.info("Configuration loaded (secrets resolved at connection time)")
 
         # Get connectors from consolidated config
         connectors = self.get_connectors()

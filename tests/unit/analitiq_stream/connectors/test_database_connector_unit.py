@@ -6,7 +6,6 @@ from typing import Any, Dict, List
 
 from src.source.connectors.database import (
     DatabaseConnector,
-    DatabaseConfig,
     EndpointConfig,
     ConfigureConfig
 )
@@ -75,48 +74,32 @@ def mock_state_manager():
     return state_manager
 
 
-class TestDatabaseConfig:
-    """Test DatabaseConfig Pydantic model."""
+class TestDatabaseConnectorConnectValidation:
+    """Test DatabaseConnector connect() validation."""
 
-    def test_valid_config(self, database_config):
-        """Test valid database configuration."""
-        config = DatabaseConfig(**database_config)
-        assert config.driver == "postgresql"
-        assert config.host == "localhost"
-        assert config.port == 5432
-        assert config.database == "test_db"
-        assert config.username == "test_user"
-        assert config.password == "test_password"
+    @pytest.mark.asyncio
+    async def test_connect_missing_driver(self):
+        """Test connect raises error when driver is missing."""
+        connector = DatabaseConnector("TestConnector")
+        with pytest.raises(ConnectionError, match="missing required 'driver' field"):
+            await connector.connect({"host": "localhost", "port": 5432})
 
-    def test_missing_required_fields(self):
-        """Test validation with missing required fields."""
-        with pytest.raises(Exception):  # ValidationError from Pydantic
-            DatabaseConfig(driver="postgresql")
+    @pytest.mark.asyncio
+    async def test_connect_works_without_explicit_credential_keys(self):
+        """Test connect works without host/port/username/password/database keys.
 
-    def test_extra_fields_allowed(self, database_config):
-        """Test that extra fields are allowed."""
-        database_config["ssl_mode"] = "prefer"
-        database_config["custom_param"] = "value"
-        config = DatabaseConfig(**database_config)
-        assert config.driver == "postgresql"
-
-    def test_database_config_extra_fields(self):
-        """Test that DatabaseConfig allows extra fields."""
-        config_data = {
-            "driver": "postgresql",
-            "host": "localhost",
-            "port": 5432,
-            "database": "test",
-            "username": "test",
-            "password": "test",
-            # Extra fields should be allowed
-            "ssl_mode": "require",
-            "connection_timeout": 30,
-            "pool_size": 5
-        }
-
-        config = DatabaseConfig(**config_data)
-        assert config.driver == "postgresql"
+        extract_connection_params in the driver provides defaults, so the
+        Pydantic gate should not block connections that omit these fields.
+        """
+        mock_driver = AsyncMock()
+        with patch('src.source.connectors.database.DriverFactory.create_driver') as mock_factory:
+            mock_factory.return_value = mock_driver
+            connector = DatabaseConnector("TestConnector")
+            # Only driver is required at the connector level
+            await connector.connect({"driver": "postgresql"})
+            mock_factory.assert_called_once_with("postgresql")
+            mock_driver.create_connection_pool.assert_called_once()
+            assert connector.is_connected is True
 
 
 class TestConfigureConfig:
@@ -215,11 +198,11 @@ class TestDatabaseConnectorConnection:
             assert connector.driver == mock_driver
 
     @pytest.mark.asyncio
-    async def test_connect_validation_error(self, connector):
-        """Test connection with invalid configuration."""
-        invalid_config = {"driver": "postgresql"}  # Missing required fields
+    async def test_connect_missing_driver_field(self, connector):
+        """Test connection with missing driver field."""
+        invalid_config = {"host": "localhost"}  # Missing driver
 
-        with pytest.raises(ConnectionError):
+        with pytest.raises(ConnectionError, match="missing required 'driver' field"):
             await connector.connect(invalid_config)
 
     @pytest.mark.asyncio
@@ -301,12 +284,15 @@ class TestDatabaseConnectorReadBatches:
         """Test successful batch reading."""
         mock_driver = MagicMock()
         mock_connection = AsyncMock()
-        mock_pool = MagicMock()
-        mock_pool.acquire.return_value.__aenter__.return_value = mock_connection
+
+        # Mock acquire_connection as async context manager
+        mock_acm = AsyncMock()
+        mock_acm.__aenter__.return_value = mock_connection
+        mock_acm.__aexit__.return_value = False
+        mock_driver.acquire_connection.return_value = mock_acm
 
         connector.driver = mock_driver
         connector._initialized = True
-        mock_driver.connection_pool = mock_pool
         mock_driver.build_incremental_query.return_value = ("SELECT * FROM test", [])
 
         # Mock query results - first batch with data, second batch empty
@@ -368,12 +354,14 @@ class TestDatabaseConnectorReadBatches:
         """Test read_batches pagination with different result sizes."""
         mock_driver = MagicMock()
         mock_connection = AsyncMock()
-        mock_pool = MagicMock()
-        mock_pool.acquire.return_value.__aenter__.return_value = mock_connection
+
+        mock_acm = AsyncMock()
+        mock_acm.__aenter__.return_value = mock_connection
+        mock_acm.__aexit__.return_value = False
+        mock_driver.acquire_connection.return_value = mock_acm
 
         connector.driver = mock_driver
         connector._initialized = True
-        mock_driver.connection_pool = mock_pool
         mock_driver.build_incremental_query.return_value = ("SELECT * FROM test", [])
 
         # Return exactly batch_size records, then fewer, then empty
@@ -405,12 +393,14 @@ class TestDatabaseConnectorWriteBatch:
         """Test successful batch write with upsert."""
         mock_driver = MagicMock()
         mock_connection = AsyncMock()
-        mock_pool = MagicMock()
-        mock_pool.acquire.return_value.__aenter__.return_value = mock_connection
+
+        mock_acm = AsyncMock()
+        mock_acm.__aenter__.return_value = mock_connection
+        mock_acm.__aexit__.return_value = False
+        mock_driver.acquire_connection.return_value = mock_acm
 
         connector.driver = mock_driver
         connector._initialized = True
-        mock_driver.connection_pool = mock_pool
         mock_driver.execute_upsert = AsyncMock()
 
         batch = [{"id": 1, "name": "test1"}, {"id": 2, "name": "test2"}]
@@ -428,12 +418,14 @@ class TestDatabaseConnectorWriteBatch:
 
         mock_driver = MagicMock()
         mock_connection = AsyncMock()
-        mock_pool = MagicMock()
-        mock_pool.acquire.return_value.__aenter__.return_value = mock_connection
+
+        mock_acm = AsyncMock()
+        mock_acm.__aenter__.return_value = mock_connection
+        mock_acm.__aexit__.return_value = False
+        mock_driver.acquire_connection.return_value = mock_acm
 
         connector.driver = mock_driver
         connector._initialized = True
-        mock_driver.connection_pool = mock_pool
         mock_driver.execute_insert = AsyncMock()
 
         batch = [{"id": 1, "name": "test1"}]
@@ -465,12 +457,14 @@ class TestDatabaseConnectorWriteBatch:
         """Test write batch with database error."""
         mock_driver = MagicMock()
         mock_connection = AsyncMock()
-        mock_pool = MagicMock()
-        mock_pool.acquire.return_value.__aenter__.return_value = mock_connection
+
+        mock_acm = AsyncMock()
+        mock_acm.__aenter__.return_value = mock_connection
+        mock_acm.__aexit__.return_value = False
+        mock_driver.acquire_connection.return_value = mock_acm
 
         connector.driver = mock_driver
         connector._initialized = True
-        mock_driver.connection_pool = mock_pool
         mock_driver.execute_upsert = AsyncMock(side_effect=Exception("DB error"))
 
         with pytest.raises(WriteError) as exc_info:
@@ -555,12 +549,10 @@ class TestDatabaseConnectorImports:
         """Test importing DatabaseConnector and related components."""
         from src.source.connectors.database import (
             DatabaseConnector,
-            DatabaseConfig,
             EndpointConfig,
             ConfigureConfig
         )
 
         assert DatabaseConnector is not None
-        assert DatabaseConfig is not None
         assert EndpointConfig is not None
         assert ConfigureConfig is not None

@@ -5,6 +5,8 @@ from contextlib import asynccontextmanager
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from sqlalchemy.engine import URL
+
 from src.destination.connectors.database import DatabaseDestinationHandler
 
 
@@ -181,3 +183,33 @@ class TestDatabaseHandlerSSLPreferFallback:
         connect_args = mock_create.call_args.kwargs.get("connect_args", {})
         assert connect_args["ssl"] is False
         assert handler._connected is True
+
+
+class TestDatabaseHandlerURLEncoding:
+    """Test that connection URLs use sqlalchemy.engine.URL (no raw f-string)."""
+
+    @pytest.mark.asyncio
+    async def test_reserved_char_password_uses_url_object(self, handler):
+        """Password with reserved characters should use URL.create(), not f-string."""
+        config = {
+            "driver": "postgresql",
+            "host": "localhost",
+            "port": 5432,
+            "database": "test_db",
+            "username": "user",
+            "password": "a@b#c%/d:e",
+        }
+
+        engine = _make_engine()
+
+        with patch(
+            "src.destination.connectors.database.create_async_engine",
+            return_value=engine,
+        ) as mock_create:
+            await handler.connect(config)
+
+        # First positional arg should be a sqlalchemy.engine.URL, not a raw string
+        url_arg = mock_create.call_args[0][0]
+        assert isinstance(url_arg, URL), (
+            f"Expected sqlalchemy.engine.URL, got {type(url_arg).__name__}: {url_arg}"
+        )

@@ -151,13 +151,20 @@ class TestSharedPackageInit:
         """Test direct imports from shared package."""
         from src.shared import (
             convert_ssl_mode, validate_sql_identifier,
-            get_full_table_name, RateLimiter
+            get_full_table_name, RateLimiter,
+            DatabaseConnectionParams, extract_connection_params,
+            is_ssl_handshake_error, DIALECT_MAP, SSL_DIALECTS,
         )
 
         assert convert_ssl_mode is not None
         assert validate_sql_identifier is not None
         assert get_full_table_name is not None
         assert RateLimiter is not None
+        assert DatabaseConnectionParams is not None
+        assert extract_connection_params is not None
+        assert is_ssl_handshake_error is not None
+        assert DIALECT_MAP is not None
+        assert SSL_DIALECTS is not None
 
 
 class TestSchemaPackageInit:
