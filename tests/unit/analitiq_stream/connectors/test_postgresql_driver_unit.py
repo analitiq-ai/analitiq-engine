@@ -825,3 +825,67 @@ class TestPostgreSQLDriverJsonConversion:
 
         values = mock_conn.executemany.call_args[0][1]
         assert values[0][1] == '["a", "b", "c"]'
+
+
+class TestPostgreSQLDriverSSLPreferFallback:
+    """Test SSL prefer fallback behavior in create_connection_pool."""
+
+    @pytest.mark.asyncio
+    async def test_ssl_prefer_retries_on_ssl_error(self, driver, connection_config):
+        """ssl_mode=prefer should retry without SSL on handshake error."""
+        mock_asyncpg = MagicMock()
+        mock_pool = AsyncMock()
+
+        ssl_error = ssl.SSLError("SSL handshake failed")
+        mock_asyncpg.create_pool = AsyncMock(side_effect=[ssl_error, mock_pool])
+
+        with patch.dict("sys.modules", {"asyncpg": mock_asyncpg}):
+            with patch("builtins.__import__", return_value=mock_asyncpg):
+                driver.asyncpg = mock_asyncpg
+                await driver.create_connection_pool(connection_config)
+
+        assert mock_asyncpg.create_pool.call_count == 2
+        # Second call should have ssl=False
+        second_call_kwargs = mock_asyncpg.create_pool.call_args_list[1]
+        assert second_call_kwargs.kwargs.get("ssl") is False or second_call_kwargs[1].get("ssl") is False
+        assert driver.connection_pool is mock_pool
+
+    @pytest.mark.asyncio
+    async def test_ssl_prefer_no_retry_on_non_ssl_error(self, driver, connection_config):
+        """ssl_mode=prefer should NOT retry on non-SSL errors."""
+        mock_asyncpg = MagicMock()
+
+        non_ssl_error = OSError("Connection timed out")
+        mock_asyncpg.create_pool = AsyncMock(side_effect=non_ssl_error)
+
+        with patch.dict("sys.modules", {"asyncpg": mock_asyncpg}):
+            with patch("builtins.__import__", return_value=mock_asyncpg):
+                driver.asyncpg = mock_asyncpg
+                with pytest.raises(OSError, match="Connection timed out"):
+                    await driver.create_connection_pool(connection_config)
+
+        assert mock_asyncpg.create_pool.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_ssl_require_does_not_fallback(self, driver):
+        """ssl_mode=require should NOT retry without SSL."""
+        config = {
+            "host": "localhost",
+            "port": 5432,
+            "database": "test_db",
+            "username": "test_user",
+            "password": "test_password",
+            "ssl_mode": "require",
+        }
+
+        mock_asyncpg = MagicMock()
+        ssl_error = ssl.SSLError("SSL handshake failed")
+        mock_asyncpg.create_pool = AsyncMock(side_effect=ssl_error)
+
+        with patch.dict("sys.modules", {"asyncpg": mock_asyncpg}):
+            with patch("builtins.__import__", return_value=mock_asyncpg):
+                driver.asyncpg = mock_asyncpg
+                with pytest.raises(ssl.SSLError):
+                    await driver.create_connection_pool(config)
+
+        assert mock_asyncpg.create_pool.call_count == 1

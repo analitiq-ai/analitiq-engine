@@ -10,6 +10,42 @@ import ssl
 from typing import Any, Dict, Union
 
 
+def is_ssl_handshake_error(exc: BaseException) -> bool:
+    """Check if exception indicates an SSL handshake/protocol failure.
+
+    Used exclusively in ssl_mode='prefer' connection paths to decide
+    whether to retry without SSL. ConnectionError and its subclasses
+    (ConnectionResetError, ConnectionRefusedError) are treated as
+    handshake failures here because they occur when a non-SSL server
+    rejects the SSL negotiation attempt (e.g. asyncpg raises a bare
+    ConnectionError on SSL rejection). Do NOT use this function
+    outside of SSL-prefer fallback logic.
+    """
+    seen: set[int] = set()
+    to_check: list[BaseException] = []
+    stack: list[BaseException] = [exc]
+    while stack:
+        current = stack.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        to_check.append(current)
+        if current.__cause__ is not None:
+            stack.append(current.__cause__)
+        if current.__context__ is not None:
+            stack.append(current.__context__)
+        if hasattr(current, "orig") and current.orig is not None:
+            stack.append(current.orig)
+
+    has_handshake_error = False
+    for e in to_check:
+        if isinstance(e, ssl.SSLCertVerificationError):
+            return False
+        if isinstance(e, (ssl.SSLError, ConnectionError)):
+            has_handshake_error = True
+    return has_handshake_error
+
+
 def convert_ssl_mode(ssl_mode: str) -> Union[bool, ssl.SSLContext]:
     """Convert PostgreSQL ssl_mode string to asyncpg ssl parameter.
 

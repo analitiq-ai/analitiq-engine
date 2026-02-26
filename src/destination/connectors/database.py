@@ -36,7 +36,7 @@ from ...grpc.generated.analitiq.v1 import (
     Cursor,
     SchemaMessage,
 )
-from ...shared.database_utils import convert_ssl_mode
+from ...shared.database_utils import convert_ssl_mode, is_ssl_handshake_error
 
 
 logger = logging.getLogger(__name__)
@@ -50,6 +50,9 @@ DIALECT_MAP = {
     "mariadb": "mysql+aiomysql",
     "sqlite": "sqlite+aiosqlite",
 }
+
+# Dialects that support SSL connections
+SSL_DIALECTS = {"postgresql", "postgres", "mysql", "mariadb"}
 
 
 class DatabaseDestinationHandler(BaseDestinationHandler):
@@ -166,24 +169,45 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         # Create async engine
         pool_config = connection_config.get("connection_pool", {})
 
-        # Build connect_args for SSL
+        # Build connect_args for SSL (only for dialects that support it)
         connect_args: Dict[str, Any] = {}
-        ssl_mode = connection_config.get("ssl_mode")
-        if ssl_mode:
+        if self._driver in SSL_DIALECTS:
+            ssl_mode = connection_config.get("ssl_mode", "prefer")
+        else:
+            ssl_mode = connection_config.get("ssl_mode")
+        if ssl_mode == "disable":
+            connect_args["ssl"] = False
+        elif ssl_mode:
             connect_args["ssl"] = self._convert_ssl_mode(ssl_mode)
 
-        self._engine = create_async_engine(
-            url,
+        engine_kwargs = dict(
             pool_size=pool_config.get("min_connections", 2),
             max_overflow=pool_config.get("max_connections", 10) - pool_config.get("min_connections", 2),
             pool_pre_ping=True,
             echo=connection_config.get("echo_sql", False),
-            connect_args=connect_args,
         )
 
-        # Test connection
-        async with self._engine.connect() as conn:
-            await conn.execute(text("SELECT 1"))
+        self._engine = create_async_engine(url, connect_args=connect_args, **engine_kwargs)
+
+        # Test connection with SSL prefer fallback
+        try:
+            async with self._engine.connect() as conn:
+                await conn.execute(text("SELECT 1"))
+        except Exception as e:
+            if ssl_mode == "prefer" and is_ssl_handshake_error(e):
+                logger.warning("SSL failed with ssl_mode='prefer', retrying without SSL: %s", e)
+                await self._engine.dispose()
+                connect_args["ssl"] = False
+                self._engine = create_async_engine(url, connect_args=connect_args, **engine_kwargs)
+                try:
+                    async with self._engine.connect() as conn:
+                        await conn.execute(text("SELECT 1"))
+                except Exception:
+                    await self._engine.dispose()
+                    raise
+            else:
+                await self._engine.dispose()
+                raise
 
         self._connected = True
 
