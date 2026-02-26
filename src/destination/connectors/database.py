@@ -195,10 +195,14 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
             if ssl_mode == "prefer" and is_ssl_handshake_error(e):
                 logger.warning("SSL failed with ssl_mode='prefer', retrying without SSL: %s", e)
                 await self._engine.dispose()
-                connect_args.pop("ssl", None)
+                connect_args["ssl"] = False
                 self._engine = create_async_engine(url, connect_args=connect_args, **engine_kwargs)
-                async with self._engine.connect() as conn:
-                    await conn.execute(text("SELECT 1"))
+                try:
+                    async with self._engine.connect() as conn:
+                        await conn.execute(text("SELECT 1"))
+                except Exception:
+                    await self._engine.dispose()
+                    raise
             else:
                 await self._engine.dispose()
                 raise
