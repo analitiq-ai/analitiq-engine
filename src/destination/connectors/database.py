@@ -51,6 +51,9 @@ DIALECT_MAP = {
     "sqlite": "sqlite+aiosqlite",
 }
 
+# Dialects that support SSL connections
+SSL_DIALECTS = {"postgresql", "postgres", "mysql", "mariadb"}
+
 
 class DatabaseDestinationHandler(BaseDestinationHandler):
     """
@@ -166,9 +169,12 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         # Create async engine
         pool_config = connection_config.get("connection_pool", {})
 
-        # Build connect_args for SSL
+        # Build connect_args for SSL (only for dialects that support it)
         connect_args: Dict[str, Any] = {}
-        ssl_mode = connection_config.get("ssl_mode", "prefer")
+        if self._driver in SSL_DIALECTS:
+            ssl_mode = connection_config.get("ssl_mode", "prefer")
+        else:
+            ssl_mode = connection_config.get("ssl_mode")
         if ssl_mode and ssl_mode != "disable":
             connect_args["ssl"] = self._convert_ssl_mode(ssl_mode)
 

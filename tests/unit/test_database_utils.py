@@ -234,6 +234,15 @@ class TestIsSSLHandshakeError:
         wrapper.__cause__ = cert_exc
         assert is_ssl_handshake_error(wrapper) is False
 
+    def test_cert_error_after_connection_reset_returns_false(self):
+        """Cert verification error later in the chain takes precedence."""
+        reset_exc = ConnectionResetError("connection reset")
+        cert_exc = ssl.SSLCertVerificationError("cert verify failed")
+        wrapper = Exception("operational error")
+        wrapper.orig = reset_exc
+        wrapper.__cause__ = cert_exc
+        assert is_ssl_handshake_error(wrapper) is False
+
     def test_cycle_in_exception_chain_no_infinite_loop(self):
         exc_a = Exception("a")
         exc_b = Exception("b")

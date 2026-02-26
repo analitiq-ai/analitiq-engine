@@ -122,3 +122,24 @@ class TestDatabaseHandlerSSLPreferFallback:
         # Should have retried (default is prefer)
         assert mock_create.call_count == 2
         assert handler._connected is True
+
+    @pytest.mark.asyncio
+    async def test_sqlite_does_not_set_ssl(self, handler):
+        """SQLite connections should not receive ssl in connect_args."""
+        sqlite_config = {
+            "driver": "sqlite",
+            "database": ":memory:",
+        }
+
+        engine = _make_engine()
+
+        with patch(
+            "src.destination.connectors.database.create_async_engine",
+            return_value=engine,
+        ) as mock_create:
+            await handler.connect(sqlite_config)
+
+        assert mock_create.call_count == 1
+        connect_args = mock_create.call_args.kwargs.get("connect_args", {})
+        assert "ssl" not in connect_args
+        assert handler._connected is True

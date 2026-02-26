@@ -35,14 +35,13 @@ def is_ssl_handshake_error(exc: BaseException) -> bool:
         if hasattr(current, "orig") and current.orig is not None:
             stack.append(current.orig)
 
+    has_handshake_error = False
     for e in to_check:
         if isinstance(e, ssl.SSLCertVerificationError):
             return False
-        if isinstance(e, ssl.SSLError):
-            return True
-        if isinstance(e, (ConnectionResetError, ConnectionRefusedError)):
-            return True
-    return False
+        if isinstance(e, (ssl.SSLError, ConnectionResetError, ConnectionRefusedError)):
+            has_handshake_error = True
+    return has_handshake_error
 
 
 def convert_ssl_mode(ssl_mode: str) -> Union[bool, ssl.SSLContext]:
