@@ -59,6 +59,36 @@ class TestExtractConnectionParams:
         params = extract_connection_params(config, require_port=True)
         assert params.database == "my_database"
 
+    def test_missing_driver_raises(self):
+        """Test that missing driver raises ValueError."""
+        config = {"host": "localhost", "port": 5432, "database": "db", "username": "u", "password": "p"}
+        with pytest.raises(ValueError, match="driver is required"):
+            extract_connection_params(config)
+
+    def test_missing_host_raises(self):
+        """Test that missing host raises ValueError."""
+        config = {"driver": "postgresql", "port": 5432, "database": "db", "username": "u", "password": "p"}
+        with pytest.raises(ValueError, match="host is required"):
+            extract_connection_params(config)
+
+    def test_missing_username_raises(self):
+        """Test that missing username raises ValueError."""
+        config = {"driver": "postgresql", "host": "localhost", "port": 5432, "database": "db", "password": "p"}
+        with pytest.raises(ValueError, match="username is required"):
+            extract_connection_params(config)
+
+    def test_missing_password_raises(self):
+        """Test that missing password raises ValueError."""
+        config = {"driver": "postgresql", "host": "localhost", "port": 5432, "database": "db", "username": "u"}
+        with pytest.raises(ValueError, match="password is required"):
+            extract_connection_params(config)
+
+    def test_missing_database_raises(self):
+        """Test that missing database raises ValueError."""
+        config = {"driver": "postgresql", "host": "localhost", "port": 5432, "username": "u", "password": "p"}
+        with pytest.raises(ValueError, match="Database name is required"):
+            extract_connection_params(config)
+
     def test_require_port_true_raises_on_missing(self):
         """Test that require_port=True raises ValueError when port is missing."""
         config = {
@@ -111,10 +141,13 @@ class TestExtractConnectionParams:
         assert params.ssl_mode == "prefer"
 
     def test_sqlite_no_ssl_mode(self):
-        """Test that SQLite gets empty ssl_mode."""
+        """Test that SQLite gets empty ssl_mode and doesn't require host/user/password."""
         config = {"driver": "sqlite", "database": ":memory:"}
         params = extract_connection_params(config, require_port=False)
         assert params.ssl_mode == ""
+        assert params.host == ""
+        assert params.username == ""
+        assert params.password == ""
 
     def test_pool_defaults(self):
         """Test default pool settings."""

@@ -114,12 +114,31 @@ def extract_connection_params(
     Returns:
         DatabaseConnectionParams frozen dataclass.
     """
-    driver = config.get("driver", "postgresql")
+    driver = config.get("driver")
+    if not driver:
+        raise ValueError("Database driver is required (e.g. 'postgresql', 'mysql')")
 
-    host = config.get("host", "localhost")
-    username = config.get("username") or config.get("user", "postgres")
-    password = config.get("password", "")
-    database = config.get("database") or config.get("dbname", "postgres")
+    database = config.get("database") or config.get("dbname")
+    if not database:
+        raise ValueError("Database name is required")
+
+    # SQLite only needs driver + database
+    if driver.lower() == "sqlite":
+        host = config.get("host", "")
+        username = config.get("username") or config.get("user", "")
+        password = config.get("password", "")
+    else:
+        host = config.get("host")
+        if not host:
+            raise ValueError("Database host is required")
+
+        username = config.get("username") or config.get("user")
+        if not username:
+            raise ValueError("Database username is required")
+
+        password = config.get("password")
+        if password is None:
+            raise ValueError("Database password is required")
 
     # Port handling
     port_value = config.get("port")
