@@ -27,7 +27,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.mysql import insert as mysql_insert
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine, AsyncConnection
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncConnection
 
 from ..base_handler import BaseDestinationHandler, BatchWriteResult
 from ..schema_contract import DestinationSchemaContract
@@ -36,12 +36,7 @@ from ...grpc.generated.analitiq.v1 import (
     Cursor,
     SchemaMessage,
 )
-from ...shared.database_utils import (
-    extract_connection_params,
-    is_ssl_handshake_error,
-    DIALECT_MAP,
-    SSL_DIALECTS,
-)
+from ...shared.database_utils import create_database_engine
 
 
 logger = logging.getLogger(__name__)
@@ -121,46 +116,17 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
 
     async def connect(self, connection_config: Dict[str, Any]) -> None:
         """
-        Establish database connection using SQLAlchemy.
+        Establish database connection using the shared engine factory.
 
         Args:
             connection_config: Connection configuration
         """
         self._config = connection_config
-
-        conn_params = extract_connection_params(connection_config, require_port=False)
-        self._driver = conn_params.driver.lower()
-
-        url = conn_params.to_sqlalchemy_url()
-        connect_args = conn_params.to_sqlalchemy_connect_args()
-        engine_kwargs = conn_params.to_sqlalchemy_engine_kwargs()
-
-        self._engine = create_async_engine(url, connect_args=connect_args, **engine_kwargs)
-
-        # Test connection with SSL prefer fallback
-        ssl_mode = conn_params.ssl_mode
-        try:
-            async with self._engine.connect() as conn:
-                await conn.execute(text("SELECT 1"))
-        except Exception as e:
-            if ssl_mode == "prefer" and is_ssl_handshake_error(e):
-                logger.warning("SSL failed with ssl_mode='prefer', retrying without SSL: %s", e)
-                await self._engine.dispose()
-                connect_args["ssl"] = False
-                self._engine = create_async_engine(url, connect_args=connect_args, **engine_kwargs)
-                try:
-                    async with self._engine.connect() as conn:
-                        await conn.execute(text("SELECT 1"))
-                except Exception:
-                    await self._engine.dispose()
-                    raise
-            else:
-                await self._engine.dispose()
-                raise
-
+        self._engine, self._driver = await create_database_engine(
+            connection_config, require_port=False
+        )
         self._connected = True
-
-        logger.info(f"DatabaseDestinationHandler connected to {self._driver}")
+        logger.info("DatabaseDestinationHandler connected to %s", self._driver)
 
     async def disconnect(self) -> None:
         """Close database connection."""

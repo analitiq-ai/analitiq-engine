@@ -99,20 +99,13 @@ class TestSubPackageInits:
         assert src.schema is not None
     
     def test_database_init_already_covered(self):
-        """Test database package init (covered in test_database_init.py)."""
-        # This is already tested in test_database_init.py
-        # Use new module path (src.source.connectors.database)
+        """Test database connector module is importable."""
         import src.source.connectors.database
 
         assert src.source.connectors.database is not None
 
-        # Verify main exports from database package
         from src.source.connectors.database import DatabaseConnector
-        from src.source.drivers.base import BaseDatabaseDriver
-        from src.source.drivers.factory import DriverFactory
 
-        assert BaseDatabaseDriver is not None
-        assert DriverFactory is not None
         assert DatabaseConnector is not None
 
 

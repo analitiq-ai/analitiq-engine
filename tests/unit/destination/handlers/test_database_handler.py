@@ -1,4 +1,4 @@
-"""Unit tests for DatabaseDestinationHandler SSL prefer fallback."""
+"""Unit tests for DatabaseDestinationHandler connection handling."""
 
 import ssl
 from contextlib import asynccontextmanager
@@ -27,170 +27,79 @@ def base_config():
     }
 
 
-def _make_engine(connect_side_effect=None):
-    """Create a mock engine whose .connect() works as async context manager."""
-    engine = AsyncMock()
-    conn = AsyncMock()
-
-    if connect_side_effect:
-        conn.execute.side_effect = connect_side_effect
-
-    @asynccontextmanager
-    async def fake_connect():
-        yield conn
-
-    engine.connect = fake_connect
-    return engine
-
-
-class TestDatabaseHandlerSSLPreferFallback:
-    """Test SSL prefer fallback behavior in connect()."""
+class TestDatabaseHandlerConnect:
+    """Test connect() delegates to shared create_database_engine."""
 
     @pytest.mark.asyncio
-    async def test_ssl_prefer_retries_on_ssl_error(self, handler, base_config):
-        """ssl_mode=prefer should retry without SSL on handshake error."""
-        base_config["ssl_mode"] = "prefer"
-
-        ssl_error = ssl.SSLError("SSL handshake failed")
-        engine_fail = _make_engine(connect_side_effect=ssl_error)
-        engine_ok = _make_engine()
-
-        engines = [engine_fail, engine_ok]
+    async def test_connect_success(self, handler, base_config):
+        """connect() should delegate to create_database_engine and set state."""
+        mock_engine = AsyncMock()
 
         with patch(
-            "src.destination.connectors.database.create_async_engine",
-            side_effect=engines,
+            "src.destination.connectors.database.create_database_engine",
+            return_value=(mock_engine, "postgresql"),
         ) as mock_create:
             await handler.connect(base_config)
 
-        assert mock_create.call_count == 2
-        engine_fail.dispose.assert_awaited_once()
-        # Second engine should explicitly disable ssl
-        second_call = mock_create.call_args_list[1]
-        connect_args = second_call.kwargs.get("connect_args", {})
-        assert connect_args["ssl"] is False
+        mock_create.assert_called_once_with(base_config, require_port=False)
         assert handler._connected is True
+        assert handler._engine is mock_engine
+        assert handler._driver == "postgresql"
 
     @pytest.mark.asyncio
-    async def test_non_ssl_error_does_not_retry(self, handler, base_config):
-        """Non-SSL errors should not trigger retry, engine should be disposed."""
-        base_config["ssl_mode"] = "prefer"
-
-        engine = _make_engine(connect_side_effect=OSError("Connection timed out"))
-
+    async def test_connect_failure_propagates(self, handler, base_config):
+        """connect() should propagate errors from create_database_engine."""
         with patch(
-            "src.destination.connectors.database.create_async_engine",
-            return_value=engine,
+            "src.destination.connectors.database.create_database_engine",
+            side_effect=OSError("Connection timed out"),
         ):
             with pytest.raises(OSError, match="Connection timed out"):
                 await handler.connect(base_config)
 
-        engine.dispose.assert_awaited_once()
+        assert handler._connected is False
 
     @pytest.mark.asyncio
-    async def test_fallback_retry_failure_disposes_engine(self, handler, base_config):
-        """If the plaintext retry also fails, the retry engine should be disposed."""
-        base_config["ssl_mode"] = "prefer"
-
-        ssl_error = ssl.SSLError("SSL handshake failed")
-        engine_fail_ssl = _make_engine(connect_side_effect=ssl_error)
-        engine_fail_plain = _make_engine(connect_side_effect=OSError("DB unreachable"))
-
-        engines = [engine_fail_ssl, engine_fail_plain]
-
+    async def test_connect_ssl_error_propagates(self, handler, base_config):
+        """SSL errors are handled by the shared engine factory, not here."""
         with patch(
-            "src.destination.connectors.database.create_async_engine",
-            side_effect=engines,
+            "src.destination.connectors.database.create_database_engine",
+            side_effect=ssl.SSLError("SSL handshake failed"),
         ):
-            with pytest.raises(OSError, match="DB unreachable"):
-                await handler.connect(base_config)
-
-        engine_fail_ssl.dispose.assert_awaited_once()
-        engine_fail_plain.dispose.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_ssl_require_does_not_fallback(self, handler, base_config):
-        """ssl_mode=require should NOT retry without SSL."""
-        base_config["ssl_mode"] = "require"
-
-        engine = _make_engine(connect_side_effect=ssl.SSLError("SSL handshake failed"))
-
-        with patch(
-            "src.destination.connectors.database.create_async_engine",
-            return_value=engine,
-        ) as mock_create:
             with pytest.raises(ssl.SSLError):
                 await handler.connect(base_config)
 
-        assert mock_create.call_count == 1
-        engine.dispose.assert_awaited_once()
+        assert handler._connected is False
 
     @pytest.mark.asyncio
-    async def test_default_ssl_mode_is_prefer(self, handler, base_config):
-        """When ssl_mode is omitted, it should default to 'prefer' behavior."""
-        assert "ssl_mode" not in base_config
-
-        ssl_error = ssl.SSLError("SSL handshake failed")
-        engine_fail = _make_engine(connect_side_effect=ssl_error)
-        engine_ok = _make_engine()
-
-        engines = [engine_fail, engine_ok]
-
-        with patch(
-            "src.destination.connectors.database.create_async_engine",
-            side_effect=engines,
-        ) as mock_create:
-            await handler.connect(base_config)
-
-        # Should have retried (default is prefer)
-        assert mock_create.call_count == 2
-        assert handler._connected is True
-
-    @pytest.mark.asyncio
-    async def test_sqlite_does_not_set_ssl(self, handler):
-        """SQLite connections should not receive ssl in connect_args."""
+    async def test_sqlite_connect(self, handler):
+        """SQLite connections should work through shared factory."""
         sqlite_config = {
             "driver": "sqlite",
             "database": ":memory:",
         }
-
-        engine = _make_engine()
+        mock_engine = AsyncMock()
 
         with patch(
-            "src.destination.connectors.database.create_async_engine",
-            return_value=engine,
+            "src.destination.connectors.database.create_database_engine",
+            return_value=(mock_engine, "sqlite"),
         ) as mock_create:
             await handler.connect(sqlite_config)
 
-        assert mock_create.call_count == 1
-        connect_args = mock_create.call_args.kwargs.get("connect_args", {})
-        assert "ssl" not in connect_args
+        mock_create.assert_called_once_with(sqlite_config, require_port=False)
         assert handler._connected is True
-
-    @pytest.mark.asyncio
-    async def test_ssl_disable_sets_ssl_false(self, handler, base_config):
-        """ssl_mode=disable should explicitly pass ssl=False to the driver."""
-        base_config["ssl_mode"] = "disable"
-
-        engine = _make_engine()
-
-        with patch(
-            "src.destination.connectors.database.create_async_engine",
-            return_value=engine,
-        ) as mock_create:
-            await handler.connect(base_config)
-
-        connect_args = mock_create.call_args.kwargs.get("connect_args", {})
-        assert connect_args["ssl"] is False
-        assert handler._connected is True
+        assert handler._driver == "sqlite"
 
 
 class TestDatabaseHandlerURLEncoding:
-    """Test that connection URLs use sqlalchemy.engine.URL (no raw f-string)."""
+    """Test that connection URLs use sqlalchemy.engine.URL (no raw f-string).
+
+    This is now guaranteed by the shared engine factory which uses
+    DatabaseConnectionParams.to_sqlalchemy_url() internally.
+    """
 
     @pytest.mark.asyncio
-    async def test_reserved_char_password_uses_url_object(self, handler):
-        """Password with reserved characters should use URL.create(), not f-string."""
+    async def test_reserved_char_password_works(self, handler):
+        """Password with reserved characters should be handled by shared engine."""
         config = {
             "driver": "postgresql",
             "host": "localhost",
@@ -199,17 +108,12 @@ class TestDatabaseHandlerURLEncoding:
             "username": "user",
             "password": "a@b#c%/d:e",
         }
-
-        engine = _make_engine()
+        mock_engine = AsyncMock()
 
         with patch(
-            "src.destination.connectors.database.create_async_engine",
-            return_value=engine,
-        ) as mock_create:
+            "src.destination.connectors.database.create_database_engine",
+            return_value=(mock_engine, "postgresql"),
+        ):
             await handler.connect(config)
 
-        # First positional arg should be a sqlalchemy.engine.URL, not a raw string
-        url_arg = mock_create.call_args[0][0]
-        assert isinstance(url_arg, URL), (
-            f"Expected sqlalchemy.engine.URL, got {type(url_arg).__name__}: {url_arg}"
-        )
+        assert handler._connected is True

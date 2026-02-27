@@ -55,31 +55,6 @@ class TestSourceConnectorsPackageInit:
         assert BaseConnector is not None
 
 
-class TestSourceDriversPackageInit:
-    """Test source/drivers package __init__ file."""
-
-    @pytest.mark.unit
-    def test_drivers_imports(self):
-        """Test that drivers package exports are available."""
-        from src.source import drivers
-
-        # Check __all__ exports if defined
-        if hasattr(drivers, '__all__'):
-            for export in drivers.__all__:
-                assert hasattr(drivers, export)
-
-    @pytest.mark.unit
-    def test_drivers_direct_imports(self):
-        """Test direct imports from drivers package."""
-        from src.source.drivers.base import BaseDatabaseDriver
-        from src.source.drivers.postgresql import PostgreSQLDriver
-        from src.source.drivers.factory import DriverFactory
-
-        assert BaseDatabaseDriver is not None
-        assert PostgreSQLDriver is not None
-        assert DriverFactory is not None
-
-
 class TestStatePackageInit:
     """Test state package __init__ file."""
 

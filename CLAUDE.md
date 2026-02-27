@@ -406,3 +406,4 @@ docker build -t analitiq-stream . && docker push $AWS_ACCOUNT_ID.dkr.ecr.eu-cent
 - Deterministic behavior, idempotent writes, safe retries
 - Update README.md when modifying documented functionality
 - DO NOT ADD LEGACY SUPPORT OR BACKWARD COMPATIBILITY, UNLESS EXPLICITLY INSTRUCTED!
+- Use @codex-plan-reviewer agent to review plans before presenting them to me for execution.

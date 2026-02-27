@@ -1,4 +1,4 @@
-"""Generic database connector using driver delegation pattern."""
+"""Database source connector using shared SQLAlchemy engine factory."""
 
 import logging
 from typing import Any, AsyncIterator, Dict, List, Optional
@@ -6,18 +6,14 @@ from typing import Any, AsyncIterator, Dict, List, Optional
 from pydantic import BaseModel, Field, ConfigDict
 
 from .base import BaseConnector, ConnectionError, ReadError, WriteError
-from ..drivers.factory import DriverFactory
+from ...shared.database_utils import (
+    create_database_engine,
+    acquire_connection,
+    convert_record_from_db,
+)
+from ...shared.query_builder import build_select_query
 
 logger = logging.getLogger(__name__)
-
-
-class ConfigureConfig(BaseModel):
-    """Pydantic model for database configuration settings."""
-    model_config = ConfigDict(extra='forbid')
-    
-    auto_create_schema: bool = Field(False, description="Auto-create schema if not exists")
-    auto_create_table: bool = Field(False, description="Auto-create table if not exists")
-    auto_create_indexes: List[Dict[str, Any]] = Field(default_factory=list, description="Index definitions to create")
 
 
 class EndpointConfig(BaseModel):
@@ -31,25 +27,22 @@ class EndpointConfig(BaseModel):
     endpoint_schema: Dict[str, Any] = Field(default_factory=dict, description="Endpoint schema definition")
     write_mode: str = Field("insert", description="Write mode (insert, upsert)")
     conflict_resolution: Dict[str, Any] = Field(default_factory=dict, description="Conflict resolution config")
-    configure: Optional[ConfigureConfig] = Field(None, description="Auto-configuration settings")
 
 
 class DatabaseConnector(BaseConnector):
     """
-    Generic database connector using driver delegation pattern.
+    Database source connector using shared SQLAlchemy engine.
 
     Features:
-    - Driver-agnostic interface with database-specific implementations
-    - Auto-creation of schemas, tables, and indexes
-    - Pydantic V2 validation for configuration
-    - Connection pooling through driver delegation
+    - Shared engine factory with SSL-prefer fallback
     - Incremental reading with cursor support
-    - Upsert operations with conflict resolution
+    - Read-only: write operations are handled by the destination handler
     """
 
     def __init__(self, name: str = "DatabaseConnector"):
         super().__init__(name)
-        self.driver = None
+        self._engine = None
+        self._driver: str = ""
         self.table_info_cache = {}
         self._initialized = False
 
@@ -77,88 +70,30 @@ class DatabaseConnector(BaseConnector):
 
     async def connect(self, config: Dict[str, Any]):
         """
-        Establish connection to the database using driver delegation.
+        Establish connection to the database using the shared engine factory.
 
         Args:
             config: Connection configuration with driver and credentials
         """
         try:
-            driver_name = config.get("driver")
-            if not driver_name:
-                raise ValueError("Database config missing required 'driver' field")
-
-            self.driver = DriverFactory.create_driver(driver_name)
-            await self.driver.create_connection_pool(config)
-
+            self._engine, self._driver = await create_database_engine(
+                config, require_port=True
+            )
             self.is_connected = True
             self._initialized = True
-            logger.info(f"Connected to database via {driver_name} driver.")
-
+            logger.info("Connected to database via %s", self._driver)
         except Exception as e:
-            logger.error(f"Failed to connect to database: {str(e)}")
-            raise ConnectionError(f"Database connection failed: {str(e)}")
+            logger.error("Failed to connect to database: %s", e)
+            raise ConnectionError(f"Database connection failed: {e}")
 
     async def disconnect(self):
         """Close database connection."""
-        if self.driver:
-            await self.driver.close_connection_pool()
-            self.is_connected = False
-            self._initialized = False
-            logger.info("Database connection closed")
-
-    async def configure(self, config: Dict[str, Any]):
-        """
-        Configure database objects (schema, tables, indexes) based on endpoint configuration.
-        
-        Args:
-            config: Endpoint configuration containing table schema and auto-creation flags
-        """
-        if not self._initialized:
-            raise RuntimeError("Database connection not initialized. Call connect() first.")
-            
-        try:
-            # Validate endpoint configuration with Pydantic
-            endpoint_config = EndpointConfig(**config)
-            
-            # Skip configuration if configure section is not provided
-            if not endpoint_config.configure:
-                logger.info(f"No configure section found - assuming schema and table already exist for {endpoint_config.schema_name}.{endpoint_config.endpoint}")
-                return
-            
-            configure_config = endpoint_config.configure
-
-            # Parse endpoint to extract schema and table name
-            schema_name, table_name = self._parse_endpoint(
-                endpoint_config.endpoint, endpoint_config.schema_name
-            )
-
-            # Create schema if requested
-            if configure_config.auto_create_schema and schema_name:
-                await self.driver.create_schema_if_not_exists(schema_name)
-
-            # Create table if requested
-            if configure_config.auto_create_table:
-                await self.driver.create_table_if_not_exists(
-                    schema_name,
-                    table_name,
-                    endpoint_config.endpoint_schema,
-                    endpoint_config.primary_key,
-                    endpoint_config.unique_constraints
-                )
-
-            # Create indexes if specified
-            if configure_config.auto_create_indexes:
-                await self.driver.create_indexes_if_not_exist(
-                    schema_name,
-                    table_name,
-                    configure_config.auto_create_indexes
-                )
-
-            logger.info(f"Database configuration completed for {schema_name}.{table_name}")
-            
-        except Exception as e:
-            logger.error(f"Database configuration failed: {str(e)}")
-            raise ConnectionError(f"Database configuration failed: {str(e)}")
+        if self._engine:
+            await self._engine.dispose()
+            self._engine = None
+        self.is_connected = False
+        self._initialized = False
+        logger.info("Database connection closed")
 
     async def read_batches(
         self,
@@ -198,18 +133,19 @@ class DatabaseConnector(BaseConnector):
             cursor_state = await state_manager.get_cursor(stream_name, partition)
             cursor_value = cursor_state.get("cursor") if cursor_state else None
 
-            logger.debug(f"Database read starting with cursor: {cursor_value}")
+            logger.debug("Database read starting with cursor: %s", cursor_value)
 
-            # Build incremental query through driver with cursor
-            query, params = self.driver.build_incremental_query(
-                schema_name,
-                table_name,
-                config,
-                cursor_value=cursor_value
+            # Build query using shared query builder
+            query, params = build_select_query(
+                dialect=self._driver,
+                schema_name=schema_name,
+                table_name=table_name,
+                config=config,
+                cursor_value=cursor_value,
             )
 
             # Execute query with batching
-            async with self.driver.acquire_connection() as conn:
+            async with acquire_connection(self._engine) as conn:
                 offset = 0
                 last_cursor_value = cursor_value
 
@@ -217,8 +153,17 @@ class DatabaseConnector(BaseConnector):
                     # Add pagination to query
                     batch_query = f"{query} LIMIT {batch_size} OFFSET {offset}"
 
-                    # Execute through driver
-                    rows = await self.driver.execute_query(conn, batch_query, params)
+                    # Execute through driver connection
+                    if params:
+                        result = await conn.exec_driver_sql(batch_query, tuple(params))
+                    else:
+                        result = await conn.exec_driver_sql(batch_query)
+
+                    # Convert rows to dicts with type conversion
+                    rows = [
+                        convert_record_from_db(dict(row._mapping))
+                        for row in result
+                    ]
 
                     if not rows:
                         break
@@ -247,83 +192,17 @@ class DatabaseConnector(BaseConnector):
                     if len(rows) < batch_size:
                         break
 
-            logger.debug(f"Database read completed with final cursor: {last_cursor_value}")
+            logger.debug("Database read completed with final cursor: %s", last_cursor_value)
 
         except Exception as e:
             self.metrics["errors"] += 1
-            logger.error(f"Database read failed: {str(e)}")
-            raise ReadError(f"Database read failed: {str(e)}")
+            logger.error("Database read failed: %s", e)
+            raise ReadError(f"Database read failed: {e}")
 
     async def write_batch(self, batch: List[Dict[str, Any]], config: Dict[str, Any]):
-        """
-        Write a batch of records to database table using driver delegation.
-
-        Args:
-            batch: List of records to write
-            config: Write configuration
-        """
-        if not self._initialized:
-            raise RuntimeError("Database connection not initialized. Call connect() first.")
-            
-        try:
-            if not batch:
-                return
-
-            endpoint_config = EndpointConfig(**config)
-
-            # Parse endpoint to extract schema and table name
-            schema_name, table_name = self._parse_endpoint(
-                endpoint_config.endpoint, endpoint_config.schema_name
-            )
-
-            async with self.driver.acquire_connection() as conn:
-                if endpoint_config.write_mode == "upsert":
-                    await self.driver.execute_upsert(
-                        conn,
-                        schema_name,
-                        table_name,
-                        batch,
-                        endpoint_config.conflict_resolution
-                    )
-                else:  # insert
-                    await self.driver.execute_insert(
-                        conn,
-                        schema_name,
-                        table_name,
-                        batch
-                    )
-
-            self.metrics["records_written"] += len(batch)
-            self.metrics["batches_written"] += 1
-
-        except Exception as e:
-            self.metrics["errors"] += 1
-            logger.error(f"Database write failed: {str(e)}")
-            raise WriteError(f"Database write failed: {str(e)}")
+        """Source connector is read-only; writes are handled by the destination."""
+        raise NotImplementedError("Source connector is read-only")
 
     def supports_incremental_read(self) -> bool:
         """Database supports incremental reading."""
         return True
-
-    def supports_upsert(self) -> bool:
-        """Database supports upsert operations."""
-        return True
-
-    def supports_schema_evolution(self) -> bool:
-        """Database supports schema evolution."""
-        return True
-
-    async def evolve_schema(self, changes: Dict[str, Any], config: Dict[str, Any]):
-        """
-        Evolve database schema based on detected changes using driver delegation.
-
-        Args:
-            changes: Schema changes from SchemaManager
-            config: Evolution configuration
-        """
-        if not self._initialized:
-            raise RuntimeError("Database connection not initialized. Call connect() first.")
-            
-        # This would delegate to driver-specific schema evolution logic
-        # Implementation depends on the specific driver capabilities
-        logger.info("Schema evolution requested - delegating to driver implementation")

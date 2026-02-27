@@ -1,5 +1,3 @@
-The destination handler uses SQLAlchemy (DatabaseDestinationHandler), while the source
-uses the DatabaseConnector with drivers.
 
 The integration tests (test_database_connector.py, test_postgresql_driver.py, test_streaming_database.py, test_postgresql_timestamp_mismatch.py) have 40+  
 usages of `connection_pool.acquire()`. 

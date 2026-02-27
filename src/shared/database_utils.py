@@ -1,15 +1,21 @@
 """Shared database utilities for source and destination components.
 
-These utilities are extracted from duplicated code across:
-- src/source/drivers/postgresql.py
-- src/destination/connectors/database.py
+Provides a single engine factory, SSL-prefer fallback, connection acquisition,
+and read-side type conversion used by both source connectors and destination handlers.
 """
 
+import logging
 import ssl
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional, Union
+from datetime import datetime
+from typing import Any, AsyncIterator, Dict, Optional, Union
 
+from sqlalchemy import text
 from sqlalchemy.engine import URL
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+
+logger = logging.getLogger(__name__)
 
 
 # SQLAlchemy dialect mapping
@@ -255,6 +261,114 @@ def get_full_table_name(schema_name: str, table_name: str) -> str:
         Fully qualified table name (schema.table or just table)
     """
     return f"{schema_name}.{table_name}" if schema_name else table_name
+
+
+async def create_database_engine(
+    config: Dict[str, Any],
+    *,
+    require_port: bool = True,
+) -> tuple[AsyncEngine, str]:
+    """Create and probe a SQLAlchemy async engine from a connection config.
+
+    Extracts connection parameters, builds a URL, creates the engine, and
+    probes with ``SELECT 1``.  When *ssl_mode* is ``prefer`` and the probe
+    fails with an SSL handshake error, the engine is disposed and a second
+    attempt is made with ``ssl=False``.
+
+    Args:
+        config: Raw connection config dictionary.
+        require_port: If True, raise ValueError when port is missing.
+
+    Returns:
+        Tuple of (AsyncEngine, driver_string).
+
+    Raises:
+        ValueError: If required fields (e.g. port) are missing.
+        Exception: Any connection error after disposal of failed engines.
+    """
+    conn_params = extract_connection_params(config, require_port=require_port)
+
+    url = conn_params.to_sqlalchemy_url()
+    connect_args = conn_params.to_sqlalchemy_connect_args()
+    engine_kwargs = conn_params.to_sqlalchemy_engine_kwargs()
+
+    engine = create_async_engine(url, connect_args=connect_args, **engine_kwargs)
+
+    ssl_mode = conn_params.ssl_mode
+    try:
+        async with engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+    except Exception as e:
+        if ssl_mode == "prefer" and is_ssl_handshake_error(e):
+            logger.warning(
+                "SSL failed with ssl_mode='prefer', retrying without SSL: %s", e
+            )
+            await engine.dispose()
+            connect_args["ssl"] = False
+            engine = create_async_engine(
+                url, connect_args=connect_args, **engine_kwargs
+            )
+            try:
+                async with engine.connect() as conn:
+                    await conn.execute(text("SELECT 1"))
+            except Exception:
+                await engine.dispose()
+                raise
+        else:
+            await engine.dispose()
+            raise
+
+    return engine, conn_params.driver.lower()
+
+
+@asynccontextmanager
+async def acquire_connection(engine: AsyncEngine) -> AsyncIterator:
+    """Acquire a connection from the engine as an async context manager.
+
+    Raises:
+        RuntimeError: If *engine* is None.
+    """
+    if engine is None:
+        raise RuntimeError("Engine not initialized")
+    async with engine.connect() as conn:
+        yield conn
+
+
+# ---------------------------------------------------------------------------
+# Read-side type conversions
+# ---------------------------------------------------------------------------
+
+def convert_db_to_python(value: Any) -> Any:
+    """Convert database values to Python-friendly types.
+
+    Used when reading data from database.
+
+    Args:
+        value: Database value to convert.
+
+    Returns:
+        Python-compatible value.
+    """
+    if value is None:
+        return None
+
+    # Convert datetime objects to ISO strings for JSON serialization
+    if isinstance(value, datetime):
+        return value.isoformat()
+
+    return value
+
+
+def convert_record_from_db(record: Dict[str, Any]) -> Dict[str, Any]:
+    """Convert all values in a record from database reading.
+
+    Args:
+        record: Dictionary with database values.
+
+    Returns:
+        Dictionary with Python-compatible values.
+    """
+    return {key: convert_db_to_python(value) for key, value in record.items()}
 
 
 def get_default_clause(field_def: Dict[str, Any]) -> str:

@@ -201,41 +201,40 @@ def database_cleanup():
     if cleanup_tables and os.getenv("POSTGRES_PASSWORD"):
         try:
             import asyncio
-            from src.source.drivers.postgresql import PostgreSQLDriver
-            
+            from sqlalchemy import text
+            from src.shared.database_utils import create_database_engine
+
             async def cleanup():
-                driver = PostgreSQLDriver()
                 config = {
+                    "driver": "postgresql",
                     "host": os.getenv("POSTGRES_HOST", "localhost"),
                     "port": int(os.getenv("POSTGRES_PORT", "5432")),
                     "database": os.getenv("POSTGRES_DB", "analitiq_test"),
                     "user": os.getenv("POSTGRES_USER", "postgres"),
                     "password": os.getenv("POSTGRES_PASSWORD"),
-                    "ssl_mode": os.getenv("POSTGRES_SSL_MODE", "prefer")
+                    "ssl_mode": os.getenv("POSTGRES_SSL_MODE", "prefer"),
                 }
-                
-                await driver.create_connection_pool(config)
+                engine, _ = await create_database_engine(config, require_port=True)
                 try:
-                    async with driver.connection_pool.acquire() as conn:
+                    async with engine.connect() as conn:
                         for schema, table in cleanup_tables:
                             try:
-                                await conn.execute(f"DROP TABLE IF EXISTS {schema}.{table} CASCADE")
-                                await conn.execute("COMMIT")
+                                await conn.execute(
+                                    text(f"DROP TABLE IF EXISTS {schema}.{table} CASCADE")
+                                )
+                                await conn.commit()
                             except Exception:
-                                pass  # Ignore cleanup errors
+                                pass
                 finally:
-                    await driver.close_connection_pool()
-            
-            # Run cleanup if there's an event loop
+                    await engine.dispose()
+
             try:
                 loop = asyncio.get_event_loop()
                 if loop.is_running():
-                    # Schedule cleanup for later if loop is running
                     asyncio.create_task(cleanup())
                 else:
                     loop.run_until_complete(cleanup())
             except RuntimeError:
-                # No event loop, create one
                 asyncio.run(cleanup())
         except Exception:
             pass  # Ignore cleanup errors
