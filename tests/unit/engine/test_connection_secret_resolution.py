@@ -4,6 +4,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock
 
 from src.engine.pipeline_config_prep import ResolvedConnection
+from src.secrets.config_wrapper import ConnectionConfig
 
 
 class TestBuildConfigDictCarriesConnectionWrapper:
@@ -121,3 +122,41 @@ class TestProcessStreamResolvesWrapper:
 
         assert src_connection_config is raw_config
         assert src_connection_config["password"] == "plain-password"
+
+
+class TestConnectionConfigResolveShortCircuit:
+    """Test that resolve() skips secret fetching when no placeholders exist."""
+
+    @pytest.mark.asyncio
+    async def test_resolve_without_placeholders_skips_resolver(self):
+        """When config has no ${placeholder} values, resolve() should return
+        the raw config without calling the secrets resolver."""
+        mock_resolver = AsyncMock()
+        config = ConnectionConfig(
+            raw_config={"host": "localhost", "port": 5432, "password": "literal"},
+            connection_id="conn-no-secrets",
+            resolver=mock_resolver,
+        )
+
+        result = await config.resolve()
+
+        mock_resolver.resolve.assert_not_awaited()
+        assert result["password"] == "literal"
+        assert result["host"] == "localhost"
+
+    @pytest.mark.asyncio
+    async def test_resolve_with_placeholders_calls_resolver(self):
+        """When config has ${placeholder} values, resolve() must call the
+        secrets resolver and expand them."""
+        mock_resolver = AsyncMock()
+        mock_resolver.resolve.return_value = {"DB_PASS": "secret123"}
+        config = ConnectionConfig(
+            raw_config={"host": "localhost", "password": "${DB_PASS}"},
+            connection_id="conn-with-secrets",
+            resolver=mock_resolver,
+        )
+
+        result = await config.resolve()
+
+        mock_resolver.resolve.assert_awaited_once_with("conn-with-secrets", client_id=None)
+        assert result["password"] == "secret123"
