@@ -177,6 +177,7 @@ class PostgreSQLDriver(BaseDatabaseDriver):
                     await conn.commit()
                     logger.info(f"Index '{index_name}' ensured to exist on {full_table_name}")
                 except Exception as e:
+                    await conn.rollback()
                     logger.warning(f"Failed to create index '{index_name}': {e}")
 
     def _build_column_type_mapping(self, endpoint_schema: Dict[str, Any]):

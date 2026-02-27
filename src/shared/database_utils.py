@@ -63,14 +63,22 @@ class DatabaseConnectionParams:
         )
 
     def to_sqlalchemy_connect_args(self) -> Dict[str, Any]:
-        """Build connect_args dict (SSL settings for supported dialects)."""
+        """Build connect_args dict (SSL, timeout settings for supported dialects)."""
+        args: Dict[str, Any] = {}
+
+        # asyncpg command_timeout (seconds before a query is cancelled)
+        if self.driver.lower() in ("postgresql", "postgres"):
+            args["command_timeout"] = self.command_timeout
+
         if self.driver.lower() not in SSL_DIALECTS:
-            return {}
+            return args
 
         if self.ssl_mode == "disable":
-            return {"ssl": False}
+            args["ssl"] = False
+        else:
+            args["ssl"] = convert_ssl_mode(self.ssl_mode)
 
-        return {"ssl": convert_ssl_mode(self.ssl_mode)}
+        return args
 
     def to_sqlalchemy_engine_kwargs(self) -> Dict[str, Any]:
         """Build engine keyword arguments (pool, echo, etc.)."""

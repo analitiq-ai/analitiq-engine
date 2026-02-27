@@ -212,6 +212,7 @@ class TestDatabaseConnectionParamsConnectArgs:
         )
         args = params.to_sqlalchemy_connect_args()
         assert "ssl" in args
+        assert args["command_timeout"] == 300
 
     def test_ssl_disable(self):
         """Test ssl_mode=disable returns ssl=False."""
@@ -226,6 +227,22 @@ class TestDatabaseConnectionParamsConnectArgs:
         )
         args = params.to_sqlalchemy_connect_args()
         assert args["ssl"] is False
+        assert args["command_timeout"] == 300
+
+    def test_command_timeout_forwarded(self):
+        """Test command_timeout is included in connect_args for PostgreSQL."""
+        params = DatabaseConnectionParams(
+            driver="postgresql",
+            host="localhost",
+            port=5432,
+            username="user",
+            password="pass",
+            database="db",
+            ssl_mode="prefer",
+            command_timeout=60,
+        )
+        args = params.to_sqlalchemy_connect_args()
+        assert args["command_timeout"] == 60
 
     def test_sqlite_empty_connect_args(self):
         """Test SQLite returns empty connect_args."""
