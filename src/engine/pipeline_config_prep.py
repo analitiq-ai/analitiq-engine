@@ -36,7 +36,6 @@ Loading Flow:
 import json
 import logging
 import os
-import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -362,66 +361,6 @@ class PipelineConfigPrep:
     # =========================================================================
     # Local File Loading Methods
     # =========================================================================
-
-    def _load_local_json(
-        self,
-        file_path: str,
-        expand_env_vars: bool = False,
-        strict_expansion: bool = False
-    ) -> Dict[str, Any]:
-        """
-        Load JSON from local filesystem.
-
-        Args:
-            file_path: Path to JSON file
-            expand_env_vars: Whether to expand ${VAR} placeholders
-            strict_expansion: If True, raise error on missing env vars; if False, keep placeholders
-        """
-        path = Path(file_path)
-        if not path.exists():
-            raise FileNotFoundError(f"Configuration file not found: {file_path}")
-
-        try:
-            with open(path, "r") as f:
-                config = json.load(f)
-
-            if expand_env_vars:
-                config = self._expand_env_vars_in_config(config, strict=strict_expansion)
-
-            return config
-
-        except json.JSONDecodeError as e:
-            raise ValueError(f"Invalid JSON in file {file_path}: {e}")
-
-    def _expand_env_vars_in_config(self, config: Any, strict: bool = False) -> Any:
-        """
-        Expand ${VAR} placeholders in config using environment variables.
-
-        Args:
-            config: Configuration value (dict, list, str, or primitive)
-            strict: If True, raise error on missing vars; if False, keep placeholders
-        """
-        pattern = re.compile(r"\$\{([^}]+)\}")
-
-        def expand_value(value: Any) -> Any:
-            if isinstance(value, str):
-                def replace_match(match: re.Match) -> str:
-                    var_name = match.group(1)
-                    env_value = os.environ.get(var_name)
-                    if env_value is not None:
-                        return env_value
-                    elif strict:
-                        raise EnvironmentError(f"Missing required environment variable: {var_name}")
-                    else:
-                        return match.group(0)  # Keep placeholder
-                return pattern.sub(replace_match, value)
-            elif isinstance(value, dict):
-                return {k: expand_value(v) for k, v in value.items()}
-            elif isinstance(value, list):
-                return [expand_value(item) for item in value]
-            return value
-
-        return expand_value(config)
 
     def _load_local_pipeline(self) -> Dict[str, Any]:
         """Load pipeline configuration from consolidated file."""

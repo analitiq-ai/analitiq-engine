@@ -324,53 +324,6 @@ class TestPipelineConfigPrepLocal:
 
             assert "Pipelines directory not found" in str(exc_info.value)
 
-    def test_load_local_json_success(self, temp_config_dir, mock_analitiq_config):
-        """Test successful local JSON loading."""
-        settings = PipelineConfigPrepSettings(
-            env="local",
-            pipeline_id="test-pipeline"
-        )
-        prep = PipelineConfigPrep(settings)
-
-        test_config = {"test": "value", "nested": {"key": "value"}}
-        test_file = Path(temp_config_dir, "test.json")
-        with open(test_file, "w") as f:
-            json.dump(test_config, f)
-
-        result = prep._load_local_json(str(test_file))
-        assert result == test_config
-
-    def test_load_local_json_file_not_found(self, temp_config_dir, mock_analitiq_config):
-        """Test local JSON loading with missing file."""
-        settings = PipelineConfigPrepSettings(
-            env="local",
-            pipeline_id="test-pipeline"
-        )
-        prep = PipelineConfigPrep(settings)
-
-        with pytest.raises(FileNotFoundError) as exc_info:
-            prep._load_local_json("/nonexistent/file.json")
-
-        assert "Configuration file not found" in str(exc_info.value)
-
-    def test_load_local_json_invalid_json(self, temp_config_dir, mock_analitiq_config):
-        """Test local JSON loading with invalid JSON."""
-        settings = PipelineConfigPrepSettings(
-            env="local",
-            pipeline_id="test-pipeline"
-        )
-        prep = PipelineConfigPrep(settings)
-
-        test_file = Path(temp_config_dir, "invalid.json")
-        with open(test_file, "w") as f:
-            f.write("{ invalid json content")
-
-        with pytest.raises(ValueError) as exc_info:
-            prep._load_local_json(str(test_file))
-
-        assert "Invalid JSON" in str(exc_info.value)
-
-
 class TestConfigurationLoading:
     """Test configuration loading functionality with consolidated file format."""
 
