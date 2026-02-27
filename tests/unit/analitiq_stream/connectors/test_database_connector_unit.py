@@ -6,11 +6,9 @@ from typing import Any, Dict, List
 
 from src.source.connectors.database import (
     DatabaseConnector,
-    DatabaseConfig,
     EndpointConfig,
-    ConfigureConfig
 )
-from src.source.connectors.base import ConnectionError, ReadError, WriteError
+from src.source.connectors.base import ConnectionError, ReadError
 
 
 @pytest.fixture
@@ -46,17 +44,6 @@ def endpoint_config():
             "action": "update",
             "update_columns": ["email", "created_at"]
         },
-        "configure": {
-            "auto_create_schema": True,
-            "auto_create_table": True,
-            "auto_create_indexes": [
-                {
-                    "name": "idx_email",
-                    "columns": ["email"],
-                    "type": "btree"
-                }
-            ]
-        }
     }
 
 
@@ -75,77 +62,6 @@ def mock_state_manager():
     return state_manager
 
 
-class TestDatabaseConfig:
-    """Test DatabaseConfig Pydantic model."""
-
-    def test_valid_config(self, database_config):
-        """Test valid database configuration."""
-        config = DatabaseConfig(**database_config)
-        assert config.driver == "postgresql"
-        assert config.host == "localhost"
-        assert config.port == 5432
-        assert config.database == "test_db"
-        assert config.username == "test_user"
-        assert config.password == "test_password"
-
-    def test_missing_required_fields(self):
-        """Test validation with missing required fields."""
-        with pytest.raises(Exception):  # ValidationError from Pydantic
-            DatabaseConfig(driver="postgresql")
-
-    def test_extra_fields_allowed(self, database_config):
-        """Test that extra fields are allowed."""
-        database_config["ssl_mode"] = "prefer"
-        database_config["custom_param"] = "value"
-        config = DatabaseConfig(**database_config)
-        assert config.driver == "postgresql"
-
-    def test_database_config_extra_fields(self):
-        """Test that DatabaseConfig allows extra fields."""
-        config_data = {
-            "driver": "postgresql",
-            "host": "localhost",
-            "port": 5432,
-            "database": "test",
-            "username": "test",
-            "password": "test",
-            # Extra fields should be allowed
-            "ssl_mode": "require",
-            "connection_timeout": 30,
-            "pool_size": 5
-        }
-
-        config = DatabaseConfig(**config_data)
-        assert config.driver == "postgresql"
-
-
-class TestConfigureConfig:
-    """Test ConfigureConfig Pydantic model."""
-
-    def test_default_values(self):
-        """Test default configuration values."""
-        config = ConfigureConfig()
-        assert config.auto_create_schema is False
-        assert config.auto_create_table is False
-        assert config.auto_create_indexes == []
-
-    def test_custom_values(self):
-        """Test custom configuration values."""
-        config = ConfigureConfig(
-            auto_create_schema=True,
-            auto_create_table=True,
-            auto_create_indexes=[{"name": "idx_test", "columns": ["test_col"]}]
-        )
-        assert config.auto_create_schema is True
-        assert config.auto_create_table is True
-        assert len(config.auto_create_indexes) == 1
-
-    def test_extra_fields_forbidden(self):
-        """Test that extra fields are forbidden."""
-        with pytest.raises(Exception):  # ValidationError from Pydantic
-            ConfigureConfig(invalid_field="value")
-
-
 class TestEndpointConfig:
     """Test EndpointConfig Pydantic model."""
 
@@ -158,7 +74,6 @@ class TestEndpointConfig:
         assert config.endpoint_schema == {}
         assert config.write_mode == "insert"
         assert config.conflict_resolution == {}
-        assert config.configure is None
 
     def test_full_configuration(self, endpoint_config):
         """Test full endpoint configuration."""
@@ -167,16 +82,13 @@ class TestEndpointConfig:
         assert config.primary_key == ["id"]
         assert config.unique_constraints == ["email"]
         assert config.write_mode == "upsert"
-        assert config.configure.auto_create_schema is True
 
     def test_endpoint_config_extra_fields(self):
         """Test that EndpointConfig allows extra fields."""
         config_data = {
             "endpoint": "public/test_table",
-            # Extra field should be allowed
             "custom_setting": "value"
         }
-
         config = EndpointConfig(**config_data)
         assert config.endpoint == "public/test_table"
 
@@ -188,7 +100,8 @@ class TestDatabaseConnectorInit:
         """Test connector initialization."""
         connector = DatabaseConnector("TestConnector")
         assert connector.name == "TestConnector"
-        assert connector.driver is None
+        assert connector._engine is None
+        assert connector._driver == ""
         assert connector.table_info_cache == {}
         assert connector._initialized is False
         assert connector.is_connected is False
@@ -200,34 +113,27 @@ class TestDatabaseConnectorConnection:
     @pytest.mark.asyncio
     async def test_connect_success(self, connector, database_config):
         """Test successful database connection."""
-        mock_driver = AsyncMock()
-        mock_driver.name = "PostgreSQL"
+        mock_engine = AsyncMock()
 
-        with patch('src.source.connectors.database.DriverFactory.create_driver') as mock_factory:
-            mock_factory.return_value = mock_driver
-
+        with patch(
+            'src.source.connectors.database.create_database_engine',
+            return_value=(mock_engine, "postgresql"),
+        ) as mock_create:
             await connector.connect(database_config)
 
-            mock_factory.assert_called_once_with("postgresql")
-            mock_driver.create_connection_pool.assert_called_once_with(database_config)
+            mock_create.assert_called_once_with(database_config, require_port=True)
             assert connector.is_connected is True
             assert connector._initialized is True
-            assert connector.driver == mock_driver
+            assert connector._engine is mock_engine
+            assert connector._driver == "postgresql"
 
     @pytest.mark.asyncio
-    async def test_connect_validation_error(self, connector):
-        """Test connection with invalid configuration."""
-        invalid_config = {"driver": "postgresql"}  # Missing required fields
-
-        with pytest.raises(ConnectionError):
-            await connector.connect(invalid_config)
-
-    @pytest.mark.asyncio
-    async def test_connect_driver_error(self, connector, database_config):
-        """Test connection failure at driver level."""
-        with patch('src.source.connectors.database.DriverFactory.create_driver') as mock_factory:
-            mock_factory.side_effect = Exception("Driver creation failed")
-
+    async def test_connect_engine_error(self, connector, database_config):
+        """Test connection failure at engine level."""
+        with patch(
+            'src.source.connectors.database.create_database_engine',
+            side_effect=Exception("Engine creation failed"),
+        ):
             with pytest.raises(ConnectionError) as exc_info:
                 await connector.connect(database_config)
 
@@ -238,59 +144,28 @@ class TestDatabaseConnectorConnection:
     @pytest.mark.asyncio
     async def test_disconnect(self, connector):
         """Test database disconnection."""
-        mock_driver = AsyncMock()
-        connector.driver = mock_driver
+        mock_engine = AsyncMock()
+        connector._engine = mock_engine
         connector.is_connected = True
         connector._initialized = True
 
         await connector.disconnect()
 
-        mock_driver.close_connection_pool.assert_called_once()
+        mock_engine.dispose.assert_awaited_once()
+        assert connector._engine is None
         assert connector.is_connected is False
         assert connector._initialized is False
 
-
-class TestDatabaseConnectorConfigure:
-    """Test DatabaseConnector configure method."""
-
     @pytest.mark.asyncio
-    async def test_configure_success(self, connector, endpoint_config):
-        """Test successful database configuration."""
-        mock_driver = AsyncMock()
-        connector.driver = mock_driver
+    async def test_disconnect_no_engine(self, connector):
+        """Test disconnect when engine is None."""
+        connector.is_connected = True
         connector._initialized = True
 
-        await connector.configure(endpoint_config)
+        await connector.disconnect()
 
-        mock_driver.create_schema_if_not_exists.assert_called_once_with("test_schema")
-        mock_driver.create_table_if_not_exists.assert_called_once()
-        mock_driver.create_indexes_if_not_exist.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_configure_no_configure_section(self, connector):
-        """Test configuration without configure section."""
-        config = {"endpoint": "test_schema/test_table"}
-        connector._initialized = True
-
-        await connector.configure(config)
-        # Should complete without errors, just log that no config section found
-
-    @pytest.mark.asyncio
-    async def test_configure_not_initialized(self, connector, endpoint_config):
-        """Test configuration without initialization."""
-        with pytest.raises(RuntimeError) as exc_info:
-            await connector.configure(endpoint_config)
-
-        assert "not initialized" in str(exc_info.value)
-
-    @pytest.mark.asyncio
-    async def test_configure_validation_error(self, connector):
-        """Test configuration with invalid endpoint config."""
-        invalid_config = {}  # Missing required table field
-        connector._initialized = True
-
-        with pytest.raises(ConnectionError):
-            await connector.configure(invalid_config)
+        assert connector.is_connected is False
+        assert connector._initialized is False
 
 
 class TestDatabaseConnectorReadBatches:
@@ -299,31 +174,46 @@ class TestDatabaseConnectorReadBatches:
     @pytest.mark.asyncio
     async def test_read_batches_success(self, connector, endpoint_config, mock_state_manager):
         """Test successful batch reading."""
-        mock_driver = MagicMock()
-        mock_connection = AsyncMock()
-        mock_pool = MagicMock()
-        mock_pool.acquire.return_value.__aenter__.return_value = mock_connection
+        mock_engine = AsyncMock()
+        mock_conn = AsyncMock()
 
-        connector.driver = mock_driver
+        # Mock result rows
+        mock_row1 = MagicMock()
+        mock_row1._mapping = {"id": 1, "name": "test1"}
+        mock_row2 = MagicMock()
+        mock_row2._mapping = {"id": 2, "name": "test2"}
+        mock_result_batch1 = MagicMock()
+        mock_result_batch1.__iter__ = lambda self: iter([mock_row1, mock_row2])
+        mock_result_empty = MagicMock()
+        mock_result_empty.__iter__ = lambda self: iter([])
+
+        mock_conn.exec_driver_sql = AsyncMock(
+            side_effect=[mock_result_batch1, mock_result_empty]
+        )
+
+        connector._engine = mock_engine
         connector._initialized = True
-        mock_driver.connection_pool = mock_pool
-        mock_driver.build_incremental_query.return_value = ("SELECT * FROM test", [])
+        connector._driver = "postgresql"
 
-        # Mock query results - first batch with data, second batch empty
-        mock_driver.execute_query = AsyncMock()
-        mock_driver.execute_query.side_effect = [
-            [{"id": 1, "name": "test1"}, {"id": 2, "name": "test2"}],
-            []  # Empty result to end iteration
-        ]
-
-        batches = []
-        async for batch in connector.read_batches(
-            endpoint_config,
-            state_manager=mock_state_manager,
-            stream_name="test_stream",
-            batch_size=2
+        with patch(
+            'src.source.connectors.database.acquire_connection',
+        ) as mock_acquire, patch(
+            'src.source.connectors.database.build_select_query',
+            return_value=("SELECT * FROM test", []),
         ):
-            batches.append(batch)
+            mock_acm = AsyncMock()
+            mock_acm.__aenter__.return_value = mock_conn
+            mock_acm.__aexit__.return_value = False
+            mock_acquire.return_value = mock_acm
+
+            batches = []
+            async for batch in connector.read_batches(
+                endpoint_config,
+                state_manager=mock_state_manager,
+                stream_name="test_stream",
+                batch_size=2
+            ):
+                batches.append(batch)
 
         assert len(batches) == 1
         assert len(batches[0]) == 2
@@ -346,184 +236,79 @@ class TestDatabaseConnectorReadBatches:
 
     @pytest.mark.asyncio
     async def test_read_batches_error(self, connector, endpoint_config, mock_state_manager):
-        """Test read batches with database error."""
-        mock_driver = AsyncMock()
-        connector.driver = mock_driver
+        """Test read batches with query build error."""
+        connector._engine = AsyncMock()
         connector._initialized = True
-        mock_driver.build_incremental_query.side_effect = Exception("Query build failed")
+        connector._driver = "postgresql"
 
-        with pytest.raises(ReadError) as exc_info:
-            async for batch in connector.read_batches(
-                endpoint_config,
-                state_manager=mock_state_manager,
-                stream_name="test_stream"
-            ):
-                pass
+        with patch(
+            'src.source.connectors.database.build_select_query',
+            side_effect=Exception("Query build failed"),
+        ):
+            with pytest.raises(ReadError) as exc_info:
+                async for batch in connector.read_batches(
+                    endpoint_config,
+                    state_manager=mock_state_manager,
+                    stream_name="test_stream"
+                ):
+                    pass
 
-        assert "Database read failed" in str(exc_info.value)
-        assert connector.metrics["errors"] == 1
+            assert "Database read failed" in str(exc_info.value)
+            assert connector.metrics["errors"] == 1
 
     @pytest.mark.asyncio
     async def test_read_batches_pagination_edge_case(self, connector, endpoint_config, mock_state_manager):
         """Test read_batches pagination with different result sizes."""
-        mock_driver = MagicMock()
-        mock_connection = AsyncMock()
-        mock_pool = MagicMock()
-        mock_pool.acquire.return_value.__aenter__.return_value = mock_connection
+        mock_engine = AsyncMock()
+        mock_conn = AsyncMock()
 
-        connector.driver = mock_driver
+        # Batch 1: exactly batch_size records
+        row1 = MagicMock(); row1._mapping = {"id": 1}
+        row2 = MagicMock(); row2._mapping = {"id": 2}
+        result1 = MagicMock(); result1.__iter__ = lambda self: iter([row1, row2])
+
+        # Batch 2: fewer than batch_size
+        row3 = MagicMock(); row3._mapping = {"id": 3}
+        result2 = MagicMock(); result2.__iter__ = lambda self: iter([row3])
+
+        mock_conn.exec_driver_sql = AsyncMock(side_effect=[result1, result2])
+
+        connector._engine = mock_engine
         connector._initialized = True
-        mock_driver.connection_pool = mock_pool
-        mock_driver.build_incremental_query.return_value = ("SELECT * FROM test", [])
+        connector._driver = "postgresql"
 
-        # Return exactly batch_size records, then fewer, then empty
-        mock_driver.execute_query = AsyncMock()
-        mock_driver.execute_query.side_effect = [
-            [{"id": 1}, {"id": 2}],
-            [{"id": 3}],  # Fewer than batch_size
-            []  # Empty
-        ]
-
-        batches = []
-        async for batch in connector.read_batches(
-            endpoint_config,
-            state_manager=mock_state_manager,
-            stream_name="test_stream",
-            batch_size=2
+        with patch(
+            'src.source.connectors.database.acquire_connection',
+        ) as mock_acquire, patch(
+            'src.source.connectors.database.build_select_query',
+            return_value=("SELECT * FROM test", []),
         ):
-            batches.append(batch)
+            mock_acm = AsyncMock()
+            mock_acm.__aenter__.return_value = mock_conn
+            mock_acm.__aexit__.return_value = False
+            mock_acquire.return_value = mock_acm
+
+            batches = []
+            async for batch in connector.read_batches(
+                endpoint_config,
+                state_manager=mock_state_manager,
+                stream_name="test_stream",
+                batch_size=2
+            ):
+                batches.append(batch)
 
         assert len(batches) == 2
         assert connector.metrics["records_read"] == 3
 
 
 class TestDatabaseConnectorWriteBatch:
-    """Test DatabaseConnector write_batch method."""
+    """Test DatabaseConnector write_batch raises NotImplementedError."""
 
     @pytest.mark.asyncio
-    async def test_write_batch_success_upsert(self, connector, endpoint_config):
-        """Test successful batch write with upsert."""
-        mock_driver = MagicMock()
-        mock_connection = AsyncMock()
-        mock_pool = MagicMock()
-        mock_pool.acquire.return_value.__aenter__.return_value = mock_connection
-
-        connector.driver = mock_driver
-        connector._initialized = True
-        mock_driver.connection_pool = mock_pool
-        mock_driver.execute_upsert = AsyncMock()
-
-        batch = [{"id": 1, "name": "test1"}, {"id": 2, "name": "test2"}]
-
-        await connector.write_batch(batch, endpoint_config)
-
-        mock_driver.execute_upsert.assert_called_once()
-        assert connector.metrics["records_written"] == 2
-        assert connector.metrics["batches_written"] == 1
-
-    @pytest.mark.asyncio
-    async def test_write_batch_success_insert(self, connector, endpoint_config):
-        """Test successful batch write with insert."""
-        endpoint_config["write_mode"] = "insert"
-
-        mock_driver = MagicMock()
-        mock_connection = AsyncMock()
-        mock_pool = MagicMock()
-        mock_pool.acquire.return_value.__aenter__.return_value = mock_connection
-
-        connector.driver = mock_driver
-        connector._initialized = True
-        mock_driver.connection_pool = mock_pool
-        mock_driver.execute_insert = AsyncMock()
-
-        batch = [{"id": 1, "name": "test1"}]
-
-        await connector.write_batch(batch, endpoint_config)
-
-        mock_driver.execute_insert.assert_called_once()
-        assert connector.metrics["records_written"] == 1
-
-    @pytest.mark.asyncio
-    async def test_write_batch_empty(self, connector, endpoint_config):
-        """Test write batch with empty batch."""
-        connector._initialized = True
-
-        # Empty batch should not raise an error
-        await connector.write_batch([], endpoint_config)
-        assert connector.metrics["records_written"] == 0
-
-    @pytest.mark.asyncio
-    async def test_write_batch_not_initialized(self, connector, endpoint_config):
-        """Test write batch without initialization."""
-        with pytest.raises(RuntimeError) as exc_info:
-            await connector.write_batch([{"id": 1}], endpoint_config)
-
-        assert "not initialized" in str(exc_info.value)
-
-    @pytest.mark.asyncio
-    async def test_write_batch_error(self, connector, endpoint_config):
-        """Test write batch with database error."""
-        mock_driver = MagicMock()
-        mock_connection = AsyncMock()
-        mock_pool = MagicMock()
-        mock_pool.acquire.return_value.__aenter__.return_value = mock_connection
-
-        connector.driver = mock_driver
-        connector._initialized = True
-        mock_driver.connection_pool = mock_pool
-        mock_driver.execute_upsert = AsyncMock(side_effect=Exception("DB error"))
-
-        with pytest.raises(WriteError) as exc_info:
-            await connector.write_batch([{"id": 1}], endpoint_config)
-
-        assert "Database write failed" in str(exc_info.value)
-        assert connector.metrics["errors"] == 1
-
-
-class TestDatabaseConnectorCapabilities:
-    """Test DatabaseConnector capability methods."""
-
-    def test_supports_incremental_read(self, connector):
-        """Test incremental read support."""
-        mock_driver = MagicMock()
-        mock_driver.supports_incremental = True
-        connector.driver = mock_driver
-
-        assert connector.supports_incremental_read() is True
-
-    def test_supports_upsert(self, connector):
-        """Test upsert support."""
-        mock_driver = MagicMock()
-        mock_driver.supports_upsert = True
-        connector.driver = mock_driver
-
-        assert connector.supports_upsert() is True
-
-    def test_supports_schema_evolution(self, connector):
-        """Test schema evolution support."""
-        mock_driver = MagicMock()
-        mock_driver.supports_schema_evolution = True
-        connector.driver = mock_driver
-
-        assert connector.supports_schema_evolution() is True
-
-    @pytest.mark.asyncio
-    async def test_evolve_schema_not_initialized(self, connector):
-        """Test evolve schema without initialization."""
-        with pytest.raises(RuntimeError) as exc_info:
-            await connector.evolve_schema({}, {})
-
-        assert "not initialized" in str(exc_info.value)
-
-    @pytest.mark.asyncio
-    async def test_evolve_schema_initialized(self, connector):
-        """Test evolve schema with initialization."""
-        mock_driver = AsyncMock()
-        connector.driver = mock_driver
-        connector._initialized = True
-
-        # Should not raise an error when initialized
-        await connector.evolve_schema({"table": "test"}, {"new_column": {"type": "string"}})
+    async def test_write_batch_raises(self, connector):
+        """Source connector write_batch should raise NotImplementedError."""
+        with pytest.raises(NotImplementedError, match="read-only"):
+            await connector.write_batch([{"id": 1}], {})
 
 
 class TestDatabaseConnectorContextManager:
@@ -532,12 +317,12 @@ class TestDatabaseConnectorContextManager:
     @pytest.mark.asyncio
     async def test_context_manager_usage(self, database_config):
         """Test connector as context manager."""
-        mock_driver = AsyncMock()
-        mock_driver.name = "PostgreSQL"
+        mock_engine = AsyncMock()
 
-        with patch('src.source.connectors.database.DriverFactory.create_driver') as mock_factory:
-            mock_factory.return_value = mock_driver
-
+        with patch(
+            'src.source.connectors.database.create_database_engine',
+            return_value=(mock_engine, "postgresql"),
+        ):
             connector = DatabaseConnector("ContextTestConnector")
             await connector.connect(database_config)
 
@@ -545,7 +330,7 @@ class TestDatabaseConnectorContextManager:
 
             await connector.disconnect()
 
-            mock_driver.close_connection_pool.assert_called_once()
+            mock_engine.dispose.assert_awaited_once()
 
 
 class TestDatabaseConnectorImports:
@@ -555,12 +340,27 @@ class TestDatabaseConnectorImports:
         """Test importing DatabaseConnector and related components."""
         from src.source.connectors.database import (
             DatabaseConnector,
-            DatabaseConfig,
             EndpointConfig,
-            ConfigureConfig
         )
 
         assert DatabaseConnector is not None
-        assert DatabaseConfig is not None
         assert EndpointConfig is not None
-        assert ConfigureConfig is not None
+
+
+class TestParseEndpoint:
+    """Test _parse_endpoint method."""
+
+    def test_schema_slash_table(self, connector):
+        schema, table = connector._parse_endpoint("myschema/mytable")
+        assert schema == "myschema"
+        assert table == "mytable"
+
+    def test_table_only(self, connector):
+        schema, table = connector._parse_endpoint("mytable")
+        assert schema == "public"
+        assert table == "mytable"
+
+    def test_empty_schema_part(self, connector):
+        schema, table = connector._parse_endpoint("/mytable")
+        assert schema == "public"
+        assert table == "mytable"

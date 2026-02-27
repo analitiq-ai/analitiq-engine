@@ -3,113 +3,38 @@
 import ssl
 import pytest
 from datetime import datetime, timezone
-from decimal import Decimal
-from unittest.mock import MagicMock
 
-from src.shared.database_utils import is_ssl_handshake_error
-
-from src.source.drivers.utils import (
-    convert_python_to_db,
+from src.shared.database_utils import (
+    is_ssl_handshake_error,
     convert_db_to_python,
-    convert_record_for_db,
     convert_record_from_db,
-    extract_values_for_columns,
-    validate_datetime_conversion
 )
 
 
-class TestDatabaseTypeConversion:
-    """Test database type conversion utilities."""
+class TestConvertDbToPython:
+    """Test convert_db_to_python utility."""
 
-    def test_convert_datetime_strings_to_db(self):
-        """Test converting datetime strings to database-compatible datetime objects."""
-        # ISO format with Z timezone
-        iso_z = "2025-01-15T10:00:00Z"
-        result = convert_python_to_db(iso_z, "TIMESTAMPTZ")
-        assert isinstance(result, datetime)
-        assert result.year == 2025
-        assert result.month == 1
-        assert result.day == 15
-        assert result.hour == 10
+    def test_none_value(self):
+        assert convert_db_to_python(None) is None
 
-        # ISO format with timezone offset
-        iso_offset = "2025-01-15T10:00:00+01:00"
-        result = convert_python_to_db(iso_offset, "TIMESTAMPTZ")
-        assert isinstance(result, datetime)
-
-        # ISO format without timezone
-        iso_simple = "2025-01-15T10:00:00"
-        result = convert_python_to_db(iso_simple, "TIMESTAMP")
-        assert isinstance(result, datetime)
-
-    def test_convert_datetime_objects_from_db(self):
-        """Test converting datetime objects to ISO strings."""
+    def test_datetime_to_iso_string(self):
         dt = datetime(2025, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
         result = convert_db_to_python(dt)
         assert isinstance(result, str)
         assert result.startswith("2025-01-15T10:00:00")
 
-    def test_convert_json_data_to_db(self):
-        """Test converting dict/list to JSON strings."""
-        # Dictionary
-        data_dict = {"key": "value", "number": 42}
-        result = convert_python_to_db(data_dict, "JSONB")
-        assert isinstance(result, str)
-        assert '"key":"value"' in result.replace(" ", "")
+    def test_regular_values_passthrough(self):
+        assert convert_db_to_python(42) == 42
+        assert convert_db_to_python("hello") == "hello"
+        assert convert_db_to_python(True) is True
+        assert convert_db_to_python(3.14) == 3.14
+        assert convert_db_to_python("") == ""
 
-        # List
-        data_list = ["item1", "item2", 123]
-        result = convert_python_to_db(data_list, "JSONB")
-        assert isinstance(result, str)
-        assert "item1" in result
 
-    def test_convert_none_values(self):
-        """Test handling None values."""
-        assert convert_python_to_db(None, "TEXT") is None
-        assert convert_db_to_python(None) is None
+class TestConvertRecordFromDb:
+    """Test convert_record_from_db utility."""
 
-    def test_convert_regular_values(self):
-        """Test that regular values pass through unchanged."""
-        # Strings that are not datetime-like
-        regular_string = "just a string"
-        assert convert_python_to_db(regular_string, "TEXT") == regular_string
-
-        # Numbers
-        assert convert_python_to_db(42, "INTEGER") == 42
-        assert convert_python_to_db(3.14, "DECIMAL") == 3.14
-
-        # Booleans
-        assert convert_python_to_db(True, "BOOLEAN") is True
-        assert convert_python_to_db(False, "BOOLEAN") is False
-
-    def test_convert_record_for_db(self):
-        """Test converting entire records for database writing."""
-        record = {
-            "id": 1,
-            "name": "Test User",
-            "created_at": "2025-01-15T10:00:00Z",
-            "metadata": {"key": "value"},
-            "is_active": True
-        }
-
-        column_types = {
-            "id": "INTEGER",
-            "name": "TEXT",
-            "created_at": "TIMESTAMPTZ",
-            "metadata": "JSONB",
-            "is_active": "BOOLEAN"
-        }
-
-        result = convert_record_for_db(record, column_types)
-
-        assert result["id"] == 1
-        assert result["name"] == "Test User"
-        assert isinstance(result["created_at"], datetime)
-        assert isinstance(result["metadata"], str)  # JSON string
-        assert result["is_active"] is True
-
-    def test_convert_record_from_db(self):
-        """Test converting records from database reading."""
+    def test_converts_datetime_fields(self):
         dt = datetime(2025, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
         record = {
             "id": 1,
@@ -117,73 +42,14 @@ class TestDatabaseTypeConversion:
             "created_at": dt,
             "is_active": True
         }
-
         result = convert_record_from_db(record)
-
         assert result["id"] == 1
         assert result["name"] == "Test User"
-        assert isinstance(result["created_at"], str)  # ISO string
+        assert isinstance(result["created_at"], str)
         assert result["is_active"] is True
 
-    def test_extract_values_for_columns(self):
-        """Test extracting values in column order with conversion."""
-        record = {
-            "name": "Test User",
-            "id": 1,
-            "created_at": "2025-01-15T10:00:00Z",
-            "metadata": {"key": "value"}
-        }
-        columns = ["id", "name", "created_at", "metadata"]
-        column_types = {
-            "id": "INTEGER",
-            "name": "TEXT",
-            "created_at": "TIMESTAMPTZ",
-            "metadata": "JSONB"
-        }
-
-        values = extract_values_for_columns(record, columns, column_types)
-
-        assert len(values) == 4
-        assert values[0] == 1  # id
-        assert values[1] == "Test User"  # name
-        assert isinstance(values[2], datetime)  # created_at converted
-        assert isinstance(values[3], str)  # metadata as JSON string
-
-    def test_validate_datetime_conversion(self):
-        """Test datetime string validation."""
-        # Valid datetime strings
-        assert validate_datetime_conversion("2025-01-15T10:00:00Z") is True
-        assert validate_datetime_conversion("2025-01-15T10:00:00+01:00") is True
-        assert validate_datetime_conversion("2025-01-15 10:00:00") is True
-
-        # Invalid datetime strings
-        assert validate_datetime_conversion("just text") is False
-        assert validate_datetime_conversion("2025") is False
-        assert validate_datetime_conversion("") is False
-        assert validate_datetime_conversion(None) is False
-        assert validate_datetime_conversion(123) is False
-
-    def test_edge_cases(self):
-        """Test edge cases and error handling."""
-        # Invalid datetime string should return as-is for non-timestamp columns
-        invalid_dt = "not-a-datetime-2025-01-15"
-        result = convert_python_to_db(invalid_dt, "TEXT")
-        assert result == invalid_dt
-
-        # Short strings should not be processed as datetime
-        short_string = "2025"
-        result = convert_python_to_db(short_string, "TEXT")
-        assert result == short_string
-
-        # Empty values
-        assert convert_python_to_db("", "TEXT") == ""
-        assert convert_db_to_python("") == ""
-
-    def test_preserve_existing_datetime_objects(self):
-        """Test that existing datetime objects are preserved."""
-        dt = datetime(2025, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
-        result = convert_python_to_db(dt, "TIMESTAMPTZ")
-        assert result is dt  # Should be the same object
+    def test_empty_record(self):
+        assert convert_record_from_db({}) == {}
 
 
 class TestIsSSLHandshakeError:

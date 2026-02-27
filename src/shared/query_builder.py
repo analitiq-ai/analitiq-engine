@@ -86,7 +86,7 @@ def _get_sqlalchemy_dialect(dialect: str) -> SADialect:
 
     if dialect_lower in ("postgresql", "postgres"):
         return postgresql.dialect()
-    elif dialect_lower == "mysql":
+    elif dialect_lower in ("mysql", "mariadb"):
         return mysql.dialect()
     else:
         raise ValueError(f"Unsupported dialect: {dialect}")

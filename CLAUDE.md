@@ -193,7 +193,7 @@ Connectors define the type and metadata for each integration. The `connector_typ
 
 ### Connection Credentials
 
-Connections reference a connector via `connector_id` and contain credentials. Credentials support `${VAR_NAME}` syntax for environment variable expansion.
+Connections reference a connector via `connector_id` and contain credentials. Credentials use `${VAR_NAME}` placeholder syntax. Placeholders are expanded at connection time from secrets files (`.secrets/{connection_id}.json`). Missing placeholders raise `PlaceholderExpansionError`. See `docs/CREDENTIALS_GUIDE.md`.
 
 **Database connection:**
 ```json
@@ -406,3 +406,4 @@ docker build -t analitiq-stream . && docker push $AWS_ACCOUNT_ID.dkr.ecr.eu-cent
 - Deterministic behavior, idempotent writes, safe retries
 - Update README.md when modifying documented functionality
 - DO NOT ADD LEGACY SUPPORT OR BACKWARD COMPATIBILITY, UNLESS EXPLICITLY INSTRUCTED!
+- Use @codex-plan-reviewer agent to review plans before presenting them to me for execution.

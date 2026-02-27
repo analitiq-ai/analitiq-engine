@@ -82,6 +82,9 @@ class ConnectionConfig:
         """
         Resolve all ${placeholder} values just-in-time.
 
+        If the raw config contains no placeholders, returns it as-is
+        without calling the secrets resolver.
+
         Returns:
             Fully resolved configuration dictionary
 
@@ -90,6 +93,12 @@ class ConnectionConfig:
             PlaceholderExpansionError: If a placeholder cannot be expanded
         """
         if self._resolved_config is not None:
+            return self._resolved_config
+
+        # Short-circuit: no placeholders means no secrets to fetch
+        if not self.has_placeholders():
+            self._resolved_config = self._raw_config.copy()
+            logger.debug(f"No placeholders in connection {self._connection_id}, skipping secret resolution")
             return self._resolved_config
 
         # Fetch secrets from resolver

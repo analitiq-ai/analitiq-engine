@@ -1,290 +1,136 @@
-# Credentials Management Guide
+# Secrets and Credential Expansion
 
-The Analitiq Stream framework now supports external credentials files for secure authentication, separating sensitive credentials from pipeline configuration.
+Analitiq Stream uses a `${placeholder}` pattern to keep credentials out of pipeline configuration files. Connection configs contain placeholders like `${password}`, and actual secret values live in separate JSON files that are merged at connection time.
 
-## Overview
+## How It Works
 
-### Benefits
-- **Security**: Credentials are stored separately from configuration files
-- **Environment Variables**: Support for `${VAR_NAME}` syntax for sensitive values
-- **Flexibility**: Different credentials for different environments
-- **Validation**: Built-in validation for database and API credentials
-- **Templates**: Easy generation of credential file templates
+### 1. Connection config has placeholders
 
-### Architecture
-- **CredentialsManager**: Core class for loading and validating credentials
-- **Pipeline Integration**: Seamless integration with existing pipeline configurations
-- **Environment Expansion**: Automatic expansion of environment variables at runtime
+In the consolidated pipeline file (`pipelines/{pipeline_id}.json`), connections contain `${placeholder}` values instead of real credentials:
 
-## Usage
-
-### Basic Usage
-
-```python
-import json
-from src import Pipeline
-
-# Load modular configuration files
-with open("pipeline_config.json") as f:
-    pipeline_config = json.load(f)
-with open("source_config.json") as f:
-    source_config = json.load(f)
-with open("destination_config.json") as f:
-    destination_config = json.load(f)
-
-# Create pipeline with external credentials
-pipeline = Pipeline(
-    pipeline_config=pipeline_config,
-    source_config=source_config,
-    destination_config=destination_config,
-    source_credentials_path="src_credentials.json",
-    destination_credentials_path="dst_credentials.json"
-)
-```
-
-### Credentials File Formats
-
-#### Database Credentials (`src_credentials.json`)
 ```json
 {
-  "host": "localhost",
+  "connections": [
+    {
+      "connection_id": "prod-postgres",
+      "connector_id": "pg-connector",
+      "host": "${DB_HOST}",
+      "port": 5432,
+      "database": "${DB_NAME}",
+      "username": "${DB_USER}",
+      "password": "${DB_PASSWORD}"
+    }
+  ]
+}
+```
+
+### 2. Secrets file provides the values
+
+A matching secrets file at `.secrets/{connection_id}.json` contains a flat key-value dictionary:
+
+```json
+{
+  "DB_HOST": "db.example.com",
+  "DB_NAME": "analytics",
+  "DB_USER": "admin",
+  "DB_PASSWORD": "Example1234"
+}
+```
+
+The keys in the secrets file must match the placeholder names exactly. `${DB_PASSWORD}` in the config maps to `"DB_PASSWORD"` in the secrets file.
+
+### 3. Expansion happens at connection time
+
+Secrets are **not** expanded when the pipeline config is loaded. They are expanded lazily, just before a connection is established. This is handled by `ConnectionConfig.resolve()` in `src/secrets/config_wrapper.py`.
+
+The flow:
+
+1. `PipelineConfigPrep.create_config()` loads the pipeline and wraps each connection in a `ConnectionConfig` object (placeholders still intact)
+2. When a component needs to connect, it calls `await resolved_connection.resolve_config()`
+3. `ConnectionConfig.resolve()` fetches secrets via `SecretsResolver.resolve(connection_id)` and expands all `${placeholder}` values
+
+After expansion, the config becomes:
+
+```json
+{
+  "connection_id": "prod-postgres",
+  "connector_id": "pg-connector",
+  "host": "db.example.com",
   "port": 5432,
   "database": "analytics",
-  "user": "postgres",
-  "password": "${DB_PASSWORD}",
-  "driver": "postgresql",
-  "ssl_mode": "prefer",
-  "connection_timeout": 30,
-  "max_connections": 10,
-  "min_connections": 1
+  "username": "admin",
+  "password": "Example1234"
 }
 ```
 
-#### API Credentials (`dst_credentials.json`)
+### 4. Missing placeholders fail immediately
+
+If a `${placeholder}` has no matching key in the secrets file, a `PlaceholderExpansionError` is raised. The connection is never established with raw placeholders. There is no silent passthrough.
+
+## Secrets File Location
+
+Secrets files are located via the `secrets` path in `analitiq.yaml`:
+
+```yaml
+paths:
+  pipelines: "./pipelines"
+  secrets: "./.secrets"
+```
+
+The resolver searches for secrets in this order:
+
+1. `{secrets_dir}/{connection_id}.json`
+2. `{secrets_dir}/{connection_id}` (no extension)
+3. `{secrets_dir}/{client_id}/{connection_id}.json` (multi-tenant)
+4. `{secrets_dir}/{client_id}/{connection_id}` (multi-tenant, no extension)
+
+## Secrets File Format
+
+Each secrets file is a flat JSON object mapping placeholder names to values:
+
 ```json
 {
-  "base_url": "https://api.example.com",
-  "auth": {
-    "type": "bearer_token",
-    "token": "${API_TOKEN}"
-  },
+  "API_TOKEN": "bearer-token-here",
+  "API_SECRET": "secret-value"
+}
+```
+
+All values are converted to strings during expansion. Nested objects are not supported inside the secrets file itself, but `${placeholder}` values can appear anywhere in the connection config, including nested dicts and lists:
+
+```json
+{
   "headers": {
-    "Content-Type": "application/json",
-    "Accept": "application/json",
-    "User-Agent": "AnalitiqStream/1.0"
+    "Authorization": "Bearer ${API_TOKEN}",
+    "X-Custom": "${CUSTOM_HEADER}"
   },
-  "timeout": 30,
-  "max_connections": 10,
-  "rate_limit": {
-    "max_requests": 100,
-    "time_window": 60
-  }
+  "params": ["${PARAM_1}", "${PARAM_2}"]
 }
 ```
 
-**Note**: The `rate_limit` configuration should be defined in API credentials as it applies to the entire API connection rather than individual endpoints.
+## Cloud Mode
 
-### Authentication Types
+In `dev`/`prod` environments, `docker/config_fetcher.py` fetches secrets from AWS and writes them to the local secrets directory before the pipeline runs. `PipelineConfigPrep` then reads from the same local path regardless of environment.
 
-#### API Authentication
+## SecretsResolver Protocol
 
-**Bearer Token:**
-```json
-{
-  "auth": {
-    "type": "bearer_token",
-    "token": "${API_TOKEN}"
-  }
-}
-```
+Secret fetching is abstracted behind the `SecretsResolver` protocol (`src/secrets/protocol.py`). Implementations:
 
-**API Key:**
-```json
-{
-  "auth": {
-    "type": "api_key",
-    "api_key": "${API_KEY}",
-    "header_name": "X-API-Key"
-  }
-}
-```
-
-**Basic Authentication:**
-```json
-{
-  "auth": {
-    "type": "basic",
-    "username": "${API_USERNAME}",
-    "password": "${API_PASSWORD}"
-  }
-}
-```
-
-### Environment Variables
-
-Set environment variables for sensitive values:
-
-```bash
-export DB_PASSWORD="your_database_password"
-export API_TOKEN="your_api_token"
-export API_KEY="your_api_key"
-```
-
-Variables are expanded using `${VAR_NAME}` syntax in credentials files.
-
-## Template Generation
-
-Generate credential file templates:
-
-```bash
-# Generate database credentials template
-python examples/generate_credentials_template.py database src_credentials.json
-
-# Generate API credentials template  
-python examples/generate_credentials_template.py api dst_credentials.json
-
-# Generate both templates
-python examples/generate_credentials_template.py both
-```
-
-## Migration from Inline Credentials
-
-### Before (Inline Credentials)
-```json
-{
-  "pipeline_id": "my-pipeline",
-  "source": {
-    "type": "database",
-    "connection": {
-      "host": "localhost",
-      "user": "postgres",
-      "password": "secret123"
-    }
-  }
-}
-```
-
-### After (External Credentials)
-
-**pipeline_config.json:**
-```json
-{
-  "pipeline_id": "my-pipeline",
-  "source": {
-    "type": "database",
-    "config": {
-      "table": "users"
-    }
-  }
-}
-```
-
-**src_credentials.json:**
-```json
-{
-  "host": "localhost",
-  "user": "postgres", 
-  "password": "${DB_PASSWORD}"
-}
-```
-
-**Python code:**
-```python
-pipeline = Pipeline(
-    config_path="pipeline_config.json",
-    source_credentials_path="src_credentials.json"
-)
-```
+| Resolver | Backend | Usage |
+|----------|---------|-------|
+| `LocalFileSecretsResolver` | `.secrets/{connection_id}.json` | Default for all environments |
+| `S3SecretsResolver` | S3 bucket | Available for direct S3 access |
+| `InMemorySecretsResolver` | In-memory dict | Testing |
 
 ## Security Best Practices
 
-1. **Never commit credentials files** to version control
-2. **Use environment variables** for sensitive values
-3. **Set appropriate file permissions** (600) for credentials files
-4. **Use different credentials** for different environments
-5. **Rotate credentials regularly**
-6. **Validate credentials** before deployment
+1. **Never commit secrets files** to version control. Add `.secrets/` to `.gitignore`.
+2. **Use restrictive file permissions** (`chmod 600`) on secrets files.
+3. **Use different secrets** per environment (local, dev, prod).
+4. **Call `clear_resolved()`** on `ConnectionConfig` after establishing a connection to remove secrets from memory.
+5. **Rotate credentials regularly** and update the secrets files.
 
-### .gitignore Example
+### .gitignore
+
 ```
-# Credentials files
-*_credentials.json
-src_credentials.json
-dst_credentials.json
-credentials/
+.secrets/
 ```
-
-## Advanced Usage
-
-### Direct CredentialsManager Usage
-
-```python
-from src import credentials_manager
-
-# Load and validate credentials
-creds = credentials_manager.load_credentials("api_creds.json")
-is_valid = credentials_manager.validate_api_credentials(creds)
-
-# Merge with configuration
-config = credentials_manager.merge_credentials_with_config(
-    pipeline_config["source"], 
-    creds
-)
-```
-
-### Custom Validation
-
-```python
-from src import CredentialsManager
-
-# Create custom credentials manager
-cm = CredentialsManager()
-
-# Load with custom validation
-creds = cm.load_credentials("custom_creds.json")
-if not cm.validate_database_credentials(creds):
-    raise ValueError("Invalid credentials")
-```
-
-## Examples
-
-The framework includes updated examples using credentials files:
-
-- **wise-to-sevdesk**: Uses separate API credentials for Wise and SevDesk
-- **basic-pipeline**: Uses database and API credentials files
-- **generate_credentials_template.py**: Utility for generating templates
-
-## Troubleshooting
-
-### Common Issues
-
-1. **Environment variable not found**
-   - Ensure environment variables are set before running
-   - Check variable names match exactly (case-sensitive)
-
-2. **Credentials file not found**
-   - Verify file paths are correct
-   - Use absolute paths if needed
-
-3. **Validation errors**
-   - Check required fields are present
-   - Verify authentication type configuration
-
-4. **Permission errors**
-   - Ensure credentials files are readable
-   - Check file ownership and permissions
-
-### Error Examples
-
-```bash
-# Missing environment variable
-Environment variable 'API_TOKEN' not found, using original value
-
-# Invalid credentials format
-Invalid JSON in credentials file: Expecting ',' delimiter: line 5 column 8
-
-# Missing required field
-Missing required API credential field: base_url
-```
-
-This credentials management system provides a secure, flexible way to handle authentication while maintaining the simplicity and power of the Analitiq Stream framework.

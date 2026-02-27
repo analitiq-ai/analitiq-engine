@@ -1,3 +1,9 @@
+
+The integration tests (test_database_connector.py, test_postgresql_driver.py, test_streaming_database.py, test_postgresql_timestamp_mismatch.py) have 40+  
+usages of `connection_pool.acquire()`. 
+
+========
+
 Adding API post authentication selections in the pipeline definition so the values can be used in the core.
 
 =====

@@ -24,7 +24,6 @@ from src.models.stream import (
     StreamConfig,
     WriteModeConfig,
 )
-from src.source.connectors.database import DatabaseConfig
 
 
 # --- Test UUIDs ---
@@ -439,16 +438,15 @@ class TestEndToEndConfigFlow:
         assert validated.timeout > 0
 
     def test_database_connection_config_validates_for_connector(self):
-        """DatabaseConnector.connect() would receive DatabaseConfig-valid dict."""
+        """DatabaseConnector.connect() requires 'driver' and typical DB fields."""
         resolved_connections = _api_to_db_resolved_connections()
         dest_conn = resolved_connections[DB_CONNECTION_ID]
         config = dest_conn.config
 
-        validated = DatabaseConfig(**config)
-        assert validated.driver
-        assert validated.host
-        assert validated.database
-        assert validated.username
+        assert config.get("driver"), "Database connection must have 'driver'"
+        assert config.get("host"), "Database connection must have 'host'"
+        assert config.get("database"), "Database connection must have 'database'"
+        assert config.get("username"), "Database connection must have 'username'"
 
     def test_full_pipeline_config_dict_structure(self):
         """Verify complete config dict has all required sections."""

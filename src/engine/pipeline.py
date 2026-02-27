@@ -378,7 +378,9 @@ class Pipeline:
                     conn = self.resolved_connections[connection_id]
                     # Handle both ResolvedConnection and dict types
                     if isinstance(conn, ResolvedConnection):
-                        return conn.config.copy()
+                        result = conn.config.copy()
+                        result["_connection_wrapper"] = conn.connection_config_wrapper
+                        return result
                     elif isinstance(conn, dict):
                         return conn.copy()
             except KeyError:

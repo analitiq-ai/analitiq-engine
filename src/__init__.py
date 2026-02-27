@@ -11,7 +11,6 @@ __author__ = "Analitiq Core Team"
 from .source.connectors.api import APIConnector
 from .source.connectors.base import BaseConnector
 from .source.connectors.database import DatabaseConnector
-from .engine.credentials import CredentialsManager, credentials_manager
 from .engine.engine import StreamingEngine
 from .engine.pipeline import Pipeline
 from .state.circuit_breaker import CircuitBreaker
@@ -22,8 +21,6 @@ from .schema.schema_manager import SchemaManager
 __all__ = [
     "StreamingEngine",
     "Pipeline",
-    "credentials_manager",
-    "CredentialsManager",
     "RetryHandler",
     "CircuitBreaker",
     "DeadLetterQueue",

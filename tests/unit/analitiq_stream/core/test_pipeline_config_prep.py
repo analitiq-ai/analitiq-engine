@@ -15,9 +15,6 @@ from src.engine.pipeline_config_prep import (
     PipelineConfigPrepSettings,
     validate_pipeline_config,
     validate_stream_config,
-    expand_required_vars,
-    find_unexpanded_placeholders,
-    validate_no_unexpanded_placeholders,
 )
 
 
@@ -123,19 +120,6 @@ def incomplete_pipeline_config():
         "name": "Incomplete Pipeline",
         "version": "1.0"
         # Missing pipeline_id
-    }
-
-
-@pytest.fixture
-def config_with_env_vars():
-    """Config that requires environment variables."""
-    return {
-        "pipeline_id": "env-test-pipeline",
-        "database_url": "${DATABASE_URL}",
-        "api_key": "${API_KEY}",
-        "nested": {
-            "secret": "${NESTED_SECRET}"
-        }
     }
 
 
@@ -282,117 +266,6 @@ class TestValidateStreamConfig:
         assert validate_stream_config(config) is False
 
 
-class TestExpandRequiredVars:
-    """Test expand_required_vars function."""
-
-    def test_expand_existing_env_vars(self, config_with_env_vars):
-        """Test expansion of existing environment variables."""
-        os.environ["DATABASE_URL"] = "postgresql://localhost:5432/test"
-        os.environ["API_KEY"] = "test-api-key"
-        os.environ["NESTED_SECRET"] = "secret-value"
-
-        try:
-            expanded = expand_required_vars(config_with_env_vars)
-
-            assert expanded["database_url"] == "postgresql://localhost:5432/test"
-            assert expanded["api_key"] == "test-api-key"
-            assert expanded["nested"]["secret"] == "secret-value"
-            assert expanded["pipeline_id"] == "env-test-pipeline"
-        finally:
-            for var in ["DATABASE_URL", "API_KEY", "NESTED_SECRET"]:
-                os.environ.pop(var, None)
-
-    def test_missing_env_var_raises_error(self):
-        """Test that missing environment variable raises EnvironmentError in strict mode."""
-        config = {
-            "pipeline_id": "test",
-            "missing_var": "${NONEXISTENT_VAR}"
-        }
-
-        os.environ.pop("NONEXISTENT_VAR", None)
-
-        with pytest.raises(EnvironmentError) as exc_info:
-            expand_required_vars(config, strict=True)
-
-        assert "Missing required environment variable: NONEXISTENT_VAR" in str(exc_info.value)
-
-    def test_missing_env_var_kept_non_strict(self):
-        """Test that missing environment variable is kept in non-strict mode."""
-        config = {
-            "pipeline_id": "test",
-            "missing_var": "${NONEXISTENT_VAR}"
-        }
-
-        os.environ.pop("NONEXISTENT_VAR", None)
-
-        expanded = expand_required_vars(config, strict=False)
-        assert expanded["missing_var"] == "${NONEXISTENT_VAR}"
-
-    def test_no_vars_to_expand(self):
-        """Test config with no environment variables to expand."""
-        config = {
-            "pipeline_id": "test",
-            "simple_value": "no_vars_here",
-            "number": 123,
-            "boolean": True,
-            "null_value": None
-        }
-
-        expanded = expand_required_vars(config)
-        assert expanded == config
-
-
-class TestFindUnexpandedPlaceholders:
-    """Test find_unexpanded_placeholders function."""
-
-    def test_finds_simple_placeholder(self):
-        """Test finding simple placeholder."""
-        config = {"key": "${VALUE}"}
-        unexpanded = find_unexpanded_placeholders(config)
-        assert len(unexpanded) == 1
-        assert unexpanded[0][0] == "key"
-        assert unexpanded[0][1] == "${VALUE}"
-
-    def test_finds_nested_placeholder(self):
-        """Test finding nested placeholder."""
-        config = {"outer": {"inner": "${VALUE}"}}
-        unexpanded = find_unexpanded_placeholders(config)
-        assert len(unexpanded) == 1
-        assert "inner" in unexpanded[0][0]
-
-    def test_finds_multiple_placeholders(self):
-        """Test finding multiple placeholders."""
-        config = {
-            "key1": "${VALUE1}",
-            "key2": "${VALUE2}",
-            "nested": {"key3": "${VALUE3}"}
-        }
-        unexpanded = find_unexpanded_placeholders(config)
-        assert len(unexpanded) == 3
-
-    def test_no_placeholders_returns_empty(self):
-        """Test that config without placeholders returns empty list."""
-        config = {"key": "value", "number": 123}
-        unexpanded = find_unexpanded_placeholders(config)
-        assert len(unexpanded) == 0
-
-
-class TestValidateNoUnexpandedPlaceholders:
-    """Test validate_no_unexpanded_placeholders function."""
-
-    def test_valid_config_passes(self):
-        """Test that config without placeholders passes."""
-        config = {"key": "value"}
-        validate_no_unexpanded_placeholders(config, "test")
-
-    def test_config_with_placeholders_raises(self):
-        """Test that config with placeholders raises ValueError."""
-        config = {"key": "${VALUE}"}
-        with pytest.raises(ValueError) as exc_info:
-            validate_no_unexpanded_placeholders(config, "test")
-        assert "unexpanded placeholder" in str(exc_info.value).lower()
-
-
 class TestPipelineConfigPrepLocal:
     """Test PipelineConfigPrep class with local filesystem operations."""
 
@@ -407,7 +280,7 @@ class TestPipelineConfigPrepLocal:
 
         assert prep.settings == settings
         assert prep.is_cloud_env is False  # local mode = not cloud
-        assert prep.credentials_manager is not None
+        assert prep.settings is not None
 
     def test_validate_environment_success(self, temp_config_dir, mock_analitiq_config):
         """Test successful environment validation."""
@@ -450,53 +323,6 @@ class TestPipelineConfigPrepLocal:
                 PipelineConfigPrep(settings)
 
             assert "Pipelines directory not found" in str(exc_info.value)
-
-    def test_load_local_json_success(self, temp_config_dir, mock_analitiq_config):
-        """Test successful local JSON loading."""
-        settings = PipelineConfigPrepSettings(
-            env="local",
-            pipeline_id="test-pipeline"
-        )
-        prep = PipelineConfigPrep(settings)
-
-        test_config = {"test": "value", "nested": {"key": "value"}}
-        test_file = Path(temp_config_dir, "test.json")
-        with open(test_file, "w") as f:
-            json.dump(test_config, f)
-
-        result = prep._load_local_json(str(test_file))
-        assert result == test_config
-
-    def test_load_local_json_file_not_found(self, temp_config_dir, mock_analitiq_config):
-        """Test local JSON loading with missing file."""
-        settings = PipelineConfigPrepSettings(
-            env="local",
-            pipeline_id="test-pipeline"
-        )
-        prep = PipelineConfigPrep(settings)
-
-        with pytest.raises(FileNotFoundError) as exc_info:
-            prep._load_local_json("/nonexistent/file.json")
-
-        assert "Configuration file not found" in str(exc_info.value)
-
-    def test_load_local_json_invalid_json(self, temp_config_dir, mock_analitiq_config):
-        """Test local JSON loading with invalid JSON."""
-        settings = PipelineConfigPrepSettings(
-            env="local",
-            pipeline_id="test-pipeline"
-        )
-        prep = PipelineConfigPrep(settings)
-
-        test_file = Path(temp_config_dir, "invalid.json")
-        with open(test_file, "w") as f:
-            f.write("{ invalid json content")
-
-        with pytest.raises(ValueError) as exc_info:
-            prep._load_local_json(str(test_file))
-
-        assert "Invalid JSON" in str(exc_info.value)
-
 
 class TestConfigurationLoading:
     """Test configuration loading functionality with consolidated file format."""

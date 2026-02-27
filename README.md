@@ -135,15 +135,18 @@ Minimal example:
 
 ### Secrets
 
-Secrets live in `.secrets/{connection_id}.json`. Placeholders in connection configs (`${VAR_NAME}`) are expanded from these files first, then environment variables.
-
-Example:
+Connection configs use `${placeholder}` syntax for sensitive values. Actual secrets live in `.secrets/{connection_id}.json` as flat key-value dictionaries:
 
 ```json
 {
-  "API_TOKEN": "your-token"
+  "API_TOKEN": "your-token",
+  "API_SECRET": "your-secret"
 }
 ```
+
+Placeholders are expanded at connection time (not at config load time). If any `${placeholder}` has no matching key in the secrets file, a `PlaceholderExpansionError` is raised and the connection is never established with raw placeholders.
+
+See `docs/CREDENTIALS_GUIDE.md` for details on the expansion mechanism, file resolution order, and the `SecretsResolver` protocol.
 
 ### Cloud Mode
 
@@ -350,6 +353,7 @@ src/
 
 ## Documentation
 
+- `docs/CREDENTIALS_GUIDE.md`
 - `docs/DESTINATION_CONFIG.md`
 - `docs/GRPC_STREAMING_ARCHITECTURE.md`
 - `docs/ENGINE_ARCHITECTURE.md`

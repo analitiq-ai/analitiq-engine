@@ -1,13 +1,179 @@
 """Shared database utilities for source and destination components.
 
-These utilities are extracted from duplicated code across:
-- src/connectors/database/postgresql_driver.py
-- src/destination/handlers/postgresql.py
-- src/destination/handlers/database.py
+Provides a single engine factory, SSL-prefer fallback, connection acquisition,
+and read-side type conversion used by both source connectors and destination handlers.
 """
 
+import logging
 import ssl
-from typing import Any, Dict, Union
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Any, AsyncIterator, Dict, Optional, Union
+
+from sqlalchemy import text
+from sqlalchemy.engine import URL
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+
+logger = logging.getLogger(__name__)
+
+
+# SQLAlchemy dialect mapping
+DIALECT_MAP = {
+    "postgresql": "postgresql+asyncpg",
+    "postgres": "postgresql+asyncpg",
+    "mysql": "mysql+aiomysql",
+    "mariadb": "mysql+aiomysql",
+    "sqlite": "sqlite+aiosqlite",
+}
+
+# Dialects that support SSL connections
+SSL_DIALECTS = {"postgresql", "postgres", "mysql", "mariadb"}
+
+
+@dataclass(frozen=True)
+class DatabaseConnectionParams:
+    """Immutable container for parsed database connection parameters."""
+
+    driver: str
+    host: str
+    port: Optional[int]
+    username: str
+    password: str
+    database: str
+    ssl_mode: str
+    pool_min: int = 2
+    pool_max: int = 10
+    pool_pre_ping: bool = True
+    echo: bool = False
+    command_timeout: int = 300
+
+    def to_sqlalchemy_url(self) -> URL:
+        """Build a SQLAlchemy URL using URL.create() (handles special characters)."""
+        dialect = DIALECT_MAP.get(self.driver.lower(), f"{self.driver}+asyncpg")
+
+        # SQLite: database-only, no host/port/user
+        if self.driver.lower() == "sqlite":
+            return URL.create(
+                drivername="sqlite+aiosqlite",
+                database=self.database,
+            )
+
+        return URL.create(
+            drivername=dialect,
+            username=self.username,
+            password=self.password,
+            host=self.host,
+            port=self.port,
+            database=self.database,
+        )
+
+    def to_sqlalchemy_connect_args(self) -> Dict[str, Any]:
+        """Build connect_args dict (SSL, timeout settings for supported dialects)."""
+        args: Dict[str, Any] = {}
+
+        # asyncpg command_timeout (seconds before a query is cancelled)
+        if self.driver.lower() in ("postgresql", "postgres"):
+            args["command_timeout"] = self.command_timeout
+
+        if self.driver.lower() not in SSL_DIALECTS:
+            return args
+
+        if self.ssl_mode == "disable":
+            args["ssl"] = False
+        else:
+            args["ssl"] = convert_ssl_mode(self.ssl_mode)
+
+        return args
+
+    def to_sqlalchemy_engine_kwargs(self) -> Dict[str, Any]:
+        """Build engine keyword arguments (pool, echo, etc.)."""
+        return {
+            "pool_size": self.pool_min,
+            "max_overflow": max(self.pool_max - self.pool_min, 0),
+            "pool_pre_ping": self.pool_pre_ping,
+            "echo": self.echo,
+        }
+
+
+def extract_connection_params(
+    config: Dict[str, Any],
+    *,
+    require_port: bool = True,
+) -> DatabaseConnectionParams:
+    """Extract and validate connection parameters from a config dict.
+
+    Handles field name variations (username/user, database/dbname) and
+    builds a DatabaseConnectionParams with sensible defaults.
+
+    Args:
+        config: Raw connection config dictionary.
+        require_port: If True, raise ValueError when port is missing.
+                      If False, default to 5432.
+
+    Returns:
+        DatabaseConnectionParams frozen dataclass.
+    """
+    driver = config.get("driver")
+    if not driver:
+        raise ValueError("Database driver is required (e.g. 'postgresql', 'mysql')")
+
+    database = config.get("database") or config.get("dbname")
+    if not database:
+        raise ValueError("Database name is required")
+
+    # SQLite only needs driver + database
+    if driver.lower() == "sqlite":
+        host = config.get("host", "")
+        username = config.get("username") or config.get("user", "")
+        password = config.get("password", "")
+    else:
+        host = config.get("host")
+        if not host:
+            raise ValueError("Database host is required")
+
+        username = config.get("username") or config.get("user")
+        if not username:
+            raise ValueError("Database username is required")
+
+        password = config.get("password")
+        if password is None:
+            raise ValueError("Database password is required")
+
+    # Port handling
+    port_value = config.get("port")
+    if port_value is None:
+        if require_port:
+            raise ValueError("Database port is required")
+        port = 5432
+    else:
+        port = int(port_value)
+
+    # SSL mode: default to "prefer" for SSL dialects, None for others
+    if driver.lower() in SSL_DIALECTS:
+        ssl_mode = config.get("ssl_mode", "prefer")
+    else:
+        ssl_mode = config.get("ssl_mode", "")
+
+    # Pool configuration
+    pool_config = config.get("connection_pool", {})
+    pool_min = pool_config.get("min_connections", 2)
+    pool_max = pool_config.get("max_connections", 10)
+
+    return DatabaseConnectionParams(
+        driver=driver,
+        host=host,
+        port=port,
+        username=username,
+        password=password,
+        database=database,
+        ssl_mode=ssl_mode,
+        pool_min=pool_min,
+        pool_max=pool_max,
+        pool_pre_ping=True,
+        echo=config.get("echo_sql", False),
+        command_timeout=config.get("command_timeout", 300),
+    )
 
 
 def is_ssl_handshake_error(exc: BaseException) -> bool:
@@ -114,6 +280,114 @@ def get_full_table_name(schema_name: str, table_name: str) -> str:
         Fully qualified table name (schema.table or just table)
     """
     return f"{schema_name}.{table_name}" if schema_name else table_name
+
+
+async def create_database_engine(
+    config: Dict[str, Any],
+    *,
+    require_port: bool = True,
+) -> tuple[AsyncEngine, str]:
+    """Create and probe a SQLAlchemy async engine from a connection config.
+
+    Extracts connection parameters, builds a URL, creates the engine, and
+    probes with ``SELECT 1``.  When *ssl_mode* is ``prefer`` and the probe
+    fails with an SSL handshake error, the engine is disposed and a second
+    attempt is made with ``ssl=False``.
+
+    Args:
+        config: Raw connection config dictionary.
+        require_port: If True, raise ValueError when port is missing.
+
+    Returns:
+        Tuple of (AsyncEngine, driver_string).
+
+    Raises:
+        ValueError: If required fields (e.g. port) are missing.
+        Exception: Any connection error after disposal of failed engines.
+    """
+    conn_params = extract_connection_params(config, require_port=require_port)
+
+    url = conn_params.to_sqlalchemy_url()
+    connect_args = conn_params.to_sqlalchemy_connect_args()
+    engine_kwargs = conn_params.to_sqlalchemy_engine_kwargs()
+
+    engine = create_async_engine(url, connect_args=connect_args, **engine_kwargs)
+
+    ssl_mode = conn_params.ssl_mode
+    try:
+        async with engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+    except Exception as e:
+        if ssl_mode == "prefer" and is_ssl_handshake_error(e):
+            logger.warning(
+                "SSL failed with ssl_mode='prefer', retrying without SSL: %s", e
+            )
+            await engine.dispose()
+            connect_args["ssl"] = False
+            engine = create_async_engine(
+                url, connect_args=connect_args, **engine_kwargs
+            )
+            try:
+                async with engine.connect() as conn:
+                    await conn.execute(text("SELECT 1"))
+            except Exception:
+                await engine.dispose()
+                raise
+        else:
+            await engine.dispose()
+            raise
+
+    return engine, conn_params.driver.lower()
+
+
+@asynccontextmanager
+async def acquire_connection(engine: AsyncEngine) -> AsyncIterator:
+    """Acquire a connection from the engine as an async context manager.
+
+    Raises:
+        RuntimeError: If *engine* is None.
+    """
+    if engine is None:
+        raise RuntimeError("Engine not initialized")
+    async with engine.connect() as conn:
+        yield conn
+
+
+# ---------------------------------------------------------------------------
+# Read-side type conversions
+# ---------------------------------------------------------------------------
+
+def convert_db_to_python(value: Any) -> Any:
+    """Convert database values to Python-friendly types.
+
+    Used when reading data from database.
+
+    Args:
+        value: Database value to convert.
+
+    Returns:
+        Python-compatible value.
+    """
+    if value is None:
+        return None
+
+    # Convert datetime objects to ISO strings for JSON serialization
+    if isinstance(value, datetime):
+        return value.isoformat()
+
+    return value
+
+
+def convert_record_from_db(record: Dict[str, Any]) -> Dict[str, Any]:
+    """Convert all values in a record from database reading.
+
+    Args:
+        record: Dictionary with database values.
+
+    Returns:
+        Dictionary with Python-compatible values.
+    """
+    return {key: convert_db_to_python(value) for key, value in record.items()}
 
 
 def get_default_clause(field_def: Dict[str, Any]) -> str:

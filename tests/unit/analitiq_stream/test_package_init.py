@@ -27,8 +27,6 @@ class TestMainPackageInit:
         expected_exports = [
             "StreamingEngine",
             "Pipeline",
-            "credentials_manager",
-            "CredentialsManager",
             "RetryHandler",
             "CircuitBreaker",
             "DeadLetterQueue",
@@ -45,16 +43,14 @@ class TestMainPackageInit:
     def test_core_classes_importable(self):
         """Test that core classes can be imported directly."""
         from src import (
-            StreamingEngine, Pipeline, CredentialsManager, credentials_manager,
+            StreamingEngine, Pipeline,
             RetryHandler, CircuitBreaker, DeadLetterQueue,
             SchemaManager, BaseConnector, DatabaseConnector, APIConnector
         )
-        
+
         # Verify classes are not None
         assert StreamingEngine is not None
         assert Pipeline is not None
-        assert CredentialsManager is not None
-        assert credentials_manager is not None
         assert RetryHandler is not None
         assert CircuitBreaker is not None
         assert DeadLetterQueue is not None
@@ -103,20 +99,13 @@ class TestSubPackageInits:
         assert src.schema is not None
     
     def test_database_init_already_covered(self):
-        """Test database package init (covered in test_database_init.py)."""
-        # This is already tested in test_database_init.py
-        # Use new module path (src.source.connectors.database)
+        """Test database connector module is importable."""
         import src.source.connectors.database
 
         assert src.source.connectors.database is not None
 
-        # Verify main exports from database package
         from src.source.connectors.database import DatabaseConnector
-        from src.source.drivers.base import BaseDatabaseDriver
-        from src.source.drivers.factory import DriverFactory
 
-        assert BaseDatabaseDriver is not None
-        assert DriverFactory is not None
         assert DatabaseConnector is not None
 
 

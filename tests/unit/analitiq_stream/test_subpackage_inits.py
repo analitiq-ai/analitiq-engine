@@ -55,31 +55,6 @@ class TestSourceConnectorsPackageInit:
         assert BaseConnector is not None
 
 
-class TestSourceDriversPackageInit:
-    """Test source/drivers package __init__ file."""
-
-    @pytest.mark.unit
-    def test_drivers_imports(self):
-        """Test that drivers package exports are available."""
-        from src.source import drivers
-
-        # Check __all__ exports if defined
-        if hasattr(drivers, '__all__'):
-            for export in drivers.__all__:
-                assert hasattr(drivers, export)
-
-    @pytest.mark.unit
-    def test_drivers_direct_imports(self):
-        """Test direct imports from drivers package."""
-        from src.source.drivers.base import BaseDatabaseDriver
-        from src.source.drivers.postgresql import PostgreSQLDriver
-        from src.source.drivers.factory import DriverFactory
-
-        assert BaseDatabaseDriver is not None
-        assert PostgreSQLDriver is not None
-        assert DriverFactory is not None
-
-
 class TestStatePackageInit:
     """Test state package __init__ file."""
 
@@ -151,13 +126,20 @@ class TestSharedPackageInit:
         """Test direct imports from shared package."""
         from src.shared import (
             convert_ssl_mode, validate_sql_identifier,
-            get_full_table_name, RateLimiter
+            get_full_table_name, RateLimiter,
+            DatabaseConnectionParams, extract_connection_params,
+            is_ssl_handshake_error, DIALECT_MAP, SSL_DIALECTS,
         )
 
         assert convert_ssl_mode is not None
         assert validate_sql_identifier is not None
         assert get_full_table_name is not None
         assert RateLimiter is not None
+        assert DatabaseConnectionParams is not None
+        assert extract_connection_params is not None
+        assert is_ssl_handshake_error is not None
+        assert DIALECT_MAP is not None
+        assert SSL_DIALECTS is not None
 
 
 class TestSchemaPackageInit:
