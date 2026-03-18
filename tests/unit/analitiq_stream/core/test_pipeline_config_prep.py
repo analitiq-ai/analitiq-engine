@@ -46,7 +46,7 @@ def valid_pipeline_config():
     """Valid pipeline configuration for testing."""
     return {
         "version": 1,
-        "org_id": "client-123",
+        "org_id": "org-123",
         "pipeline_id": "test-pipeline-123",
         "name": "Test Pipeline",
         "status": "active",
@@ -82,7 +82,7 @@ def valid_stream_config():
         "version": 1,
         "stream_id": "stream-456",
         "pipeline_id": "test-pipeline-123",
-        "org_id": "client-123",
+        "org_id": "org-123",
         "status": "active",
         "is_enabled": True,
         "source": {
