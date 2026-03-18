@@ -40,7 +40,7 @@ class PipelineMetricsRecord(BaseModel):
     run_id: str = Field(..., description="Unique identifier for this pipeline run")
     pipeline_id: str = Field(..., description="Pipeline identifier")
     pipeline_name: Optional[str] = Field(default=None, description="Human-readable pipeline name")
-    client_id: str = Field(..., description="Client identifier")
+    org_id: str = Field(..., description="Org identifier")
 
     # Timing
     start_time: str = Field(..., description="Pipeline start time (ISO 8601)")
@@ -82,7 +82,7 @@ def emit_metrics_log(data: Dict[str, Any]) -> None:
 def create_metrics_record(
     run_id: str,
     pipeline_id: str,
-    client_id: str,
+    org_id: str,
     start_time: datetime,
     end_time: datetime,
     records_processed: int = 0,
@@ -99,7 +99,7 @@ def create_metrics_record(
     Args:
         run_id: Unique run identifier
         pipeline_id: Pipeline identifier
-        client_id: Client identifier
+        org_id: Org identifier
         start_time: Pipeline start time
         end_time: Pipeline end time
         records_processed: Number of successfully processed records
@@ -127,7 +127,7 @@ def create_metrics_record(
         run_id=run_id,
         pipeline_id=pipeline_id,
         pipeline_name=pipeline_name,
-        client_id=client_id,
+        org_id=org_id,
         start_time=start_time.isoformat(),
         end_time=end_time.isoformat(),
         duration_seconds=round(duration_seconds, 2),
@@ -145,7 +145,7 @@ def create_metrics_record(
 def save_pipeline_metrics(
     run_id: str,
     pipeline_id: str,
-    client_id: str,
+    org_id: str,
     start_time: datetime,
     end_time: datetime,
     records_processed: int = 0,
@@ -165,7 +165,7 @@ def save_pipeline_metrics(
     Args:
         run_id: Unique run identifier
         pipeline_id: Pipeline identifier
-        client_id: Client identifier
+        org_id: Org identifier
         start_time: Pipeline start time
         end_time: Pipeline end time
         records_processed: Number of successfully processed records
@@ -179,7 +179,7 @@ def save_pipeline_metrics(
     record = create_metrics_record(
         run_id=run_id,
         pipeline_id=pipeline_id,
-        client_id=client_id,
+        org_id=org_id,
         start_time=start_time,
         end_time=end_time,
         records_processed=records_processed,

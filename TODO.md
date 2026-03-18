@@ -1,9 +1,4 @@
 
-The integration tests (test_database_connector.py, test_postgresql_driver.py, test_streaming_database.py, test_postgresql_timestamp_mismatch.py) have 40+  
-usages of `connection_pool.acquire()`. 
-
-========
-
 Adding API post authentication selections in the pipeline definition so the values can be used in the core.
 
 =====
@@ -55,3 +50,10 @@ Add this to SSM and add API endpoint for fetching:
 Add transformations to SSM and API endpoint for fetching
 
 ==============  
+Authentication Differences
+
+- Source: Auth goes directly in headers (e.g. "Authorization": "Bearer ${API_TOKEN}").
+- Destination: Supports both headers and a structured auth block with type = bearer/api_key/basic, which auto-populates headers.
+
+==========
+

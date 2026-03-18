@@ -18,7 +18,7 @@ class StateStorageSettings(BaseModel):
 
     env: str = Field(default="local", description="Environment: local, dev, or prod")
     pipeline_id: str = Field(..., description="Unique pipeline identifier")
-    client_id: Optional[str] = Field(default=None, description="Client ID for S3 path partitioning")
+    org_id: Optional[str] = Field(default=None, description="Org ID for S3 path partitioning")
     aws_region: str = Field(default="eu-central-1", description="AWS region")
     state_bucket: Optional[str] = Field(default=None, description="S3 bucket for state storage")
     local_base_dir: str = Field(default="state", description="Local base directory for state")
@@ -28,7 +28,7 @@ class StateStorageSettings(BaseModel):
         """Create settings from environment variables."""
         env = os.getenv("ENV", "local")
         pipeline_id = os.getenv("PIPELINE_ID", "")
-        client_id = os.getenv("CLIENT_ID")
+        org_id = os.getenv("ORG_ID")
         aws_region = os.getenv("AWS_REGION", "eu-central-1")
         state_bucket = os.getenv("STATE_BUCKET") or f"analitiq-client-pipeline-state-{env}"
         local_base_dir = os.getenv("STATE_DIR", "state")
@@ -36,7 +36,7 @@ class StateStorageSettings(BaseModel):
         return cls(
             env=env,
             pipeline_id=pipeline_id,
-            client_id=client_id,
+            org_id=org_id,
             aws_region=aws_region,
             state_bucket=state_bucket,
             local_base_dir=local_base_dir,
@@ -161,7 +161,7 @@ class S3StateStorage(StateStorageBackend):
     def __init__(
         self,
         bucket: str,
-        client_id: str,
+        org_id: str,
         pipeline_id: str,
         aws_region: str = "eu-central-1",
     ):
@@ -170,12 +170,12 @@ class S3StateStorage(StateStorageBackend):
 
         Args:
             bucket: S3 bucket name (e.g., analitiq-client-pipeline-state-dev)
-            client_id: Client identifier for path partitioning
+            org_id: Org identifier for path partitioning
             pipeline_id: Pipeline identifier
             aws_region: AWS region for S3 client
         """
         self.bucket = bucket
-        self.client_id = client_id
+        self.org_id = org_id
         self.pipeline_id = pipeline_id
         self.aws_region = aws_region
         self._s3_client = None
@@ -192,7 +192,7 @@ class S3StateStorage(StateStorageBackend):
     def _build_s3_key(self, path: str) -> str:
         """Build full S3 key with client/pipeline prefix."""
         # path is relative like "index.json" or "streams/stream1/partition-default.json"
-        return f"{self.client_id}/{self.pipeline_id}/{path}"
+        return f"{self.org_id}/{self.pipeline_id}/{path}"
 
     def ensure_directories(self, paths: List[str]) -> None:
         """No-op for S3 - directories are implicit."""
@@ -315,17 +315,17 @@ class S3StateStorage(StateStorageBackend):
 def create_storage_backend(settings: StateStorageSettings) -> StateStorageBackend:
     """Factory function to create appropriate storage backend."""
     if settings.is_cloud_mode:
-        if not settings.client_id:
-            raise ValueError("client_id is required for cloud state storage")
+        if not settings.org_id:
+            raise ValueError("org_id is required for cloud state storage")
         if not settings.state_bucket:
             raise ValueError("state_bucket is required for cloud state storage")
 
         logger.info(
-            f"Using S3 state storage: s3://{settings.state_bucket}/{settings.client_id}/{settings.pipeline_id}/"
+            f"Using S3 state storage: s3://{settings.state_bucket}/{settings.org_id}/{settings.pipeline_id}/"
         )
         return S3StateStorage(
             bucket=settings.state_bucket,
-            client_id=settings.client_id,
+            org_id=settings.org_id,
             pipeline_id=settings.pipeline_id,
             aws_region=settings.aws_region,
         )
