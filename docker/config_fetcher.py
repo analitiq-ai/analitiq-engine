@@ -29,7 +29,7 @@ Usage:
 
 Environment Variables:
     PIPELINE_ID: UUID of the pipeline to fetch (optionally with version: uuid_v1)
-    CLIENT_ID: UUID of the client
+    ORG_ID: UUID of the client
     STREAM_ID: UUID of the stream to process
     INVOCATION_ID: UUID of the batch job invocation (passed to Lambda)
     AWS_BATCH_JOB_ID: AWS Batch job ID (auto-injected by AWS Batch, passed to Lambda)
@@ -94,7 +94,7 @@ class ConfigFetcher:
         # Get environment variables
         self.env = os.getenv("ENV", "dev")
         self.pipeline_id = os.getenv("PIPELINE_ID")
-        self.client_id = os.getenv("CLIENT_ID")
+        self.org_id = os.getenv("ORG_ID")
         self.stream_id = os.getenv("STREAM_ID")
         self.invocation_id = os.getenv("INVOCATION_ID")
         self.batch_job_id = os.getenv("AWS_BATCH_JOB_ID")
@@ -170,7 +170,7 @@ class ConfigFetcher:
         """Validate required environment variables."""
         required = {
             "PIPELINE_ID": self.pipeline_id,
-            "CLIENT_ID": self.client_id,
+            "ORG_ID": self.org_id,
         }
 
         missing = [name for name, value in required.items() if not value]
@@ -200,7 +200,7 @@ class ConfigFetcher:
         """
         try:
             payload: Dict[str, Any] = {
-                "client_id": self.client_id,
+                "org_id": self.org_id,
                 "pipeline_id": self.pipeline_id,
             }
 
@@ -236,7 +236,7 @@ class ConfigFetcher:
             if not pipeline:
                 raise ValueError(
                     f"Pipeline not found: {self.pipeline_id} "
-                    f"(client_id={self.client_id})"
+                    f"(org_id={self.org_id})"
                 )
 
             logger.info(
@@ -250,7 +250,7 @@ class ConfigFetcher:
 
     def fetch_secrets(self, connection_id: str) -> Optional[Dict[str, Any]]:
         """Fetch secrets from S3."""
-        key = f"connections/{self.client_id}/{connection_id}"
+        key = f"connections/{self.org_id}/{connection_id}"
 
         try:
             response = self.s3.get_object(

@@ -77,7 +77,7 @@ class PipelineConfigPrepSettings(BaseModel):
 
     env: str = Field(default="local", description="Environment: local, dev, or prod")
     pipeline_id: str = Field(..., description="Pipeline ID to load")
-    client_id: Optional[str] = Field(default=None, description="Client ID for cloud storage paths")
+    org_id: Optional[str] = Field(default=None, description="Org ID for cloud storage paths")
 
     # AWS region (used for state/logs/DLQ storage in cloud environments)
     aws_region: str = Field(default="eu-central-1", description="AWS region for cloud storage")
@@ -260,18 +260,18 @@ class PipelineConfigPrep:
         In cloud environments, config_fetcher.py populates these directories first.
         """
         env = os.getenv("ENV", "local")
-        client_id = os.getenv("CLIENT_ID")
+        org_id = os.getenv("ORG_ID")
 
-        # Validate CLIENT_ID for cloud environments (needed for state/logs paths)
-        if env != "local" and not client_id:
+        # Validate ORG_ID for cloud environments (needed for state/logs paths)
+        if env != "local" and not org_id:
             raise RuntimeError(
-                f"CLIENT_ID environment variable is required for cloud environment '{env}'"
+                f"ORG_ID environment variable is required for cloud environment '{env}'"
             )
 
         return PipelineConfigPrepSettings(
             env=env,
             pipeline_id=os.getenv("PIPELINE_ID", ""),
-            client_id=client_id,
+            org_id=org_id,
             aws_region=os.getenv("AWS_REGION", "eu-central-1"),
         )
 
@@ -530,7 +530,7 @@ class PipelineConfigPrep:
         self,
         connection_ref: str,
         connection_id: str,
-        client_id: str = ""
+        org_id: str = ""
     ) -> ResolvedConnection:
         """
         Resolve a connection by its ID.
@@ -541,7 +541,7 @@ class PipelineConfigPrep:
         Args:
             connection_ref: Reference alias from pipeline (e.g., "conn_1")
             connection_id: Connection identifier (filename without .json)
-            client_id: Client ID (for logging and late-binding resolver)
+            org_id: Org ID (for logging and late-binding resolver)
 
         Returns:
             ResolvedConnection object with expanded configuration
@@ -574,7 +574,7 @@ class PipelineConfigPrep:
             raw_config=config,
             connection_id=connection_id,
             resolver=self.secrets_resolver,
-            client_id=client_id or None,
+            org_id=org_id or None,
         )
 
         resolved = ResolvedConnection(
@@ -672,7 +672,7 @@ class PipelineConfigPrep:
         if not validate_pipeline_config(raw_pipeline):
             raise ValueError("Pipeline configuration validation failed")
 
-        client_id = raw_pipeline.get("client_id", "")
+        org_id = raw_pipeline.get("org_id", "")
 
         # Get connections from pipeline
         raw_connections = raw_pipeline.get("connections", {})
@@ -696,11 +696,11 @@ class PipelineConfigPrep:
 
         # Resolve all connections (load from connections/ dir, secrets from .secrets/)
         for alias, connection_id in source_connections.items():
-            self._resolve_connection_by_id(alias, connection_id, client_id)
+            self._resolve_connection_by_id(alias, connection_id, org_id)
 
         for dest_dict in dest_connections:
             for alias, connection_id in dest_dict.items():
-                self._resolve_connection_by_id(alias, connection_id, client_id)
+                self._resolve_connection_by_id(alias, connection_id, org_id)
 
         # Build connections_config with plain connection IDs (no prefix)
         connections_config = PipelineConnectionsConfig(
@@ -719,7 +719,7 @@ class PipelineConfigPrep:
         # Build PipelineConfig
         pipeline_config = PipelineConfig(
             version=version,
-            client_id=client_id,
+            org_id=org_id,
             pipeline_id=raw_pipeline["pipeline_id"],
             name=raw_pipeline.get("name", ""),
             description=raw_pipeline.get("description"),
@@ -757,7 +757,7 @@ class PipelineConfigPrep:
             stream_config = self._build_stream_config(
                 raw_stream,
                 connections_config,
-                client_id
+                org_id
             )
             stream_configs.append(stream_config)
 
@@ -768,7 +768,7 @@ class PipelineConfigPrep:
         self,
         raw_stream: Dict[str, Any],
         connections_config: PipelineConnectionsConfig,
-        client_id: str
+        org_id: str
     ) -> StreamConfig:
         """
         Build a StreamConfig from raw stream data with resolved connections and endpoints.
@@ -849,7 +849,7 @@ class PipelineConfigPrep:
             version=version,
             stream_id=stream_id,
             pipeline_id=raw_stream.get("pipeline_id", self.settings.pipeline_id),
-            client_id=client_id,
+            org_id=org_id,
             status=raw_stream.get("status", "draft"),
             is_enabled=raw_stream.get("is_enabled", True),
             source=SourceConfig(**self._normalize_source_config(source_data)),

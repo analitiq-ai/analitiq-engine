@@ -33,7 +33,7 @@ poetry shell
 RUN_MODE=destination \
 ENV=local \
 PIPELINE_ID=<pipeline-id> \
-CLIENT_ID=<client-id> \
+ORG_ID=<client-id> \
 python -m src.main
 ```
 
@@ -43,7 +43,7 @@ python -m src.main
 RUN_MODE=engine \
 ENV=local \
 PIPELINE_ID=<pipeline-id> \
-CLIENT_ID=<client-id> \
+ORG_ID=<client-id> \
 DESTINATION_GRPC_HOST=localhost \
 python -m src.main
 ```
@@ -79,7 +79,7 @@ Minimal example:
 {
   "pipeline": {
     "pipeline_id": "<pipeline-id>",
-    "client_id": "<client-id>",
+    "org_id": "<client-id>",
     "name": "Example",
     "status": "active",
     "connections": {
@@ -157,7 +157,7 @@ In `dev`/`prod`, `docker/config_fetcher.py` populates the consolidated pipeline 
 Common:
 - `ENV`: `local`, `dev`, `prod`
 - `PIPELINE_ID`: pipeline ID (optionally with version suffix)
-- `CLIENT_ID`: client UUID
+- `ORG_ID`: client UUID
 - `LOG_LEVEL`: logging level
 
 Engine mode:
@@ -294,17 +294,17 @@ The engine emits structured logs for observability:
 
 **ANALITIQ_METRICS** (batch metrics, includes cursor context):
 ```
-ANALITIQ_METRICS::{"type":"batch","run_id":"...","pipeline_id":"...","client_id":"...","stream_id":"...","batch_seq":1,"records_written":1000,"cursor":"hex...","cursor_value":"2025-02-05T10:30:15Z",...}
+ANALITIQ_METRICS::{"type":"batch","run_id":"...","pipeline_id":"...","org_id":"...","stream_id":"...","batch_seq":1,"records_written":1000,"cursor":"hex...","cursor_value":"2025-02-05T10:30:15Z",...}
 ```
 
 **ANALITIQ_METRICS** (stream metrics, emitted on stream completion):
 ```
-ANALITIQ_METRICS::{"type":"stream","run_id":"...","pipeline_id":"...","stream_id":"...","client_id":"...","start_time":"...","end_time":"...","duration_seconds":123.4,"records_processed":1000,"records_failed":0,"records_total":1000,"batches_processed":10,"status":"success","error_message":null,"records_per_second":8.1,"environment":"local"}
+ANALITIQ_METRICS::{"type":"stream","run_id":"...","pipeline_id":"...","stream_id":"...","org_id":"...","start_time":"...","end_time":"...","duration_seconds":123.4,"records_processed":1000,"records_failed":0,"records_total":1000,"batches_processed":10,"status":"success","error_message":null,"records_per_second":8.1,"environment":"local"}
 ```
 
 **ANALITIQ_STATE** (state advances; emitted after each checkpoint save):
 ```
-ANALITIQ_STATE::{"type":"state","run_id":"...","pipeline_id":"...","client_id":"...","stream_id":"...","cursor":"hex...","cursor_value":"2025-02-05T10:30:15Z","timestamp":"..."}
+ANALITIQ_STATE::{"type":"state","run_id":"...","pipeline_id":"...","org_id":"...","stream_id":"...","cursor":"hex...","cursor_value":"2025-02-05T10:30:15Z","timestamp":"..."}
 ```
 
 Details:

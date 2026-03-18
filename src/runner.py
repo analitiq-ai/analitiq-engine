@@ -96,7 +96,7 @@ class PipelineRunner:
             settings = PipelineConfigPrepSettings(
                 env=os.getenv("ENV", "local"),
                 pipeline_id=self.pipeline_id,
-                client_id=os.getenv("CLIENT_ID"),
+                org_id=os.getenv("ORG_ID"),
             )
 
             pipeline_config_prep = PipelineConfigPrep(settings)
@@ -152,12 +152,12 @@ class PipelineRunner:
             # Always emit metrics, even on failure
             end_time = datetime.now(timezone.utc)
             try:
-                client_id = os.getenv("CLIENT_ID") or (pipeline_config.client_id if pipeline_config else self.pipeline_id)
+                org_id = os.getenv("ORG_ID") or (pipeline_config.org_id if pipeline_config else self.pipeline_id)
 
                 save_pipeline_metrics(
                     run_id=run_id,
                     pipeline_id=self.pipeline_id,
-                    client_id=client_id,
+                    org_id=org_id,
                     start_time=start_time,
                     end_time=end_time,
                     records_processed=records_processed,

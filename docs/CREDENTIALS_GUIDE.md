@@ -81,8 +81,8 @@ The resolver searches for secrets in this order:
 
 1. `{secrets_dir}/{connection_id}.json`
 2. `{secrets_dir}/{connection_id}` (no extension)
-3. `{secrets_dir}/{client_id}/{connection_id}.json` (multi-tenant)
-4. `{secrets_dir}/{client_id}/{connection_id}` (multi-tenant, no extension)
+3. `{secrets_dir}/{org_id}/{connection_id}.json` (multi-tenant)
+4. `{secrets_dir}/{org_id}/{connection_id}` (multi-tenant, no extension)
 
 ## Secrets File Format
 

@@ -364,7 +364,7 @@ class StreamConfig(BaseModel):
     version: int = Field(1, description="Stream configuration version")
     stream_id: str = Field(..., description="Unique stream identifier")
     pipeline_id: str = Field(..., description="Parent pipeline identifier")
-    client_id: str = Field("", description="Client identifier")
+    org_id: str = Field("", description="Org identifier")
     status: str = Field("draft", description="Stream status (draft, active, paused, etc.)")
     is_enabled: bool = Field(True, description="Whether the stream is enabled")
 
@@ -439,7 +439,7 @@ class StreamConfigLegacy(BaseModel):
         self,
         stream_id: str,
         pipeline_id: str,
-        client_id: str,
+        org_id: str,
         source_connection_ref: str,
         dest_connection_ref: str
     ) -> StreamConfig:
@@ -548,7 +548,7 @@ class StreamConfigLegacy(BaseModel):
             version="1.0",
             stream_id=stream_id,
             pipeline_id=pipeline_id,
-            client_id=client_id,
+            org_id=org_id,
             is_enabled=True,
             tags=[],
             source=source,

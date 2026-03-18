@@ -49,7 +49,7 @@ def config_fetcher(tmp_path):
         os.chdir(project_root)
         with patch.dict("os.environ", {
             "PIPELINE_ID": "22ab7b76-b4df-4c68-8b27-82c307436661",
-            "CLIENT_ID": "d7a11991-2795-49d1-a858-c7e58ee5ecc6",
+            "ORG_ID": "d7a11991-2795-49d1-a858-c7e58ee5ecc6",
             "ENV": "dev",
         }):
             fetcher = ConfigFetcher(region="eu-central-1")
@@ -286,7 +286,7 @@ class TestStatesWriting:
                 "run_id": "20260206T120000Z-abc123",
                 "pipeline_id": "abc123_v1",
                 "stream_id": "stream1_v1",
-                "client_id": "d7a11991-2795-49d1-a858-c7e58ee5ecc6",
+                "org_id": "d7a11991-2795-49d1-a858-c7e58ee5ecc6",
                 "cursor": "hex123",
                 "cursor_value": "2026-02-06T12:00:00Z",
                 "timestamp": "2026-02-06T12:00:00+00:00",
@@ -296,7 +296,7 @@ class TestStatesWriting:
                 "run_id": "20260206T113000Z-def456",
                 "pipeline_id": "abc123_v1",
                 "stream_id": "stream2_v1",
-                "client_id": "d7a11991-2795-49d1-a858-c7e58ee5ecc6",
+                "org_id": "d7a11991-2795-49d1-a858-c7e58ee5ecc6",
                 "cursor": "hex456",
                 "cursor_value": "2026-02-06T11:30:00Z",
                 "timestamp": "2026-02-06T11:30:00+00:00",

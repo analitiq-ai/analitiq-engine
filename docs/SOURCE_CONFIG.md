@@ -6,7 +6,7 @@
 |----------|----------|-------------|
 | `ENV` | Yes | `local`, `dev`, `prod` |
 | `PIPELINE_ID` | Yes | Pipeline UUID |
-| `CLIENT_ID` | Yes | Client UUID |
+| `ORG_ID` | Yes | Org UUID |
 | `LOCAL_CONFIG_MOUNT` | Yes | Config directory path |
 | `AWS_REGION` | No | Default: `eu-central-1` |
 | `LOG_LEVEL` | No | Default: `INFO` |

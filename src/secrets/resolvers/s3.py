@@ -23,7 +23,7 @@ class S3SecretsResolver(SecretsResolver):
     Resolves secrets from AWS S3.
 
     Secrets are stored in S3 with the path pattern:
-    s3://{bucket}/connections/{client_id}/{connection_id}
+    s3://{bucket}/connections/{org_id}/{connection_id}
 
     Each file contains a JSON object with key-value pairs:
     {"token": "secret-value", "password": "secret-password"}
@@ -70,17 +70,17 @@ class S3SecretsResolver(SecretsResolver):
                 )
         return self._s3_client
 
-    def _build_key(self, connection_id: str, client_id: Optional[str]) -> str:
+    def _build_key(self, connection_id: str, org_id: Optional[str]) -> str:
         """Build S3 object key."""
-        if client_id:
-            return f"{self._prefix}/{client_id}/{connection_id}"
+        if org_id:
+            return f"{self._prefix}/{org_id}/{connection_id}"
         return f"{self._prefix}/{connection_id}"
 
     async def resolve(
         self,
         connection_id: str,
         *,
-        client_id: Optional[str] = None,
+        org_id: Optional[str] = None,
         keys: Optional[list[str]] = None,
     ) -> Dict[str, str]:
         """
@@ -88,7 +88,7 @@ class S3SecretsResolver(SecretsResolver):
 
         Args:
             connection_id: Identifier for the connection
-            client_id: Client identifier (required for S3)
+            org_id: Org identifier (required for S3)
             keys: Optional list of specific keys to retrieve
 
         Returns:
@@ -99,7 +99,7 @@ class S3SecretsResolver(SecretsResolver):
             SecretAccessDeniedError: If access to S3 is denied
             SecretResolutionError: For other S3 failures
         """
-        s3_key = self._build_key(connection_id, client_id)
+        s3_key = self._build_key(connection_id, org_id)
         s3_uri = f"s3://{self._bucket}/{s3_key}"
 
         try:

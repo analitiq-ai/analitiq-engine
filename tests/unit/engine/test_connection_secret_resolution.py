@@ -158,5 +158,5 @@ class TestConnectionConfigResolveShortCircuit:
 
         result = await config.resolve()
 
-        mock_resolver.resolve.assert_awaited_once_with("conn-with-secrets", client_id=None)
+        mock_resolver.resolve.assert_awaited_once_with("conn-with-secrets", org_id=None)
         assert result["password"] == "secret123"

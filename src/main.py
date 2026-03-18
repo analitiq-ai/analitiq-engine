@@ -21,7 +21,7 @@ Environment Variables:
     Common (both modes):
         ENV: Deployment environment (local, dev, prod)
         PIPELINE_ID: UUID of the pipeline to execute
-        CLIENT_ID: UUID of the client (required for cloud environments)
+        ORG_ID: UUID of the org (required for cloud environments)
 
     Engine Mode:
         DESTINATION_GRPC_HOST: Hostname of destination gRPC server
@@ -131,7 +131,7 @@ async def run_destination_mode() -> None:
     destination_index = int(os.getenv("DESTINATION_INDEX", "0"))
 
     # Load configuration using PipelineConfigPrep (same as engine)
-    # This uses PIPELINE_ID and CLIENT_ID env vars
+    # This uses PIPELINE_ID and ORG_ID env vars
     logger.info("Loading pipeline configuration via PipelineConfigPrep")
     config_prep = PipelineConfigPrep()
     pipeline_config, stream_configs, resolved_connections, resolved_endpoints, _connectors = config_prep.create_config()

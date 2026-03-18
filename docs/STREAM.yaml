@@ -3,7 +3,7 @@ version: "1.0"
 
 stream_id: "f1a2b3c4-d5e6-7890-abcd-ef1234567891"
 pipeline_id: "b0c2f9d0-3b2a-4a7e-8c86-1b9c6c2d7b15"
-client_id: ""
+org_id: ""
 
 is_enabled: true
 tags:

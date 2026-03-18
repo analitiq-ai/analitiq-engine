@@ -12,7 +12,7 @@ services:
     image: analitiq-stream-cloud:latest
     container_name: analitiq-destination
 
-    # Base environment variables - per-invocation vars (PIPELINE_ID, CLIENT_ID)
+    # Base environment variables - per-invocation vars (PIPELINE_ID, ORG_ID)
     # must be passed at runtime: docker compose run -e PIPELINE_ID=xxx destination
     env_file:
       - .env
@@ -25,7 +25,7 @@ services:
       - DESTINATION_INDEX=${DESTINATION_INDEX:-0}
       # Pipeline identification (required at runtime)
       - PIPELINE_ID=${PIPELINE_ID}
-      - CLIENT_ID=${CLIENT_ID}
+      - ORG_ID=${ORG_ID}
       # AWS configuration
       - AWS_PROFILE=${AWS_PROFILE:-}
       - AWS_REGION=${AWS_REGION:-eu-central-1}
@@ -85,7 +85,7 @@ services:
     image: analitiq-stream-cloud:latest
     container_name: analitiq-source-engine
 
-    # Base environment variables - per-invocation vars (PIPELINE_ID, CLIENT_ID)
+    # Base environment variables - per-invocation vars (PIPELINE_ID, ORG_ID)
     # must be passed at runtime: docker compose run -e PIPELINE_ID=xxx source_engine
     env_file:
       - .env
@@ -102,7 +102,7 @@ services:
       - ROW_COUNT_BUCKET=${ROW_COUNT_BUCKET:-analitiq-client-pipeline-row-count}
       # Pipeline identification (required at runtime)
       - PIPELINE_ID=${PIPELINE_ID}
-      - CLIENT_ID=${CLIENT_ID}
+      - ORG_ID=${ORG_ID}
       # AWS configuration
       - AWS_PROFILE=${AWS_PROFILE:-}
 
