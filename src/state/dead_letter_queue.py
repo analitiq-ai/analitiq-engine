@@ -30,8 +30,8 @@ class DLQStorageSettings(BaseModel):
 
     env: str = Field(default="local", description="Environment: local, dev, or prod")
     pipeline_id: str = Field(default="", description="Unique pipeline identifier")
-    client_id: Optional[str] = Field(
-        default=None, description="Client ID for S3 path partitioning"
+    org_id: Optional[str] = Field(
+        default=None, description="Org ID for S3 path partitioning"
     )
     aws_region: str = Field(default="eu-central-1", description="AWS region")
     dlq_bucket: Optional[str] = Field(
@@ -46,7 +46,7 @@ class DLQStorageSettings(BaseModel):
         """Create settings from environment variables."""
         env = os.getenv("ENV", "local")
         pipeline_id = os.getenv("PIPELINE_ID", "")
-        client_id = os.getenv("CLIENT_ID")
+        org_id = os.getenv("ORG_ID")
         aws_region = os.getenv("AWS_REGION", "eu-central-1")
         dlq_bucket = os.getenv("DLQ_BUCKET") or f"analitiq-client-pipeline-deadletter-{env}"
         local_dlq_dir = os.getenv("DLQ_DIR", "deadletter")
@@ -54,7 +54,7 @@ class DLQStorageSettings(BaseModel):
         return cls(
             env=env,
             pipeline_id=pipeline_id,
-            client_id=client_id,
+            org_id=org_id,
             aws_region=aws_region,
             dlq_bucket=dlq_bucket,
             local_dlq_dir=local_dlq_dir,
@@ -286,7 +286,7 @@ class S3DLQStorage(DLQStorageBackend):
     def __init__(
         self,
         bucket: str,
-        client_id: str,
+        org_id: str,
         pipeline_id: str,
         aws_region: str = "eu-central-1",
         buffer_size: int = 100,
@@ -296,13 +296,13 @@ class S3DLQStorage(DLQStorageBackend):
 
         Args:
             bucket: S3 bucket name
-            client_id: Client identifier for path partitioning
+            org_id: Org identifier for path partitioning
             pipeline_id: Pipeline identifier
             aws_region: AWS region
             buffer_size: Number of records to buffer before flushing
         """
         self.bucket = bucket
-        self.client_id = client_id
+        self.org_id = org_id
         self.pipeline_id = pipeline_id
         self.aws_region = aws_region
         self.buffer_size = buffer_size
@@ -325,15 +325,15 @@ class S3DLQStorage(DLQStorageBackend):
         """
         Build S3 key with date-based partitioning.
 
-        Pattern: {client_id}/{pipeline_id}/year=YYYY/month=MM/day=DD/{stream_id}/{run_id}_dlq.jsonl
+        Pattern: {org_id}/{pipeline_id}/year=YYYY/month=MM/day=DD/{stream_id}/{run_id}_dlq.jsonl
         """
         now = datetime.now(timezone.utc)
         date_path = f"year={now.year}/month={now.month:02d}/day={now.day:02d}"
         filename = f"{self._run_id}_dlq.jsonl"
 
         if stream_id:
-            return f"{self.client_id}/{self.pipeline_id}/{date_path}/{stream_id}/{filename}"
-        return f"{self.client_id}/{self.pipeline_id}/{date_path}/{filename}"
+            return f"{self.org_id}/{self.pipeline_id}/{date_path}/{stream_id}/{filename}"
+        return f"{self.org_id}/{self.pipeline_id}/{date_path}/{filename}"
 
     async def write_record(self, record: Dict[str, Any], stream_id: Optional[str] = None) -> None:
         """Buffer a DLQ record for later S3 upload."""
@@ -401,7 +401,7 @@ class S3DLQStorage(DLQStorageBackend):
         from botocore.exceptions import ClientError
 
         records = []
-        prefix = f"{self.client_id}/{self.pipeline_id}/"
+        prefix = f"{self.org_id}/{self.pipeline_id}/"
 
         try:
             paginator = self.s3_client.get_paginator("list_objects_v2")
@@ -448,7 +448,7 @@ class S3DLQStorage(DLQStorageBackend):
             "total_size_bytes": 0,
         }
 
-        prefix = f"{self.client_id}/{self.pipeline_id}/"
+        prefix = f"{self.org_id}/{self.pipeline_id}/"
 
         try:
             paginator = self.s3_client.get_paginator("list_objects_v2")
@@ -505,7 +505,7 @@ class S3DLQStorage(DLQStorageBackend):
         """Clear DLQ records from S3."""
         from botocore.exceptions import ClientError
 
-        prefix = f"{self.client_id}/{self.pipeline_id}/"
+        prefix = f"{self.org_id}/{self.pipeline_id}/"
 
         try:
             paginator = self.s3_client.get_paginator("list_objects_v2")
@@ -541,18 +541,18 @@ def create_dlq_storage(
 ) -> DLQStorageBackend:
     """Factory function to create appropriate DLQ storage backend."""
     if settings.is_cloud_mode:
-        if not settings.client_id:
-            raise ValueError("client_id is required for cloud DLQ storage")
+        if not settings.org_id:
+            raise ValueError("org_id is required for cloud DLQ storage")
         if not settings.dlq_bucket:
             raise ValueError("dlq_bucket is required for cloud DLQ storage")
 
         logger.info(
             f"Using S3 DLQ storage: s3://{settings.dlq_bucket}/"
-            f"{settings.client_id}/{settings.pipeline_id}/..."
+            f"{settings.org_id}/{settings.pipeline_id}/..."
         )
         return S3DLQStorage(
             bucket=settings.dlq_bucket,
-            client_id=settings.client_id,
+            org_id=settings.org_id,
             pipeline_id=settings.pipeline_id,
             aws_region=settings.aws_region,
         )

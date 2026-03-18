@@ -6,7 +6,7 @@
 #   ./scripts/deploy-ecr.sh [ENV] [TAG]
 #
 # Arguments:
-#   ENV  - Environment: dev, staging, prod (default: dev)
+#   ENV  - Environment: dev, local, prod (default: dev)
 #   TAG  - Image tag (default: latest)
 #
 # Examples:
@@ -23,7 +23,7 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_ROOT"
 
 # Configuration
-ENV="${1:-dev}"
+ENV="${1}"
 TAG="${2:-latest}"
 AWS_REGION="${AWS_REGION:-eu-central-1}"
 ECR_REPO="analitiq-stream-${ENV}"
@@ -47,8 +47,8 @@ log_error() {
 }
 
 # Validate environment
-if [[ ! "$ENV" =~ ^(dev|staging|prod)$ ]]; then
-    log_error "Invalid environment: $ENV. Must be one of: dev, staging, prod"
+if [[ ! "$ENV" =~ ^(dev|local|prod)$ ]]; then
+    log_error "Invalid environment: $ENV. Must be one of: dev, local, prod"
     exit 1
 fi
 
@@ -77,13 +77,16 @@ log_info "Authenticating with ECR..."
 aws ecr get-login-password --region "$AWS_REGION" | \
     docker login --username AWS --password-stdin "$ECR_URI"
 
-# Check if repository exists
+# Check if repository exists, create if not
 log_info "Checking if ECR repository exists..."
 if ! aws ecr describe-repositories --repository-names "$ECR_REPO" --region "$AWS_REGION" > /dev/null 2>&1; then
-    log_error "ECR repository '$ECR_REPO' does not exist in region $AWS_REGION"
-    log_info "Available repositories:"
-    aws ecr describe-repositories --region "$AWS_REGION" --query 'repositories[*].repositoryName' --output table
-    exit 1
+    log_warn "ECR repository '$ECR_REPO' does not exist. Creating it..."
+    aws ecr create-repository \
+        --repository-name "$ECR_REPO" \
+        --region "$AWS_REGION" \
+        --image-scanning-configuration scanOnPush=true \
+        --image-tag-mutability MUTABLE > /dev/null
+    log_info "Created ECR repository: $ECR_REPO"
 fi
 
 # Build Docker image for x86_64/amd64 (required for AWS)

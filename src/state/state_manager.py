@@ -78,7 +78,7 @@ class StateManager:
 
         # Path prefixes (relative to storage root)
         # For local: paths are relative to base_dir/{pipeline_id}/
-        # For S3: paths are relative to {client_id}/{pipeline_id}/ prefix
+        # For S3: paths are relative to {org_id}/{pipeline_id}/ prefix
         self.streams_path = "streams"
         self.state_path = None
         self.lock_path = None
@@ -221,7 +221,7 @@ class StateManager:
             stream_id=stream_name,
             cursor_hex=json.dumps(cursor).encode().hex() if cursor else "",
             cursor_value=hwm,
-            client_id=os.getenv("CLIENT_ID", ""),
+            org_id=os.getenv("ORG_ID", ""),
         )
 
     def get_stream_state(self, stream_id: str) -> Optional[Dict[str, Any]]:

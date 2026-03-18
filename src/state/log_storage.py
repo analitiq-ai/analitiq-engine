@@ -16,7 +16,7 @@ class LogStorageSettings(BaseModel):
 
     env: str = Field(default="local", description="Environment: local, dev, or prod")
     pipeline_id: str = Field(..., description="Unique pipeline identifier")
-    client_id: Optional[str] = Field(default=None, description="Client ID for S3 path partitioning")
+    org_id: Optional[str] = Field(default=None, description="Org ID for S3 path partitioning")
     aws_region: str = Field(default="eu-central-1", description="AWS region")
     logs_bucket: Optional[str] = Field(default=None, description="S3 bucket for log storage")
     local_logs_dir: str = Field(default="logs", description="Local directory for logs")
@@ -26,7 +26,7 @@ class LogStorageSettings(BaseModel):
         """Create settings from environment variables."""
         env = os.getenv("ENV", "local")
         pipeline_id = os.getenv("PIPELINE_ID", "")
-        client_id = os.getenv("CLIENT_ID")
+        org_id = os.getenv("ORG_ID")
         aws_region = os.getenv("AWS_REGION", "eu-central-1")
         logs_bucket = os.getenv("LOGS_BUCKET") or f"analitiq-client-pipeline-logs-{env}"
         local_logs_dir = os.getenv("LOGS_DIR", "logs")
@@ -34,7 +34,7 @@ class LogStorageSettings(BaseModel):
         return cls(
             env=env,
             pipeline_id=pipeline_id,
-            client_id=client_id,
+            org_id=org_id,
             aws_region=aws_region,
             logs_bucket=logs_bucket,
             local_logs_dir=local_logs_dir,
@@ -51,7 +51,7 @@ class S3LogHandler(logging.Handler):
     Logging handler that writes logs to S3 with date-based partitioning.
 
     Path structure for lifecycle management:
-    s3://{bucket}/{client_id}/{pipeline_id}/year=YYYY/month=MM/day=DD/{log_name}.log
+    s3://{bucket}/{org_id}/{pipeline_id}/year=YYYY/month=MM/day=DD/{log_name}.log
 
     Features:
     - Buffered writes to reduce S3 API calls
@@ -63,7 +63,7 @@ class S3LogHandler(logging.Handler):
     def __init__(
         self,
         bucket: str,
-        client_id: str,
+        org_id: str,
         pipeline_id: str,
         log_name: str = "pipeline",
         stream_id: Optional[str] = None,
@@ -76,7 +76,7 @@ class S3LogHandler(logging.Handler):
 
         Args:
             bucket: S3 bucket name
-            client_id: Client identifier for path partitioning
+            org_id: Org identifier for path partitioning
             pipeline_id: Pipeline identifier
             log_name: Name of the log file (e.g., "pipeline" or "stream")
             stream_id: Optional stream identifier for stream-specific logs
@@ -86,7 +86,7 @@ class S3LogHandler(logging.Handler):
         """
         super().__init__()
         self.bucket = bucket
-        self.client_id = client_id
+        self.org_id = org_id
         self.pipeline_id = pipeline_id
         self.log_name = log_name
         self.stream_id = stream_id
@@ -112,13 +112,13 @@ class S3LogHandler(logging.Handler):
         """
         Build S3 key with date-based partitioning.
 
-        Pattern: {client_id}/{pipeline_id}/year=YYYY/month=MM/day=DD/{stream_id}/{log_name}.log
+        Pattern: {org_id}/{pipeline_id}/year=YYYY/month=MM/day=DD/{stream_id}/{log_name}.log
         """
         date_path = f"year={date.year}/month={date.month:02d}/day={date.day:02d}"
 
         if self.stream_id:
-            return f"{self.client_id}/{self.pipeline_id}/{date_path}/{self.stream_id}/{self.log_name}.log"
-        return f"{self.client_id}/{self.pipeline_id}/{date_path}/{self.log_name}.log"
+            return f"{self.org_id}/{self.pipeline_id}/{date_path}/{self.stream_id}/{self.log_name}.log"
+        return f"{self.org_id}/{self.pipeline_id}/{date_path}/{self.log_name}.log"
 
     def _should_flush(self) -> bool:
         """Check if buffer should be flushed."""
@@ -215,7 +215,7 @@ class BufferedS3LogHandler(logging.Handler):
     def __init__(
         self,
         bucket: str,
-        client_id: str,
+        org_id: str,
         pipeline_id: str,
         log_name: str = "pipeline",
         stream_id: Optional[str] = None,
@@ -227,7 +227,7 @@ class BufferedS3LogHandler(logging.Handler):
 
         Args:
             bucket: S3 bucket name
-            client_id: Client identifier for path partitioning
+            org_id: Org identifier for path partitioning
             pipeline_id: Pipeline identifier
             log_name: Name of the log file
             stream_id: Optional stream identifier
@@ -236,7 +236,7 @@ class BufferedS3LogHandler(logging.Handler):
         """
         super().__init__()
         self.bucket = bucket
-        self.client_id = client_id
+        self.org_id = org_id
         self.pipeline_id = pipeline_id
         self.log_name = log_name
         self.stream_id = stream_id
@@ -260,15 +260,15 @@ class BufferedS3LogHandler(logging.Handler):
         """
         Build S3 key with date-based partitioning.
 
-        Pattern: {client_id}/{pipeline_id}/year=YYYY/month=MM/day=DD/{stream_id}/{run_id}_{log_name}.log
+        Pattern: {org_id}/{pipeline_id}/year=YYYY/month=MM/day=DD/{stream_id}/{run_id}_{log_name}.log
         """
         date = self._start_time
         date_path = f"year={date.year}/month={date.month:02d}/day={date.day:02d}"
         filename = f"{self.run_id}_{self.log_name}.log"
 
         if self.stream_id:
-            return f"{self.client_id}/{self.pipeline_id}/{date_path}/{self.stream_id}/{filename}"
-        return f"{self.client_id}/{self.pipeline_id}/{date_path}/{filename}"
+            return f"{self.org_id}/{self.pipeline_id}/{date_path}/{self.stream_id}/{filename}"
+        return f"{self.org_id}/{self.pipeline_id}/{date_path}/{filename}"
 
     def emit(self, record: logging.LogRecord) -> None:
         """Emit a log record to the buffer."""
@@ -333,15 +333,15 @@ def create_log_handler(
         Appropriate logging handler for the environment
     """
     if settings.is_cloud_mode:
-        if not settings.client_id:
-            raise ValueError("client_id is required for cloud log storage")
+        if not settings.org_id:
+            raise ValueError("org_id is required for cloud log storage")
         if not settings.logs_bucket:
             raise ValueError("logs_bucket is required for cloud log storage")
 
         if buffered:
             return BufferedS3LogHandler(
                 bucket=settings.logs_bucket,
-                client_id=settings.client_id,
+                org_id=settings.org_id,
                 pipeline_id=settings.pipeline_id,
                 log_name=log_name,
                 stream_id=stream_id,
@@ -351,7 +351,7 @@ def create_log_handler(
         else:
             return S3LogHandler(
                 bucket=settings.logs_bucket,
-                client_id=settings.client_id,
+                org_id=settings.org_id,
                 pipeline_id=settings.pipeline_id,
                 log_name=log_name,
                 stream_id=stream_id,
