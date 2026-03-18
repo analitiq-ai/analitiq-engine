@@ -45,7 +45,7 @@ class ConnectionConfig:
         connection_id: str,
         resolver: SecretsResolver,
         *,
-        client_id: Optional[str] = None,
+        org_id: Optional[str] = None,
     ):
         """
         Initialize ConnectionConfig wrapper.
@@ -54,12 +54,12 @@ class ConnectionConfig:
             raw_config: Configuration dict with ${placeholder} values
             connection_id: Identifier for the connection
             resolver: SecretsResolver instance for fetching secrets
-            client_id: Optional client identifier for multi-tenant deployments
+            org_id: Optional org identifier for multi-tenant deployments
         """
         self._raw_config = raw_config
         self._connection_id = connection_id
         self._resolver = resolver
-        self._client_id = client_id
+        self._org_id = org_id
         self._resolved_config: Optional[Dict[str, Any]] = None
         self._secrets: Optional[Dict[str, str]] = None
 
@@ -104,7 +104,7 @@ class ConnectionConfig:
         # Fetch secrets from resolver
         self._secrets = await self._resolver.resolve(
             self._connection_id,
-            client_id=self._client_id,
+            org_id=self._org_id,
         )
 
         # Expand placeholders

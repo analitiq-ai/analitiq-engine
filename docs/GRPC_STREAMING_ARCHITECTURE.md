@@ -433,7 +433,7 @@ await server.wait_for_termination()
 |----------|----------|---------|-------------|
 | `RUN_MODE` | Yes | - | Set to `destination` for server mode |
 | `PIPELINE_ID` | Yes | - | Pipeline UUID (same as engine) |
-| `CLIENT_ID` | Cloud | - | Client UUID (required for cloud environments) |
+| `ORG_ID` | Cloud | - | Org UUID (required for cloud environments) |
 | `DESTINATION_INDEX` | No | `0` | Index of destination in pipeline config |
 | `GRPC_PORT` | No | `50051` | Port to listen on |
 | `LOG_LEVEL` | No | `INFO` | Logging level |
@@ -508,8 +508,8 @@ services:
 cd docker
 docker compose up -d destination
 
-# Run pipeline (PIPELINE_ID and CLIENT_ID passed at runtime)
-docker compose run -e PIPELINE_ID=<uuid> -e CLIENT_ID=<uuid> source_engine
+# Run pipeline (PIPELINE_ID and ORG_ID passed at runtime)
+docker compose run -e PIPELINE_ID=<uuid> -e ORG_ID=<uuid> source_engine
 ```
 
 ### ECS Deployment

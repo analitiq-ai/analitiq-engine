@@ -222,7 +222,7 @@ class PipelineConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
     version: int = Field(1, description="Pipeline configuration version")
-    client_id: str = Field("", description="Client identifier")
+    org_id: str = Field("", description="Org identifier")
     pipeline_id: str = Field(..., description="Unique pipeline identifier")
     name: str = Field(..., description="Human-readable pipeline name")
     description: Optional[str] = Field(None, description="Pipeline description")
@@ -292,7 +292,7 @@ class PipelineConfigLegacy(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     pipeline_id: str = Field(..., description="Unique pipeline identifier")
-    client_id: str = Field("", description="Client identifier")
+    org_id: str = Field("", description="Org identifier")
     name: str = Field(..., description="Human-readable pipeline name")
     version: str = Field("1.0", description="Pipeline version string")
 
@@ -344,7 +344,7 @@ class PipelineConfigLegacy(BaseModel):
 
         pipeline = PipelineConfig(
             version=self.version,
-            client_id=self.client_id,
+            org_id=self.org_id,
             pipeline_id=self.pipeline_id,
             name=self.name,
             is_enabled=True,
@@ -358,7 +358,7 @@ class PipelineConfigLegacy(BaseModel):
             stream_configs.append({
                 "stream_id": stream_id,
                 "pipeline_id": self.pipeline_id,
-                "client_id": self.client_id,
+                "org_id": self.org_id,
                 **stream_data,
             })
 

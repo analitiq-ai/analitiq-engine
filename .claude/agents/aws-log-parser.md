@@ -23,7 +23,7 @@ Each pipeline run creates an AWS Batch job with two containers:
 The `pipeline-invoker` Lambda triggers batch jobs and passes:
 - `INVOCATION_ID`: Unique identifier for the pipeline run (UUID)
 - `AWS_BATCH_JOB_ID` or `BATCH_JOB_ID`: The batch job identifier
-- `PIPELINE_ID`, `CLIENT_ID`, `DOMAIN`: Additional context
+- `PIPELINE_ID`, `ORG_ID`, `DOMAIN`: Additional context
 
 These are logged at the start of each ECS task run.
 

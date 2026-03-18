@@ -28,7 +28,7 @@ from src.models.stream import (
 
 # --- Test UUIDs ---
 PIPELINE_ID = "22ab7b76-b4df-4c68-8b27-82c307436661"
-CLIENT_ID = "d7a11991-2795-49d1-a858-c7e58ee5ecc6"
+ORG_ID = "d7a11991-2795-49d1-a858-c7e58ee5ecc6"
 WISE_CONNECTION_ID = "b4904c77-0a4a-4a8d-a768-4a8b5f2f2414"
 SEVDESK_CONNECTION_ID = "b452b1b2-34f9-4175-a47b-3dd6a4012230"
 DB_CONNECTION_ID = "c5d6e7f8-9a0b-1c2d-3e4f-567890abcdef"
@@ -147,7 +147,7 @@ def _make_pipeline_config(source_alias, source_conn_id, dest_alias, dest_conn_id
     return PipelineConfig(
         version=1,
         pipeline_id=PIPELINE_ID,
-        client_id=CLIENT_ID,
+        org_id=ORG_ID,
         name="Test Pipeline",
         status="active",
         connections=PipelineConnectionsConfig(
@@ -164,7 +164,7 @@ def _make_stream_config(source_alias, source_endpoint_id, dest_alias, dest_endpo
         version=1,
         stream_id=STREAM_ID,
         pipeline_id=PIPELINE_ID,
-        client_id=CLIENT_ID,
+        org_id=ORG_ID,
         status="active",
         is_enabled=True,
         source=SourceConfig(

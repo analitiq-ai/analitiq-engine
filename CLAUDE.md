@@ -110,7 +110,7 @@ Configuration loads from local filesystem when ran locally. In cloud, `config_fe
 |----------|----------|-------------|
 | `ENV` | Yes | `local`, `dev`, `prod` - affects storage backends only |
 | `PIPELINE_ID` | Yes | Pipeline UUID |
-| `CLIENT_ID` | Yes | Client UUID |
+| `ORG_ID` | Yes | Org UUID |
 | `LOCAL_CONFIG_MOUNT` | Yes | Config directory path |
 | `AWS_REGION` | Cloud | Default: `eu-central-1` |
 
@@ -138,7 +138,7 @@ pipeline_config, stream_configs, connections, endpoints = prep.create_config()
 {
   "version": 1,
   "pipeline_id": "uuid",
-  "client_id": "uuid",
+  "org_id": "uuid",
   "name": "Pipeline Name",
   "status": "active",
   "connections": {
@@ -256,7 +256,7 @@ Connections reference a connector via `connector_id` and contain credentials. Cr
 
 All storage (state, logs, DLQ, metrics) follows the same pattern:
 - **Local (`ENV=local`):** `{type}/{pipeline_id}/`
-- **S3 (`ENV=dev/prod`):** `s3://analitiq-client-pipeline-{type}-{env}/{client_id}/{pipeline_id}/year=.../`
+- **S3 (`ENV=dev/prod`):** `s3://analitiq-client-pipeline-{type}-{env}/{org_id}/{pipeline_id}/year=.../`
 
 Centralized directories at project root: `state/`, `logs/`, `deadletter/`, `metrics/`
 
@@ -344,8 +344,8 @@ Source (native types) -> Arrow Table (canonical schema) -> Destination (native t
 Use agent `aws-log-parser` to parse CloudWatch logs.
 
 ## Testing
-When running tests where client_id is needed, use:
- - client_id = `d7a11991-2795-49d1-a858-c7e58ee5ecc6`
+When running tests where org_id is needed, use:
+ - org_id = `d7a11991-2795-49d1-a858-c7e58ee5ecc6`
 
 ### Running docker test locally
 When running docker test, the run should mimic the production environment:
@@ -359,7 +359,7 @@ Example:
 ```shell
 cd docker && \                                                                                                                                          
    PIPELINE_ID=0569c85b-b538-442a-bdc5-726afca08da4 \                                                                                                                                                               
-   CLIENT_ID=d7a11991-2795-49d1-a858-c7e58ee5ecc6 \                                                                                                                                                                 
+   ORG_ID=d7a11991-2795-49d1-a858-c7e58ee5ecc6 \                                                                                                                                                                 
    AWS_PROFILE=434659057682_AdministratorAccess \                                                                                                                                                                   
    docker compose run --rm source_engine 2>&1 
 ```
@@ -380,7 +380,7 @@ docker build -t analitiq-stream . && docker push $AWS_ACCOUNT_ID.dkr.ecr.eu-cent
 ```
 
 **Batch Job Requirements:**
-- Runtime env: `PIPELINE_ID`, `CLIENT_ID`
+- Runtime env: `PIPELINE_ID`, `ORG_ID`
 - Static env: `ENV`, `PIPELINES_TABLE`, `STREAMS_TABLE`, `CONNECTIONS_TABLE`
 - Resources: 0.5-1 vCPU, 1-2GB memory, 3600s timeout
 - IAM: S3 read/write on buckets, DynamoDB read on tables
@@ -407,3 +407,27 @@ docker build -t analitiq-stream . && docker push $AWS_ACCOUNT_ID.dkr.ecr.eu-cent
 - Update README.md when modifying documented functionality
 - DO NOT ADD LEGACY SUPPORT OR BACKWARD COMPATIBILITY, UNLESS EXPLICITLY INSTRUCTED!
 - Use @codex-plan-reviewer agent to review plans before presenting them to me for execution.
+
+
+## Working on Issues:
+
+1. Examine GitHub issues, pick the easist one to implement.
+2. Create a new branch for the issue.
+3. Implement the issue.
+4. Commit your changes and push to the branch.
+5. Create a pull request (if not yet created).
+6. Run the PR Review Process
+7. Wait for feedback from the review executor.
+
+## PR Review Process:
+
+1. Use `@"pr-review-executor (agent)"` to review the PR after you have implemented all changes.
+2. Wait for feedback from the review executor.
+3. Determine if the raised issues are legitimate or not.
+   a. if the issue is legitimate and relevant to the PR, fix it.
+   b. if the issue is outside the scope of the PR, check if there is a related issue in the GitHub issue tracker. If not, create a new issue in GitHub and move on.
+   c. If the issue is not a legitimate problem, summarize your thoughts on the point and move on.
+4. Once you fixed all issues that need fixing, commit fixes, push to the branch.
+5. Use `@"pr-review-executor (agent)"` to review again
+6. Continue doing this cycle until the PR is approved by the review executor.
+7. Once the PR is approved, run the tests to make sure they all pass.

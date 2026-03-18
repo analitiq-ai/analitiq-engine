@@ -1,7 +1,7 @@
 # Pipeline JSON (YAML representation)
 version: "1"
 
-client_id: ""
+org_id: ""
 pipeline_id: "b0c2f9d0-3b2a-4a7e-8c86-1b9c6c2d7b15"
 name: "Wise Multi-Stream to SevDesk Integration"
 status: active

@@ -28,7 +28,7 @@ class SecretsResolver(ABC):
         self,
         connection_id: str,
         *,
-        client_id: Optional[str] = None,
+        org_id: Optional[str] = None,
         keys: Optional[list[str]] = None,
     ) -> Dict[str, str]:
         """
@@ -36,7 +36,7 @@ class SecretsResolver(ABC):
 
         Args:
             connection_id: Identifier for the connection (e.g., connector name or UUID)
-            client_id: Optional client identifier (for multi-tenant deployments)
+            org_id: Optional org identifier (for multi-tenant deployments)
             keys: Optional list of specific keys to retrieve (if None, return all)
 
         Returns:

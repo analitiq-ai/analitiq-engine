@@ -157,7 +157,7 @@ class Pipeline:
 
         return PipelineConfig(
             version=version,
-            client_id=config.get("client_id", ""),
+            org_id=config.get("org_id", ""),
             pipeline_id=config["pipeline_id"],
             name=config.get("name", ""),
             status="active",
@@ -286,7 +286,7 @@ class Pipeline:
                 version=1,
                 stream_id=stream_id,
                 pipeline_id=config["pipeline_id"],
-                client_id=config.get("client_id", ""),
+                org_id=config.get("org_id", ""),
                 status="active",
                 is_enabled=True,
                 source=source,
@@ -346,7 +346,7 @@ class Pipeline:
         if self._log_settings.is_cloud_mode:
             logger.info(
                 f"Setup pipeline logging: s3://{self._log_settings.logs_bucket}/"
-                f"{self._log_settings.client_id}/{pipeline_id}/..."
+                f"{self._log_settings.org_id}/{pipeline_id}/..."
             )
         else:
             logger.info(f"Setup pipeline logging: {self.logs_dir}/pipeline.log")
@@ -551,7 +551,7 @@ class Pipeline:
             "pipeline_id": self.pipeline_config.pipeline_id,
             "name": self.pipeline_config.name,
             "version": self.pipeline_config.version,
-            "client_id": self.pipeline_config.client_id,
+            "org_id": self.pipeline_config.org_id,
             "connections": self.pipeline_config.connections.model_dump(),
             "resolved_connections": self.resolved_connections,  # Include for engine access
             "source": pipeline_source_config,

@@ -19,7 +19,7 @@ ANALITIQ_METRICS::{"type":"batch","run_id":"abc123","pipeline_id":"xyz","stream_
 
 **Pipeline metrics** (emitted at pipeline completion in `runner.py`):
 ```json
-ANALITIQ_METRICS::{"type":"pipeline","run_id":"abc123","pipeline_id":"xyz","pipeline_name":"Sales Sync","client_id":"d7a11991-2795-49d1-a858-c7e58ee5ecc6","start_time":"2025-02-04T10:00:00+00:00","end_time":"2025-02-04T10:35:00+00:00","duration_seconds":2100.5,"records_processed":15000,"records_failed":0,"records_total":15000,"batches_processed":15,"status":"success","error_message":null,"records_per_second":7.14,"environment":"prod"}
+ANALITIQ_METRICS::{"type":"pipeline","run_id":"abc123","pipeline_id":"xyz","pipeline_name":"Sales Sync","org_id":"d7a11991-2795-49d1-a858-c7e58ee5ecc6","start_time":"2025-02-04T10:00:00+00:00","end_time":"2025-02-04T10:35:00+00:00","duration_seconds":2100.5,"records_processed":15000,"records_failed":0,"records_total":15000,"batches_processed":15,"status":"success","error_message":null,"records_per_second":7.14,"environment":"prod"}
 ```
 
 ## CloudWatch Logs Insights Queries
@@ -55,13 +55,13 @@ fields @timestamp
 | limit 100
 ```
 
-### Filter by Client ID
+### Filter by Org ID
 
 ```sql
 fields @timestamp
 | filter @message like /ANALITIQ_METRICS::/
 | parse @message /ANALITIQ_METRICS::(?<metrics>.*)$/
-| filter metrics like /"client_id":"d7a11991-2795-49d1-a858-c7e58ee5ecc6"/
+| filter metrics like /"org_id":"d7a11991-2795-49d1-a858-c7e58ee5ecc6"/
 | filter metrics like /"type":"pipeline"/
 | parse metrics /"pipeline_name":"(?<pipeline_name>[^"]+)"/
 | parse metrics /"records_processed":(?<records_processed>\d+)/
@@ -91,7 +91,7 @@ fields @timestamp
 | filter @message like /ANALITIQ_METRICS::/
 | parse @message /ANALITIQ_METRICS::(?<metrics>.*)$/
 | filter metrics like /"type":"pipeline"/
-| filter metrics like /"client_id":"d7a11991-2795-49d1-a858-c7e58ee5ecc6"/
+| filter metrics like /"org_id":"d7a11991-2795-49d1-a858-c7e58ee5ecc6"/
 | parse metrics /"records_processed":(?<records_processed>\d+)/
 | parse metrics /"records_failed":(?<records_failed>\d+)/
 | stats sum(records_processed) as total_processed, sum(records_failed) as total_failed, count() as pipeline_runs by bin(1d)
@@ -234,7 +234,7 @@ def execute_logs_query(query: str, start_time: datetime, end_time: datetime, tim
     return results
 
 
-def get_pipeline_metrics(client_id: str, start_date: str, end_date: str, pipeline_id: str = None) -> list[dict]:
+def get_pipeline_metrics(org_id: str, start_date: str, end_date: str, pipeline_id: str = None) -> list[dict]:
     """
     Get pipeline completion metrics for a client.
     """
@@ -250,7 +250,7 @@ def get_pipeline_metrics(client_id: str, start_date: str, end_date: str, pipelin
     | filter @message like /ANALITIQ_METRICS::/
     | parse @message /ANALITIQ_METRICS::(?<metrics>.*)$/
     | filter metrics like /"type":"pipeline"/
-    | filter metrics like /"client_id":"{client_id}"/
+    | filter metrics like /"org_id":"{org_id}"/
     {pipeline_filter}
     | parse metrics /"run_id":"(?<run_id>[^"]+)"/
     | parse metrics /"pipeline_id":"(?<pipeline_id>[^"]+)"/
@@ -266,7 +266,7 @@ def get_pipeline_metrics(client_id: str, start_date: str, end_date: str, pipelin
     return execute_logs_query(query, start_time, end_time)
 
 
-def get_daily_aggregates(client_id: str, start_date: str, end_date: str) -> list[dict]:
+def get_daily_aggregates(org_id: str, start_date: str, end_date: str) -> list[dict]:
     """
     Get daily aggregated metrics for a client.
     """
@@ -278,7 +278,7 @@ def get_daily_aggregates(client_id: str, start_date: str, end_date: str) -> list
     | filter @message like /ANALITIQ_METRICS::/
     | parse @message /ANALITIQ_METRICS::(?<metrics>.*)$/
     | filter metrics like /"type":"pipeline"/
-    | filter metrics like /"client_id":"{client_id}"/
+    | filter metrics like /"org_id":"{org_id}"/
     | parse metrics /"records_processed":(?<records_processed>\\d+)/
     | parse metrics /"records_failed":(?<records_failed>\\d+)/
     | stats sum(records_processed) as total_processed, sum(records_failed) as total_failed, count() as pipeline_runs by bin(1d) as day
@@ -295,7 +295,7 @@ def lambda_handler(event: dict, context: Any) -> dict:
     Event structure:
     {
         "action": "pipeline_metrics" | "daily_aggregates",
-        "client_id": "uuid",
+        "org_id": "uuid",
         "pipeline_id": "uuid",  // optional
         "start_date": "YYYY-MM-DD",
         "end_date": "YYYY-MM-DD"
@@ -303,20 +303,20 @@ def lambda_handler(event: dict, context: Any) -> dict:
     """
     try:
         action = event.get("action")
-        client_id = event.get("client_id")
+        org_id = event.get("org_id")
         start_date = event.get("start_date")
         end_date = event.get("end_date")
 
-        if not client_id:
-            return {"statusCode": 400, "body": json.dumps({"error": "client_id is required"})}
+        if not org_id:
+            return {"statusCode": 400, "body": json.dumps({"error": "org_id is required"})}
         if not start_date or not end_date:
             return {"statusCode": 400, "body": json.dumps({"error": "start_date and end_date are required"})}
 
         if action == "pipeline_metrics":
             pipeline_id = event.get("pipeline_id")
-            results = get_pipeline_metrics(client_id, start_date, end_date, pipeline_id)
+            results = get_pipeline_metrics(org_id, start_date, end_date, pipeline_id)
         elif action == "daily_aggregates":
-            results = get_daily_aggregates(client_id, start_date, end_date)
+            results = get_daily_aggregates(org_id, start_date, end_date)
         else:
             return {
                 "statusCode": 400,
@@ -359,7 +359,7 @@ def lambda_handler(event: dict, context: Any) -> dict:
 | `run_id` | string | Unique run identifier |
 | `pipeline_id` | string | Pipeline UUID |
 | `pipeline_name` | string | Human-readable pipeline name |
-| `client_id` | string | Client UUID |
+| `org_id` | string | Org UUID |
 | `start_time` | string | ISO 8601 start timestamp |
 | `end_time` | string | ISO 8601 end timestamp |
 | `duration_seconds` | float | Total execution duration |
@@ -391,7 +391,7 @@ def lambda_handler(event: dict, context: Any) -> dict:
 
 The previous implementation stored metrics as JSON files in S3:
 ```
-s3://analitiq-client-pipeline-row-count/client_id={id}/year=.../month=.../day=.../{run_id}.json
+s3://analitiq-client-pipeline-row-count/org_id={id}/year=.../month=.../day=.../{run_id}.json
 ```
 
 The new implementation emits metrics directly to logs, which:
