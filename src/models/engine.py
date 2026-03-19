@@ -10,17 +10,6 @@ from pydantic import (
 )
 
 
-class EngineConfig(BaseModel):
-    """Engine configuration with validation."""
-    
-    model_config = ConfigDict(extra='forbid', validate_assignment=True)
-    
-    batch_size: int = Field(1000, ge=1, le=100000, description="Batch size for processing")
-    max_concurrent_batches: int = Field(10, ge=1, le=1000, description="Maximum concurrent batches")
-    buffer_size: int = Field(10000, ge=100, le=1000000, description="Buffer size for queues")
-    dlq_path: str = Field("./deadletter/", description="Dead letter queue path")
-    checkpoint_interval: int = Field(100, ge=1, description="Checkpoint every N batches")
-
 
 class StreamStageConfig(BaseModel):
     """Configuration for individual pipeline stages."""

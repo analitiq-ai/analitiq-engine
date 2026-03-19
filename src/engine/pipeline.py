@@ -104,7 +104,7 @@ class Pipeline:
     def _convert_legacy_pipeline_config(self, config: Dict[str, Any]) -> PipelineConfig:
         """Convert legacy dict config to PipelineConfig model."""
         from ..models.pipeline import (
-            RuntimeConfig, BatchingConfig, EngineRuntimeConfig,
+            EngineConfig, BatchingConfig, EngineResourceConfig,
             LoggingConfig, ErrorHandlingConfig, ScheduleConfig,
             PipelineConnectionsConfig
         )
@@ -131,7 +131,7 @@ class Pipeline:
                 batch_size=engine_config.get("batch_size", 100),
                 max_concurrent_batches=engine_config.get("max_concurrent_batches", 3),
             ),
-            "engine": EngineRuntimeConfig(
+            "engine": EngineResourceConfig(
                 buffer_size=engine_config.get("buffer_size", 5000),
             ),
             "logging": LoggingConfig(
@@ -161,7 +161,7 @@ class Pipeline:
             name=config.get("name", ""),
             status="active",
             connections=connections,
-            engine_config=RuntimeConfig(**runtime_dict),
+            engine_config=EngineConfig(**runtime_dict),
         )
 
     def _convert_legacy_stream_configs(self, config: Dict[str, Any]) -> List[StreamConfig]:

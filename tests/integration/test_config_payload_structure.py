@@ -16,7 +16,7 @@ from unittest.mock import Mock
 from src.engine.pipeline import Pipeline
 from src.engine.pipeline_config_prep import ResolvedConnection
 from src.models.api import APIConnectionConfig
-from src.models.pipeline import PipelineConfig, PipelineConnectionsConfig, RuntimeConfig
+from src.models.pipeline import PipelineConfig, PipelineConnectionsConfig, EngineConfig
 from src.models.stream import (
     DestinationConfig,
     MappingConfig,
@@ -160,7 +160,7 @@ def _make_pipeline_config(source_alias, source_conn_id, dest_alias, dest_conn_id
             source={source_alias: source_conn_id},
             destinations=[{dest_alias: dest_conn_id}],
         ),
-        engine_config=RuntimeConfig(),
+        engine_config=EngineConfig(),
     )
 
 

@@ -23,7 +23,7 @@ from ..config import load_analitiq_config
 from ..models.metrics import PipelineMetrics
 from ..models.state import PipelineConfig
 from ..models.engine import (
-    EngineConfig, StreamProcessingConfig, PipelineStagesConfig,
+    StreamProcessingConfig, PipelineStagesConfig,
     StreamStageConfig, PipelineMetricsSnapshot
 )
 from .data_transformer import DataTransformer
@@ -78,26 +78,13 @@ class StreamingEngine:
         max_concurrent_batches: int = 10,
         buffer_size: int = 10000,
         dlq_path: str = "./deadletter/",
-        engine_config: Optional[EngineConfig] = None,
     ):
         self.pipeline_id = pipeline_id
-        
-        # Validate and set engine configuration
-        if engine_config:
-            self.engine_config = engine_config
-        else:
-            self.engine_config = EngineConfig(
-                batch_size=batch_size,
-                max_concurrent_batches=max_concurrent_batches,
-                buffer_size=buffer_size,
-                dlq_path=dlq_path
-            )
-        
-        # Initialize from validated config
-        self.batch_size = self.engine_config.batch_size
-        self.max_concurrent_batches = self.engine_config.max_concurrent_batches
-        self.buffer_size = self.engine_config.buffer_size
-        self.semaphore = Semaphore(self.engine_config.max_concurrent_batches)
+        self.batch_size = batch_size
+        self.max_concurrent_batches = max_concurrent_batches
+        self.buffer_size = buffer_size
+        self.dlq_path = dlq_path
+        self.semaphore = Semaphore(max_concurrent_batches)
         
         # Setup structured logging
         self.logger = logging.getLogger(f"{__name__}.{pipeline_id}")
@@ -116,7 +103,7 @@ class StreamingEngine:
         self._state_manager = self.sharded_state_manager
         self.retry_handler = RetryHandler()
         self.circuit_breaker = CircuitBreaker()
-        self.dlq = DeadLetterQueue(self.engine_config.dlq_path)
+        self.dlq = DeadLetterQueue(self.dlq_path)
         
         # Data transformation component
         self.data_transformer = DataTransformer()

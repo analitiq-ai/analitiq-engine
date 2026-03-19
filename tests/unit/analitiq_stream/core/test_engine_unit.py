@@ -375,21 +375,14 @@ class TestEngineConfiguration:
         assert engine.max_concurrent_batches == 10  # Default
         assert engine.buffer_size == 10000  # Default
 
-    def test_engine_with_engine_config_object(self, temp_dir):
-        """Test engine with EngineConfig object."""
-        from src.models.engine import EngineConfig
-
-        config = EngineConfig(
+    def test_engine_with_custom_config_params(self, temp_dir):
+        """Test engine with explicit config parameters."""
+        engine = StreamingEngine(
+            pipeline_id="with-config",
             batch_size=200,
             max_concurrent_batches=4,
             buffer_size=2000,
-            dlq_path=temp_dir
-        )
-
-        engine = StreamingEngine(
-            pipeline_id="with-config",
             dlq_path=temp_dir,
-            engine_config=config
         )
 
         assert engine.batch_size == 200

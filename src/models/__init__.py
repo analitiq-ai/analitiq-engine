@@ -1,23 +1,17 @@
 """Pydantic models for type safety and validation."""
 
-# New pipeline/stream models (PIPELINE.yaml, STREAM.yaml, STREAM_STATE.yaml specs)
+# Pipeline models (mirrors k2m's PipelineConfig)
 from .pipeline import (
-    BackoffStrategy,
     BatchingConfig,
-    EngineRuntimeConfig,
-    ErrorAction,
+    EngineConfig,
+    EngineResourceConfig,
     ErrorCategoriesConfig,
     ErrorHandlingConfig,
-    ExpressionConfig,
-    ExpressionPolicy,
-    FunctionCatalogConfig,
     LoggingConfig,
     PipelineConfig,
     PipelineConnectionsConfig,
     RetryConfig,
-    RuntimeConfig,
     ScheduleConfig,
-    ScheduleType,
 )
 
 from .stream import (
@@ -70,7 +64,6 @@ from .stream_state import (
 
 # Engine models
 from .engine import (
-    EngineConfig,
     PipelineMetricsSnapshot,
     PipelineStagesConfig,
     StreamProcessingConfig,
@@ -134,22 +127,16 @@ from .state import (
 
 __all__ = [
     # Pipeline models
-    "BackoffStrategy",
     "BatchingConfig",
-    "EngineRuntimeConfig",
-    "ErrorAction",
+    "EngineConfig",
+    "EngineResourceConfig",
     "ErrorCategoriesConfig",
     "ErrorHandlingConfig",
-    "ExpressionConfig",
-    "ExpressionPolicy",
-    "FunctionCatalogConfig",
     "LoggingConfig",
     "PipelineConfig",
     "PipelineConnectionsConfig",
     "RetryConfig",
-    "RuntimeConfig",
     "ScheduleConfig",
-    "ScheduleType",
     # Stream models
     "Assignment",
     "AssignmentTarget",
@@ -195,7 +182,6 @@ __all__ = [
     "StreamStateIndex",
     "StreamStatus",
     # Engine models
-    "EngineConfig",
     "PipelineMetricsSnapshot",
     "PipelineStagesConfig",
     "StreamProcessingConfig",

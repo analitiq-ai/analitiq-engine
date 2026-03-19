@@ -42,7 +42,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from pydantic import BaseModel, Field
 
 from src.config import load_analitiq_config, validate_consolidated_config
-from src.models.pipeline import PipelineConfig, PipelineConnectionsConfig, RuntimeConfig
+from src.models.pipeline import PipelineConfig, PipelineConnectionsConfig, EngineConfig
 from src.models.stream import StreamConfig, SourceConfig, DestinationConfig, MappingConfig
 from src.models.stream_state import StreamState
 from src.secrets import (
@@ -724,8 +724,7 @@ class PipelineConfigPrep:
             status=raw_pipeline.get("status", "draft"),
             tags=raw_pipeline.get("tags", []),
             connections=connections_config,
-            engine_config=RuntimeConfig(**raw_pipeline.get("engine_config", {})) if raw_pipeline.get("engine_config") else RuntimeConfig(),
-            function_catalog=raw_pipeline.get("function_catalog"),
+            engine_config=EngineConfig(**raw_pipeline.get("engine_config", {})) if raw_pipeline.get("engine_config") else EngineConfig(),
             created_at=raw_pipeline.get("created_at"),
             updated_at=raw_pipeline.get("updated_at"),
         )
