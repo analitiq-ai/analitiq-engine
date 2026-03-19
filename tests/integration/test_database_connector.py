@@ -27,11 +27,13 @@ def database_config():
     return {
         "driver": "postgresql",
         "host": os.getenv("POSTGRES_HOST", "localhost"),
-        "port": int(os.getenv("POSTGRES_PORT", "5432")),
-        "database": os.getenv("POSTGRES_DB", "analitiq_test"),
-        "username": os.getenv("POSTGRES_USER", "postgres"),
-        "password": os.getenv("POSTGRES_PASSWORD", ""),
-        "ssl_mode": os.getenv("POSTGRES_SSL_MODE", "prefer"),
+        "parameters": {
+            "port": int(os.getenv("POSTGRES_PORT", "5432")),
+            "database": os.getenv("POSTGRES_DB", "analitiq_test"),
+            "username": os.getenv("POSTGRES_USER", "postgres"),
+            "password": os.getenv("POSTGRES_PASSWORD", ""),
+            "ssl_mode": os.getenv("POSTGRES_SSL_MODE", "prefer"),
+        },
     }
 
 

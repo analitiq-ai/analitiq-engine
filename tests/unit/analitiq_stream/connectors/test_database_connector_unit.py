@@ -17,10 +17,12 @@ def database_config():
     return {
         "driver": "postgresql",
         "host": "localhost",
-        "port": 5432,
-        "database": "test_db",
-        "username": "test_user",
-        "password": "test_password",
+        "parameters": {
+            "port": 5432,
+            "database": "test_db",
+            "username": "test_user",
+            "password": "test_password",
+        },
     }
 
 

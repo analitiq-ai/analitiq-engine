@@ -25,15 +25,17 @@ def connection_config():
     return {
         "driver": "postgresql",
         "host": os.getenv("POSTGRES_HOST", "localhost"),
-        "port": int(os.getenv("POSTGRES_PORT", "5432")),
-        "username": os.getenv("POSTGRES_USER", "postgres"),
-        "password": os.getenv("POSTGRES_PASSWORD", ""),
-        "database": os.getenv("POSTGRES_DB", "analitiq_test"),
-        "ssl_mode": os.getenv("POSTGRES_SSL_MODE", "prefer"),
-        "connection_pool": {
-            "min_connections": 2,
-            "max_connections": 10
-        }
+        "parameters": {
+            "port": int(os.getenv("POSTGRES_PORT", "5432")),
+            "username": os.getenv("POSTGRES_USER", "postgres"),
+            "password": os.getenv("POSTGRES_PASSWORD", ""),
+            "database": os.getenv("POSTGRES_DB", "analitiq_test"),
+            "ssl_mode": os.getenv("POSTGRES_SSL_MODE", "prefer"),
+            "connection_pool": {
+                "min_connections": 2,
+                "max_connections": 10
+            },
+        },
     }
 
 

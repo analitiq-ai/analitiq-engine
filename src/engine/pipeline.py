@@ -12,15 +12,14 @@ from pydantic import ValidationError
 
 from .engine import StreamingEngine
 from .pipeline_config_prep import ResolvedConnection
-from ..shared.connector_utils import get_connector_type_from_list
+
 from ..shared.run_id import get_or_generate_run_id
 from ..state.log_storage import LogStorageSettings, create_log_handler
 from ..models.enriched import (
-    EnrichedAPIDestinationConfig,
-    EnrichedAPISourceConfig,
-    EnrichedDatabaseDestinationConfig,
-    EnrichedDatabaseSourceConfig,
+    EnrichedAPIConfig,
+    EnrichedDatabaseConfig,
 )
+from ..shared.connector_utils import find_connector
 from ..models.pipeline import PipelineConfig
 from ..models.stream import StreamConfig
 
@@ -398,31 +397,18 @@ class Pipeline:
             logger.warning(f"Endpoint not found: {endpoint_id}")
             return {}
 
-        # Helper to validate source config against enriched model
-        def validate_source_config(config: Dict[str, Any]) -> None:
+        # Helper to validate connection config against enriched model
+        def validate_connection_config(config: Dict[str, Any], label: str) -> None:
             connector_type = config.get("connector_type")
             try:
                 if connector_type == "api":
-                    EnrichedAPISourceConfig(**config)
+                    EnrichedAPIConfig(**config)
                 elif connector_type == "database":
-                    EnrichedDatabaseSourceConfig(**config)
+                    EnrichedDatabaseConfig(**config)
                 else:
                     logger.debug(f"Unknown connector_type '{connector_type}', skipping validation")
             except ValidationError as e:
-                logger.warning(f"Source config validation failed: {e}")
-
-        # Helper to validate destination config against enriched model
-        def validate_dest_config(config: Dict[str, Any]) -> None:
-            connector_type = config.get("connector_type")
-            try:
-                if connector_type == "api":
-                    EnrichedAPIDestinationConfig(**config)
-                elif connector_type == "database":
-                    EnrichedDatabaseDestinationConfig(**config)
-                else:
-                    logger.debug(f"Unknown connector_type '{connector_type}', skipping validation")
-            except ValidationError as e:
-                logger.warning(f"Destination config validation failed: {e}")
+                logger.warning(f"{label} config validation failed: {e}")
 
         streams = {}
         for stream in self.stream_configs:
@@ -437,55 +423,49 @@ class Pipeline:
             source_endpoint = get_endpoint_config(stream.source.endpoint_id)
             dest_endpoint = get_endpoint_config(dest.endpoint_id)
 
-            # Look up connector_type for source and destination
+            # Look up connector metadata for source and destination
             source_connector_id = source_conn.get("connector_id")
             dest_connector_id = dest_conn.get("connector_id")
-            source_connector_type = None
-            dest_connector_type = None
-            if source_connector_id and self.connectors:
-                try:
-                    source_connector_type = get_connector_type_from_list(
-                        self.connectors, source_connector_id
-                    )
-                except ValueError:
-                    logger.warning(f"Could not find connector_type for source connector_id: {source_connector_id}")
-            if dest_connector_id and self.connectors:
-                try:
-                    dest_connector_type = get_connector_type_from_list(
-                        self.connectors, dest_connector_id
-                    )
-                except ValueError:
-                    logger.warning(f"Could not find connector_type for dest connector_id: {dest_connector_id}")
+            source_connector = find_connector(self.connectors, source_connector_id) if source_connector_id and self.connectors else None
+            dest_connector = find_connector(self.connectors, dest_connector_id) if dest_connector_id and self.connectors else None
+            source_connector_type = source_connector.get("connector_type") if source_connector else None
+            dest_connector_type = dest_connector.get("connector_type") if dest_connector else None
 
-            # Build source config with connection and endpoint details
+            # Build source config: host at root, parameters nested, driver from connector
             source_config = {
-                **source_conn,  # Include host, headers, type, etc.
-                **source_endpoint,  # Include endpoint path, method, pagination, filters, etc.
+                "host": source_conn.get("host"),
+                "parameters": source_conn.get("parameters", {}),
+                "connector_type": source_connector_type,
+                "driver": source_connector.get("driver") if source_connector else None,
+                "_connection_wrapper": source_conn.get("_connection_wrapper"),
+                **source_endpoint,
                 "endpoint_id": stream.source.endpoint_id,
                 "connection_ref": stream.source.connection_ref,
                 "replication_method": stream.source.replication.method.value,
                 "cursor_field": stream.source.replication.cursor_field[0] if stream.source.replication.cursor_field else None,
-                "cursor_mode": "inclusive",  # Always use inclusive mode (>= for cursor comparison)
+                "cursor_mode": "inclusive",
                 "safety_window_seconds": stream.source.replication.safety_window_seconds,
                 "primary_key": stream.source.primary_key,
-                "connector_type": source_connector_type,
             }
 
-            # Build destination config with connection and endpoint details
+            # Build destination config: host at root, parameters nested, driver from connector
             dest_config = {
-                **dest_conn,  # Include host, headers, type, etc.
-                **dest_endpoint,  # Include endpoint path, method, etc.
+                "host": dest_conn.get("host"),
+                "parameters": dest_conn.get("parameters", {}),
+                "connector_type": dest_connector_type,
+                "driver": dest_connector.get("driver") if dest_connector else None,
+                "_connection_wrapper": dest_conn.get("_connection_wrapper"),
+                **dest_endpoint,
                 "endpoint_id": dest.endpoint_id,
                 "connection_ref": dest.connection_ref,
                 "refresh_mode": dest.write.mode.value,
                 "batch_support": dest.batching.supported if dest.batching else False,
                 "batch_size": dest.batching.size if dest.batching else 1,
-                "connector_type": dest_connector_type,
             }
 
             # Validate configs against enriched models (logs warnings on failure)
-            validate_source_config(source_config)
-            validate_dest_config(dest_config)
+            validate_connection_config(source_config, "Source")
+            validate_connection_config(dest_config, "Destination")
 
             # Build mapping config for engine
             if self._legacy_mode:
@@ -534,12 +514,14 @@ class Pipeline:
                 dest_host_id = ""
 
             pipeline_source_config = {
-                **first_source_conn,
+                "host": first_source_conn.get("host"),
+                "parameters": first_source_conn.get("parameters", {}),
                 "endpoint_id": first_stream.source.endpoint_id,
                 "host_id": source_host_id,
             }
             pipeline_dest_config = {
-                **first_dest_conn,
+                "host": first_dest_conn.get("host"),
+                "parameters": first_dest_conn.get("parameters", {}),
                 "endpoint_id": first_dest.endpoint_id,
                 "host_id": dest_host_id,
             }

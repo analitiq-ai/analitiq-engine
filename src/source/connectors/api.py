@@ -47,15 +47,15 @@ class APIConnector(BaseConnector):
                 validated_config = APIConnectionConfig(**config)
             except Exception as e:
                 raise ConnectionError(f"Invalid API connection configuration: {str(e)}")
-            
+
             self.base_url = validated_config.host
-            self.headers = validated_config.headers
-            
+            self.headers = validated_config.parameters.headers
+
             # Create session with validated timeout and connection limits
-            timeout = aiohttp.ClientTimeout(total=validated_config.timeout)
+            timeout = aiohttp.ClientTimeout(total=validated_config.parameters.timeout)
             connector = aiohttp.TCPConnector(
-                limit=validated_config.max_connections,
-                limit_per_host=validated_config.max_connections_per_host,
+                limit=validated_config.parameters.max_connections,
+                limit_per_host=validated_config.parameters.max_connections_per_host,
             )
 
             self.session = aiohttp.ClientSession(
@@ -67,14 +67,14 @@ class APIConnector(BaseConnector):
             logger.debug(f"API Connection configured:")
             logger.debug(f"  Base URL: {self.base_url}")
             logger.debug(f"  Headers: {masked_headers}")
-            logger.debug(f"  Timeout: {validated_config.timeout}s")
-            logger.debug(f"  Max connections: {validated_config.max_connections}")
+            logger.debug(f"  Timeout: {validated_config.parameters.timeout}s")
+            logger.debug(f"  Max connections: {validated_config.parameters.max_connections}")
 
             # Set up rate limiting with validation
-            if validated_config.rate_limit:
+            if validated_config.parameters.rate_limit:
                 self.rate_limiter = RateLimiter(
-                    max_requests=validated_config.rate_limit.max_requests,
-                    time_window=validated_config.rate_limit.time_window,
+                    max_requests=validated_config.parameters.rate_limit.max_requests,
+                    time_window=validated_config.parameters.rate_limit.time_window,
                 )
 
             self.is_connected = True

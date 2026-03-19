@@ -218,30 +218,33 @@ class TestAPIConnectionConfig:
         config = APIConnectionConfig(host="https://api.example.com")
 
         assert config.host == "https://api.example.com"
-        assert config.headers == {}
-        assert config.timeout == 30
-        assert config.max_connections == 10
-        assert config.max_connections_per_host == 2
-        assert config.rate_limit is None
+        assert config.parameters.headers == {}
+        assert config.parameters.timeout == 30
+        assert config.parameters.max_connections == 10
+        assert config.parameters.max_connections_per_host == 2
+        assert config.parameters.rate_limit is None
 
     def test_api_connection_config_full(self):
-        """Test full API connection config."""
+        """Test full API connection config with parameters."""
+        from src.models.api import APIConnectionParameters
         rate_limit = RateLimitConfig(max_requests=200, time_window=120)
         config = APIConnectionConfig(
             host="https://api.example.com",
-            headers={"Authorization": "Bearer token"},
-            timeout=60,
-            max_connections=20,
-            max_connections_per_host=5,
-            rate_limit=rate_limit
+            parameters=APIConnectionParameters(
+                headers={"Authorization": "Bearer token"},
+                timeout=60,
+                max_connections=20,
+                max_connections_per_host=5,
+                rate_limit=rate_limit,
+            ),
         )
 
         assert config.host == "https://api.example.com"
-        assert config.headers["Authorization"] == "Bearer token"
-        assert config.timeout == 60
-        assert config.max_connections == 20
-        assert config.max_connections_per_host == 5
-        assert config.rate_limit.max_requests == 200
+        assert config.parameters.headers["Authorization"] == "Bearer token"
+        assert config.parameters.timeout == 60
+        assert config.parameters.max_connections == 20
+        assert config.parameters.max_connections_per_host == 5
+        assert config.parameters.rate_limit.max_requests == 200
 
     def test_host_validation_empty(self):
         """Test host validation with empty string."""
@@ -276,57 +279,88 @@ class TestAPIConnectionConfig:
 
     def test_headers_validation_empty_name(self):
         """Test headers validation with empty header name."""
+        from src.models.api import APIConnectionParameters
         with pytest.raises(ValidationError) as exc_info:
             APIConnectionConfig(
                 host="https://api.example.com",
-                headers={"": "value"}
+                parameters=APIConnectionParameters(headers={"": "value"}),
             )
         assert "Header names must be non-empty strings" in str(exc_info.value)
 
     def test_headers_validation_non_string_value(self):
         """Test headers validation with non-string header value."""
+        from src.models.api import APIConnectionParameters
         with pytest.raises(ValidationError) as exc_info:
             APIConnectionConfig(
                 host="https://api.example.com",
-                headers={"Content-Type": 123}
+                parameters=APIConnectionParameters(headers={"Content-Type": 123}),
             )
         assert "Input should be a valid string" in str(exc_info.value)
 
     def test_headers_validation_whitespace_handling(self):
         """Test headers validation handles whitespace correctly."""
+        from src.models.api import APIConnectionParameters
         config = APIConnectionConfig(
             host="https://api.example.com",
-            headers={" Authorization ": " Bearer token "}
+            parameters=APIConnectionParameters(
+                headers={" Authorization ": " Bearer token "}
+            ),
         )
 
-        assert config.headers["Authorization"] == "Bearer token"
-        assert " Authorization " not in config.headers
+        assert config.parameters.headers["Authorization"] == "Bearer token"
+        assert " Authorization " not in config.parameters.headers
 
     def test_timeout_validation_range(self):
         """Test timeout validation within valid range."""
+        from src.models.api import APIConnectionParameters
         # Valid values
-        APIConnectionConfig(host="https://api.example.com", timeout=1)
-        APIConnectionConfig(host="https://api.example.com", timeout=300)
+        APIConnectionConfig(
+            host="https://api.example.com",
+            parameters=APIConnectionParameters(timeout=1),
+        )
+        APIConnectionConfig(
+            host="https://api.example.com",
+            parameters=APIConnectionParameters(timeout=300),
+        )
 
         # Invalid values
         with pytest.raises(ValidationError):
-            APIConnectionConfig(host="https://api.example.com", timeout=0)
+            APIConnectionConfig(
+                host="https://api.example.com",
+                parameters=APIConnectionParameters(timeout=0),
+            )
 
         with pytest.raises(ValidationError):
-            APIConnectionConfig(host="https://api.example.com", timeout=301)
+            APIConnectionConfig(
+                host="https://api.example.com",
+                parameters=APIConnectionParameters(timeout=301),
+            )
 
     def test_connection_limits_validation(self):
         """Test connection limits validation."""
+        from src.models.api import APIConnectionParameters
         # Valid values
-        APIConnectionConfig(host="https://api.example.com", max_connections=100)
-        APIConnectionConfig(host="https://api.example.com", max_connections_per_host=50)
+        APIConnectionConfig(
+            host="https://api.example.com",
+            parameters=APIConnectionParameters(max_connections=100),
+        )
+        APIConnectionConfig(
+            host="https://api.example.com",
+            parameters=APIConnectionParameters(max_connections_per_host=50),
+        )
 
         # Invalid values
         with pytest.raises(ValidationError):
-            APIConnectionConfig(host="https://api.example.com", max_connections=101)
+            APIConnectionConfig(
+                host="https://api.example.com",
+                parameters=APIConnectionParameters(max_connections=101),
+            )
 
         with pytest.raises(ValidationError):
-            APIConnectionConfig(host="https://api.example.com", max_connections_per_host=51)
+            APIConnectionConfig(
+                host="https://api.example.com",
+                parameters=APIConnectionParameters(max_connections_per_host=51),
+            )
 
 
 class TestAPIReadConfig:
@@ -480,10 +514,11 @@ class TestAPIModelsIntegration:
     
     def test_models_can_be_nested(self):
         """Test that models can be properly nested."""
+        from src.models.api import APIConnectionParameters
         rate_limit = RateLimitConfig(max_requests=500, time_window=300)
         connection_config = APIConnectionConfig(
             host="https://api.example.com",
-            rate_limit=rate_limit
+            parameters=APIConnectionParameters(rate_limit=rate_limit),
         )
         
         pagination = PaginationConfig(
@@ -502,7 +537,7 @@ class TestAPIModelsIntegration:
         )
         
         # All models should work together
-        assert connection_config.rate_limit.max_requests == 500
+        assert connection_config.parameters.rate_limit.max_requests == 500
         assert read_config.pagination.params.offset_param == "skip"
         assert read_config.filters["active"].value is True
     

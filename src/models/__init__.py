@@ -109,14 +109,12 @@ from .transformations import (
 # Metrics models
 from .metrics import PipelineMetrics
 
-# Enriched config models (merged connection + endpoint + stream settings)
+# Enriched config models (merged connection + endpoint config)
 from .enriched import (
-    BaseDestinationStreamConfig,
-    BaseSourceStreamConfig,
-    EnrichedAPIDestinationConfig,
-    EnrichedAPISourceConfig,
-    EnrichedDatabaseDestinationConfig,
-    EnrichedDatabaseSourceConfig,
+    APIConnectionParameters,
+    DatabaseConnectionParameters,
+    EnrichedAPIConfig,
+    EnrichedDatabaseConfig,
     EnrichedDestinationConfig,
     EnrichedSourceConfig,
 )
@@ -228,12 +226,10 @@ __all__ = [
     # Metrics models
     "PipelineMetrics",
     # Enriched config models
-    "BaseDestinationStreamConfig",
-    "BaseSourceStreamConfig",
-    "EnrichedAPIDestinationConfig",
-    "EnrichedAPISourceConfig",
-    "EnrichedDatabaseDestinationConfig",
-    "EnrichedDatabaseSourceConfig",
+    "APIConnectionParameters",
+    "DatabaseConnectionParameters",
+    "EnrichedAPIConfig",
+    "EnrichedDatabaseConfig",
     "EnrichedDestinationConfig",
     "EnrichedSourceConfig",
     # Stream-only state models

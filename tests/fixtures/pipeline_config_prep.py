@@ -9,24 +9,24 @@ def sample_wise_host_config():
     """Sample Wise API host configuration."""
     return {
         "host": "https://api.sandbox.transferwise.tech",
-        "headers": {
-            "Authorization": "Bearer ${WISE_API_TOKEN}",
-            "Content-Type": "application/json",
-            "User-Agent": "Analitiq-Stream/1.0"
-        },
-        "rate_limit": {
-            "max_requests": 100,
-            "time_window": 60,
-            "backoff_strategy": "exponential"
-        },
-        "timeout": {
-            "connect": 30,
-            "read": 120
+        "parameters": {
+            "headers": {
+                "Authorization": "Bearer ${WISE_API_TOKEN}",
+                "Content-Type": "application/json",
+                "User-Agent": "Analitiq-Stream/1.0",
+            },
+            "rate_limit": {
+                "max_requests": 100,
+                "time_window": 60,
+                "backoff_strategy": "exponential",
+            },
+            "timeout": 30,
+            "max_connections": 10,
         },
         "retry": {
             "max_attempts": 3,
-            "backoff_factor": 2
-        }
+            "backoff_factor": 2,
+        },
     }
 
 
@@ -35,19 +35,19 @@ def sample_sevdesk_host_config():
     """Sample SevDesk API host configuration."""
     return {
         "host": "https://my.sevdesk.de",
-        "headers": {
-            "Authorization": "${SEVDESK_API_TOKEN}",
-            "Content-Type": "application/json"
+        "parameters": {
+            "headers": {
+                "Authorization": "${SEVDESK_API_TOKEN}",
+                "Content-Type": "application/json",
+            },
+            "rate_limit": {
+                "max_requests": 10,
+                "time_window": 60,
+                "backoff_strategy": "linear",
+            },
+            "timeout": 15,
+            "max_connections": 10,
         },
-        "rate_limit": {
-            "max_requests": 10,
-            "time_window": 60,
-            "backoff_strategy": "linear"
-        },
-        "timeout": {
-            "connect": 15,
-            "read": 60
-        }
     }
 
 
@@ -55,23 +55,24 @@ def sample_sevdesk_host_config():
 def sample_database_host_config():
     """Sample PostgreSQL database host configuration."""
     return {
-        "driver": "postgresql",
         "host": "localhost",
-        "port": 5432,
-        "database": "analytics",
-        "user": "postgres",
-        "password": "${DB_PASSWORD}",
-        "ssl_mode": "prefer",
-        "connection_pool": {
-            "min_connections": 2,
-            "max_connections": 10,
-            "max_overflow": 20,
-            "pool_timeout": 30,
-            "pool_recycle": 3600,
-            "pool_pre_ping": True
+        "parameters": {
+            "port": 5432,
+            "database": "analytics",
+            "user": "postgres",
+            "password": "${DB_PASSWORD}",
+            "ssl_mode": "prefer",
+            "connection_pool": {
+                "min_connections": 2,
+                "max_connections": 10,
+                "max_overflow": 20,
+                "pool_timeout": 30,
+                "pool_recycle": 3600,
+                "pool_pre_ping": True
+            },
+            "query_timeout": 300,
+            "statement_timeout": 600,
         },
-        "query_timeout": 300,
-        "statement_timeout": 600
     }
 
 

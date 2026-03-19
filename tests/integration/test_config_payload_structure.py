@@ -11,6 +11,7 @@ These tests verify that:
 """
 
 import pytest
+from unittest.mock import Mock
 
 from src.engine.pipeline import Pipeline
 from src.engine.pipeline_config_prep import ResolvedConnection
@@ -48,7 +49,7 @@ API_CONNECTORS = [
 ]
 API_DB_CONNECTORS = [
     {"connector_id": "api-connector", "connector_type": "api", "connector_name": "REST API"},
-    {"connector_id": "pg-connector", "connector_type": "database", "connector_name": "PostgreSQL"},
+    {"connector_id": "pg-connector", "connector_type": "database", "connector_name": "PostgreSQL", "driver": "postgresql"},
 ]
 
 
@@ -58,15 +59,17 @@ def _wise_connection_config():
         "connector_id": "api-connector",
         "connector_type": "api",
         "host": "https://api.sandbox.transferwise.tech",
-        "headers": {
-            "Authorization": "Bearer test_token",
-            "Content-Type": "application/json",
-            "User-Agent": "Analitiq-Stream/1.0",
-        },
-        "timeout": 30,
-        "rate_limit": {
-            "max_requests": 100,
-            "time_window": 60,
+        "parameters": {
+            "headers": {
+                "Authorization": "Bearer test_token",
+                "Content-Type": "application/json",
+                "User-Agent": "Analitiq-Stream/1.0",
+            },
+            "timeout": 30,
+            "rate_limit": {
+                "max_requests": 100,
+                "time_window": 60,
+            },
         },
     }
 
@@ -77,14 +80,16 @@ def _sevdesk_connection_config():
         "connector_id": "api-connector",
         "connector_type": "api",
         "host": "https://my.sevdesk.de",
-        "headers": {
-            "Authorization": "Bearer test_token",
-            "Content-Type": "application/json",
-        },
-        "timeout": 15,
-        "rate_limit": {
-            "max_requests": 10,
-            "time_window": 60,
+        "parameters": {
+            "headers": {
+                "Authorization": "Bearer test_token",
+                "Content-Type": "application/json",
+            },
+            "timeout": 15,
+            "rate_limit": {
+                "max_requests": 10,
+                "time_window": 60,
+            },
         },
     }
 
@@ -94,13 +99,14 @@ def _database_connection_config():
     return {
         "connector_id": "pg-connector",
         "connector_type": "database",
-        "driver": "postgresql",
         "host": "localhost",
-        "port": 5432,
-        "database": "analytics",
-        "username": "postgres",
-        "password": "test_password",
-        "ssl_mode": "prefer",
+        "parameters": {
+            "port": 5432,
+            "database": "analytics",
+            "username": "postgres",
+            "password": "test_password",
+            "ssl_mode": "prefer",
+        },
     }
 
 
@@ -194,11 +200,13 @@ def _api_to_api_resolved_connections():
             connection_id=WISE_CONNECTION_ID,
             connection_type="api",
             config=_wise_connection_config(),
+            connection_config_wrapper=Mock(),
         ),
         SEVDESK_CONNECTION_ID: ResolvedConnection(
             connection_id=SEVDESK_CONNECTION_ID,
             connection_type="api",
             config=_sevdesk_connection_config(),
+            connection_config_wrapper=Mock(),
         ),
     }
 
@@ -218,11 +226,13 @@ def _api_to_db_resolved_connections():
             connection_id=WISE_CONNECTION_ID,
             connection_type="api",
             config=_wise_connection_config(),
+            connection_config_wrapper=Mock(),
         ),
         DB_CONNECTION_ID: ResolvedConnection(
             connection_id=DB_CONNECTION_ID,
             connection_type="database",
             config=_database_connection_config(),
+            connection_config_wrapper=Mock(),
         ),
     }
 
@@ -287,9 +297,9 @@ class TestAPIToAPIConfigStructure:
         source_conn = resolved_connections[source_connection_id]
         config = source_conn.config
 
-        validated = APIConnectionConfig(**config)
-        assert validated.host, "API connection must have host"
-        assert validated.host.startswith("http"), f"Host should be URL, got: {validated.host}"
+        assert "host" in config, "API connection must have host"
+        assert config["host"].startswith("http"), f"Host should be URL, got: {config['host']}"
+        assert "parameters" in config, "API connection must have parameters"
 
     def test_destination_connection_has_api_fields(self, api_to_api_config):
         """Verify API destination connection has required fields."""
@@ -305,8 +315,8 @@ class TestAPIToAPIConfigStructure:
         dest_conn = resolved_connections[dest_connection_id]
         config = dest_conn.config
 
-        validated = APIConnectionConfig(**config)
-        assert validated.host, "API connection must have host"
+        assert "host" in config, "API connection must have host"
+        assert "parameters" in config, "API connection must have parameters"
 
     def test_pipeline_build_config_produces_valid_source(self, api_to_api_config):
         """Verify Pipeline._build_config_dict() produces valid source config."""
@@ -404,7 +414,7 @@ class TestAPIToDatabaseConfigStructure:
         )
 
     def test_database_fields_validated(self, api_to_db_config):
-        """Verify port is int type, driver/database/username present."""
+        """Verify port is int type, database/username present in parameters."""
         pipeline_config, _, resolved_connections, _ = api_to_db_config
 
         dest_refs = pipeline_config.connections.destinations[0]
@@ -413,13 +423,14 @@ class TestAPIToDatabaseConfigStructure:
         dest_conn = resolved_connections[dest_connection_id]
         config = dest_conn.config
 
-        assert "driver" in config, "Database connection must have 'driver'"
-        assert "database" in config, "Database connection must have 'database'"
-        assert "username" in config, "Database connection must have 'username'"
         assert "host" in config, "Database connection must have 'host'"
-        assert "port" in config, "Database connection must have 'port'"
+        assert "parameters" in config, "Database connection must have 'parameters'"
+        params = config["parameters"]
+        assert "database" in params, "Database parameters must have 'database'"
+        assert "username" in params, "Database parameters must have 'username'"
+        assert "port" in params, "Database parameters must have 'port'"
 
-        port_value = config["port"]
+        port_value = params["port"]
         int(port_value)  # Should not raise
 
 
@@ -434,19 +445,19 @@ class TestEndToEndConfigFlow:
 
         validated = APIConnectionConfig(**config)
         assert validated.host
-        assert isinstance(validated.headers, dict)
-        assert validated.timeout > 0
+        assert isinstance(validated.parameters.headers, dict)
+        assert validated.parameters.timeout > 0
 
     def test_database_connection_config_validates_for_connector(self):
-        """DatabaseConnector.connect() requires 'driver' and typical DB fields."""
+        """DatabaseConnector.connect() requires 'host' at root and DB fields in parameters."""
         resolved_connections = _api_to_db_resolved_connections()
         dest_conn = resolved_connections[DB_CONNECTION_ID]
         config = dest_conn.config
 
-        assert config.get("driver"), "Database connection must have 'driver'"
         assert config.get("host"), "Database connection must have 'host'"
-        assert config.get("database"), "Database connection must have 'database'"
-        assert config.get("username"), "Database connection must have 'username'"
+        params = config.get("parameters", {})
+        assert params.get("database"), "Database parameters must have 'database'"
+        assert params.get("username"), "Database parameters must have 'username'"
 
     def test_full_pipeline_config_dict_structure(self):
         """Verify complete config dict has all required sections."""

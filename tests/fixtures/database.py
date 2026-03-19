@@ -25,23 +25,27 @@ async def postgres_driver():
         config = {
             "driver": "postgresql",
             "host": parsed.hostname or "localhost",
-            "port": parsed.port or 5432,
-            "user": parsed.username or "postgres",
-            "password": parsed.password or "",
-            "database": parsed.path.lstrip('/') or "analitiq_test",
+            "parameters": {
+                "port": parsed.port or 5432,
+                "user": parsed.username or "postgres",
+                "password": parsed.password or "",
+                "database": parsed.path.lstrip('/') or "analitiq_test",
+            },
         }
     else:
         config = {
             "driver": "postgresql",
             "host": os.getenv("POSTGRES_HOST", "localhost"),
-            "port": int(os.getenv("POSTGRES_PORT", "5432")),
-            "user": os.getenv("POSTGRES_USER", "postgres"),
-            "password": os.getenv("POSTGRES_PASSWORD", ""),
-            "database": os.getenv("POSTGRES_DB", "analitiq_test"),
-            "ssl_mode": os.getenv("POSTGRES_SSL_MODE", "prefer"),
-            "connection_pool": {
-                "min_connections": int(os.getenv("POSTGRES_MIN_CONNECTIONS", "2")),
-                "max_connections": int(os.getenv("POSTGRES_MAX_CONNECTIONS", "10")),
+            "parameters": {
+                "port": int(os.getenv("POSTGRES_PORT", "5432")),
+                "user": os.getenv("POSTGRES_USER", "postgres"),
+                "password": os.getenv("POSTGRES_PASSWORD", ""),
+                "database": os.getenv("POSTGRES_DB", "analitiq_test"),
+                "ssl_mode": os.getenv("POSTGRES_SSL_MODE", "prefer"),
+                "connection_pool": {
+                    "min_connections": int(os.getenv("POSTGRES_MIN_CONNECTIONS", "2")),
+                    "max_connections": int(os.getenv("POSTGRES_MAX_CONNECTIONS", "10")),
+                },
             },
         }
 
@@ -71,9 +75,11 @@ def sample_database_config():
     return {
         "driver": "postgresql",
         "host": os.getenv("POSTGRES_HOST", "localhost"),
-        "port": int(os.getenv("POSTGRES_PORT", "5432")),
-        "database": os.getenv("POSTGRES_DB", "analitiq_test"),
-        "user": os.getenv("POSTGRES_USER", "postgres"),
-        "password": os.getenv("POSTGRES_PASSWORD", "test_password"),
-        "ssl_mode": os.getenv("POSTGRES_SSL_MODE", "prefer"),
+        "parameters": {
+            "port": int(os.getenv("POSTGRES_PORT", "5432")),
+            "database": os.getenv("POSTGRES_DB", "analitiq_test"),
+            "user": os.getenv("POSTGRES_USER", "postgres"),
+            "password": os.getenv("POSTGRES_PASSWORD", "test_password"),
+            "ssl_mode": os.getenv("POSTGRES_SSL_MODE", "prefer"),
+        },
     }

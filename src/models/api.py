@@ -57,16 +57,37 @@ class FilterConfig(BaseModel):
         return self
 
 
-class APIConnectionConfig(BaseModel):
-    """API connection configuration with validation."""
+class APIConnectionParameters(BaseModel):
+    """Connector-specific parameters for API connections."""
 
-    host: str = Field(..., description="Host URL for the API")
     headers: Dict[str, str] = Field(default_factory=dict, description="HTTP headers")
     timeout: int = Field(30, gt=0, le=300, description="Request timeout in seconds")
     max_connections: int = Field(10, gt=0, le=100, description="Maximum concurrent connections")
     max_connections_per_host: int = Field(2, gt=0, le=50, description="Maximum connections per host")
     rate_limit: Optional[RateLimitConfig] = Field(None, description="Rate limiting configuration")
-    
+
+    @field_validator("headers")
+    @classmethod
+    def validate_headers(cls, v):
+        """Validate HTTP headers."""
+        validated_headers = {}
+        for name, value in v.items():
+            if not isinstance(name, str) or not name.strip():
+                raise ValueError("Header names must be non-empty strings")
+            if not isinstance(value, str):
+                raise ValueError(f"Header value for '{name}' must be a string")
+            validated_headers[name.strip()] = value.strip()
+        return validated_headers
+
+
+class APIConnectionConfig(BaseModel):
+    """API connection configuration with validation."""
+
+    host: str = Field(..., description="Host URL for the API")
+    parameters: APIConnectionParameters = Field(
+        default_factory=APIConnectionParameters, description="Connection parameters"
+    )
+
     @field_validator("host")
     @classmethod
     def validate_host(cls, v):
@@ -82,19 +103,6 @@ class APIConnectionConfig(BaseModel):
             raise ValueError("host must use http or https scheme")
 
         return v
-    
-    @field_validator("headers")
-    @classmethod
-    def validate_headers(cls, v):
-        """Validate HTTP headers."""
-        validated_headers = {}
-        for name, value in v.items():
-            if not isinstance(name, str) or not name.strip():
-                raise ValueError("Header names must be non-empty strings")
-            if not isinstance(value, str):
-                raise ValueError(f"Header value for '{name}' must be a string")
-            validated_headers[name.strip()] = value.strip()
-        return validated_headers
 
 
 class APIReadConfig(BaseModel):

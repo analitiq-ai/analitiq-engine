@@ -166,8 +166,12 @@ async def run_destination_mode() -> None:
 
     connection_config = await resolved_conn.resolve_config()
 
-    # Look up connector_type from connectors array using connector_id
-    connector_type = config_prep.get_connector_type(connection_config, connection_id)
+    # Look up connector metadata from connectors array using connector_id
+    connector = config_prep.get_connector_for_connection(connection_config, connection_id)
+    connector_type = connector.get("connector_type")
+
+    if connector_type == "database":
+        connection_config["driver"] = connector.get("driver")
 
     logger.info(f"Connector type: {connector_type}")
     logger.info(f"gRPC port: {grpc_port}")

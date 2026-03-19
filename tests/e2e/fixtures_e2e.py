@@ -51,16 +51,18 @@ def e2e_database_source_host_config():
     return {
         "driver": "postgresql",
         "host": "localhost",
-        "port": 5432,
-        "database": "test_source_db",
-        "user": "test_user",
-        "password": "test_password",
-        "ssl_mode": "prefer",
-        "connection_pool": {
-            "min_connections": 2,
-            "max_connections": 10,
-            "max_overflow": 20,
-            "pool_timeout": 30
+        "parameters": {
+            "port": 5432,
+            "database": "test_source_db",
+            "user": "test_user",
+            "password": "test_password",
+            "ssl_mode": "prefer",
+            "connection_pool": {
+                "min_connections": 2,
+                "max_connections": 10,
+                "max_overflow": 20,
+                "pool_timeout": 30
+            }
         }
     }
 
@@ -71,16 +73,18 @@ def e2e_database_destination_host_config():
     return {
         "driver": "postgresql",
         "host": "localhost",
-        "port": 5432,
-        "database": "test_destination_db",
-        "user": "test_user",
-        "password": "test_password",
-        "ssl_mode": "prefer",
-        "connection_pool": {
-            "min_connections": 2,
-            "max_connections": 10,
-            "max_overflow": 20,
-            "pool_timeout": 30
+        "parameters": {
+            "port": 5432,
+            "database": "test_destination_db",
+            "user": "test_user",
+            "password": "test_password",
+            "ssl_mode": "prefer",
+            "connection_pool": {
+                "min_connections": 2,
+                "max_connections": 10,
+                "max_overflow": 20,
+                "pool_timeout": 30
+            }
         }
     }
 

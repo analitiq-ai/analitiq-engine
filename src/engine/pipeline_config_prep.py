@@ -513,14 +513,12 @@ class PipelineConfigPrep:
             Normalized configuration dictionary
         """
         result = config.copy()
+        params = result.get("parameters", {})
 
-        # Get driver from connector (authoritative source)
-        if "driver" not in result:
-            result["driver"] = connector.get("driver")
-
-        # Convert port to integer
-        if "port" in result and isinstance(result["port"], str):
-            result["port"] = int(result["port"])
+        # Convert port to integer inside parameters
+        if isinstance(params.get("port"), str):
+            params["port"] = int(params["port"])
+            result["parameters"] = params
 
         return result
 

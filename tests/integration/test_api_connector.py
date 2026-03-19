@@ -22,10 +22,12 @@ def valid_connection_config():
     """Valid connection configuration."""
     return {
         "host": "https://api.example.com",
-        "headers": {"Authorization": "Bearer token"},
-        "timeout": 30,
-        "max_connections": 5,
-        "max_connections_per_host": 2,
+        "parameters": {
+            "headers": {"Authorization": "Bearer token"},
+            "timeout": 30,
+            "max_connections": 5,
+            "max_connections_per_host": 2,
+        },
     }
 
 @pytest.fixture
@@ -87,11 +89,13 @@ class TestConnection:
         """Test connection with rate limiting configuration."""
         config = {
             "host": "https://api.example.com",
-            "headers": {},
-            "timeout": 30,
-            "max_connections": 5,
-            "max_connections_per_host": 2,
-            "rate_limit": {"max_requests": 10, "time_window": 60}
+            "parameters": {
+                "headers": {},
+                "timeout": 30,
+                "max_connections": 5,
+                "max_connections_per_host": 2,
+                "rate_limit": {"max_requests": 10, "time_window": 60},
+            },
         }
         
         with patch('aiohttp.ClientSession'), \
