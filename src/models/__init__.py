@@ -32,17 +32,9 @@ from .engine import (
 
 # API models
 from .api import (
-    APIConfig,
-    APIConnectionConfig,
     APIReadConfig,
-    APIRequestParams,
-    APIWriteConfig,
-    EndpointConfig,
     FilterConfig,
-    HostConfig,
     HTTPResponse,
-    PaginationConfig,
-    PaginationParams,
     RateLimitConfig,
     RecordBatch,
 )
@@ -58,8 +50,6 @@ from .metrics import PipelineMetrics
 
 # Enriched config models (merged connection + endpoint config)
 from .enriched import (
-    APIConnectionParameters,
-    DatabaseConnectionParameters,
     EnrichedAPIConfig,
     EnrichedDatabaseConfig,
     EnrichedDestinationConfig,
@@ -103,17 +93,9 @@ __all__ = [
     "StreamStageConfig",
     "TaskExecutionInfo",
     # API models
-    "APIConfig",
-    "APIConnectionConfig",
     "APIReadConfig",
-    "APIRequestParams",
-    "APIWriteConfig",
-    "EndpointConfig",
     "FilterConfig",
-    "HostConfig",
     "HTTPResponse",
-    "PaginationConfig",
-    "PaginationParams",
     "RateLimitConfig",
     "RecordBatch",
     # Transformation models
@@ -122,8 +104,6 @@ __all__ = [
     # Metrics models
     "PipelineMetrics",
     # Enriched config models
-    "APIConnectionParameters",
-    "DatabaseConnectionParameters",
     "EnrichedAPIConfig",
     "EnrichedDatabaseConfig",
     "EnrichedDestinationConfig",

@@ -1,9 +1,6 @@
 """Pydantic models for API connector validation."""
 
-from datetime import datetime
-from typing import Any, Dict, List, Optional, Union, Literal
-from urllib.parse import urlparse
-
+from typing import Any, Dict, List, Optional, Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 
@@ -13,31 +10,6 @@ class RateLimitConfig(BaseModel):
     max_requests: int = Field(100, gt=0, description="Maximum requests per time window")
     time_window: int = Field(60, gt=0, description="Time window in seconds")
 
-
-class PaginationParams(BaseModel):
-    """Pagination parameters configuration."""
-    
-    limit_param: Optional[str] = Field(None, description="Parameter name for page size")
-    max_limit: Optional[int] = Field(None, gt=0, description="Maximum allowed page size")
-    page_param: Optional[str] = Field(None, description="Parameter name for page number")
-    offset_param: Optional[str] = Field(None, description="Parameter name for offset")
-    cursor_param: Optional[str] = Field(None, description="Parameter name for cursor")
-    next_cursor_field: Optional[str] = Field(None, description="Response field containing next cursor")
-    uses_link_header: bool = Field(False, description="Whether API uses Link header for pagination")
-
-
-class TimeWindowParams(BaseModel):
-    """Time window parameters for filtering."""
-    
-    start_param: Optional[str] = Field(None, description="Start time parameter name")
-    end_param: Optional[str] = Field(None, description="End time parameter name")
-
-
-class PaginationConfig(BaseModel):
-    """Pagination configuration with validation."""
-    
-    type: Literal["offset", "cursor", "page", "time", "link"] = Field(..., description="Pagination type")
-    params: PaginationParams = Field(default_factory=PaginationParams, description="Pagination parameters")
 
 
 class FilterConfig(BaseModel):
@@ -57,60 +29,12 @@ class FilterConfig(BaseModel):
         return self
 
 
-class APIConnectionParameters(BaseModel):
-    """Connector-specific parameters for API connections."""
-
-    headers: Dict[str, str] = Field(default_factory=dict, description="HTTP headers")
-    timeout: int = Field(30, gt=0, le=300, description="Request timeout in seconds")
-    max_connections: int = Field(10, gt=0, le=100, description="Maximum concurrent connections")
-    max_connections_per_host: int = Field(2, gt=0, le=50, description="Maximum connections per host")
-    rate_limit: Optional[RateLimitConfig] = Field(None, description="Rate limiting configuration")
-
-    @field_validator("headers")
-    @classmethod
-    def validate_headers(cls, v):
-        """Validate HTTP headers."""
-        validated_headers = {}
-        for name, value in v.items():
-            if not isinstance(name, str) or not name.strip():
-                raise ValueError("Header names must be non-empty strings")
-            if not isinstance(value, str):
-                raise ValueError(f"Header value for '{name}' must be a string")
-            validated_headers[name.strip()] = value.strip()
-        return validated_headers
-
-
-class APIConnectionConfig(BaseModel):
-    """API connection configuration with validation."""
-
-    host: str = Field(..., description="Host URL for the API")
-    parameters: APIConnectionParameters = Field(
-        default_factory=APIConnectionParameters, description="Connection parameters"
-    )
-
-    @field_validator("host")
-    @classmethod
-    def validate_host(cls, v):
-        """Validate host URL format."""
-        if not v:
-            raise ValueError("host cannot be empty")
-
-        parsed = urlparse(v)
-        if not parsed.scheme or not parsed.netloc:
-            raise ValueError("host must be a valid URL with scheme and host")
-
-        if parsed.scheme not in ["http", "https"]:
-            raise ValueError("host must use http or https scheme")
-
-        return v
-
-
 class APIReadConfig(BaseModel):
     """API read configuration with validation."""
     
     endpoint: str = Field(..., description="API endpoint path")
     method: Literal["GET", "POST", "PUT", "PATCH"] = Field("GET", description="HTTP method")
-    pagination: Optional[PaginationConfig] = Field(None, description="Pagination configuration")
+    pagination: Optional[Dict[str, Any]] = Field(None, description="Pagination configuration")
     filters: Dict[str, FilterConfig] = Field(default_factory=dict, description="Request filters")
     data_field: str = Field("data", description="Response field containing records")
     pipeline_config: Optional[Dict[str, Any]] = Field(None, description="Pipeline configuration")
@@ -129,49 +53,6 @@ class APIReadConfig(BaseModel):
             
         return endpoint
     
-    @model_validator(mode='after')
-    def validate_pagination_params(self):
-        """Validate pagination parameters are consistent with type."""
-        if not self.pagination:
-            return self
-            
-        pag_type = self.pagination.type
-        params = self.pagination.params
-        
-        if pag_type == "offset" and not params.offset_param:
-            raise ValueError("Offset pagination requires 'offset_param'")
-        
-        if pag_type == "cursor" and not params.cursor_param:
-            raise ValueError("Cursor pagination requires 'cursor_param'")
-            
-        if pag_type == "page" and not params.page_param:
-            raise ValueError("Page pagination requires 'page_param'")
-            
-        return self
-
-
-class APIWriteConfig(BaseModel):
-    """API write configuration with validation."""
-    
-    endpoint: str = Field(..., description="API endpoint path")
-    method: Literal["POST", "PUT", "PATCH"] = Field("POST", description="HTTP method")
-    batch_support: bool = Field(False, description="Whether endpoint supports batch writes")
-    batch_size: int = Field(1, gt=0, le=10000, description="Maximum batch size")
-    idempotency_header: Optional[str] = Field(None, description="Idempotency header name")
-    
-    @field_validator("endpoint")
-    @classmethod
-    def validate_endpoint(cls, v):
-        """Validate endpoint path."""
-        if not v or not v.strip():
-            raise ValueError("endpoint cannot be empty")
-        
-        # Ensure endpoint starts with /
-        endpoint = v.strip()
-        if not endpoint.startswith("/"):
-            endpoint = "/" + endpoint
-            
-        return endpoint
 
 
 class HTTPResponse(BaseModel):
@@ -191,45 +72,6 @@ class HTTPResponse(BaseModel):
                 validated[name.lower()] = value
         return validated
 
-
-class APIRequestParams(BaseModel):
-    """Validated API request parameters."""
-    
-    url: str = Field(..., description="Full request URL")
-    method: str = Field(..., description="HTTP method")
-    params: Dict[str, Any] = Field(default_factory=dict, description="Query parameters")
-    headers: Dict[str, str] = Field(default_factory=dict, description="Request headers")
-    json_data: Optional[Dict[str, Any]] = Field(None, description="JSON request body")
-    
-    @field_validator("url")
-    @classmethod
-    def validate_url(cls, v):
-        """Validate request URL."""
-        parsed = urlparse(v)
-        if not parsed.scheme or not parsed.netloc:
-            raise ValueError("Invalid URL format")
-        return v
-    
-    @field_validator("method")
-    @classmethod
-    def validate_method(cls, v):
-        """Validate HTTP method."""
-        if v not in ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]:
-            raise ValueError(f"Unsupported HTTP method: {v}")
-        return v.upper()
-    
-    @field_validator("params")
-    @classmethod
-    def validate_params(cls, v):
-        """Validate query parameters."""
-        validated = {}
-        for key, value in v.items():
-            if not isinstance(key, str):
-                raise ValueError("Parameter keys must be strings")
-            # Convert values to strings for URL encoding
-            if value is not None:
-                validated[key] = str(value)
-        return validated
 
 
 class RecordBatch(BaseModel):
@@ -268,57 +110,3 @@ class RecordBatch(BaseModel):
         return self
 
 
-class EndpointConfig(BaseModel):
-    """API endpoint configuration."""
-
-    endpoint: str = Field(..., description="API endpoint path")
-    method: Literal["GET", "POST", "PUT", "PATCH", "DELETE"] = Field("GET", description="HTTP method")
-    endpoint_schema: Optional[Dict[str, Any]] = Field(None, description="JSON Schema for endpoint data")
-
-    @field_validator("endpoint")
-    @classmethod
-    def validate_endpoint(cls, v):
-        """Validate endpoint path."""
-        if not v or not v.strip():
-            raise ValueError("endpoint cannot be empty")
-
-        # Ensure endpoint starts with /
-        endpoint = v.strip()
-        if not endpoint.startswith("/"):
-            endpoint = "/" + endpoint
-
-        return endpoint
-
-
-class HostConfig(BaseModel):
-    """API host configuration."""
-
-    host: str = Field(..., description="Host URL for the API")
-    headers: Dict[str, str] = Field(default_factory=dict, description="HTTP headers")
-    rate_limit: Optional[RateLimitConfig] = Field(None, description="Rate limiting configuration")
-
-    @field_validator("host")
-    @classmethod
-    def validate_host(cls, v):
-        """Validate host URL format."""
-        if not v:
-            raise ValueError("host cannot be empty")
-
-        parsed = urlparse(v)
-        if not parsed.scheme or not parsed.netloc:
-            raise ValueError("host must be a valid URL with scheme and host")
-
-        if parsed.scheme not in ["http", "https"]:
-            raise ValueError("host must use http or https scheme")
-
-        return v
-
-
-class APIConfig(BaseModel):
-    """Complete API configuration combining host and endpoint."""
-
-    host: HostConfig = Field(..., description="Host configuration")
-    endpoint: EndpointConfig = Field(..., description="Endpoint configuration")
-    connection: Optional[APIConnectionConfig] = Field(None, description="Connection configuration")
-    read_config: Optional[APIReadConfig] = Field(None, description="Read-specific configuration")
-    write_config: Optional[APIWriteConfig] = Field(None, description="Write-specific configuration")

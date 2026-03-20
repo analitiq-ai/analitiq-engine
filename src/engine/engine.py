@@ -345,17 +345,10 @@ class StreamingEngine:
                 logger.warning(f"Failed to disconnect connectors for stream {stream_name}: {str(e)}")
 
             try:
-                org_id = (
-                    os.getenv("ORG_ID")
-                    or pipeline_config.get("org_id")
-                    or pipeline_config.get("pipeline", {}).get("org_id")
-                    or ""
-                )
                 pipeline_name = pipeline_config.get("name") or pipeline_config.get("pipeline", {}).get("name")
                 record = create_metrics_record(
                     run_id=self.state_manager.current_run_id or get_or_generate_run_id(),
                     pipeline_id=self.pipeline_id,
-                    org_id=org_id,
                     start_time=stream_start_time,
                     end_time=end_time,
                     records_processed=stream_metrics["records_processed"],
@@ -598,7 +591,6 @@ class StreamingEngine:
                             "type": "batch",
                             "run_id": run_id,
                             "pipeline_id": self.pipeline_id,
-                            "org_id": os.getenv("ORG_ID", ""),
                             "stream_id": stream_id,
                             "batch_seq": batch_seq,
                             "records_written": result.records_written,

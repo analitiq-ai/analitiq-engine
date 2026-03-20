@@ -5,32 +5,9 @@ Stream-level fields (replication_method, cursor_field, etc.) are passed
 through as plain dict entries — they are NOT part of these models.
 """
 
-from typing import Any, Dict, List, Literal, Optional, Union
+from typing import Any, Dict, Literal, Optional, Union
 
 from pydantic import BaseModel, Field
-
-from .api import RateLimitConfig
-
-
-class DatabaseConnectionParameters(BaseModel):
-    """Connector-specific parameters for database connections."""
-
-    port: int = Field(..., description="Database port")
-    database: str = Field(..., description="Database name")
-    username: str = Field(..., description="Database username")
-    password: str = Field(..., description="Database password")
-    ssl_mode: Optional[str] = Field(None, description="SSL mode")
-    connection_pool: Optional[Dict[str, Any]] = Field(None, description="Pool settings")
-
-
-class APIConnectionParameters(BaseModel):
-    """Connector-specific parameters for API connections."""
-
-    headers: Dict[str, str] = Field(default_factory=dict, description="HTTP headers")
-    timeout: int = Field(30, ge=1, le=300, description="Request timeout in seconds")
-    max_connections: int = Field(10, ge=1, le=100, description="Maximum concurrent connections")
-    max_connections_per_host: int = Field(2, ge=1, le=50, description="Maximum connections per host")
-    rate_limit: Optional[RateLimitConfig] = Field(None, description="Rate limiting configuration")
 
 
 class EnrichedDatabaseConfig(BaseModel):
@@ -39,7 +16,7 @@ class EnrichedDatabaseConfig(BaseModel):
     connector_type: Literal["database"] = Field("database", description="Connector type discriminator")
     driver: str = Field(..., description="Database driver from connector metadata")
     host: str = Field(..., description="Database host")
-    parameters: DatabaseConnectionParameters
+    parameters: Dict[str, Any] = Field(default_factory=dict, description="Connection parameters")
 
     # Endpoint fields
     schema_name: str = Field("public", alias="schema", description="Database schema name")
@@ -51,7 +28,7 @@ class EnrichedAPIConfig(BaseModel):
 
     connector_type: Literal["api"] = Field("api", description="Connector type discriminator")
     host: str = Field(..., description="API base URL")
-    parameters: APIConnectionParameters
+    parameters: Dict[str, Any] = Field(default_factory=dict, description="Connection parameters")
 
     # Endpoint fields
     endpoint: str = Field(..., description="API endpoint path")

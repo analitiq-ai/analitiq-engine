@@ -15,7 +15,6 @@ from unittest.mock import Mock
 
 from src.engine.pipeline import Pipeline
 from src.engine.pipeline_config_prep import ResolvedConnection
-from src.models.api import APIConnectionConfig
 
 
 # --- Test UUIDs ---
@@ -426,16 +425,15 @@ class TestAPIToDatabaseConfigStructure:
 class TestEndToEndConfigFlow:
     """Complete flow tests from constructed configs to Engine."""
 
-    def test_api_connection_config_validates_for_connector(self):
-        """APIConnector.connect() would receive APIConnectionConfig-valid dict."""
+    def test_api_connection_config_has_required_fields(self):
+        """APIConnector.connect() receives a dict with host and parameters."""
         resolved_connections = _api_to_api_resolved_connections()
         source_conn = resolved_connections[WISE_CONNECTION_ID]
         config = source_conn.config
 
-        validated = APIConnectionConfig(**config)
-        assert validated.host
-        assert isinstance(validated.parameters.headers, dict)
-        assert validated.parameters.timeout > 0
+        assert config["host"]
+        assert isinstance(config["parameters"]["headers"], dict)
+        assert config["parameters"]["timeout"] > 0
 
     def test_database_connection_config_validates_for_connector(self):
         """DatabaseConnector.connect() requires 'host' at root and DB fields in parameters."""

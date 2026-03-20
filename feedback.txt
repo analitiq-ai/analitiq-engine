@@ -1,0 +1,8 @@
+
+  3. Late secret binding already exists, but the plan does not materially improve its safety lifecycle. ConnectionConfig already resolves placeholders lazily in /Users/
+     kirillandriychuk/Documents/Projects/analitiq-core/src/secrets/config_wrapper.py:18, which aligns with my requirement. The real gap is that resolved secrets are cached
+     in memory until someone explicitly clears them, and clear_resolved() appears unused: /Users/kirillandriychuk/Documents/Projects/analitiq-core/src/secrets/
+     config_wrapper.py:81, /Users/kirillandriychuk/Documents/Projects/analitiq-core/src/secrets/config_wrapper.py:195. Some destination handlers also retain the full
+     resolved config on the instance, for example /Users/kirillandriychuk/Documents/Projects/analitiq-core/src/destination/connectors/database.py:117 and /Users/
+     kirillandriychuk/Documents/Projects/analitiq-core/src/destination/connectors/file.py:74. The proposed plan front-loads non-secret metadata, which is fine, but it does
+     not address secret lifetime after resolution.
