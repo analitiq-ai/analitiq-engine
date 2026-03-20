@@ -8,12 +8,8 @@ from typing import Any, Dict
 from unittest.mock import patch
 
 import pytest
-from pydantic import ValidationError
 
-from src.engine.pipeline_config_prep import (
-    PipelineConfigPrep,
-    PipelineConfigPrepSettings,
-)
+from src.engine.pipeline_config_prep import PipelineConfigPrep
 
 
 @pytest.fixture
@@ -160,85 +156,34 @@ def valid_endpoint_config():
     }
 
 
-class TestPipelineConfigPrepSettings:
-    """Test PipelineConfigPrepSettings validation and behavior."""
-
-    def test_default_settings_local(self):
-        """Test default settings for local environment."""
-        settings = PipelineConfigPrepSettings(pipeline_id="test-pipeline")
-
-        assert settings.env == "local"
-        assert settings.pipeline_id == "test-pipeline"
-        assert settings.aws_region == "eu-central-1"
-
-    def test_custom_local_settings(self):
-        """Test custom local settings."""
-        settings = PipelineConfigPrepSettings(
-            env="local",
-            pipeline_id="custom-pipeline",
-            org_id="client-xyz",
-            aws_region="us-west-2"
-        )
-
-        assert settings.env == "local"
-        assert settings.pipeline_id == "custom-pipeline"
-        assert settings.org_id == "client-xyz"
-        assert settings.aws_region == "us-west-2"
-
-    def test_missing_pipeline_id_raises_validation_error(self):
-        """Test that missing pipeline_id raises ValidationError."""
-        with pytest.raises(ValidationError):
-            PipelineConfigPrepSettings()
-
-    def test_empty_pipeline_id_validation(self):
-        """Test that empty pipeline_id raises error."""
-        settings = PipelineConfigPrepSettings(pipeline_id="")
-        with pytest.raises(RuntimeError) as exc_info:
-            PipelineConfigPrep(settings)
-        assert "PIPELINE_ID" in str(exc_info.value)
-
 
 class TestPipelineConfigPrepLocal:
     """Test PipelineConfigPrep class with local filesystem operations."""
 
     def test_initialization_local_mode(self, temp_config_dir, mock_analitiq_config):
         """Test initialization in local mode."""
-        settings = PipelineConfigPrepSettings(
-            env="local",
-            pipeline_id="test-pipeline"
-        )
+        with patch.dict(os.environ, {"PIPELINE_ID": "test-pipeline"}):
+            prep = PipelineConfigPrep()
 
-        prep = PipelineConfigPrep(settings)
-
-        assert prep.settings == settings
-        assert prep.is_cloud_env is False  # local mode = not cloud
-        assert prep.settings is not None
+            assert prep.pipeline_id == "test-pipeline"
 
     def test_validate_environment_success(self, temp_config_dir, mock_analitiq_config):
         """Test successful environment validation."""
-        settings = PipelineConfigPrepSettings(
-            env="local",
-            pipeline_id="test-pipeline"
-        )
-
-        prep = PipelineConfigPrep(settings)
-        prep.validate_environment()
+        with patch.dict(os.environ, {"PIPELINE_ID": "test-pipeline"}):
+            prep = PipelineConfigPrep()
+            prep.validate_environment()
 
     def test_validate_environment_missing_pipeline_id(self, temp_config_dir, mock_analitiq_config):
         """Test environment validation with missing pipeline ID."""
-        settings = PipelineConfigPrepSettings(
-            env="local",
-            pipeline_id=""
-        )
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("PIPELINE_ID", None)
+            with pytest.raises(RuntimeError) as exc_info:
+                PipelineConfigPrep()
 
-        with pytest.raises(RuntimeError) as exc_info:
-            PipelineConfigPrep(settings)
-
-        assert "PIPELINE_ID environment variable is required" in str(exc_info.value)
+            assert "PIPELINE_ID environment variable is required" in str(exc_info.value)
 
     def test_validate_environment_missing_pipelines_directory(self, temp_config_dir):
         """Test environment validation with missing pipelines directory."""
-        # Create mock config pointing to non-existent pipelines directory
         mock_config = {
             "paths": {
                 "pipelines": "/nonexistent/pipelines",
@@ -246,15 +191,11 @@ class TestPipelineConfigPrepLocal:
             }
         }
         with patch("src.engine.pipeline_config_prep.load_analitiq_config", return_value=mock_config):
-            settings = PipelineConfigPrepSettings(
-                env="local",
-                pipeline_id="test-pipeline"
-            )
+            with patch.dict(os.environ, {"PIPELINE_ID": "test-pipeline"}):
+                with pytest.raises(RuntimeError) as exc_info:
+                    PipelineConfigPrep()
 
-            with pytest.raises(RuntimeError) as exc_info:
-                PipelineConfigPrep(settings)
-
-            assert "Pipelines directory not found" in str(exc_info.value)
+                assert "Pipelines directory not found" in str(exc_info.value)
 
 class TestConfigurationLoading:
     """Test configuration loading functionality with consolidated file format."""
@@ -315,7 +256,6 @@ class TestConfigurationLoading:
         valid_stream_config
     ):
         """Test loading pipeline and stream configurations from consolidated file."""
-        # Create connection configs
         connection_configs = [
             {
                 "connection_id": "source-connection-id",
@@ -358,21 +298,18 @@ class TestConfigurationLoading:
             secret_configs=secret_configs
         )
 
-        settings = PipelineConfigPrepSettings(
-            env="local",
-            pipeline_id="test-pipeline-123"
-        )
-        prep = PipelineConfigPrep(settings)
+        with patch.dict(os.environ, {"PIPELINE_ID": "test-pipeline-123"}):
+            prep = PipelineConfigPrep()
 
-        pipeline_config, stream_configs_result = prep.load_pipeline_config()
+            pipeline_config, stream_configs_result = prep.load_pipeline_config()
 
-        # Verify pipeline
-        assert pipeline_config["pipeline_id"] == "test-pipeline-123"
-        assert pipeline_config["name"] == "Test Pipeline"
+            # Verify pipeline
+            assert pipeline_config["pipeline_id"] == "test-pipeline-123"
+            assert pipeline_config["name"] == "Test Pipeline"
 
-        # Verify streams
-        assert len(stream_configs_result) == 1
-        assert stream_configs_result[0]["stream_id"] == "stream-456"
+            # Verify streams
+            assert len(stream_configs_result) == 1
+            assert stream_configs_result[0]["stream_id"] == "stream-456"
 
     def test_connection_resolution(
         self,
@@ -414,17 +351,14 @@ class TestConfigurationLoading:
             secret_configs=secret_configs
         )
 
-        settings = PipelineConfigPrepSettings(
-            env="local",
-            pipeline_id="test-pipeline-123"
-        )
-        prep = PipelineConfigPrep(settings)
+        with patch.dict(os.environ, {"PIPELINE_ID": "test-pipeline-123"}):
+            prep = PipelineConfigPrep()
 
-        pipeline, streams, connections, endpoints, connectors = prep.create_config()
+            pipeline, streams, connections, endpoints, connectors = prep.create_config()
 
-        # Check connections are resolved
-        assert "source-connection-id" in connections
-        assert connections["source-connection-id"].connection_type == "api"
+            # Check connections are resolved
+            assert "source-connection-id" in connections
+            assert connections["source-connection-id"].connection_type == "api"
 
     def test_endpoint_resolution(
         self,
@@ -458,17 +392,14 @@ class TestConfigurationLoading:
             secret_configs=secret_configs
         )
 
-        settings = PipelineConfigPrepSettings(
-            env="local",
-            pipeline_id="test-pipeline-123"
-        )
-        prep = PipelineConfigPrep(settings)
+        with patch.dict(os.environ, {"PIPELINE_ID": "test-pipeline-123"}):
+            prep = PipelineConfigPrep()
 
-        pipeline, streams, connections, endpoints, connectors = prep.create_config()
+            pipeline, streams, connections, endpoints, connectors = prep.create_config()
 
-        # Check endpoints are resolved
-        assert "source-endpoint-id" in endpoints
-        assert endpoints["source-endpoint-id"]["endpoint"] == "/v1/data"
+            # Check endpoints are resolved
+            assert "source-endpoint-id" in endpoints
+            assert endpoints["source-endpoint-id"]["endpoint"] == "/v1/data"
 
 
 class TestConsolidatedConfigLoading:
@@ -502,15 +433,15 @@ class TestConsolidatedConfigLoading:
         with open(pipeline_path, "w") as f:
             json.dump(consolidated, f)
 
-        settings = PipelineConfigPrepSettings(env="local", pipeline_id="test-pipe")
-        prep = PipelineConfigPrep(settings)
+        with patch.dict(os.environ, {"PIPELINE_ID": "test-pipe"}):
+            prep = PipelineConfigPrep()
 
-        # First call loads from disk
-        config1 = prep._load_consolidated_config()
-        # Second call returns cached
-        config2 = prep._load_consolidated_config()
+            # First call loads from disk
+            config1 = prep._load_consolidated_config()
+            # Second call returns cached
+            config2 = prep._load_consolidated_config()
 
-        assert config1 is config2  # Same object (cached)
+            assert config1 is config2  # Same object (cached)
 
     def test_connection_lookup_from_consolidated(self, temp_config_dir, mock_analitiq_config):
         """Verify connections are looked up from consolidated file."""
@@ -519,12 +450,12 @@ class TestConsolidatedConfigLoading:
         with open(pipeline_path, "w") as f:
             json.dump(consolidated, f)
 
-        settings = PipelineConfigPrepSettings(env="local", pipeline_id="test-pipe")
-        prep = PipelineConfigPrep(settings)
+        with patch.dict(os.environ, {"PIPELINE_ID": "test-pipe"}):
+            prep = PipelineConfigPrep()
 
-        conn = prep._load_connection_config("conn-1")
-        assert conn["connection_id"] == "conn-1"
-        assert conn["host"] == "https://example1.com"
+            conn = prep._load_connection_config("conn-1")
+            assert conn["connection_id"] == "conn-1"
+            assert conn["host"] == "https://example1.com"
 
     def test_endpoint_lookup_from_consolidated(self, temp_config_dir, mock_analitiq_config):
         """Verify endpoints are looked up from consolidated file."""
@@ -533,12 +464,12 @@ class TestConsolidatedConfigLoading:
         with open(pipeline_path, "w") as f:
             json.dump(consolidated, f)
 
-        settings = PipelineConfigPrepSettings(env="local", pipeline_id="test-pipe")
-        prep = PipelineConfigPrep(settings)
+        with patch.dict(os.environ, {"PIPELINE_ID": "test-pipe"}):
+            prep = PipelineConfigPrep()
 
-        ep = prep._load_endpoint_config("ep-1")
-        assert ep["endpoint_id"] == "ep-1"
-        assert ep["endpoint"] == "/v1/data"
+            ep = prep._load_endpoint_config("ep-1")
+            assert ep["endpoint_id"] == "ep-1"
+            assert ep["endpoint"] == "/v1/data"
 
     def test_missing_connection_raises_error(self, temp_config_dir, mock_analitiq_config):
         """Verify FileNotFoundError when connection not in consolidated file."""
@@ -547,13 +478,13 @@ class TestConsolidatedConfigLoading:
         with open(pipeline_path, "w") as f:
             json.dump(consolidated, f)
 
-        settings = PipelineConfigPrepSettings(env="local", pipeline_id="test-pipe")
-        prep = PipelineConfigPrep(settings)
+        with patch.dict(os.environ, {"PIPELINE_ID": "test-pipe"}):
+            prep = PipelineConfigPrep()
 
-        with pytest.raises(FileNotFoundError) as exc_info:
-            prep._load_connection_config("nonexistent-id")
+            with pytest.raises(FileNotFoundError) as exc_info:
+                prep._load_connection_config("nonexistent-id")
 
-        assert "not found in consolidated config" in str(exc_info.value)
+            assert "not found in consolidated config" in str(exc_info.value)
 
     def test_missing_endpoint_raises_error(self, temp_config_dir, mock_analitiq_config):
         """Verify FileNotFoundError when endpoint not in consolidated file."""
@@ -562,10 +493,10 @@ class TestConsolidatedConfigLoading:
         with open(pipeline_path, "w") as f:
             json.dump(consolidated, f)
 
-        settings = PipelineConfigPrepSettings(env="local", pipeline_id="test-pipe")
-        prep = PipelineConfigPrep(settings)
+        with patch.dict(os.environ, {"PIPELINE_ID": "test-pipe"}):
+            prep = PipelineConfigPrep()
 
-        with pytest.raises(FileNotFoundError) as exc_info:
-            prep._load_endpoint_config("nonexistent-ep")
+            with pytest.raises(FileNotFoundError) as exc_info:
+                prep._load_endpoint_config("nonexistent-ep")
 
-        assert "not found in consolidated config" in str(exc_info.value)
+            assert "not found in consolidated config" in str(exc_info.value)

@@ -39,8 +39,6 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from pydantic import BaseModel, Field
-
 from src.config import load_analitiq_config, validate_consolidated_config
 
 
@@ -63,33 +61,6 @@ from src.secrets import (
 
 logger = logging.getLogger(__name__)
 
-
-class PipelineConfigPrepSettings(BaseModel):
-    """Configuration settings for PipelineConfigPrep.
-
-    Configuration is loaded from a single consolidated file per pipeline:
-    - Consolidated file: {paths.pipelines}/{pipeline_id}.json
-    - Secrets: {paths.secrets}/{connection_id}.json
-
-    In cloud environments (dev/prod), config_fetcher.py fetches all data
-    from Lambda and writes the consolidated file + secrets before
-    PipelineConfigPrep runs.
-
-    The ENV variable controls:
-    - State storage backend (local filesystem vs S3)
-    - Log storage backend (local filesystem vs S3)
-    - DLQ storage backend (local filesystem vs S3)
-    - Metrics storage backend (local filesystem vs S3)
-    """
-
-    env: str = Field(default="local", description="Environment: local, dev, or prod")
-    pipeline_id: str = Field(..., description="Pipeline ID to load")
-    org_id: Optional[str] = Field(default=None, description="Org ID for cloud storage paths")
-
-    # AWS region (used for state/logs/DLQ storage in cloud environments)
-    aws_region: str = Field(default="eu-central-1", description="AWS region for cloud storage")
-
-    model_config = {"validate_assignment": True}
 
 
 class ResolvedConnection:
@@ -148,14 +119,8 @@ class PipelineConfigPrep:
     not config loading.
     """
 
-    def __init__(self, settings: Optional[PipelineConfigPrepSettings] = None):
-        """
-        Initialize PipelineConfigPrep.
-
-        Args:
-            settings: Configuration settings. If None, loads from environment variables.
-        """
-        self.settings = settings or self._load_settings_from_env()
+    def __init__(self):
+        """Initialize PipelineConfigPrep."""
         # Load paths from analitiq.yaml (only pipelines and secrets needed)
         self._paths = self._load_paths_from_analitiq_yaml()
 
@@ -170,11 +135,14 @@ class PipelineConfigPrep:
         self._secrets_resolver: Optional[SecretsResolver] = None
         self._secrets_dir: Optional[Path] = None
 
+        self.pipeline_id = os.getenv("PIPELINE_ID", "")
+        if not self.pipeline_id:
+            raise RuntimeError("PIPELINE_ID environment variable is required")
+
         # Validate environment
         self.validate_environment()
 
-        logger.info(f"Initialized PipelineConfigPrep for environment: {self.settings.env}")
-        logger.info(f"Pipeline ID: {self.settings.pipeline_id}")
+        logger.info(f"Initialized PipelineConfigPrep for pipeline: {self.pipeline_id}")
         logger.info(f"Using paths from analitiq.yaml: pipelines={self._paths['pipelines']}, "
                     f"secrets={self._paths['secrets']}")
 
@@ -205,38 +173,6 @@ class PipelineConfigPrep:
             "pipelines": Path(paths_config["pipelines"]),
             "secrets": Path(paths_config["secrets"]),
         }
-
-    @classmethod
-    def _load_settings_from_env(cls) -> PipelineConfigPrepSettings:
-        """Load settings from environment variables.
-
-        Pipeline/stream configs are loaded from paths defined in analitiq.yaml.
-        In cloud environments, config_fetcher.py populates these directories first.
-        """
-        env = os.getenv("ENV", "local")
-        org_id = os.getenv("ORG_ID")
-
-        # Validate ORG_ID for cloud environments (needed for state/logs paths)
-        if env != "local" and not org_id:
-            raise RuntimeError(
-                f"ORG_ID environment variable is required for cloud environment '{env}'"
-            )
-
-        return PipelineConfigPrepSettings(
-            env=env,
-            pipeline_id=os.getenv("PIPELINE_ID", ""),
-            org_id=org_id,
-            aws_region=os.getenv("AWS_REGION", "eu-central-1"),
-        )
-
-    @property
-    def is_cloud_env(self) -> bool:
-        """Check if running in a cloud environment (dev/prod).
-
-        This affects storage backends (state, logs, DLQ) but NOT config loading.
-        Config is always loaded from local filesystem.
-        """
-        return self.settings.env in ("dev", "prod")
 
     @property
     def secrets_resolver(self) -> SecretsResolver:
@@ -294,7 +230,7 @@ class PipelineConfigPrep:
         if self._consolidated_config is not None:
             return self._consolidated_config
 
-        path = self._paths["pipelines"] / f"{self.settings.pipeline_id}.json"
+        path = self._paths["pipelines"] / f"{self.pipeline_id}.json"
         if not path.exists():
             raise FileNotFoundError(f"Pipeline config not found: {path}")
 
@@ -323,7 +259,7 @@ class PipelineConfigPrep:
         if not pipeline:
             raise ValueError(
                 f"Consolidated config missing 'pipeline' key for pipeline_id: "
-                f"{self.settings.pipeline_id}"
+                f"{self.pipeline_id}"
             )
         return pipeline
 
@@ -791,7 +727,7 @@ class PipelineConfigPrep:
         return {
             "version": version,
             "stream_id": stream_id,
-            "pipeline_id": raw_stream.get("pipeline_id", self.settings.pipeline_id),
+            "pipeline_id": raw_stream.get("pipeline_id", self.pipeline_id),
             "org_id": org_id,
             "status": raw_stream.get("status", "draft"),
             "is_enabled": raw_stream.get("is_enabled", True),
@@ -1007,9 +943,6 @@ class PipelineConfigPrep:
         Configuration is always loaded from local filesystem. In cloud environments,
         config_fetcher.py populates directories defined in analitiq.yaml before this runs.
         """
-        if not self.settings.pipeline_id:
-            raise RuntimeError("PIPELINE_ID environment variable is required")
-
         # Validate pipelines directory exists (most critical for loading pipeline config)
         pipelines_path = self._paths["pipelines"]
         if not pipelines_path.exists():
