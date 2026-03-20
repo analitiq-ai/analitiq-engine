@@ -112,7 +112,7 @@ class TestStreamingEngine:
             # Missing required fields
         }
 
-        with pytest.raises(ConfigurationError, match="Invalid pipeline configuration"):
+        with pytest.raises(ConfigurationError, match="No streams configured"):
             await engine.stream_data(invalid_config)
 
     @pytest.mark.asyncio

@@ -367,12 +367,12 @@ class TestConfigurationLoading:
         pipeline_config, stream_configs_result = prep.load_pipeline_config()
 
         # Verify pipeline
-        assert pipeline_config.pipeline_id == "test-pipeline-123"
-        assert pipeline_config.name == "Test Pipeline"
+        assert pipeline_config["pipeline_id"] == "test-pipeline-123"
+        assert pipeline_config["name"] == "Test Pipeline"
 
         # Verify streams
         assert len(stream_configs_result) == 1
-        assert stream_configs_result[0].stream_id == "stream-456"
+        assert stream_configs_result[0]["stream_id"] == "stream-456"
 
     def test_connection_resolution(
         self,

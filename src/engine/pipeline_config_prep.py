@@ -42,15 +42,16 @@ from typing import Any, Dict, List, Optional, Tuple
 from pydantic import BaseModel, Field
 
 from src.config import load_analitiq_config, validate_consolidated_config
-from src.models.pipeline import PipelineConfig, PipelineConnectionsConfig, EngineConfig
-from src.models.stream import (
-    StreamConfig, SourceConfig, DestinationConfig, MappingConfig,
-    ReplicationConfig, WriteModeConfig, DestinationBatchingConfig,
-    IdempotencyKeyConfig, StreamEngineConfig,
-    Assignment, AssignmentTarget, AssignmentValue, ConstValue,
-    ValidationConfig, ValidationRule,
-)
-from src.models.stream_state import StreamState
+
+
+def _get_connection_uuid(connections: Dict[str, Any], alias: str) -> Optional[str]:
+    """Look up connection UUID by alias from a connections dict."""
+    if alias in connections.get("source", {}):
+        return connections["source"][alias]
+    for dest in connections.get("destinations", []):
+        if alias in dest:
+            return dest[alias]
+    return None
 from src.secrets import (
     SecretsResolver,
     ConnectionConfig,
@@ -604,7 +605,7 @@ class PipelineConfigPrep:
     # Configuration Loading and Assembly
     # =========================================================================
 
-    def load_pipeline_config(self) -> Tuple[PipelineConfig, List[StreamConfig]]:
+    def load_pipeline_config(self) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
         """
         Load and assemble complete pipeline and stream configurations.
 
@@ -615,7 +616,7 @@ class PipelineConfigPrep:
         that is looked up in the consolidated file's connections array.
 
         Returns:
-            Tuple of (PipelineConfig, list of StreamConfig)
+            Tuple of (pipeline_config dict, list of stream_config dicts)
         """
         # Load raw pipeline config from consolidated file
         raw_pipeline = self._load_local_pipeline()
@@ -651,10 +652,10 @@ class PipelineConfigPrep:
                 self._resolve_connection_by_id(alias, connection_id, org_id)
 
         # Build connections_config with plain connection IDs (no prefix)
-        connections_config = PipelineConnectionsConfig(
-            source=dict(source_connections),
-            destinations=[dict(dest_dict) for dest_dict in dest_connections]
-        )
+        connections_config = {
+            "source": dict(source_connections),
+            "destinations": [dict(dest_dict) for dest_dict in dest_connections],
+        }
 
         # Load stream configs from local filesystem
         raw_streams = self._load_local_streams()
@@ -664,20 +665,20 @@ class PipelineConfigPrep:
         if isinstance(version, str):
             version = int(float(version))
 
-        # Build PipelineConfig
-        pipeline_config = PipelineConfig(
-            version=version,
-            org_id=org_id,
-            pipeline_id=raw_pipeline["pipeline_id"],
-            name=raw_pipeline.get("name", ""),
-            description=raw_pipeline.get("description"),
-            status=raw_pipeline.get("status", "draft"),
-            tags=raw_pipeline.get("tags", []),
-            connections=connections_config,
-            engine_config=EngineConfig(**raw_pipeline.get("engine_config", {})) if raw_pipeline.get("engine_config") else EngineConfig(),
-            created_at=raw_pipeline.get("created_at"),
-            updated_at=raw_pipeline.get("updated_at"),
-        )
+        # Build pipeline config dict
+        pipeline_config = {
+            "version": version,
+            "org_id": org_id,
+            "pipeline_id": raw_pipeline["pipeline_id"],
+            "name": raw_pipeline.get("name", ""),
+            "description": raw_pipeline.get("description"),
+            "status": raw_pipeline.get("status", "draft"),
+            "tags": raw_pipeline.get("tags", []),
+            "connections": connections_config,
+            "engine_config": raw_pipeline.get("engine_config", {}),
+            "created_at": raw_pipeline.get("created_at"),
+            "updated_at": raw_pipeline.get("updated_at"),
+        }
 
         # Build StreamConfigs with resolved connections and endpoints
         # Only include streams that are listed in pipeline.streams
@@ -704,17 +705,18 @@ class PipelineConfigPrep:
             )
             stream_configs.append(stream_config)
 
-        logger.info(f"Loaded pipeline '{pipeline_config.name}' with {len(stream_configs)} streams")
+        pipeline_name = pipeline_config["name"]
+        logger.info(f"Loaded pipeline '{pipeline_name}' with {len(stream_configs)} streams")
         return pipeline_config, stream_configs
 
     def _build_stream_config(
         self,
         raw_stream: Dict[str, Any],
-        connections_config: PipelineConnectionsConfig,
+        connections_config: Dict[str, Any],
         org_id: str
-    ) -> StreamConfig:
+    ) -> Dict[str, Any]:
         """
-        Build a StreamConfig from raw stream data with resolved connections and endpoints.
+        Build a stream config dict from raw stream data with resolved connections and endpoints.
 
         Connections are resolved from the consolidated config's connections array.
         Endpoints are resolved from the consolidated config's endpoints array.
@@ -723,9 +725,8 @@ class PipelineConfigPrep:
 
         # Resolve source connection
         source_ref = raw_stream["source"]["connection_ref"]
-        try:
-            source_connection_id = connections_config.get_connection_uuid(source_ref)
-        except KeyError:
+        source_connection_id = _get_connection_uuid(connections_config, source_ref)
+        if source_connection_id is None:
             raise ValueError(f"Unknown connection_ref '{source_ref}' in stream {stream_id}")
 
         # Get connection from cache - all connections must be pre-resolved
@@ -751,9 +752,8 @@ class PipelineConfigPrep:
         destinations_data = []
         for dest in raw_stream["destinations"]:
             dest_ref = dest["connection_ref"]
-            try:
-                dest_connection_id = connections_config.get_connection_uuid(dest_ref)
-            except KeyError:
+            dest_connection_id = _get_connection_uuid(connections_config, dest_ref)
+            if dest_connection_id is None:
                 raise ValueError(f"Unknown connection_ref '{dest_ref}' in stream {stream_id}")
 
             # Get connection from cache - all connections must be pre-resolved
@@ -779,7 +779,7 @@ class PipelineConfigPrep:
         if isinstance(version, str):
             version = int(float(version))
 
-        # Build StreamConfig
+        # Build stream config dict
         raw_mapping = raw_stream.get("mapping", {})
         # Get first destination's connection_ref for type lookup
         dest_connection_ref = destinations_data[0].get("connection_ref") if destinations_data else None
@@ -788,24 +788,24 @@ class PipelineConfigPrep:
             if raw_mapping
             else {}
         )
-        return StreamConfig(
-            version=version,
-            stream_id=stream_id,
-            pipeline_id=raw_stream.get("pipeline_id", self.settings.pipeline_id),
-            org_id=org_id,
-            status=raw_stream.get("status", "draft"),
-            is_enabled=raw_stream.get("is_enabled", True),
-            source=self._build_source_config(source_data),
-            destinations=[
-                self._build_destination_config(d)
+        return {
+            "version": version,
+            "stream_id": stream_id,
+            "pipeline_id": raw_stream.get("pipeline_id", self.settings.pipeline_id),
+            "org_id": org_id,
+            "status": raw_stream.get("status", "draft"),
+            "is_enabled": raw_stream.get("is_enabled", True),
+            "source": self._normalize_source_config(source_data),
+            "destinations": [
+                self._normalize_destination_config(d)
                 for d in destinations_data
             ],
-            mapping=self._build_mapping_config(normalized_mapping) if normalized_mapping else MappingConfig(),
-            tags=raw_stream.get("tags"),
-            engine_config=StreamEngineConfig(**raw_stream["engine_config"]) if raw_stream.get("engine_config") else None,
-            created_at=raw_stream.get("created_at"),
-            updated_at=raw_stream.get("updated_at"),
-        )
+            "mapping": normalized_mapping or {},
+            "tags": raw_stream.get("tags"),
+            "engine_config": raw_stream.get("engine_config"),
+            "created_at": raw_stream.get("created_at"),
+            "updated_at": raw_stream.get("updated_at"),
+        }
 
     def _normalize_mapping_config(
         self, mapping: Dict[str, Any], dest_connection_ref: Optional[str] = None
@@ -946,55 +946,6 @@ class PipelineConfigPrep:
 
         return result
 
-    def _build_source_config(self, source_data: Dict[str, Any]) -> SourceConfig:
-        """Build SourceConfig dataclass from normalized source data."""
-        normalized = self._normalize_source_config(source_data)
-        repl_data = normalized.pop("replication", {})
-        replication = ReplicationConfig(**repl_data)
-        return SourceConfig(replication=replication, **normalized)
-
-    def _build_destination_config(self, dest_data: Dict[str, Any]) -> DestinationConfig:
-        """Build DestinationConfig dataclass from raw destination data."""
-        normalized = self._normalize_destination_config(dest_data)
-        write_data = normalized.pop("write", {})
-        idem_data = write_data.pop("idempotency_key", None)
-        write = WriteModeConfig(
-            idempotency_key=IdempotencyKeyConfig(**idem_data) if idem_data else None,
-            **write_data,
-        )
-        batching_data = normalized.pop("batching", None)
-        batching = DestinationBatchingConfig(**batching_data) if batching_data else None
-        return DestinationConfig(write=write, batching=batching, **normalized)
-
-    def _build_mapping_config(self, normalized_mapping: Dict[str, Any]) -> MappingConfig:
-        """Build MappingConfig dataclass from normalized mapping data."""
-        raw_assignments = normalized_mapping.pop("assignments", [])
-        assignments = []
-        for raw in raw_assignments:
-            target_data = raw.get("target", {})
-            value_data = raw.get("value", {})
-            validation_data = raw.get("validate") or raw.get("validation")
-
-            const_data = value_data.get("const")
-            const = ConstValue(**const_data) if const_data else None
-
-            validation = None
-            if validation_data:
-                rules = [ValidationRule(**r) for r in validation_data.get("rules", [])]
-                validation = ValidationConfig(rules=rules, on_error=validation_data.get("on_error", "dlq"))
-
-            assignments.append(Assignment(
-                target=AssignmentTarget(**target_data),
-                value=AssignmentValue(
-                    kind=value_data.get("kind", "expr"),
-                    const=const,
-                    expr=value_data.get("expr"),
-                ),
-                validation=validation,
-            ))
-
-        # Build source_to_generic and generic_to_destination as plain data (no nested models needed)
-        return MappingConfig(assignments=assignments, **normalized_mapping)
 
     def get_connectors(self) -> List[Dict[str, Any]]:
         """
@@ -1011,8 +962,8 @@ class PipelineConfigPrep:
         return consolidated.get("connectors", [])
 
     def create_config(self) -> Tuple[
-        PipelineConfig,
-        List[StreamConfig],
+        Dict[str, Any],
+        List[Dict[str, Any]],
         Dict[str, "ResolvedConnection"],
         Dict[str, Dict[str, Any]],
         List[Dict[str, Any]],
@@ -1021,7 +972,7 @@ class PipelineConfigPrep:
         Load and return validated pipeline and stream configurations.
 
         Returns:
-            Tuple of (PipelineConfig, list of StreamConfig, resolved_connections dict,
+            Tuple of (pipeline_config dict, list of stream_config dicts, resolved_connections dict,
                       resolved_endpoints dict, connectors list)
             - resolved_connections maps connection_id to ResolvedConnection objects
               (use await resolved.resolve_config() to get fully-expanded config)

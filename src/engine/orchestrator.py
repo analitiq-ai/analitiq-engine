@@ -10,6 +10,8 @@ from .exceptions import (
     PipelineOrchestrationError, StreamExecutionError,
     StreamConfigurationError,
 )
+from pydantic import ValidationError
+
 from ..models.engine import (
     StreamProcessingConfig, PipelineMetricsSnapshot, TaskExecutionInfo
 )

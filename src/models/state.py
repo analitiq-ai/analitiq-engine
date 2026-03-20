@@ -1,80 +1,69 @@
-"""Pydantic models for stream state management."""
+"""Dataclass models for stream state management."""
 
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field, field_validator
 
-
-class CursorField(BaseModel):
+@dataclass
+class CursorField:
     """Cursor field definition with type safety."""
+    field: str = ""
+    value: Any = None
+    inclusive: bool = True
 
-    field: str = Field(..., description="Field name for cursor")
-    value: Any = Field(..., description="Current cursor value")
-    inclusive: bool = Field(True, description="Whether cursor is inclusive")
 
-
-class StreamCursor(BaseModel):
+@dataclass
+class StreamCursor:
     """Cursor state for a stream."""
-
-    primary: CursorField = Field(..., description="Primary cursor field")
-    tiebreakers: Optional[List[CursorField]] = Field(
-        None,
-        description="Tiebreaker fields for deterministic ordering (0+ items)",
-    )
+    primary: CursorField = field(default_factory=CursorField)
+    tiebreakers: Optional[List[CursorField]] = None
 
 
-class HttpConditionals(BaseModel):
+@dataclass
+class HttpConditionals:
     """HTTP conditional headers for efficient fetching."""
+    etag: Optional[str] = None
+    last_modified: Optional[str] = None
 
-    etag: Optional[str] = Field(None, description="Entity tag for resource version")
-    last_modified: Optional[str] = Field(None, description="Last-Modified header value")
 
-
-class PageState(BaseModel):
+@dataclass
+class PageState:
     """Pagination state for resumable API requests."""
+    next_token: Optional[str] = None
+    request: Optional[Dict[str, Any]] = None
 
-    next_token: Optional[str] = Field(None, description="Next page token")
-    request: Optional[Dict[str, Any]] = Field(None, description="Last request parameters")
 
-
-class StreamStats(BaseModel):
+@dataclass
+class StreamStats:
     """Statistics for stream processing."""
+    records_synced: int = 0
+    batches_written: int = 0
+    last_checkpoint_at: Optional[datetime] = None
+    errors_since_checkpoint: int = 0
 
-    records_synced: int = Field(0, description="Total records synchronized")
-    batches_written: int = Field(0, description="Number of batches written")
-    last_checkpoint_at: datetime = Field(..., description="Last checkpoint timestamp")
-    errors_since_checkpoint: int = Field(0, description="Error count since last checkpoint")
 
-
-class StreamState(BaseModel):
+@dataclass
+class StreamState:
     """Complete state for a stream (no partitions)."""
+    version: int = 1
+    stream_id: str = ""
+    cursor: Optional[StreamCursor] = None
+    hwm: str = ""
+    page_state: Optional[PageState] = None
+    http_conditionals: Optional[HttpConditionals] = None
+    stats: Optional[StreamStats] = None
+    last_updated: Optional[datetime] = None
 
-    version: int = Field(1, description="State format version")
-    stream_id: str = Field(..., description="Stream identifier")
-    cursor: StreamCursor = Field(..., description="Current cursor position")
-    hwm: str = Field(..., description="High-water mark for this sync run")
-    page_state: Optional[PageState] = Field(None, description="Pagination state")
-    http_conditionals: Optional[HttpConditionals] = Field(None, description="HTTP conditional headers")
-    stats: StreamStats = Field(..., description="Processing statistics")
-    last_updated: datetime = Field(..., description="When this state was last updated")
 
-
-class ReplicationConfig(BaseModel):
+@dataclass
+class ReplicationConfig:
     """Configuration for incremental replication."""
-
-    replication_method: str = Field("incremental", description="Replication method")
-    cursor_field: Optional[str] = Field(None, description="Field for cursor-based replication")
-    safety_window_seconds: int = Field(120, description="Safety window for late-arriving data")
-    tie_breaker_fields: Optional[List[str]] = Field(None, description="Fields for deterministic ordering")
-    primary_key: Optional[List[str]] = Field(None, description="Primary key fields for record identification")
-
-    @field_validator("replication_method")
-    @classmethod
-    def validate_replication_method(cls, v):
-        if v not in ["full", "incremental"]:
-            raise ValueError("replication_method must be 'full' or 'incremental'")
-        return v
+    replication_method: str = "incremental"
+    cursor_field: Optional[str] = None
+    safety_window_seconds: int = 120
+    tie_breaker_fields: Optional[List[str]] = None
+    primary_key: Optional[List[str]] = None
 
     @classmethod
     def get_replication_field_names(cls) -> List[str]:
@@ -88,37 +77,21 @@ class ReplicationConfig(BaseModel):
         ]
 
 
-class SourceConfig(BaseModel):
-    """Source configuration with validation."""
-
-    endpoint_id: str = Field(..., description="UUID of endpoint schema")
-    host_id: str = Field(..., description="UUID of host credentials")
-    replication_method: str = Field("incremental", description="Replication method")
-    replication_key: Optional[str] = Field(None, description="Field for incremental sync")
-    safety_window_seconds: int = Field(120, description="Safety window in seconds")
-
-    @field_validator("replication_method")
-    @classmethod
-    def validate_replication_method(cls, v):
-        if v not in ["full", "incremental"]:
-            raise ValueError("replication_method must be 'full' or 'incremental'")
-        return v
+@dataclass
+class SourceConfig:
+    """Source configuration."""
+    endpoint_id: str = ""
+    host_id: str = ""
+    replication_method: str = "incremental"
+    replication_key: Optional[str] = None
+    safety_window_seconds: int = 120
 
 
-class DestinationConfig(BaseModel):
-    """Destination configuration with validation."""
-
-    endpoint_id: str = Field(..., description="UUID of endpoint schema")
-    host_id: str = Field(..., description="UUID of host credentials")
-    refresh_mode: str = Field("upsert", description="Write strategy")
-    batch_support: bool = Field(False, description="Whether destination supports batching")
-    batch_size: int = Field(1, description="Batch size for destination")
-
-    @field_validator("refresh_mode")
-    @classmethod
-    def validate_refresh_mode(cls, v):
-        if v not in ["insert", "upsert", "truncate_insert"]:
-            raise ValueError("refresh_mode must be 'insert', 'upsert', or 'truncate_insert'")
-        return v
-
-
+@dataclass
+class DestinationConfig:
+    """Destination configuration."""
+    endpoint_id: str = ""
+    host_id: str = ""
+    refresh_mode: str = "upsert"
+    batch_support: bool = False
+    batch_size: int = 1

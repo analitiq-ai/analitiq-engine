@@ -16,15 +16,6 @@ from unittest.mock import Mock
 from src.engine.pipeline import Pipeline
 from src.engine.pipeline_config_prep import ResolvedConnection
 from src.models.api import APIConnectionConfig
-from src.models.pipeline import PipelineConfig, PipelineConnectionsConfig, EngineConfig
-from src.models.stream import (
-    DestinationConfig,
-    MappingConfig,
-    ReplicationConfig,
-    SourceConfig,
-    StreamConfig,
-    WriteModeConfig,
-)
 
 
 # --- Test UUIDs ---
@@ -149,48 +140,46 @@ def _database_endpoint_config():
 
 
 def _make_pipeline_config(source_alias, source_conn_id, dest_alias, dest_conn_id):
-    """Build a PipelineConfig for testing."""
-    return PipelineConfig(
-        version=1,
-        pipeline_id=PIPELINE_ID,
-        org_id=ORG_ID,
-        name="Test Pipeline",
-        status="active",
-        connections=PipelineConnectionsConfig(
-            source={source_alias: source_conn_id},
-            destinations=[{dest_alias: dest_conn_id}],
-        ),
-        engine_config=EngineConfig(),
-    )
+    """Build a pipeline config dict for testing."""
+    return {
+        "version": 1,
+        "pipeline_id": PIPELINE_ID,
+        "org_id": ORG_ID,
+        "name": "Test Pipeline",
+        "status": "active",
+        "connections": {
+            "source": {source_alias: source_conn_id},
+            "destinations": [{dest_alias: dest_conn_id}],
+        },
+        "engine_config": {},
+    }
 
 
 def _make_stream_config(source_alias, source_endpoint_id, dest_alias, dest_endpoint_id):
-    """Build a StreamConfig for testing."""
-    return StreamConfig(
-        version=1,
-        stream_id=STREAM_ID,
-        pipeline_id=PIPELINE_ID,
-        org_id=ORG_ID,
-        status="active",
-        is_enabled=True,
-        source=SourceConfig(
-            connection_ref=source_alias,
-            endpoint_id=source_endpoint_id,
-            primary_key=["id"],
-            replication=ReplicationConfig(
-                method="incremental",
-                cursor_field=["created"],
-            ),
-        ),
-        destinations=[
-            DestinationConfig(
-                connection_ref=dest_alias,
-                endpoint_id=dest_endpoint_id,
-                write=WriteModeConfig(mode="upsert"),
-            ),
-        ],
-        mapping=MappingConfig(assignments=[]),
-    )
+    """Build a stream config dict for testing."""
+    return {
+        "version": 1,
+        "stream_id": STREAM_ID,
+        "pipeline_id": PIPELINE_ID,
+        "org_id": ORG_ID,
+        "status": "active",
+        "is_enabled": True,
+        "source": {
+            "connection_ref": source_alias,
+            "endpoint_id": source_endpoint_id,
+            "primary_key": ["id"],
+            "replication": {
+                "method": "incremental",
+                "cursor_field": ["created"],
+            },
+        },
+        "destinations": [{
+            "connection_ref": dest_alias,
+            "endpoint_id": dest_endpoint_id,
+            "write": {"mode": "upsert"},
+        }],
+        "mapping": {"assignments": []},
+    }
 
 
 def _api_to_api_resolved_connections():
@@ -287,7 +276,7 @@ class TestAPIToAPIConfigStructure:
         """Verify API source connection has required fields for APIConnectionConfig."""
         pipeline_config, _, resolved_connections, _ = api_to_api_config
 
-        source_refs = pipeline_config.connections.source
+        source_refs = pipeline_config["connections"]["source"]
         source_connection_id = list(source_refs.values())[0]
 
         assert source_connection_id in resolved_connections, (
@@ -305,7 +294,7 @@ class TestAPIToAPIConfigStructure:
         """Verify API destination connection has required fields."""
         pipeline_config, _, resolved_connections, _ = api_to_api_config
 
-        dest_refs = pipeline_config.connections.destinations[0]
+        dest_refs = pipeline_config["connections"]["destinations"][0]
         dest_connection_id = list(dest_refs.values())[0]
 
         assert dest_connection_id in resolved_connections, (
@@ -388,7 +377,7 @@ class TestAPIToDatabaseConfigStructure:
         """Verify API source has host, headers."""
         pipeline_config, _, resolved_connections, _ = api_to_db_config
 
-        source_refs = pipeline_config.connections.source
+        source_refs = pipeline_config["connections"]["source"]
         source_connection_id = list(source_refs.values())[0]
 
         source_conn = resolved_connections[source_connection_id]
@@ -403,7 +392,7 @@ class TestAPIToDatabaseConfigStructure:
         """Verify database dest has driver, host, port, database, username."""
         pipeline_config, _, resolved_connections, _ = api_to_db_config
 
-        dest_refs = pipeline_config.connections.destinations[0]
+        dest_refs = pipeline_config["connections"]["destinations"][0]
         dest_connection_id = list(dest_refs.values())[0]
 
         dest_conn = resolved_connections[dest_connection_id]
@@ -417,7 +406,7 @@ class TestAPIToDatabaseConfigStructure:
         """Verify port is int type, database/username present in parameters."""
         pipeline_config, _, resolved_connections, _ = api_to_db_config
 
-        dest_refs = pipeline_config.connections.destinations[0]
+        dest_refs = pipeline_config["connections"]["destinations"][0]
         dest_connection_id = list(dest_refs.values())[0]
 
         dest_conn = resolved_connections[dest_connection_id]
