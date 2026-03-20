@@ -122,16 +122,3 @@ class DestinationConfig(BaseModel):
         return v
 
 
-class PipelineConfig(BaseModel):
-    """Complete multi-stream pipeline configuration with validation."""
-
-    pipeline_id: str = Field(..., description="Unique identifier for the pipeline")
-    version: str | int = Field(..., description="Pipeline version")
-    source: Dict[str, Any] = Field(default_factory=dict, description="Pipeline-level source configuration")
-    destination: Dict[str, Any] = Field(default_factory=dict, description="Pipeline-level destination configuration")
-    streams: Dict[str, Any] = Field(default_factory=dict, description="Multi-stream configurations")
-    name: str = Field(..., description="Human-readable pipeline name")
-
-    engine_config: Dict[str, Any] = Field(None, description="Engine configuration")
-    error_handling: Dict[str, Any] = Field(None, description="Error handling configuration")
-    monitoring: Optional[Dict[str, Any]] = Field(None, description="Monitoring configuration")

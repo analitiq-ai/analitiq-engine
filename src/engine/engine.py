@@ -9,8 +9,6 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, AsyncIterator, Tuple
 
-from pydantic import ValidationError
-
 from ..source.connectors.base import BaseConnector
 from ..shared.connector_utils import get_connector_type_from_list
 from ..shared.run_id import get_or_generate_run_id
@@ -21,7 +19,6 @@ from ..state.retry_handler import RetryHandler
 from ..state.state_manager import StateManager
 from ..config import load_analitiq_config
 from ..models.metrics import PipelineMetrics
-from ..models.state import PipelineConfig
 from ..models.engine import (
     StreamProcessingConfig, PipelineStagesConfig,
     StreamStageConfig, PipelineMetricsSnapshot
@@ -119,14 +116,6 @@ class StreamingEngine:
 
     async def stream_data(self, pipeline_config: Dict[str, Any]) -> None:
         """Process all streams concurrently with state management."""
-
-        # Validate configuration using Pydantic
-        try:
-            config = PipelineConfig(**pipeline_config)
-            logger.info("Pipeline configuration validation passed")
-        except Exception as e:
-            logger.error(f"Pipeline configuration validation failed: {e}")
-            raise ConfigurationError(f"Invalid pipeline configuration: {e}") from e
 
         pipeline_id = pipeline_config["pipeline_id"]
         streams = pipeline_config.get("streams", {})

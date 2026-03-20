@@ -1,4 +1,4 @@
-"""Pydantic models for type safety and validation."""
+"""Data models for configuration and state."""
 
 # Pipeline models (mirrors k2m's PipelineConfig)
 from .pipeline import (
@@ -58,7 +58,6 @@ from .stream_state import (
     RetryState,
     RunOutcome,
     StreamState,
-    StreamStateIndex,
     StreamStatus,
 )
 
@@ -90,12 +89,7 @@ from .api import (
 
 # Transformation models
 from .transformations import (
-    ComputedFieldConfig,
-    FieldMappingConfig,
-    MappingConfig as LegacyMappingConfig,
     TransformationConfig,
-    TransformationResult,
-    TransformationStats,
     TransformationType,
 )
 
@@ -119,7 +113,6 @@ from .state import (
     StreamCursor,
     StreamStats,
     StreamState as SimpleStreamState,
-    PipelineConfig as StatePipelineConfig,
     DestinationConfig as StateDestinationConfig,
     ReplicationConfig as StateReplicationConfig,
     SourceConfig as StateSourceConfig,
@@ -179,7 +172,6 @@ __all__ = [
     "RetryState",
     "RunOutcome",
     "StreamState",
-    "StreamStateIndex",
     "StreamStatus",
     # Engine models
     "PipelineMetricsSnapshot",
@@ -202,12 +194,7 @@ __all__ = [
     "RateLimitConfig",
     "RecordBatch",
     # Transformation models
-    "ComputedFieldConfig",
-    "FieldMappingConfig",
-    "LegacyMappingConfig",
     "TransformationConfig",
-    "TransformationResult",
-    "TransformationStats",
     "TransformationType",
     # Metrics models
     "PipelineMetrics",
@@ -226,7 +213,6 @@ __all__ = [
     "StreamStats",
     "SimpleStreamState",
     "StateDestinationConfig",
-    "StatePipelineConfig",
     "StateReplicationConfig",
     "StateSourceConfig",
 ]

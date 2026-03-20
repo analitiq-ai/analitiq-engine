@@ -298,27 +298,3 @@ class StreamState(BaseModel):
         )
 
 
-class StreamStateIndex(BaseModel):
-    """
-    Index of all stream states for a pipeline.
-    Used as the top-level state manifest.
-    """
-    model_config = ConfigDict(extra="forbid")
-
-    version: str = Field("1.0", description="Index format version")
-    pipeline_id: str = Field(..., description="Pipeline identifier")
-    streams: Dict[str, str] = Field(
-        default_factory=dict,
-        description="Stream ID to state file path mapping"
-    )
-    last_updated: datetime = Field(default_factory=datetime.utcnow, description="Last update timestamp")
-
-    def add_stream(self, stream_id: str, state_path: str) -> None:
-        """Add or update a stream in the index."""
-        self.streams[stream_id] = state_path
-        self.last_updated = datetime.utcnow()
-
-    def remove_stream(self, stream_id: str) -> None:
-        """Remove a stream from the index."""
-        self.streams.pop(stream_id, None)
-        self.last_updated = datetime.utcnow()

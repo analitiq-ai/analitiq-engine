@@ -43,7 +43,13 @@ from pydantic import BaseModel, Field
 
 from src.config import load_analitiq_config, validate_consolidated_config
 from src.models.pipeline import PipelineConfig, PipelineConnectionsConfig, EngineConfig
-from src.models.stream import StreamConfig, SourceConfig, DestinationConfig, MappingConfig
+from src.models.stream import (
+    StreamConfig, SourceConfig, DestinationConfig, MappingConfig,
+    ReplicationConfig, WriteModeConfig, DestinationBatchingConfig,
+    IdempotencyKeyConfig, StreamEngineConfig,
+    Assignment, AssignmentTarget, AssignmentValue, ConstValue,
+    ValidationConfig, ValidationRule,
+)
 from src.models.stream_state import StreamState
 from src.secrets import (
     SecretsResolver,
@@ -83,59 +89,6 @@ class PipelineConfigPrepSettings(BaseModel):
     aws_region: str = Field(default="eu-central-1", description="AWS region for cloud storage")
 
     model_config = {"validate_assignment": True}
-
-
-def validate_pipeline_config(config: Dict[str, Any]) -> bool:
-    """Validate pipeline-level configuration fields."""
-    required_fields = ["pipeline_id"]
-
-    for field in required_fields:
-        if field not in config:
-            logger.error(f"Missing required pipeline field: {field}")
-            return False
-
-    pipeline_id = config["pipeline_id"]
-    if not isinstance(pipeline_id, str) or not pipeline_id.strip():
-        logger.error("pipeline_id must be a non-empty string")
-        return False
-
-    return True
-
-
-def validate_stream_config(config: Dict[str, Any]) -> bool:
-    """Validate stream configuration fields.
-
-    Requires endpoint_id for source and destinations.
-    """
-    required_fields = ["stream_id", "source", "destinations"]
-
-    for field in required_fields:
-        if field not in config:
-            logger.error(f"Missing required stream field: {field}")
-            return False
-
-    source = config.get("source", {})
-    if not source.get("connection_ref"):
-        logger.error("source.connection_ref is required")
-        return False
-    if not source.get("endpoint_id"):
-        logger.error("source.endpoint_id is required")
-        return False
-
-    destinations = config.get("destinations", [])
-    if not destinations:
-        logger.error("At least one destination is required")
-        return False
-
-    for i, dest in enumerate(destinations):
-        if not dest.get("connection_ref"):
-            logger.error(f"destinations[{i}].connection_ref is required")
-            return False
-        if not dest.get("endpoint_id"):
-            logger.error(f"destinations[{i}].endpoint_id is required")
-            return False
-
-    return True
 
 
 class ResolvedConnection:
@@ -667,9 +620,6 @@ class PipelineConfigPrep:
         # Load raw pipeline config from consolidated file
         raw_pipeline = self._load_local_pipeline()
 
-        if not validate_pipeline_config(raw_pipeline):
-            raise ValueError("Pipeline configuration validation failed")
-
         org_id = raw_pipeline.get("org_id", "")
 
         # Get connections from pipeline
@@ -746,10 +696,6 @@ class PipelineConfigPrep:
                     f"This indicates a data consistency issue - the stream must be "
                     f"referenced in the pipeline's 'streams' array."
                 )
-
-            if not validate_stream_config(raw_stream):
-                logger.warning(f"Skipping invalid stream: {stream_id}")
-                continue
 
             stream_config = self._build_stream_config(
                 raw_stream,
@@ -849,14 +795,14 @@ class PipelineConfigPrep:
             org_id=org_id,
             status=raw_stream.get("status", "draft"),
             is_enabled=raw_stream.get("is_enabled", True),
-            source=SourceConfig(**self._normalize_source_config(source_data)),
+            source=self._build_source_config(source_data),
             destinations=[
-                DestinationConfig(**self._normalize_destination_config(d))
+                self._build_destination_config(d)
                 for d in destinations_data
             ],
-            mapping=MappingConfig(**normalized_mapping) if normalized_mapping else MappingConfig(),
+            mapping=self._build_mapping_config(normalized_mapping) if normalized_mapping else MappingConfig(),
             tags=raw_stream.get("tags"),
-            engine_config=raw_stream.get("engine_config"),
+            engine_config=StreamEngineConfig(**raw_stream["engine_config"]) if raw_stream.get("engine_config") else None,
             created_at=raw_stream.get("created_at"),
             updated_at=raw_stream.get("updated_at"),
         )
@@ -999,6 +945,56 @@ class PipelineConfigPrep:
             }
 
         return result
+
+    def _build_source_config(self, source_data: Dict[str, Any]) -> SourceConfig:
+        """Build SourceConfig dataclass from normalized source data."""
+        normalized = self._normalize_source_config(source_data)
+        repl_data = normalized.pop("replication", {})
+        replication = ReplicationConfig(**repl_data)
+        return SourceConfig(replication=replication, **normalized)
+
+    def _build_destination_config(self, dest_data: Dict[str, Any]) -> DestinationConfig:
+        """Build DestinationConfig dataclass from raw destination data."""
+        normalized = self._normalize_destination_config(dest_data)
+        write_data = normalized.pop("write", {})
+        idem_data = write_data.pop("idempotency_key", None)
+        write = WriteModeConfig(
+            idempotency_key=IdempotencyKeyConfig(**idem_data) if idem_data else None,
+            **write_data,
+        )
+        batching_data = normalized.pop("batching", None)
+        batching = DestinationBatchingConfig(**batching_data) if batching_data else None
+        return DestinationConfig(write=write, batching=batching, **normalized)
+
+    def _build_mapping_config(self, normalized_mapping: Dict[str, Any]) -> MappingConfig:
+        """Build MappingConfig dataclass from normalized mapping data."""
+        raw_assignments = normalized_mapping.pop("assignments", [])
+        assignments = []
+        for raw in raw_assignments:
+            target_data = raw.get("target", {})
+            value_data = raw.get("value", {})
+            validation_data = raw.get("validate") or raw.get("validation")
+
+            const_data = value_data.get("const")
+            const = ConstValue(**const_data) if const_data else None
+
+            validation = None
+            if validation_data:
+                rules = [ValidationRule(**r) for r in validation_data.get("rules", [])]
+                validation = ValidationConfig(rules=rules, on_error=validation_data.get("on_error", "dlq"))
+
+            assignments.append(Assignment(
+                target=AssignmentTarget(**target_data),
+                value=AssignmentValue(
+                    kind=value_data.get("kind", "expr"),
+                    const=const,
+                    expr=value_data.get("expr"),
+                ),
+                validation=validation,
+            ))
+
+        # Build source_to_generic and generic_to_destination as plain data (no nested models needed)
+        return MappingConfig(assignments=assignments, **normalized_mapping)
 
     def get_connectors(self) -> List[Dict[str, Any]]:
         """

@@ -13,8 +13,6 @@ from pydantic import ValidationError
 from src.engine.pipeline_config_prep import (
     PipelineConfigPrep,
     PipelineConfigPrepSettings,
-    validate_pipeline_config,
-    validate_stream_config,
 )
 
 
@@ -198,72 +196,6 @@ class TestPipelineConfigPrepSettings:
         with pytest.raises(RuntimeError) as exc_info:
             PipelineConfigPrep(settings)
         assert "PIPELINE_ID" in str(exc_info.value)
-
-
-class TestValidatePipelineConfig:
-    """Test validate_pipeline_config function."""
-
-    def test_valid_config_passes(self, valid_pipeline_config):
-        """Test that valid pipeline configuration passes validation."""
-        assert validate_pipeline_config(valid_pipeline_config) is True
-
-    def test_missing_pipeline_id_fails(self, incomplete_pipeline_config):
-        """Test that missing pipeline_id fails validation."""
-        assert validate_pipeline_config(incomplete_pipeline_config) is False
-
-    def test_empty_pipeline_id_fails(self):
-        """Test that empty pipeline_id fails validation."""
-        config = {"pipeline_id": "", "name": "Test"}
-        assert validate_pipeline_config(config) is False
-
-    def test_non_string_pipeline_id_fails(self):
-        """Test that non-string pipeline_id fails validation."""
-        config = {"pipeline_id": 123, "name": "Test"}
-        assert validate_pipeline_config(config) is False
-
-
-class TestValidateStreamConfig:
-    """Test validate_stream_config function."""
-
-    def test_valid_config_passes(self, valid_stream_config):
-        """Test that valid stream configuration passes validation."""
-        assert validate_stream_config(valid_stream_config) is True
-
-    def test_missing_stream_id_fails(self, valid_stream_config):
-        """Test that missing stream_id fails validation."""
-        config = valid_stream_config.copy()
-        del config["stream_id"]
-        assert validate_stream_config(config) is False
-
-    def test_missing_source_fails(self, valid_stream_config):
-        """Test that missing source fails validation."""
-        config = valid_stream_config.copy()
-        del config["source"]
-        assert validate_stream_config(config) is False
-
-    def test_missing_destinations_fails(self, valid_stream_config):
-        """Test that missing destinations fails validation."""
-        config = valid_stream_config.copy()
-        del config["destinations"]
-        assert validate_stream_config(config) is False
-
-    def test_empty_destinations_fails(self, valid_stream_config):
-        """Test that empty destinations array fails validation."""
-        config = valid_stream_config.copy()
-        config["destinations"] = []
-        assert validate_stream_config(config) is False
-
-    def test_missing_source_connection_ref_fails(self, valid_stream_config):
-        """Test that missing source.connection_ref fails validation."""
-        config = valid_stream_config.copy()
-        config["source"] = {"endpoint_id": "test-endpoint"}
-        assert validate_stream_config(config) is False
-
-    def test_missing_destination_endpoint_fails(self, valid_stream_config):
-        """Test that missing destination endpoint_id fails validation."""
-        config = valid_stream_config.copy()
-        config["destinations"] = [{"connection_ref": "conn_dst", "write": {"mode": "upsert"}}]
-        assert validate_stream_config(config) is False
 
 
 class TestPipelineConfigPrepLocal:
