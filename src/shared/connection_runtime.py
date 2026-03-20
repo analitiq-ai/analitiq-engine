@@ -42,6 +42,8 @@ async def _create_api_session(
         Tuple of (session, base_url, rate_limiter)
     """
     parameters = config.get("parameters", {})
+    if "host" not in config or not config["host"]:
+        raise ValueError("API connection requires 'host' in configuration")
     base_url = config["host"].rstrip("/")
     headers = dict(parameters.get("headers", {}))
 
@@ -50,14 +52,24 @@ async def _create_api_session(
     if auth_config:
         auth_type = auth_config.get("type", "").lower()
         if auth_type in ("bearer_token", "bearer"):
-            headers["Authorization"] = f"Bearer {auth_config.get('token', '')}"
+            token = auth_config.get("token", "")
+            if not token:
+                raise ValueError("Auth type 'bearer' requires a non-empty 'token' field")
+            headers["Authorization"] = f"Bearer {token}"
         elif auth_type == "api_key":
             header_name = auth_config.get("header_name", "X-API-Key")
-            headers[header_name] = auth_config.get("api_key", "")
+            api_key = auth_config.get("api_key", "")
+            if not api_key:
+                raise ValueError("Auth type 'api_key' requires a non-empty 'api_key' field")
+            headers[header_name] = api_key
         elif auth_type == "basic":
             import base64
+            username = auth_config.get("username", "")
+            password = auth_config.get("password", "")
+            if not username:
+                raise ValueError("Auth type 'basic' requires a non-empty 'username' field")
             credentials = base64.b64encode(
-                f"{auth_config.get('username', '')}:{auth_config.get('password', '')}".encode()
+                f"{username}:{password}".encode()
             ).decode()
             headers["Authorization"] = f"Basic {credentials}"
         else:
@@ -239,12 +251,21 @@ class ConnectionRuntime:
         """
         try:
             if self._engine:
-                await self._engine.dispose()
+                try:
+                    await self._engine.dispose()
+                except Exception as e:
+                    logger.error(f"Failed to dispose engine for {self._connection_id}: {e}")
                 self._engine = None
         finally:
             if self._session:
-                await self._session.close()
+                try:
+                    await self._session.close()
+                except Exception as e:
+                    logger.error(f"Failed to close session for {self._connection_id}: {e}")
                 self._session = None
+            self._base_url = None
+            self._rate_limiter = None
+            self._resolved_config = None
             self._materialized = False
 
     # --- Private ---

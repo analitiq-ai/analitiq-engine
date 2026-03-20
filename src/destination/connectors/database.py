@@ -123,7 +123,11 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
             runtime: ConnectionRuntime with enriched config
         """
         self._runtime = runtime
-        await runtime.materialize(require_port=False)
+        try:
+            await runtime.materialize(require_port=False)
+        except Exception as e:
+            logger.error(f"Database destination connection failed: {e}")
+            raise ConnectionError(f"Database connection failed: {e}") from e
         self._engine = runtime.engine
         self._driver = runtime.driver or ""
         self._connected = True

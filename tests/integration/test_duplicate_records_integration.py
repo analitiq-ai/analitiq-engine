@@ -14,7 +14,26 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from datetime import datetime, timezone
 
 from src.source.connectors.api import APIConnector
+from src.shared.connection_runtime import ConnectionRuntime
+from src.secrets.resolvers.memory import InMemorySecretsResolver
 from src.state.state_manager import StateManager
+
+
+def _make_api_runtime(host="https://api.test.com"):
+    """Create a ConnectionRuntime for API tests."""
+    return ConnectionRuntime(
+        raw_config={
+            "host": host,
+            "parameters": {
+                "headers": {"Authorization": "Bearer test-token"},
+                "timeout": 30,
+            },
+        },
+        connector_type="api",
+        driver=None,
+        connection_id="test-conn",
+        resolver=InMemorySecretsResolver({}),
+    )
 
 
 class TestDuplicateRecordsIntegration:
@@ -249,11 +268,7 @@ class TestDuplicateRecordsIntegration:
         connector.base_url = "https://api.test.com"
         
         # Connect the API connector to initialize session  
-        await connector.connect({
-            "host": "https://api.test.com",
-            "headers": {"Authorization": "Bearer test-token"},
-            "timeout": 30
-        })
+        await connector.connect(_make_api_runtime())
         
         # Create state manager
         state_manager = StateManager("test-pipeline", str(temp_state_dir))
@@ -323,11 +338,7 @@ class TestDuplicateRecordsIntegration:
         connector.base_url = "https://api.test.com"
         
         # Connect the API connector to initialize session
-        await connector.connect({
-            "host": "https://api.test.com",
-            "headers": {"Authorization": "Bearer test-token"},
-            "timeout": 30
-        })
+        await connector.connect(_make_api_runtime())
         
         # Create state manager
         state_manager = StateManager("test-pipeline", str(temp_state_dir))
@@ -463,11 +474,7 @@ class TestDuplicateRecordsIntegration:
         }
 
         connector = APIConnector("test-api")
-        await connector.connect({
-            "host": "https://api.test.com",
-            "headers": {"Authorization": "Bearer test-token"},
-            "timeout": 30
-        })
+        await connector.connect(_make_api_runtime())
         
         state_manager = StateManager("test-pipeline", str(temp_state_dir))
         
@@ -514,11 +521,7 @@ class TestDuplicateRecordsIntegration:
         }
 
         connector = APIConnector("test-api")
-        await connector.connect({
-            "host": "https://api.test.com",
-            "headers": {"Authorization": "Bearer test-token"},
-            "timeout": 30
-        })
+        await connector.connect(_make_api_runtime())
         
         state_manager = StateManager("test-pipeline", str(temp_state_dir))
         
@@ -591,11 +594,7 @@ class TestDuplicateRecordsIntegration:
         }
 
         connector = APIConnector("test-api")
-        await connector.connect({
-            "host": "https://api.test.com",
-            "headers": {"Authorization": "Bearer test-token"},
-            "timeout": 30
-        })
+        await connector.connect(_make_api_runtime())
         
         state_manager = StateManager("test-pipeline", str(temp_state_dir))
         
@@ -658,11 +657,7 @@ class TestDuplicateRecordsIntegration:
         }
 
         connector = APIConnector("test-api")
-        await connector.connect({
-            "host": "https://api.test.com",
-            "headers": {"Authorization": "Bearer test-token"},
-            "timeout": 30
-        })
+        await connector.connect(_make_api_runtime())
         
         state_manager = StateManager("test-pipeline", str(temp_state_dir))
         

@@ -128,10 +128,9 @@ class ApiDestinationHandler(BaseDestinationHandler):
     async def disconnect(self) -> None:
         """Close API connection."""
         if self._session:
-            # RetryClient.close() does NOT close the underlying session
             await self._session.close()
         if self._runtime:
-            # Close the underlying plain session owned by the runtime
+            # runtime.close() is idempotent — safe even if RetryClient already closed the session
             await self._runtime.close()
         self._connected = False
         logger.info("ApiDestinationHandler disconnected")

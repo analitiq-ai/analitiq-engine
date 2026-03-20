@@ -312,11 +312,12 @@ class TestConnectionRuntimeClose:
         runtime._session = mock_session
         runtime._materialized = True
 
-        with pytest.raises(Exception, match="dispose failed"):
-            await runtime.close()
+        # close() should not raise — it logs the error and continues cleanup
+        await runtime.close()
 
         # Session should still be closed despite engine failure
         mock_session.close.assert_awaited_once()
+        assert runtime._materialized is False
 
 
 class TestCreateSourceConnectorUnknownType:

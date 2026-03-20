@@ -168,15 +168,24 @@ class Pipeline:
         # Helper to get resolved connection config by reference
         def get_connection_config(connection_ref: str) -> Dict[str, Any]:
             connection_id = _get_connection_uuid(connections, connection_ref)
-            if connection_id and connection_id in self.resolved_connections:
-                runtime = self.resolved_connections[connection_id]
-                if isinstance(runtime, ConnectionRuntime):
-                    result = runtime.raw_config
-                    result["_runtime"] = runtime
-                    return result
-                elif isinstance(runtime, dict):
-                    return runtime.copy()
-            return {}
+            if not connection_id:
+                raise ValueError(
+                    f"Connection reference '{connection_ref}' not found in pipeline connections"
+                )
+            if connection_id not in self.resolved_connections:
+                raise ValueError(
+                    f"Connection '{connection_id}' (ref='{connection_ref}') was not resolved"
+                )
+            runtime = self.resolved_connections[connection_id]
+            if isinstance(runtime, ConnectionRuntime):
+                result = runtime.raw_config
+                result["_runtime"] = runtime
+                return result
+            elif isinstance(runtime, dict):
+                return runtime.copy()
+            raise ValueError(
+                f"Unexpected connection type for '{connection_id}': {type(runtime)}"
+            )
 
         # Helper to get resolved endpoint config by endpoint_id
         def get_endpoint_config(endpoint_id: str) -> Dict[str, Any]:

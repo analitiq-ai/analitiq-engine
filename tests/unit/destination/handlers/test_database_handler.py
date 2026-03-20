@@ -75,14 +75,14 @@ class TestDatabaseHandlerConnect:
 
     @pytest.mark.asyncio
     async def test_connect_ssl_error_propagates(self, handler, base_config):
-        """SSL errors are propagated from materialize."""
+        """SSL errors are wrapped in ConnectionError from materialize."""
         runtime = _make_runtime(base_config)
 
         with patch(
             "src.shared.connection_runtime.create_database_engine",
             side_effect=ssl.SSLError("SSL handshake failed"),
         ):
-            with pytest.raises(ssl.SSLError):
+            with pytest.raises(ConnectionError, match="Database connection failed"):
                 await handler.connect(runtime)
 
         assert handler._connected is False

@@ -5,12 +5,24 @@ import logging
 import os
 import shutil
 from abc import ABC, abstractmethod
+from datetime import datetime, date
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
+
+
+class _StateEncoder(json.JSONEncoder):
+    """JSON encoder that handles known state types, raises on unexpected types."""
+
+    def default(self, obj):
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        if isinstance(obj, date):
+            return obj.isoformat()
+        raise TypeError(f"State data contains non-serializable type: {type(obj).__name__}")
 
 
 class StateStorageSettings(BaseModel):
@@ -123,7 +135,7 @@ class LocalStateStorage(StateStorageBackend):
 
         try:
             with open(temp_file, "w") as f:
-                json.dump(data, f, indent=2, default=str)
+                json.dump(data, f, indent=2, cls=_StateEncoder)
             temp_file.replace(full_path)
             logger.debug(f"Wrote state to {full_path}")
         except Exception as e:
@@ -225,7 +237,7 @@ class S3StateStorage(StateStorageBackend):
 
         key = self._build_s3_key(path)
         try:
-            content = json.dumps(data, indent=2, default=str)
+            content = json.dumps(data, indent=2, cls=_StateEncoder)
             self.s3_client.put_object(
                 Bucket=self.bucket,
                 Key=key,
