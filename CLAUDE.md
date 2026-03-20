@@ -110,7 +110,6 @@ Configuration loads from local filesystem when ran locally. In cloud, `config_fe
 |----------|----------|-------------|
 | `ENV` | Yes | `local`, `dev`, `prod` - affects storage backends only |
 | `PIPELINE_ID` | Yes | Pipeline UUID |
-| `ORG_ID` | Yes | Org UUID |
 | `LOCAL_CONFIG_MOUNT` | Yes | Config directory path |
 | `AWS_REGION` | Cloud | Default: `eu-central-1` |
 
@@ -357,11 +356,11 @@ When running docker test, the run should mimic the production environment:
 
 Example:
 ```shell
-cd docker && \                                                                                                                                          
-   PIPELINE_ID=0569c85b-b538-442a-bdc5-726afca08da4 \                                                                                                                                                               
-   ORG_ID=d7a11991-2795-49d1-a858-c7e58ee5ecc6 \                                                                                                                                                                 
-   AWS_PROFILE=434659057682_AdministratorAccess \                                                                                                                                                                   
-   docker compose run --rm source_engine 2>&1 
+cd docker && \
+   PIPELINE_ID=0569c85b-b538-442a-bdc5-726afca08da4 \
+   AWS_PROFILE=434659057682_AdministratorAccess \
+   ENV=dev \
+   docker compose run --rm source_engine 2>&1
 ```
 
 ## Data Flow
