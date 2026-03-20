@@ -63,6 +63,7 @@ class DatabaseConnector(BaseConnector):
         """
         try:
             self._runtime = runtime
+            runtime.acquire()
             await runtime.materialize(require_port=True)
             self._engine = runtime.engine
             self._driver = runtime.driver or ""

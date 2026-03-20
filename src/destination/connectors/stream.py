@@ -70,6 +70,7 @@ class StreamDestinationHandler(BaseDestinationHandler):
             runtime: ConnectionRuntime with enriched config
         """
         self._runtime = runtime
+        runtime.acquire()
         await runtime.materialize()
         connection_config = runtime.resolved_config
         self._config = connection_config

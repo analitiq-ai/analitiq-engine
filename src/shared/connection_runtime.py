@@ -3,8 +3,9 @@
 Constructed by PipelineConfigPrep with enriched config (connector_type, driver
 already baked in). Internal lifecycle: resolve secrets -> create transport -> scrub.
 
-Ownership: the connector/handler that receives this runtime owns it.
-It must call close() in its disconnect() method.
+Shared ownership via reference counting: each consumer calls acquire() on
+connect and close() on disconnect. Transport is disposed only when the last
+consumer releases.
 """
 
 import copy
@@ -100,15 +101,14 @@ async def _create_api_session(
 
 class ConnectionRuntime:
     """
-    Single owner of connection lifecycle.
+    Shared-ownership connection lifecycle with reference counting.
 
     Constructed by PipelineConfigPrep with enriched config (connector_type,
-    driver already baked in). Passed to connectors, which call materialize()
-    to get a connected transport. Secrets are scrubbed from memory after
-    materialization.
+    driver already baked in). Multiple connectors may share the same instance
+    when streams reference the same connection_id.
 
-    Ownership: the connector/handler that receives this runtime owns it.
-    It must call close() in its disconnect() method.
+    Each consumer calls acquire() on connect and close() on disconnect.
+    Transport resources are only disposed when the last consumer releases.
     """
 
     def __init__(
@@ -141,6 +141,9 @@ class ConnectionRuntime:
         self._base_url: Optional[str] = None
         self._rate_limiter: Optional[RateLimiter] = None
         self._resolved_config: Optional[Dict] = None
+
+        # Reference counting for shared ownership across streams
+        self._ref_count = 0
 
         # Secret resolution internals
         self._secrets: Optional[Dict[str, str]] = None
@@ -240,15 +243,38 @@ class ConnectionRuntime:
             )
         return self._resolved_config
 
+    # --- Reference counting ---
+
+    def acquire(self) -> None:
+        """Register a consumer of this runtime. Call before using transport."""
+        self._ref_count += 1
+        logger.debug(
+            f"Runtime {self._connection_id} acquired (ref_count={self._ref_count})"
+        )
+
+    async def release(self) -> None:
+        """Alias for close() — decrement ref count and dispose if last."""
+        await self.close()
+
     # --- Teardown ---
 
     async def close(self) -> None:
         """
-        Dispose transport resources. Safe to call multiple times.
+        Decrement ref count; dispose transport when last consumer releases.
 
-        Resets materialization state, allowing materialize() to be called
-        again if reconnection is needed.
+        Safe to call multiple times. When ref count reaches zero the
+        underlying engine/session is disposed and materialization state is
+        reset.
         """
+        self._ref_count = max(0, self._ref_count - 1)
+        if self._ref_count > 0:
+            logger.debug(
+                f"Runtime {self._connection_id} released but still in use "
+                f"(ref_count={self._ref_count})"
+            )
+            return
+
+        logger.debug(f"Runtime {self._connection_id} closing (last reference)")
         try:
             if self._engine:
                 try:

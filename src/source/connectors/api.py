@@ -39,6 +39,7 @@ class APIConnector(BaseConnector):
         """Establish connection to the API using ConnectionRuntime."""
         try:
             self._runtime = runtime
+            runtime.acquire()
             await runtime.materialize()
             self.session = runtime.session
             self.base_url = runtime.base_url

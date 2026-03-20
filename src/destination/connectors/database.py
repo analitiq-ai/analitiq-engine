@@ -123,6 +123,7 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
             runtime: ConnectionRuntime with enriched config
         """
         self._runtime = runtime
+        runtime.acquire()
         try:
             await runtime.materialize(require_port=False)
         except Exception as e:

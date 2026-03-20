@@ -80,6 +80,7 @@ class FileDestinationHandler(BaseDestinationHandler):
         Args:
             runtime: ConnectionRuntime with enriched config
         """
+        runtime.acquire()
         await runtime.materialize()
         connection_config = runtime.resolved_config
         self._config = connection_config

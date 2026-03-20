@@ -107,6 +107,7 @@ class ApiDestinationHandler(BaseDestinationHandler):
             runtime: ConnectionRuntime with enriched config
         """
         self._runtime = runtime
+        runtime.acquire()
         await runtime.materialize()
         self._base_url = runtime.base_url
         self._rate_limiter = runtime.rate_limiter
