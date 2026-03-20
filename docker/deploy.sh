@@ -2,17 +2,19 @@
 #
 # Deploy Docker image to AWS ECR
 #
+# Requires ENV and AWS_PROFILE in the environment.
+# Load them from an env file before running:
+#   set -a && source .env.dev && set +a
+#
 # Usage:
-#   ./scripts/deploy-ecr.sh [ENV] [TAG]
+#   ./deploy.sh [TAG]
 #
 # Arguments:
-#   ENV  - Environment: dev, local, prod (default: dev)
 #   TAG  - Image tag (default: latest)
 #
 # Examples:
-#   ./scripts/deploy-ecr.sh              # Deploy to dev with 'latest' tag
-#   ./scripts/deploy-ecr.sh dev v1.2.3   # Deploy to dev with 'v1.2.3' tag
-#   ./scripts/deploy-ecr.sh prod latest  # Deploy to prod with 'latest' tag
+#   set -a && source .env.dev && set +a && ./deploy.sh
+#   set -a && source .env.app && set +a && ./deploy.sh v1.2.3
 #
 
 set -euo pipefail
@@ -22,11 +24,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_ROOT"
 
-# Configuration
-ENV="${1}"
-TAG="${2:-latest}"
+# Configuration — expects ENV and AWS_PROFILE from the environment
+# Load with: set -a && source .env.dev && set +a
+TAG="${1:-latest}"
 AWS_REGION="${AWS_REGION:-eu-central-1}"
-ECR_REPO="analitiq-stream-${ENV}"
+ECR_REPO="analitiq-stream-${ENV:-}"
 
 # Colors for output
 RED='\033[0;31m'
@@ -46,9 +48,17 @@ log_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
-# Validate environment
-if [[ ! "$ENV" =~ ^(dev|local|prod)$ ]]; then
-    log_error "Invalid environment: $ENV. Must be one of: dev, local, prod"
+# Validate required environment variables
+if [[ -z "${ENV:-}" ]]; then
+    log_error "ENV is not set. Source your env file first: set -a && source .env.dev && set +a"
+    exit 1
+fi
+if [[ ! "$ENV" =~ ^(dev|local|app)$ ]]; then
+    log_error "Invalid ENV: '$ENV'. Must be one of: dev, local, app"
+    exit 1
+fi
+if [[ -z "${AWS_PROFILE:-}" ]]; then
+    log_error "AWS_PROFILE is not set. Source your env file first: set -a && source .env.dev && set +a"
     exit 1
 fi
 
@@ -65,6 +75,7 @@ FULL_IMAGE_URI="${ECR_URI}/${ECR_REPO}:${TAG}"
 
 log_info "Configuration:"
 echo "  Environment:  $ENV"
+echo "  AWS Profile:  $AWS_PROFILE"
 echo "  Tag:          $TAG"
 echo "  AWS Region:   $AWS_REGION"
 echo "  AWS Account:  $AWS_ACCOUNT_ID"
