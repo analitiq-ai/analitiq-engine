@@ -24,14 +24,16 @@ def sample_api_config():
     """Sample API configuration for testing."""
     return {
         "host": "https://api.example.com",
-        "headers": {
-            "Content-Type": "application/json",
-            "Authorization": "Bearer test-token"
+        "parameters": {
+            "headers": {
+                "Content-Type": "application/json",
+                "Authorization": "Bearer test-token",
+            },
+            "rate_limit": {
+                "max_requests": 100,
+                "time_window": 60,
+            },
         },
-        "rate_limit": {
-            "max_requests": 100,
-            "time_window": 60
-        }
     }
 
 

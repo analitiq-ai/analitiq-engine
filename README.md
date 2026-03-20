@@ -351,6 +351,29 @@ src/
 └── runner.py                    # PipelineRunner
 ```
 
+## Deployment
+
+Deploy the Docker image to AWS ECR using `docker/deploy.sh`. The script reads `ENV` and `AWS_PROFILE` from the environment.
+
+### Environment files
+
+Create `.env.<environment>` files with the required variables:
+
+| File | `ENV` | `AWS_PROFILE` |
+|------|-------|---------------|
+| `.env.dev` | `dev` | `434659057682_AdministratorAccess` |
+| `.env.local` | `local` | `162174360570_AdministratorAccess` |
+| `.env.app` | `app` | `019915518575_AdministratorAccess` |
+
+### Deploy
+
+```bash
+# Load environment and deploy
+set -a && source .env.dev && set +a
+./docker/deploy.sh            # deploys with 'latest' tag
+./docker/deploy.sh v1.2.3     # deploys with a specific tag
+```
+
 ## Documentation
 
 - `docs/CREDENTIALS_GUIDE.md`

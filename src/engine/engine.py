@@ -9,8 +9,6 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, AsyncIterator, Tuple
 
-from pydantic import ValidationError
-
 from ..source.connectors.base import BaseConnector
 from ..shared.connector_utils import get_connector_type_from_list
 from ..shared.run_id import get_or_generate_run_id
@@ -21,9 +19,8 @@ from ..state.retry_handler import RetryHandler
 from ..state.state_manager import StateManager
 from ..config import load_analitiq_config
 from ..models.metrics import PipelineMetrics
-from ..models.state import PipelineConfig
 from ..models.engine import (
-    EngineConfig, StreamProcessingConfig, PipelineStagesConfig,
+    StreamProcessingConfig, PipelineStagesConfig,
     StreamStageConfig, PipelineMetricsSnapshot
 )
 from .data_transformer import DataTransformer
@@ -78,26 +75,13 @@ class StreamingEngine:
         max_concurrent_batches: int = 10,
         buffer_size: int = 10000,
         dlq_path: str = "./deadletter/",
-        engine_config: Optional[EngineConfig] = None,
     ):
         self.pipeline_id = pipeline_id
-        
-        # Validate and set engine configuration
-        if engine_config:
-            self.engine_config = engine_config
-        else:
-            self.engine_config = EngineConfig(
-                batch_size=batch_size,
-                max_concurrent_batches=max_concurrent_batches,
-                buffer_size=buffer_size,
-                dlq_path=dlq_path
-            )
-        
-        # Initialize from validated config
-        self.batch_size = self.engine_config.batch_size
-        self.max_concurrent_batches = self.engine_config.max_concurrent_batches
-        self.buffer_size = self.engine_config.buffer_size
-        self.semaphore = Semaphore(self.engine_config.max_concurrent_batches)
+        self.batch_size = batch_size
+        self.max_concurrent_batches = max_concurrent_batches
+        self.buffer_size = buffer_size
+        self.dlq_path = dlq_path
+        self.semaphore = Semaphore(max_concurrent_batches)
         
         # Setup structured logging
         self.logger = logging.getLogger(f"{__name__}.{pipeline_id}")
@@ -116,7 +100,7 @@ class StreamingEngine:
         self._state_manager = self.sharded_state_manager
         self.retry_handler = RetryHandler()
         self.circuit_breaker = CircuitBreaker()
-        self.dlq = DeadLetterQueue(self.engine_config.dlq_path)
+        self.dlq = DeadLetterQueue(self.dlq_path)
         
         # Data transformation component
         self.data_transformer = DataTransformer()
@@ -132,14 +116,6 @@ class StreamingEngine:
 
     async def stream_data(self, pipeline_config: Dict[str, Any]) -> None:
         """Process all streams concurrently with state management."""
-
-        # Validate configuration using Pydantic
-        try:
-            config = PipelineConfig(**pipeline_config)
-            logger.info("Pipeline configuration validation passed")
-        except Exception as e:
-            logger.error(f"Pipeline configuration validation failed: {e}")
-            raise ConfigurationError(f"Invalid pipeline configuration: {e}") from e
 
         pipeline_id = pipeline_config["pipeline_id"]
         streams = pipeline_config.get("streams", {})
@@ -369,17 +345,10 @@ class StreamingEngine:
                 logger.warning(f"Failed to disconnect connectors for stream {stream_name}: {str(e)}")
 
             try:
-                org_id = (
-                    os.getenv("ORG_ID")
-                    or pipeline_config.get("org_id")
-                    or pipeline_config.get("pipeline", {}).get("org_id")
-                    or ""
-                )
                 pipeline_name = pipeline_config.get("name") or pipeline_config.get("pipeline", {}).get("name")
                 record = create_metrics_record(
                     run_id=self.state_manager.current_run_id or get_or_generate_run_id(),
                     pipeline_id=self.pipeline_id,
-                    org_id=org_id,
                     start_time=stream_start_time,
                     end_time=end_time,
                     records_processed=stream_metrics["records_processed"],
@@ -622,7 +591,6 @@ class StreamingEngine:
                             "type": "batch",
                             "run_id": run_id,
                             "pipeline_id": self.pipeline_id,
-                            "org_id": os.getenv("ORG_ID", ""),
                             "stream_id": stream_id,
                             "batch_seq": batch_seq,
                             "records_written": result.records_written,

@@ -4,10 +4,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from typing import Any, Dict, List
 
-from src.source.connectors.database import (
-    DatabaseConnector,
-    EndpointConfig,
-)
+from src.source.connectors.database import DatabaseConnector
 from src.source.connectors.base import ConnectionError, ReadError
 
 
@@ -17,10 +14,12 @@ def database_config():
     return {
         "driver": "postgresql",
         "host": "localhost",
-        "port": 5432,
-        "database": "test_db",
-        "username": "test_user",
-        "password": "test_password",
+        "parameters": {
+            "port": 5432,
+            "database": "test_db",
+            "username": "test_user",
+            "password": "test_password",
+        },
     }
 
 
@@ -60,37 +59,6 @@ def mock_state_manager():
     state_manager.get_cursor = AsyncMock(return_value=None)
     state_manager.update_cursor = AsyncMock()
     return state_manager
-
-
-class TestEndpointConfig:
-    """Test EndpointConfig Pydantic model."""
-
-    def test_default_values(self):
-        """Test default endpoint configuration values."""
-        config = EndpointConfig(endpoint="test_table")
-        assert config.endpoint == "test_table"
-        assert config.primary_key == []
-        assert config.unique_constraints == []
-        assert config.endpoint_schema == {}
-        assert config.write_mode == "insert"
-        assert config.conflict_resolution == {}
-
-    def test_full_configuration(self, endpoint_config):
-        """Test full endpoint configuration."""
-        config = EndpointConfig(**endpoint_config)
-        assert config.endpoint == "test_schema/test_table"
-        assert config.primary_key == ["id"]
-        assert config.unique_constraints == ["email"]
-        assert config.write_mode == "upsert"
-
-    def test_endpoint_config_extra_fields(self):
-        """Test that EndpointConfig allows extra fields."""
-        config_data = {
-            "endpoint": "public/test_table",
-            "custom_setting": "value"
-        }
-        config = EndpointConfig(**config_data)
-        assert config.endpoint == "public/test_table"
 
 
 class TestDatabaseConnectorInit:
@@ -337,14 +305,10 @@ class TestDatabaseConnectorImports:
     """Test DatabaseConnector imports and initialization."""
 
     def test_import_database_connector(self):
-        """Test importing DatabaseConnector and related components."""
-        from src.source.connectors.database import (
-            DatabaseConnector,
-            EndpointConfig,
-        )
+        """Test importing DatabaseConnector."""
+        from src.source.connectors.database import DatabaseConnector
 
         assert DatabaseConnector is not None
-        assert EndpointConfig is not None
 
 
 class TestParseEndpoint:

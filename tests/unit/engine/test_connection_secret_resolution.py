@@ -16,9 +16,11 @@ class TestBuildConfigDictCarriesConnectionWrapper:
         mock_wrapper = MagicMock()
         raw_config = {
             "host": "db.example.com",
-            "port": 5432,
-            "password": "${password}",
             "driver": "postgresql",
+            "parameters": {
+                "port": 5432,
+                "password": "${password}",
+            },
         }
         resolved_conn = ResolvedConnection(
             connection_id="conn-1",
@@ -40,9 +42,11 @@ class TestBuildConfigDictCarriesConnectionWrapper:
         """When resolved_connections stores a plain dict, no wrapper is added."""
         raw_config = {
             "host": "db.example.com",
-            "port": 5432,
-            "password": "plain",
             "driver": "postgresql",
+            "parameters": {
+                "port": 5432,
+                "password": "plain",
+            },
         }
 
         # Simulate the dict branch of get_connection_config
@@ -61,9 +65,11 @@ class TestProcessStreamResolvesWrapper:
         (not the raw one with ${password}) to source_connector.connect()."""
         resolved_config = {
             "host": "db.example.com",
-            "port": 5432,
-            "password": "actual-secret",
             "driver": "postgresql",
+            "parameters": {
+                "port": 5432,
+                "password": "actual-secret",
+            },
         }
 
         mock_wrapper = AsyncMock()
@@ -75,9 +81,11 @@ class TestProcessStreamResolvesWrapper:
             "_connection_wrapper": mock_wrapper,
             "_connection": {
                 "host": "db.example.com",
-                "port": 5432,
-                "password": "${password}",
                 "driver": "postgresql",
+                "parameters": {
+                    "port": 5432,
+                    "password": "${password}",
+                },
             },
         }
 
@@ -95,7 +103,7 @@ class TestProcessStreamResolvesWrapper:
         mock_wrapper.resolve.assert_awaited_once()
         mock_source_connector.connect.assert_awaited_once_with(resolved_config)
         call_args = mock_source_connector.connect.call_args[0][0]
-        assert call_args["password"] == "actual-secret"
+        assert call_args["parameters"]["password"] == "actual-secret"
         assert "${password}" not in str(call_args)
 
     @pytest.mark.asyncio
@@ -103,9 +111,11 @@ class TestProcessStreamResolvesWrapper:
         """When _connection_wrapper is absent, engine uses _connection directly."""
         raw_config = {
             "host": "db.example.com",
-            "port": 5432,
-            "password": "plain-password",
             "driver": "postgresql",
+            "parameters": {
+                "port": 5432,
+                "password": "plain-password",
+            },
         }
 
         merged_src_config = {
@@ -121,7 +131,7 @@ class TestProcessStreamResolvesWrapper:
             )
 
         assert src_connection_config is raw_config
-        assert src_connection_config["password"] == "plain-password"
+        assert src_connection_config["parameters"]["password"] == "plain-password"
 
 
 class TestConnectionConfigResolveShortCircuit:
@@ -133,7 +143,7 @@ class TestConnectionConfigResolveShortCircuit:
         the raw config without calling the secrets resolver."""
         mock_resolver = AsyncMock()
         config = ConnectionConfig(
-            raw_config={"host": "localhost", "port": 5432, "password": "literal"},
+            raw_config={"host": "localhost", "driver": "postgresql", "parameters": {"port": 5432, "password": "literal"}},
             connection_id="conn-no-secrets",
             resolver=mock_resolver,
         )
@@ -141,7 +151,7 @@ class TestConnectionConfigResolveShortCircuit:
         result = await config.resolve()
 
         mock_resolver.resolve.assert_not_awaited()
-        assert result["password"] == "literal"
+        assert result["parameters"]["password"] == "literal"
         assert result["host"] == "localhost"
 
     @pytest.mark.asyncio
@@ -151,7 +161,7 @@ class TestConnectionConfigResolveShortCircuit:
         mock_resolver = AsyncMock()
         mock_resolver.resolve.return_value = {"DB_PASS": "secret123"}
         config = ConnectionConfig(
-            raw_config={"host": "localhost", "password": "${DB_PASS}"},
+            raw_config={"host": "localhost", "driver": "postgresql", "parameters": {"password": "${DB_PASS}"}},
             connection_id="conn-with-secrets",
             resolver=mock_resolver,
         )
@@ -159,4 +169,4 @@ class TestConnectionConfigResolveShortCircuit:
         result = await config.resolve()
 
         mock_resolver.resolve.assert_awaited_once_with("conn-with-secrets", org_id=None)
-        assert result["password"] == "secret123"
+        assert result["parameters"]["password"] == "secret123"

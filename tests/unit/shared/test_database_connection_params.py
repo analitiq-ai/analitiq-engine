@@ -19,10 +19,12 @@ class TestExtractConnectionParams:
         config = {
             "driver": "postgresql",
             "host": "localhost",
-            "port": 5432,
-            "database": "test_db",
-            "username": "test_user",
-            "password": "test_pass",
+            "parameters": {
+                "port": 5432,
+                "database": "test_db",
+                "username": "test_user",
+                "password": "test_pass",
+            },
         }
         params = extract_connection_params(config, require_port=True)
 
@@ -38,10 +40,12 @@ class TestExtractConnectionParams:
         config = {
             "driver": "postgresql",
             "host": "localhost",
-            "port": 5432,
-            "user": "pg_user",
-            "password": "pass",
-            "database": "db",
+            "parameters": {
+                "port": 5432,
+                "user": "pg_user",
+                "password": "pass",
+                "database": "db",
+            },
         }
         params = extract_connection_params(config, require_port=True)
         assert params.username == "pg_user"
@@ -51,41 +55,61 @@ class TestExtractConnectionParams:
         config = {
             "driver": "postgresql",
             "host": "localhost",
-            "port": 5432,
-            "username": "user",
-            "password": "pass",
-            "dbname": "my_database",
+            "parameters": {
+                "port": 5432,
+                "username": "user",
+                "password": "pass",
+                "dbname": "my_database",
+            },
         }
         params = extract_connection_params(config, require_port=True)
         assert params.database == "my_database"
 
     def test_missing_driver_raises(self):
         """Test that missing driver raises ValueError."""
-        config = {"host": "localhost", "port": 5432, "database": "db", "username": "u", "password": "p"}
+        config = {
+            "host": "localhost",
+            "parameters": {"port": 5432, "database": "db", "username": "u", "password": "p"},
+        }
         with pytest.raises(ValueError, match="driver is required"):
             extract_connection_params(config)
 
     def test_missing_host_raises(self):
         """Test that missing host raises ValueError."""
-        config = {"driver": "postgresql", "port": 5432, "database": "db", "username": "u", "password": "p"}
+        config = {
+            "driver": "postgresql",
+            "parameters": {"port": 5432, "database": "db", "username": "u", "password": "p"},
+        }
         with pytest.raises(ValueError, match="host is required"):
             extract_connection_params(config)
 
     def test_missing_username_raises(self):
         """Test that missing username raises ValueError."""
-        config = {"driver": "postgresql", "host": "localhost", "port": 5432, "database": "db", "password": "p"}
+        config = {
+            "driver": "postgresql",
+            "host": "localhost",
+            "parameters": {"port": 5432, "database": "db", "password": "p"},
+        }
         with pytest.raises(ValueError, match="username is required"):
             extract_connection_params(config)
 
     def test_missing_password_raises(self):
         """Test that missing password raises ValueError."""
-        config = {"driver": "postgresql", "host": "localhost", "port": 5432, "database": "db", "username": "u"}
+        config = {
+            "driver": "postgresql",
+            "host": "localhost",
+            "parameters": {"port": 5432, "database": "db", "username": "u"},
+        }
         with pytest.raises(ValueError, match="password is required"):
             extract_connection_params(config)
 
     def test_missing_database_raises(self):
         """Test that missing database raises ValueError."""
-        config = {"driver": "postgresql", "host": "localhost", "port": 5432, "username": "u", "password": "p"}
+        config = {
+            "driver": "postgresql",
+            "host": "localhost",
+            "parameters": {"port": 5432, "username": "u", "password": "p"},
+        }
         with pytest.raises(ValueError, match="Database name is required"):
             extract_connection_params(config)
 
@@ -94,9 +118,11 @@ class TestExtractConnectionParams:
         config = {
             "driver": "postgresql",
             "host": "localhost",
-            "database": "db",
-            "username": "user",
-            "password": "pass",
+            "parameters": {
+                "database": "db",
+                "username": "user",
+                "password": "pass",
+            },
         }
         with pytest.raises(ValueError, match="port is required"):
             extract_connection_params(config, require_port=True)
@@ -106,9 +132,11 @@ class TestExtractConnectionParams:
         config = {
             "driver": "postgresql",
             "host": "localhost",
-            "database": "db",
-            "username": "user",
-            "password": "pass",
+            "parameters": {
+                "database": "db",
+                "username": "user",
+                "password": "pass",
+            },
         }
         params = extract_connection_params(config, require_port=False)
         assert params.port == 5432
@@ -118,10 +146,12 @@ class TestExtractConnectionParams:
         config = {
             "driver": "postgresql",
             "host": "localhost",
-            "port": "5432",
-            "database": "db",
-            "username": "user",
-            "password": "pass",
+            "parameters": {
+                "port": "5432",
+                "database": "db",
+                "username": "user",
+                "password": "pass",
+            },
         }
         params = extract_connection_params(config, require_port=True)
         assert params.port == 5432
@@ -132,17 +162,19 @@ class TestExtractConnectionParams:
         config = {
             "driver": "postgresql",
             "host": "localhost",
-            "port": 5432,
-            "database": "db",
-            "username": "user",
-            "password": "pass",
+            "parameters": {
+                "port": 5432,
+                "database": "db",
+                "username": "user",
+                "password": "pass",
+            },
         }
         params = extract_connection_params(config, require_port=True)
         assert params.ssl_mode == "prefer"
 
     def test_sqlite_no_ssl_mode(self):
         """Test that SQLite gets empty ssl_mode and doesn't require host/user/password."""
-        config = {"driver": "sqlite", "database": ":memory:"}
+        config = {"driver": "sqlite", "parameters": {"database": ":memory:"}}
         params = extract_connection_params(config, require_port=False)
         assert params.ssl_mode == ""
         assert params.host == ""
@@ -154,10 +186,12 @@ class TestExtractConnectionParams:
         config = {
             "driver": "postgresql",
             "host": "localhost",
-            "port": 5432,
-            "database": "db",
-            "username": "user",
-            "password": "pass",
+            "parameters": {
+                "port": 5432,
+                "database": "db",
+                "username": "user",
+                "password": "pass",
+            },
         }
         params = extract_connection_params(config, require_port=True)
         assert params.pool_min == 2

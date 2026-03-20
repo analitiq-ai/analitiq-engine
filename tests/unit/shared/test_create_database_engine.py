@@ -25,6 +25,29 @@ def _make_engine(connect_side_effect=None):
     return engine
 
 
+def _pg_config(**overrides):
+    """Build a standard PostgreSQL config dict with new structure."""
+    base = {
+        "driver": "postgresql",
+        "host": "localhost",
+        "parameters": {
+            "port": 5432,
+            "database": "db",
+            "username": "user",
+            "password": "pass",
+        },
+    }
+    base.update(overrides)
+    return base
+
+
+def _pg_config_with_ssl(ssl_mode):
+    """Build a PostgreSQL config with a specific ssl_mode."""
+    config = _pg_config()
+    config["parameters"]["ssl_mode"] = ssl_mode
+    return config
+
+
 class TestCreateDatabaseEngine:
     """Test create_database_engine factory."""
 
@@ -38,8 +61,7 @@ class TestCreateDatabaseEngine:
             return_value=engine,
         ) as mock_create:
             result_engine, driver = await create_database_engine(
-                {"driver": "postgresql", "host": "localhost", "port": 5432,
-                 "database": "db", "username": "user", "password": "pass"},
+                _pg_config(),
                 require_port=True,
             )
 
@@ -61,9 +83,7 @@ class TestCreateDatabaseEngine:
             side_effect=engines,
         ) as mock_create:
             result_engine, driver = await create_database_engine(
-                {"driver": "postgresql", "host": "localhost", "port": 5432,
-                 "database": "db", "username": "user", "password": "pass",
-                 "ssl_mode": "prefer"},
+                _pg_config_with_ssl("prefer"),
                 require_port=True,
             )
 
@@ -90,9 +110,7 @@ class TestCreateDatabaseEngine:
         ):
             with pytest.raises(OSError, match="DB unreachable"):
                 await create_database_engine(
-                    {"driver": "postgresql", "host": "localhost", "port": 5432,
-                     "database": "db", "username": "user", "password": "pass",
-                     "ssl_mode": "prefer"},
+                    _pg_config_with_ssl("prefer"),
                     require_port=True,
                 )
 
@@ -110,9 +128,7 @@ class TestCreateDatabaseEngine:
         ) as mock_create:
             with pytest.raises(OSError, match="Connection timed out"):
                 await create_database_engine(
-                    {"driver": "postgresql", "host": "localhost", "port": 5432,
-                     "database": "db", "username": "user", "password": "pass",
-                     "ssl_mode": "prefer"},
+                    _pg_config_with_ssl("prefer"),
                     require_port=True,
                 )
 
@@ -130,9 +146,7 @@ class TestCreateDatabaseEngine:
         ) as mock_create:
             with pytest.raises(ssl.SSLError):
                 await create_database_engine(
-                    {"driver": "postgresql", "host": "localhost", "port": 5432,
-                     "database": "db", "username": "user", "password": "pass",
-                     "ssl_mode": "require"},
+                    _pg_config_with_ssl("require"),
                     require_port=True,
                 )
 
@@ -142,15 +156,20 @@ class TestCreateDatabaseEngine:
     @pytest.mark.asyncio
     async def test_require_port_raises_before_engine(self):
         """ValueError from missing port should not create any engine."""
+        config = {
+            "driver": "postgresql",
+            "host": "localhost",
+            "parameters": {
+                "database": "db",
+                "username": "user",
+                "password": "pass",
+            },
+        }
         with patch(
             "src.shared.database_utils.create_async_engine",
         ) as mock_create:
             with pytest.raises(ValueError, match="port is required"):
-                await create_database_engine(
-                    {"driver": "postgresql", "host": "localhost",
-                     "database": "db", "username": "user", "password": "pass"},
-                    require_port=True,
-                )
+                await create_database_engine(config, require_port=True)
 
         mock_create.assert_not_called()
 

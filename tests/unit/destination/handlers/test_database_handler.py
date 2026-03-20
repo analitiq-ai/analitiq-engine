@@ -20,10 +20,12 @@ def base_config():
     return {
         "driver": "postgresql",
         "host": "localhost",
-        "port": 5432,
-        "database": "test_db",
-        "username": "test_user",
-        "password": "test_password",
+        "parameters": {
+            "port": 5432,
+            "database": "test_db",
+            "username": "test_user",
+            "password": "test_password",
+        },
     }
 
 
@@ -103,10 +105,12 @@ class TestDatabaseHandlerURLEncoding:
         config = {
             "driver": "postgresql",
             "host": "localhost",
-            "port": 5432,
-            "database": "test_db",
-            "username": "user",
-            "password": "a@b#c%/d:e",
+            "parameters": {
+                "port": 5432,
+                "database": "test_db",
+                "username": "user",
+                "password": "a@b#c%/d:e",
+            },
         }
         mock_engine = AsyncMock()
 

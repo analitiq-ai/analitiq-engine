@@ -42,13 +42,13 @@ def main() -> None:
     logger.info(f"AWS_BATCH_JOB_ID: {os.getenv('AWS_BATCH_JOB_ID')}")
     logger.info("=" * 60)
 
-    env = os.getenv("ENV", "dev").lower()
-    if env != "local":
+    env = os.getenv("ENV", "local").lower()
+    if env != "loc":
         # Fetch configs from Lambda/S3 (this script only runs in cloud)
         fetch_configs()
     else:
         logger.info(
-            "ENV=local; skipping config fetcher and reusing pipelines/*.json"
+            "ENV=loc; skipping config fetcher and reusing pipelines/*.json"
         )
 
     # Initialize run_id (uses AWS_BATCH_JOB_ID in cloud)

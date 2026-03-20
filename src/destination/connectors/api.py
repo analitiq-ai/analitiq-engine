@@ -107,14 +107,15 @@ class ApiDestinationHandler(BaseDestinationHandler):
             connection_config: Connection configuration
         """
         self._config = connection_config
+        params = connection_config.get("parameters", {})
 
         # Extract connection settings
         self._base_url = connection_config.get("host", "").rstrip("/")
         if not self._base_url:
             raise ValueError("API destination requires 'host' in configuration")
 
-        self._headers = dict(connection_config.get("headers", {}))
-        self._timeout = connection_config.get("timeout", 30)
+        self._headers = dict(params.get("headers", {}))
+        self._timeout = params.get("timeout", 30)
         self._max_retries = connection_config.get("max_retries", 3)
 
         # Setup authentication if provided
@@ -123,7 +124,7 @@ class ApiDestinationHandler(BaseDestinationHandler):
             self._setup_auth(auth_config)
 
         # Setup rate limiting
-        rate_limit = connection_config.get("rate_limit")
+        rate_limit = params.get("rate_limit")
         if rate_limit:
             self._rate_limiter = RateLimiter(
                 max_requests=rate_limit.get("max_requests", 100),
@@ -133,8 +134,8 @@ class ApiDestinationHandler(BaseDestinationHandler):
         # Create aiohttp session with retry support
         timeout = aiohttp.ClientTimeout(total=self._timeout)
         connector = aiohttp.TCPConnector(
-            limit=connection_config.get("max_connections", 10),
-            limit_per_host=connection_config.get("max_connections_per_host", 5),
+            limit=params.get("max_connections", 10),
+            limit_per_host=params.get("max_connections_per_host", 5),
         )
 
         # Configure retry: only retry on specific status codes

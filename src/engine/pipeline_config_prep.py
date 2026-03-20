@@ -39,12 +39,17 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from pydantic import BaseModel, Field
-
 from src.config import load_analitiq_config, validate_consolidated_config
-from src.models.pipeline import PipelineConfig, PipelineConnectionsConfig, RuntimeConfig
-from src.models.stream import StreamConfig, SourceConfig, DestinationConfig, MappingConfig
-from src.models.stream_state import StreamState
+
+
+def _get_connection_uuid(connections: Dict[str, Any], alias: str) -> Optional[str]:
+    """Look up connection UUID by alias from a connections dict."""
+    if alias in connections.get("source", {}):
+        return connections["source"][alias]
+    for dest in connections.get("destinations", []):
+        if alias in dest:
+            return dest[alias]
+    return None
 from src.secrets import (
     SecretsResolver,
     ConnectionConfig,
@@ -56,86 +61,6 @@ from src.secrets import (
 
 logger = logging.getLogger(__name__)
 
-
-class PipelineConfigPrepSettings(BaseModel):
-    """Configuration settings for PipelineConfigPrep.
-
-    Configuration is loaded from a single consolidated file per pipeline:
-    - Consolidated file: {paths.pipelines}/{pipeline_id}.json
-    - Secrets: {paths.secrets}/{connection_id}.json
-
-    In cloud environments (dev/prod), config_fetcher.py fetches all data
-    from Lambda and writes the consolidated file + secrets before
-    PipelineConfigPrep runs.
-
-    The ENV variable controls:
-    - State storage backend (local filesystem vs S3)
-    - Log storage backend (local filesystem vs S3)
-    - DLQ storage backend (local filesystem vs S3)
-    - Metrics storage backend (local filesystem vs S3)
-    """
-
-    env: str = Field(default="local", description="Environment: local, dev, or prod")
-    pipeline_id: str = Field(..., description="Pipeline ID to load")
-    org_id: Optional[str] = Field(default=None, description="Org ID for cloud storage paths")
-
-    # AWS region (used for state/logs/DLQ storage in cloud environments)
-    aws_region: str = Field(default="eu-central-1", description="AWS region for cloud storage")
-
-    model_config = {"validate_assignment": True}
-
-
-def validate_pipeline_config(config: Dict[str, Any]) -> bool:
-    """Validate pipeline-level configuration fields."""
-    required_fields = ["pipeline_id"]
-
-    for field in required_fields:
-        if field not in config:
-            logger.error(f"Missing required pipeline field: {field}")
-            return False
-
-    pipeline_id = config["pipeline_id"]
-    if not isinstance(pipeline_id, str) or not pipeline_id.strip():
-        logger.error("pipeline_id must be a non-empty string")
-        return False
-
-    return True
-
-
-def validate_stream_config(config: Dict[str, Any]) -> bool:
-    """Validate stream configuration fields.
-
-    Requires endpoint_id for source and destinations.
-    """
-    required_fields = ["stream_id", "source", "destinations"]
-
-    for field in required_fields:
-        if field not in config:
-            logger.error(f"Missing required stream field: {field}")
-            return False
-
-    source = config.get("source", {})
-    if not source.get("connection_ref"):
-        logger.error("source.connection_ref is required")
-        return False
-    if not source.get("endpoint_id"):
-        logger.error("source.endpoint_id is required")
-        return False
-
-    destinations = config.get("destinations", [])
-    if not destinations:
-        logger.error("At least one destination is required")
-        return False
-
-    for i, dest in enumerate(destinations):
-        if not dest.get("connection_ref"):
-            logger.error(f"destinations[{i}].connection_ref is required")
-            return False
-        if not dest.get("endpoint_id"):
-            logger.error(f"destinations[{i}].endpoint_id is required")
-            return False
-
-    return True
 
 
 class ResolvedConnection:
@@ -194,14 +119,8 @@ class PipelineConfigPrep:
     not config loading.
     """
 
-    def __init__(self, settings: Optional[PipelineConfigPrepSettings] = None):
-        """
-        Initialize PipelineConfigPrep.
-
-        Args:
-            settings: Configuration settings. If None, loads from environment variables.
-        """
-        self.settings = settings or self._load_settings_from_env()
+    def __init__(self):
+        """Initialize PipelineConfigPrep."""
         # Load paths from analitiq.yaml (only pipelines and secrets needed)
         self._paths = self._load_paths_from_analitiq_yaml()
 
@@ -216,11 +135,14 @@ class PipelineConfigPrep:
         self._secrets_resolver: Optional[SecretsResolver] = None
         self._secrets_dir: Optional[Path] = None
 
+        self.pipeline_id = os.getenv("PIPELINE_ID", "")
+        if not self.pipeline_id:
+            raise RuntimeError("PIPELINE_ID environment variable is required")
+
         # Validate environment
         self.validate_environment()
 
-        logger.info(f"Initialized PipelineConfigPrep for environment: {self.settings.env}")
-        logger.info(f"Pipeline ID: {self.settings.pipeline_id}")
+        logger.info(f"Initialized PipelineConfigPrep for pipeline: {self.pipeline_id}")
         logger.info(f"Using paths from analitiq.yaml: pipelines={self._paths['pipelines']}, "
                     f"secrets={self._paths['secrets']}")
 
@@ -251,38 +173,6 @@ class PipelineConfigPrep:
             "pipelines": Path(paths_config["pipelines"]),
             "secrets": Path(paths_config["secrets"]),
         }
-
-    @classmethod
-    def _load_settings_from_env(cls) -> PipelineConfigPrepSettings:
-        """Load settings from environment variables.
-
-        Pipeline/stream configs are loaded from paths defined in analitiq.yaml.
-        In cloud environments, config_fetcher.py populates these directories first.
-        """
-        env = os.getenv("ENV", "local")
-        org_id = os.getenv("ORG_ID")
-
-        # Validate ORG_ID for cloud environments (needed for state/logs paths)
-        if env != "local" and not org_id:
-            raise RuntimeError(
-                f"ORG_ID environment variable is required for cloud environment '{env}'"
-            )
-
-        return PipelineConfigPrepSettings(
-            env=env,
-            pipeline_id=os.getenv("PIPELINE_ID", ""),
-            org_id=org_id,
-            aws_region=os.getenv("AWS_REGION", "eu-central-1"),
-        )
-
-    @property
-    def is_cloud_env(self) -> bool:
-        """Check if running in a cloud environment (dev/prod).
-
-        This affects storage backends (state, logs, DLQ) but NOT config loading.
-        Config is always loaded from local filesystem.
-        """
-        return self.settings.env in ("dev", "prod")
 
     @property
     def secrets_resolver(self) -> SecretsResolver:
@@ -340,7 +230,7 @@ class PipelineConfigPrep:
         if self._consolidated_config is not None:
             return self._consolidated_config
 
-        path = self._paths["pipelines"] / f"{self.settings.pipeline_id}.json"
+        path = self._paths["pipelines"] / f"{self.pipeline_id}.json"
         if not path.exists():
             raise FileNotFoundError(f"Pipeline config not found: {path}")
 
@@ -369,7 +259,7 @@ class PipelineConfigPrep:
         if not pipeline:
             raise ValueError(
                 f"Consolidated config missing 'pipeline' key for pipeline_id: "
-                f"{self.settings.pipeline_id}"
+                f"{self.pipeline_id}"
             )
         return pipeline
 
@@ -513,14 +403,17 @@ class PipelineConfigPrep:
             Normalized configuration dictionary
         """
         result = config.copy()
+        params = result.get("parameters", {})
 
-        # Get driver from connector (authoritative source)
-        if "driver" not in result:
-            result["driver"] = connector.get("driver")
+        # Add driver from connector definition (e.g. "postgresql", "mysql")
+        driver = connector.get("driver")
+        if driver:
+            result["driver"] = driver
 
-        # Convert port to integer
-        if "port" in result and isinstance(result["port"], str):
-            result["port"] = int(result["port"])
+        # Convert port to integer inside parameters
+        if isinstance(params.get("port"), str):
+            params["port"] = int(params["port"])
+            result["parameters"] = params
 
         return result
 
@@ -653,7 +546,7 @@ class PipelineConfigPrep:
     # Configuration Loading and Assembly
     # =========================================================================
 
-    def load_pipeline_config(self) -> Tuple[PipelineConfig, List[StreamConfig]]:
+    def load_pipeline_config(self) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
         """
         Load and assemble complete pipeline and stream configurations.
 
@@ -664,13 +557,10 @@ class PipelineConfigPrep:
         that is looked up in the consolidated file's connections array.
 
         Returns:
-            Tuple of (PipelineConfig, list of StreamConfig)
+            Tuple of (pipeline_config dict, list of stream_config dicts)
         """
         # Load raw pipeline config from consolidated file
         raw_pipeline = self._load_local_pipeline()
-
-        if not validate_pipeline_config(raw_pipeline):
-            raise ValueError("Pipeline configuration validation failed")
 
         org_id = raw_pipeline.get("org_id", "")
 
@@ -703,10 +593,10 @@ class PipelineConfigPrep:
                 self._resolve_connection_by_id(alias, connection_id, org_id)
 
         # Build connections_config with plain connection IDs (no prefix)
-        connections_config = PipelineConnectionsConfig(
-            source=dict(source_connections),
-            destinations=[dict(dest_dict) for dest_dict in dest_connections]
-        )
+        connections_config = {
+            "source": dict(source_connections),
+            "destinations": [dict(dest_dict) for dest_dict in dest_connections],
+        }
 
         # Load stream configs from local filesystem
         raw_streams = self._load_local_streams()
@@ -716,21 +606,20 @@ class PipelineConfigPrep:
         if isinstance(version, str):
             version = int(float(version))
 
-        # Build PipelineConfig
-        pipeline_config = PipelineConfig(
-            version=version,
-            org_id=org_id,
-            pipeline_id=raw_pipeline["pipeline_id"],
-            name=raw_pipeline.get("name", ""),
-            description=raw_pipeline.get("description"),
-            status=raw_pipeline.get("status", "draft"),
-            tags=raw_pipeline.get("tags", []),
-            connections=connections_config,
-            engine_config=RuntimeConfig(**raw_pipeline.get("engine_config", {})) if raw_pipeline.get("engine_config") else RuntimeConfig(),
-            function_catalog=raw_pipeline.get("function_catalog"),
-            created_at=raw_pipeline.get("created_at"),
-            updated_at=raw_pipeline.get("updated_at"),
-        )
+        # Build pipeline config dict
+        pipeline_config = {
+            "version": version,
+            "org_id": org_id,
+            "pipeline_id": raw_pipeline["pipeline_id"],
+            "name": raw_pipeline.get("name", ""),
+            "description": raw_pipeline.get("description"),
+            "status": raw_pipeline.get("status", "draft"),
+            "tags": raw_pipeline.get("tags", []),
+            "connections": connections_config,
+            "engine_config": raw_pipeline.get("engine_config", {}),
+            "created_at": raw_pipeline.get("created_at"),
+            "updated_at": raw_pipeline.get("updated_at"),
+        }
 
         # Build StreamConfigs with resolved connections and endpoints
         # Only include streams that are listed in pipeline.streams
@@ -750,10 +639,6 @@ class PipelineConfigPrep:
                     f"referenced in the pipeline's 'streams' array."
                 )
 
-            if not validate_stream_config(raw_stream):
-                logger.warning(f"Skipping invalid stream: {stream_id}")
-                continue
-
             stream_config = self._build_stream_config(
                 raw_stream,
                 connections_config,
@@ -761,17 +646,18 @@ class PipelineConfigPrep:
             )
             stream_configs.append(stream_config)
 
-        logger.info(f"Loaded pipeline '{pipeline_config.name}' with {len(stream_configs)} streams")
+        pipeline_name = pipeline_config["name"]
+        logger.info(f"Loaded pipeline '{pipeline_name}' with {len(stream_configs)} streams")
         return pipeline_config, stream_configs
 
     def _build_stream_config(
         self,
         raw_stream: Dict[str, Any],
-        connections_config: PipelineConnectionsConfig,
+        connections_config: Dict[str, Any],
         org_id: str
-    ) -> StreamConfig:
+    ) -> Dict[str, Any]:
         """
-        Build a StreamConfig from raw stream data with resolved connections and endpoints.
+        Build a stream config dict from raw stream data with resolved connections and endpoints.
 
         Connections are resolved from the consolidated config's connections array.
         Endpoints are resolved from the consolidated config's endpoints array.
@@ -780,9 +666,8 @@ class PipelineConfigPrep:
 
         # Resolve source connection
         source_ref = raw_stream["source"]["connection_ref"]
-        try:
-            source_connection_id = connections_config.get_connection_uuid(source_ref)
-        except KeyError:
+        source_connection_id = _get_connection_uuid(connections_config, source_ref)
+        if source_connection_id is None:
             raise ValueError(f"Unknown connection_ref '{source_ref}' in stream {stream_id}")
 
         # Get connection from cache - all connections must be pre-resolved
@@ -808,9 +693,8 @@ class PipelineConfigPrep:
         destinations_data = []
         for dest in raw_stream["destinations"]:
             dest_ref = dest["connection_ref"]
-            try:
-                dest_connection_id = connections_config.get_connection_uuid(dest_ref)
-            except KeyError:
+            dest_connection_id = _get_connection_uuid(connections_config, dest_ref)
+            if dest_connection_id is None:
                 raise ValueError(f"Unknown connection_ref '{dest_ref}' in stream {stream_id}")
 
             # Get connection from cache - all connections must be pre-resolved
@@ -836,7 +720,7 @@ class PipelineConfigPrep:
         if isinstance(version, str):
             version = int(float(version))
 
-        # Build StreamConfig
+        # Build stream config dict
         raw_mapping = raw_stream.get("mapping", {})
         # Get first destination's connection_ref for type lookup
         dest_connection_ref = destinations_data[0].get("connection_ref") if destinations_data else None
@@ -845,24 +729,24 @@ class PipelineConfigPrep:
             if raw_mapping
             else {}
         )
-        return StreamConfig(
-            version=version,
-            stream_id=stream_id,
-            pipeline_id=raw_stream.get("pipeline_id", self.settings.pipeline_id),
-            org_id=org_id,
-            status=raw_stream.get("status", "draft"),
-            is_enabled=raw_stream.get("is_enabled", True),
-            source=SourceConfig(**self._normalize_source_config(source_data)),
-            destinations=[
-                DestinationConfig(**self._normalize_destination_config(d))
+        return {
+            "version": version,
+            "stream_id": stream_id,
+            "pipeline_id": raw_stream.get("pipeline_id", self.pipeline_id),
+            "org_id": org_id,
+            "status": raw_stream.get("status", "draft"),
+            "is_enabled": raw_stream.get("is_enabled", True),
+            "source": self._normalize_source_config(source_data),
+            "destinations": [
+                self._normalize_destination_config(d)
                 for d in destinations_data
             ],
-            mapping=MappingConfig(**normalized_mapping) if normalized_mapping else MappingConfig(),
-            tags=raw_stream.get("tags"),
-            engine_config=raw_stream.get("engine_config"),
-            created_at=raw_stream.get("created_at"),
-            updated_at=raw_stream.get("updated_at"),
-        )
+            "mapping": normalized_mapping or {},
+            "tags": raw_stream.get("tags"),
+            "engine_config": raw_stream.get("engine_config"),
+            "created_at": raw_stream.get("created_at"),
+            "updated_at": raw_stream.get("updated_at"),
+        }
 
     def _normalize_mapping_config(
         self, mapping: Dict[str, Any], dest_connection_ref: Optional[str] = None
@@ -1003,6 +887,7 @@ class PipelineConfigPrep:
 
         return result
 
+
     def get_connectors(self) -> List[Dict[str, Any]]:
         """
         Get the connectors array from consolidated config.
@@ -1018,8 +903,8 @@ class PipelineConfigPrep:
         return consolidated.get("connectors", [])
 
     def create_config(self) -> Tuple[
-        PipelineConfig,
-        List[StreamConfig],
+        Dict[str, Any],
+        List[Dict[str, Any]],
         Dict[str, "ResolvedConnection"],
         Dict[str, Dict[str, Any]],
         List[Dict[str, Any]],
@@ -1028,7 +913,7 @@ class PipelineConfigPrep:
         Load and return validated pipeline and stream configurations.
 
         Returns:
-            Tuple of (PipelineConfig, list of StreamConfig, resolved_connections dict,
+            Tuple of (pipeline_config dict, list of stream_config dicts, resolved_connections dict,
                       resolved_endpoints dict, connectors list)
             - resolved_connections maps connection_id to ResolvedConnection objects
               (use await resolved.resolve_config() to get fully-expanded config)
@@ -1063,9 +948,6 @@ class PipelineConfigPrep:
         Configuration is always loaded from local filesystem. In cloud environments,
         config_fetcher.py populates directories defined in analitiq.yaml before this runs.
         """
-        if not self.settings.pipeline_id:
-            raise RuntimeError("PIPELINE_ID environment variable is required")
-
         # Validate pipelines directory exists (most critical for loading pipeline config)
         pipelines_path = self._paths["pipelines"]
         if not pipelines_path.exists():

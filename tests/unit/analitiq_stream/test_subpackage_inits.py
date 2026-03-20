@@ -216,14 +216,3 @@ class TestModelsPackageInit:
 
         # Package should be importable
         assert models is not None
-
-    @pytest.mark.unit
-    def test_models_api_import(self):
-        """Test that API models can be imported."""
-        from src.models.api import (
-            EndpointConfig, HostConfig, APIConfig
-        )
-
-        assert EndpointConfig is not None
-        assert HostConfig is not None
-        assert APIConfig is not None

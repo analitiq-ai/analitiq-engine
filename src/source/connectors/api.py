@@ -1,19 +1,14 @@
 """Modern API connector with state management."""
 
 import asyncio
-import json
 import logging
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Dict, List, Optional
-from urllib.parse import urljoin, urlparse, urlencode
+from urllib.parse import urljoin, urlencode
 
 from .base import BaseConnector, ConnectionError, ReadError, WriteError
 from ...state.state_manager import StateManager
 from ...models.state import StreamCursor, CursorField, StreamStats
-from ...models.api import (
-    APIConnectionConfig, APIReadConfig, APIWriteConfig,
-    HTTPResponse, APIRequestParams, RecordBatch, FilterConfig
-)
 from ...shared.rate_limiter import RateLimiter
 
 logger = logging.getLogger(__name__)
@@ -42,20 +37,20 @@ class APIConnector(BaseConnector):
         try:
             import aiohttp
             
-            # Validate connection configuration
-            try:
-                validated_config = APIConnectionConfig(**config)
-            except Exception as e:
-                raise ConnectionError(f"Invalid API connection configuration: {str(e)}")
-            
-            self.base_url = validated_config.host
-            self.headers = validated_config.headers
-            
-            # Create session with validated timeout and connection limits
-            timeout = aiohttp.ClientTimeout(total=validated_config.timeout)
+            parameters = config.get("parameters", {})
+
+            self.base_url = config["host"]
+            self.headers = parameters.get("headers", {})
+
+            # Create session with timeout and connection limits
+            timeout_seconds = parameters.get("timeout", 30)
+            max_connections = parameters.get("max_connections", 100)
+            max_connections_per_host = parameters.get("max_connections_per_host", 10)
+
+            timeout = aiohttp.ClientTimeout(total=timeout_seconds)
             connector = aiohttp.TCPConnector(
-                limit=validated_config.max_connections,
-                limit_per_host=validated_config.max_connections_per_host,
+                limit=max_connections,
+                limit_per_host=max_connections_per_host,
             )
 
             self.session = aiohttp.ClientSession(
@@ -67,14 +62,15 @@ class APIConnector(BaseConnector):
             logger.debug(f"API Connection configured:")
             logger.debug(f"  Base URL: {self.base_url}")
             logger.debug(f"  Headers: {masked_headers}")
-            logger.debug(f"  Timeout: {validated_config.timeout}s")
-            logger.debug(f"  Max connections: {validated_config.max_connections}")
+            logger.debug(f"  Timeout: {timeout_seconds}s")
+            logger.debug(f"  Max connections: {max_connections}")
 
-            # Set up rate limiting with validation
-            if validated_config.rate_limit:
+            # Set up rate limiting
+            rate_limit = parameters.get("rate_limit")
+            if rate_limit:
                 self.rate_limiter = RateLimiter(
-                    max_requests=validated_config.rate_limit.max_requests,
-                    time_window=validated_config.rate_limit.time_window,
+                    max_requests=rate_limit["max_requests"],
+                    time_window=rate_limit["time_window"],
                 )
 
             self.is_connected = True
@@ -899,50 +895,3 @@ class APIConnector(BaseConnector):
                 masked[key] = value
         return masked
 
-    async def _validate_response(self, response) -> HTTPResponse:
-        """Validate HTTP response safely."""
-        try:
-            # Extract headers safely
-            headers = {}
-            for name, value in response.headers.items():
-                if isinstance(name, str) and isinstance(value, str):
-                    headers[name.lower()] = value
-            
-            # Parse response data safely
-            content_type = headers.get('content-type', '')
-            if 'application/json' in content_type:
-                try:
-                    data = await response.json()
-                except json.JSONDecodeError as e:
-                    logger.warning(f"Failed to parse JSON response: {str(e)}")
-                    data = await response.text()
-            else:
-                data = await response.text()
-                
-            return HTTPResponse(
-                status=response.status,
-                headers=headers,
-                data=data
-            )
-            
-        except Exception as e:
-            logger.error(f"Failed to validate HTTP response: {str(e)}")
-            # Return minimal valid response
-            return HTTPResponse(status=response.status)
-    
-    def _validate_batch(self, batch: List[Dict[str, Any]], config: APIReadConfig) -> RecordBatch:
-        """Validate and wrap batch data."""
-        try:
-            return RecordBatch(records=batch)
-        except Exception as e:
-            logger.error(f"Batch validation failed: {str(e)}")
-            # Filter out invalid records
-            valid_records = []
-            for record in batch:
-                if isinstance(record, dict):
-                    valid_records.append(record)
-            return RecordBatch(records=valid_records)
-
-
-
-# RateLimiter is imported from src.shared.rate_limiter

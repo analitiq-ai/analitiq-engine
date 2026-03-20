@@ -6,16 +6,15 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from pydantic import ValidationError
-
 from .exceptions import (
     PipelineOrchestrationError, StreamExecutionError,
-    StreamConfigurationError, PipelineValidationError
+    StreamConfigurationError,
 )
+from pydantic import ValidationError
+
 from ..models.engine import (
     StreamProcessingConfig, PipelineMetricsSnapshot, TaskExecutionInfo
 )
-from ..models.state import PipelineConfig
 from ..shared.run_id import get_or_generate_run_id
 
 logger = logging.getLogger(__name__)
@@ -86,13 +85,9 @@ class PipelineOrchestrator:
             
         Raises:
             PipelineOrchestrationError: When pipeline orchestration fails
-            PipelineValidationError: When configuration validation fails
         """
         try:
-            # Validate pipeline configuration
-            validated_config = self._validate_pipeline_config(pipeline_config)
-            
-            streams = validated_config.streams
+            streams = pipeline_config.get("streams", {})
             if not streams:
                 raise PipelineOrchestrationError(
                     "No streams configured in pipeline", 
@@ -152,23 +147,6 @@ class PipelineOrchestrator:
             raise PipelineOrchestrationError(
                 f"Pipeline orchestration failed: {str(e)}",
                 self.pipeline_id
-            ) from e
-    
-    def _validate_pipeline_config(self, pipeline_config: Dict[str, Any]) -> PipelineConfig:
-        """Validate pipeline configuration using Pydantic."""
-        try:
-            return PipelineConfig(**pipeline_config)
-        except ValidationError as e:
-            error_details = {}
-            for error in e.errors():
-                field_path = ".".join(str(x) for x in error["loc"])
-                if field_path not in error_details:
-                    error_details[field_path] = []
-                error_details[field_path].append(error["msg"])
-            
-            raise PipelineValidationError(
-                f"Pipeline configuration validation failed: {len(e.errors())} errors",
-                error_details
             ) from e
     
     async def _create_stream_tasks(

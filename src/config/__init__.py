@@ -4,7 +4,6 @@
 from .analitiq_config import (
     load_analitiq_config,
     validate_consolidated_config,
-    ConsolidatedConfigValidator,
 )
 
 # Export path-based config loader
@@ -25,7 +24,6 @@ __all__ = [
     "load_analitiq_config",
     # Consolidated config validation
     "validate_consolidated_config",
-    "ConsolidatedConfigValidator",
     # Path-based loader
     "PathBasedConfigLoader",
     # Exceptions

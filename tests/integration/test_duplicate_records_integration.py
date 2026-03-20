@@ -379,15 +379,16 @@ class TestDuplicateRecordsIntegration:
         state_manager = StateManager("test-pipeline", str(temp_state_dir))
         
         # Simulate a previously saved state with tie-breaker
-        from src.models.state import PartitionCursor, CursorField, PartitionStats
+        from dataclasses import asdict
+        from src.models.state import StreamCursor, CursorField, StreamStats
         from datetime import datetime, timezone
         
-        cursor = PartitionCursor(
+        cursor = StreamCursor(
             primary=CursorField(field="created", value="2025-08-11T15:58:36Z", inclusive=True),
             tiebreakers=[CursorField(field="id", value=12345, inclusive=True)]
         )
         
-        stats = PartitionStats(
+        stats = StreamStats(
             records_synced=1,
             batches_written=1,
             last_checkpoint_at=datetime.now(timezone.utc),
@@ -398,9 +399,9 @@ class TestDuplicateRecordsIntegration:
         state_manager.save_stream_checkpoint(
             stream_name="test-stream-1",
             partition={},
-            cursor=cursor.model_dump(mode='json'),
+            cursor=asdict(cursor),
             hwm="2025-08-11T15:58:36Z",
-            stats=stats.model_dump(mode='json')
+            stats=asdict(stats)
         )
         
         # Now test that the API connector loads this state correctly
@@ -522,16 +523,17 @@ class TestDuplicateRecordsIntegration:
         state_manager = StateManager("test-pipeline", str(temp_state_dir))
         
         # First, simulate having processed some records previously
-        from src.models.state import PartitionCursor, CursorField, PartitionStats
+        from dataclasses import asdict
+        from src.models.state import StreamCursor, CursorField, StreamStats
         from datetime import datetime, timezone
         
         # Set up state as if we've already processed records up to 12346
-        cursor = PartitionCursor(
+        cursor = StreamCursor(
             primary=CursorField(field="created", value="2025-08-11T15:59:30Z", inclusive=True),
             tiebreakers=[CursorField(field="id", value=12346, inclusive=True)]
         )
         
-        stats = PartitionStats(
+        stats = StreamStats(
             records_synced=2,
             batches_written=1,
             last_checkpoint_at=datetime.now(timezone.utc),
@@ -541,9 +543,9 @@ class TestDuplicateRecordsIntegration:
         state_manager.save_stream_checkpoint(
             stream_name="test-stream-1",
             partition={},
-            cursor=cursor.model_dump(mode='json'),
+            cursor=asdict(cursor),
             hwm="2025-08-11T15:59:30Z",
-            stats=stats.model_dump(mode='json')
+            stats=asdict(stats)
         )
         
         with patch('aiohttp.ClientSession.request') as mock_request:

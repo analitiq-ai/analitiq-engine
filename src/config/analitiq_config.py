@@ -6,51 +6,28 @@ Loads configuration from analitiq.yaml file.
 
 import logging
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, Optional
 
 import yaml
-from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
 
-class ConsolidatedConfigValidator(BaseModel):
-    """
-    Pydantic validator for consolidated pipeline configuration.
+def validate_consolidated_config(config: dict[str, Any]) -> dict[str, Any]:
+    """Validate a consolidated pipeline configuration has minimum required elements."""
+    required = {"pipeline", "connections", "connectors", "endpoints", "streams"}
+    missing = required - config.keys()
+    if missing:
+        raise ValueError(f"Missing required config keys: {missing}")
 
-    Validates that the consolidated config contains the minimum required
-    number of connections, connectors, endpoints, and streams.
-    """
+    minimums = {"connections": 2, "connectors": 2, "endpoints": 2, "streams": 1}
+    for key, min_count in minimums.items():
+        actual = len(config[key])
+        if actual < min_count:
+            raise ValueError(f"'{key}' requires at least {min_count} items, got {actual}")
 
-    pipeline: dict[str, Any] = Field(..., description="Pipeline configuration")
-    connections: List[dict[str, Any]] = Field(
-        ..., min_length=2, description="At least 2 connections required"
-    )
-    connectors: List[dict[str, Any]] = Field(
-        ..., min_length=2, description="At least 2 connectors required"
-    )
-    endpoints: List[dict[str, Any]] = Field(
-        ..., min_length=2, description="At least 2 endpoints required"
-    )
-    streams: List[dict[str, Any]] = Field(
-        ..., min_length=1, description="At least 1 stream required"
-    )
+    return config
 
-
-def validate_consolidated_config(config: dict[str, Any]) -> ConsolidatedConfigValidator:
-    """
-    Validate a consolidated pipeline configuration.
-
-    Args:
-        config: The consolidated config dictionary to validate.
-
-    Returns:
-        Validated ConsolidatedConfigValidator instance.
-
-    Raises:
-        pydantic.ValidationError: If validation fails.
-    """
-    return ConsolidatedConfigValidator.model_validate(config)
 
 # Default config file name
 DEFAULT_CONFIG_FILE = "analitiq.yaml"

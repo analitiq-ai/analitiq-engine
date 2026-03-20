@@ -8,8 +8,8 @@ from typing import Dict, Any
 
 from src.engine.orchestrator import PipelineOrchestrator
 from src.engine.exceptions import (
-    PipelineOrchestrationError, StreamExecutionError, 
-    PipelineValidationError, StreamConfigurationError
+    PipelineOrchestrationError, StreamExecutionError,
+    StreamConfigurationError
 )
 from src.models.engine import (
     StreamProcessingConfig, PipelineMetricsSnapshot, TaskExecutionInfo
@@ -46,49 +46,6 @@ class TestPipelineOrchestrator:
         active_tasks = orchestrator.get_active_tasks()
         assert isinstance(active_tasks, dict)
         assert len(active_tasks) == 0
-
-
-class TestConfigurationValidation:
-    """Test pipeline configuration validation."""
-    
-    @pytest.fixture
-    def orchestrator(self):
-        return PipelineOrchestrator("test-pipeline")
-    
-    def test_validate_pipeline_config_success(self, orchestrator):
-        """Test successful pipeline configuration validation."""
-        valid_config = {
-            "pipeline_id": "test-pipeline",
-            "name": "Test Pipeline",
-            "version": "1.0",
-            "source": {"connection_id": "src-host"},
-            "destination": {"connection_id": "dst-host"},
-            "streams": {
-                "stream1": {
-                    "name": "Stream 1",
-                    "source": {"endpoint_id": "endpoint-src-1"},
-                    "destination": {"endpoint_id": "endpoint-dst-1"}
-                }
-            }
-        }
-        
-        result = orchestrator._validate_pipeline_config(valid_config)
-        assert result.pipeline_id == "test-pipeline"
-        assert result.name == "Test Pipeline"
-    
-    def test_validate_pipeline_config_failure(self, orchestrator):
-        """Test pipeline configuration validation failure."""
-        invalid_config = {
-            "name": "Missing pipeline_id",
-            "streams": {}
-        }
-        
-        with pytest.raises(PipelineValidationError) as exc_info:
-            orchestrator._validate_pipeline_config(invalid_config)
-        
-        error = exc_info.value
-        assert "Pipeline configuration validation failed" in str(error)
-        assert isinstance(error.errors, dict)
 
 
 class TestStreamProcessingConfig:

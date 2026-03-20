@@ -138,6 +138,8 @@ class DestinationServicer(DestinationServiceServicer):
         4. Server responds with BatchAck for each batch
         """
         logger.info("StreamRecords: New stream started")
+        self._schema_configured = False
+        self._current_stream_id = None
 
         try:
             async for request in request_iterator:

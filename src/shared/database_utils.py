@@ -118,30 +118,32 @@ def extract_connection_params(
     if not driver:
         raise ValueError("Database driver is required (e.g. 'postgresql', 'mysql')")
 
-    database = config.get("database") or config.get("dbname")
+    host = config.get("host")
+    params = config.get("parameters", {})
+
+    database = params.get("database") or params.get("dbname")
     if not database:
         raise ValueError("Database name is required")
 
     # SQLite only needs driver + database
     if driver.lower() == "sqlite":
-        host = config.get("host", "")
-        username = config.get("username") or config.get("user", "")
-        password = config.get("password", "")
+        host = host or ""
+        username = params.get("username") or params.get("user", "")
+        password = params.get("password", "")
     else:
-        host = config.get("host")
         if not host:
             raise ValueError("Database host is required")
 
-        username = config.get("username") or config.get("user")
+        username = params.get("username") or params.get("user")
         if not username:
             raise ValueError("Database username is required")
 
-        password = config.get("password")
+        password = params.get("password")
         if password is None:
             raise ValueError("Database password is required")
 
     # Port handling
-    port_value = config.get("port")
+    port_value = params.get("port")
     if port_value is None:
         if require_port:
             raise ValueError("Database port is required")
@@ -151,12 +153,12 @@ def extract_connection_params(
 
     # SSL mode: default to "prefer" for SSL dialects, None for others
     if driver.lower() in SSL_DIALECTS:
-        ssl_mode = config.get("ssl_mode", "prefer")
+        ssl_mode = params.get("ssl_mode", "prefer")
     else:
-        ssl_mode = config.get("ssl_mode", "")
+        ssl_mode = params.get("ssl_mode", "")
 
     # Pool configuration
-    pool_config = config.get("connection_pool", {})
+    pool_config = params.get("connection_pool", {})
     pool_min = pool_config.get("min_connections", 2)
     pool_max = pool_config.get("max_connections", 10)
 
@@ -171,8 +173,8 @@ def extract_connection_params(
         pool_min=pool_min,
         pool_max=pool_max,
         pool_pre_ping=True,
-        echo=config.get("echo_sql", False),
-        command_timeout=config.get("command_timeout", 300),
+        echo=params.get("echo_sql", False),
+        command_timeout=params.get("command_timeout", 300),
     )
 
 

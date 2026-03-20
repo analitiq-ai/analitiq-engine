@@ -3,8 +3,6 @@
 import logging
 from typing import Any, AsyncIterator, Dict, List, Optional
 
-from pydantic import BaseModel, Field, ConfigDict
-
 from .base import BaseConnector, ConnectionError, ReadError, WriteError
 from ...shared.database_utils import (
     create_database_engine,
@@ -14,19 +12,6 @@ from ...shared.database_utils import (
 from ...shared.query_builder import build_select_query
 
 logger = logging.getLogger(__name__)
-
-
-class EndpointConfig(BaseModel):
-    """Pydantic model for database endpoint configuration validation."""
-    model_config = ConfigDict(extra='allow', populate_by_name=True)
-
-    schema_name: str = Field("public", alias="schema", description="Database schema name")
-    endpoint: str = Field(..., description="Database table name (schema/table format)")
-    primary_key: List[str] = Field(default_factory=list, description="Primary key columns")
-    unique_constraints: List[str] = Field(default_factory=list, description="Unique constraint columns")
-    endpoint_schema: Dict[str, Any] = Field(default_factory=dict, description="Endpoint schema definition")
-    write_mode: str = Field("insert", description="Write mode (insert, upsert)")
-    conflict_resolution: Dict[str, Any] = Field(default_factory=dict, description="Conflict resolution config")
 
 
 class DatabaseConnector(BaseConnector):
@@ -121,12 +106,11 @@ class DatabaseConnector(BaseConnector):
             raise RuntimeError("Database connection not initialized. Call connect() first.")
 
         try:
-            endpoint_config = EndpointConfig(**config)
             partition = partition or {}
 
             # Parse endpoint to extract schema and table name
             schema_name, table_name = self._parse_endpoint(
-                endpoint_config.endpoint, endpoint_config.schema_name
+                config["endpoint"], config.get("schema", "public")
             )
 
             # Get current cursor from state manager for incremental reads

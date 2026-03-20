@@ -26,19 +26,23 @@ class TestPostgreSQLTimestampMismatch:
             config = {
                 "driver": "postgresql",
                 "host": parsed.hostname or "localhost",
-                "port": parsed.port or 5432,
-                "user": parsed.username or "postgres",
-                "password": parsed.password or "",
-                "database": parsed.path.lstrip('/') or "test",
+                "parameters": {
+                    "port": parsed.port or 5432,
+                    "user": parsed.username or "postgres",
+                    "password": parsed.password or "",
+                    "database": parsed.path.lstrip('/') or "test",
+                },
             }
         else:
             config = {
                 "driver": "postgresql",
                 "host": os.getenv("POSTGRES_HOST", "localhost"),
-                "port": int(os.getenv("POSTGRES_PORT", "5432")),
-                "user": os.getenv("POSTGRES_USER", "postgres"),
-                "password": os.getenv("POSTGRES_PASSWORD", ""),
-                "database": os.getenv("POSTGRES_DB", "test"),
+                "parameters": {
+                    "port": int(os.getenv("POSTGRES_PORT", "5432")),
+                    "user": os.getenv("POSTGRES_USER", "postgres"),
+                    "password": os.getenv("POSTGRES_PASSWORD", ""),
+                    "database": os.getenv("POSTGRES_DB", "test"),
+                },
             }
 
         eng, _ = await create_database_engine(config, require_port=True)
