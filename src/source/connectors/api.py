@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Dict, List, Optional
 from urllib.parse import urljoin, urlencode
@@ -177,9 +178,9 @@ class APIConnector(BaseConnector):
                             state_manager.save_stream_checkpoint(
                                 stream_name=stream_name,
                                 partition=partition,
-                                cursor=cursor.model_dump(mode='json'),
+                                cursor=asdict(cursor),
                                 hwm=cursor_value,
-                                stats=stats.model_dump(mode='json')
+                                stats=asdict(stats)
                             )
             else:
                 # Single request without pagination
@@ -239,9 +240,9 @@ class APIConnector(BaseConnector):
                         state_manager.save_stream_checkpoint(
                             stream_name=stream_name,
                             partition=partition,
-                            cursor=cursor.model_dump(mode='json'),
+                            cursor=asdict(cursor),
                             hwm=cursor_value,
-                            stats=stats.model_dump(mode='json')
+                            stats=asdict(stats)
                         )
 
         except Exception as e:

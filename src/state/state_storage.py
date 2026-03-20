@@ -123,7 +123,7 @@ class LocalStateStorage(StateStorageBackend):
 
         try:
             with open(temp_file, "w") as f:
-                json.dump(data, f, indent=2)
+                json.dump(data, f, indent=2, default=str)
             temp_file.replace(full_path)
             logger.debug(f"Wrote state to {full_path}")
         except Exception as e:
@@ -225,7 +225,7 @@ class S3StateStorage(StateStorageBackend):
 
         key = self._build_s3_key(path)
         try:
-            content = json.dumps(data, indent=2)
+            content = json.dumps(data, indent=2, default=str)
             self.s3_client.put_object(
                 Bucket=self.bucket,
                 Key=key,
