@@ -50,7 +50,7 @@ class BaseDestinationHandler(ABC):
         Establish connection to the destination.
 
         Args:
-            runtime: ConnectionRuntime with enriched config and transport factory
+            runtime: ConnectionRuntime that manages connection lifecycle
 
         Raises:
             ConnectionError: If connection cannot be established

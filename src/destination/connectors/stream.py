@@ -37,6 +37,7 @@ class StreamDestinationHandler(BaseDestinationHandler):
 
     def __init__(self) -> None:
         """Initialize the stream handler."""
+        self._runtime: ConnectionRuntime | None = None
         self._formatter: BaseFormatter | None = None
         self._config: Dict[str, Any] = {}
         self._connected: bool = False
@@ -94,7 +95,7 @@ class StreamDestinationHandler(BaseDestinationHandler):
         """
         if self._connected:
             sys.stdout.flush()
-        if hasattr(self, '_runtime') and self._runtime:
+        if self._runtime:
             await self._runtime.close()
         self._connected = False
         logger.info("StreamDestinationHandler disconnected")

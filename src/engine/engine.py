@@ -249,6 +249,11 @@ class StreamingEngine:
 
             # Connect source connector using runtime
             runtime = merged_src_config.get("_runtime")
+            if not runtime:
+                raise StreamConfigurationError(
+                    "Missing _runtime in source config",
+                    stream_id=stream_id,
+                )
             await source_connector.connect(runtime)
 
             # Get current run_id from centralized source

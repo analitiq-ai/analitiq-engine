@@ -4,6 +4,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from src.shared.connection_runtime import ConnectionRuntime
+from src.secrets.exceptions import PlaceholderExpansionError
 
 
 class TestConnectionRuntimeMetadata:
@@ -21,7 +22,7 @@ class TestConnectionRuntimeMetadata:
         assert runtime.driver == "postgresql"
         assert runtime.connection_id == "conn-1"
 
-    def test_raw_config_available(self):
+    def test_raw_config_returns_deep_copy(self):
         config = {"host": "localhost", "parameters": {"port": 5432}}
         runtime = ConnectionRuntime(
             raw_config=config,
@@ -30,7 +31,22 @@ class TestConnectionRuntimeMetadata:
             driver="postgresql",
             resolver=AsyncMock(),
         )
-        assert runtime.raw_config is config
+        result = runtime.raw_config
+        assert result == config
+        assert result is not config
+        # Mutating the copy should not affect internal state
+        result["host"] = "mutated"
+        assert runtime.raw_config["host"] == "localhost"
+
+    def test_invalid_connector_type_raises(self):
+        with pytest.raises(ValueError, match="Invalid connector_type"):
+            ConnectionRuntime(
+                raw_config={"host": "localhost"},
+                connection_id="conn-1",
+                connector_type="foobar",
+                driver=None,
+                resolver=AsyncMock(),
+            )
 
 
 class TestConnectionRuntimeResolveSecrets:
@@ -68,6 +84,23 @@ class TestConnectionRuntimeResolveSecrets:
 
         mock_resolver.resolve.assert_awaited_once_with("conn-with-secrets", org_id=None)
         assert runtime.resolved_config["parameters"]["password"] == "secret123"
+
+    @pytest.mark.asyncio
+    async def test_missing_secret_key_raises_placeholder_error(self):
+        mock_resolver = AsyncMock()
+        mock_resolver.resolve.return_value = {"OTHER_KEY": "value"}
+        runtime = ConnectionRuntime(
+            raw_config={"host": "localhost", "token": "${MISSING_KEY}"},
+            connection_id="conn-missing",
+            connector_type="file",
+            driver=None,
+            resolver=mock_resolver,
+        )
+
+        with pytest.raises(PlaceholderExpansionError) as exc_info:
+            await runtime.materialize()
+
+        assert "MISSING_KEY" in str(exc_info.value)
 
 
 class TestConnectionRuntimeMaterialize:
@@ -148,7 +181,7 @@ class TestConnectionRuntimeMaterialize:
         )
 
         with patch(
-            "src.shared.connection_runtime.create_api_session",
+            "src.shared.connection_runtime._create_api_session",
             return_value=(mock_session, "https://api.example.com", mock_rate_limiter),
         ):
             await runtime.materialize()
@@ -177,10 +210,32 @@ class TestConnectionRuntimeMaterialize:
         with patch("src.shared.connection_runtime.create_database_engine", return_value=(AsyncMock(), "postgresql")):
             await runtime.materialize()
 
-        # Secrets should be scrubbed
         assert runtime._secrets is None
-        # For database, resolved config should also be scrubbed
         assert runtime._resolved_config is None
+
+    @pytest.mark.asyncio
+    async def test_secrets_scrubbed_on_materialize_failure(self):
+        mock_resolver = AsyncMock()
+        mock_resolver.resolve.return_value = {"DB_PASS": "secret"}
+
+        runtime = ConnectionRuntime(
+            raw_config={
+                "host": "localhost",
+                "driver": "postgresql",
+                "parameters": {"password": "${DB_PASS}"},
+            },
+            connection_id="conn-db",
+            connector_type="database",
+            driver="postgresql",
+            resolver=mock_resolver,
+        )
+
+        with patch("src.shared.connection_runtime.create_database_engine", side_effect=Exception("connection failed")):
+            with pytest.raises(Exception, match="connection failed"):
+                await runtime.materialize()
+
+        # Secrets should still be scrubbed even on failure
+        assert runtime._secrets is None
 
 
 class TestConnectionRuntimeClose:
@@ -204,6 +259,24 @@ class TestConnectionRuntimeClose:
         mock_engine.dispose.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_close_disposes_session(self):
+        mock_session = AsyncMock()
+        runtime = ConnectionRuntime(
+            raw_config={"host": "https://api.example.com", "parameters": {}},
+            connection_id="conn-api",
+            connector_type="api",
+            driver=None,
+            resolver=AsyncMock(),
+        )
+
+        with patch("src.shared.connection_runtime._create_api_session", return_value=(mock_session, "https://api.example.com", None)):
+            await runtime.materialize()
+
+        await runtime.close()
+        mock_session.close.assert_awaited_once()
+        assert not runtime._materialized
+
+    @pytest.mark.asyncio
     async def test_double_close_is_safe(self):
         mock_engine = AsyncMock()
         runtime = ConnectionRuntime(
@@ -219,3 +292,50 @@ class TestConnectionRuntimeClose:
 
         await runtime.close()
         await runtime.close()  # Should not raise
+
+    @pytest.mark.asyncio
+    async def test_close_engine_failure_still_closes_session(self):
+        """If engine.dispose() fails, session.close() should still be called."""
+        mock_engine = AsyncMock()
+        mock_engine.dispose.side_effect = Exception("dispose failed")
+        mock_session = AsyncMock()
+
+        runtime = ConnectionRuntime(
+            raw_config={"host": "localhost"},
+            connection_id="conn-1",
+            connector_type="database",
+            driver="postgresql",
+            resolver=AsyncMock(),
+        )
+        # Manually set state to simulate both engine and session
+        runtime._engine = mock_engine
+        runtime._session = mock_session
+        runtime._materialized = True
+
+        with pytest.raises(Exception, match="dispose failed"):
+            await runtime.close()
+
+        # Session should still be closed despite engine failure
+        mock_session.close.assert_awaited_once()
+
+
+class TestCreateSourceConnectorUnknownType:
+    """Test _create_source_connector with unknown connector_type."""
+
+    def test_unknown_connector_type_raises(self):
+        from src.engine.engine import StreamingEngine
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = StreamingEngine(
+                pipeline_id="test", dlq_path=tmp
+            )
+            runtime = ConnectionRuntime(
+                raw_config={},
+                connection_id="conn-1",
+                connector_type="file",
+                driver=None,
+                resolver=AsyncMock(),
+            )
+            config = {"_runtime": runtime}
+            with pytest.raises(ValueError, match="Unknown connector_type 'file'"):
+                engine._create_source_connector(config)

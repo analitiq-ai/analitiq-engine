@@ -39,7 +39,7 @@ class BaseConnector(ABC):
         Establish connection to the data source.
 
         Args:
-            runtime: ConnectionRuntime with enriched config and transport factory
+            runtime: ConnectionRuntime that manages connection lifecycle
         """
         pass
 

@@ -1,15 +1,13 @@
 """ConnectionRuntime — unified connection materialization.
 
-Single owner of connection lifecycle: enrich -> resolve -> materialize -> scrub.
-
-Created by PipelineConfigPrep with enriched config (connector_type, driver
-already baked in). Passed to connectors, which call materialize() to get
-a connected transport. Secrets are scrubbed from memory after materialization.
+Constructed by PipelineConfigPrep with enriched config (connector_type, driver
+already baked in). Internal lifecycle: resolve secrets -> create transport -> scrub.
 
 Ownership: the connector/handler that receives this runtime owns it.
 It must call close() in its disconnect() method.
 """
 
+import copy
 import re
 import logging
 from typing import Any, Dict, Optional
@@ -27,15 +25,18 @@ logger = logging.getLogger(__name__)
 # Pattern for ${placeholder} syntax
 PLACEHOLDER_PATTERN = re.compile(r"\$\{([^}]+)\}")
 
+VALID_CONNECTOR_TYPES = frozenset({"database", "api", "file", "s3", "stdout"})
 
-async def create_api_session(
+
+async def _create_api_session(
     config: Dict[str, Any],
 ) -> tuple[aiohttp.ClientSession, str, Optional[RateLimiter]]:
     """
     Create an aiohttp session from resolved connection config.
 
-    Auth is resolved here from the resolved config, so headers contain
-    expanded secret values before the runtime scrubs the config.
+    Auth headers are built from the already-resolved config, so secret values
+    are baked into the session headers before the runtime scrubs the resolved
+    config from memory.
 
     Returns:
         Tuple of (session, base_url, rate_limiter)
@@ -59,6 +60,10 @@ async def create_api_session(
                 f"{auth_config.get('username', '')}:{auth_config.get('password', '')}".encode()
             ).decode()
             headers["Authorization"] = f"Basic {credentials}"
+        else:
+            logger.warning(
+                f"Unknown auth type '{auth_type}', skipping auth header setup"
+            )
 
     timeout = aiohttp.ClientTimeout(total=parameters.get("timeout", 30))
     connector = aiohttp.TCPConnector(
@@ -85,9 +90,10 @@ class ConnectionRuntime:
     """
     Single owner of connection lifecycle.
 
-    Created by PipelineConfigPrep with enriched config (connector_type, driver
-    already baked in). Passed to connectors, which call materialize() to get
-    a connected transport. Secrets are scrubbed from memory after materialization.
+    Constructed by PipelineConfigPrep with enriched config (connector_type,
+    driver already baked in). Passed to connectors, which call materialize()
+    to get a connected transport. Secrets are scrubbed from memory after
+    materialization.
 
     Ownership: the connector/handler that receives this runtime owns it.
     It must call close() in its disconnect() method.
@@ -103,6 +109,12 @@ class ConnectionRuntime:
         resolver: SecretsResolver,
         org_id: Optional[str] = None,
     ):
+        if connector_type not in VALID_CONNECTOR_TYPES:
+            raise ValueError(
+                f"Invalid connector_type: {connector_type!r}. "
+                f"Expected one of: {sorted(VALID_CONNECTOR_TYPES)}"
+            )
+
         self._raw_config = raw_config
         self._connection_id = connection_id
         self._connector_type = connector_type
@@ -137,7 +149,7 @@ class ConnectionRuntime:
 
     @property
     def raw_config(self) -> Dict[str, Any]:
-        return self._raw_config
+        return copy.deepcopy(self._raw_config)
 
     # --- Materialization ---
 
@@ -147,6 +159,7 @@ class ConnectionRuntime:
 
         Args:
             require_port: For database connections, whether port is required.
+                          Ignored for non-database connector types.
 
         Idempotent — second call is a no-op.
         """
@@ -155,17 +168,22 @@ class ConnectionRuntime:
 
         resolved = await self._resolve_secrets()
 
-        if self._connector_type == "database":
-            self._engine, _ = await create_database_engine(
-                resolved, require_port=require_port
-            )
-        elif self._connector_type == "api":
-            self._session, self._base_url, self._rate_limiter = (
-                await create_api_session(resolved)
-            )
-        else:
-            # file, s3, stdout — no transport, just resolved config
-            self._resolved_config = resolved
+        try:
+            if self._connector_type == "database":
+                self._engine, _ = await create_database_engine(
+                    resolved, require_port=require_port
+                )
+            elif self._connector_type == "api":
+                self._session, self._base_url, self._rate_limiter = (
+                    await _create_api_session(resolved)
+                )
+            else:
+                # file, s3, stdout — no transport, just resolved config
+                self._resolved_config = resolved
+        except Exception:
+            # Clean up secrets on failure — don't leave them in memory
+            self._scrub_secrets()
+            raise
 
         self._scrub_secrets()
         self._materialized = True
@@ -213,14 +231,21 @@ class ConnectionRuntime:
     # --- Teardown ---
 
     async def close(self) -> None:
-        """Dispose transport resources. Safe to call multiple times."""
-        if self._engine:
-            await self._engine.dispose()
-            self._engine = None
-        if self._session:
-            await self._session.close()
-            self._session = None
-        self._materialized = False
+        """
+        Dispose transport resources. Safe to call multiple times.
+
+        Resets materialization state, allowing materialize() to be called
+        again if reconnection is needed.
+        """
+        try:
+            if self._engine:
+                await self._engine.dispose()
+                self._engine = None
+        finally:
+            if self._session:
+                await self._session.close()
+                self._session = None
+            self._materialized = False
 
     # --- Private ---
 
@@ -231,7 +256,7 @@ class ConnectionRuntime:
                 f"No placeholders in connection {self._connection_id}, "
                 f"skipping secret resolution"
             )
-            return self._raw_config.copy()
+            return copy.deepcopy(self._raw_config)
 
         self._secrets = await self._resolver.resolve(
             self._connection_id,

@@ -47,7 +47,7 @@ class APIConnector(BaseConnector):
 
         except Exception as e:
             logger.error(f"Failed to connect to API: {str(e)}")
-            raise ConnectionError(f"API connection failed: {str(e)}")
+            raise ConnectionError(f"API connection failed: {str(e)}") from e
 
     async def disconnect(self):
         """Close API connection."""

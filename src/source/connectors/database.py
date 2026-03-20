@@ -71,7 +71,7 @@ class DatabaseConnector(BaseConnector):
             logger.info("Connected to database via %s", self._driver)
         except Exception as e:
             logger.error("Failed to connect to database: %s", e)
-            raise ConnectionError(f"Database connection failed: {e}")
+            raise ConnectionError(f"Database connection failed: {e}") from e
 
     async def disconnect(self):
         """Close database connection."""

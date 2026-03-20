@@ -44,6 +44,7 @@ class FileDestinationHandler(BaseDestinationHandler):
 
     def __init__(self) -> None:
         """Initialize the file handler."""
+        self._runtime: ConnectionRuntime | None = None
         self._storage: BaseStorageBackend | None = None
         self._formatter: BaseFormatter | None = None
         self._manifest: ManifestTracker | None = None
@@ -122,7 +123,7 @@ class FileDestinationHandler(BaseDestinationHandler):
         """Disconnect the file handler."""
         if self._storage and self._connected:
             await self._storage.disconnect()
-        if hasattr(self, '_runtime') and self._runtime:
+        if self._runtime:
             await self._runtime.close()
         self._connected = False
         logger.info("FileDestinationHandler disconnected")

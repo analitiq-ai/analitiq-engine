@@ -171,7 +171,7 @@ class Pipeline:
             if connection_id and connection_id in self.resolved_connections:
                 runtime = self.resolved_connections[connection_id]
                 if isinstance(runtime, ConnectionRuntime):
-                    result = runtime.raw_config.copy()
+                    result = runtime.raw_config
                     result["_runtime"] = runtime
                     return result
                 elif isinstance(runtime, dict):
