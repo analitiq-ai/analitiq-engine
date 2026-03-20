@@ -137,7 +137,7 @@ async def run_destination_mode() -> None:
     pipeline_config, stream_configs, resolved_connections, resolved_endpoints, _connectors = config_prep.create_config()
 
     # Get destination connection from pipeline config
-    destinations = pipeline_config.connections.destinations
+    destinations = pipeline_config["connections"]["destinations"]
     if not destinations:
         logger.error("Pipeline has no destinations configured")
         sys.exit(1)

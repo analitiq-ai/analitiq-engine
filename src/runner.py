@@ -66,7 +66,7 @@ class PipelineRunner:
             pipeline_config, stream_configs, resolved_connections, resolved_endpoints, connectors = pipeline_config_prep.create_config()
 
             # Create and run pipeline
-            logger.info(f"Starting {pipeline_config.name} (ID: {pipeline_config.pipeline_id})")
+            logger.info(f"Starting {pipeline_config['name']} (ID: {pipeline_config['pipeline_id']})")
 
             # Create pipeline instance
             pipeline = Pipeline(
@@ -125,7 +125,7 @@ class PipelineRunner:
                     batches_processed=batches_processed,
                     status=status,
                     error_message=error_message,
-                    pipeline_name=pipeline_config.name if pipeline_config else None,
+                    pipeline_name=pipeline_config["name"] if pipeline_config else None,
                 )
                 logger.info("Emitted pipeline metrics to logs")
 

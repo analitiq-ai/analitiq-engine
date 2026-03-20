@@ -405,6 +405,11 @@ class PipelineConfigPrep:
         result = config.copy()
         params = result.get("parameters", {})
 
+        # Add driver from connector definition (e.g. "postgresql", "mysql")
+        driver = connector.get("driver")
+        if driver:
+            result["driver"] = driver
+
         # Convert port to integer inside parameters
         if isinstance(params.get("port"), str):
             params["port"] = int(params["port"])
