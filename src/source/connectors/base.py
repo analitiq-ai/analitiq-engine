@@ -34,12 +34,12 @@ class BaseConnector(ABC):
         }
 
     @abstractmethod
-    async def connect(self, config: Dict[str, Any]):
+    async def connect(self, runtime: "ConnectionRuntime"):
         """
         Establish connection to the data source.
 
         Args:
-            config: Connection configuration
+            runtime: ConnectionRuntime that manages connection lifecycle
         """
         pass
 

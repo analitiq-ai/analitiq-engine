@@ -131,12 +131,12 @@ class TestStreamingEngine:
         with pytest.raises(ConfigurationError, match="No streams configured"):
             await engine.stream_data(config)
 
-    def test_get_connector_unknown_type(self, engine):
-        """Test error handling for missing connector_id."""
+    def test_create_source_connector_missing_runtime(self, engine):
+        """Test error handling when _runtime is missing."""
         config = {"type": "unknown"}
 
-        with pytest.raises(ValueError, match="missing 'connector_id'"):
-            engine._get_connector(config)
+        with pytest.raises(ValueError, match="Missing _runtime"):
+            engine._create_source_connector(config)
 
     def test_get_stream_name(self, engine):
         """Test stream name generation."""

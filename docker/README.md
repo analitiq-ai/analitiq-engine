@@ -28,7 +28,6 @@ cp .env.example .env
 
 ```bash
 PIPELINE_ID=<pipeline-uuid> \
-ORG_ID=<client-uuid> \
 docker compose run --rm destination
 ```
 
@@ -36,7 +35,6 @@ docker compose run --rm destination
 
 ```bash
 PIPELINE_ID=<pipeline-uuid> \
-ORG_ID=<client-uuid> \
 docker compose run --rm source_engine
 ```
 
@@ -53,8 +51,8 @@ Use the `dev.env` template and let the container fetch config from AWS.
 cp dev.env .env
 
 PIPELINE_ID=<pipeline-uuid> \
-ORG_ID=d7a11991-2795-49d1-a858-c7e58ee5ecc6 \
 AWS_PROFILE=434659057682_AdministratorAccess \
+ENV=dev \
 docker compose run --rm source_engine
 ```
 
@@ -70,7 +68,6 @@ Paths are loaded from `analitiq.yaml` at the project root.
 Set these at runtime (not in `.env`):
 
 - `PIPELINE_ID`: Pipeline UUID (optionally with version suffix).
-- `ORG_ID`: Org UUID.
 
 Optional:
 

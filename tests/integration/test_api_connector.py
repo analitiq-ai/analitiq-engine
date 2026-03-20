@@ -9,7 +9,20 @@ from aiohttp import ClientTimeout, TCPConnector, ClientSession
 
 from src.source.connectors.api import APIConnector, RateLimiter
 from src.source.connectors.base import ConnectionError, ReadError, WriteError
+from src.shared.connection_runtime import ConnectionRuntime
+from src.secrets.resolvers.memory import InMemorySecretsResolver
 from src.state.state_manager import StateManager
+
+
+def _make_api_runtime(config):
+    """Create a ConnectionRuntime for API tests."""
+    return ConnectionRuntime(
+        raw_config=config,
+        connector_type="api",
+        driver=None,
+        connection_id="test-conn",
+        resolver=InMemorySecretsResolver({}),
+    )
 
 
 @pytest.fixture
@@ -66,24 +79,24 @@ class TestConnection:
     @pytest.mark.asyncio
     async def test_connect_success(self, connector, valid_connection_config):
         """Test successful API connection."""
+        runtime = _make_api_runtime(valid_connection_config)
         with patch('aiohttp.ClientSession') as mock_session_cls, \
              patch('aiohttp.ClientTimeout') as mock_timeout_cls, \
              patch('aiohttp.TCPConnector') as mock_connector_cls:
-            
+
             mock_session = AsyncMock()
             mock_session_cls.return_value = mock_session
-            
-            await connector.connect(valid_connection_config)
-            
+
+            await connector.connect(runtime)
+
             assert connector.is_connected is True
             assert connector.base_url == "https://api.example.com"
-            assert connector.headers == {"Authorization": "Bearer token"}
             assert connector.session == mock_session
-            
+
             # Verify aiohttp components were configured correctly
             mock_timeout_cls.assert_called_once_with(total=30)
             mock_connector_cls.assert_called_once_with(limit=5, limit_per_host=2)
-    
+
     @pytest.mark.asyncio
     async def test_connect_with_rate_limit(self, connector):
         """Test connection with rate limiting configuration."""
@@ -97,41 +110,45 @@ class TestConnection:
                 "rate_limit": {"max_requests": 10, "time_window": 60},
             },
         }
-        
+        runtime = _make_api_runtime(config)
+
         with patch('aiohttp.ClientSession'), \
              patch('aiohttp.ClientTimeout'), \
              patch('aiohttp.TCPConnector'):
-            
-            await connector.connect(config)
-            
+
+            await connector.connect(runtime)
+
             assert connector.rate_limiter is not None
             assert connector.rate_limiter.max_requests == 10
             assert connector.rate_limiter.time_window == 60
-    
+
     @pytest.mark.asyncio
     async def test_connect_invalid_config(self, connector):
         """Test connection with invalid configuration."""
-        invalid_config = {"invalid": "config"}
-        
-        with pytest.raises(ConnectionError, match="Invalid API connection configuration"):
-            await connector.connect(invalid_config)
-    
+        runtime = _make_api_runtime({"invalid": "config"})
+
+        with pytest.raises(ConnectionError, match="API connection failed"):
+            await connector.connect(runtime)
+
     @pytest.mark.asyncio
-    async def test_connect_missing_aiohttp(self, connector, valid_connection_config):
-        """Test connection when aiohttp is not available."""
-        with patch('builtins.__import__', side_effect=ImportError):
-            with pytest.raises(ConnectionError, match="aiohttp package not installed"):
-                await connector.connect(valid_connection_config)
+    async def test_connect_missing_host(self, connector):
+        """Test connection with missing host."""
+        runtime = _make_api_runtime({"parameters": {}})
+
+        with pytest.raises(ConnectionError, match="API connection failed"):
+            await connector.connect(runtime)
     
     @pytest.mark.asyncio
     async def test_disconnect(self, connector, mock_session):
         """Test API disconnection."""
+        mock_runtime = AsyncMock()
+        connector._runtime = mock_runtime
         connector.session = mock_session
         connector.is_connected = True
-        
+
         await connector.disconnect()
-        
-        mock_session.close.assert_called_once()
+
+        mock_runtime.close.assert_called_once()
         assert connector.is_connected is False
     
     @pytest.mark.asyncio

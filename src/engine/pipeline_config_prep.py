@@ -52,45 +52,15 @@ def _get_connection_uuid(connections: Dict[str, Any], alias: str) -> Optional[st
     return None
 from src.secrets import (
     SecretsResolver,
-    ConnectionConfig,
     LocalFileSecretsResolver,
     InMemorySecretsResolver,
     SecretNotFoundError,
 )
+from src.shared.connection_runtime import ConnectionRuntime
 
 
 logger = logging.getLogger(__name__)
 
-
-
-class ResolvedConnection:
-    """
-    Container for a resolved connection configuration.
-
-    Secrets are resolved lazily via the ConnectionConfig wrapper
-    when resolve_config() is called.
-    """
-
-    def __init__(
-        self,
-        connection_id: str,
-        connection_type: str,
-        config: Dict[str, Any],
-        connection_config_wrapper: ConnectionConfig,
-    ):
-        self.connection_id = connection_id
-        self.connection_type = connection_type  # "api" or "database"
-        self.config = config
-        self.connection_config_wrapper = connection_config_wrapper
-
-    async def resolve_config(self) -> Dict[str, Any]:
-        """
-        Resolve secrets and return fully-expanded configuration.
-
-        Returns:
-            Fully resolved configuration dictionary
-        """
-        return await self.connection_config_wrapper.resolve()
 
 
 class PipelineConfigPrep:
@@ -128,7 +98,7 @@ class PipelineConfigPrep:
         self._consolidated_config: Optional[Dict[str, Any]] = None
 
         # Cache for resolved connections and endpoints
-        self._resolved_connections: Dict[str, ResolvedConnection] = {}
+        self._resolved_connections: Dict[str, ConnectionRuntime] = {}
         self._resolved_endpoints: Dict[str, Dict[str, Any]] = {}
 
         # Secrets resolver for late-binding (initialized lazily)
@@ -424,29 +394,27 @@ class PipelineConfigPrep:
         connection_ref: str,
         connection_id: str,
         org_id: str = ""
-    ) -> ResolvedConnection:
+    ) -> ConnectionRuntime:
         """
         Resolve a connection by its ID.
 
-        Loads connection config from connections/{connection_id}.json,
-        expands secrets from .secrets/{connection_id}.json.
+        Creates a ConnectionRuntime with enriched metadata (connector_type,
+        driver baked in). Secrets are resolved lazily via materialize().
 
         Args:
             connection_ref: Reference alias from pipeline (e.g., "conn_1")
-            connection_id: Connection identifier (filename without .json)
-            org_id: Org ID (for logging and late-binding resolver)
+            connection_id: Connection identifier
+            org_id: Org ID (for late-binding resolver)
 
         Returns:
-            ResolvedConnection object with expanded configuration
+            ConnectionRuntime object
         """
         cache_key = f"id:{connection_id}"
         if cache_key in self._resolved_connections:
             return self._resolved_connections[cache_key]
 
-        # Load connection config from connections directory
         config = self._load_connection_config(connection_id)
 
-        # Get connector and determine connection type
         connector = self.get_connector_for_connection(config, connection_id)
         connection_type = connector.get("connector_type")
 
@@ -456,30 +424,25 @@ class PipelineConfigPrep:
                 f"Expected one of: {sorted(self.VALID_CONNECTOR_TYPES)}"
             )
 
-        # Normalize database connections (adds driver from connector)
         if connection_type == "database":
             config = self._normalize_database_connection(config, connector)
 
         # Store secrets directory for the resolver
         self._secrets_dir = self._paths["secrets"]
 
-        config_wrapper = ConnectionConfig(
+        runtime = ConnectionRuntime(
             raw_config=config,
             connection_id=connection_id,
+            connector_type=connection_type,
+            driver=connector.get("driver") if connection_type == "database" else None,
             resolver=self.secrets_resolver,
             org_id=org_id or None,
         )
 
-        resolved = ResolvedConnection(
-            connection_ref,
-            connection_type,
-            config,
-            connection_config_wrapper=config_wrapper,
-        )
-        self._resolved_connections[cache_key] = resolved
+        self._resolved_connections[cache_key] = runtime
 
         logger.info(f"Resolved connection: {connection_ref} -> {connection_id}")
-        return resolved
+        return runtime
 
     # =========================================================================
     # Endpoint Loading Methods (from consolidated config)
@@ -685,8 +648,7 @@ class PipelineConfigPrep:
 
         # Build enriched source config
         source_data = raw_stream["source"].copy()
-        source_data["_connection"] = source_connection.config
-        source_data["_connection_wrapper"] = source_connection.connection_config_wrapper
+        source_data["_runtime"] = source_connection
         source_data["_endpoint"] = source_endpoint
 
         # Resolve destinations
@@ -711,7 +673,7 @@ class PipelineConfigPrep:
             dest_endpoint = self._resolve_endpoint_flexible(dest)
 
             dest_data = dest.copy()
-            dest_data["_connection"] = dest_connection.config
+            dest_data["_runtime"] = dest_connection
             dest_data["_endpoint"] = dest_endpoint
             destinations_data.append(dest_data)
 
@@ -905,7 +867,7 @@ class PipelineConfigPrep:
     def create_config(self) -> Tuple[
         Dict[str, Any],
         List[Dict[str, Any]],
-        Dict[str, "ResolvedConnection"],
+        Dict[str, "ConnectionRuntime"],
         Dict[str, Dict[str, Any]],
         List[Dict[str, Any]],
     ]:
@@ -913,10 +875,9 @@ class PipelineConfigPrep:
         Load and return validated pipeline and stream configurations.
 
         Returns:
-            Tuple of (pipeline_config dict, list of stream_config dicts, resolved_connections dict,
-                      resolved_endpoints dict, connectors list)
-            - resolved_connections maps connection_id to ResolvedConnection objects
-              (use await resolved.resolve_config() to get fully-expanded config)
+            Tuple of (pipeline_config, stream_configs, resolved_connections,
+                      resolved_endpoints, connectors)
+            - resolved_connections maps connection_id to ConnectionRuntime objects
             - resolved_endpoints maps endpoint_id to its resolved config dict
             - connectors is the list of connector definitions from consolidated config
         """
@@ -957,11 +918,12 @@ class PipelineConfigPrep:
             )
         logger.debug(f"Pipelines directory validated: {pipelines_path}")
 
-    def get_resolved_connection(self, connection_ref: str, connections_map: Dict[str, str]) -> ResolvedConnection:
+    def get_resolved_connection(self, connection_ref: str, connections_map: Dict[str, str]) -> ConnectionRuntime:
         """Get a resolved connection by its reference alias."""
         connection_id = connections_map.get(connection_ref)
         if not connection_id:
             raise ValueError(f"Unknown connection reference: {connection_ref}")
-        if connection_id not in self._resolved_connections:
+        cache_key = f"id:{connection_id}"
+        if cache_key not in self._resolved_connections:
             raise ValueError(f"Connection not resolved: {connection_id}")
-        return self._resolved_connections[connection_id]
+        return self._resolved_connections[cache_key]

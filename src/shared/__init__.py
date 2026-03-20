@@ -20,6 +20,7 @@ from .database_utils import (
     SSL_DIALECTS,
 )
 from .rate_limiter import RateLimiter
+from .connection_runtime import ConnectionRuntime
 from .connector_utils import (
     find_connector,
     get_connector_type_from_list,
@@ -45,6 +46,7 @@ __all__ = [
     "DIALECT_MAP",
     "SSL_DIALECTS",
     "RateLimiter",
+    "ConnectionRuntime",
     "find_connector",
     "get_connector_type_from_list",
     "get_run_id",

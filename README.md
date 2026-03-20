@@ -33,7 +33,6 @@ poetry shell
 RUN_MODE=destination \
 ENV=local \
 PIPELINE_ID=<pipeline-id> \
-ORG_ID=<client-id> \
 python -m src.main
 ```
 
@@ -43,7 +42,6 @@ python -m src.main
 RUN_MODE=engine \
 ENV=local \
 PIPELINE_ID=<pipeline-id> \
-ORG_ID=<client-id> \
 DESTINATION_GRPC_HOST=localhost \
 python -m src.main
 ```
@@ -157,7 +155,6 @@ In `dev`/`prod`, `docker/config_fetcher.py` populates the consolidated pipeline 
 Common:
 - `ENV`: `local`, `dev`, `prod`
 - `PIPELINE_ID`: pipeline ID (optionally with version suffix)
-- `ORG_ID`: client UUID
 - `LOG_LEVEL`: logging level
 
 Engine mode:

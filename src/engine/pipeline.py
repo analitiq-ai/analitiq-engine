@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 from pydantic import ValidationError
 
 from .engine import StreamingEngine
-from .pipeline_config_prep import ResolvedConnection, _get_connection_uuid
+from .pipeline_config_prep import _get_connection_uuid
 
 from ..shared.run_id import get_or_generate_run_id
 from ..state.log_storage import LogStorageSettings, create_log_handler
@@ -19,7 +19,7 @@ from ..models.enriched import (
     EnrichedAPIConfig,
     EnrichedDatabaseConfig,
 )
-from ..shared.connector_utils import find_connector
+from ..shared.connection_runtime import ConnectionRuntime
 
 logger = logging.getLogger(__name__)
 
@@ -168,15 +168,24 @@ class Pipeline:
         # Helper to get resolved connection config by reference
         def get_connection_config(connection_ref: str) -> Dict[str, Any]:
             connection_id = _get_connection_uuid(connections, connection_ref)
-            if connection_id and connection_id in self.resolved_connections:
-                conn = self.resolved_connections[connection_id]
-                if isinstance(conn, ResolvedConnection):
-                    result = conn.config.copy()
-                    result["_connection_wrapper"] = conn.connection_config_wrapper
-                    return result
-                elif isinstance(conn, dict):
-                    return conn.copy()
-            return {}
+            if not connection_id:
+                raise ValueError(
+                    f"Connection reference '{connection_ref}' not found in pipeline connections"
+                )
+            if connection_id not in self.resolved_connections:
+                raise ValueError(
+                    f"Connection '{connection_id}' (ref='{connection_ref}') was not resolved"
+                )
+            runtime = self.resolved_connections[connection_id]
+            if isinstance(runtime, ConnectionRuntime):
+                result = runtime.raw_config
+                result["_runtime"] = runtime
+                return result
+            elif isinstance(runtime, dict):
+                return runtime.copy()
+            raise ValueError(
+                f"Unexpected connection type for '{connection_id}': {type(runtime)}"
+            )
 
         # Helper to get resolved endpoint config by endpoint_id
         def get_endpoint_config(endpoint_id: str) -> Dict[str, Any]:
@@ -215,13 +224,11 @@ class Pipeline:
             source_endpoint = get_endpoint_config(source["endpoint_id"])
             dest_endpoint = get_endpoint_config(dest["endpoint_id"])
 
-            # Look up connector metadata for source and destination
-            source_connector_id = source_conn.get("connector_id")
-            dest_connector_id = dest_conn.get("connector_id")
-            source_connector = find_connector(self.connectors, source_connector_id) if source_connector_id and self.connectors else None
-            dest_connector = find_connector(self.connectors, dest_connector_id) if dest_connector_id and self.connectors else None
-            source_connector_type = source_connector.get("connector_type") if source_connector else None
-            dest_connector_type = dest_connector.get("connector_type") if dest_connector else None
+            # Read connector metadata from runtime
+            source_runtime = source_conn.get("_runtime")
+            dest_runtime = dest_conn.get("_runtime")
+            source_connector_type = source_runtime.connector_type if source_runtime else None
+            dest_connector_type = dest_runtime.connector_type if dest_runtime else None
 
             # Source replication config
             replication = source.get("replication", {})
@@ -232,8 +239,8 @@ class Pipeline:
                 "host": source_conn.get("host"),
                 "parameters": source_conn.get("parameters", {}),
                 "connector_type": source_connector_type,
-                "driver": source_connector.get("driver") if source_connector else None,
-                "_connection_wrapper": source_conn.get("_connection_wrapper"),
+                "driver": source_runtime.driver if source_runtime else None,
+                "_runtime": source_runtime,
                 **source_endpoint,
                 "endpoint_id": source["endpoint_id"],
                 "connection_ref": source["connection_ref"],
@@ -253,8 +260,8 @@ class Pipeline:
                 "host": dest_conn.get("host"),
                 "parameters": dest_conn.get("parameters", {}),
                 "connector_type": dest_connector_type,
-                "driver": dest_connector.get("driver") if dest_connector else None,
-                "_connection_wrapper": dest_conn.get("_connection_wrapper"),
+                "driver": dest_runtime.driver if dest_runtime else None,
+                "_runtime": dest_runtime,
                 **dest_endpoint,
                 "endpoint_id": dest["endpoint_id"],
                 "connection_ref": dest["connection_ref"],

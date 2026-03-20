@@ -157,28 +157,19 @@ async def run_destination_mode() -> None:
 
     logger.info(f"Using destination index {destination_index}: alias={dest_alias}, connection_id={connection_id}")
 
-    # Get resolved connection config (with secrets already expanded)
+    # Get ConnectionRuntime for selected destination
     if connection_id not in resolved_connections:
         logger.error(f"Connection {connection_id} not found in resolved connections")
         sys.exit(1)
 
-    resolved_conn = resolved_connections[connection_id]
+    runtime = resolved_connections[connection_id]
 
-    connection_config = await resolved_conn.resolve_config()
-
-    # Look up connector metadata from connectors array using connector_id
-    connector = config_prep.get_connector_for_connection(connection_config, connection_id)
-    connector_type = connector.get("connector_type")
-
-    if connector_type == "database":
-        connection_config["driver"] = connector.get("driver")
-
-    logger.info(f"Connector type: {connector_type}")
+    logger.info(f"Connector type: {runtime.connector_type}")
     logger.info(f"gRPC port: {grpc_port}")
 
     # Create handler and start server
-    handler = get_handler(connector_type)
-    await handler.connect(connection_config)
+    handler = get_handler(runtime.connector_type)
+    await handler.connect(runtime)
 
     server = DestinationGRPCServer(handler, port=grpc_port)
 
