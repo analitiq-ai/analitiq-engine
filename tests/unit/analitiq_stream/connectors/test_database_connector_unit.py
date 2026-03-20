@@ -6,6 +6,7 @@ from typing import Any, Dict, List
 
 from src.source.connectors.database import DatabaseConnector
 from src.source.connectors.base import ConnectionError, ReadError
+from src.shared.connection_runtime import ConnectionRuntime
 
 
 @pytest.fixture
@@ -21,6 +22,18 @@ def database_config():
             "password": "test_password",
         },
     }
+
+
+@pytest.fixture
+def database_runtime(database_config):
+    """ConnectionRuntime for database tests."""
+    return ConnectionRuntime(
+        raw_config=database_config,
+        connection_id="test-conn",
+        connector_type="database",
+        driver="postgresql",
+        resolver=AsyncMock(),
+    )
 
 
 @pytest.fixture
@@ -79,31 +92,30 @@ class TestDatabaseConnectorConnection:
     """Test DatabaseConnector connection management."""
 
     @pytest.mark.asyncio
-    async def test_connect_success(self, connector, database_config):
+    async def test_connect_success(self, connector, database_runtime):
         """Test successful database connection."""
         mock_engine = AsyncMock()
 
         with patch(
-            'src.source.connectors.database.create_database_engine',
+            'src.shared.connection_runtime.create_database_engine',
             return_value=(mock_engine, "postgresql"),
-        ) as mock_create:
-            await connector.connect(database_config)
+        ):
+            await connector.connect(database_runtime)
 
-            mock_create.assert_called_once_with(database_config, require_port=True)
             assert connector.is_connected is True
             assert connector._initialized is True
             assert connector._engine is mock_engine
             assert connector._driver == "postgresql"
 
     @pytest.mark.asyncio
-    async def test_connect_engine_error(self, connector, database_config):
+    async def test_connect_engine_error(self, connector, database_runtime):
         """Test connection failure at engine level."""
         with patch(
-            'src.source.connectors.database.create_database_engine',
+            'src.shared.connection_runtime.create_database_engine',
             side_effect=Exception("Engine creation failed"),
         ):
             with pytest.raises(ConnectionError) as exc_info:
-                await connector.connect(database_config)
+                await connector.connect(database_runtime)
 
             assert "Database connection failed" in str(exc_info.value)
             assert connector.is_connected is False
@@ -113,13 +125,15 @@ class TestDatabaseConnectorConnection:
     async def test_disconnect(self, connector):
         """Test database disconnection."""
         mock_engine = AsyncMock()
+        mock_runtime = AsyncMock()
+        connector._runtime = mock_runtime
         connector._engine = mock_engine
         connector.is_connected = True
         connector._initialized = True
 
         await connector.disconnect()
 
-        mock_engine.dispose.assert_awaited_once()
+        mock_runtime.close.assert_awaited_once()
         assert connector._engine is None
         assert connector.is_connected is False
         assert connector._initialized is False
@@ -283,22 +297,22 @@ class TestDatabaseConnectorContextManager:
     """Test DatabaseConnector context manager behavior."""
 
     @pytest.mark.asyncio
-    async def test_context_manager_usage(self, database_config):
+    async def test_context_manager_usage(self, database_runtime):
         """Test connector as context manager."""
         mock_engine = AsyncMock()
 
         with patch(
-            'src.source.connectors.database.create_database_engine',
+            'src.shared.connection_runtime.create_database_engine',
             return_value=(mock_engine, "postgresql"),
         ):
             connector = DatabaseConnector("ContextTestConnector")
-            await connector.connect(database_config)
+            await connector.connect(database_runtime)
 
             assert connector.is_connected is True
 
             await connector.disconnect()
 
-            mock_engine.dispose.assert_awaited_once()
+            assert connector.is_connected is False
 
 
 class TestDatabaseConnectorImports:

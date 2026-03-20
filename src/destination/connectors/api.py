@@ -4,7 +4,6 @@ This handler sends records to REST API endpoints with support for
 rate limiting, retries, and different batch modes.
 """
 
-import base64
 import json
 import logging
 from typing import Any, Dict, List, Optional
@@ -18,6 +17,7 @@ from ...grpc.generated.analitiq.v1 import (
     Cursor,
     SchemaMessage,
 )
+from ...shared.connection_runtime import ConnectionRuntime
 from ...shared.rate_limiter import RateLimiter
 
 
@@ -56,13 +56,13 @@ class ApiDestinationHandler(BaseDestinationHandler):
 
     def __init__(self) -> None:
         """Initialize the API handler."""
+        self._runtime: ConnectionRuntime | None = None
         self._session: RetryClient | None = None
         self._config: Dict[str, Any] = {}
         self._connected: bool = False
 
         # Connection settings
         self._base_url: str = ""
-        self._headers: Dict[str, str] = {}
         self._timeout: int = 30
 
         # Rate limiter
@@ -99,97 +99,42 @@ class ApiDestinationHandler(BaseDestinationHandler):
         """APIs support bulk mode."""
         return True
 
-    async def connect(self, connection_config: Dict[str, Any]) -> None:
+    async def connect(self, runtime: ConnectionRuntime) -> None:
         """
-        Establish connection to the API.
+        Establish connection to the API using ConnectionRuntime.
 
         Args:
-            connection_config: Connection configuration
+            runtime: ConnectionRuntime with enriched config
         """
-        self._config = connection_config
-        params = connection_config.get("parameters", {})
+        self._runtime = runtime
+        await runtime.materialize()
+        self._base_url = runtime.base_url
+        self._rate_limiter = runtime.rate_limiter
+        self._max_retries = runtime.raw_config.get("max_retries", 3)
 
-        # Extract connection settings
-        self._base_url = connection_config.get("host", "").rstrip("/")
-        if not self._base_url:
-            raise ValueError("API destination requires 'host' in configuration")
-
-        self._headers = dict(params.get("headers", {}))
-        self._timeout = params.get("timeout", 30)
-        self._max_retries = connection_config.get("max_retries", 3)
-
-        # Setup authentication if provided
-        auth_config = connection_config.get("auth")
-        if auth_config:
-            self._setup_auth(auth_config)
-
-        # Setup rate limiting
-        rate_limit = params.get("rate_limit")
-        if rate_limit:
-            self._rate_limiter = RateLimiter(
-                max_requests=rate_limit.get("max_requests", 100),
-                time_window=rate_limit.get("time_window", 60),
-            )
-
-        # Create aiohttp session with retry support
-        timeout = aiohttp.ClientTimeout(total=self._timeout)
-        connector = aiohttp.TCPConnector(
-            limit=params.get("max_connections", 10),
-            limit_per_host=params.get("max_connections_per_host", 5),
-        )
-
-        # Configure retry: only retry on specific status codes
-        # 429 (rate limit), 500, 503, 504 get up to 3 attempts
-        # 502 and other 4xx errors are NOT retried
+        # Wrap plain session with retry (destination-specific)
         retry_options = ExponentialRetry(
             attempts=self._max_retries,
             statuses=self._retry_statuses,
         )
-
         self._session = RetryClient(
-            client_session=aiohttp.ClientSession(
-                timeout=timeout,
-                connector=connector,
-                headers=self._headers,
-            ),
+            client_session=runtime.session,
             retry_options=retry_options,
         )
 
         self._connected = True
         logger.info(f"ApiDestinationHandler connected to {self._base_url}")
 
-    def _setup_auth(self, auth_config: Dict[str, Any]) -> None:
-        """
-        Setup authentication headers.
-
-        Args:
-            auth_config: Authentication configuration
-        """
-        auth_type = auth_config.get("type", "").lower()
-
-        if auth_type == "bearer_token" or auth_type == "bearer":
-            token = auth_config.get("token", "")
-            self._headers["Authorization"] = f"Bearer {token}"
-
-        elif auth_type == "api_key":
-            api_key = auth_config.get("api_key", "")
-            header_name = auth_config.get("header_name", "X-API-Key")
-            self._headers[header_name] = api_key
-
-        elif auth_type == "basic":
-            username = auth_config.get("username", "")
-            password = auth_config.get("password", "")
-            credentials = base64.b64encode(f"{username}:{password}".encode()).decode()
-            self._headers["Authorization"] = f"Basic {credentials}"
-
-        logger.debug(f"Configured {auth_type} authentication")
-
     async def disconnect(self) -> None:
         """Close API connection."""
-        if self._session and self._connected:
+        if self._session:
+            # RetryClient.close() does NOT close the underlying session
             await self._session.close()
-            self._connected = False
-            logger.info("ApiDestinationHandler disconnected")
+        if self._runtime:
+            # Close the underlying plain session owned by the runtime
+            await self._runtime.close()
+        self._connected = False
+        logger.info("ApiDestinationHandler disconnected")
 
     async def configure_schema(self, schema_msg: SchemaMessage) -> bool:
         """

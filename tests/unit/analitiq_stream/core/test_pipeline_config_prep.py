@@ -358,7 +358,7 @@ class TestConfigurationLoading:
 
             # Check connections are resolved
             assert "source-connection-id" in connections
-            assert connections["source-connection-id"].connection_type == "api"
+            assert connections["source-connection-id"].connector_type == "api"
 
     def test_endpoint_resolution(
         self,

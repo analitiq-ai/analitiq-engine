@@ -17,6 +17,7 @@ from ...grpc.generated.analitiq.v1 import (
     Cursor,
     SchemaMessage,
 )
+from ...shared.connection_runtime import ConnectionRuntime
 
 
 logger = logging.getLogger(__name__)
@@ -71,15 +72,18 @@ class FileDestinationHandler(BaseDestinationHandler):
         """File destinations support bulk writes."""
         return True
 
-    async def connect(self, connection_config: Dict[str, Any]) -> None:
+    async def connect(self, runtime: ConnectionRuntime) -> None:
         """
         Initialize the file handler with configuration.
 
         Args:
-            connection_config: Configuration dictionary
+            runtime: ConnectionRuntime with enriched config
         """
+        await runtime.materialize()
+        connection_config = runtime.resolved_config
         self._config = connection_config
         self._connector_type = connection_config.get("connector_type", "file")
+        self._runtime = runtime
 
         # Determine storage backend type
         storage_type = "local" if self._connector_type == "file" else self._connector_type
@@ -118,8 +122,10 @@ class FileDestinationHandler(BaseDestinationHandler):
         """Disconnect the file handler."""
         if self._storage and self._connected:
             await self._storage.disconnect()
-            self._connected = False
-            logger.info("FileDestinationHandler disconnected")
+        if hasattr(self, '_runtime') and self._runtime:
+            await self._runtime.close()
+        self._connected = False
+        logger.info("FileDestinationHandler disconnected")
 
     async def configure_schema(self, schema_msg: SchemaMessage) -> bool:
         """

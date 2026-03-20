@@ -16,6 +16,7 @@ from ...grpc.generated.analitiq.v1 import (
     Cursor,
     SchemaMessage,
 )
+from ...shared.connection_runtime import ConnectionRuntime
 
 
 logger = logging.getLogger(__name__)
@@ -60,15 +61,16 @@ class StreamDestinationHandler(BaseDestinationHandler):
         """Stdout does not support bulk load."""
         return False
 
-    async def connect(self, connection_config: Dict[str, Any]) -> None:
+    async def connect(self, runtime: ConnectionRuntime) -> None:
         """
         Initialize the stream handler with configuration.
 
         Args:
-            connection_config: Configuration dictionary with optional keys:
-                - file_format: Output format (jsonl, csv). Default: jsonl
-                - formatter_config: Format-specific configuration
+            runtime: ConnectionRuntime with enriched config
         """
+        self._runtime = runtime
+        await runtime.materialize()
+        connection_config = runtime.resolved_config
         self._config = connection_config
 
         # Get format from config, default to jsonl
@@ -92,8 +94,10 @@ class StreamDestinationHandler(BaseDestinationHandler):
         """
         if self._connected:
             sys.stdout.flush()
-            self._connected = False
-            logger.info("StreamDestinationHandler disconnected")
+        if hasattr(self, '_runtime') and self._runtime:
+            await self._runtime.close()
+        self._connected = False
+        logger.info("StreamDestinationHandler disconnected")
 
     async def configure_schema(self, schema_msg: SchemaMessage) -> bool:
         """

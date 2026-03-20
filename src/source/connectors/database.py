@@ -4,8 +4,8 @@ import logging
 from typing import Any, AsyncIterator, Dict, List, Optional
 
 from .base import BaseConnector, ConnectionError, ReadError, WriteError
+from ...shared.connection_runtime import ConnectionRuntime
 from ...shared.database_utils import (
-    create_database_engine,
     acquire_connection,
     convert_record_from_db,
 )
@@ -26,6 +26,7 @@ class DatabaseConnector(BaseConnector):
 
     def __init__(self, name: str = "DatabaseConnector"):
         super().__init__(name)
+        self._runtime: ConnectionRuntime | None = None
         self._engine = None
         self._driver: str = ""
         self.table_info_cache = {}
@@ -53,17 +54,18 @@ class DatabaseConnector(BaseConnector):
             table_name = endpoint
         return schema_name, table_name
 
-    async def connect(self, config: Dict[str, Any]):
+    async def connect(self, runtime: ConnectionRuntime):
         """
-        Establish connection to the database using the shared engine factory.
+        Establish connection to the database using ConnectionRuntime.
 
         Args:
-            config: Connection configuration with driver and credentials
+            runtime: ConnectionRuntime with enriched config
         """
         try:
-            self._engine, self._driver = await create_database_engine(
-                config, require_port=True
-            )
+            self._runtime = runtime
+            await runtime.materialize(require_port=True)
+            self._engine = runtime.engine
+            self._driver = runtime.driver or ""
             self.is_connected = True
             self._initialized = True
             logger.info("Connected to database via %s", self._driver)
@@ -73,9 +75,9 @@ class DatabaseConnector(BaseConnector):
 
     async def disconnect(self):
         """Close database connection."""
-        if self._engine:
-            await self._engine.dispose()
-            self._engine = None
+        if self._runtime:
+            await self._runtime.close()
+        self._engine = None
         self.is_connected = False
         self._initialized = False
         logger.info("Database connection closed")

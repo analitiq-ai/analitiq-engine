@@ -7,6 +7,7 @@ from typing import Any, AsyncIterator, Dict, List, Optional
 from urllib.parse import urljoin, urlencode
 
 from .base import BaseConnector, ConnectionError, ReadError, WriteError
+from ...shared.connection_runtime import ConnectionRuntime
 from ...state.state_manager import StateManager
 from ...models.state import StreamCursor, CursorField, StreamStats
 from ...shared.rate_limiter import RateLimiter
@@ -27,72 +28,34 @@ class APIConnector(BaseConnector):
 
     def __init__(self, name: str = "APIConnector"):
         super().__init__(name)
+        self._runtime: ConnectionRuntime | None = None
         self.session = None
         self.base_url = None
         self.headers = {}
         self.rate_limiter = None
 
-    async def connect(self, config: Dict[str, Any]):
-        """Establish connection to the API."""
+    async def connect(self, runtime: ConnectionRuntime):
+        """Establish connection to the API using ConnectionRuntime."""
         try:
-            import aiohttp
-            
-            parameters = config.get("parameters", {})
-
-            self.base_url = config["host"]
-            self.headers = parameters.get("headers", {})
-
-            # Create session with timeout and connection limits
-            timeout_seconds = parameters.get("timeout", 30)
-            max_connections = parameters.get("max_connections", 100)
-            max_connections_per_host = parameters.get("max_connections_per_host", 10)
-
-            timeout = aiohttp.ClientTimeout(total=timeout_seconds)
-            connector = aiohttp.TCPConnector(
-                limit=max_connections,
-                limit_per_host=max_connections_per_host,
-            )
-
-            self.session = aiohttp.ClientSession(
-                timeout=timeout, connector=connector, headers=self.headers
-            )
-
-            # Log connection configuration (mask sensitive values)
-            masked_headers = self._mask_sensitive_headers(self.headers)
-            logger.debug(f"API Connection configured:")
-            logger.debug(f"  Base URL: {self.base_url}")
-            logger.debug(f"  Headers: {masked_headers}")
-            logger.debug(f"  Timeout: {timeout_seconds}s")
-            logger.debug(f"  Max connections: {max_connections}")
-
-            # Set up rate limiting
-            rate_limit = parameters.get("rate_limit")
-            if rate_limit:
-                self.rate_limiter = RateLimiter(
-                    max_requests=rate_limit["max_requests"],
-                    time_window=rate_limit["time_window"],
-                )
-
+            self._runtime = runtime
+            await runtime.materialize()
+            self.session = runtime.session
+            self.base_url = runtime.base_url
+            self.rate_limiter = runtime.rate_limiter
             self.is_connected = True
             logger.debug(f"Connected to API: {self.base_url}")
 
-        except ImportError:
-            raise ConnectionError(
-                "aiohttp package not installed. Install with: pip install aiohttp"
-            )
         except Exception as e:
             logger.error(f"Failed to connect to API: {str(e)}")
             raise ConnectionError(f"API connection failed: {str(e)}")
 
-
     async def disconnect(self):
         """Close API connection."""
-        if self.session:
-            await self.session.close()
-            # Allow event loop to close underlying transport
+        if self._runtime:
+            await self._runtime.close()
             await asyncio.sleep(0.25)
-            self.session = None
-            self.is_connected = False
+        self.session = None
+        self.is_connected = False
 
     async def read_batches(
         self,

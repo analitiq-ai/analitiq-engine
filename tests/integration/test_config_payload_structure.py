@@ -11,10 +11,10 @@ These tests verify that:
 """
 
 import pytest
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 from src.engine.pipeline import Pipeline
-from src.engine.pipeline_config_prep import ResolvedConnection
+from src.shared.connection_runtime import ConnectionRuntime
 
 
 # --- Test UUIDs ---
@@ -44,7 +44,7 @@ API_DB_CONNECTORS = [
 
 
 def _wise_connection_config():
-    """Wise API connection config (compatible with APIConnectionConfig)."""
+    """Wise API connection config."""
     return {
         "connector_id": "api-connector",
         "connector_type": "api",
@@ -65,7 +65,7 @@ def _wise_connection_config():
 
 
 def _sevdesk_connection_config():
-    """SevDesk API connection config (compatible with APIConnectionConfig)."""
+    """SevDesk API connection config."""
     return {
         "connector_id": "api-connector",
         "connector_type": "api",
@@ -85,7 +85,7 @@ def _sevdesk_connection_config():
 
 
 def _database_connection_config():
-    """PostgreSQL database connection config (compatible with DatabaseConfig)."""
+    """PostgreSQL database connection config."""
     return {
         "connector_id": "pg-connector",
         "connector_type": "database",
@@ -181,20 +181,25 @@ def _make_stream_config(source_alias, source_endpoint_id, dest_alias, dest_endpo
     }
 
 
+def _make_runtime(connection_id, connector_type, config, driver=None):
+    """Create a ConnectionRuntime for testing."""
+    return ConnectionRuntime(
+        raw_config=config,
+        connection_id=connection_id,
+        connector_type=connector_type,
+        driver=driver,
+        resolver=AsyncMock(),
+    )
+
+
 def _api_to_api_resolved_connections():
     """Resolved connections for API-to-API (Wise -> SevDesk)."""
     return {
-        WISE_CONNECTION_ID: ResolvedConnection(
-            connection_id=WISE_CONNECTION_ID,
-            connection_type="api",
-            config=_wise_connection_config(),
-            connection_config_wrapper=Mock(),
+        WISE_CONNECTION_ID: _make_runtime(
+            WISE_CONNECTION_ID, "api", _wise_connection_config(),
         ),
-        SEVDESK_CONNECTION_ID: ResolvedConnection(
-            connection_id=SEVDESK_CONNECTION_ID,
-            connection_type="api",
-            config=_sevdesk_connection_config(),
-            connection_config_wrapper=Mock(),
+        SEVDESK_CONNECTION_ID: _make_runtime(
+            SEVDESK_CONNECTION_ID, "api", _sevdesk_connection_config(),
         ),
     }
 
@@ -210,17 +215,11 @@ def _api_to_api_resolved_endpoints():
 def _api_to_db_resolved_connections():
     """Resolved connections for API-to-DB (Wise -> Postgres)."""
     return {
-        WISE_CONNECTION_ID: ResolvedConnection(
-            connection_id=WISE_CONNECTION_ID,
-            connection_type="api",
-            config=_wise_connection_config(),
-            connection_config_wrapper=Mock(),
+        WISE_CONNECTION_ID: _make_runtime(
+            WISE_CONNECTION_ID, "api", _wise_connection_config(),
         ),
-        DB_CONNECTION_ID: ResolvedConnection(
-            connection_id=DB_CONNECTION_ID,
-            connection_type="database",
-            config=_database_connection_config(),
-            connection_config_wrapper=Mock(),
+        DB_CONNECTION_ID: _make_runtime(
+            DB_CONNECTION_ID, "database", _database_connection_config(), driver="postgresql",
         ),
     }
 
@@ -272,18 +271,16 @@ class TestAPIToAPIConfigStructure:
         return pipeline_config, stream_configs, resolved_connections, resolved_endpoints
 
     def test_source_connection_has_api_fields(self, api_to_api_config):
-        """Verify API source connection has required fields for APIConnectionConfig."""
+        """Verify API source connection has required fields."""
         pipeline_config, _, resolved_connections, _ = api_to_api_config
 
         source_refs = pipeline_config["connections"]["source"]
         source_connection_id = list(source_refs.values())[0]
 
-        assert source_connection_id in resolved_connections, (
-            f"Source connection {source_connection_id} not in resolved connections"
-        )
+        assert source_connection_id in resolved_connections
 
-        source_conn = resolved_connections[source_connection_id]
-        config = source_conn.config
+        runtime = resolved_connections[source_connection_id]
+        config = runtime.raw_config
 
         assert "host" in config, "API connection must have host"
         assert config["host"].startswith("http"), f"Host should be URL, got: {config['host']}"
@@ -296,12 +293,10 @@ class TestAPIToAPIConfigStructure:
         dest_refs = pipeline_config["connections"]["destinations"][0]
         dest_connection_id = list(dest_refs.values())[0]
 
-        assert dest_connection_id in resolved_connections, (
-            f"Destination connection {dest_connection_id} not in resolved connections"
-        )
+        assert dest_connection_id in resolved_connections
 
-        dest_conn = resolved_connections[dest_connection_id]
-        config = dest_conn.config
+        runtime = resolved_connections[dest_connection_id]
+        config = runtime.raw_config
 
         assert "host" in config, "API connection must have host"
         assert "parameters" in config, "API connection must have parameters"
@@ -379,13 +374,9 @@ class TestAPIToDatabaseConfigStructure:
         source_refs = pipeline_config["connections"]["source"]
         source_connection_id = list(source_refs.values())[0]
 
-        source_conn = resolved_connections[source_connection_id]
-        config = source_conn.config
-
-        assert config.get("connector_type") == "api" or config.get("type") == "api", (
-            f"Source should be API type, got: {config}"
-        )
-        assert "host" in config, "API source must have 'host'"
+        runtime = resolved_connections[source_connection_id]
+        assert runtime.connector_type == "api"
+        assert "host" in runtime.raw_config
 
     def test_destination_connection_is_database_type(self, api_to_db_config):
         """Verify database dest has driver, host, port, database, username."""
@@ -394,12 +385,8 @@ class TestAPIToDatabaseConfigStructure:
         dest_refs = pipeline_config["connections"]["destinations"][0]
         dest_connection_id = list(dest_refs.values())[0]
 
-        dest_conn = resolved_connections[dest_connection_id]
-        config = dest_conn.config
-
-        assert config.get("connector_type") == "database" or config.get("type") == "database", (
-            f"Destination should be database type, got type: {config.get('type')}"
-        )
+        runtime = resolved_connections[dest_connection_id]
+        assert runtime.connector_type == "database"
 
     def test_database_fields_validated(self, api_to_db_config):
         """Verify port is int type, database/username present in parameters."""
@@ -408,8 +395,8 @@ class TestAPIToDatabaseConfigStructure:
         dest_refs = pipeline_config["connections"]["destinations"][0]
         dest_connection_id = list(dest_refs.values())[0]
 
-        dest_conn = resolved_connections[dest_connection_id]
-        config = dest_conn.config
+        runtime = resolved_connections[dest_connection_id]
+        config = runtime.raw_config
 
         assert "host" in config, "Database connection must have 'host'"
         assert "parameters" in config, "Database connection must have 'parameters'"
@@ -426,20 +413,20 @@ class TestEndToEndConfigFlow:
     """Complete flow tests from constructed configs to Engine."""
 
     def test_api_connection_config_has_required_fields(self):
-        """APIConnector.connect() receives a dict with host and parameters."""
+        """APIConnector.connect() receives a runtime with host and parameters."""
         resolved_connections = _api_to_api_resolved_connections()
-        source_conn = resolved_connections[WISE_CONNECTION_ID]
-        config = source_conn.config
+        runtime = resolved_connections[WISE_CONNECTION_ID]
+        config = runtime.raw_config
 
         assert config["host"]
         assert isinstance(config["parameters"]["headers"], dict)
         assert config["parameters"]["timeout"] > 0
 
     def test_database_connection_config_validates_for_connector(self):
-        """DatabaseConnector.connect() requires 'host' at root and DB fields in parameters."""
+        """DatabaseConnector needs 'host' at root and DB fields in parameters."""
         resolved_connections = _api_to_db_resolved_connections()
-        dest_conn = resolved_connections[DB_CONNECTION_ID]
-        config = dest_conn.config
+        runtime = resolved_connections[DB_CONNECTION_ID]
+        config = runtime.raw_config
 
         assert config.get("host"), "Database connection must have 'host'"
         params = config.get("parameters", {})

@@ -45,12 +45,12 @@ class BaseDestinationHandler(ABC):
     """
 
     @abstractmethod
-    async def connect(self, connection_config: Dict[str, Any]) -> None:
+    async def connect(self, runtime: "ConnectionRuntime") -> None:
         """
         Establish connection to the destination.
 
         Args:
-            connection_config: Connection parameters (host, port, credentials, etc.)
+            runtime: ConnectionRuntime with enriched config and transport factory
 
         Raises:
             ConnectionError: If connection cannot be established

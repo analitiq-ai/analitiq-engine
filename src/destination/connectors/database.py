@@ -36,7 +36,7 @@ from ...grpc.generated.analitiq.v1 import (
     Cursor,
     SchemaMessage,
 )
-from ...shared.database_utils import create_database_engine
+from ...shared.connection_runtime import ConnectionRuntime
 
 
 logger = logging.getLogger(__name__)
@@ -74,6 +74,7 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
 
     def __init__(self) -> None:
         """Initialize the database handler."""
+        self._runtime: ConnectionRuntime | None = None
         self._engine: AsyncEngine | None = None
         self._metadata: MetaData = MetaData()
         self._config: Dict[str, Any] = {}
@@ -114,26 +115,26 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         """Bulk load support depends on database."""
         return False
 
-    async def connect(self, connection_config: Dict[str, Any]) -> None:
+    async def connect(self, runtime: ConnectionRuntime) -> None:
         """
-        Establish database connection using the shared engine factory.
+        Establish database connection using ConnectionRuntime.
 
         Args:
-            connection_config: Connection configuration
+            runtime: ConnectionRuntime with enriched config
         """
-        self._config = connection_config
-        self._engine, self._driver = await create_database_engine(
-            connection_config, require_port=False
-        )
+        self._runtime = runtime
+        await runtime.materialize(require_port=False)
+        self._engine = runtime.engine
+        self._driver = runtime.driver or ""
         self._connected = True
         logger.info("DatabaseDestinationHandler connected to %s", self._driver)
 
     async def disconnect(self) -> None:
         """Close database connection."""
-        if self._engine and self._connected:
-            await self._engine.dispose()
-            self._connected = False
-            logger.info("DatabaseDestinationHandler disconnected")
+        if self._runtime:
+            await self._runtime.close()
+        self._connected = False
+        logger.info("DatabaseDestinationHandler disconnected")
 
     async def configure_schema(self, schema_msg: SchemaMessage) -> bool:
         """

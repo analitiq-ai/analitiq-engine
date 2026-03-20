@@ -7,7 +7,9 @@ from unittest.mock import AsyncMock
 
 from sqlalchemy import text
 from src.source.connectors.database import DatabaseConnector
+from src.shared.connection_runtime import ConnectionRuntime
 from src.shared.database_utils import acquire_connection
+from src.secrets.resolvers.memory import InMemorySecretsResolver
 
 
 def _postgres_configured() -> bool:
@@ -38,6 +40,19 @@ def database_config():
 
 
 @pytest.fixture
+def database_runtime(database_config):
+    """ConnectionRuntime for real database tests."""
+    resolver = InMemorySecretsResolver({})
+    return ConnectionRuntime(
+        raw_config=database_config,
+        connection_id="test-conn",
+        connector_type="database",
+        driver="postgresql",
+        resolver=resolver,
+    )
+
+
+@pytest.fixture
 def unique_table_name():
     """Generate unique table name for test isolation."""
     return f"test_connector_{uuid.uuid4().hex[:8]}"
@@ -56,11 +71,11 @@ class TestDatabaseConnectorRealIntegration:
     """Integration tests using real PostgreSQL database."""
 
     @pytest.mark.asyncio
-    async def test_connect_and_disconnect(self, database_config):
+    async def test_connect_and_disconnect(self, database_runtime):
         """Test real database connection and disconnection."""
         connector = DatabaseConnector("RealTestConnector")
 
-        await connector.connect(database_config)
+        await connector.connect(database_runtime)
 
         assert connector.is_connected is True
         assert connector._initialized is True
@@ -75,13 +90,13 @@ class TestDatabaseConnectorRealIntegration:
 
     @pytest.mark.asyncio
     async def test_read_batches_pagination(
-        self, database_config, unique_table_name, mock_state_manager
+        self, database_runtime, unique_table_name, mock_state_manager
     ):
         """Test that read_batches correctly paginates through large datasets."""
         connector = DatabaseConnector("RealPaginationConnector")
 
         try:
-            await connector.connect(database_config)
+            await connector.connect(database_runtime)
 
             # Create table and insert data directly via the engine
             async with connector._engine.begin() as conn:
