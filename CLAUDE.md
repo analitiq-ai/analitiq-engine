@@ -424,13 +424,13 @@ docker build -t analitiq-stream . && docker push $AWS_ACCOUNT_ID.dkr.ecr.eu-cent
 
 ## PR Review Process:
 
-1. Use `@"pr-review-executor (agent)"` to review the PR after you have implemented all changes.
+1. Use `/pr-review-toolkit` to review the PR after you have implemented all changes.
 2. Wait for feedback from the review executor.
 3. Determine if the raised issues are legitimate or not.
    a. if the issue is legitimate and relevant to the PR, fix it.
    b. if the issue is outside the scope of the PR, check if there is a related issue in the GitHub issue tracker. If not, create a new issue in GitHub and move on.
    c. If the issue is not a legitimate problem, summarize your thoughts on the point and move on.
 4. Once you fixed all issues that need fixing, commit fixes, push to the branch.
-5. Use `@"pr-review-executor (agent)"` to review again
+5. Use `/pr-review-toolkit` to review again
 6. Continue doing this cycle until the PR is approved by the review executor.
 7. Once the PR is approved, run the tests to make sure they all pass.
