@@ -356,7 +356,7 @@ class StreamingEngine:
                     error_message=error_message,
                     pipeline_name=pipeline_name,
                 )
-                if os.environ["METRICS_ENABLED"].lower() == "true":
+                if os.getenv("METRICS_ENABLED", "false").lower() == "true":
                     emit_metrics_log({
                         "type": "stream",
                         "stream_id": stream_id,
@@ -587,7 +587,7 @@ class StreamingEngine:
                             )
 
                         # Emit per-batch metrics
-                        if os.environ["METRICS_ENABLED"].lower() == "true":
+                        if os.getenv("METRICS_ENABLED", "false").lower() == "true":
                             emit_metrics_log({
                                 "type": "batch",
                                 "run_id": run_id,
