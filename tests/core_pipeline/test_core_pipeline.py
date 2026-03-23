@@ -5,9 +5,13 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import os
 import shutil
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
+
+os.environ.setdefault("LOG_LEVEL", "DEBUG")
+os.environ.setdefault("METRICS_ENABLED", "false")
 
 import pytest
 
@@ -76,10 +80,8 @@ def in_memory_connectors(monkeypatch):
 
 
 @pytest.fixture
-def temp_directories(tmp_path, monkeypatch):
+def temp_directories(tmp_path):
     """Use an isolated filesystem layout for stateful components."""
-
-    from src import config as global_config
 
     state_dir = tmp_path / "state"
     deadletter_dir = tmp_path / "deadletter"
@@ -87,10 +89,6 @@ def temp_directories(tmp_path, monkeypatch):
 
     for path in (state_dir, deadletter_dir, logs_dir):
         path.mkdir(parents=True, exist_ok=True)
-
-    monkeypatch.setitem(global_config.DIRECTORIES, "state", state_dir)
-    monkeypatch.setitem(global_config.DIRECTORIES, "deadletter", deadletter_dir)
-    monkeypatch.setitem(global_config.DIRECTORIES, "logs", logs_dir)
 
     return {
         "state": state_dir,
