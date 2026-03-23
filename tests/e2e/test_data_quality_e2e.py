@@ -96,7 +96,7 @@ def test_field_transformations_apply_to_valid_records(
     # Create custom config for transformation testing
     pipeline_config = e2e_pipeline_config_base.copy()
     pipeline_config["name"] = "Transformation Pipeline"
-    pipeline_config["runtime"]["batch_size"] = 2
+    pipeline_config["runtime"]["batching"]["batch_size"] = 2
     pipeline_config["streams"] = {
         stream_id: {
             "name": "transformation-stream",

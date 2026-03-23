@@ -271,7 +271,7 @@ def test_pipeline_initializes_real_engine(
     )
 
     assert isinstance(pipeline.engine, StreamingEngine)
-    assert pipeline.engine.batch_size == config["runtime"]["batch_size"]
+    assert pipeline.engine.batch_size == config["runtime"]["batching"]["batch_size"]
     assert Path(pipeline.state_dir).exists()
     assert Path(pipeline.logs_dir).exists()
     assert Path(pipeline.dlq_dir).exists()

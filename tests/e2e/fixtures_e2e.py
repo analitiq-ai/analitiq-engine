@@ -499,8 +499,8 @@ def e2e_fault_tolerance_pipeline_config(e2e_pipeline_config_base):
 
     config = e2e_pipeline_config_base.copy()
     config["name"] = "Fault Tolerance E2E Test Pipeline"
-    config["runtime"]["batch_size"] = 1  # Small batches for fault tolerance testing
-    config["error_handling"]["max_retries"] = 2
+    config["runtime"]["batching"]["batch_size"] = 1  # Small batches for fault tolerance testing
+    config["runtime"]["error_handling"]["max_retries"] = 2
     config["streams"] = {
         stream_id: {
             "name": "fault-tolerance-stream",
@@ -588,8 +588,8 @@ def e2e_performance_pipeline_config(e2e_pipeline_config_base):
 
     config = e2e_pipeline_config_base.copy()
     config["name"] = "Performance E2E Test Pipeline"
-    config["runtime"]["batch_size"] = 100  # Larger batches for performance testing
-    config["runtime"]["max_concurrent_batches"] = 5
+    config["runtime"]["batching"]["batch_size"] = 100  # Larger batches for performance testing
+    config["runtime"]["batching"]["max_concurrent_batches"] = 5
     config["streams"] = {
         stream_id: {
             "name": "performance-stream",
