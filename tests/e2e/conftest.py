@@ -186,6 +186,7 @@ def mock_pipeline_id():
 def base_runtime():
     """Base engine configuration for tests."""
     return {
+        "buffer_size": 100,
         "batching": {
             "batch_size": 10,
             "max_concurrent_batches": 2

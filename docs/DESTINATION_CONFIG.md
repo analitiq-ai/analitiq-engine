@@ -290,8 +290,9 @@ file_format = connection.get("file_format", "jsonl")
     ]
   },
   "runtime": {
+    "buffer_size": 5000,
     "batching": { "batch_size": 100, "max_concurrent_batches": 3 },
-    "retry": { "max_attempts": 5, "backoff": "exponential" }
+    "error_handling": { "strategy": "dlq", "max_retries": 3, "retry_delay": 5 }
   }
 }
 ```

@@ -56,14 +56,14 @@ def valid_pipeline_config():
             ]
         },
         "streams": ["stream-456"],
+        "schedule": {"type": "interval", "interval_minutes": 60},
+        "engine": {"vcpu": 1, "memory": 8192},
         "runtime": {
             "expression": {"lang": "jsonata"},
             "logging": {"log_level": "INFO"},
-            "error_handling": {"max_retries": 3},
-            "retry": {"max_attempts": 5},
+            "error_handling": {"strategy": "dlq", "max_retries": 3, "retry_delay": 5},
             "buffer_size": 5000,
-            "batching": {"batch_size": 100},
-            "schedule": {"type": "interval", "interval_minutes": 60}
+            "batching": {"batch_size": 100}
         },
         "function_catalog": {"catalog_id": "core", "version": 1}
     }
