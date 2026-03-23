@@ -239,10 +239,10 @@ def e2e_pipeline_config_base(mock_pipeline_id):
         },
         "engine": {
             "vcpu": 1,
-            "memory": 8192,
-            "buffer_size": 100
+            "memory": 8192
         },
         "runtime": {
+            "buffer_size": 100,
             "batching": {
                 "batch_size": 10,
                 "max_concurrent_batches": 2

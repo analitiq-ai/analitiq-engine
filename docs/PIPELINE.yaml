@@ -26,9 +26,10 @@ schedule:
 engine:
   vcpu: 1
   memory: 8192
-  buffer_size: "5000"
 
 runtime:
+  buffer_size: "5000"
+
   # Default expression configuration for all streams in this pipeline.
   # Streams may optionally override (rare).
   expression:

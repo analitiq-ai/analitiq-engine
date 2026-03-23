@@ -415,10 +415,10 @@ def multi_stream_pipeline_config():
         },
         "engine": {
             "vcpu": 1,
-            "memory": 8192,
-            "buffer_size": 10000
+            "memory": 8192
         },
         "runtime": {
+            "buffer_size": 10000,
             "batching": {
                 "batch_size": 500,
                 "max_concurrent_batches": 5

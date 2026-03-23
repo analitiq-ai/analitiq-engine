@@ -83,10 +83,10 @@ def sample_pipeline_config():
         },
         "engine": {
             "vcpu": 1,
-            "memory": 8192,
-            "buffer_size": 5000
+            "memory": 8192
         },
         "runtime": {
+            "buffer_size": 5000,
             "batching": {
                 "batch_size": 100,
                 "max_concurrent_batches": 3

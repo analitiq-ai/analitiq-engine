@@ -109,10 +109,10 @@ def base_pipeline_config() -> Dict[str, Any]:
         "version": "1.0",
         "engine": {
             "vcpu": 1,
-            "memory": 8192,
-            "buffer_size": 256
+            "memory": 8192
         },
         "runtime": {
+            "buffer_size": 256,
             "batching": {
                 "batch_size": 2,
                 "max_concurrent_batches": 1

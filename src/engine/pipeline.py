@@ -78,12 +78,11 @@ class Pipeline:
         runtime = pipeline_config["runtime"]
         batching = runtime["batching"]
         error_handling = runtime["error_handling"]
-        engine_res = pipeline_config["engine"]
         self.engine = StreamingEngine(
             pipeline_id=pipeline_id,
             batch_size=batching["batch_size"],
             max_concurrent_batches=batching["max_concurrent_batches"],
-            buffer_size=engine_res["buffer_size"],
+            buffer_size=runtime["buffer_size"],
             dlq_path=self.dlq_dir,
             max_retries=error_handling["max_retries"],
             retry_delay=error_handling["retry_delay"],

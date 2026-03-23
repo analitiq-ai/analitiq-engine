@@ -61,8 +61,8 @@ def valid_pipeline_config():
             "logging": {"log_level": "INFO"},
             "error_handling": {"max_retries": 3},
             "retry": {"max_attempts": 5},
+            "buffer_size": 5000,
             "batching": {"batch_size": 100},
-            "engine": {"buffer_size": 5000},
             "schedule": {"type": "interval", "interval_minutes": 60}
         },
         "function_catalog": {"catalog_id": "core", "version": 1}
