@@ -108,7 +108,7 @@ class TestAPIIncrementalIntegration:
 
                 # Execute incremental read
                 batches = []
-                async for batch in self.connector.read_batches(config, self.mock_state_manager, self.stream_name):
+                async for batch in self.connector.read_batches(config, state_manager=self.mock_state_manager, stream_name=self.stream_name):
                     batches.append(batch)
 
                 # Verify results
@@ -180,7 +180,7 @@ class TestAPIIncrementalIntegration:
 
                 # Execute incremental read
                 batches = []
-                async for batch in self.connector.read_batches(config, self.mock_state_manager, self.stream_name):
+                async for batch in self.connector.read_batches(config, state_manager=self.mock_state_manager, stream_name=self.stream_name):
                     batches.append(batch)
 
                 # Verify results
@@ -227,7 +227,7 @@ class TestAPIIncrementalIntegration:
 
                 # Execute read - should perform full replication on first run
                 batches = []
-                async for batch in self.connector.read_batches(config, self.mock_state_manager, self.stream_name):
+                async for batch in self.connector.read_batches(config, state_manager=self.mock_state_manager, stream_name=self.stream_name):
                     batches.append(batch)
 
                 # Verify results
@@ -269,7 +269,7 @@ class TestAPIIncrementalIntegration:
 
         # Execute read - should ignore bookmarks and perform full replication
         batches = []
-        async for batch in self.connector.read_batches(config, self.mock_state_manager, self.stream_name):
+        async for batch in self.connector.read_batches(config, state_manager=self.mock_state_manager, stream_name=self.stream_name):
             batches.append(batch)
 
         # Verify results - should get data without any incremental filtering

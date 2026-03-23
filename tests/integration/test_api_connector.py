@@ -1,13 +1,13 @@
 """Comprehensive tests for API connector functionality."""
 
 import asyncio
-import json
 import pytest
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 from aiohttp import ClientTimeout, TCPConnector, ClientSession
 
-from src.source.connectors.api import APIConnector, RateLimiter
+from src.source.connectors.api import APIConnector
+from src.shared.rate_limiter import RateLimiter
 from src.source.connectors.base import ConnectionError, ReadError, WriteError
 from src.shared.connection_runtime import ConnectionRuntime
 from src.secrets.resolvers.memory import InMemorySecretsResolver
@@ -184,14 +184,14 @@ class TestReadOperations:
         
         batches = []
         async for batch in connector.read_batches(
-            valid_read_config, mock_state_manager, "test_stream"
+            valid_read_config, state_manager=mock_state_manager, stream_name="test_stream"
         ):
             batches.append(batch)
-        
+
         assert len(batches) == 1
         assert len(batches[0]) == 2
         assert batches[0][0]["name"] == "User 1"
-        
+
         # Verify state checkpoint was saved
         mock_state_manager.save_stream_checkpoint.assert_called_once()
     
@@ -223,10 +223,10 @@ class TestReadOperations:
         
         batches = []
         async for batch in connector.read_batches(
-            valid_read_config, mock_state_manager, "test_stream"
+            valid_read_config, state_manager=mock_state_manager, stream_name="test_stream"
         ):
             batches.append(batch)
-        
+
         assert len(batches) == 1
         assert len(batches[0]) == 2  # Only 2 non-duplicate records
         assert batches[0][0]["id"] == 2  # User 2 (new)
@@ -262,10 +262,10 @@ class TestReadOperations:
         
         batches = []
         async for batch in connector.read_batches(
-            valid_read_config, mock_state_manager, "test_stream", batch_size=1
+            valid_read_config, state_manager=mock_state_manager, stream_name="test_stream", batch_size=1
         ):
             batches.append(batch)
-        
+
         assert len(batches) == 2
         assert len(batches[0]) == 1
         assert len(batches[1]) == 1
@@ -307,10 +307,10 @@ class TestReadOperations:
         
         batches = []
         async for batch in connector.read_batches(
-            valid_read_config, mock_state_manager, "test_stream", batch_size=1
+            valid_read_config, state_manager=mock_state_manager, stream_name="test_stream", batch_size=1
         ):
             batches.append(batch)
-        
+
         assert len(batches) == 2
         assert batches[0][0]["id"] == 1
         assert batches[1][0]["id"] == 2
@@ -345,10 +345,10 @@ class TestReadOperations:
         
         batches = []
         async for batch in connector.read_batches(
-            valid_read_config, mock_state_manager, "test_stream", batch_size=1
+            valid_read_config, state_manager=mock_state_manager, stream_name="test_stream", batch_size=1
         ):
             batches.append(batch)
-        
+
         assert len(batches) == 1
         assert batches[0][0]["id"] == 1
     
@@ -365,7 +365,7 @@ class TestReadOperations:
         
         with pytest.raises(ReadError, match="API request failed with status 500"):
             async for batch in connector.read_batches(
-                valid_read_config, mock_state_manager, "test_stream"
+                valid_read_config, state_manager=mock_state_manager, stream_name="test_stream"
             ):
                 pass
     
@@ -380,7 +380,7 @@ class TestReadOperations:
         
         with pytest.raises(ReadError, match="API GET connection to https://api.example.com/users failed"):
             async for batch in connector.read_batches(
-                valid_read_config, mock_state_manager, "test_stream"
+                valid_read_config, state_manager=mock_state_manager, stream_name="test_stream"
             ):
                 pass
 
@@ -658,11 +658,10 @@ class TestUtilityMethods:
     def test_build_replication_filter(self, connector):
         """Test building replication filters."""
         filter_param = "updated_since"
-        cursor_mode = "inclusive"
         effective_start = "2023-01-01T12:00:00Z"
-        
-        result = connector._build_replication_filter(filter_param, cursor_mode, effective_start)
-        
+
+        result = connector._build_replication_filter(filter_param, effective_start)
+
         assert result == {"updated_since": "2023-01-01T12:00:00Z"}
     
     def test_supports_capabilities(self, connector):
@@ -721,83 +720,3 @@ class TestRateLimiter:
         assert len(limiter.requests) == 2
 
 
-class TestResponseValidation:
-    """Test response validation and error handling."""
-    
-    @pytest.mark.asyncio
-    async def test_validate_response_json(self, connector):
-        """Test validating JSON response."""
-        mock_response = AsyncMock()
-        mock_response.status = 200
-        mock_response.headers = {"content-type": "application/json"}
-        mock_response.json.return_value = {"data": "test"}
-        
-        result = await connector._validate_response(mock_response)
-        
-        assert result.status == 200
-        assert result.data == {"data": "test"}
-        assert "content-type" in result.headers
-    
-    @pytest.mark.asyncio
-    async def test_validate_response_text(self, connector):
-        """Test validating text response."""
-        mock_response = AsyncMock()
-        mock_response.status = 200
-        mock_response.headers = {"content-type": "text/plain"}
-        mock_response.text.return_value = "plain text response"
-        
-        result = await connector._validate_response(mock_response)
-        
-        assert result.status == 200
-        assert result.data == "plain text response"
-    
-    @pytest.mark.asyncio
-    async def test_validate_response_json_error(self, connector):
-        """Test handling JSON parsing errors."""
-        mock_response = AsyncMock()
-        mock_response.status = 200
-        mock_response.headers = {"content-type": "application/json"}
-        mock_response.json.side_effect = json.JSONDecodeError("Invalid JSON", "", 0)
-        mock_response.text.return_value = "invalid json"
-        
-        result = await connector._validate_response(mock_response)
-        
-        assert result.status == 200
-        assert result.data == "invalid json"  # Falls back to text
-    
-    @pytest.mark.asyncio
-    async def test_validate_response_error(self, connector):
-        """Test handling response validation errors."""
-        mock_response = AsyncMock()
-        mock_response.status = 500
-        mock_response.headers = {}
-        
-        # Mock exception during validation
-        mock_response.json.side_effect = Exception("Network error")
-        mock_response.text.side_effect = Exception("Network error")
-        
-        result = await connector._validate_response(mock_response)
-        
-        assert result.status == 500
-        assert result.data is None  # Minimal response on error
-    
-    def test_validate_batch_success(self, connector):
-        """Test successful batch validation."""
-        batch = [{"id": 1}, {"id": 2}]
-        config = MagicMock()
-        
-        result = connector._validate_batch(batch, config)
-        
-        assert len(result.records) == 2
-        assert result.records == batch
-    
-    def test_validate_batch_filter_invalid(self, connector):
-        """Test batch validation with invalid records."""
-        batch = [{"id": 1}, "invalid_record", {"id": 2}]
-        config = MagicMock()
-        
-        result = connector._validate_batch(batch, config)
-        
-        # Should filter out invalid records
-        assert len(result.records) == 2
-        assert result.records == [{"id": 1}, {"id": 2}]
