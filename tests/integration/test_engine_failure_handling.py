@@ -319,7 +319,7 @@ class TestEngineStreamFailurePropagation:
             "version": "1.0",
             "source": {"connector_type": "api"},
             "destination": {"connector_type": "api"},
-            "runtime": {"batch_size": 10},
+            "runtime": {"buffer_size": 100, "batching": {"batch_size": 10, "max_concurrent_batches": 1}, "logging": {"log_level": "DEBUG", "metrics_enabled": False}, "error_handling": {"strategy": "dlq", "max_retries": 3, "retry_delay": 1}},
             "streams": {
                 "stream-001": {
                     "name": "failing-stream",
@@ -367,7 +367,7 @@ class TestEngineStreamFailurePropagation:
             "version": "1.0",
             "source": {"connector_type": "api"},
             "destination": {"connector_type": "api"},
-            "runtime": {"batch_size": 10},
+            "runtime": {"buffer_size": 100, "batching": {"batch_size": 10, "max_concurrent_batches": 1}, "logging": {"log_level": "DEBUG", "metrics_enabled": False}, "error_handling": {"strategy": "dlq", "max_retries": 3, "retry_delay": 1}},
             "streams": {
                 "stream-001": {
                     "name": "successful-stream",

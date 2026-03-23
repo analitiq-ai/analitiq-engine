@@ -75,16 +75,12 @@ class StreamingEngine:
         max_concurrent_batches: int = 10,
         buffer_size: int = 10000,
         dlq_path: str = "./deadletter/",
-        max_retries: int = 3,
-        retry_delay: float = 5.0,
     ):
         self.pipeline_id = pipeline_id
         self.batch_size = batch_size
         self.max_concurrent_batches = max_concurrent_batches
         self.buffer_size = buffer_size
         self.dlq_path = dlq_path
-        self.max_retries = max_retries
-        self.retry_delay = retry_delay
         self.semaphore = Semaphore(max_concurrent_batches)
         
         # Setup structured logging
@@ -102,7 +98,7 @@ class StreamingEngine:
             state_path = "./state"
         self.sharded_state_manager = StateManager(pipeline_id, state_path)
         self._state_manager = self.sharded_state_manager
-        self.retry_handler = RetryHandler(max_retries=max_retries, base_delay=retry_delay)
+        self.retry_handler = RetryHandler()
         self.circuit_breaker = CircuitBreaker()
         self.dlq = DeadLetterQueue(self.dlq_path)
         
@@ -356,13 +352,12 @@ class StreamingEngine:
                     error_message=error_message,
                     pipeline_name=pipeline_name,
                 )
-                if os.environ["METRICS_ENABLED"].lower() == "true":
-                    emit_metrics_log({
-                        "type": "stream",
-                        "stream_id": stream_id,
-                        **record.model_dump(),
-                    })
-                    logger.info(f"Emitted stream metrics for {stream_name}")
+                emit_metrics_log({
+                    "type": "stream",
+                    "stream_id": stream_id,
+                    **record.model_dump(),
+                })
+                logger.info(f"Emitted stream metrics for {stream_name}")
             except Exception as metrics_error:
                 logger.error(f"Failed to emit stream metrics for {stream_name}: {metrics_error}")
 
@@ -488,9 +483,8 @@ class StreamingEngine:
         logger.info(f"Stream {stream_name}: Starting gRPC load stage")
 
         batch_seq = 0
-        max_retries = self.max_retries
-        retry_base_delay = self.retry_delay
-        error_strategy = config["runtime"]["error_handling"]["strategy"]
+        max_retries = int(os.getenv("MAX_RETRIES", "3"))
+        retry_base_delay = float(os.getenv("RETRY_BASE_DELAY_MS", "500")) / 1000.0
 
         try:
             while True:
@@ -587,21 +581,20 @@ class StreamingEngine:
                             )
 
                         # Emit per-batch metrics
-                        if os.environ["METRICS_ENABLED"].lower() == "true":
-                            emit_metrics_log({
-                                "type": "batch",
-                                "run_id": run_id,
-                                "pipeline_id": self.pipeline_id,
-                                "stream_id": stream_id,
-                                "batch_seq": batch_seq,
-                                "records_written": result.records_written,
-                                "cumulative_records_processed": self.metrics.records_processed,
-                                "cumulative_records_failed": self.metrics.records_failed,
-                                "cumulative_batches_processed": self.metrics.batches_processed,
-                                "cursor": json.dumps(cursor_data).encode().hex() if cursor_data else "",
-                                "cursor_value": hwm,
-                                "timestamp": datetime.now(timezone.utc).isoformat(),
-                            })
+                        emit_metrics_log({
+                            "type": "batch",
+                            "run_id": run_id,
+                            "pipeline_id": self.pipeline_id,
+                            "stream_id": stream_id,
+                            "batch_seq": batch_seq,
+                            "records_written": result.records_written,
+                            "cumulative_records_processed": self.metrics.records_processed,
+                            "cumulative_records_failed": self.metrics.records_failed,
+                            "cumulative_batches_processed": self.metrics.batches_processed,
+                            "cursor": json.dumps(cursor_data).encode().hex() if cursor_data else "",
+                            "cursor_value": hwm,
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                        })
 
                         await output_queue.put(batch)
                         break
@@ -650,10 +643,9 @@ class StreamingEngine:
                             self.metrics.increment_batches_failed()
                             stream_metrics["records_failed"] += len(batch)
                             stream_metrics["batches_failed"] += 1
-                            if error_strategy == "dlq":
-                                await stream_dlq.send_batch(
-                                    batch, result.failure_summary, self.pipeline_id
-                                )
+                            await stream_dlq.send_batch(
+                                batch, result.failure_summary, self.pipeline_id
+                            )
                             break
 
                         # Exponential backoff
@@ -676,10 +668,10 @@ class StreamingEngine:
                         stream_metrics["records_failed"] += len(batch)
                         stream_metrics["batches_failed"] += 1
 
-                        if error_strategy == "dlq":
-                            await stream_dlq.send_batch(
-                                batch, result.failure_summary, self.pipeline_id
-                            )
+                        # Send entire batch to DLQ with record_ids for correlation
+                        await stream_dlq.send_batch(
+                            batch, result.failure_summary, self.pipeline_id
+                        )
 
                         # Raise exception to mark stream as failed
                         raise StreamProcessingError(
@@ -696,10 +688,9 @@ class StreamingEngine:
                         self.metrics.increment_batches_failed()
                         stream_metrics["records_failed"] += len(batch)
                         stream_metrics["batches_failed"] += 1
-                        if error_strategy == "dlq":
-                            await stream_dlq.send_batch(
-                                batch, f"Unknown ACK status: {result.status}", self.pipeline_id
-                            )
+                        await stream_dlq.send_batch(
+                            batch, f"Unknown ACK status: {result.status}", self.pipeline_id
+                        )
                         break
 
             # Signal end of stream
@@ -824,7 +815,7 @@ class StreamingEngine:
         host = os.getenv("DESTINATION_GRPC_HOST") or grpc_config.get("host", "localhost")
         port = int(os.getenv("DESTINATION_GRPC_PORT", "0")) or grpc_config.get("port", 50051)
         timeout = int(os.getenv("GRPC_TIMEOUT_SECONDS", "0")) or grpc_config.get("timeout_seconds", 300)
-        max_retries = self.max_retries
+        max_retries = int(os.getenv("MAX_RETRIES", "0")) or grpc_config.get("max_retries", 3)
         max_message_size = grpc_config.get("max_message_size", 16 * 1024 * 1024)
 
         logger.info(f"Creating gRPC client for {host}:{port}")

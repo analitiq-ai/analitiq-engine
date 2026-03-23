@@ -801,9 +801,13 @@ class TestDuplicateRecordsIntegration:
             "name": "Integration Test Pipeline",
             "version": "1.0",
             "runtime": {
-                "batch_size": 100,
-                "max_concurrent_batches": 1,
-                "buffer_size": 1000
+                "buffer_size": 1000,
+                "batching": {
+                    "batch_size": 100,
+                    "max_concurrent_batches": 1
+                },
+                "logging": {"log_level": "DEBUG", "metrics_enabled": False},
+                "error_handling": {"strategy": "dlq", "max_retries": 3, "retry_delay": 1}
             },
             "streams": {
                 "test-stream-001": {

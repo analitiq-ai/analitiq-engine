@@ -179,7 +179,7 @@ async def test_retry_exhaustion(
         "pipeline_id": mock_pipeline_id,
         "name": "API to warehouse",
         "version": "1.0",
-        "runtime": {"batch_size": 3, "max_concurrent_batches": 1},
+        "runtime": {"buffer_size": 100, "batching": {"batch_size": 3, "max_concurrent_batches": 1}, "logging": {"log_level": "DEBUG", "metrics_enabled": false}, "error_handling": {"strategy": "dlq", "max_retries": 3, "retry_delay": 1}},
         "streams": {
             "orders": {
                 "name": "orders",
