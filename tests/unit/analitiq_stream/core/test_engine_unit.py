@@ -124,7 +124,7 @@ class TestStreamingEngine:
             "version": "1.0",
             "source": {"connection_id": "test-src"},
             "destination": {"connection_id": "test-dst"},
-            "engine_config": {"batch_size": 10},
+            "runtime": {"batch_size": 10},
             "streams": {}  # Empty streams
         }
 

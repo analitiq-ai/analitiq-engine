@@ -33,7 +33,7 @@ def test_db_to_api_pipeline_formats_payload_for_destination(
         "pipeline_id": mock_pipeline_id,
         "name": "DB to API pipeline",
         "version": "1.0",
-        "engine_config": {"batch_size": 1, "max_concurrent_batches": 1},
+        "runtime": {"batch_size": 1, "max_concurrent_batches": 1},
         "streams": {
             stream_id: {
                 "name": "DB to API",

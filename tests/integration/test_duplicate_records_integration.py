@@ -800,7 +800,7 @@ class TestDuplicateRecordsIntegration:
             "pipeline_id": "test-integration-pipeline",
             "name": "Integration Test Pipeline",
             "version": "1.0",
-            "engine_config": {
+            "runtime": {
                 "batch_size": 100,
                 "max_concurrent_batches": 1,
                 "buffer_size": 1000

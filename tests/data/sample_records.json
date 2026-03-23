@@ -59,7 +59,7 @@
       "connection_id": "dst-connection-789",
       "endpoint_id": "dst-endpoint-012"
     },
-    "engine_config": {
+    "runtime": {
       "batch_size": 100,
       "max_concurrent_batches": 5
     }

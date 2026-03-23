@@ -35,7 +35,7 @@ def test_destination_failures_are_captured_in_dlq(
         "pipeline_id": mock_pipeline_id,
         "name": "Fault tolerance pipeline",
         "version": "1.0",
-        "engine_config": {"batch_size": 1, "max_concurrent_batches": 1},
+        "runtime": {"batch_size": 1, "max_concurrent_batches": 1},
         "streams": {
             stream_id: {
                 "name": "Failure stream",
@@ -107,7 +107,7 @@ def test_failing_stream_does_not_block_successful_stream(
         "pipeline_id": mock_pipeline_id,
         "name": "Mixed reliability pipeline",
         "version": "1.0",
-        "engine_config": {"batch_size": 1, "max_concurrent_batches": 2},
+        "runtime": {"batch_size": 1, "max_concurrent_batches": 2},
         "streams": {
             failing_stream: {
                 "name": "always failing",

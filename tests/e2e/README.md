@@ -179,7 +179,7 @@ async def test_retry_exhaustion(
         "pipeline_id": mock_pipeline_id,
         "name": "API to warehouse",
         "version": "1.0",
-        "engine_config": {"batch_size": 3, "max_concurrent_batches": 1},
+        "runtime": {"batch_size": 3, "max_concurrent_batches": 1},
         "streams": {
             "orders": {
                 "name": "orders",

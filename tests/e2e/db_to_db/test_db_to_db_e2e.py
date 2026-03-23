@@ -32,7 +32,7 @@ def test_db_to_db_pipeline_moves_multiple_tables(
         "pipeline_id": mock_pipeline_id,
         "name": "DB to DB pipeline",
         "version": "1.0",
-        "engine_config": {"batch_size": 2, "max_concurrent_batches": 2},
+        "runtime": {"batch_size": 2, "max_concurrent_batches": 2},
         "streams": {
             orders_stream: {
                 "name": "orders",

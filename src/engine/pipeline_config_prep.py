@@ -579,7 +579,9 @@ class PipelineConfigPrep:
             "status": raw_pipeline.get("status", "draft"),
             "tags": raw_pipeline.get("tags", []),
             "connections": connections_config,
-            "engine_config": raw_pipeline.get("engine_config", {}),
+            "schedule": raw_pipeline.get("schedule"),
+            "engine": raw_pipeline["engine"],
+            "runtime": raw_pipeline["runtime"],
             "created_at": raw_pipeline.get("created_at"),
             "updated_at": raw_pipeline.get("updated_at"),
         }
@@ -705,7 +707,7 @@ class PipelineConfigPrep:
             ],
             "mapping": normalized_mapping or {},
             "tags": raw_stream.get("tags"),
-            "engine_config": raw_stream.get("engine_config"),
+            "runtime": raw_stream.get("runtime"),
             "created_at": raw_stream.get("created_at"),
             "updated_at": raw_stream.get("updated_at"),
         }

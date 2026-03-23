@@ -292,7 +292,7 @@ class StreamConfig:
     is_enabled: bool = True
     mapping: MappingConfig = field(default_factory=MappingConfig)
     tags: Optional[List[str]] = None
-    engine_config: Optional[StreamEngineConfig] = None
+    runtime: Optional[StreamEngineConfig] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
 

@@ -33,7 +33,7 @@ def test_api_to_api_stream_applies_nested_field_mapping(
         "pipeline_id": mock_pipeline_id,
         "name": "API to API pipeline",
         "version": "1.0",
-        "engine_config": {"batch_size": 2, "max_concurrent_batches": 1},
+        "runtime": {"batch_size": 2, "max_concurrent_batches": 1},
         "streams": {
             stream_id: {
                 "name": "API stream",

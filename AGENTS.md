@@ -150,7 +150,7 @@ pipeline_config, stream_configs, connections, endpoints = prep.create_config()
     "source": { "conn_alias": "connection-uuid" },
     "destinations": [{ "conn_alias": "connection-uuid" }]
   },
-  "engine_config": {
+  "runtime": {
     "retry": { "max_attempts": 5, "backoff": "exponential" },
     "batching": { "batch_size": 100, "max_concurrent_batches": 3 }
   }

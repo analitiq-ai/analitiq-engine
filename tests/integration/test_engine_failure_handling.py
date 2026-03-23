@@ -319,7 +319,7 @@ class TestEngineStreamFailurePropagation:
             "version": "1.0",
             "source": {"connector_type": "api"},
             "destination": {"connector_type": "api"},
-            "engine_config": {"batch_size": 10},
+            "runtime": {"batch_size": 10},
             "streams": {
                 "stream-001": {
                     "name": "failing-stream",
@@ -367,7 +367,7 @@ class TestEngineStreamFailurePropagation:
             "version": "1.0",
             "source": {"connector_type": "api"},
             "destination": {"connector_type": "api"},
-            "engine_config": {"batch_size": 10},
+            "runtime": {"batch_size": 10},
             "streams": {
                 "stream-001": {
                     "name": "successful-stream",

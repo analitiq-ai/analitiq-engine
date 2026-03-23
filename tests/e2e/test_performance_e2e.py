@@ -33,7 +33,7 @@ def test_large_batch_processing_generates_expected_metrics(
         "pipeline_id": mock_pipeline_id,
         "name": "Performance Pipeline",
         "version": "1.0",
-        "engine_config": {"batch_size": 10, "max_concurrent_batches": 2},
+        "runtime": {"batch_size": 10, "max_concurrent_batches": 2},
         "streams": {
             stream_id: {
                 "name": "Throughput test",

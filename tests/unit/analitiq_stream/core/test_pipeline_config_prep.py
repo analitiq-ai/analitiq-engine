@@ -56,7 +56,7 @@ def valid_pipeline_config():
             ]
         },
         "streams": ["stream-456"],
-        "engine_config": {
+        "runtime": {
             "expression": {"lang": "jsonata"},
             "logging": {"log_level": "INFO"},
             "error_handling": {"max_retries": 3},

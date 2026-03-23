@@ -107,10 +107,25 @@ def base_pipeline_config() -> Dict[str, Any]:
         "pipeline_id": "test-pipeline",
         "name": "Test Pipeline",
         "version": "1.0",
-        "engine_config": {
-            "batch_size": 2,
-            "max_concurrent_batches": 1,
-            "buffer_size": 256,
+        "engine": {
+            "vcpu": 1,
+            "memory": 8192,
+            "buffer_size": 256
+        },
+        "runtime": {
+            "batching": {
+                "batch_size": 2,
+                "max_concurrent_batches": 1
+            },
+            "logging": {
+                "log_level": "INFO",
+                "metrics_enabled": False
+            },
+            "error_handling": {
+                "strategy": "dlq",
+                "max_retries": 3,
+                "retry_delay": 1
+            }
         },
         "streams": {
             "users": {
@@ -130,10 +145,6 @@ def base_pipeline_config() -> Dict[str, Any]:
                 },
                 "mapping": {},
             }
-        },
-        "monitoring": {
-            "log_level": "INFO",
-            "progress_monitoring": "disabled",
         },
     }
 
@@ -260,7 +271,7 @@ def test_pipeline_initializes_real_engine(
     )
 
     assert isinstance(pipeline.engine, StreamingEngine)
-    assert pipeline.engine.batch_size == config["engine_config"]["batch_size"]
+    assert pipeline.engine.batch_size == config["runtime"]["batch_size"]
     assert Path(pipeline.state_dir).exists()
     assert Path(pipeline.logs_dir).exists()
     assert Path(pipeline.dlq_dir).exists()

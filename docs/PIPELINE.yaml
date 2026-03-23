@@ -18,7 +18,17 @@ connections:
   # optional future:
   # - dlq: "deadletter-connection-uuid"
 
-engine_config:
+schedule:
+  type: interval # can be one of: manual, interval, cron
+  timezone: UTC
+  interval_minutes: "1440"
+
+engine:
+  vcpu: 1
+  memory: 8192
+  buffer_size: "5000"
+
+runtime:
   # Default expression configuration for all streams in this pipeline.
   # Streams may optionally override (rare).
   expression:
@@ -30,52 +40,18 @@ engine_config:
 
   logging:
     log_level: DEBUG
-    progress_monitoring: enabled
-    health_check_interval: "300"
-    checkpoint_interval: "50"
     metrics_enabled: true
 
   # Default error-handling policy; streams and individual field assignments
   # may override on a case-by-case basis.
   error_handling:
-    retry_failed_records: true
     strategy: dlq
     max_retries: "3"
     retry_delay: "5"
-    error_categories:
-      api_error: retry
-      validation_error: dlq
-      transformation_error: dlq
-      rate_limit_error: retry_with_backoff
-      default_action: dlq
-
-    supported_actions:
-      - dlq
-      - skip_record
-      - stop_stream
-      - default_value
-      - quarantine
-
-  retry:
-    max_attempts: 5
-    backoff: "exponential"
-    base_delay_ms: 500
 
   batching:
     batch_size: "100" # If not defined, then batching is not supported.
     max_concurrent_batches: "3"
-
-  engine:
-    # Optional pipeline-wide rate limiting; can be overridden per stream.
-    requests_per_second: 10
-    buffer_size: "5000"
-    vcpu: 1
-    memory: 8192
-
-  schedule:
-    type: interval # can be one of: manual, interval, cron
-    timezone: UTC
-    interval_minutes: "1440"
 
 # Optional: declare which function catalogs (and versions) the pipeline uses.
 # Your UI uses this to present transforms/functions and your runtime uses it

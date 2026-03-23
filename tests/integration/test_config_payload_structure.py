@@ -150,7 +150,7 @@ def _make_pipeline_config(source_alias, source_conn_id, dest_alias, dest_conn_id
             "source": {source_alias: source_conn_id},
             "destinations": [{dest_alias: dest_conn_id}],
         },
-        "engine_config": {},
+        "runtime": {},
     }
 
 
@@ -462,7 +462,7 @@ class TestEndToEndConfigFlow:
         assert "streams" in config_dict
         assert "source" in config_dict
         assert "destination" in config_dict
-        assert "engine_config" in config_dict
+        assert "runtime" in config_dict
 
         # Streams should not be empty
         assert len(config_dict["streams"]) > 0
