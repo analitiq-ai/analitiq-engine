@@ -60,8 +60,13 @@
       "endpoint_id": "dst-endpoint-012"
     },
     "runtime": {
-      "batch_size": 100,
-      "max_concurrent_batches": 5
+      "buffer_size": 5000,
+      "batching": {
+        "batch_size": 100,
+        "max_concurrent_batches": 5
+      },
+      "logging": {"log_level": "INFO", "metrics_enabled": true},
+      "error_handling": {"strategy": "dlq", "max_retries": 3, "retry_delay": 5}
     }
   }
 }
