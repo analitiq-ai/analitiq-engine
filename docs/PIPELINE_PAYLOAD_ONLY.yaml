@@ -14,13 +14,13 @@ connections:
   # optional future:
   # - dlq: "deadletter-connection-uuid"
 
-engine_config:
+schedule:
+  type: interval # can be one of: manual, interval, cron
+  timezone: UTC
+  interval_minutes: "1440"
+
+runtime:
   # Default error-handling policy; streams and individual field assignments
   # may override on a case-by-case basis.
   error_handling:
     strategy: dlq
-
-  schedule:
-    type: interval # can be one of: manual, interval, cron
-    timezone: UTC
-    interval_minutes: "1440"

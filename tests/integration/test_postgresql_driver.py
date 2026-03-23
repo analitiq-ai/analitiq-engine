@@ -8,14 +8,21 @@ from sqlalchemy import text
 from src.shared.database_utils import create_database_engine, acquire_connection
 
 
-def _postgres_configured() -> bool:
-    """Check if PostgreSQL is configured for testing."""
-    return bool(os.getenv("POSTGRES_PASSWORD") or os.getenv("TEST_POSTGRES_URL"))
+def _postgres_available() -> bool:
+    """Check if PostgreSQL is reachable for testing."""
+    import socket
+    host = os.getenv("POSTGRES_HOST", "localhost")
+    port = int(os.getenv("POSTGRES_PORT", "5432"))
+    try:
+        with socket.create_connection((host, port), timeout=1):
+            return True
+    except OSError:
+        return False
 
 
 pytestmark = pytest.mark.skipif(
-    not _postgres_configured(),
-    reason="PostgreSQL not configured (set POSTGRES_PASSWORD)"
+    not _postgres_available(),
+    reason="PostgreSQL not reachable"
 )
 
 

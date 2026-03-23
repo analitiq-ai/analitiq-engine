@@ -2,7 +2,6 @@
 
 import logging
 import os
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
@@ -76,15 +75,17 @@ class Pipeline:
         # Setup logging for this pipeline
         self._setup_pipeline_logging(pipeline_id)
 
-        ec = pipeline_config.get("engine_config", {})
-        batching = ec.get("batching", {})
-        engine_res = ec.get("engine", {})
+        runtime = pipeline_config["runtime"]
+        batching = runtime["batching"]
+        error_handling = runtime["error_handling"]
         self.engine = StreamingEngine(
             pipeline_id=pipeline_id,
-            batch_size=batching.get("batch_size", 100),
-            max_concurrent_batches=batching.get("max_concurrent_batches", 3),
-            buffer_size=engine_res.get("buffer_size", 5000),
+            batch_size=batching["batch_size"],
+            max_concurrent_batches=batching["max_concurrent_batches"],
+            buffer_size=runtime["buffer_size"],
             dlq_path=self.dlq_dir,
+            max_retries=error_handling["max_retries"],
+            retry_delay=error_handling["retry_delay"],
         )
 
     def _ensure_directories(self):
@@ -114,10 +115,7 @@ class Pipeline:
             '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
         )
 
-        # Set log level from environment (preferred) or config
-        ec = self.pipeline_config.get("engine_config", {})
-        logging_config = ec.get("logging", {})
-        log_level = os.getenv("LOG_LEVEL", logging_config.get("log_level", "INFO"))
+        log_level = os.environ["LOG_LEVEL"]
 
         # Attach handler to src package logger (parent of all src.* modules)
         root_package_logger = logging.getLogger("src")
@@ -314,9 +312,6 @@ class Pipeline:
             pipeline_source_config = {}
             pipeline_dest_config = {}
 
-        ec = self.pipeline_config.get("engine_config", {})
-        logging_config = ec.get("logging", {})
-
         return {
             "pipeline_id": self.pipeline_config["pipeline_id"],
             "name": self.pipeline_config.get("name", ""),
@@ -327,84 +322,24 @@ class Pipeline:
             "source": pipeline_source_config,
             "destination": pipeline_dest_config,
             "streams": streams,
-            "engine_config": ec,
-            "monitoring": {
-                "log_level": logging_config.get("log_level", "INFO"),
-                "metrics_enabled": logging_config.get("metrics_enabled", True),
-                "checkpoint_interval": logging_config.get("checkpoint_interval", 50),
-                "progress_monitoring": logging_config.get("progress_monitoring", "enabled"),
-            },
+            "runtime": self.pipeline_config["runtime"],
             "connectors": self.connectors,
         }
 
     async def run(self):
-        """Execute the pipeline and optional progress monitoring."""
+        """Execute the pipeline."""
         pipeline_id = self.pipeline_config["pipeline_id"]
 
-        # Check if progress monitoring is enabled
-        ec = self.pipeline_config.get("engine_config", {})
-        logging_config = ec.get("logging", {})
-        progress_monitoring = logging_config.get("progress_monitoring", "enabled") == "enabled"
-
-        # Build config dict for engine
         config_dict = self._build_config_dict()
 
         try:
-            if progress_monitoring:
-                await self._run_with_progress_monitoring(config_dict)
-            else:
-                await self.engine.stream_data(config_dict)
+            await self.engine.stream_data(config_dict)
             logger.info(f"Pipeline {pipeline_id} completed successfully")
         except Exception as e:
             logger.debug(f"Pipeline {pipeline_id} failed: {str(e)}")
             raise
         finally:
             self._close_log_handlers()
-
-    async def _run_with_progress_monitoring(self, config_dict: Dict[str, Any]):
-        """Run pipeline with progress monitoring enabled."""
-        import asyncio
-
-        pipeline_id = self.pipeline_config["pipeline_id"]
-        logger.info(f"Starting pipeline {pipeline_id} with progress monitoring")
-
-        # Start pipeline in background
-        pipeline_task = asyncio.create_task(self.engine.stream_data(config_dict))
-
-        # Monitoring loop
-        last_processed = 0
-        start_time = datetime.now()
-
-        logger.info("Monitoring pipeline progress (updates every 5 seconds)...")
-
-        while not pipeline_task.done():
-            await asyncio.sleep(5)
-
-            try:
-                metrics = self.get_metrics()
-                current_processed = getattr(metrics, 'records_processed', 0)
-
-                if current_processed > last_processed:
-                    elapsed = datetime.now() - start_time
-                    rate = current_processed / max(elapsed.total_seconds(), 1)
-                    logger.info(f"  {current_processed} records processed ({rate:.1f}/sec)")
-                    last_processed = current_processed
-
-            except Exception as e:
-                logger.debug(f"Progress monitoring error: {e}")
-
-        await pipeline_task
-
-        # Final summary
-        final_metrics = self.get_metrics()
-        total_time = datetime.now() - start_time
-
-        logger.info(f"Pipeline {pipeline_id} monitoring completed")
-        logger.info(f"Total time: {total_time}")
-        logger.info(f"Final records processed: {getattr(final_metrics, 'records_processed', 0)}")
-
-        if getattr(final_metrics, 'records_failed', 0) > 0:
-            logger.warning(f"Failed records: {getattr(final_metrics, 'records_failed', 0)}")
 
     def get_metrics(self) -> Dict[str, Any]:
         """Get pipeline execution metrics."""

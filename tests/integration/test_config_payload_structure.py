@@ -150,7 +150,14 @@ def _make_pipeline_config(source_alias, source_conn_id, dest_alias, dest_conn_id
             "source": {source_alias: source_conn_id},
             "destinations": [{dest_alias: dest_conn_id}],
         },
-        "engine_config": {},
+        "schedule": {"type": "interval", "timezone": "UTC", "interval_minutes": 1440},
+        "engine": {"vcpu": 1, "memory": 8192},
+        "runtime": {
+            "buffer_size": 5000,
+            "batching": {"batch_size": 100, "max_concurrent_batches": 3},
+            "logging": {"log_level": "INFO", "metrics_enabled": True},
+            "error_handling": {"strategy": "dlq", "max_retries": 3, "retry_delay": 5},
+        },
     }
 
 
@@ -462,7 +469,7 @@ class TestEndToEndConfigFlow:
         assert "streams" in config_dict
         assert "source" in config_dict
         assert "destination" in config_dict
-        assert "engine_config" in config_dict
+        assert "runtime" in config_dict
 
         # Streams should not be empty
         assert len(config_dict["streams"]) > 0

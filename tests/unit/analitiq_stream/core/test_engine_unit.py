@@ -124,7 +124,7 @@ class TestStreamingEngine:
             "version": "1.0",
             "source": {"connection_id": "test-src"},
             "destination": {"connection_id": "test-dst"},
-            "engine_config": {"batch_size": 10},
+            "runtime": {"buffer_size": 100, "batching": {"batch_size": 10, "max_concurrent_batches": 1}, "logging": {"log_level": "DEBUG", "metrics_enabled": False}, "error_handling": {"strategy": "dlq", "max_retries": 3, "retry_delay": 1}},
             "streams": {}  # Empty streams
         }
 

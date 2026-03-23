@@ -183,14 +183,23 @@ def mock_pipeline_id():
 
 
 @pytest.fixture
-def base_engine_config():
+def base_runtime():
     """Base engine configuration for tests."""
     return {
-        "batch_size": 10,
-        "max_concurrent_batches": 2,
         "buffer_size": 100,
-        "checkpoint_interval": 5,
-        "backpressure_threshold": 80
+        "batching": {
+            "batch_size": 10,
+            "max_concurrent_batches": 2
+        },
+        "logging": {
+            "log_level": "DEBUG",
+            "metrics_enabled": True
+        },
+        "error_handling": {
+            "strategy": "dlq",
+            "max_retries": 3,
+            "retry_delay": 1
+        }
     }
 
 

@@ -58,7 +58,7 @@ class PipelineOrchestrator:
 class StreamingEngine:
     """Core stream processing with modern architecture."""
     
-    def __init__(self, pipeline_id, engine_config: Optional[EngineConfig] = None):
+    def __init__(self, pipeline_id, runtime: Optional[EngineConfig] = None):
         # Validates engine configuration using Pydantic
         # Initializes orchestrator and fault tolerance components
         # Sets up structured logging with pipeline context
@@ -456,7 +456,7 @@ class StreamingEngine:
 
 ```python
 # Pydantic model testing
-def test_engine_config_validation():
+def test_runtime_validation():
     config = EngineConfig(batch_size=1000, max_concurrent_batches=5)
     assert config.batch_size == 1000
     
@@ -504,8 +504,8 @@ def test_stream_execution_error():
 engine = StreamingEngine("pipeline-id", batch_size=1000)
 
 # New approach  
-engine_config = EngineConfig(batch_size=1000, max_concurrent_batches=5)
-engine = StreamingEngine("pipeline-id", engine_config=engine_config)
+runtime = EngineConfig(batch_size=1000, max_concurrent_batches=5)
+engine = StreamingEngine("pipeline-id", runtime=runtime)
 
 # Access new metrics
 metrics = engine.orchestrator.get_current_metrics()

@@ -33,7 +33,7 @@ def test_api_to_db_pipeline_persists_transformed_payloads(
         "pipeline_id": mock_pipeline_id,
         "name": "API to DB pipeline",
         "version": "1.0",
-        "engine_config": {"batch_size": 2, "max_concurrent_batches": 1},
+        "runtime": {"buffer_size": 100, "batching": {"batch_size": 2, "max_concurrent_batches": 1}, "logging": {"log_level": "DEBUG", "metrics_enabled": False}, "error_handling": {"strategy": "dlq", "max_retries": 3, "retry_delay": 1}},
         "streams": {
             stream_id: {
                 "name": "API to DB",

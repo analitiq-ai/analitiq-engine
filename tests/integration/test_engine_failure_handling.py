@@ -77,6 +77,13 @@ def sample_stream_config():
             "host": "https://dest.example.com",
         },
         "cursor_field": "updated_at",
+        "runtime": {
+            "error_handling": {
+                "strategy": "dlq",
+                "max_retries": 3,
+                "retry_delay": 1,
+            },
+        },
     }
 
 
@@ -132,6 +139,8 @@ class TestEngineFatalFailureHandling:
         stream_dlq = DeadLetterQueue(f"{temp_dir}/dlq")
 
         # Execute and expect exception
+        stream_metrics = {"records_processed": 0, "records_failed": 0, "batches_processed": 0, "batches_failed": 0}
+
         with pytest.raises(StreamProcessingError) as exc_info:
             await engine._load_stage(
                 input_queue=input_queue,
@@ -140,6 +149,7 @@ class TestEngineFatalFailureHandling:
                 config=sample_stream_config,
                 stream_dlq=stream_dlq,
                 run_id="test-run-001",
+                stream_metrics=stream_metrics,
             )
 
         # Assert: exception contains failure info
@@ -180,15 +190,19 @@ class TestEngineFatalFailureHandling:
 
         stream_dlq = DeadLetterQueue(f"{temp_dir}/dlq")
 
+        stream_metrics = {"records_processed": 0, "records_failed": 0, "batches_processed": 0, "batches_failed": 0}
+
         # Execute - should NOT raise
-        await engine._load_stage(
-            input_queue=input_queue,
-            output_queue=output_queue,
-            grpc_client=mock_grpc_client,
-            config=sample_stream_config,
-            stream_dlq=stream_dlq,
-            run_id="test-run-001",
-        )
+        with patch.dict("os.environ", {"METRICS_ENABLED": "false"}):
+            await engine._load_stage(
+                input_queue=input_queue,
+                output_queue=output_queue,
+                grpc_client=mock_grpc_client,
+                config=sample_stream_config,
+                stream_dlq=stream_dlq,
+                run_id="test-run-001",
+                stream_metrics=stream_metrics,
+            )
 
         # Assert: batch was forwarded to output queue
         output_batch = await output_queue.get()
@@ -231,6 +245,8 @@ class TestEngineFatalFailureHandling:
         stream_dlq = DeadLetterQueue(f"{temp_dir}/dlq")
 
         # Patch env vars for faster retries
+        stream_metrics = {"records_processed": 0, "records_failed": 0, "batches_processed": 0, "batches_failed": 0}
+
         with patch.dict("os.environ", {"MAX_RETRIES": "2", "RETRY_BASE_DELAY_MS": "10"}):
             # Execute - should NOT raise (goes to DLQ after retries)
             await engine._load_stage(
@@ -240,11 +256,12 @@ class TestEngineFatalFailureHandling:
                 config=sample_stream_config,
                 stream_dlq=stream_dlq,
                 run_id="test-run-001",
+                stream_metrics=stream_metrics,
             )
 
         # Assert: send_batch was called multiple times (initial + retries)
-        # Initial call + 2 retries = 3 calls
-        assert mock_grpc_client.send_batch.call_count == 3
+        # Initial call + 3 retries (default max_retries=3) = 4 calls
+        assert mock_grpc_client.send_batch.call_count == 4
 
     @pytest.mark.asyncio
     async def test_metrics_updated_on_fatal_failure(
@@ -282,6 +299,8 @@ class TestEngineFatalFailureHandling:
 
         stream_dlq = DeadLetterQueue(f"{temp_dir}/dlq")
 
+        stream_metrics = {"records_processed": 0, "records_failed": 0, "batches_processed": 0, "batches_failed": 0}
+
         # Execute
         with pytest.raises(StreamProcessingError):
             await engine._load_stage(
@@ -291,6 +310,7 @@ class TestEngineFatalFailureHandling:
                 config=sample_stream_config,
                 stream_dlq=stream_dlq,
                 run_id="test-run-001",
+                stream_metrics=stream_metrics,
             )
 
         # Assert: metrics were updated
@@ -319,7 +339,7 @@ class TestEngineStreamFailurePropagation:
             "version": "1.0",
             "source": {"connector_type": "api"},
             "destination": {"connector_type": "api"},
-            "engine_config": {"batch_size": 10},
+            "runtime": {"buffer_size": 100, "batching": {"batch_size": 10, "max_concurrent_batches": 1}, "logging": {"log_level": "DEBUG", "metrics_enabled": False}, "error_handling": {"strategy": "dlq", "max_retries": 3, "retry_delay": 1}},
             "streams": {
                 "stream-001": {
                     "name": "failing-stream",
@@ -367,7 +387,7 @@ class TestEngineStreamFailurePropagation:
             "version": "1.0",
             "source": {"connector_type": "api"},
             "destination": {"connector_type": "api"},
-            "engine_config": {"batch_size": 10},
+            "runtime": {"buffer_size": 100, "batching": {"batch_size": 10, "max_concurrent_batches": 1}, "logging": {"log_level": "DEBUG", "metrics_enabled": False}, "error_handling": {"strategy": "dlq", "max_retries": 3, "retry_delay": 1}},
             "streams": {
                 "stream-001": {
                     "name": "successful-stream",
@@ -446,6 +466,8 @@ class TestEngineDLQOnFailure:
         dlq_path = f"{temp_dir}/dlq"
         stream_dlq = DeadLetterQueue(dlq_path)
 
+        stream_metrics = {"records_processed": 0, "records_failed": 0, "batches_processed": 0, "batches_failed": 0}
+
         # Execute
         with pytest.raises(StreamProcessingError):
             await engine._load_stage(
@@ -455,6 +477,7 @@ class TestEngineDLQOnFailure:
                 config=sample_stream_config,
                 stream_dlq=stream_dlq,
                 run_id="test-run-001",
+                stream_metrics=stream_metrics,
             )
 
         # Assert: DLQ file was created

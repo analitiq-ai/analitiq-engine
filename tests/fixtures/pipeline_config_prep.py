@@ -350,7 +350,7 @@ def sample_invalid_pipeline_config():
         "pipeline_id": "invalid-pipeline",
         "name": "Invalid Pipeline",
         # Missing required fields like source, destination, streams
-        "engine_config": {
+        "runtime": {
             "batch_size": "not_a_number"  # Invalid type
         }
     }
@@ -408,14 +408,29 @@ def multi_stream_pipeline_config():
             "connection_id": "database-host-id",
             "name": "Analytics Database"
         },
-        "engine_config": {
-            "batch_size": 500,
-            "max_concurrent_batches": 5,
+        "schedule": {
+            "type": "cron",
+            "cron_expression": "0 */6 * * *",
+            "timezone": "UTC"
+        },
+        "engine": {
+            "vcpu": 1,
+            "memory": 8192
+        },
+        "runtime": {
             "buffer_size": 10000,
-            "schedule": {
-                "type": "cron",
-                "cron_expression": "0 */6 * * *",
-                "timezone": "UTC"
+            "batching": {
+                "batch_size": 500,
+                "max_concurrent_batches": 5
+            },
+            "logging": {
+                "log_level": "INFO",
+                "metrics_enabled": True
+            },
+            "error_handling": {
+                "strategy": "dlq",
+                "max_retries": 5,
+                "retry_delay": 10
             }
         },
         "streams": {
@@ -454,29 +469,4 @@ def multi_stream_pipeline_config():
                 }
             }
         },
-        "error_handling": {
-            "strategy": "dlq",
-            "retry_failed_records": True,
-            "max_retries": 5,
-            "retry_delay": 10,
-            "exponential_backoff": True,
-            "error_categories": {
-                "validation_error": "dlq",
-                "transformation_error": "dlq",
-                "api_error": "retry",
-                "rate_limit_error": "retry_with_backoff",
-                "authentication_error": "fail_fast"
-            }
-        },
-        "monitoring": {
-            "metrics_enabled": True,
-            "log_level": "INFO",
-            "checkpoint_interval": 100,
-            "health_check_interval": 180,
-            "progress_monitoring": "enabled",
-            "alerts": {
-                "error_rate_threshold": 0.05,
-                "latency_threshold_ms": 5000
-            }
-        }
     }

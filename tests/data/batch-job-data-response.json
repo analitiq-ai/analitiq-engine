@@ -29,14 +29,29 @@
       "tags": [],
       "updated_at": "2026-01-07T10:12:14.665664",
       "version": 1,
-      "engine_config": {
-        "schedule": {
-          "type": "interval",
-          "timezone": "UTC",
-          "interval_minutes": "1440"
+      "schedule": {
+        "type": "interval",
+        "timezone": "UTC",
+        "interval_minutes": "1440"
+      },
+      "engine": {
+        "vcpu": 1,
+        "memory": 8192
+      },
+      "runtime": {
+        "buffer_size": 5000,
+        "batching": {
+          "batch_size": 100,
+          "max_concurrent_batches": 3
+        },
+        "logging": {
+          "log_level": "INFO",
+          "metrics_enabled": true
         },
         "error_handling": {
-          "strategy": "dlq"
+          "strategy": "dlq",
+          "max_retries": 3,
+          "retry_delay": 5
         }
       }
     },

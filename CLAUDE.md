@@ -144,9 +144,13 @@ pipeline_config, stream_configs, connections, endpoints = prep.create_config()
     "source": { "conn_alias": "connection-uuid" },
     "destinations": [{ "conn_alias": "connection-uuid" }]
   },
-  "engine_config": {
-    "retry": { "max_attempts": 5, "backoff": "exponential" },
-    "batching": { "batch_size": 100, "max_concurrent_batches": 3 }
+  "schedule": { "type": "interval", "timezone": "UTC", "interval_minutes": 1440 },
+  "engine": { "vcpu": 1, "memory": 8192 },
+  "runtime": {
+    "buffer_size": 5000,
+    "batching": { "batch_size": 100, "max_concurrent_batches": 3 },
+    "logging": { "log_level": "INFO", "metrics_enabled": true },
+    "error_handling": { "strategy": "dlq", "max_retries": 3, "retry_delay": 5 }
   }
 }
 ```
@@ -420,13 +424,13 @@ docker build -t analitiq-stream . && docker push $AWS_ACCOUNT_ID.dkr.ecr.eu-cent
 
 ## PR Review Process:
 
-1. Use `@"pr-review-executor (agent)"` to review the PR after you have implemented all changes.
+1. Use `/pr-review-toolkit` to review the PR after you have implemented all changes.
 2. Wait for feedback from the review executor.
 3. Determine if the raised issues are legitimate or not.
    a. if the issue is legitimate and relevant to the PR, fix it.
    b. if the issue is outside the scope of the PR, check if there is a related issue in the GitHub issue tracker. If not, create a new issue in GitHub and move on.
    c. If the issue is not a legitimate problem, summarize your thoughts on the point and move on.
 4. Once you fixed all issues that need fixing, commit fixes, push to the branch.
-5. Use `@"pr-review-executor (agent)"` to review again
+5. Use `/pr-review-toolkit` to review again
 6. Continue doing this cycle until the PR is approved by the review executor.
 7. Once the PR is approved, run the tests to make sure they all pass.

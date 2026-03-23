@@ -5,9 +5,13 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import os
 import shutil
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
+
+os.environ.setdefault("LOG_LEVEL", "DEBUG")
+os.environ.setdefault("METRICS_ENABLED", "false")
 
 import pytest
 
@@ -76,10 +80,8 @@ def in_memory_connectors(monkeypatch):
 
 
 @pytest.fixture
-def temp_directories(tmp_path, monkeypatch):
+def temp_directories(tmp_path):
     """Use an isolated filesystem layout for stateful components."""
-
-    from src import config as global_config
 
     state_dir = tmp_path / "state"
     deadletter_dir = tmp_path / "deadletter"
@@ -87,10 +89,6 @@ def temp_directories(tmp_path, monkeypatch):
 
     for path in (state_dir, deadletter_dir, logs_dir):
         path.mkdir(parents=True, exist_ok=True)
-
-    monkeypatch.setitem(global_config.DIRECTORIES, "state", state_dir)
-    monkeypatch.setitem(global_config.DIRECTORIES, "deadletter", deadletter_dir)
-    monkeypatch.setitem(global_config.DIRECTORIES, "logs", logs_dir)
 
     return {
         "state": state_dir,
@@ -107,10 +105,25 @@ def base_pipeline_config() -> Dict[str, Any]:
         "pipeline_id": "test-pipeline",
         "name": "Test Pipeline",
         "version": "1.0",
-        "engine_config": {
-            "batch_size": 2,
-            "max_concurrent_batches": 1,
+        "engine": {
+            "vcpu": 1,
+            "memory": 8192
+        },
+        "runtime": {
             "buffer_size": 256,
+            "batching": {
+                "batch_size": 2,
+                "max_concurrent_batches": 1
+            },
+            "logging": {
+                "log_level": "INFO",
+                "metrics_enabled": False
+            },
+            "error_handling": {
+                "strategy": "dlq",
+                "max_retries": 3,
+                "retry_delay": 1
+            }
         },
         "streams": {
             "users": {
@@ -130,10 +143,6 @@ def base_pipeline_config() -> Dict[str, Any]:
                 },
                 "mapping": {},
             }
-        },
-        "monitoring": {
-            "log_level": "INFO",
-            "progress_monitoring": "disabled",
         },
     }
 
@@ -260,7 +269,7 @@ def test_pipeline_initializes_real_engine(
     )
 
     assert isinstance(pipeline.engine, StreamingEngine)
-    assert pipeline.engine.batch_size == config["engine_config"]["batch_size"]
+    assert pipeline.engine.batch_size == config["runtime"]["batching"]["batch_size"]
     assert Path(pipeline.state_dir).exists()
     assert Path(pipeline.logs_dir).exists()
     assert Path(pipeline.dlq_dir).exists()

@@ -76,14 +76,29 @@ def sample_pipeline_config():
             "connection_id": "7c1a69eb-239f-45d4-b6c2-3ad4c6e89cfa",
             "name": "SevDesk Platform"
         },
-        "engine_config": {
-            "batch_size": 100,
-            "max_concurrent_batches": 3,
+        "schedule": {
+            "type": "interval",
+            "interval_minutes": 60,
+            "timezone": "UTC"
+        },
+        "engine": {
+            "vcpu": 1,
+            "memory": 8192
+        },
+        "runtime": {
             "buffer_size": 5000,
-            "schedule": {
-                "type": "interval",
-                "interval_minutes": 60,
-                "timezone": "UTC"
+            "batching": {
+                "batch_size": 100,
+                "max_concurrent_batches": 3
+            },
+            "logging": {
+                "log_level": "DEBUG",
+                "metrics_enabled": True
+            },
+            "error_handling": {
+                "strategy": "dlq",
+                "max_retries": 3,
+                "retry_delay": 5
             }
         },
         "streams": {
@@ -140,25 +155,6 @@ def sample_pipeline_config():
                 }
             }
         },
-        "error_handling": {
-            "strategy": "dlq",
-            "retry_failed_records": True,
-            "max_retries": 3,
-            "retry_delay": 5,
-            "error_categories": {
-                "validation_error": "dlq",
-                "transformation_error": "dlq",
-                "api_error": "retry",
-                "rate_limit_error": "retry_with_backoff"
-            }
-        },
-        "monitoring": {
-            "metrics_enabled": True,
-            "log_level": "DEBUG",
-            "checkpoint_interval": 50,
-            "health_check_interval": 300,
-            "progress_monitoring": "enabled"
-        }
     }
 
 

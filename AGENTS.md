@@ -150,9 +150,13 @@ pipeline_config, stream_configs, connections, endpoints = prep.create_config()
     "source": { "conn_alias": "connection-uuid" },
     "destinations": [{ "conn_alias": "connection-uuid" }]
   },
-  "engine_config": {
-    "retry": { "max_attempts": 5, "backoff": "exponential" },
-    "batching": { "batch_size": 100, "max_concurrent_batches": 3 }
+  "schedule": { "type": "interval", "timezone": "UTC", "interval_minutes": 1440 },
+  "engine": { "vcpu": 1, "memory": 8192 },
+  "runtime": {
+    "buffer_size": 5000,
+    "batching": { "batch_size": 100, "max_concurrent_batches": 3 },
+    "logging": { "log_level": "INFO", "metrics_enabled": true },
+    "error_handling": { "strategy": "dlq", "max_retries": 3, "retry_delay": 5 }
   }
 }
 ```
