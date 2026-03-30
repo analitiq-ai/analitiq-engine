@@ -2,36 +2,35 @@
 Pipeline Configuration Preparation
 
 This module provides the PipelineConfigPrep class that handles loading and merging
-of pipeline and stream configurations from local filesystem.
+of pipeline and stream configurations from a modular filesystem layout.
 
 Architecture:
 
-Configuration is loaded from a SINGLE consolidated file per pipeline:
-- Consolidated file: {paths.pipelines}/{pipeline_id}.json
-- Secrets: {paths.secrets}/{connection_id}.json (kept separate for security)
+Configuration is assembled at runtime from separate files:
+- Manifest: {paths.pipelines}/manifest.json (central index of all pipelines)
+- Pipeline: {paths.pipelines}/{id}/pipeline.json (lightweight references)
+- Streams: {paths.pipelines}/{id}/streams/{stream_id}.json (individual stream files)
+- Connectors: {paths.connectors}/{slug}/definition/connector.json (downloaded from GitHub)
+- Connections: {paths.connections}/{alias}/connection.json (user-created)
+- Public endpoints: {paths.connectors}/{slug}/definition/endpoints/{name}.json
+- Private endpoints: {paths.connections}/{alias}/endpoints/{name}.json
+- Secrets: {paths.connections}/{alias}/.secrets/credentials.json
 
-The consolidated file format:
-{
-    "pipeline": { ... },        # Full pipeline object
-    "connections": [ ... ],     # List of connection objects (no secrets)
-    "connectors": [ ... ],      # List of connector metadata
-    "endpoints": [ ... ],       # List of endpoint definitions
-    "streams": [ ... ]          # List of stream configurations
-}
-
-In cloud environments (dev/prod):
-1. config_fetcher.py fetches all data from Lambda and writes consolidated file + secrets
-2. PipelineConfigPrep then loads from the consolidated file
-
-The ENV variable controls storage backends (state, logs, DLQ, metrics), NOT config loading.
+Endpoint references use scoped path format:
+- "connector:{slug}/{endpoint_name}" for public endpoints
+- "connection:{alias}/{endpoint_name}" for private endpoints
 
 Loading Flow:
-1. Load paths from analitiq.yaml (only pipelines and secrets paths needed)
-2. Load consolidated config from {paths.pipelines}/{pipeline_id}.json
-3. Extract pipeline, connections, connectors, endpoints, streams from consolidated file
-4. For each connection:
-   - Load secrets from {paths.secrets}/{connection_id}.json
-   - Expand ${placeholder} values with secrets
+1. Discover project root by locating pipelines/manifest.json
+2. Load manifest.json, find entry matching PIPELINE_ID, enforce status=active
+3. Load pipeline.json from the path specified in the manifest entry
+4. Load individual stream files from {pipeline_dir}/streams/{stream_id}.json
+5. For each connection alias in pipeline.connections:
+   - Load connection config from connections/{alias}/connection.json
+   - Load connector definition from connectors/{slug}/definition/connector.json
+   - Create ConnectionRuntime with per-connection secrets resolver
+6. For each stream, resolve endpoint_ref to endpoint JSON
+7. Build stream configs with resolved connections and endpoints
 """
 import json
 import logging
@@ -39,17 +38,12 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from src.config import load_analitiq_config, validate_consolidated_config
-
-
-def _get_connection_uuid(connections: Dict[str, Any], alias: str) -> Optional[str]:
-    """Look up connection UUID by alias from a connections dict."""
-    if alias in connections.get("source", {}):
-        return connections["source"][alias]
-    for dest in connections.get("destinations", []):
-        if alias in dest:
-            return dest[alias]
-    return None
+from src.config import (
+    validate_pipeline_config,
+    validate_connection_config,
+)
+from src.config.endpoint_resolver import resolve_endpoint_ref
+from src.config.connection_loader import load_connection, load_connector_for_connection
 from src.secrets import (
     SecretsResolver,
     LocalFileSecretsResolver,
@@ -62,447 +56,403 @@ from src.shared.connection_runtime import ConnectionRuntime
 logger = logging.getLogger(__name__)
 
 
+VALID_CONNECTOR_TYPES = {"api", "database", "file", "s3", "stdout"}
+
 
 class PipelineConfigPrep:
     """
     Orchestrates loading and preparation of pipeline and stream configurations.
 
-    Configuration is loaded from a SINGLE consolidated file per pipeline:
-    - Consolidated file: {paths.pipelines}/{pipeline_id}.json
-    - Secrets: {paths.secrets}/{connection_id}.json
+    Configuration is discovered via manifest.json and assembled from modular files:
+    - Manifest: {paths.pipelines}/manifest.json
+    - Pipeline: {paths.pipelines}/{id}/pipeline.json
+    - Streams: {paths.pipelines}/{id}/streams/{stream_id}.json
+    - Connections: {paths.connections}/{alias}/connection.json
+    - Connectors: {paths.connectors}/{slug}/definition/connector.json
+    - Endpoints: resolved via scoped endpoint_ref strings
 
-    The consolidated file contains:
-    - pipeline: Full pipeline object with connections structure
-    - connections: List of connection objects (no secrets)
-    - connectors: List of connector metadata
-    - endpoints: List of endpoint definitions
-    - streams: List of stream configurations
-
-    Connection format in pipeline config:
-    - connections.source.{alias}: "connection_id" (string)
-    - connections.destinations[].{alias}: "connection_id" (string)
-
-    In cloud environments (dev/prod), config_fetcher.py writes the consolidated
-    file and secrets before this class runs.
-
-    The ENV variable only affects storage backends (state, logs, DLQ, metrics),
-    not config loading.
+    Connection aliases (directory names) serve as connection identifiers.
+    Secrets are colocated at connections/{alias}/.secrets/credentials.json.
+    Only pipelines with status 'active' in the manifest can be executed.
     """
 
     def __init__(self):
         """Initialize PipelineConfigPrep."""
-        # Load paths from analitiq.yaml (only pipelines and secrets needed)
-        self._paths = self._load_paths_from_analitiq_yaml()
+        self._paths = self._discover_paths()
 
-        # Cache for consolidated config (loaded lazily)
-        self._consolidated_config: Optional[Dict[str, Any]] = None
+        # Cache for pipeline file (loaded lazily)
+        self._pipeline_file: Optional[Dict[str, Any]] = None
+
+        # Manifest entry and pipeline directory (set during pipeline loading)
+        self._manifest_entry: Optional[Dict[str, Any]] = None
+        self._pipeline_dir: Optional[Path] = None
 
         # Cache for resolved connections and endpoints
         self._resolved_connections: Dict[str, ConnectionRuntime] = {}
         self._resolved_endpoints: Dict[str, Dict[str, Any]] = {}
 
-        # Secrets resolver for late-binding (initialized lazily)
-        self._secrets_resolver: Optional[SecretsResolver] = None
-        self._secrets_dir: Optional[Path] = None
+        # Cache for loaded connectors (keyed by slug)
+        self._loaded_connectors: Dict[str, Dict[str, Any]] = {}
 
         self.pipeline_id = os.getenv("PIPELINE_ID", "")
         if not self.pipeline_id:
             raise RuntimeError("PIPELINE_ID environment variable is required")
 
-        # Validate environment
         self.validate_environment()
 
         logger.info(f"Initialized PipelineConfigPrep for pipeline: {self.pipeline_id}")
-        logger.info(f"Using paths from analitiq.yaml: pipelines={self._paths['pipelines']}, "
-                    f"secrets={self._paths['secrets']}")
+        logger.info(
+            f"Using paths: connectors={self._paths['connectors']}, "
+            f"connections={self._paths['connections']}, "
+            f"pipelines={self._paths['pipelines']}"
+        )
 
-    def _load_paths_from_analitiq_yaml(self) -> Dict[str, Path]:
-        """
-        Load directory paths from analitiq.yaml (single source of truth).
+    def _discover_paths(self) -> Dict[str, Path]:
+        """Discover project root and derive convention-based directory paths.
 
-        Only requires 'pipelines' and 'secrets' paths since configuration
-        is now loaded from a single consolidated file.
+        Searches for pipelines/manifest.json starting from CWD and walking
+        up parent directories. The project root is the parent of the
+        pipelines/ directory. connectors/ and connections/ are expected
+        as siblings of pipelines/.
 
         Returns:
-            Dict with Path objects for pipelines and secrets
+            Dict with Path objects for connectors, connections, and pipelines
+        """
+        current = Path.cwd()
+        for _ in range(10):
+            candidate = current / "pipelines" / "manifest.json"
+            if candidate.exists():
+                project_root = current
+                return {
+                    "connectors": project_root / "connectors",
+                    "connections": project_root / "connections",
+                    "pipelines": project_root / "pipelines",
+                }
+            if current.parent == current:
+                break
+            current = current.parent
+
+        raise RuntimeError(
+            "Could not find pipelines/manifest.json in current or parent directories. "
+            "Ensure you are running from the project root."
+        )
+
+    def _create_secrets_resolver(self, alias: str) -> SecretsResolver:
+        """Create a secrets resolver for a specific connection.
+
+        Each connection has its own .secrets/ directory at
+        connections/{alias}/.secrets/
+
+        Args:
+            alias: Connection alias (directory name)
+
+        Returns:
+            LocalFileSecretsResolver pointing to the connection's secrets dir
+        """
+        secrets_dir = self._paths["connections"] / alias / ".secrets"
+        return LocalFileSecretsResolver(secrets_dir)
+
+    # =========================================================================
+    # Manifest and Pipeline File Loading
+    # =========================================================================
+
+    def _load_manifest(self) -> Dict[str, Any]:
+        """Load the pipelines manifest.json.
+
+        Returns:
+            Parsed manifest dict with 'pipelines' key
+        """
+        manifest_path = self._paths["pipelines"] / "manifest.json"
+        if not manifest_path.exists():
+            raise FileNotFoundError(
+                f"Pipeline manifest not found: {manifest_path}"
+            )
+
+        try:
+            with open(manifest_path) as f:
+                manifest = json.load(f)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid JSON in manifest {manifest_path}: {e}")
+
+        if "pipelines" not in manifest:
+            raise ValueError("manifest.json missing required key: 'pipelines'")
+
+        return manifest
+
+    def _find_manifest_entry(self, manifest: Dict[str, Any]) -> Dict[str, Any]:
+        """Find the manifest entry matching self.pipeline_id.
+
+        Args:
+            manifest: Parsed manifest dict
+
+        Returns:
+            Manifest entry dict for the matched pipeline
 
         Raises:
-            FileNotFoundError: If analitiq.yaml is not found
-            ValueError: If required paths are missing
+            ValueError: If pipeline not found or not active
         """
-        config = load_analitiq_config()
-        paths_config = config.get("paths", {})
+        for entry in manifest["pipelines"]:
+            if entry.get("pipeline_id") == self.pipeline_id:
+                return entry
 
-        required_paths = ["pipelines", "secrets"]
-        missing = [p for p in required_paths if p not in paths_config]
-        if missing:
-            raise ValueError(f"analitiq.yaml missing required paths: {missing}")
+        available = [
+            e.get("pipeline_id", "unknown")
+            for e in manifest["pipelines"]
+        ]
+        raise ValueError(
+            f"Pipeline '{self.pipeline_id}' not found in manifest. "
+            f"Available pipelines: {sorted(available)}"
+        )
 
-        # Return Path objects (relative paths resolved from current working directory)
-        return {
-            "pipelines": Path(paths_config["pipelines"]),
-            "secrets": Path(paths_config["secrets"]),
-        }
+    def _load_pipeline_file(self) -> Dict[str, Any]:
+        """Load the pipeline configuration file via manifest lookup.
 
-    @property
-    def secrets_resolver(self) -> SecretsResolver:
-        """
-        Get the secrets resolver for late-binding secret resolution.
+        Loads manifest.json, finds the entry for self.pipeline_id,
+        enforces active status, and loads the pipeline file from the
+        path specified in the manifest entry.
 
         Returns:
-            SecretsResolver instance appropriate for the current environment
+            Dict with pipeline and streams keys
         """
-        if self._secrets_resolver is None:
-            if self._secrets_dir is None:
-                raise RuntimeError(
-                    "Secrets directory not configured. "
-                    "Call create_config() first or set _secrets_dir manually."
-                )
-            self._secrets_resolver = LocalFileSecretsResolver(self._secrets_dir)
-            logger.debug(f"Created LocalFileSecretsResolver for: {self._secrets_dir}")
-        return self._secrets_resolver
+        if self._pipeline_file is not None:
+            return self._pipeline_file
 
-    # =========================================================================
-    # Secrets Methods
-    # =========================================================================
+        manifest = self._load_manifest()
+        entry = self._find_manifest_entry(manifest)
 
-    def _merge_configs(self, base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
-        """Deep merge two configurations (override takes precedence)."""
-        result = base.copy()
-        for key, value in override.items():
-            if key in result and isinstance(result[key], dict) and isinstance(value, dict):
-                result[key] = self._merge_configs(result[key], value)
-            else:
-                result[key] = value
-        return result
+        status = entry.get("status", "")
+        if status != "active":
+            raise ValueError(
+                f"Pipeline '{self.pipeline_id}' has status '{status}'. "
+                f"Only 'active' pipelines can be executed."
+            )
 
-    # =========================================================================
-    # Consolidated Config Loading
-    # =========================================================================
-
-    def _load_consolidated_config(self) -> Dict[str, Any]:
-        """
-        Load the consolidated pipeline configuration file.
-
-        The consolidated file contains all related configuration:
-        - pipeline: Full pipeline object
-        - connections: List of connection objects
-        - connectors: List of connector metadata
-        - endpoints: List of endpoint definitions
-        - streams: List of stream configurations
-
-        Returns:
-            Dict with consolidated configuration
-
-        Raises:
-            FileNotFoundError: If consolidated file doesn't exist
-        """
-        if self._consolidated_config is not None:
-            return self._consolidated_config
-
-        path = self._paths["pipelines"] / f"{self.pipeline_id}.json"
+        path = self._paths["pipelines"] / entry["path"]
         if not path.exists():
             raise FileNotFoundError(f"Pipeline config not found: {path}")
 
         try:
-            with open(path, "r") as f:
-                self._consolidated_config = json.load(f)
+            with open(path) as f:
+                self._pipeline_file = json.load(f)
         except json.JSONDecodeError as e:
-            raise ValueError(f"Invalid JSON in consolidated config {path}: {e}")
+            raise ValueError(f"Invalid JSON in pipeline config {path}: {e}")
 
-        logger.info(f"Loaded consolidated config from: {path}")
+        logger.info(f"Loaded pipeline config from: {path}")
+        validate_pipeline_config(self._pipeline_file)
 
-        # Validate minimum required configuration elements
-        validate_consolidated_config(self._consolidated_config)
-        logger.info("Consolidated config validation passed")
+        self._manifest_entry = entry
+        self._pipeline_dir = path.parent
 
-        return self._consolidated_config
-
-    # =========================================================================
-    # Local File Loading Methods
-    # =========================================================================
+        return self._pipeline_file
 
     def _load_local_pipeline(self) -> Dict[str, Any]:
-        """Load pipeline configuration from consolidated file."""
-        consolidated = self._load_consolidated_config()
-        pipeline = consolidated.get("pipeline")
+        """Load pipeline section from the pipeline file."""
+        pipeline_file = self._load_pipeline_file()
+        pipeline = pipeline_file.get("pipeline")
         if not pipeline:
             raise ValueError(
-                f"Consolidated config missing 'pipeline' key for pipeline_id: "
+                f"Pipeline file missing 'pipeline' key for pipeline_id: "
                 f"{self.pipeline_id}"
             )
         return pipeline
 
     def _load_local_streams(self) -> List[Dict[str, Any]]:
-        """Load stream configurations from consolidated file.
+        """Load stream configurations from individual stream files.
 
-        Streams are loaded from the 'streams' array in the consolidated config.
+        Stream IDs come from the pipeline.streams array. Each stream is
+        loaded from {pipeline_dir}/streams/{stream_id}.json.
+
+        Returns:
+            List of stream configuration dicts
         """
-        consolidated = self._load_consolidated_config()
-        streams = consolidated.get("streams", [])
-        logger.info(f"Loaded {len(streams)} streams from consolidated config")
+        pipeline_file = self._load_pipeline_file()
+        pipeline = pipeline_file.get("pipeline", {})
+        stream_ids = pipeline.get("streams", [])
+
+        if not stream_ids:
+            logger.warning("Pipeline has no streams defined in 'streams' array")
+            return []
+
+        streams_dir = self._pipeline_dir / "streams"
+        if not streams_dir.is_dir():
+            raise FileNotFoundError(
+                f"Streams directory not found: {streams_dir}"
+            )
+
+        streams = []
+        for stream_id in stream_ids:
+            stream_path = streams_dir / f"{stream_id}.json"
+            if not stream_path.exists():
+                raise FileNotFoundError(
+                    f"Stream config not found: {stream_path} "
+                    f"(referenced by pipeline '{self.pipeline_id}')"
+                )
+            try:
+                with open(stream_path) as f:
+                    stream_config = json.load(f)
+            except json.JSONDecodeError as e:
+                raise ValueError(
+                    f"Invalid JSON in stream config {stream_path}: {e}"
+                )
+            streams.append(stream_config)
+
+        logger.info(f"Loaded {len(streams)} streams from {streams_dir}")
         return streams
 
     # =========================================================================
-    # Connection Loading Methods (from consolidated config)
+    # Connection and Connector Loading
     # =========================================================================
 
-    def _load_connection_config(self, connection_id: str) -> Dict[str, Any]:
-        """
-        Load connection configuration by ID from consolidated config.
+    def _load_connection(self, alias: str) -> Dict[str, Any]:
+        """Load a connection configuration by alias.
 
         Args:
-            connection_id: Connection identifier
+            alias: Connection alias (directory name)
 
         Returns:
-            Connection configuration dictionary
-
-        Raises:
-            FileNotFoundError: If connection not found in consolidated config
+            Connection configuration dict
         """
-        consolidated = self._load_consolidated_config()
-        connections = consolidated.get("connections", [])
+        config = load_connection(alias, self._paths["connections"])
+        validate_connection_config(config)
+        return config
 
-        for conn in connections:
-            if conn.get("connection_id") == connection_id:
-                return conn
+    def _load_connector(self, connector_slug: str) -> Dict[str, Any]:
+        """Load a connector definition by slug, with caching.
 
-        raise FileNotFoundError(
-            f"Connection not found in consolidated config: {connection_id}"
+        Args:
+            connector_slug: Connector slug (directory name)
+
+        Returns:
+            Connector definition dict
+        """
+        if connector_slug in self._loaded_connectors:
+            return self._loaded_connectors[connector_slug]
+
+        connector = load_connector_for_connection(
+            connector_slug, self._paths["connectors"]
         )
+        self._loaded_connectors[connector_slug] = connector
+        return connector
 
     def get_connector_for_connection(
-        self, config: Dict[str, Any], connection_id: str
+        self, config: Dict[str, Any], alias: str
     ) -> Dict[str, Any]:
-        """
-        Get the connector definition for a connection.
+        """Get the connector definition for a connection config.
 
         Args:
-            config: Connection configuration dictionary
-            connection_id: Connection identifier (for error messages)
+            config: Connection configuration dict (must have connector_slug)
+            alias: Connection alias (for error messages)
 
         Returns:
-            Connector definition dict with connector_type, driver, etc.
-
-        Raises:
-            ValueError: If connector cannot be found
+            Connector definition dict
         """
-        connector_id = config.get("connector_id")
-        if not connector_id:
+        slug = config.get("connector_slug")
+        if not slug:
             raise ValueError(
-                f"Connection '{connection_id}' is missing 'connector_id' field."
+                f"Connection '{alias}' is missing 'connector_slug' field."
             )
+        return self._load_connector(slug)
 
-        consolidated = self._load_consolidated_config()
-        connectors = consolidated.get("connectors", [])
-
-        for connector in connectors:
-            if connector.get("connector_id") == connector_id:
-                return connector
-
-        raise ValueError(
-            f"Connector not found for connection '{connection_id}' "
-            f"with connector_id '{connector_id}'."
-        )
-
-    def get_connector_type(self, config: Dict[str, Any], connection_id: str) -> str:
-        """
-        Get the connector_type for a connection.
-
-        This is a convenience method that looks up the connector and returns
-        its connector_type. Unlike _determine_connection_type(), this method
-        does not validate the type against VALID_CONNECTOR_TYPES - it returns
-        whatever connector_type is defined.
+    def get_connector_type(self, config: Dict[str, Any], alias: str) -> str:
+        """Get the connector_type for a connection.
 
         Args:
-            config: Connection configuration dictionary containing connector_id
-            connection_id: Connection identifier (for error messages)
+            config: Connection configuration dict
+            alias: Connection alias (for error messages)
 
         Returns:
-            The connector_type string (e.g., "api", "database", "file", "s3", "stdout")
-
-        Raises:
-            ValueError: If connector_id is missing or connector not found
+            The connector_type string
         """
-        connector = self.get_connector_for_connection(config, connection_id)
+        connector = self.get_connector_for_connection(config, alias)
         connector_type = connector.get("connector_type")
         if not connector_type:
-            connector_id = config.get("connector_id")
             raise ValueError(
-                f"Connector '{connector_id}' is missing 'connector_type' field."
+                f"Connector for '{alias}' is missing 'connector_type' field."
             )
         return connector_type
-
-    def _determine_connection_type(self, config: Dict[str, Any], connection_id: str) -> str:
-        """
-        Determine connection type by looking up connector_type from connectors array.
-
-        Args:
-            config: Connection configuration dictionary
-            connection_id: Connection identifier (for error messages)
-
-        Returns:
-            Connection type: "api", "database", "file", "s3", or "stdout"
-
-        Raises:
-            ValueError: If connection type cannot be determined
-        """
-        connector = self.get_connector_for_connection(config, connection_id)
-        conn_type = connector.get("connector_type")
-
-        if conn_type in self.VALID_CONNECTOR_TYPES:
-            return conn_type
-
-        connector_id = config.get("connector_id")
-        raise ValueError(
-            f"Connector '{connector_id}' has invalid or missing 'connector_type'. "
-            f"Expected one of {sorted(self.VALID_CONNECTOR_TYPES)}, got: {conn_type!r}"
-        )
 
     def _normalize_database_connection(
         self, config: Dict[str, Any], connector: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """
-        Normalize database connection fields to match expected schema.
-
-        Args:
-            config: Raw database connection configuration
-            connector: Connector definition with driver field
-
-        Returns:
-            Normalized configuration dictionary
-        """
+        """Normalize database connection fields."""
         result = config.copy()
         params = result.get("parameters", {})
 
-        # Add driver from connector definition (e.g. "postgresql", "mysql")
         driver = connector.get("driver")
         if driver:
             result["driver"] = driver
 
-        # Convert port to integer inside parameters
         if isinstance(params.get("port"), str):
             params["port"] = int(params["port"])
             result["parameters"] = params
 
         return result
 
-    VALID_CONNECTOR_TYPES = {"api", "database", "file", "s3", "stdout"}
-
-    def _resolve_connection_by_id(
-        self,
-        connection_ref: str,
-        connection_id: str,
-        org_id: str = ""
+    def _resolve_connection(
+        self, alias: str, org_id: str = ""
     ) -> ConnectionRuntime:
-        """
-        Resolve a connection by its ID.
+        """Resolve a connection by alias.
 
-        Creates a ConnectionRuntime with enriched metadata (connector_type,
-        driver baked in). Secrets are resolved lazily via materialize().
+        Creates a ConnectionRuntime with enriched metadata.
+        Secrets are resolved lazily via materialize().
 
         Args:
-            connection_ref: Reference alias from pipeline (e.g., "conn_1")
-            connection_id: Connection identifier
-            org_id: Org ID (for late-binding resolver)
+            alias: Connection alias (directory name, used as connection_id)
+            org_id: Org ID for secrets resolution
 
         Returns:
             ConnectionRuntime object
         """
-        cache_key = f"id:{connection_id}"
-        if cache_key in self._resolved_connections:
-            return self._resolved_connections[cache_key]
+        if alias in self._resolved_connections:
+            return self._resolved_connections[alias]
 
-        config = self._load_connection_config(connection_id)
-
-        connector = self.get_connector_for_connection(config, connection_id)
+        config = self._load_connection(alias)
+        connector = self.get_connector_for_connection(config, alias)
         connection_type = connector.get("connector_type")
 
-        if connection_type not in self.VALID_CONNECTOR_TYPES:
+        if connection_type not in VALID_CONNECTOR_TYPES:
             raise ValueError(
-                f"Connector has invalid connector_type: {connection_type!r}. "
-                f"Expected one of: {sorted(self.VALID_CONNECTOR_TYPES)}"
+                f"Connector for '{alias}' has invalid connector_type: {connection_type!r}. "
+                f"Expected one of: {sorted(VALID_CONNECTOR_TYPES)}"
             )
 
         if connection_type == "database":
             config = self._normalize_database_connection(config, connector)
 
-        # Store secrets directory for the resolver
-        self._secrets_dir = self._paths["secrets"]
+        resolver = self._create_secrets_resolver(alias)
 
         runtime = ConnectionRuntime(
             raw_config=config,
-            connection_id=connection_id,
+            connection_id=alias,
             connector_type=connection_type,
             driver=connector.get("driver") if connection_type == "database" else None,
-            resolver=self.secrets_resolver,
+            resolver=resolver,
             org_id=org_id or None,
         )
 
-        self._resolved_connections[cache_key] = runtime
-
-        logger.info(f"Resolved connection: {connection_ref} -> {connection_id}")
+        self._resolved_connections[alias] = runtime
+        logger.info(f"Resolved connection: {alias}")
         return runtime
-
-    # =========================================================================
-    # Endpoint Loading Methods (from consolidated config)
-    # =========================================================================
-
-    def _load_endpoint_config(self, endpoint_id: str) -> Dict[str, Any]:
-        """
-        Load endpoint configuration by ID from consolidated config.
-
-        Args:
-            endpoint_id: Endpoint identifier
-
-        Returns:
-            Endpoint configuration dictionary
-
-        Raises:
-            FileNotFoundError: If endpoint not found in consolidated config
-        """
-        consolidated = self._load_consolidated_config()
-        endpoints = consolidated.get("endpoints", [])
-
-        for ep in endpoints:
-            if ep.get("endpoint_id") == endpoint_id:
-                return ep
-
-        raise FileNotFoundError(
-            f"Endpoint not found in consolidated config: {endpoint_id}"
-        )
 
     # =========================================================================
     # Endpoint Resolution
     # =========================================================================
 
-    def _resolve_endpoint_flexible(self, config: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Resolve endpoint from config by endpoint_id.
+    def _resolve_endpoint(self, endpoint_ref: str) -> Dict[str, Any]:
+        """Resolve an endpoint by its scoped reference.
 
         Args:
-            config: Dict containing endpoint_id
+            endpoint_ref: Scoped reference, e.g. "connector:pipedrive/deals"
 
         Returns:
             Resolved endpoint configuration dict
-
-        Raises:
-            ValueError: If endpoint_id is not specified
         """
-        endpoint_id = config.get("endpoint_id")
+        if endpoint_ref in self._resolved_endpoints:
+            return self._resolved_endpoints[endpoint_ref]
 
-        if not endpoint_id:
-            raise ValueError(
-                "Stream config must specify 'endpoint_id'"
-            )
-
-        cache_key = f"id:{endpoint_id}"
-        if cache_key in self._resolved_endpoints:
-            return self._resolved_endpoints[cache_key]
-
-        endpoint = self._load_endpoint_config(endpoint_id)
-        self._resolved_endpoints[cache_key] = endpoint
-        logger.info(f"Resolved endpoint: {endpoint_id}")
+        endpoint = resolve_endpoint_ref(endpoint_ref, self._paths)
+        self._resolved_endpoints[endpoint_ref] = endpoint
+        logger.info(f"Resolved endpoint: {endpoint_ref}")
         return endpoint
 
     # =========================================================================
@@ -510,70 +460,54 @@ class PipelineConfigPrep:
     # =========================================================================
 
     def load_pipeline_config(self) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
-        """
-        Load and assemble complete pipeline and stream configurations.
-
-        Configuration is loaded from the consolidated pipeline file.
-        Connections, connectors, endpoints, and streams are all in the same file.
-
-        Connections use ID-based format where the value is a connection_id string
-        that is looked up in the consolidated file's connections array.
+        """Load and assemble complete pipeline and stream configurations.
 
         Returns:
             Tuple of (pipeline_config dict, list of stream_config dicts)
         """
-        # Load raw pipeline config from consolidated file
         raw_pipeline = self._load_local_pipeline()
-
         org_id = raw_pipeline.get("org_id", "")
 
-        # Get connections from pipeline
         raw_connections = raw_pipeline.get("connections", {})
-        source_connections = raw_connections.get("source", {})
-        dest_connections = raw_connections.get("destinations", [])
+        source_alias = raw_connections.get("source")
+        dest_aliases = raw_connections.get("destinations", [])
 
-        # Validate all connections use ID-based format (string)
-        for alias, value in source_connections.items():
-            if not isinstance(value, str):
+        if not source_alias:
+            raise ValueError("Pipeline must define connections.source")
+        if not isinstance(source_alias, str):
+            raise ValueError(
+                f"connections.source must be a string (alias), got {type(source_alias).__name__}"
+            )
+
+        # Resolve source connection
+        self._resolve_connection(source_alias, org_id)
+
+        # Resolve destination connections
+        for dest_alias in dest_aliases:
+            if not isinstance(dest_alias, str):
                 raise ValueError(
-                    f"Connection '{alias}' must be a string (connection_id) "
-                    f"that maps to a file in the connections directory."
+                    f"Each destination must be a string (alias), got {type(dest_alias).__name__}"
                 )
+            self._resolve_connection(dest_alias, org_id)
 
-        for dest_dict in dest_connections:
-            for alias, value in dest_dict.items():
-                if not isinstance(value, str):
-                    raise ValueError(
-                        f"Connection '{alias}' must be a string (connection_id)."
-                    )
-
-        # Resolve all connections (load from connections/ dir, secrets from .secrets/)
-        for alias, connection_id in source_connections.items():
-            self._resolve_connection_by_id(alias, connection_id, org_id)
-
-        for dest_dict in dest_connections:
-            for alias, connection_id in dest_dict.items():
-                self._resolve_connection_by_id(alias, connection_id, org_id)
-
-        # Build connections_config with plain connection IDs (no prefix)
+        # Build connections_config in the format downstream code expects
         connections_config = {
-            "source": dict(source_connections),
-            "destinations": [dict(dest_dict) for dest_dict in dest_connections],
+            "source": source_alias,
+            "destinations": list(dest_aliases),
         }
 
-        # Load stream configs from local filesystem
+        # Load streams
         raw_streams = self._load_local_streams()
 
-        # Handle version - convert string to int if needed
+        # Handle version
         version = raw_pipeline.get("version", 1)
         if isinstance(version, str):
             version = int(float(version))
 
-        # Build pipeline config dict
         pipeline_config = {
             "version": version,
             "org_id": org_id,
-            "pipeline_id": raw_pipeline["pipeline_id"],
+            "pipeline_id": self.pipeline_id,
             "name": raw_pipeline.get("name", ""),
             "description": raw_pipeline.get("description"),
             "status": raw_pipeline.get("status", "draft"),
@@ -586,8 +520,7 @@ class PipelineConfigPrep:
             "updated_at": raw_pipeline.get("updated_at"),
         }
 
-        # Build StreamConfigs with resolved connections and endpoints
-        # Only include streams that are listed in pipeline.streams
+        # Build stream configs — only include streams listed in pipeline.streams
         pipeline_stream_ids = set(raw_pipeline.get("streams", []))
         if not pipeline_stream_ids:
             logger.warning("Pipeline has no streams defined in 'streams' array")
@@ -599,15 +532,11 @@ class PipelineConfigPrep:
             if stream_id not in pipeline_stream_ids:
                 raise ValueError(
                     f"Stream '{stream_id}' is not listed in pipeline.streams. "
-                    f"Expected one of: {sorted(pipeline_stream_ids)}. "
-                    f"This indicates a data consistency issue - the stream must be "
-                    f"referenced in the pipeline's 'streams' array."
+                    f"Expected one of: {sorted(pipeline_stream_ids)}."
                 )
 
             stream_config = self._build_stream_config(
-                raw_stream,
-                connections_config,
-                org_id
+                raw_stream, connections_config, org_id
             )
             stream_configs.append(stream_config)
 
@@ -619,36 +548,28 @@ class PipelineConfigPrep:
         self,
         raw_stream: Dict[str, Any],
         connections_config: Dict[str, Any],
-        org_id: str
+        org_id: str,
     ) -> Dict[str, Any]:
-        """
-        Build a stream config dict from raw stream data with resolved connections and endpoints.
-
-        Connections are resolved from the consolidated config's connections array.
-        Endpoints are resolved from the consolidated config's endpoints array.
-        """
+        """Build a stream config dict with resolved connections and endpoints."""
         stream_id = raw_stream["stream_id"]
 
-        # Resolve source connection
+        # Resolve source connection by alias
         source_ref = raw_stream["source"]["connection_ref"]
-        source_connection_id = _get_connection_uuid(connections_config, source_ref)
-        if source_connection_id is None:
-            raise ValueError(f"Unknown connection_ref '{source_ref}' in stream {stream_id}")
-
-        # Get connection from cache - all connections must be pre-resolved
-        # Internal cache uses "id:{uuid}" keys
-        cache_key = f"id:{source_connection_id}"
-        source_connection = self._resolved_connections.get(cache_key)
+        source_connection = self._resolved_connections.get(source_ref)
         if not source_connection:
             raise ValueError(
-                f"Connection '{source_ref}' (id={source_connection_id}) not resolved. "
-                f"Ensure pipeline uses path-based connection format with 'connector' key."
+                f"Connection '{source_ref}' not resolved for stream {stream_id}"
             )
 
-        # Resolve source endpoint from local connectors directory
-        source_endpoint = self._resolve_endpoint_flexible(raw_stream["source"])
+        # Resolve source endpoint
+        source_endpoint_ref = raw_stream["source"].get("endpoint_ref")
+        if not source_endpoint_ref:
+            raise ValueError(
+                f"Stream {stream_id} source is missing 'endpoint_ref'"
+            )
+        source_endpoint = self._resolve_endpoint(source_endpoint_ref)
 
-        # Build enriched source config
+        # Build enriched source data
         source_data = raw_stream["source"].copy()
         source_data["_runtime"] = source_connection
         source_data["_endpoint"] = source_endpoint
@@ -657,42 +578,40 @@ class PipelineConfigPrep:
         destinations_data = []
         for dest in raw_stream["destinations"]:
             dest_ref = dest["connection_ref"]
-            dest_connection_id = _get_connection_uuid(connections_config, dest_ref)
-            if dest_connection_id is None:
-                raise ValueError(f"Unknown connection_ref '{dest_ref}' in stream {stream_id}")
-
-            # Get connection from cache - all connections must be pre-resolved
-            # Internal cache uses "id:{uuid}" keys
-            dest_cache_key = f"id:{dest_connection_id}"
-            dest_connection = self._resolved_connections.get(dest_cache_key)
+            dest_connection = self._resolved_connections.get(dest_ref)
             if not dest_connection:
                 raise ValueError(
-                    f"Connection '{dest_ref}' (id={dest_connection_id}) not resolved. "
-                    f"Ensure pipeline uses path-based connection format with 'connector' key."
+                    f"Connection '{dest_ref}' not resolved for stream {stream_id}"
                 )
 
-            # Resolve destination endpoint from local connectors directory
-            dest_endpoint = self._resolve_endpoint_flexible(dest)
+            dest_endpoint_ref = dest.get("endpoint_ref")
+            if not dest_endpoint_ref:
+                raise ValueError(
+                    f"Stream {stream_id} destination '{dest_ref}' is missing 'endpoint_ref'"
+                )
+            dest_endpoint = self._resolve_endpoint(dest_endpoint_ref)
 
             dest_data = dest.copy()
             dest_data["_runtime"] = dest_connection
             dest_data["_endpoint"] = dest_endpoint
             destinations_data.append(dest_data)
 
-        # Handle version - convert string to int if needed
+        # Handle version
         version = raw_stream.get("version", 1)
         if isinstance(version, str):
             version = int(float(version))
 
-        # Build stream config dict
+        # Normalize mapping
         raw_mapping = raw_stream.get("mapping", {})
-        # Get first destination's connection_ref for type lookup
-        dest_connection_ref = destinations_data[0].get("connection_ref") if destinations_data else None
+        dest_connection_ref = (
+            destinations_data[0].get("connection_ref") if destinations_data else None
+        )
         normalized_mapping = (
             self._normalize_mapping_config(raw_mapping, dest_connection_ref)
             if raw_mapping
             else {}
         )
+
         return {
             "version": version,
             "stream_id": stream_id,
@@ -702,8 +621,7 @@ class PipelineConfigPrep:
             "is_enabled": raw_stream.get("is_enabled", True),
             "source": self._normalize_source_config(source_data),
             "destinations": [
-                self._normalize_destination_config(d)
-                for d in destinations_data
+                self._normalize_destination_config(d) for d in destinations_data
             ],
             "mapping": normalized_mapping or {},
             "tags": raw_stream.get("tags"),
@@ -719,20 +637,10 @@ class PipelineConfigPrep:
 
         Sets target.type to generic type (for Pydantic validation) and
         target.dest_type to native destination type (for DDL/casting).
-
-        Args:
-            mapping: Raw mapping configuration with assignments
-            dest_connection_ref: Destination connection reference for type lookup
-                                (e.g., "conn_2"). Used to look up destination types
-                                from generic_to_destination mapping.
-
-        Returns:
-            Normalized mapping with generic types set on target.type
         """
         normalized = dict(mapping)
         assignments = list(normalized.get("assignments", []))
 
-        # Use provided mappings (trust they are correct)
         source_to_generic = mapping.get("source_to_generic", {}) or {}
         generic_to_dest = (
             mapping.get("generic_to_destination", {}).get(dest_connection_ref, {})
@@ -748,7 +656,6 @@ class PipelineConfigPrep:
             return entry.get("generic_type")
 
         def _resolve_generic_type(assignment: Dict[str, Any]) -> str:
-            """Resolve generic type from source_to_generic mapping."""
             target = assignment.get("target", {})
             target_path = target.get("path") or []
             generic = _generic_from_source_path(target_path)
@@ -763,7 +670,6 @@ class PipelineConfigPrep:
                     if generic:
                         return generic
 
-            # Preserve existing target.type before falling back to "string"
             return assignment.get("target", {}).get("type", "string")
 
         normalized_assignments = []
@@ -772,18 +678,15 @@ class PipelineConfigPrep:
             target = dict(updated.get("target", {}))
             target_path = target.get("path") or []
 
-            # Get generic type from source_to_generic
             generic_type = _resolve_generic_type(updated)
             target["type"] = generic_type
 
-            # Get destination type and nullable from generic_to_destination
             if target_path:
                 field_name = ".".join(target_path)
                 dest_entry = generic_to_dest.get(field_name, {})
                 dest_type = dest_entry.get("destination_type")
                 if dest_type:
                     target["dest_type"] = dest_type
-                # Only set nullable from dest mapping if present
                 if "nullable" in dest_entry:
                     target["nullable"] = dest_entry["nullable"]
 
@@ -797,11 +700,13 @@ class PipelineConfigPrep:
         """Normalize source configuration to match SourceConfig model."""
         replication = source_data.get("replication", {})
 
-        endpoint_ref = source_data.get("endpoint_id", "")
+        # Use endpoint_ref as the endpoint identifier
+        endpoint_ref = source_data.get("endpoint_ref", "")
 
         result = {
             "connection_ref": source_data["connection_ref"],
             "endpoint_id": endpoint_ref,
+            "endpoint_ref": endpoint_ref,
             "primary_key": source_data.get("primary_key", []),
             "replication": {
                 "method": replication.get("method", "incremental"),
@@ -809,7 +714,6 @@ class PipelineConfigPrep:
             },
         }
 
-        # Add optional fields only if present
         if source_data.get("source_schema_fingerprint"):
             result["source_schema_fingerprint"] = source_data["source_schema_fingerprint"]
         if replication.get("safety_window_seconds") is not None:
@@ -825,17 +729,18 @@ class PipelineConfigPrep:
         """Normalize destination configuration to match DestinationConfig model."""
         write = dest_data.get("write", {})
 
-        endpoint_ref = dest_data.get("endpoint_id", "")
+        # Use endpoint_ref as the endpoint identifier
+        endpoint_ref = dest_data.get("endpoint_ref", "")
 
         result = {
             "connection_ref": dest_data["connection_ref"],
             "endpoint_id": endpoint_ref,
+            "endpoint_ref": endpoint_ref,
             "write": {
                 "mode": write.get("mode", "upsert"),
             },
         }
 
-        # Add optional fields only if present
         if dest_data.get("target_schema_fingerprint"):
             result["target_schema_fingerprint"] = dest_data["target_schema_fingerprint"]
         if write.get("conflict_keys"):
@@ -851,20 +756,13 @@ class PipelineConfigPrep:
 
         return result
 
-
     def get_connectors(self) -> List[Dict[str, Any]]:
-        """
-        Get the connectors array from consolidated config.
-
-        Connectors define the type and metadata for each integration.
-        The connector_type field determines which handler processes connections.
+        """Get the list of connector definitions that were loaded during resolution.
 
         Returns:
-            List of connector definitions with connector_id, connector_name,
-            connector_type, and optional driver/slug fields.
+            List of connector definition dicts
         """
-        consolidated = self._load_consolidated_config()
-        return consolidated.get("connectors", [])
+        return list(self._loaded_connectors.values())
 
     def create_config(self) -> Tuple[
         Dict[str, Any],
@@ -873,59 +771,43 @@ class PipelineConfigPrep:
         Dict[str, Dict[str, Any]],
         List[Dict[str, Any]],
     ]:
-        """
-        Load and return validated pipeline and stream configurations.
+        """Load and return validated pipeline and stream configurations.
 
         Returns:
             Tuple of (pipeline_config, stream_configs, resolved_connections,
                       resolved_endpoints, connectors)
-            - resolved_connections maps connection_id to ConnectionRuntime objects
-            - resolved_endpoints maps endpoint_id to its resolved config dict
-            - connectors is the list of connector definitions from consolidated config
         """
         pipeline_config, stream_configs = self.load_pipeline_config()
 
-        # Strip internal key prefixes for external consumers
-        # Internal keys use "id:{uuid}" format, but consumers expect plain UUIDs
-        resolved_connections = {}
-        for key, conn in self._resolved_connections.items():
-            clean_key = key.split(":", 1)[1] if ":" in key else key
-            resolved_connections[clean_key] = conn
-
-        # Strip "path:" prefix from endpoint keys for external consumers
-        resolved_endpoints = {}
-        for key, endpoint in self._resolved_endpoints.items():
-            clean_key = key.split(":", 1)[1] if ":" in key else key
-            resolved_endpoints[clean_key] = endpoint
+        resolved_connections = dict(self._resolved_connections)
+        resolved_endpoints = dict(self._resolved_endpoints)
+        connectors = self.get_connectors()
 
         logger.info("Configuration loaded (secrets resolved at connection time)")
-
-        # Get connectors from consolidated config
-        connectors = self.get_connectors()
 
         return pipeline_config, stream_configs, resolved_connections, resolved_endpoints, connectors
 
     def validate_environment(self) -> None:
-        """Validate that the environment is properly configured.
-
-        Configuration is always loaded from local filesystem. In cloud environments,
-        config_fetcher.py populates directories defined in analitiq.yaml before this runs.
-        """
-        # Validate pipelines directory exists (most critical for loading pipeline config)
+        """Validate that the environment is properly configured."""
         pipelines_path = self._paths["pipelines"]
         if not pipelines_path.exists():
             raise RuntimeError(
-                f"Pipelines directory not found: {pipelines_path}. "
-                f"Check analitiq.yaml configuration or run config_fetcher.py first."
+                f"Pipelines directory not found: {pipelines_path}"
             )
         logger.debug(f"Pipelines directory validated: {pipelines_path}")
 
-    def get_resolved_connection(self, connection_ref: str, connections_map: Dict[str, str]) -> ConnectionRuntime:
-        """Get a resolved connection by its reference alias."""
-        connection_id = connections_map.get(connection_ref)
-        if not connection_id:
-            raise ValueError(f"Unknown connection reference: {connection_ref}")
-        cache_key = f"id:{connection_id}"
-        if cache_key not in self._resolved_connections:
-            raise ValueError(f"Connection not resolved: {connection_id}")
-        return self._resolved_connections[cache_key]
+    def get_resolved_connection(self, connection_ref: str) -> ConnectionRuntime:
+        """Get a resolved connection by its alias."""
+        if connection_ref not in self._resolved_connections:
+            raise ValueError(f"Connection not resolved: {connection_ref}")
+        return self._resolved_connections[connection_ref]
+
+    def _merge_configs(self, base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+        """Deep merge two configurations (override takes precedence)."""
+        result = base.copy()
+        for key, value in override.items():
+            if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+                result[key] = self._merge_configs(result[key], value)
+            else:
+                result[key] = value
+        return result

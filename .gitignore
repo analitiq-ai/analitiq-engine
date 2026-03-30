@@ -170,6 +170,11 @@ cython_debug/
 # Analitiq Stream Specific
 # =============================================================================
 
+# Config directories - populated at runtime (connectors from GitHub, connections user-created, pipelines via manifest)
+connectors/
+connections/
+pipelines/
+
 # Runtime state files - These contain pipeline execution state and should not be committed
 state/
 runtime_test_state/

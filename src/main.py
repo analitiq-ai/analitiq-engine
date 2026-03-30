@@ -149,20 +149,17 @@ async def run_destination_mode() -> None:
         )
         sys.exit(1)
 
-    # Get the connection ID for the selected destination
-    # destinations is a list of dicts like [{"conn_2": "uuid"}, ...]
-    dest_dict = destinations[destination_index]
-    dest_alias = list(dest_dict.keys())[0]
-    connection_id = dest_dict[dest_alias]
+    # Get the connection alias for the selected destination
+    dest_alias = destinations[destination_index]
 
-    logger.info(f"Using destination index {destination_index}: alias={dest_alias}, connection_id={connection_id}")
+    logger.info(f"Using destination index {destination_index}: alias={dest_alias}")
 
     # Get ConnectionRuntime for selected destination
-    if connection_id not in resolved_connections:
-        logger.error(f"Connection {connection_id} not found in resolved connections")
+    if dest_alias not in resolved_connections:
+        logger.error(f"Connection '{dest_alias}' not found in resolved connections")
         sys.exit(1)
 
-    runtime = resolved_connections[connection_id]
+    runtime = resolved_connections[dest_alias]
 
     logger.info(f"Connector type: {runtime.connector_type}")
     logger.info(f"gRPC port: {grpc_port}")

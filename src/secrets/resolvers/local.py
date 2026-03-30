@@ -126,8 +126,9 @@ class LocalFileSecretsResolver(SecretsResolver):
         Checks multiple path patterns in order:
         1. {secrets_dir}/{connection_id}.json
         2. {secrets_dir}/{connection_id}  (no extension)
-        3. {secrets_dir}/{org_id}/{connection_id}.json  (if org_id provided)
-        4. {secrets_dir}/{org_id}/{connection_id}  (if org_id provided)
+        3. {secrets_dir}/credentials.json  (standard name for colocated secrets)
+        4. {secrets_dir}/{org_id}/{connection_id}.json  (if org_id provided)
+        5. {secrets_dir}/{org_id}/{connection_id}  (if org_id provided)
 
         Args:
             connection_id: Connection identifier
@@ -139,6 +140,7 @@ class LocalFileSecretsResolver(SecretsResolver):
         candidates = [
             self._secrets_dir / f"{connection_id}.json",
             self._secrets_dir / connection_id,
+            self._secrets_dir / "credentials.json",
         ]
 
         if org_id:

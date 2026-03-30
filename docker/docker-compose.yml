@@ -8,8 +8,8 @@ services:
   destination:
     build:
       context: ..
-      dockerfile: Dockerfile.cloud
-    image: analitiq-stream-cloud:latest
+      dockerfile: Dockerfile
+    image: analitiq-stream:latest
     container_name: analitiq-destination
 
     # Base environment variables - per-invocation vars (PIPELINE_ID)
@@ -29,12 +29,13 @@ services:
       - AWS_PROFILE=${AWS_PROFILE:-}
       - AWS_REGION=${AWS_REGION:-eu-central-1}
 
-    # Volume mounts for consolidated config files - match analitiq.yaml paths
-    # Note: pipelines and .secrets are writable for cloud_entrypoint/config_fetcher
+    # Volume mounts for modular config files
+    # Convention-based discovery finds pipelines/manifest.json at /app/pipelines/
     volumes:
       - ../src:/app/src  # Live code changes without rebuild
+      - ../connectors:/app/connectors
+      - ../connections:/app/connections  # includes .secrets/ per connection
       - ../pipelines:/app/pipelines
-      - ../.secrets:/app/.secrets
       - ~/.aws:/home/appuser/.aws:ro
 
     # Expose gRPC port to other containers
@@ -80,8 +81,8 @@ services:
   source_engine:
     build:
       context: ..
-      dockerfile: Dockerfile.cloud
-    image: analitiq-stream-cloud:latest
+      dockerfile: Dockerfile
+    image: analitiq-stream:latest
     container_name: analitiq-source-engine
 
     # Base environment variables - per-invocation vars (PIPELINE_ID)
@@ -92,7 +93,6 @@ services:
       - RUN_MODE=engine
       - ENV=${ENV:-local}
       - AWS_REGION=${AWS_REGION:-eu-central-1}
-      - LOCAL_CONFIG_MOUNT=/config
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       # gRPC destination connection
       - DESTINATION_GRPC_HOST=destination
@@ -104,17 +104,19 @@ services:
       # AWS configuration
       - AWS_PROFILE=${AWS_PROFILE:-}
 
-    # Volume mounts for consolidated config files - match analitiq.yaml paths
-    # Note: pipelines and .secrets are writable for cloud_entrypoint/config_fetcher
+    # Volume mounts for modular config files
+    # Convention-based discovery finds pipelines/manifest.json at /app/pipelines/
     volumes:
       - ../src:/app/src  # Live code changes without rebuild
+      - ../connectors:/app/connectors
+      - ../connections:/app/connections  # includes .secrets/ per connection
       - ../pipelines:/app/pipelines
-      - ../.secrets:/app/.secrets
       - ~/.aws:/home/appuser/.aws:ro
       # Mount state, logs, and deadletter directories for persistence
       - ../state:/app/state
       - ../logs:/app/logs
       - ../deadletter:/app/deadletter
+      - ../metrics:/app/metrics
 
     # Resource limits (similar to ECS task definition)
     deploy:
@@ -131,7 +133,7 @@ services:
 
     # Health check
     healthcheck:
-      test: ["CMD", "python", "-c", "from src.core.pipeline_config_prep import PipelineConfigPrep; print('OK')"]
+      test: ["CMD", "python", "-c", "from src.engine.pipeline_config_prep import PipelineConfigPrep; print('OK')"]
       interval: 30s
       timeout: 10s
       retries: 3

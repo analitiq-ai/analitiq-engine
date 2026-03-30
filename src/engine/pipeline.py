@@ -10,7 +10,6 @@ from dotenv import load_dotenv
 from pydantic import ValidationError
 
 from .engine import StreamingEngine
-from .pipeline_config_prep import _get_connection_uuid
 
 from ..shared.run_id import get_or_generate_run_id
 from ..state.log_storage import LogStorageSettings, create_log_handler
@@ -163,18 +162,13 @@ class Pipeline:
         """Build a config dict from pipeline and stream configs for engine."""
         connections = self.pipeline_config.get("connections", {})
 
-        # Helper to get resolved connection config by reference
+        # Helper to get resolved connection config by alias
         def get_connection_config(connection_ref: str) -> Dict[str, Any]:
-            connection_id = _get_connection_uuid(connections, connection_ref)
-            if not connection_id:
+            if connection_ref not in self.resolved_connections:
                 raise ValueError(
-                    f"Connection reference '{connection_ref}' not found in pipeline connections"
+                    f"Connection '{connection_ref}' was not resolved"
                 )
-            if connection_id not in self.resolved_connections:
-                raise ValueError(
-                    f"Connection '{connection_id}' (ref='{connection_ref}') was not resolved"
-                )
-            runtime = self.resolved_connections[connection_id]
+            runtime = self.resolved_connections[connection_ref]
             if isinstance(runtime, ConnectionRuntime):
                 result = runtime.raw_config
                 result["_runtime"] = runtime
@@ -182,7 +176,7 @@ class Pipeline:
             elif isinstance(runtime, dict):
                 return runtime.copy()
             raise ValueError(
-                f"Unexpected connection type for '{connection_id}': {type(runtime)}"
+                f"Unexpected connection type for '{connection_ref}': {type(runtime)}"
             )
 
         # Helper to get resolved endpoint config by endpoint_id
@@ -293,8 +287,8 @@ class Pipeline:
             first_source_conn = get_connection_config(first_source["connection_ref"])
             first_dest_conn = get_connection_config(first_dest["connection_ref"])
 
-            source_host_id = _get_connection_uuid(connections, first_source["connection_ref"]) or ""
-            dest_host_id = _get_connection_uuid(connections, first_dest["connection_ref"]) or ""
+            source_host_id = first_source["connection_ref"]
+            dest_host_id = first_dest["connection_ref"]
 
             pipeline_source_config = {
                 "host": first_source_conn.get("host"),

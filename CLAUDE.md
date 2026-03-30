@@ -94,23 +94,44 @@ Backward compatibility aliases exist but will emit deprecation warnings.
 
 ## Configuration Architecture
 
-Configuration loads from local filesystem when ran locally. In cloud, `config_fetcher.py` pre-populates from DynamoDB/S3 first.
+Configuration is assembled at runtime from modular files. Paths are defined in `analitiq.yaml`.
+Pipeline discovery uses `manifest.json` as the central index; only `active` pipelines are executable.
 
 ```
-{local_config_mount}/
-├── pipelines/{pipeline_id}.json
-├── streams/{stream_id}.json
-├── .secrets/{connection_id}
-└── connectors/{connector_name}/connector.json
+project_root/
+├── connectors/{slug}/              # Downloaded from GitHub (one repo per connector)
+│   └── definition/
+│       ├── connector.json          # Connector metadata, auth, form_fields
+│       ├── manifest.json           # Lists public endpoints
+│       └── endpoints/              # Public endpoints (API schemas)
+│           └── {name}.json
+├── connections/{alias}/            # User-created, human-readable alias
+│   ├── connection.json             # Host, connector_slug, parameters
+│   ├── .secrets/
+│   │   └── credentials.json        # Secret key-value pairs
+│   └── endpoints/                  # Private endpoints (DB table schemas)
+│       └── {name}.json
+├── pipelines/
+│   ├── manifest.json               # Central index of all pipelines
+│   └── {pipeline_id}/              # Pipeline directory (name = pipeline ID)
+│       ├── pipeline.json           # Pipeline config (connections, runtime, stream IDs)
+│       └── streams/
+│           └── {stream_id}.json    # Individual stream config files
+└── analitiq.yaml                   # Path configuration
 ```
+
+### Endpoint References
+
+Streams reference endpoints using scoped path format:
+- `"connector:{slug}/{name}"` → public endpoint from a connector
+- `"connection:{alias}/{name}"` → private endpoint from a connection
 
 ### Environment Variables
 
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `ENV` | Yes | `local`, `dev`, `prod` - affects storage backends only |
-| `PIPELINE_ID` | Yes | Pipeline UUID |
-| `LOCAL_CONFIG_MOUNT` | Yes | Config directory path |
+| `PIPELINE_ID` | Yes | Pipeline ID (matches `pipeline_id` in manifest.json) |
 | `AWS_REGION` | Cloud | Default: `eu-central-1` |
 
 **Cloud-only (config_fetcher.py):** `PIPELINES_TABLE`, `STREAMS_TABLE`, `CONNECTIONS_TABLE`, `SECRETS_BUCKET`
@@ -120,138 +141,131 @@ S3 buckets auto-construct as `analitiq-{purpose}-{env}` (e.g., `analitiq-client-
 ### Using PipelineConfigPrep
 
 ```python
-from src.engine.pipeline_config_prep import PipelineConfigPrep, PipelineConfigPrepSettings
+from src.engine.pipeline_config_prep import PipelineConfigPrep
 
-settings = PipelineConfigPrepSettings(
-    env="local", pipeline_id="uuid", local_config_mount="/path/to/config"
-)
-prep = PipelineConfigPrep(settings)
-pipeline_config, stream_configs, connections, endpoints = prep.create_config()
+# Requires PIPELINE_ID env var. Reads paths from analitiq.yaml.
+# Discovers pipeline via manifest.json, enforces active status.
+prep = PipelineConfigPrep()
+pipeline_config, stream_configs, connections, endpoints, connectors = prep.create_config()
 ```
 
 ## Configuration Schemas
 
-### Pipeline (`pipelines/{id}.json`)
+### Manifest (`pipelines/manifest.json`)
+
+Central index of all pipelines. Only pipelines with `status: "active"` can be executed.
 
 ```json
 {
-  "version": 1,
-  "pipeline_id": "uuid",
-  "org_id": "uuid",
-  "name": "Pipeline Name",
-  "status": "active",
-  "connections": {
-    "source": { "conn_alias": "connection-uuid" },
-    "destinations": [{ "conn_alias": "connection-uuid" }]
-  },
-  "schedule": { "type": "interval", "timezone": "UTC", "interval_minutes": 1440 },
-  "engine": { "vcpu": 1, "memory": 8192 },
-  "runtime": {
-    "buffer_size": 5000,
-    "batching": { "batch_size": 100, "max_concurrent_batches": 3 },
-    "logging": { "log_level": "INFO", "metrics_enabled": true },
-    "error_handling": { "strategy": "dlq", "max_retries": 3, "retry_delay": 5 }
-  }
-}
-```
-
-### Stream (`streams/{id}.json`)
-
-```json
-{
-  "version": 1,
-  "stream_id": "uuid",
-  "pipeline_id": "uuid",
-  "is_enabled": true,
-  "source": {
-    "connection_ref": "conn_alias",
-    "endpoint_id": "uuid",
-    "replication": { "method": "incremental", "cursor_field": ["updated_at"] }
-  },
-  "destinations": [{
-    "connection_ref": "conn_alias",
-    "endpoint_id": "uuid",
-    "write": { "mode": "upsert" }
-  }],
-  "mapping": { "assignments": [...] }
-}
-```
-
-### Connectors
-
-Connectors define the type and metadata for each integration. The `connector_type` field determines which handler processes connections using this connector.
-
-```json
-{
-  "connectors": [
-    {"connector_id": "pg-connector", "connector_name": "PostgreSQL", "connector_type": "database", "slug": "postgresql"},
-    {"connector_id": "mysql-connector", "connector_name": "MySQL", "connector_type": "database", "slug": "mysql"},
-    {"connector_id": "api-connector", "connector_name": "REST API", "connector_type": "api"},
-    {"connector_id": "file-connector", "connector_name": "File Export", "connector_type": "file"},
-    {"connector_id": "s3-connector", "connector_name": "S3 Export", "connector_type": "s3"},
-    {"connector_id": "stdout-connector", "connector_name": "Stdout", "connector_type": "stdout"}
+  "pipelines": [
+    {
+      "pipeline_id": "mysql-to-postgresql",
+      "name": "MySQL to PostgreSQL",
+      "path": "mysql-to-postgresql/pipeline.json",
+      "status": "active",
+      "schedule": { "type": "manual", "cron": null },
+      "streams": ["stream-1"]
+    }
   ]
 }
 ```
 
-### Connection Credentials
+### Pipeline (`pipelines/{id}/pipeline.json`)
 
-Connections reference a connector via `connector_id` and contain credentials. Credentials use `${VAR_NAME}` placeholder syntax. Placeholders are expanded at connection time from secrets files (`.secrets/{connection_id}.json`). Missing placeholders raise `PlaceholderExpansionError`. See `docs/CREDENTIALS_GUIDE.md`.
+Lightweight reference documents. Connections are aliases, stream IDs reference separate stream files.
+
+```json
+{
+  "pipeline": {
+    "org_id": "uuid",
+    "name": "Pipeline Name",
+    "status": "active",
+    "version": 1,
+    "connections": {
+      "source": "my-api-connection",
+      "destinations": ["prod-postgres"]
+    },
+    "streams": ["stream-1"],
+    "schedule": { "type": "interval", "timezone": "UTC", "interval_minutes": 1440 },
+    "engine": { "vcpu": 1, "memory": 8192 },
+    "runtime": {
+      "buffer_size": 5000,
+      "batching": { "batch_size": 100, "max_concurrent_batches": 3 },
+      "logging": { "log_level": "INFO", "metrics_enabled": true },
+      "error_handling": { "strategy": "dlq", "max_retries": 3, "retry_delay": 5 }
+    }
+  },
+  "streams": []
+}
+```
+
+### Stream (`pipelines/{id}/streams/{stream_id}.json`)
+
+Individual stream configuration with source, destinations, and mapping.
+
+```json
+{
+  "stream_id": "stream-1",
+  "is_enabled": true,
+  "source": {
+    "connection_ref": "my-api-connection",
+    "endpoint_ref": "connector:wise/transfers",
+    "primary_key": ["id"],
+    "replication": { "method": "incremental", "cursor_field": ["created"] }
+  },
+  "destinations": [{
+    "connection_ref": "prod-postgres",
+    "endpoint_ref": "connection:prod-postgres/public_transfers",
+    "write": { "mode": "upsert", "conflict_keys": ["id"] }
+  }],
+  "mapping": { "assignments": [] }
+}
+```
+
+### Connectors (`connectors/{slug}/definition/connector.json`)
+
+Downloaded from GitHub. Define connector type, auth, form fields, rate limits.
+
+```json
+{
+  "connector_id": "uuid",
+  "connector_name": "Wise",
+  "connector_type": "api",
+  "slug": "wise",
+  "base_url": "https://api.transferwise.com",
+  "auth": { "type": "api_key" },
+  "headers": { "Authorization": "Bearer ${access_token}" }
+}
+```
+
+Connector types: `api`, `database`, `file`, `s3`, `stdout`
+
+### Connections (`connections/{alias}/connection.json`)
+
+User-created. Reference a connector by `connector_slug`. Credentials use `${VAR}` placeholders resolved from `connections/{alias}/.secrets/credentials.json`.
 
 **Database connection:**
 ```json
 {
-  "connection_id": "prod-postgres",
-  "connector_id": "pg-connector",
+  "connector_slug": "postgresql",
   "host": "${DB_HOST}",
-  "port": 5432,
-  "database": "${DB_NAME}",
-  "username": "${DB_USER}",
-  "password": "${DB_PASSWORD}"
+  "parameters": {
+    "database": "${DB_NAME}",
+    "username": "${DB_USER}",
+    "password": "${DB_PASSWORD}",
+    "port": 5432
+  }
 }
 ```
 
 **API connection:**
 ```json
 {
-  "connection_id": "external-api",
-  "connector_id": "api-connector",
-  "host": "https://api.example.com",
-  "headers": { "Authorization": "Bearer ${API_TOKEN}" },
-  "timeout": 30,
-  "rate_limit": { "max_requests": 60, "time_window": 60 }
-}
-```
-
-**File connection:**
-```json
-{
-  "connection_id": "local-export",
-  "connector_id": "file-connector",
-  "file_format": "jsonl",
-  "path": "/data/exports"
-}
-```
-
-**S3 connection:**
-```json
-{
-  "connection_id": "s3-export",
-  "connector_id": "s3-connector",
-  "file_format": "parquet",
-  "bucket": "data-lake",
-  "prefix": "exports",
-  "region": "eu-central-1",
-  "compression": "snappy"
-}
-```
-
-**Stdout connection:**
-```json
-{
-  "connection_id": "debug-output",
-  "connector_id": "stdout-connector",
-  "file_format": "jsonl"
+  "connector_slug": "wise",
+  "host": "https://api.transferwise.com",
+  "parameters": {
+    "headers": { "Authorization": "Bearer ${access_token}" }
+  }
 }
 ```
 

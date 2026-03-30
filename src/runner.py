@@ -1,7 +1,7 @@
 """
 Pipeline runner for executing Analitiq Stream pipelines.
 
-Configuration paths are defined in analitiq.yaml (single source of truth).
+Configuration paths are defined in manifest.json (single source of truth).
 Requires PIPELINE_ID environment variable.
 """
 
@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 class PipelineRunner:
     """Executes Analitiq Stream pipelines with proper error handling and metrics.
 
-    Configuration paths are defined in analitiq.yaml (single source of truth).
+    Configuration paths are defined in manifest.json (single source of truth).
     Requires PIPELINE_ID environment variable to be set.
     """
 
@@ -29,7 +29,7 @@ class PipelineRunner:
         """
         Initialize pipeline runner.
 
-        Configuration paths are loaded from analitiq.yaml.
+        Configuration paths are loaded from manifest.json.
         Pipeline ID is read from PIPELINE_ID environment variable.
         """
         self.pipeline_id = os.getenv("PIPELINE_ID")
@@ -59,7 +59,7 @@ class PipelineRunner:
 
         try:
             # Create pipeline config prep instance
-            # Configuration paths are loaded from analitiq.yaml
+            # Configuration paths are loaded from manifest.json
             logger.info("Initializing PipelineConfigPrep...")
 
             pipeline_config_prep = PipelineConfigPrep()

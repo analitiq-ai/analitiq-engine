@@ -3,37 +3,18 @@
 import pytest
 
 from src.config import (
-    load_analitiq_config,
-    validate_consolidated_config,
+    validate_pipeline_config,
+    validate_connection_config,
+    parse_endpoint_ref,
+    resolve_endpoint_ref,
+    load_connection,
+    load_connector_for_connection,
 )
+from src.config.exceptions import EndpointNotFoundError, ConnectorNotFoundError, ConnectionConfigError
 
 
 class TestConfig:
     """Test suite for configuration module."""
-
-    @pytest.mark.unit
-    def test_load_analitiq_config_loads_paths(self):
-        """Test that load_analitiq_config loads paths from analitiq.yaml."""
-        config = load_analitiq_config()
-
-        assert "paths" in config
-        paths = config["paths"]
-
-        assert paths["state"] == "./state"
-        assert paths["logs"] == "./logs"
-        assert paths["deadletter"] == "./deadletter"
-        assert paths["metrics"] == "./metrics"
-
-    @pytest.mark.unit
-    def test_load_analitiq_config_loads_defaults(self):
-        """Test that load_analitiq_config loads defaults section."""
-        config = load_analitiq_config()
-
-        assert "defaults" in config
-        defaults = config["defaults"]
-
-        assert defaults["monitoring_interval_seconds"] == 5
-        assert isinstance(defaults["monitoring_interval_seconds"], int)
 
     @pytest.mark.unit
     def test_config_module_exports(self):
@@ -41,108 +22,199 @@ class TestConfig:
         from src import config
 
         expected_exports = [
-            "load_analitiq_config",
+            "validate_pipeline_config",
+            "validate_connection_config",
+            "parse_endpoint_ref",
+            "resolve_endpoint_ref",
+            "load_connection",
+            "load_connector_for_connection",
             "PathBasedConfigLoader",
-            "validate_consolidated_config",
         ]
 
         for attr in expected_exports:
             assert hasattr(config, attr), f"config module should have attribute: {attr}"
 
 
-class TestConsolidatedConfigValidator:
-    """Test suite for consolidated config validation."""
+class TestPipelineConfigValidator:
+    """Test suite for pipeline config validation."""
 
     @pytest.fixture
-    def valid_config(self):
-        """Return a valid consolidated config with minimum requirements."""
+    def valid_pipeline(self):
         return {
-            "pipeline": {"pipeline_id": "test-pipeline"},
-            "connections": [
-                {"connection_id": "conn-1", "type": "api"},
-                {"connection_id": "conn-2", "type": "database"},
-            ],
-            "connectors": [
-                {"connector_id": "connector-1"},
-                {"connector_id": "connector-2"},
-            ],
-            "endpoints": [
-                {"endpoint_id": "endpoint-1"},
-                {"endpoint_id": "endpoint-2"},
-            ],
-            "streams": [
-                {"stream_id": "stream-1"},
-            ],
+            "pipeline": {
+                "pipeline_id": "test-pipeline",
+                "connections": {
+                    "source": "my-api",
+                    "destinations": ["prod-postgres"],
+                },
+                "streams": ["stream-1"],
+                "engine": {"vcpu": 1, "memory": 8192},
+                "runtime": {
+                    "buffer_size": 5000,
+                    "batching": {"batch_size": 100, "max_concurrent_batches": 3},
+                    "logging": {"log_level": "INFO", "metrics_enabled": True},
+                    "error_handling": {"strategy": "dlq", "max_retries": 3, "retry_delay": 5},
+                },
+            },
+            "streams": [{"stream_id": "stream-1"}],
         }
 
     @pytest.mark.unit
-    def test_valid_config_passes_validation(self, valid_config):
-        """Test that a valid config passes validation."""
-        result = validate_consolidated_config(valid_config)
-        assert isinstance(result, dict)
-        assert len(result["connections"]) == 2
-        assert len(result["connectors"]) == 2
-        assert len(result["endpoints"]) == 2
-        assert len(result["streams"]) == 1
+    def test_valid_pipeline_passes(self, valid_pipeline):
+        result = validate_pipeline_config(valid_pipeline)
+        assert "pipeline" in result
 
     @pytest.mark.unit
-    def test_missing_pipeline_fails_validation(self, valid_config):
-        """Test that missing pipeline key fails validation."""
-        del valid_config["pipeline"]
-        with pytest.raises(ValueError) as exc_info:
-            validate_consolidated_config(valid_config)
-        assert "pipeline" in str(exc_info.value).lower()
+    def test_missing_pipeline_key_fails(self, valid_pipeline):
+        del valid_pipeline["pipeline"]
+        with pytest.raises(ValueError, match="pipeline"):
+            validate_pipeline_config(valid_pipeline)
 
     @pytest.mark.unit
-    def test_insufficient_connections_fails_validation(self, valid_config):
-        """Test that fewer than 2 connections fails validation."""
-        valid_config["connections"] = [{"connection_id": "conn-1"}]
-        with pytest.raises(ValueError) as exc_info:
-            validate_consolidated_config(valid_config)
-        assert "connections" in str(exc_info.value).lower()
+    def test_missing_streams_key_fails(self, valid_pipeline):
+        del valid_pipeline["streams"]
+        with pytest.raises(ValueError, match="streams"):
+            validate_pipeline_config(valid_pipeline)
 
     @pytest.mark.unit
-    def test_insufficient_connectors_fails_validation(self, valid_config):
-        """Test that fewer than 2 connectors fails validation."""
-        valid_config["connectors"] = [{"connector_id": "connector-1"}]
-        with pytest.raises(ValueError) as exc_info:
-            validate_consolidated_config(valid_config)
-        assert "connectors" in str(exc_info.value).lower()
+    def test_missing_source_fails(self, valid_pipeline):
+        valid_pipeline["pipeline"]["connections"]["source"] = ""
+        with pytest.raises(ValueError, match="source"):
+            validate_pipeline_config(valid_pipeline)
 
     @pytest.mark.unit
-    def test_insufficient_endpoints_fails_validation(self, valid_config):
-        """Test that fewer than 2 endpoints fails validation."""
-        valid_config["endpoints"] = [{"endpoint_id": "endpoint-1"}]
-        with pytest.raises(ValueError) as exc_info:
-            validate_consolidated_config(valid_config)
-        assert "endpoints" in str(exc_info.value).lower()
+    def test_missing_destinations_fails(self, valid_pipeline):
+        valid_pipeline["pipeline"]["connections"]["destinations"] = []
+        with pytest.raises(ValueError, match="destinations"):
+            validate_pipeline_config(valid_pipeline)
 
     @pytest.mark.unit
-    def test_no_streams_fails_validation(self, valid_config):
-        """Test that zero streams fails validation."""
-        valid_config["streams"] = []
-        with pytest.raises(ValueError) as exc_info:
-            validate_consolidated_config(valid_config)
-        assert "streams" in str(exc_info.value).lower()
+    def test_no_stream_ids_fails(self, valid_pipeline):
+        valid_pipeline["pipeline"]["streams"] = []
+        with pytest.raises(ValueError, match="stream"):
+            validate_pipeline_config(valid_pipeline)
+
+
+class TestConnectionConfigValidator:
+    """Test suite for connection config validation."""
 
     @pytest.mark.unit
-    def test_empty_connections_fails_validation(self, valid_config):
-        """Test that empty connections list fails validation."""
-        valid_config["connections"] = []
-        with pytest.raises(ValueError) as exc_info:
-            validate_consolidated_config(valid_config)
-        assert "connections" in str(exc_info.value).lower()
+    def test_valid_connection_passes(self):
+        config = {"connector_slug": "postgresql", "host": "localhost"}
+        result = validate_connection_config(config)
+        assert result["connector_slug"] == "postgresql"
 
     @pytest.mark.unit
-    def test_more_than_minimum_passes_validation(self, valid_config):
-        """Test that having more than minimum requirements passes."""
-        valid_config["connections"].append({"connection_id": "conn-3"})
-        valid_config["connectors"].append({"connector_id": "connector-3"})
-        valid_config["endpoints"].append({"endpoint_id": "endpoint-3"})
-        valid_config["streams"].append({"stream_id": "stream-2"})
+    def test_missing_connector_slug_fails(self):
+        with pytest.raises(ValueError, match="connector_slug"):
+            validate_connection_config({"host": "localhost"})
 
-        result = validate_consolidated_config(valid_config)
-        assert len(result["connections"]) == 3
-        assert len(result["connectors"]) == 3
-        assert len(result["endpoints"]) == 3
-        assert len(result["streams"]) == 2
+
+class TestEndpointRefParser:
+    """Test suite for endpoint reference parsing."""
+
+    @pytest.mark.unit
+    def test_parse_connector_ref(self):
+        scope, identifier, name = parse_endpoint_ref("connector:pipedrive/deals")
+        assert scope == "connector"
+        assert identifier == "pipedrive"
+        assert name == "deals"
+
+    @pytest.mark.unit
+    def test_parse_connection_ref(self):
+        scope, identifier, name = parse_endpoint_ref("connection:prod-postgres/public_users")
+        assert scope == "connection"
+        assert identifier == "prod-postgres"
+        assert name == "public_users"
+
+    @pytest.mark.unit
+    def test_missing_scope_raises(self):
+        with pytest.raises(ValueError, match="missing scope"):
+            parse_endpoint_ref("pipedrive/deals")
+
+    @pytest.mark.unit
+    def test_invalid_scope_raises(self):
+        with pytest.raises(ValueError, match="Invalid endpoint_ref scope"):
+            parse_endpoint_ref("unknown:pipedrive/deals")
+
+    @pytest.mark.unit
+    def test_missing_slash_raises(self):
+        with pytest.raises(ValueError, match="identifier/endpoint_name"):
+            parse_endpoint_ref("connector:pipedrive")
+
+    @pytest.mark.unit
+    def test_empty_parts_raises(self):
+        with pytest.raises(ValueError, match="cannot be empty"):
+            parse_endpoint_ref("connector:/deals")
+
+
+class TestEndpointRefResolver:
+    """Test suite for endpoint reference resolution."""
+
+    @pytest.mark.unit
+    def test_resolve_connector_endpoint(self, tmp_path):
+        """Test resolving a public connector endpoint."""
+        # Set up connector directory structure
+        endpoint_dir = tmp_path / "connectors" / "wise" / "definition" / "endpoints"
+        endpoint_dir.mkdir(parents=True)
+        endpoint_file = endpoint_dir / "transfers.json"
+        endpoint_file.write_text('{"endpoint": "/v1/transfers", "method": "GET"}')
+
+        paths = {"connectors": tmp_path / "connectors", "connections": tmp_path / "connections"}
+        result = resolve_endpoint_ref("connector:wise/transfers", paths)
+        assert result["endpoint"] == "/v1/transfers"
+
+    @pytest.mark.unit
+    def test_resolve_connection_endpoint(self, tmp_path):
+        """Test resolving a private connection endpoint."""
+        endpoint_dir = tmp_path / "connections" / "prod-pg" / "endpoints"
+        endpoint_dir.mkdir(parents=True)
+        endpoint_file = endpoint_dir / "public_users.json"
+        endpoint_file.write_text('{"endpoint": "public/users", "method": "DATABASE"}')
+
+        paths = {"connectors": tmp_path / "connectors", "connections": tmp_path / "connections"}
+        result = resolve_endpoint_ref("connection:prod-pg/public_users", paths)
+        assert result["method"] == "DATABASE"
+
+    @pytest.mark.unit
+    def test_resolve_missing_endpoint_raises(self, tmp_path):
+        """Test that missing endpoint file raises EndpointNotFoundError."""
+        paths = {"connectors": tmp_path / "connectors", "connections": tmp_path / "connections"}
+        with pytest.raises(EndpointNotFoundError):
+            resolve_endpoint_ref("connector:wise/nonexistent", paths)
+
+
+class TestConnectionLoader:
+    """Test suite for connection loading."""
+
+    @pytest.mark.unit
+    def test_load_connection(self, tmp_path):
+        conn_dir = tmp_path / "my-api"
+        conn_dir.mkdir()
+        (conn_dir / "connection.json").write_text(
+            '{"connector_slug": "wise", "host": "https://api.wise.com"}'
+        )
+
+        result = load_connection("my-api", tmp_path)
+        assert result["connector_slug"] == "wise"
+
+    @pytest.mark.unit
+    def test_load_missing_connection_raises(self, tmp_path):
+        with pytest.raises(ConnectionConfigError):
+            load_connection("nonexistent", tmp_path)
+
+    @pytest.mark.unit
+    def test_load_connector_for_connection(self, tmp_path):
+        connector_dir = tmp_path / "wise" / "definition"
+        connector_dir.mkdir(parents=True)
+        (connector_dir / "connector.json").write_text(
+            '{"connector_type": "api", "slug": "wise"}'
+        )
+
+        result = load_connector_for_connection("wise", tmp_path)
+        assert result["connector_type"] == "api"
+
+    @pytest.mark.unit
+    def test_load_missing_connector_raises(self, tmp_path):
+        with pytest.raises(ConnectorNotFoundError):
+            load_connector_for_connection("nonexistent", tmp_path)

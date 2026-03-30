@@ -17,7 +17,6 @@ from ..state.dead_letter_queue import DeadLetterQueue
 from ..state.metrics_storage import emit_metrics_log, create_metrics_record
 from ..state.retry_handler import RetryHandler
 from ..state.state_manager import StateManager
-from ..config import load_analitiq_config
 from ..models.metrics import PipelineMetrics
 from ..models.engine import (
     StreamProcessingConfig, PipelineStagesConfig,
@@ -94,13 +93,7 @@ class StreamingEngine:
         self.orchestrator = PipelineOrchestrator(pipeline_id)
 
         # Fault tolerance components with state management
-        # Load state path from analitiq.yaml
-        try:
-            config = load_analitiq_config()
-            state_path = config.get("paths", {}).get("state", "./state")
-        except FileNotFoundError:
-            state_path = "./state"
-        self.sharded_state_manager = StateManager(pipeline_id, state_path)
+        self.sharded_state_manager = StateManager(pipeline_id, "./state")
         self._state_manager = self.sharded_state_manager
         self.retry_handler = RetryHandler(max_retries=max_retries, base_delay=retry_delay)
         self.circuit_breaker = CircuitBreaker()

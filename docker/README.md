@@ -9,11 +9,11 @@ Both services use the same image and switch behavior with `RUN_MODE`.
 
 ## Files
 
-- `docker-compose.yml`: Local/dev orchestration for engine + destination.
+- `docker-compose.yml`: Local orchestration for engine + destination.
 - `cloud_entrypoint.py`: Cloud entrypoint that fetches config then runs `src.main`.
-- `config_fetcher.py`: Fetches consolidated pipeline config + secrets via Lambda/S3.
+- `config_fetcher.py`: Fetches pipeline config + secrets via Lambda/S3 (cloud only).
 - `grpc_health_check.py`: gRPC readiness check for destination container.
-- `deploy-ecr.sh`: Build and push image to ECR.
+- `deploy.sh`: Build and push image to ECR.
 - `.env.example`, `local.env`, `dev.env`: Environment templates.
 
 ## Quick Start (Local)
@@ -22,25 +22,30 @@ Both services use the same image and switch behavior with `RUN_MODE`.
 
 ```bash
 cp .env.example .env
+# Set PIPELINE_ID to a pipeline_id from pipelines/manifest.json
 ```
 
-2. Run destination server:
+2. Run both services:
 
 ```bash
-PIPELINE_ID=<pipeline-uuid> \
-docker compose run --rm destination
+PIPELINE_ID=mysql-to-postgresql docker compose run --rm source_engine
 ```
 
-3. Run source engine:
+Or run individually:
 
 ```bash
-PIPELINE_ID=<pipeline-uuid> \
-docker compose run --rm source_engine
+# Start destination first
+PIPELINE_ID=mysql-to-postgresql docker compose run --rm destination
+
+# Then engine in another terminal
+PIPELINE_ID=mysql-to-postgresql docker compose run --rm source_engine
 ```
 
 Notes:
-- `ENV=local` uses local config files under the repo root (for example `pipelines/` and `.secrets/`).
-- Both services mount `../src`, `../pipelines`, and `../.secrets` into the container.
+- `ENV=local` uses local config files from the repo root.
+- Both services mount `connectors/`, `connections/`, and `pipelines/` into the container.
+- Pipeline discovery uses `pipelines/manifest.json` (convention-based path resolution).
+- Secrets are loaded from `connections/{alias}/.secrets/credentials.json`.
 - The destination container must be healthy before the engine starts.
 
 ## Dev Mode (Cloud-like)
@@ -56,18 +61,13 @@ ENV=dev \
 docker compose run --rm source_engine
 ```
 
-This invokes `docker/config_fetcher.py` via `cloud_entrypoint.py` and writes:
-
-- Consolidated config to `{paths.pipelines}/{pipeline_id}.json`
-- Secrets to `{paths.secrets}/{connection_id}.json`
-
-Paths are loaded from `analitiq.yaml` at the project root.
+This invokes `config_fetcher.py` via `cloud_entrypoint.py` to fetch and write configs.
 
 ## Required Environment Variables
 
 Set these at runtime (not in `.env`):
 
-- `PIPELINE_ID`: Pipeline UUID (optionally with version suffix).
+- `PIPELINE_ID`: Must match a `pipeline_id` in `pipelines/manifest.json`.
 
 Optional:
 
@@ -87,13 +87,13 @@ python docker/grpc_health_check.py
 ## Deploy to ECR
 
 ```bash
-./deploy-ecr.sh dev latest
+./deploy.sh dev latest
 ```
 
 The script builds the image with `Dockerfile.cloud`, tags it, and pushes to ECR.
 
 ## Troubleshooting
 
-- Missing config files in `local` mode: ensure `pipelines/` and `.secrets/` exist in the repo root.
+- Missing config: ensure `pipelines/manifest.json` exists and the `PIPELINE_ID` matches an active entry.
 - AWS auth errors in `dev` mode: verify `AWS_PROFILE` and credentials.
 - gRPC connection errors: confirm the destination container is healthy and `DESTINATION_GRPC_HOST=destination`.

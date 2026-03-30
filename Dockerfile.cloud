@@ -33,19 +33,20 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY --chown=appuser:appuser . .
 
 # Create required directories with proper permissions
-# These directories match paths defined in analitiq.yaml (single source of truth)
-# Consolidated config: pipelines/{pipeline_id}.json + .secrets/{connection_id}.json
+# In cloud mode, config_fetcher writes configs to these directories.
+# connectors/ and connections/ are populated by the config fetcher at startup.
 RUN mkdir -p \
     /app/pipelines \
-    /app/.secrets \
+    /app/connectors \
+    /app/connections \
     /app/state \
     /app/logs \
     /app/deadletter \
     /app/metrics && \
-    chown -R appuser:appuser /app/pipelines /app/.secrets /app/state /app/logs /app/deadletter /app/metrics
+    chown -R appuser:appuser /app/pipelines /app/connectors /app/connections /app/state /app/logs /app/deadletter /app/metrics
 
 # Cloud environment variables
-# Note: Config paths are determined by analitiq.yaml, not environment variables
+# Config paths are discovered via convention (pipelines/manifest.json at project root).
 #
 # RUN_MODE determines container behavior:
 #   - "engine" (default): Runs the data pipeline engine

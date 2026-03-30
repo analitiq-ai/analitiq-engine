@@ -79,10 +79,7 @@ class DatabaseConnectionParams:
         if self.driver.lower() not in SSL_DIALECTS:
             return args
 
-        if self.ssl_mode == "disable":
-            args["ssl"] = False
-        else:
-            args["ssl"] = convert_ssl_mode(self.ssl_mode)
+        args["ssl"] = canonical_ssl_to_connect_arg(self.ssl_mode)
 
         return args
 
@@ -151,11 +148,12 @@ def extract_connection_params(
     else:
         port = int(port_value)
 
-    # SSL mode: default to "prefer" for SSL dialects, None for others
+    # SSL mode: expects canonical values (none/encrypt/verify) from connector.
+    # Default to "encrypt" for SSL dialects (encrypted, no cert verification).
     if driver.lower() in SSL_DIALECTS:
-        ssl_mode = params.get("ssl_mode", "prefer")
+        ssl_mode = params.get("ssl_mode", "encrypt")
     else:
-        ssl_mode = params.get("ssl_mode", "")
+        ssl_mode = params.get("ssl_mode", "none")
 
     # Pool configuration
     pool_config = params.get("connection_pool", {})
@@ -178,78 +176,32 @@ def extract_connection_params(
     )
 
 
-def is_ssl_handshake_error(exc: BaseException) -> bool:
-    """Check if exception indicates an SSL handshake/protocol failure.
 
-    Used exclusively in ssl_mode='prefer' connection paths to decide
-    whether to retry without SSL. ConnectionError and its subclasses
-    (ConnectionResetError, ConnectionRefusedError) are treated as
-    handshake failures here because they occur when a non-SSL server
-    rejects the SSL negotiation attempt (e.g. asyncpg raises a bare
-    ConnectionError on SSL rejection). Do NOT use this function
-    outside of SSL-prefer fallback logic.
-    """
-    seen: set[int] = set()
-    to_check: list[BaseException] = []
-    stack: list[BaseException] = [exc]
-    while stack:
-        current = stack.pop()
-        if id(current) in seen:
-            continue
-        seen.add(id(current))
-        to_check.append(current)
-        if current.__cause__ is not None:
-            stack.append(current.__cause__)
-        if current.__context__ is not None:
-            stack.append(current.__context__)
-        if hasattr(current, "orig") and current.orig is not None:
-            stack.append(current.orig)
+def canonical_ssl_to_connect_arg(ssl_mode: str) -> Union[bool, ssl.SSLContext]:
+    """Convert a canonical ssl_mode to the Python ssl argument for asyncpg/aiomysql.
 
-    has_handshake_error = False
-    for e in to_check:
-        if isinstance(e, ssl.SSLCertVerificationError):
-            return False
-        if isinstance(e, (ssl.SSLError, ConnectionError)):
-            has_handshake_error = True
-    return has_handshake_error
-
-
-def convert_ssl_mode(ssl_mode: str) -> Union[bool, ssl.SSLContext]:
-    """Convert PostgreSQL ssl_mode string to asyncpg ssl parameter.
-
-    Both asyncpg and aiomysql accept True/False or ssl.SSLContext.
-
-    ssl_mode semantics:
-    - disable: No SSL
-    - prefer/require: Encrypt connection, but don't verify server certificate
-    - verify-ca/verify-full: Encrypt and verify server certificate
-
-    When ssl=True is passed, Python creates an SSLContext with
-    certificate verification enabled by default, which fails for RDS and
-    other services using non-public CA chains. For 'prefer' and 'require',
-    we create an SSLContext that skips certificate verification, matching
-    standard PostgreSQL/libpq behavior.
+    Canonical values (stored in connection config by the connection-creator agent):
+    - "none":    no SSL
+    - "encrypt": SSL without certificate verification
+    - "prefer":  same as encrypt (fallback to none is handled by create_database_engine)
+    - "verify":  SSL with certificate verification
 
     Args:
-        ssl_mode: PostgreSQL SSL mode string
+        ssl_mode: Canonical SSL mode string
 
     Returns:
         SSL parameter suitable for asyncpg/aiomysql connection
     """
-    if ssl_mode == "disable":
+    if ssl_mode == "none":
         return False
 
-    if ssl_mode in ("prefer", "require"):
-        # Create SSL context without certificate verification
-        # This matches PostgreSQL libpq behavior for these modes
+    if ssl_mode in ("encrypt", "prefer"):
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
         return ctx
 
-    # For 'verify-ca' and 'verify-full', use default verification
-    # Note: For proper verification, sslrootcert should be configured
-    # with the appropriate CA bundle (e.g., AWS RDS CA bundle)
+    # "verify" or any unrecognised value — full cert verification
     return True
 
 
@@ -320,7 +272,7 @@ async def create_database_engine(
         async with engine.connect() as conn:
             await conn.execute(text("SELECT 1"))
     except Exception as e:
-        if ssl_mode == "prefer" and is_ssl_handshake_error(e):
+        if ssl_mode == "prefer":
             logger.warning(
                 "SSL failed with ssl_mode='prefer', retrying without SSL: %s", e
             )
