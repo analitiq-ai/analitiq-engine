@@ -320,6 +320,171 @@ class TestConnectionRuntimeClose:
         assert runtime._materialized is False
 
 
+class TestScrubResolvedConfig:
+    """Test cooperative scrub_resolved_config() lifecycle."""
+
+    @pytest.mark.asyncio
+    async def test_scrub_clears_resolved_config_for_file_type(self):
+        runtime = ConnectionRuntime(
+            raw_config={"path": "/tmp/out", "token": "${SECRET}"},
+            connection_id="conn-file",
+            connector_type="file",
+            driver=None,
+            resolver=AsyncMock(resolve=AsyncMock(return_value={"SECRET": "s3cr3t"})),
+        )
+        runtime.acquire()
+        await runtime.materialize()
+
+        # Before scrub: resolved config is accessible
+        assert runtime.resolved_config["token"] == "s3cr3t"
+
+        runtime.scrub_resolved_config()
+
+        # After scrub: resolved config is cleared
+        assert runtime._resolved_config is None
+
+    @pytest.mark.asyncio
+    async def test_scrub_waits_for_all_acquirers(self):
+        runtime = ConnectionRuntime(
+            raw_config={"path": "/tmp/out"},
+            connection_id="conn-shared",
+            connector_type="file",
+            driver=None,
+            resolver=AsyncMock(),
+        )
+        runtime.acquire()
+        runtime.acquire()
+        await runtime.materialize()
+
+        # First scrub: not all consumers have signalled
+        runtime.scrub_resolved_config()
+        assert runtime._resolved_config is not None
+
+        # Second scrub: all consumers signalled, now cleared
+        runtime.scrub_resolved_config()
+        assert runtime._resolved_config is None
+
+    @pytest.mark.asyncio
+    async def test_resolved_config_accessible_before_scrub(self):
+        runtime = ConnectionRuntime(
+            raw_config={"path": "/data", "file_format": "jsonl"},
+            connection_id="conn-stdout",
+            connector_type="stdout",
+            driver=None,
+            resolver=AsyncMock(),
+        )
+        runtime.acquire()
+        await runtime.materialize()
+
+        cfg = runtime.resolved_config
+        assert cfg["path"] == "/data"
+        assert cfg["file_format"] == "jsonl"
+
+    @pytest.mark.asyncio
+    async def test_close_resets_scrub_counter(self):
+        runtime = ConnectionRuntime(
+            raw_config={"path": "/tmp"},
+            connection_id="conn-reset",
+            connector_type="file",
+            driver=None,
+            resolver=AsyncMock(),
+        )
+        runtime.acquire()
+        await runtime.materialize()
+        runtime.scrub_resolved_config()
+
+        # After close, scrub counter is reset
+        await runtime.close()
+        assert runtime._scrub_requests == 0
+
+    def test_scrub_before_materialize_is_ignored(self):
+        runtime = ConnectionRuntime(
+            raw_config={"path": "/tmp"},
+            connection_id="conn-early",
+            connector_type="file",
+            driver=None,
+            resolver=AsyncMock(),
+        )
+        runtime.acquire()
+        # Calling scrub before materialize should not raise
+        runtime.scrub_resolved_config()
+        assert runtime._scrub_requests == 0
+
+    @pytest.mark.asyncio
+    async def test_scrub_with_zero_ref_count_clears_immediately(self):
+        runtime = ConnectionRuntime(
+            raw_config={"path": "/tmp"},
+            connection_id="conn-zero-ref",
+            connector_type="file",
+            driver=None,
+            resolver=AsyncMock(),
+        )
+        # Materialize without acquire (unusual but possible)
+        await runtime.materialize()
+        assert runtime._resolved_config is not None
+
+        runtime.scrub_resolved_config()
+        assert runtime._resolved_config is None
+
+    @pytest.mark.asyncio
+    async def test_scrub_is_noop_on_database_type(self):
+        runtime = ConnectionRuntime(
+            raw_config={"host": "localhost", "driver": "postgresql", "parameters": {"port": 5432, "database": "test", "username": "u", "password": "p"}},
+            connection_id="conn-db-scrub",
+            connector_type="database",
+            driver="postgresql",
+            resolver=AsyncMock(),
+        )
+        runtime.acquire()
+
+        with patch("src.shared.connection_runtime.create_database_engine", return_value=(AsyncMock(), "postgresql")):
+            await runtime.materialize()
+
+        # _resolved_config is already None from _scrub_secrets()
+        assert runtime._resolved_config is None
+
+        # scrub_resolved_config() should be a safe no-op
+        runtime.scrub_resolved_config()
+        assert runtime._scrub_requests == 0
+
+    @pytest.mark.asyncio
+    async def test_excess_scrub_calls_are_harmless(self):
+        runtime = ConnectionRuntime(
+            raw_config={"path": "/tmp"},
+            connection_id="conn-excess",
+            connector_type="file",
+            driver=None,
+            resolver=AsyncMock(),
+        )
+        runtime.acquire()
+        await runtime.materialize()
+
+        # First scrub clears
+        runtime.scrub_resolved_config()
+        assert runtime._resolved_config is None
+
+        # Extra scrub calls are no-ops (config already None)
+        runtime.scrub_resolved_config()
+        runtime.scrub_resolved_config()
+        assert runtime._resolved_config is None
+
+    @pytest.mark.asyncio
+    async def test_resolved_config_error_message_after_scrub(self):
+        runtime = ConnectionRuntime(
+            raw_config={"path": "/tmp"},
+            connection_id="conn-msg",
+            connector_type="file",
+            driver=None,
+            resolver=AsyncMock(),
+        )
+        runtime.acquire()
+        await runtime.materialize()
+        runtime.scrub_resolved_config()
+
+        with pytest.raises(RuntimeError, match="already scrubbed"):
+            _ = runtime.resolved_config
+
+
 class TestCreateSourceConnectorUnknownType:
     """Test _create_source_connector with unknown connector_type."""
 

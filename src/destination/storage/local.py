@@ -48,7 +48,6 @@ class LocalFileStorage(BaseStorageBackend):
             raise ValueError("LocalFileStorage requires 'path' in configuration")
 
         self._base_path = Path(path)
-        self._config = config
 
         # Optionally create base directory
         create_dirs = config.get("create_dirs", True)

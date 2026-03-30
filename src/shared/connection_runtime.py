@@ -1,7 +1,13 @@
 """ConnectionRuntime — unified connection materialization.
 
 Constructed by PipelineConfigPrep with enriched config (connector_type, driver
-already baked in). Internal lifecycle: resolve secrets -> create transport -> scrub.
+already baked in).
+
+Lifecycle per connector type:
+- database/api: resolve secrets -> create transport -> scrub immediately.
+- file/s3/stdout: resolve secrets -> retain resolved config -> handlers
+  consume config during connect() -> cooperative scrub via
+  scrub_resolved_config() once all consumers have signalled.
 
 Shared ownership via reference counting: each consumer calls acquire() on
 connect and close() on disconnect. Transport is disposed only when the last
@@ -148,6 +154,11 @@ class ConnectionRuntime:
         # Secret resolution internals
         self._secrets: Optional[Dict[str, str]] = None
 
+        # Cooperative scrub: handlers call scrub_resolved_config() after
+        # consuming the config.  We only actually clear when every acquirer
+        # has signalled.
+        self._scrub_requests: int = 0
+
     # --- Read-only metadata (available before materialize) ---
 
     @property
@@ -237,9 +248,15 @@ class ConnectionRuntime:
 
     @property
     def resolved_config(self) -> Dict[str, Any]:
-        if not self._materialized or self._resolved_config is None:
+        if not self._materialized:
             raise RuntimeError(
-                "resolved_config not available: call materialize() first or wrong connector_type"
+                "resolved_config not available: call materialize() first"
+            )
+        if self._resolved_config is None:
+            raise RuntimeError(
+                f"resolved_config for {self._connection_id} was already scrubbed "
+                f"(scrub_requests={self._scrub_requests}, ref_count={self._ref_count}). "
+                f"Access resolved_config before calling scrub_resolved_config()."
             )
         return self._resolved_config
 
@@ -255,6 +272,45 @@ class ConnectionRuntime:
     async def release(self) -> None:
         """Alias for close() — decrement ref count and dispose if last."""
         await self.close()
+
+    def scrub_resolved_config(self) -> None:
+        """Signal that the caller has consumed the resolved config.
+
+        For file/s3/stdout connections the resolved config is kept after
+        materialize() so handlers can pass it to storage backends during
+        connect().  Once a handler has finished consuming it, it calls this
+        method.  The config is actually cleared only when every acquirer has
+        signalled, so shared runtimes stay functional until the last consumer
+        is done.
+
+        For database/api connections the resolved config is already scrubbed
+        by materialize(), so calling this method is a safe no-op.
+        """
+        if not self._materialized:
+            logger.warning(
+                f"Runtime {self._connection_id}: scrub_resolved_config() "
+                f"called before materialize() — ignoring"
+            )
+            return
+
+        if self._resolved_config is None:
+            return
+
+        if self._ref_count == 0:
+            logger.warning(
+                f"Runtime {self._connection_id}: scrub_resolved_config() "
+                f"called with ref_count=0 — scrubbing immediately"
+            )
+            self._resolved_config = None
+            return
+
+        self._scrub_requests += 1
+        if self._scrub_requests >= self._ref_count:
+            self._resolved_config = None
+            logger.debug(
+                f"Runtime {self._connection_id}: resolved config scrubbed "
+                f"(all {self._ref_count} consumers signalled)"
+            )
 
     # --- Teardown ---
 
@@ -292,6 +348,7 @@ class ConnectionRuntime:
             self._base_url = None
             self._rate_limiter = None
             self._resolved_config = None
+            self._scrub_requests = 0
             self._materialized = False
 
     # --- Private ---

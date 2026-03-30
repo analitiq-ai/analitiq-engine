@@ -83,36 +83,46 @@ class FileDestinationHandler(BaseDestinationHandler):
         runtime.acquire()
         await runtime.materialize()
         connection_config = runtime.resolved_config
-        self._config = connection_config
         self._connector_type = connection_config.get("connector_type", "file")
         self._runtime = runtime
 
-        # Determine storage backend type
-        storage_type = "local" if self._connector_type == "file" else self._connector_type
+        try:
+            # Determine storage backend type
+            storage_type = "local" if self._connector_type == "file" else self._connector_type
 
-        # Create storage backend
-        self._storage = get_storage_backend(storage_type)
-        await self._storage.connect(connection_config)
+            # Create storage backend
+            self._storage = get_storage_backend(storage_type)
+            await self._storage.connect(connection_config)
 
-        # Create formatter
-        file_format = connection_config.get("file_format", "jsonl")
-        self._formatter = get_formatter(file_format)
+            # Create formatter
+            file_format = connection_config.get("file_format", "jsonl")
+            self._formatter = get_formatter(file_format)
 
-        # Configure formatter with any format-specific options
-        formatter_config = connection_config.get("formatter_config", {})
-        self._formatter.configure(formatter_config)
+            # Configure formatter with any format-specific options
+            formatter_config = connection_config.get("formatter_config", {})
+            self._formatter.configure(formatter_config)
 
-        # Determine base path
-        base_path = connection_config.get("path", "")
-        if self._connector_type == "s3":
-            base_path = connection_config.get("prefix", "")
+            # Determine base path
+            base_path = connection_config.get("path", "")
+            if self._connector_type == "s3":
+                base_path = connection_config.get("prefix", "")
 
-        # Create manifest tracker for idempotency
-        self._manifest = ManifestTracker(self._storage, base_path)
-        await self._manifest.load()
+            # Create manifest tracker for idempotency
+            self._manifest = ManifestTracker(self._storage, base_path)
+            await self._manifest.load()
 
-        # Store path template if provided
-        self._path_template = connection_config.get("path_template")
+            # Store path template if provided
+            self._path_template = connection_config.get("path_template")
+
+            # Retain only the non-secret fields needed after connect().
+            # write_batch() uses path or prefix (as fallback) for build_path().
+            # _path_template is stored separately above.
+            self._config = {
+                "path": connection_config.get("path", ""),
+                "prefix": connection_config.get("prefix", ""),
+            }
+        finally:
+            runtime.scrub_resolved_config()
 
         self._connected = True
         logger.info(

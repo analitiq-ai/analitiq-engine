@@ -73,17 +73,23 @@ class StreamDestinationHandler(BaseDestinationHandler):
         runtime.acquire()
         await runtime.materialize()
         connection_config = runtime.resolved_config
-        self._config = connection_config
 
-        # Get format from config, default to jsonl
-        file_format = connection_config.get("file_format", "jsonl")
+        try:
+            # Get format from config, default to jsonl
+            file_format = connection_config.get("file_format", "jsonl")
 
-        # Create formatter
-        self._formatter = get_formatter(file_format)
+            # Create formatter
+            self._formatter = get_formatter(file_format)
 
-        # Configure formatter with any format-specific options
-        formatter_config = connection_config.get("formatter_config", {})
-        self._formatter.configure(formatter_config)
+            # Configure formatter with any format-specific options
+            formatter_config = connection_config.get("formatter_config", {})
+            self._formatter.configure(formatter_config)
+
+            # Do not retain resolved config — it may contain secrets and is
+            # never read after connect(). Scrub is in finally to cover failures.
+            self._config = {}
+        finally:
+            runtime.scrub_resolved_config()
 
         self._connected = True
         logger.info(f"StreamDestinationHandler connected with format: {file_format}")

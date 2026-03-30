@@ -17,7 +17,6 @@ from src.secrets.exceptions import (
     SecretResolutionError,
     PlaceholderExpansionError,
 )
-from src.secrets.config_wrapper import ConnectionConfig
 from src.secrets.resolvers.local import LocalFileSecretsResolver
 from src.secrets.resolvers.memory import InMemorySecretsResolver
 from src.secrets.resolvers.s3 import S3SecretsResolver
@@ -30,8 +29,6 @@ __all__ = [
     "SecretAccessDeniedError",
     "SecretResolutionError",
     "PlaceholderExpansionError",
-    # Wrapper
-    "ConnectionConfig",
     # Resolvers
     "LocalFileSecretsResolver",
     "InMemorySecretsResolver",

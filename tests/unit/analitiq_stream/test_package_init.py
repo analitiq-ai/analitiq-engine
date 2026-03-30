@@ -70,13 +70,6 @@ class TestSubPackageInits:
         # Should be able to import the package
         assert src.connectors is not None
     
-    def test_core_init(self):
-        """Test core package initialization."""
-        import src.core
-        
-        # Should be able to import the package
-        assert src.core is not None
-    
     def test_fault_tolerance_init(self):
         """Test fault_tolerance package initialization."""
         import src.fault_tolerance
@@ -179,7 +172,7 @@ class TestPackageStructure:
         # All public code attributes should be in __all__ (except submodules)
         # These are modules, not classes to export
         submodules = [
-            'cli', 'config', 'connectors', 'core', 'destination', 'engine',
+            'cli', 'config', 'connectors', 'destination', 'engine',
             'fault_tolerance', 'grpc', 'mapping', 'models', 'schema', 'secrets',
             'shared', 'source', 'state', 'transformations'
         ]
