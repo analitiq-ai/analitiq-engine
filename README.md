@@ -1,4 +1,27 @@
-# Analitiq Stream
+# Analitiq Engine
+
+The open-source engine that moves data between systems using AI (Claude).
+- API -> Database
+- Databse -> API
+- API -> API
+- Databse -> Database
+- many more (sftp, s3, anything really)
+
+## How Analitiq works
+
+Analitiq is a set of open-source tools for connecting APIs, databases, and storage systems — no coding required.
+
+| Repository | What it does |
+|---|---|
+| **[AI Plugins](https://github.com/analitiq-ai/ai-plugins-official)** | Claude Code plugins that build connectors and pipelines through conversation. |
+| **[DIP Registry](https://github.com/analitiq-dip-registry)** | Open catalog of ready-made connector definitions for common systems. |
+| **[Core Engine](https://github.com/analitiq-ai/analitiq-core)** *(this repo)* | Runs the pipelines — reads from sources, transforms data, writes to destinations. |
+
+**Use the plugins** to create connectors and assemble pipelines. **Connectors** live in the registry. **This engine** executes the pipelines. Or skip the setup and use **[Analitiq Cloud](https://analitiq-app.com)** for a fully managed experience.
+
+Learn more at [analitiq.ai](https://analitiq.ai).
+
+---
 
 Analitiq Stream is a fault-tolerant, async-first data streaming framework for Python 3.11+ that moves data between sources and destinations with strong validation, stateful recovery, and gRPC-based decoupling.
 
