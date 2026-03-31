@@ -99,7 +99,6 @@ class StateManager:
             stream_id=stream_name,
             cursor_hex=json.dumps(cursor).encode().hex() if cursor else "",
             cursor_value=hwm,
-            org_id=os.getenv("ORG_ID", ""),
         )
 
     def get_run_info(self) -> Dict[str, Any]:

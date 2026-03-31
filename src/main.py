@@ -129,7 +129,6 @@ async def run_destination_mode() -> None:
     destination_index = int(os.getenv("DESTINATION_INDEX", "0"))
 
     # Load configuration using PipelineConfigPrep (same as engine)
-    # This uses PIPELINE_ID and ORG_ID env vars
     logger.info("Loading pipeline configuration via PipelineConfigPrep")
     config_prep = PipelineConfigPrep()
     pipeline_config, stream_configs, resolved_connections, resolved_endpoints, _connectors = config_prep.create_config()

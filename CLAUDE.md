@@ -177,7 +177,6 @@ Lightweight reference documents. Connections are aliases, stream IDs reference s
 ```json
 {
   "pipeline": {
-    "org_id": "uuid",
     "name": "Pipeline Name",
     "status": "active",
     "version": 1,
@@ -273,7 +272,7 @@ User-created. Reference a connector by `connector_slug`. Credentials use `${VAR}
 
 All storage (state, logs, DLQ, metrics) follows the same pattern:
 - **Local (`ENV=local`):** `{type}/{pipeline_id}/`
-- **S3 (`ENV=dev/prod`):** `s3://analitiq-client-pipeline-{type}-{env}/{org_id}/{pipeline_id}/year=.../`
+- **S3 (`ENV=dev/prod`):** `s3://analitiq-client-pipeline-{type}-{env}/{pipeline_id}/year=.../`
 
 Centralized directories at project root: `state/`, `logs/`, `deadletter/`, `metrics/`
 
@@ -361,8 +360,6 @@ Source (native types) -> Arrow Table (canonical schema) -> Destination (native t
 Use agent `aws-log-parser` to parse CloudWatch logs.
 
 ## Testing
-When running tests where org_id is needed, use:
- - org_id = `d7a11991-2795-49d1-a858-c7e58ee5ecc6`
 
 ### Running docker test locally
 When running docker test, the run should mimic the production environment:
@@ -397,7 +394,7 @@ docker build -t analitiq-stream . && docker push $AWS_ACCOUNT_ID.dkr.ecr.eu-cent
 ```
 
 **Batch Job Requirements:**
-- Runtime env: `PIPELINE_ID`, `ORG_ID`
+- Runtime env: `PIPELINE_ID`
 - Static env: `ENV`, `PIPELINES_TABLE`, `STREAMS_TABLE`, `CONNECTIONS_TABLE`
 - Resources: 0.5-1 vCPU, 1-2GB memory, 3600s timeout
 - IAM: S3 read/write on buckets, DynamoDB read on tables
