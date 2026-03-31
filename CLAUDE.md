@@ -75,7 +75,6 @@ src/
 ├── config/                      # Configuration loading
 ├── secrets/                     # Secret resolvers
 ├── schema/                      # Schema drift detection
-├── mapping/                     # Field mapping processor
 ├── transformations/             # Transformation registry
 ├── main.py                      # Entry point (dual-mode: engine/destination)
 └── runner.py                    # PipelineRunner
