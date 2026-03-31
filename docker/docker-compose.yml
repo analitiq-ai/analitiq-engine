@@ -14,7 +14,6 @@ services:
 
     environment:
       - RUN_MODE=destination
-      - ENV=${ENV:-local}
       - GRPC_PORT=50051
       - LOG_LEVEL=${LOG_LEVEL:-DEBUG}
       # DESTINATION_INDEX selects which destination from pipeline config (default: 0)

@@ -180,29 +180,29 @@ class TestDeadLetterQueue:
         dlq = DeadLetterQueue(dlq_path=str(self.dlq_path), max_file_size=1000)
 
         # Initially should need new file (no current file)
-        assert dlq._need_new_file() is True
+        assert dlq.storage._need_new_file() is True
 
         # Set current file but make it large - access through storage backend
         dlq.storage.current_file = self.dlq_path / "test.jsonl"
         dlq.storage.current_file.touch()  # Create the file
         dlq.storage.current_file_size = 1500  # Over limit
 
-        assert dlq._need_new_file() is True
+        assert dlq.storage._need_new_file() is True
 
         # Set reasonable size
         dlq.storage.current_file_size = 500
-        assert dlq._need_new_file() is False
+        assert dlq.storage._need_new_file() is False
 
         # Remove the file (simulate deletion)
         dlq.storage.current_file.unlink()
-        assert dlq._need_new_file() is True
+        assert dlq.storage._need_new_file() is True
     
     @pytest.mark.asyncio
     async def test_create_new_file(self):
         """Test new file creation."""
         dlq = DeadLetterQueue(dlq_path=str(self.dlq_path))
 
-        await dlq._create_new_file()
+        await dlq.storage._create_new_file()
 
         # Access storage backend for file tracking
         assert dlq.storage.current_file is not None
@@ -221,7 +221,7 @@ class TestDeadLetterQueue:
             file_path = dlq.dlq_path / f"dlq_test_{i:03d}.jsonl"
             file_path.touch()
         
-        await dlq._cleanup_old_files()
+        await dlq.cleanup()
         
         # Should have only max_files remaining
         remaining_files = list(dlq.dlq_path.glob("dlq_*.jsonl"))
@@ -245,7 +245,7 @@ class TestDeadLetterQueue:
             assert test_file.exists()
         
         # Run cleanup - with reasonable retention, files should not be removed
-        await dlq._cleanup_old_files()
+        await dlq.cleanup()
         
         # Files should still exist (within retention period)
         for test_file in test_files:
@@ -529,7 +529,7 @@ class TestDeadLetterQueueEdgeCases:
         with patch('pathlib.Path.glob', side_effect=Exception("Glob error")):
             with patch('src.state.dead_letter_queue.logger') as mock_logger:
                 # Should not raise but log error
-                await dlq._cleanup_old_files()
+                await dlq.cleanup()
                 
                 # Should log the error
                 mock_logger.error.assert_called_once()

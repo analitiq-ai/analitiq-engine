@@ -82,7 +82,7 @@ class TestConnectionRuntimeResolveSecrets:
 
         await runtime.materialize()
 
-        mock_resolver.resolve.assert_awaited_once_with("conn-with-secrets", org_id=None)
+        mock_resolver.resolve.assert_awaited_once_with("conn-with-secrets")
         assert runtime.resolved_config["parameters"]["password"] == "secret123"
 
     @pytest.mark.asyncio

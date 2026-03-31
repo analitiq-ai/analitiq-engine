@@ -71,7 +71,6 @@ class InMemorySecretsResolver(SecretsResolver):
         self,
         connection_id: str,
         *,
-        org_id: Optional[str] = None,
         keys: Optional[list[str]] = None,
     ) -> Dict[str, str]:
         """
@@ -79,7 +78,6 @@ class InMemorySecretsResolver(SecretsResolver):
 
         Args:
             connection_id: Identifier for the connection
-            org_id: Ignored for in-memory resolver
             keys: Optional list of specific keys to retrieve
 
         Returns:
@@ -88,17 +86,7 @@ class InMemorySecretsResolver(SecretsResolver):
         Raises:
             SecretNotFoundError: If no secrets exist for the connection
         """
-        # Try with org_id prefix first if provided
-        lookup_keys = []
-        if org_id:
-            lookup_keys.append(f"{org_id}/{connection_id}")
-        lookup_keys.append(connection_id)
-
-        secrets = None
-        for key in lookup_keys:
-            if key in self._secrets:
-                secrets = self._secrets[key]
-                break
+        secrets = self._secrets.get(connection_id)
 
         if secrets is None:
             raise SecretNotFoundError(

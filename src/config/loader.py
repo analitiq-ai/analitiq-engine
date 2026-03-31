@@ -30,8 +30,6 @@ class PathBasedConfigLoader:
     - streams/{stream_id}.json
     - connectors/{connector_name}/connector.json
     - connectors/{connector_name}/endpoints/{endpoint_name}.json
-
-    The loader is environment-agnostic - it only knows about local file paths.
     """
 
     def __init__(self, base_path: str | Path):

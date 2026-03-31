@@ -287,7 +287,6 @@ class StreamConfig:
     source: SourceConfig = field(default_factory=SourceConfig)
     destinations: List[DestinationConfig] = field(default_factory=list)
     version: int = 1
-    org_id: str = ""
     status: str = "draft"
     is_enabled: bool = True
     mapping: MappingConfig = field(default_factory=MappingConfig)

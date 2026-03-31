@@ -237,7 +237,6 @@ class Pipeline:
             "pipeline_id": self.pipeline_config["pipeline_id"],
             "name": self.pipeline_config.get("name", ""),
             "version": self.pipeline_config.get("version", 1),
-            "org_id": self.pipeline_config.get("org_id", ""),
             "connections": connections,
             "resolved_connections": self.resolved_connections,
             "source": pipeline_source_config,

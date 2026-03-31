@@ -125,7 +125,6 @@ class ConnectionRuntime:
         connector_type: str,
         driver: Optional[str],
         resolver: SecretsResolver,
-        org_id: Optional[str] = None,
     ):
         if connector_type not in VALID_CONNECTOR_TYPES:
             raise ValueError(
@@ -138,7 +137,6 @@ class ConnectionRuntime:
         self._connector_type = connector_type
         self._driver = driver
         self._resolver = resolver
-        self._org_id = org_id
 
         # Transport state — set by materialize()
         self._materialized = False
@@ -364,7 +362,6 @@ class ConnectionRuntime:
 
         self._secrets = await self._resolver.resolve(
             self._connection_id,
-            org_id=self._org_id,
         )
 
         resolved = self._expand_placeholders(self._raw_config, self._secrets)

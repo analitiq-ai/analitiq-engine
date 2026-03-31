@@ -389,7 +389,7 @@ class PipelineConfigPrep:
         return result
 
     def _resolve_connection(
-        self, alias: str, org_id: str = ""
+        self, alias: str,
     ) -> ConnectionRuntime:
         """Resolve a connection by alias.
 
@@ -398,7 +398,6 @@ class PipelineConfigPrep:
 
         Args:
             alias: Connection alias (directory name, used as connection_id)
-            org_id: Org ID for secrets resolution
 
         Returns:
             ConnectionRuntime object
@@ -427,7 +426,6 @@ class PipelineConfigPrep:
             connector_type=connection_type,
             driver=connector.get("driver") if connection_type == "database" else None,
             resolver=resolver,
-            org_id=org_id or None,
         )
 
         self._resolved_connections[alias] = runtime
@@ -466,7 +464,6 @@ class PipelineConfigPrep:
             Tuple of (pipeline_config dict, list of stream_config dicts)
         """
         raw_pipeline = self._load_local_pipeline()
-        org_id = raw_pipeline.get("org_id", "")
 
         raw_connections = raw_pipeline.get("connections", {})
         source_alias = raw_connections.get("source")
@@ -480,7 +477,7 @@ class PipelineConfigPrep:
             )
 
         # Resolve source connection
-        self._resolve_connection(source_alias, org_id)
+        self._resolve_connection(source_alias)
 
         # Resolve destination connections
         for dest_alias in dest_aliases:
@@ -488,7 +485,7 @@ class PipelineConfigPrep:
                 raise ValueError(
                     f"Each destination must be a string (alias), got {type(dest_alias).__name__}"
                 )
-            self._resolve_connection(dest_alias, org_id)
+            self._resolve_connection(dest_alias)
 
         # Build connections_config in the format downstream code expects
         connections_config = {
@@ -506,7 +503,6 @@ class PipelineConfigPrep:
 
         pipeline_config = {
             "version": version,
-            "org_id": org_id,
             "pipeline_id": self.pipeline_id,
             "name": raw_pipeline.get("name", ""),
             "description": raw_pipeline.get("description"),
@@ -536,7 +532,7 @@ class PipelineConfigPrep:
                 )
 
             stream_config = self._build_stream_config(
-                raw_stream, connections_config, org_id
+                raw_stream, connections_config,
             )
             stream_configs.append(stream_config)
 
@@ -548,7 +544,6 @@ class PipelineConfigPrep:
         self,
         raw_stream: Dict[str, Any],
         connections_config: Dict[str, Any],
-        org_id: str,
     ) -> Dict[str, Any]:
         """Build a stream config dict with resolved connections and endpoints."""
         stream_id = raw_stream["stream_id"]
@@ -616,7 +611,6 @@ class PipelineConfigPrep:
             "version": version,
             "stream_id": stream_id,
             "pipeline_id": raw_stream.get("pipeline_id", self.pipeline_id),
-            "org_id": org_id,
             "status": raw_stream.get("status", "draft"),
             "is_enabled": raw_stream.get("is_enabled", True),
             "source": self._normalize_source_config(source_data),

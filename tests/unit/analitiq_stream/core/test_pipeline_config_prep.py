@@ -219,7 +219,6 @@ def standard_setup(temp_config_dir, helper):
     # Pipeline
     pipeline_config = {
         "pipeline_id": "test-pipeline-123",
-        "org_id": "org-123",
         "name": "Wise to Postgres",
         "status": "active",
         "version": 1,
@@ -392,8 +391,7 @@ class TestConfigurationLoading:
         """Test that a pipeline with non-active status raises ValueError."""
         pipelines_dir = Path(temp_config_dir, "pipelines")
         pipeline_config = {
-            "org_id": "org-123",
-            "name": "Draft Pipeline",
+                "name": "Draft Pipeline",
             "status": "draft",
             "version": 1,
             "connections": {"source": "my-wise", "destinations": ["prod-pg"]},
@@ -430,8 +428,7 @@ class TestConfigurationLoading:
         """Test that a missing stream file raises FileNotFoundError."""
         pipelines_dir = Path(temp_config_dir, "pipelines")
         pipeline_config = {
-            "org_id": "org-123",
-            "name": "Bad",
+                "name": "Bad",
             "status": "active",
             "version": 1,
             "connections": {"source": "my-wise", "destinations": ["prod-pg"]},
@@ -462,8 +459,7 @@ class TestConfigurationLoading:
         """Test that a stream file with mismatched stream_id raises ValueError."""
         pipelines_dir = Path(temp_config_dir, "pipelines")
         pipeline_config = {
-            "org_id": "org-123",
-            "name": "Mismatch",
+                "name": "Mismatch",
             "status": "active",
             "version": 1,
             "connections": {"source": "my-wise", "destinations": ["prod-pg"]},

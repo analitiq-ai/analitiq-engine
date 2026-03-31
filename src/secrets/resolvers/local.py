@@ -27,7 +27,6 @@ class LocalFileSecretsResolver(SecretsResolver):
 
     Alternative path patterns supported:
     - {secrets_dir}/{connection_id}  (without .json extension)
-    - {secrets_dir}/{org_id}/{connection_id}  (for multi-tenant)
     """
 
     def __init__(self, secrets_dir: str | Path):
@@ -50,7 +49,6 @@ class LocalFileSecretsResolver(SecretsResolver):
         self,
         connection_id: str,
         *,
-        org_id: Optional[str] = None,
         keys: Optional[list[str]] = None,
     ) -> Dict[str, str]:
         """
@@ -58,7 +56,6 @@ class LocalFileSecretsResolver(SecretsResolver):
 
         Args:
             connection_id: Identifier for the connection
-            org_id: Optional org identifier (for multi-tenant)
             keys: Optional list of specific keys to retrieve
 
         Returns:
@@ -68,7 +65,7 @@ class LocalFileSecretsResolver(SecretsResolver):
             SecretNotFoundError: If no secrets file exists
             SecretResolutionError: If file cannot be parsed
         """
-        secrets_path = self._find_secrets_file(connection_id, org_id)
+        secrets_path = self._find_secrets_file(connection_id)
 
         if not secrets_path:
             raise SecretNotFoundError(
@@ -118,7 +115,6 @@ class LocalFileSecretsResolver(SecretsResolver):
     def _find_secrets_file(
         self,
         connection_id: str,
-        org_id: Optional[str] = None,
     ) -> Optional[Path]:
         """
         Find the secrets file for a connection.
@@ -127,12 +123,9 @@ class LocalFileSecretsResolver(SecretsResolver):
         1. {secrets_dir}/{connection_id}.json
         2. {secrets_dir}/{connection_id}  (no extension)
         3. {secrets_dir}/credentials.json  (standard name for colocated secrets)
-        4. {secrets_dir}/{org_id}/{connection_id}.json  (if org_id provided)
-        5. {secrets_dir}/{org_id}/{connection_id}  (if org_id provided)
 
         Args:
             connection_id: Connection identifier
-            org_id: Optional org identifier
 
         Returns:
             Path to secrets file if found, None otherwise
@@ -142,12 +135,6 @@ class LocalFileSecretsResolver(SecretsResolver):
             self._secrets_dir / connection_id,
             self._secrets_dir / "credentials.json",
         ]
-
-        if org_id:
-            candidates.extend([
-                self._secrets_dir / org_id / f"{connection_id}.json",
-                self._secrets_dir / org_id / connection_id,
-            ])
 
         for path in candidates:
             if path.is_file():
