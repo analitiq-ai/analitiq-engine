@@ -3,20 +3,20 @@
 Main entrypoint for Analitiq Stream with dual-mode support.
 
 This module serves as the unified entrypoint for both:
-- Engine mode (RUN_MODE=engine): Runs the data pipeline engine
+- Source mode (RUN_MODE=source): Runs the data pipeline engine
 - Destination mode (RUN_MODE=destination): Runs the gRPC destination server
 
 The mode is determined by the RUN_MODE environment variable.
 
 Usage:
     # As engine (default)
-    RUN_MODE=engine python -m src.main
+    RUN_MODE=source python -m src.main
 
     # As destination server
     RUN_MODE=destination python -m src.main
 
 Environment Variables:
-    RUN_MODE: "engine" (default) or "destination"
+    RUN_MODE: "source" (default) or "destination"
 
     Common (both modes):
         PIPELINE_ID: UUID of the pipeline to execute
@@ -191,11 +191,11 @@ async def main() -> int:
     logger.info("Analitiq Stream Starting")
     logger.info("=" * 60)
 
-    run_mode = os.getenv("RUN_MODE", "engine").lower()
+    run_mode = os.getenv("RUN_MODE", "source").lower()
     logger.info(f"Run mode: {run_mode}")
 
     try:
-        if run_mode == "engine":
+        if run_mode == "source":
             success = await run_engine_mode()
             return 0 if success else 1
 
@@ -205,7 +205,7 @@ async def main() -> int:
 
         else:
             logger.error(f"Unknown RUN_MODE: {run_mode}")
-            logger.error("Valid modes: engine, destination")
+            logger.error("Valid modes: source, destination")
             return 1
 
     except KeyboardInterrupt:

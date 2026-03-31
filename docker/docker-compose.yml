@@ -79,8 +79,7 @@ services:
     # Per-invocation vars (PIPELINE_ID) must be passed at runtime:
     # docker compose run -e PIPELINE_ID=xxx source_engine
     environment:
-      - RUN_MODE=engine
-      - ENV=${ENV:-local}
+      - RUN_MODE=source
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       # gRPC destination connection
       - DESTINATION_GRPC_HOST=destination
@@ -97,9 +96,7 @@ services:
       - ../pipelines:/app/pipelines
       # Mount state, logs, and deadletter directories for persistence
       - ../state:/app/state
-      - ../logs:/app/logs
       - ../deadletter:/app/deadletter
-      - ../metrics:/app/metrics
 
     # Resource limits (similar to ECS task definition)
     deploy:

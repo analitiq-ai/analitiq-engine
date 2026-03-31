@@ -166,7 +166,7 @@ graph LR
 | Variable | Default | Description |
 |---|---|---|
 | `PIPELINE_ID` | *(required)* | Pipeline ID from `manifest.json` |
-| `RUN_MODE` | `engine` | `engine` or `destination` |
+| `RUN_MODE` | `source` | `source` or `destination` |
 | `ENV` | `local` | Environment: `local`, `dev`, `prod` |
 | `LOG_LEVEL` | `INFO` | Logging level |
 | `DESTINATION_GRPC_HOST` | | Destination service host (engine mode) |
