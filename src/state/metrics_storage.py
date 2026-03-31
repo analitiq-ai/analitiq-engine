@@ -14,7 +14,6 @@ CloudWatch extraction query:
 
 import json
 import logging
-import os
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
@@ -61,8 +60,6 @@ class PipelineMetricsRecord(BaseModel):
     # Performance metrics
     records_per_second: Optional[float] = Field(default=None, ge=0, description="Processing throughput")
 
-    # Metadata
-    environment: str = Field(..., description="Execution environment: local, dev, prod")
 
 
 def emit_metrics_log(data: Dict[str, Any]) -> None:
@@ -89,7 +86,6 @@ def create_metrics_record(
     status: str = "success",
     error_message: Optional[str] = None,
     pipeline_name: Optional[str] = None,
-    environment: Optional[str] = None,
 ) -> PipelineMetricsRecord:
     """
     Factory function to create a metrics record from pipeline execution data.
@@ -117,8 +113,6 @@ def create_metrics_record(
     if duration_seconds > 0 and records_processed > 0:
         records_per_second = round(records_processed / duration_seconds, 2)
 
-    env = environment or os.getenv("ENV", "local")
-
     return PipelineMetricsRecord(
         run_id=run_id,
         pipeline_id=pipeline_id,
@@ -133,7 +127,6 @@ def create_metrics_record(
         status=status,
         error_message=error_message,
         records_per_second=records_per_second,
-        environment=env,
     )
 
 
@@ -148,7 +141,6 @@ def save_pipeline_metrics(
     status: str = "success",
     error_message: Optional[str] = None,
     pipeline_name: Optional[str] = None,
-    environment: Optional[str] = None,
 ) -> None:
     """
     Emit pipeline metrics to logs.
@@ -179,7 +171,6 @@ def save_pipeline_metrics(
         status=status,
         error_message=error_message,
         pipeline_name=pipeline_name,
-        environment=environment,
     )
 
     emit_metrics_log({
