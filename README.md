@@ -16,18 +16,16 @@ graph TB
         U[fa:fa-user Engineer / Analyst]
     end
 
-    subgraph CLAUDE ["Claude Code"]
+    subgraph CLAUDE ["Claude Code + Pipeline Builder Plugin"]
         direction TB
         CC[Claude Code CLI / IDE]
         PB[Pipeline Builder Plugin]
-        CB[Connector Builder Plugin]
         CC --> PB
-        CC --> CB
     end
 
     subgraph REGISTRY ["DIP Registry  (GitHub)"]
         direction TB
-        R_DESC[Open catalog of connector definitions]
+        R_DESC[Pre-built Data Integration Protocols]
         R_CONN[connector-pipedrive\nconnector-wise\nconnector-xero\nconnector-postgresql\n...]
         R_DESC ~~~ R_CONN
     end
@@ -42,10 +40,9 @@ graph TB
     end
 
     U -- "natural language" --> CC
-    PB -- "downloads connectors" --> REGISTRY
-    CB -- "publishes new connectors" --> REGISTRY
+    PB -- "downloads protocols" --> REGISTRY
     PB -- "generates config" --> ENGINE
-    ENGINE -- "reads connectors" --> REGISTRY
+    ENGINE -- "reads protocols" --> REGISTRY
 
     style USER fill:#f0f4ff,stroke:#4a6cf7,color:#1a1a2e
     style CLAUDE fill:#fdf6e3,stroke:#cb8a02,color:#1a1a2e
@@ -55,11 +52,13 @@ graph TB
 
 | Component | Repository | Role |
 |---|---|---|
-| **AI Plugins** | [ai-plugins-official](https://github.com/analitiq-ai/ai-plugins-official) | Claude Code plugins that build connectors and pipelines through conversation |
-| **DIP Registry** | [analitiq-dip-registry](https://github.com/analitiq-dip-registry) | Open catalog of ready-made connector definitions for common systems |
+| **Pipeline Builder Plugin** | [ai-plugins-official](https://github.com/analitiq-ai/ai-plugins-official) | Claude Code plugin that assembles pipelines through conversation |
+| **DIP Registry** | [analitiq-dip-registry](https://github.com/analitiq-dip-registry) | Pre-built Data Integration Protocols for common systems (Pipedrive, Wise, Xero, PostgreSQL, ...) |
 | **Data Sync Engine** | [analitiq-core](https://github.com/analitiq-ai/analitiq-core) *(this repo)* | Runs the pipelines — extract, transform, load |
 
-**Use the plugins** to create connectors and assemble pipelines. **Connectors** live in the registry. **This engine** executes the pipelines. Or skip the setup and use **[Analitiq Cloud](https://analitiq-app.com)** for a fully managed experience.
+The DIP Registry already covers the most common systems. **Use the plugin** to pick a protocol and assemble a pipeline. **This engine** executes it. Or skip the setup and use **[Analitiq Cloud](https://analitiq-app.com)** for a fully managed experience.
+
+> Don't see your system in the registry? A separate [Connector Builder plugin](https://github.com/analitiq-ai/ai-plugins-official) can create a new protocol from API docs — but for most use cases, a pre-built protocol is already available.
 
 Learn more at [analitiq.ai](https://analitiq.ai).
 
