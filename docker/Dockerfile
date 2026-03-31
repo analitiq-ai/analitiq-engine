@@ -21,7 +21,7 @@ RUN groupadd --gid 1000 appuser && \
 WORKDIR /app
 
 # Copy requirements and install dependencies first (for better caching)
-COPY requirements.txt ./
+COPY docker/requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code

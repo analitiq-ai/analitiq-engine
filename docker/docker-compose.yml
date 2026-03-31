@@ -8,7 +8,7 @@ services:
   destination:
     build:
       context: ..
-      dockerfile: Dockerfile
+      dockerfile: docker/Dockerfile
     image: analitiq-stream:latest
     container_name: analitiq-destination
 
@@ -72,7 +72,7 @@ services:
   source_engine:
     build:
       context: ..
-      dockerfile: Dockerfile
+      dockerfile: docker/Dockerfile
     image: analitiq-stream:latest
     container_name: analitiq-source-engine
 

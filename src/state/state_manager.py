@@ -41,6 +41,9 @@ class StateManager:
         # In-run batch commit tracker (initialized by init_commit_tracker)
         self._commit_tracker: Optional[BatchCommitTracker] = None
 
+        # In-run cursor state keyed by (stream_name, partition_key)
+        self._cursors: Dict[str, Dict[str, Any]] = {}
+
     def init_commit_tracker(self, run_id: str) -> None:
         """Initialize batch commit tracker for the current run."""
         self._commit_tracker = BatchCommitTracker(
@@ -100,6 +103,31 @@ class StateManager:
             cursor_hex=json.dumps(cursor).encode().hex() if cursor else "",
             cursor_value=hwm,
         )
+
+    @staticmethod
+    def _cursor_key(stream_name: str, partition: Dict[str, Any]) -> str:
+        """Build a deterministic key from stream name and partition dict."""
+        suffix = json.dumps(partition, sort_keys=True) if partition else "{}"
+        return f"{stream_name}::{suffix}"
+
+    async def get_cursor(
+        self, stream_name: str, partition: Optional[Dict[str, Any]] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Return the last saved cursor for a stream/partition, or None."""
+        key = self._cursor_key(stream_name, partition or {})
+        with self.lock:
+            return self._cursors.get(key)
+
+    async def save_cursor(
+        self,
+        stream_name: str,
+        partition: Optional[Dict[str, Any]],
+        cursor: Dict[str, Any],
+    ) -> None:
+        """Persist cursor state for a stream/partition in the current run."""
+        key = self._cursor_key(stream_name, partition or {})
+        with self.lock:
+            self._cursors[key] = cursor
 
     def get_run_info(self) -> Dict[str, Any]:
         """Get current run information."""

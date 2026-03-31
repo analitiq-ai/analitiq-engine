@@ -16,7 +16,6 @@ from .engine.pipeline import Pipeline
 from .state.circuit_breaker import CircuitBreaker
 from .state.dead_letter_queue import DeadLetterQueue
 from .state.retry_handler import RetryHandler
-from .schema.schema_manager import SchemaManager
 
 __all__ = [
     "StreamingEngine",
@@ -24,7 +23,6 @@ __all__ = [
     "RetryHandler",
     "CircuitBreaker",
     "DeadLetterQueue",
-    "SchemaManager",
     "BaseConnector",
     "DatabaseConnector",
     "APIConnector",
