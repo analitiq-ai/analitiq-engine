@@ -11,43 +11,16 @@ API -> Database    |    Database -> Database    |    API -> API    |    SFTP -> 
 ## How It All Fits Together
 
 ```mermaid
-graph TB
-    subgraph USER ["You"]
-        U[fa:fa-user Engineer / Analyst]
-    end
+graph LR
+    You -- "natural language" --> Plugin["Pipeline Builder\n(Claude Code Plugin)"]
+    Plugin -- "downloads protocols" --> Registry["DIP Registry\n(GitHub)"]
+    Plugin -- "generates config" --> Engine["Data Sync Engine\n(this repo)"]
+    Engine -- "reads protocols" --> Registry
 
-    subgraph CLAUDE ["Claude Code + Pipeline Builder Plugin"]
-        direction TB
-        CC[Claude Code CLI / IDE]
-        PB[Pipeline Builder Plugin]
-        CC --> PB
-    end
-
-    subgraph REGISTRY ["DIP Registry  (GitHub)"]
-        direction TB
-        R_DESC[Pre-built Data Integration Protocols]
-        R_CONN[connector-pipedrive\nconnector-wise\nconnector-xero\nconnector-postgresql\n...]
-        R_DESC ~~~ R_CONN
-    end
-
-    subgraph ENGINE ["Data Sync Engine  (this repo)"]
-        direction TB
-        E_DESC[Reads from sources, transforms, writes to destinations]
-        SRC[Source Connectors\nAPI / Database / File]
-        TRANSFORM[Transform & Map]
-        DST[Destination Handlers\nDatabase / API / File / Stdout]
-        SRC --> TRANSFORM --> DST
-    end
-
-    U -- "natural language" --> CC
-    PB -- "downloads protocols" --> REGISTRY
-    PB -- "generates config" --> ENGINE
-    ENGINE -- "reads protocols" --> REGISTRY
-
-    style USER fill:#f0f4ff,stroke:#4a6cf7,color:#1a1a2e
-    style CLAUDE fill:#fdf6e3,stroke:#cb8a02,color:#1a1a2e
-    style REGISTRY fill:#f0fff4,stroke:#38a169,color:#1a1a2e
-    style ENGINE fill:#fff0f0,stroke:#e53e3e,color:#1a1a2e
+    style You fill:#f0f4ff,stroke:#4a6cf7,color:#1a1a2e
+    style Plugin fill:#fdf6e3,stroke:#cb8a02,color:#1a1a2e
+    style Registry fill:#f0fff4,stroke:#38a169,color:#1a1a2e
+    style Engine fill:#fff0f0,stroke:#e53e3e,color:#1a1a2e
 ```
 
 | Component | Repository | Role |
