@@ -16,11 +16,15 @@ graph LR
     Plugin -- "downloads protocols" --> Registry["DIP Registry\n(GitHub)"]
     Plugin -- "generates config" --> Engine["Data Sync Engine\n(this repo)"]
     Engine -- "reads protocols" --> Registry
+    Source[(Source\nAPI / DB / File)] -- "data" --> Engine
+    Engine -- "data" --> Destination[(Destination\nDB / API / File)]
 
     style You fill:#f0f4ff,stroke:#4a6cf7,color:#1a1a2e
     style Plugin fill:#fdf6e3,stroke:#cb8a02,color:#1a1a2e
     style Registry fill:#f0fff4,stroke:#38a169,color:#1a1a2e
     style Engine fill:#fff0f0,stroke:#e53e3e,color:#1a1a2e
+    style Source fill:#e8f5e9,stroke:#43a047,color:#1a1a2e
+    style Destination fill:#e8f5e9,stroke:#43a047,color:#1a1a2e
 ```
 
 | Component | Repository | Role |
