@@ -9,7 +9,7 @@ Analitiq Stream is a fault-tolerant data streaming framework for Python 3.11+ en
 ```bash
 # Setup
 poetry install                              # Install dependencies
-poetry install -E "kafka cloud analytics"  # With extras
+poetry install -E "kafka analytics"         # With extras
 poetry shell                                # Activate venv
 
 # Testing
@@ -52,7 +52,7 @@ src/
 │   │   ├── file.py              # FileDestinationHandler
 │   │   └── stream.py            # StreamDestinationHandler
 │   ├── formatters/              # JSONL, CSV, Parquet formatters
-│   ├── storage/                 # Local, S3 storage backends
+│   ├── storage/                 # Local storage backends
 │   └── idempotency/             # ManifestTracker for file-based idempotency
 │
 ├── engine/                      # Core engine (renamed from core/)
@@ -64,7 +64,7 @@ src/
 │
 ├── state/                       # Fault tolerance (renamed from fault_tolerance/)
 │   ├── state_manager.py         # State management
-│   ├── state_storage.py         # Local/S3 state storage
+│   ├── state_storage.py         # Local state storage
 │   ├── retry_handler.py         # Retry handling
 │   ├── circuit_breaker.py       # Circuit breaker pattern
 │   ├── dead_letter_queue.py     # Dead letter queue
@@ -130,13 +130,7 @@ Streams reference endpoints using scoped path format:
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `ENV` | Yes | `local`, `dev`, `prod` - affects storage backends only |
 | `PIPELINE_ID` | Yes | Pipeline ID (matches `pipeline_id` in manifest.json) |
-| `AWS_REGION` | Cloud | Default: `eu-central-1` |
-
-**Cloud-only (config_fetcher.py):** `PIPELINES_TABLE`, `STREAMS_TABLE`, `CONNECTIONS_TABLE`, `SECRETS_BUCKET`
-
-S3 buckets auto-construct as `analitiq-{purpose}-{env}` (e.g., `analitiq-client-pipeline-state-dev`).
 
 ### Using PipelineConfigPrep
 
@@ -237,7 +231,7 @@ Downloaded from GitHub. Define connector type, auth, form fields, rate limits.
 }
 ```
 
-Connector types: `api`, `database`, `file`, `s3`, `stdout`
+Connector types: `api`, `database`, `file`, `stdout`
 
 ### Connections (`connections/{alias}/connection.json`)
 
@@ -270,9 +264,8 @@ User-created. Reference a connector by `connector_slug`. Credentials use `${VAR}
 
 ## Storage Backends
 
-All storage (state, logs, DLQ, metrics) follows the same pattern:
-- **Local (`ENV=local`):** `{type}/{pipeline_id}/`
-- **S3 (`ENV=dev/prod`):** `s3://analitiq-client-pipeline-{type}-{env}/{pipeline_id}/year=.../`
+All storage (state, logs, DLQ, metrics) uses local filesystem:
+- **Local:** `{type}/{pipeline_id}/`
 
 Centralized directories at project root: `state/`, `logs/`, `deadletter/`, `metrics/`
 
@@ -308,11 +301,11 @@ See [gRPC Architecture](docs/GRPC_STREAMING_ARCHITECTURE.md) for details.
 
 Configuration-driven destination system with layered abstractions. Single Docker image handles all destination types based on `connector_type` defined in the connector (looked up via `connector_id` on the connection).
 
-**Handlers:** `db` (SQLAlchemy), `postgresql` (legacy asyncpg), `api`, `file`, `s3`, `stdout`
+**Handlers:** `db` (SQLAlchemy), `postgresql` (legacy asyncpg), `api`, `file`, `stdout`
 
 **Formatters:** `jsonl`, `csv`, `parquet`
 
-**Storage:** `local`, `s3`
+**Storage:** `local`
 
 **Idempotency:** Database handlers use `_batch_commits` table; file handlers use `_manifest.json`
 
@@ -356,25 +349,17 @@ Source (native types) -> Arrow Table (canonical schema) -> Destination (native t
 - **`bookmarks`**: Array of `{partition, cursor, aux}` for checkpoint tracking
 - Engine uses inclusive mode (`>=`) for cursor comparison; duplicates handled via upsert
 
-## AWS Logs Debugging
-Use agent `aws-log-parser` to parse CloudWatch logs.
-
 ## Testing
 
 ### Running docker test locally
-When running docker test, the run should mimic the production environment:
- - start docker coontainer with `ENV=dev`.
- - use aws profile id = `434659057682_AdministratorAccess` if needed.
- - pass the required env vars to the container (including AWS Profile).
- - Docker should then connect to AWS and fetch all required configs and execute the code.
+When running docker test locally:
+ - pass the required env vars to the container.
  - examine docker logs for errors.
 
 Example:
 ```shell
 cd docker && \
-   PIPELINE_ID=0569c85b-b538-442a-bdc5-726afca08da4 \
-   AWS_PROFILE=434659057682_AdministratorAccess \
-   ENV=dev \
+   PIPELINE_ID=my-pipeline-id \
    docker compose run --rm source_engine 2>&1
 ```
 
@@ -384,20 +369,6 @@ cd docker && \
 2. **Transform**: Apply field mappings and transformations
 3. **Load**: Write to destination with fault tolerance
 4. **Checkpoint**: Save progress state
-
-## AWS Deployment
-
-```bash
-# Build and push to ECR
-aws ecr get-login-password --region eu-central-1 | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.eu-central-1.amazonaws.com
-docker build -t analitiq-stream . && docker push $AWS_ACCOUNT_ID.dkr.ecr.eu-central-1.amazonaws.com/analitiq-stream:latest
-```
-
-**Batch Job Requirements:**
-- Runtime env: `PIPELINE_ID`
-- Static env: `ENV`, `PIPELINES_TABLE`, `STREAMS_TABLE`, `CONNECTIONS_TABLE`
-- Resources: 0.5-1 vCPU, 1-2GB memory, 3600s timeout
-- IAM: S3 read/write on buckets, DynamoDB read on tables
 
 ## Key Design Patterns
 

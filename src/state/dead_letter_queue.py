@@ -16,9 +16,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
-logger = logging.getLogger(__name__)
+from src.state.log_emitter import emit_log
 
-DLQ_MARKER = "ANALITIQ_DLQ::"
+logger = logging.getLogger(__name__)
 
 
 def emit_dlq_log(
@@ -31,16 +31,15 @@ def emit_dlq_log(
 
     Never emits record payloads -- only counts.
     """
-    data = {
+    data: Dict[str, Any] = {
         "type": "dlq",
         "pipeline_id": pipeline_id,
         "added": added,
         "total": total,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
     }
     if stream_id:
         data["stream_id"] = stream_id
-    logger.info(f"{DLQ_MARKER}{json.dumps(data)}")
+    emit_log("dlq", data)
 
 
 class DateTimeEncoder(json.JSONEncoder):

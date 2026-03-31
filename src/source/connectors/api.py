@@ -251,42 +251,19 @@ class APIConnector(BaseConnector):
             raise ReadError(f"API {method} connection to {full_url} failed: {str(e)}")
 
     def _load_state_from_state_manager(
-        self, 
+        self,
         state_manager: StateManager,
-        stream_name: str, 
+        stream_name: str,
         partition: Dict[str, Any],
-        config: Dict[str, Any]
+        config: Dict[str, Any],
     ) -> Dict[str, Any]:
         """Load state from state manager."""
-        partition_state = state_manager.get_partition_state(stream_name, partition)
-        
-        if partition_state:
-            # Convert state format to internal format
-            cursor_info = partition_state.get("cursor", {})
-            primary_cursor = cursor_info.get("primary", {})
-            
-            # Extract tie-breaker information
-            tiebreaker_info = {}
-            if cursor_info.get("tiebreakers"):
-                tiebreaker_info["tiebreakers"] = cursor_info["tiebreakers"]
-            
-            bookmarks = [{
-                "partition": partition,
-                "cursor": primary_cursor.get("value"),
-                "aux": tiebreaker_info
-            }] if primary_cursor.get("value") else []
-        else:
-            bookmarks = []
-            
         cursor_field = config.get("cursor_field")
-        logger.debug(f"API Connector _load_state_from_state_manager: received config keys = {list(config.keys())}")
-        logger.debug(f"API Connector _load_state_from_state_manager: cursor_field = {cursor_field}")
-        
-        state = {
-            "bookmarks": bookmarks,
+        state: Dict[str, Any] = {
+            "bookmarks": [],
             "run": state_manager.get_run_info(),
             "replication_method": config.get("replication_method", "incremental"),
-            "cursor_field": cursor_field,  # Source record field name
+            "cursor_field": cursor_field,
         }
         if config.get("safety_window_seconds") is not None:
             state["safety_window_seconds"] = config["safety_window_seconds"]

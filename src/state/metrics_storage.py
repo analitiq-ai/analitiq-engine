@@ -12,17 +12,15 @@ CloudWatch extraction query:
     | parse @message /ANALITIQ_METRICS::(?<metrics>.*)$/
 """
 
-import json
 import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from pydantic import BaseModel, Field
 
+from src.state.log_emitter import emit_log
 
 logger = logging.getLogger(__name__)
-
-METRICS_MARKER = "ANALITIQ_METRICS::"
 
 
 class PipelineMetricsRecord(BaseModel):
@@ -63,16 +61,8 @@ class PipelineMetricsRecord(BaseModel):
 
 
 def emit_metrics_log(data: Dict[str, Any]) -> None:
-    """
-    Emit metrics as structured JSON log with marker for extraction.
-
-    The marker prefix allows easy filtering and extraction from CloudWatch Logs
-    or other log aggregation systems.
-
-    Args:
-        data: Dictionary of metrics to emit
-    """
-    logger.info(f"{METRICS_MARKER}{json.dumps(data)}")
+    """Emit metrics as structured JSON log with marker for extraction."""
+    emit_log("metrics", data)
 
 
 def create_metrics_record(

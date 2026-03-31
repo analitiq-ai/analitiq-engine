@@ -184,30 +184,26 @@ class TestAPIIncrementalReplication:
         # Should not modify config filters when no cursor
         assert config["filters"] == {}
 
-    def test_load_state_from_manager(self):
+    def test_load_state_from_manager(self, tmp_path):
         """Test loading state from state manager."""
-        # Create mock state manager
-        mock_state_manager = MagicMock(spec=StateManager)
-        mock_state_manager.get_partition_state.return_value = None  # No existing state
-        mock_state_manager.get_run_info.return_value = {"run_id": "test-run"}
+        state_manager = StateManager(pipeline_id="test-pipeline", base_dir=str(tmp_path))
+        state_manager.start_run({}, run_id="test-run")
 
-        # Test configuration
         config = {
             "replication_method": "incremental",
             "cursor_field": "updated_at",
-            "safety_window_seconds": 300
+            "safety_window_seconds": 300,
         }
 
         state = self.connector._load_state_from_state_manager(
-            mock_state_manager, "test_stream", {}, config
+            state_manager, "test_stream", {}, config
         )
 
         assert state["replication_method"] == "incremental"
         assert state["cursor_field"] == "updated_at"
-        # cursor_mode is always "inclusive" now, no longer in config
         assert state["safety_window_seconds"] == 300
-        assert state["bookmarks"] == []  # No existing state
-        assert "run" in state
+        assert state["bookmarks"] == []
+        assert state["run"] == {"run_id": "test-run"}
 
 
 class TestAPITieBreakerDeduplication:

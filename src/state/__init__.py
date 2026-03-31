@@ -5,14 +5,13 @@ from .circuit_breaker import CircuitBreaker
 from .dead_letter_queue import (
     DeadLetterQueue,
     LocalDLQStorage,
-    DLQ_MARKER,
     emit_dlq_log,
 )
+from .log_emitter import MARKERS, emit_log
 from .retry_handler import RetryHandler
-from .state_emission import STATE_MARKER, emit_state_log
+from .state_emission import emit_state_log
 from .state_manager import StateManager
 from .metrics_storage import (
-    METRICS_MARKER,
     PipelineMetricsRecord,
     emit_metrics_log,
     create_metrics_record,
@@ -26,14 +25,13 @@ __all__ = [
     "CircuitBreaker",
     "DeadLetterQueue",
     "LocalDLQStorage",
-    "DLQ_MARKER",
     "emit_dlq_log",
+    "MARKERS",
+    "emit_log",
     "StateManager",
-    "METRICS_MARKER",
     "PipelineMetricsRecord",
     "emit_metrics_log",
     "create_metrics_record",
     "save_pipeline_metrics",
-    "STATE_MARKER",
     "emit_state_log",
 ]
