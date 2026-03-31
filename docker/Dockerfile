@@ -46,12 +46,9 @@ RUN mkdir -p \
 # RUN_MODE determines container behavior:
 #   - "engine" (default): Runs the data pipeline engine
 #   - "destination": Runs the gRPC destination server
-ENV ENV=local \
-    RUN_MODE=engine \
+ENV RUN_MODE=engine \
     PIPELINE_ID="" \
-    AWS_REGION=eu-central-1 \
     PYTHONPATH=/app \
-    ROW_COUNT_BUCKET=analitiq-client-pipeline-row-count \
     GRPC_PORT=50051 \
     DESTINATION_GRPC_HOST="" \
     DESTINATION_GRPC_PORT=50051

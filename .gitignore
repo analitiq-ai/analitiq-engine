@@ -193,6 +193,7 @@ dst_credentials.json
 
 # Environment files - May contain sensitive API keys and database passwords
 .env*
+.envrc
 !.env.example
 
 # Pipeline state and checkpoint files
@@ -381,6 +382,9 @@ yarn-error.log*
 # Project Specific Exceptions
 # =============================================================================
 /examples
+
+# Generated test reports
+tests/e2e/reports/
 
 # Keep test fixtures
 !**/tests/**/fixtures/**
