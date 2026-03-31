@@ -19,9 +19,7 @@ Environment Variables:
     RUN_MODE: "engine" (default) or "destination"
 
     Common (both modes):
-        ENV: Deployment environment (local, dev, prod)
         PIPELINE_ID: UUID of the pipeline to execute
-        ORG_ID: UUID of the org (required for cloud environments)
 
     Engine Mode:
         DESTINATION_GRPC_HOST: Hostname of destination gRPC server

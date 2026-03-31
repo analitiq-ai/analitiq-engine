@@ -1,9 +1,8 @@
 """Pipeline management and configuration."""
 
 import logging
-import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
 
@@ -11,8 +10,6 @@ from pydantic import ValidationError
 
 from .engine import StreamingEngine
 
-from ..shared.run_id import get_or_generate_run_id
-from ..state.log_storage import LogStorageSettings, create_log_handler
 from ..models.enriched import (
     EnrichedAPIConfig,
     EnrichedDatabaseConfig,
@@ -65,14 +62,10 @@ class Pipeline:
         # Setup directory structure using centralized paths
         project_root = Path(__file__).parent.parent.parent
         self.state_dir = state_dir or str(project_root / "state")
-        self.logs_dir = str(project_root / "logs" / pipeline_id)
         self.dlq_dir = str(project_root / "deadletter" / pipeline_id)
 
         # Create required directories
         self._ensure_directories()
-
-        # Setup logging for this pipeline
-        self._setup_pipeline_logging(pipeline_id)
 
         runtime = pipeline_config["runtime"]
         batching = runtime["batching"]
@@ -90,73 +83,7 @@ class Pipeline:
     def _ensure_directories(self):
         """Create required directories for pipeline operation."""
         Path(self.state_dir).mkdir(parents=True, exist_ok=True)
-        Path(self.logs_dir).mkdir(parents=True, exist_ok=True)
         Path(self.dlq_dir).mkdir(parents=True, exist_ok=True)
-
-    def _setup_pipeline_logging(self, pipeline_id: str):
-        """
-        Setup structured logging for the pipeline.
-
-        Automatically uses S3 storage in cloud mode (ENV=dev or ENV=prod).
-        Uses local filesystem in local mode.
-        """
-        self._log_handlers: List[logging.Handler] = []
-
-        # Get log storage settings from environment
-        self._log_settings = LogStorageSettings.from_env()
-        self._log_settings.pipeline_id = pipeline_id
-
-        # Get run_id for log file naming (already initialized at startup)
-        self._run_id = get_or_generate_run_id()
-
-        # Set log format
-        formatter = logging.Formatter(
-            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-        )
-
-        log_level = os.environ["LOG_LEVEL"]
-
-        # Attach handler to src package logger (parent of all src.* modules)
-        root_package_logger = logging.getLogger("src")
-
-        # Create handler based on environment
-        pipeline_handler = create_log_handler(
-            settings=self._log_settings,
-            log_name="pipeline",
-            run_id=self._run_id,
-            buffered=True,
-        )
-        pipeline_handler.setFormatter(formatter)
-        pipeline_handler.setLevel(getattr(logging, log_level.upper()))
-
-        root_package_logger.addHandler(pipeline_handler)
-        root_package_logger.setLevel(getattr(logging, log_level.upper()))
-        self._log_handlers.append(pipeline_handler)
-
-        if self._log_settings.is_cloud_mode:
-            logger.info(
-                f"Setup pipeline logging: s3://{self._log_settings.logs_bucket}/"
-                f"{self._log_settings.org_id}/{pipeline_id}/..."
-            )
-        else:
-            logger.info(f"Setup pipeline logging: {self.logs_dir}/pipeline.log")
-
-        # Create DLQ directories for streams
-        for stream_config in self.stream_configs:
-            stream_dlq_path = Path(self.dlq_dir) / stream_config["stream_id"]
-            stream_dlq_path.mkdir(parents=True, exist_ok=True)
-            logger.debug(f"Setup DLQ directory for stream: {stream_config['stream_id']}")
-
-    def _close_log_handlers(self):
-        """Close all log handlers to flush buffered logs to S3."""
-        root_package_logger = logging.getLogger("src")
-        for handler in getattr(self, '_log_handlers', []):
-            try:
-                root_package_logger.removeHandler(handler)
-                handler.close()
-            except Exception as e:
-                import sys
-                print(f"Failed to close log handler: {e}", file=sys.stderr)
 
     def _build_config_dict(self) -> Dict[str, Any]:
         """Build a config dict from pipeline and stream configs for engine."""
@@ -332,8 +259,6 @@ class Pipeline:
         except Exception as e:
             logger.debug(f"Pipeline {pipeline_id} failed: {str(e)}")
             raise
-        finally:
-            self._close_log_handlers()
 
     def get_metrics(self) -> Dict[str, Any]:
         """Get pipeline execution metrics."""

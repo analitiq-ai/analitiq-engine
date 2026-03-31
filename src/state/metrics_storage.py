@@ -105,7 +105,6 @@ def create_metrics_record(
         status: Execution status (success, failed, partial)
         error_message: Error message if failed
         pipeline_name: Human-readable pipeline name
-        environment: Execution environment (defaults to ENV env var)
 
     Returns:
         PipelineMetricsRecord ready for emission
@@ -168,7 +167,6 @@ def save_pipeline_metrics(
         status: Execution status (success, failed, partial)
         error_message: Error message if failed
         pipeline_name: Human-readable pipeline name
-        environment: Execution environment (defaults to ENV env var)
     """
     record = create_metrics_record(
         run_id=run_id,

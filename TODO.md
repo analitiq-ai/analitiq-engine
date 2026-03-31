@@ -57,3 +57,22 @@ Authentication Differences
 
 ==========
 
+Filters are defined in array based format:
+```shell
+  {                                                                                                                                                                                   
+    "filters": [                                                                                                                                                                      
+      {"field": "status", "op": "eq", "value": "active"},                                                                                                                             
+      {"or": [                                                                                                                                                                        
+        {"field": "priority", "op": "eq", "value": "high"},                                                                                                                           
+        {"field": "amount", "op": "gt", "value": "1000"}                                                                                                                              
+      ]}                                                                                                                                                                              
+    ]                                                                                                                                                                                 
+  }  
+```
+=====
+
+params:
+PROFILE_ID: 2496403
+BALANCE_ID: 5305253
+SEVDESK_BANK_ACCOUNT_ID: 5936402
+

@@ -12,10 +12,6 @@ services:
     image: analitiq-stream:latest
     container_name: analitiq-destination
 
-    # Base environment variables - per-invocation vars (PIPELINE_ID)
-    # must be passed at runtime: docker compose run -e PIPELINE_ID=xxx destination
-    env_file:
-      - .env
     environment:
       - RUN_MODE=destination
       - ENV=${ENV:-local}
@@ -25,30 +21,26 @@ services:
       - DESTINATION_INDEX=${DESTINATION_INDEX:-0}
       # Pipeline identification (required at runtime)
       - PIPELINE_ID=${PIPELINE_ID}
-      # AWS configuration
-      - AWS_PROFILE=${AWS_PROFILE:-}
-      - AWS_REGION=${AWS_REGION:-eu-central-1}
 
     # Volume mounts for modular config files
     # Convention-based discovery finds pipelines/manifest.json at /app/pipelines/
     volumes:
-      - ../src:/app/src  # Live code changes without rebuild
+      - ../src:/app/src
       - ../connectors:/app/connectors
-      - ../connections:/app/connections  # includes .secrets/ per connection
+      - ../connections:/app/connections
       - ../pipelines:/app/pipelines
-      - ~/.aws:/home/appuser/.aws:ro
 
     # Expose gRPC port to other containers
     expose:
       - "50051"
 
-    # Health check using gRPC health protocol
+    # Health check - verify gRPC server is accepting connections
     healthcheck:
-      test: ["CMD", "python", "-c", "import grpc; print('gRPC available')"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-      start_period: 30s
+      test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('localhost',50051),2); s.close()"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
 
     # Resource limits
     deploy:
@@ -85,24 +77,17 @@ services:
     image: analitiq-stream:latest
     container_name: analitiq-source-engine
 
-    # Base environment variables - per-invocation vars (PIPELINE_ID)
-    # must be passed at runtime: docker compose run -e PIPELINE_ID=xxx source_engine
-    env_file:
-      - .env
+    # Per-invocation vars (PIPELINE_ID) must be passed at runtime:
+    # docker compose run -e PIPELINE_ID=xxx source_engine
     environment:
       - RUN_MODE=engine
       - ENV=${ENV:-local}
-      - AWS_REGION=${AWS_REGION:-eu-central-1}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       # gRPC destination connection
       - DESTINATION_GRPC_HOST=destination
       - DESTINATION_GRPC_PORT=50051
-      # S3 bucket for row count metrics
-      - ROW_COUNT_BUCKET=${ROW_COUNT_BUCKET:-analitiq-client-pipeline-row-count}
       # Pipeline identification (required at runtime)
       - PIPELINE_ID=${PIPELINE_ID}
-      # AWS configuration
-      - AWS_PROFILE=${AWS_PROFILE:-}
 
     # Volume mounts for modular config files
     # Convention-based discovery finds pipelines/manifest.json at /app/pipelines/
@@ -111,7 +96,6 @@ services:
       - ../connectors:/app/connectors
       - ../connections:/app/connections  # includes .secrets/ per connection
       - ../pipelines:/app/pipelines
-      - ~/.aws:/home/appuser/.aws:ro
       # Mount state, logs, and deadletter directories for persistence
       - ../state:/app/state
       - ../logs:/app/logs
@@ -131,14 +115,6 @@ services:
     # One-shot pipeline job - exit after completion
     restart: "no"
 
-    # Health check
-    healthcheck:
-      test: ["CMD", "python", "-c", "from src.engine.pipeline_config_prep import PipelineConfigPrep; print('OK')"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 60s
-
     # Logging configuration
     logging:
       driver: "json-file"
@@ -152,13 +128,6 @@ services:
 
     networks:
       - analitiq-net
-
-# ===========================================================================
-# Named volumes for data persistence
-# ===========================================================================
-volumes:
-  postgres_data:
-    driver: local
 
 # ===========================================================================
 # Network configuration

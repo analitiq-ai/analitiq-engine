@@ -211,7 +211,7 @@ sample_data/
 .claude/
 TODO.md
 docs/
-docker/
+docker-cloud/
 
 # =============================================================================
 # IDE and Editor
@@ -379,14 +379,7 @@ yarn-error.log*
 # =============================================================================
 # Project Specific Exceptions
 # =============================================================================
-
-# Keep example configuration templates
-!**/examples/**/*.json
-!**/*_template.json
-!**/.env.example
-
-# Keep schema files
-!**/schema/**/*.json
+/examples
 
 # Keep test fixtures
 !**/tests/**/fixtures/**
