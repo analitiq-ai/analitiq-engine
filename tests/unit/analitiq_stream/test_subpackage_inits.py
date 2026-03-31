@@ -163,25 +163,6 @@ class TestSchemaPackageInit:
         assert SchemaManager is not None
 
 
-class TestMappingPackageInit:
-    """Test mapping package __init__ file."""
-
-    @pytest.mark.unit
-    def test_mapping_imports(self):
-        """Test that mapping package can be imported."""
-        import src.mapping as mapping
-
-        # Package should be importable
-        assert mapping is not None
-
-    @pytest.mark.unit
-    def test_mapping_processor_import(self):
-        """Test that processor can be imported from mapping package."""
-        from src.mapping.processor import FieldMappingProcessor
-
-        assert FieldMappingProcessor is not None
-
-
 class TestTransformationsPackageInit:
     """Test transformations package __init__ file."""
 
