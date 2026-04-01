@@ -342,6 +342,8 @@ class APIConnector(BaseConnector):
 
             async with self.session.request(method, url, params=params) as response:
                 if response.status != 200:
+                    body = await response.text()
+                    logger.error(f"API {response.status} response body: {body[:500]}")
                     raise ReadError(f"API request failed with status {response.status}")
 
                 data = await response.json()
@@ -389,6 +391,8 @@ class APIConnector(BaseConnector):
 
             async with self.session.request(method, url, params=params) as response:
                 if response.status != 200:
+                    body = await response.text()
+                    logger.error(f"API {response.status} response body: {body[:500]}")
                     raise ReadError(f"API request failed with status {response.status}")
 
                 data = await response.json()
@@ -433,6 +437,8 @@ class APIConnector(BaseConnector):
 
             async with self.session.request(method, url, params=params) as response:
                 if response.status != 200:
+                    body = await response.text()
+                    logger.error(f"API {response.status} response body: {body[:500]}")
                     raise ReadError(f"API request failed with status {response.status}")
 
                 data = await response.json()
@@ -493,6 +499,8 @@ class APIConnector(BaseConnector):
 
         async with self.session.request(method, url, params=params) as response:
             if response.status != 200:
+                body = await response.text()
+                logger.error(f"API {response.status} response body: {body[:500]}")
                 raise ReadError(f"API request failed with status {response.status}")
 
             data = await response.json()
@@ -538,14 +546,23 @@ class APIConnector(BaseConnector):
 
     def _extract_value_from_schema_filter(self, filter_config: Dict[str, Any]) -> Any:
         """Extract actual filter value from schema-based filter configuration."""
+        raw = None
         if "value" in filter_config:
-            return filter_config["value"]
+            raw = filter_config["value"]
         elif "default" in filter_config:
-            return filter_config["default"]
+            raw = filter_config["default"]
         else:
             if filter_config.get("required", False):
                 logger.warning(f"Required filter missing explicit value: {filter_config}")
             return None
+
+        declared_type = filter_config.get("type")
+        if declared_type == "integer" and isinstance(raw, str):
+            try:
+                return int(raw)
+            except ValueError:
+                pass
+        return raw
 
 
     def _get_filter_param_for_cursor_field(self, cursor_field: str, source_config: Dict[str, Any]) -> Optional[str]:

@@ -15,7 +15,6 @@ consumer releases.
 """
 
 import copy
-import re
 import logging
 from typing import Any, Dict, Optional
 
@@ -25,12 +24,10 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from ..secrets.protocol import SecretsResolver
 from ..secrets.exceptions import PlaceholderExpansionError
 from .database_utils import create_database_engine
+from .placeholder import PLACEHOLDER_PATTERN, expand_placeholders, has_placeholders
 from .rate_limiter import RateLimiter
 
 logger = logging.getLogger(__name__)
-
-# Pattern for ${placeholder} syntax
-PLACEHOLDER_PATTERN = re.compile(r"\$\{([^}]+)\}")
 
 VALID_CONNECTOR_TYPES = frozenset({"database", "api", "file", "s3", "stdout"})
 
@@ -353,7 +350,7 @@ class ConnectionRuntime:
 
     async def _resolve_secrets(self) -> Dict[str, Any]:
         """Resolve ${placeholder} values."""
-        if not self._has_placeholders(self._raw_config):
+        if not has_placeholders(self._raw_config):
             logger.debug(
                 f"No placeholders in connection {self._connection_id}, "
                 f"skipping secret resolution"
@@ -364,44 +361,16 @@ class ConnectionRuntime:
             self._connection_id,
         )
 
-        resolved = self._expand_placeholders(self._raw_config, self._secrets)
+        try:
+            resolved = expand_placeholders(self._raw_config, self._secrets)
+        except KeyError as e:
+            raise PlaceholderExpansionError(
+                placeholder=str(e),
+                connection_id=self._connection_id,
+                detail=f"Secret key not found",
+            ) from e
         logger.debug(f"Resolved secrets for connection: {self._connection_id}")
         return resolved
-
-    def _expand_placeholders(
-        self,
-        value: Any,
-        secrets: Dict[str, str],
-    ) -> Any:
-        if isinstance(value, str):
-            return self._expand_string(value, secrets)
-        elif isinstance(value, dict):
-            return {k: self._expand_placeholders(v, secrets) for k, v in value.items()}
-        elif isinstance(value, list):
-            return [self._expand_placeholders(item, secrets) for item in value]
-        return value
-
-    def _expand_string(self, value: str, secrets: Dict[str, str]) -> str:
-        def replace_placeholder(match: re.Match) -> str:
-            key = match.group(1)
-            if key in secrets:
-                return str(secrets[key])
-            raise PlaceholderExpansionError(
-                placeholder=f"${{{key}}}",
-                connection_id=self._connection_id,
-                detail=f"Secret key '{key}' not found",
-            )
-
-        return PLACEHOLDER_PATTERN.sub(replace_placeholder, value)
-
-    def _has_placeholders(self, value: Any) -> bool:
-        if isinstance(value, str):
-            return bool(PLACEHOLDER_PATTERN.search(value))
-        elif isinstance(value, dict):
-            return any(self._has_placeholders(v) for v in value.values())
-        elif isinstance(value, list):
-            return any(self._has_placeholders(item) for item in value)
-        return False
 
     def _scrub_secrets(self) -> None:
         self._secrets = None

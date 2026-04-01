@@ -15,6 +15,7 @@ from ..models.enriched import (
     EnrichedDatabaseConfig,
 )
 from ..shared.connection_runtime import ConnectionRuntime
+from ..shared.placeholder import expand_placeholders
 
 logger = logging.getLogger(__name__)
 
@@ -169,6 +170,20 @@ class Pipeline:
                 "safety_window_seconds": replication.get("safety_window_seconds"),
                 "primary_key": source.get("primary_key", []),
             }
+
+            # Resolve ${param} placeholders in endpoint-derived fields
+            # (filters, endpoint path) using connection parameters
+            params = source_config.get("parameters", {})
+            if params:
+                params_str = {k: str(v) for k, v in params.items() if not isinstance(v, dict)}
+                if "filters" in source_config:
+                    source_config["filters"] = expand_placeholders(
+                        source_config["filters"], params_str, ignore_missing=True
+                    )
+                if "endpoint" in source_config:
+                    source_config["endpoint"] = expand_placeholders(
+                        source_config["endpoint"], params_str, ignore_missing=True
+                    )
 
             # Dest write config
             write = dest.get("write", {})
