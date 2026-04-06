@@ -2,9 +2,11 @@
 
 An open-source, AI-managed data synchronization engine. Tell Claude what data you need to move — it builds the connectors, assembles the pipeline, and runs it. No coding required.
 
-```
-API -> Database    |    Database -> Database    |    API -> API    |    SFTP -> Database    |    and more
-```
+ - API -> Database
+ - Database -> Database
+ - API -> API
+ - SFTP -> Database
+ - and more
 
 ---
 
