@@ -1,0 +1,74 @@
+# Analitiq Stream - Data Streaming Framework Requirements
+# Generated from pyproject.toml for Docker deployment
+
+# Core async and concurrency
+aiofiles>=23.0.0
+
+# Database connectors
+asyncpg>=0.28.0
+aiomysql>=0.2.0
+
+# API connectors
+aiohttp>=3.8.0
+aiohttp-retry>=2.8.3
+
+# Data processing and validation
+pydantic>=2.0.0
+jsonschema>=4.0.0
+
+# Retry and fault tolerance
+backoff>=2.0.0
+
+# Logging and monitoring
+structlog>=23.0.0
+prometheus-client>=0.17.0
+
+# Configuration and utilities
+python-dotenv>=1.0.0
+click>=8.0.0
+pyyaml>=6.0.0
+
+# AWS SDK for cloud deployments
+boto3>=1.26.0
+
+# Fast JSON serialization (used by models)
+orjson>=3.9.0
+
+# gRPC for destination streaming
+grpcio>=1.60.0
+grpcio-tools>=1.60.0
+protobuf>=4.25.0
+
+# Serialization formats for gRPC payloads
+msgpack>=1.0.0
+
+# SQLAlchemy for database abstraction
+sqlalchemy[asyncio]>=2.0.0
+
+# Optional dependencies for specific use cases
+# Install with: pip install "analitiq-stream[kafka]" etc.
+
+# For Apache Kafka integration
+# kafka-python>=2.0.0
+# aiokafka>=0.8.0
+
+# For cloud storage connectors  
+# boto3>=1.26.0
+# azure-storage-blob>=12.0.0
+# google-cloud-storage>=2.0.0
+
+# For analytics and data processing
+# pandas>=2.0.0
+# numpy>=1.24.0
+pyarrow>=12.0.0
+
+# For NoSQL databases
+# motor>=3.0.0
+# aioredis>=2.0.0
+
+# For security features
+# cryptography>=41.0.0
+# passlib>=1.7.4
+
+# For job scheduling
+# apscheduler>=3.10.0

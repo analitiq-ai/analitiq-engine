@@ -1,0 +1,133 @@
+services:
+  # ===========================================================================
+  # Destination Service (gRPC server for data ingestion)
+  # ===========================================================================
+  # This service receives streamed data from the source_engine via gRPC and writes
+  # it to the destination database. Same image as source_engine, different RUN_MODE.
+  # Both services use PIPELINE_ID to load configuration via PipelineConfigPrep.
+  destination:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: analitiq-stream:latest
+    container_name: analitiq-destination
+
+    environment:
+      - RUN_MODE=destination
+      - GRPC_PORT=50051
+      - LOG_LEVEL=${LOG_LEVEL:-DEBUG}
+      # DESTINATION_INDEX selects which destination from pipeline config (default: 0)
+      - DESTINATION_INDEX=${DESTINATION_INDEX:-0}
+      # Pipeline identification (required at runtime)
+      - PIPELINE_ID=${PIPELINE_ID}
+
+    # Volume mounts for modular config files
+    # Convention-based discovery finds pipelines/manifest.json at /app/pipelines/
+    volumes:
+      - ../src:/app/src
+      - ../connectors:/app/connectors
+      - ../connections:/app/connections
+      - ../pipelines:/app/pipelines
+
+    # Expose gRPC port to other containers
+    expose:
+      - "50051"
+
+    # Health check - verify gRPC server is accepting connections
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('localhost',50051),2); s.close()"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+
+    # Long-running server - restart on failure
+    restart: unless-stopped
+
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+    networks:
+      - analitiq-net
+
+  # ===========================================================================
+  # Source Engine Service (Pipeline orchestrator)
+  # ===========================================================================
+  # This service runs the data pipeline: extract -> transform -> stream to destination.
+  # Same image as destination, different RUN_MODE.
+  source_engine:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: analitiq-stream:latest
+    container_name: analitiq-source-engine
+
+    # Per-invocation vars (PIPELINE_ID) must be passed at runtime:
+    # docker compose run -e PIPELINE_ID=xxx source_engine
+    environment:
+      - RUN_MODE=source
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      # gRPC destination connection
+      - DESTINATION_GRPC_HOST=destination
+      - DESTINATION_GRPC_PORT=50051
+      # Pipeline identification (required at runtime)
+      - PIPELINE_ID=${PIPELINE_ID}
+
+    # Volume mounts for modular config files
+    # Convention-based discovery finds pipelines/manifest.json at /app/pipelines/
+    volumes:
+      - ../src:/app/src  # Live code changes without rebuild
+      - ../connectors:/app/connectors
+      - ../connections:/app/connections  # includes .secrets/ per connection
+      - ../pipelines:/app/pipelines
+      # Mount state, logs, and deadletter directories for persistence
+      - ../state:/app/state
+      - ../deadletter:/app/deadletter
+
+    # Resource limits (similar to ECS task definition)
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1024M
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
+    # One-shot pipeline job - exit after completion
+    restart: "no"
+
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "3"
+
+    depends_on:
+      destination:
+        condition: service_healthy
+
+    networks:
+      - analitiq-net
+
+# ===========================================================================
+# Network configuration
+# ===========================================================================
+networks:
+  analitiq-net:
+    driver: bridge

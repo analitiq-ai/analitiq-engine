@@ -1,0 +1,451 @@
+{
+  "success": true,
+  "data": {
+    "pipeline": {
+      "connections": {
+        "source": {
+          "conn_1": "b4904c77-0000-0000-0000-000000000001"
+        },
+        "destinations": [
+          {
+            "conn_2": "b452b1b2-0000-0000-0000-000000000002"
+          }
+        ]
+      },
+      "created_at": "2026-01-02T22:56:26.522941",
+      "description": "Example pipeline",
+      "last_run_status": "FAILED",
+      "last_run_ts": "2026-01-07 10:12:13.886344+00:00",
+      "name": "Source API to Destination API",
+      "pipeline_id": "22ab7b76-0000-0000-0000-000000000003",
+      "status": "active",
+      "streams": [
+        {
+          "stream_id": "c8a73982-0000-0000-0000-000000000004",
+          "version": 1
+        }
+      ],
+      "tags": [],
+      "updated_at": "2026-01-07T10:12:14.665664",
+      "version": 1,
+      "schedule": {
+        "type": "interval",
+        "timezone": "UTC",
+        "interval_minutes": "1440"
+      },
+      "engine": {
+        "vcpu": 1,
+        "memory": 8192
+      },
+      "runtime": {
+        "buffer_size": 5000,
+        "batching": {
+          "batch_size": 100,
+          "max_concurrent_batches": 3
+        },
+        "logging": {
+          "log_level": "INFO",
+          "metrics_enabled": true
+        },
+        "error_handling": {
+          "strategy": "dlq",
+          "max_retries": 3,
+          "retry_delay": 5
+        }
+      }
+    },
+    "connections": [
+      {
+        "version": 1,
+        "created_at": "2025-11-29T09:32:28.538446",
+        "secret_name": "/app/00000000-0000-0000-0000-000000000000/connections/b4904c77-0000-0000-0000-000000000001",
+        "connection_name": "Source API",
+        "category_name": "Other",
+        "max_connections_per_host": "3",
+        "headers": {
+          "Authorization": "Bearer ${token}",
+          "User-Agent": "AnalitiqStream/1.0",
+          "Accept": "application/json",
+          "Content-Type": "application/json"
+        },
+        "timeout": "30",
+        "updated_at": "2025-12-01T03:28:14.799382",
+        "max_connections": "10",
+        "token": "*****",
+        "host": "https://api.example.com",
+        "connector_id": "0b1b1d31-0000-0000-0000-000000000005",
+        "rate_limit": {
+          "time_window": "60",
+          "max_requests": "60"
+        },
+        "connection_id": "b4904c77-0000-0000-0000-000000000001",
+        "type": "api"
+      },
+      {
+        "version": 1,
+        "created_at": "2025-11-29T12:27:22.564680",
+        "secret_name": "/app/00000000-0000-0000-0000-000000000000/connections/b452b1b2-0000-0000-0000-000000000002",
+        "connection_name": "Destination API",
+        "category_name": "Other",
+        "max_connections_per_host": "5",
+        "headers": {
+          "Authorization": "${token}",
+          "User-Agent": "AnalitiqStream/1.0",
+          "Accept": "application/json",
+          "Content-Type": "application/json"
+        },
+        "timeout": "30",
+        "updated_at": "2025-12-01T03:26:01.462772",
+        "max_connections": "10",
+        "connector_name": "REST API",
+        "token": "*****",
+        "host": "https://api.example.com",
+        "connector_id": "acc98990-0000-0000-0000-000000000006",
+        "rate_limit": {
+          "time_window": "60",
+          "max_requests": "60"
+        },
+        "connection_id": "b452b1b2-0000-0000-0000-000000000002",
+        "type": "api"
+      }
+    ],
+    "connectors": [
+      {
+        "connector_id": "acc98990-0000-0000-0000-000000000006",
+        "connector_image": "https://example.com/placeholder.svg",
+        "connector_name": "Destination API",
+        "slug": "destination-api"
+      },
+      {
+        "connector_id": "0b1b1d31-0000-0000-0000-000000000005",
+        "connector_image": "https://example.com/placeholder.svg",
+        "connector_name": "Source API",
+        "slug": "source-api"
+      }
+    ],
+    "endpoints": [
+      {
+        "version": 1,
+        "pagination": null,
+        "response_schema": {
+          "description": "Response for creating a new transaction",
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "title": "Transaction Response",
+          "type": "object",
+          "properties": {
+            "amount": {
+              "type": "string",
+              "description": "Amount of the transaction",
+              "example": "-100.32"
+            },
+            "entryDate": {
+              "format": "date-time",
+              "description": "Date the transaction was booked",
+              "type": "string",
+              "nullable": true,
+              "example": "2024-05-10T00:00:00+02:00"
+            },
+            "update": {
+              "type": "string",
+              "format": "date-time",
+              "description": "Date of last transaction update"
+            },
+            "valueDate": {
+              "format": "date-time",
+              "description": "Date the transaction was imported",
+              "type": "string",
+              "example": "2024-05-10T00:00:00+02:00"
+            },
+            "objectName": {
+              "type": "string",
+              "description": "The transaction object name",
+              "example": "Transaction"
+            },
+            "create": {
+              "type": "string",
+              "format": "date-time",
+              "description": "Date of transaction creation"
+            },
+            "purpose": {
+              "description": "The purpose of the transaction",
+              "type": "string",
+              "nullable": true,
+              "example": "salary"
+            },
+            "id": {
+              "type": "string",
+              "description": "The transaction id",
+              "example": "1"
+            },
+            "payeeName": {
+              "description": "Name of the other party",
+              "type": "string",
+              "nullable": true,
+              "example": "Jane Doe"
+            },
+            "status": {
+              "type": "string",
+              "description": "Status of the transaction",
+              "enum": [
+                "100",
+                "200",
+                "300",
+                "400"
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "objectName",
+            "valueDate",
+            "amount",
+            "status"
+          ]
+        },
+        "connector_id": "acc98990-0000-0000-0000-000000000006",
+        "endpoint_id": "1e63d782-0000-0000-0000-000000000007",
+        "filters": {
+          "endDate": {
+            "description": "Only retrieve transactions up to this date",
+            "type": "string",
+            "operators": [
+              "lte"
+            ],
+            "required": false,
+            "example": "2024-12-31T23:59:59+02:00"
+          },
+          "startDate": {
+            "description": "Only retrieve transactions from this date on",
+            "type": "string",
+            "operators": [
+              "gte"
+            ],
+            "required": false,
+            "example": "2024-01-01T00:00:00+02:00"
+          }
+        },
+        "endpoint": "/api/v1/transactions",
+        "method": "POST"
+      },
+      {
+        "version": 1,
+        "pagination": {
+          "type": "offset",
+          "params": {
+            "max_limit": null,
+            "offset_param": "offset",
+            "uses_link_header": false,
+            "limit_param": "limit",
+            "cursor_param": null,
+            "next_cursor_field": null,
+            "time_window_params": {
+              "end_param": null,
+              "start_param": null
+            },
+            "page_param": null
+          }
+        },
+        "replication_filter_mapping": {
+          "created": "createdDateStart"
+        },
+        "response_schema": {
+          "description": "Returns an array of transfer objects for a given profile",
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "title": "Transfers List",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "targetCurrency": {
+                "type": "string",
+                "description": "Target currency code"
+              },
+              "created": {
+                "type": "string",
+                "format": "date-time",
+                "description": "Timestamp when transfer was created"
+              },
+              "sourceCurrency": {
+                "type": "string",
+                "description": "Source currency code"
+              },
+              "reference": {
+                "type": "string",
+                "description": "Payment reference text"
+              },
+              "hasActiveIssues": {
+                "type": "boolean",
+                "description": "Are there any pending issues which stop executing the transfer?"
+              },
+              "rate": {
+                "type": "number",
+                "description": "Exchange rate value"
+              },
+              "targetValue": {
+                "type": "number",
+                "description": "Transfer amount in target currency"
+              },
+              "details": {
+                "type": "object",
+                "properties": {
+                  "reference": {
+                    "type": "string",
+                    "description": "Payment reference text"
+                  }
+                }
+              },
+              "id": {
+                "type": "integer",
+                "description": "Transfer ID"
+              },
+              "sourceValue": {
+                "type": "number",
+                "description": "Transfer amount in source currency"
+              },
+              "status": {
+                "type": "string",
+                "description": "Transfer status"
+              }
+            }
+          }
+        },
+        "connector_id": "0b1b1d31-0000-0000-0000-000000000005",
+        "endpoint_id": "5a4b9e21-0000-0000-0000-000000000008",
+        "filters": {
+          "createdDateEnd": {
+            "description": "Ending date to filter transfers",
+            "type": "string",
+            "operators": [
+              "lte"
+            ],
+            "required": false,
+            "example": "2024-12-30T23:59:59.999Z"
+          },
+          "targetCurrency": {
+            "description": "Target currency code",
+            "type": "string",
+            "operators": [
+              "eq"
+            ],
+            "required": false
+          },
+          "offset": {
+            "description": "Starting record number",
+            "type": "integer",
+            "operators": [
+              "eq"
+            ],
+            "required": false
+          },
+          "limit": {
+            "description": "Maximum number of records to be returned in response",
+            "type": "integer",
+            "operators": [
+              "eq"
+            ],
+            "required": false
+          },
+          "sourceCurrency": {
+            "description": "Source currency code",
+            "type": "string",
+            "operators": [
+              "eq"
+            ],
+            "required": false
+          },
+          "createdDateStart": {
+            "description": "Starting date to filter transfers",
+            "type": "string",
+            "operators": [
+              "gte"
+            ],
+            "required": false,
+            "example": "2024-01-01T00:00:00.000Z"
+          },
+          "status": {
+            "description": "Comma separated list of status codes to filter transfers",
+            "type": "string",
+            "operators": [
+              "eq",
+              "in"
+            ],
+            "required": false
+          }
+        },
+        "endpoint": "/v1/transfers",
+        "method": "GET"
+      }
+    ],
+    "streams": [
+      {
+        "mapping": {
+          "assignments": [
+            {
+              "value": {
+                "expr": {
+                  "op": "get",
+                  "path": [
+                    "created"
+                  ]
+                },
+                "kind": "expr"
+              },
+              "target": {
+                "nullable": true,
+                "type": "string",
+                "path": [
+                  "valueDate"
+                ]
+              }
+            },
+            {
+              "value": {
+                "const": {
+                  "value": {
+                    "objectName": "Account",
+                    "id": "1234567"
+                  }
+                },
+                "kind": "const"
+              },
+              "target": {
+                "path": [
+                  "account"
+                ]
+              }
+            }
+          ]
+        },
+        "stream_id": "c8a73982-0000-0000-0000-000000000004",
+        "version": 1,
+        "destinations": [
+          {
+            "connection_ref": "conn_2",
+            "endpoint_id": "1e63d782-0000-0000-0000-000000000007",
+            "write": {
+              "mode": "upsert"
+            }
+          }
+        ],
+        "created_at": "2026-01-02T22:57:03.551939",
+        "pipeline_id": "22ab7b76-0000-0000-0000-000000000003",
+        "status": "draft",
+        "source": {
+          "connection_ref": "conn_1",
+          "replication": {
+            "method": "incremental",
+            "cursor_field": [
+              "created"
+            ]
+          },
+          "endpoint_id": "5a4b9e21-0000-0000-0000-000000000008",
+          "primary_key": [
+            "id"
+          ]
+        },
+        "is_enabled": false,
+        "updated_at": "2026-01-02T22:57:03.551939"
+      }
+    ]
+  }
+}

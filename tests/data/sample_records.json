@@ -1,0 +1,72 @@
+{
+  "wise_transaction": {
+    "id": 12821221,
+    "user_id": 3631891,
+    "target_account": 6179781,
+    "source_account": 6179811,
+    "quote": null,
+    "quote_uuid": null,
+    "status": "outgoing_payment_sent",
+    "reference": "",
+    "details_reference": "",
+    "rate": 1.06245,
+    "created": "2016-12-13T22:57:03+00:00",
+    "business": null,
+    "has_active_issues": false,
+    "source_currency": "EUR",
+    "source_value": 235.31,
+    "target_currency": "USD",
+    "target_value": 250.0,
+    "customer_transaction_id": null,
+    "originator_data": null,
+    "raw_data": "record_to_json()",
+    "synced_at": "2025-08-19T14:16:14.290559+00:00",
+    "updated_at": "2025-08-19T14:16:14.290571+00:00"
+  },
+  "api_response_paginated": {
+    "data": [
+      {
+        "id": 123,
+        "name": "Test Record",
+        "created_at": "2025-08-19T10:30:00Z",
+        "status": "active",
+        "amount": 100.50
+      },
+      {
+        "id": 124,
+        "name": "Another Record", 
+        "created_at": "2025-08-19T10:35:00Z",
+        "status": "pending",
+        "amount": 75.25
+      }
+    ],
+    "pagination": {
+      "page": 1,
+      "per_page": 100,
+      "total": 2,
+      "has_next": false
+    }
+  },
+  "pipeline_config_minimal": {
+    "pipeline_id": "test-pipeline",
+    "name": "Test Pipeline",
+    "version": "1.0",
+    "source": {
+      "connection_id": "src-connection-123",
+      "endpoint_id": "src-endpoint-456"
+    },
+    "destination": {
+      "connection_id": "dst-connection-789",
+      "endpoint_id": "dst-endpoint-012"
+    },
+    "runtime": {
+      "buffer_size": 5000,
+      "batching": {
+        "batch_size": 100,
+        "max_concurrent_batches": 5
+      },
+      "logging": {"log_level": "INFO", "metrics_enabled": true},
+      "error_handling": {"strategy": "dlq", "max_retries": 3, "retry_delay": 5}
+    }
+  }
+}

@@ -1,0 +1,105 @@
+// gRPC service definition for destination streaming
+// Defines the bidirectional streaming RPC between engine and destination
+
+syntax = "proto3";
+
+package analitiq.v1;
+
+import "analitiq/v1/stream.proto";
+
+option java_multiple_files = true;
+option java_package = "com.analitiq.v1";
+
+// DestinationService handles bidirectional streaming of records
+// Engine sends: SchemaMessage (once), then RecordBatch messages
+// Destination responds: SchemaAck (once), then BatchAck for each batch
+service DestinationService {
+  // Bidirectional streaming for data transfer
+  // Engine sends StreamRequest (schema + batches)
+  // Destination responds with StreamResponse (acks)
+  rpc StreamRecords(stream StreamRequest) returns (stream StreamResponse);
+
+  // Health check for container orchestration
+  // Implements grpc.health.v1.Health-compatible response
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+
+  // Capability discovery - what features does this destination support?
+  rpc GetCapabilities(GetCapabilitiesRequest) returns (GetCapabilitiesResponse);
+
+  // Graceful shutdown signal from engine
+  // Called after all streams complete to terminate the server
+  rpc Shutdown(ShutdownRequest) returns (ShutdownAck);
+}
+
+// Health check request
+message HealthCheckRequest {
+  // Optional service name for multi-service containers
+  string service = 1;
+}
+
+// Health check response
+message HealthCheckResponse {
+  enum ServingStatus {
+    UNKNOWN = 0;
+    SERVING = 1;
+    NOT_SERVING = 2;
+    SERVICE_UNKNOWN = 3;
+  }
+  ServingStatus status = 1;
+
+  // Additional health details
+  string message = 2;
+  ConnectionStatus db_connection = 3;
+  uint32 pending_batches = 4;
+  uint64 total_records_written = 5;
+  uint64 total_batches_processed = 6;
+}
+
+enum ConnectionStatus {
+  CONNECTION_STATUS_UNSPECIFIED = 0;
+  CONNECTION_STATUS_CONNECTED = 1;
+  CONNECTION_STATUS_DISCONNECTED = 2;
+  CONNECTION_STATUS_RECONNECTING = 3;
+}
+
+// Capability discovery request
+message GetCapabilitiesRequest {}
+
+// Capability discovery response
+message GetCapabilitiesResponse {
+  // Connector type (postgresql, mysql, api, etc.)
+  string connector_type = 1;
+
+  // Supported write modes
+  repeated WriteMode supported_write_modes = 2;
+
+  // Feature flags
+  bool supports_transactions = 3;
+  bool supports_auto_create = 4;
+  bool supports_upsert = 5;
+  bool supports_bulk_load = 6;
+
+  // Limits
+  uint32 max_batch_size = 7;
+  uint32 max_batch_bytes = 8;
+
+  // Supported payload formats
+  repeated PayloadFormat supported_formats = 9;
+
+  // Protocol version for compatibility checking
+  string protocol_version = 10;
+}
+
+// Shutdown request from engine to destination
+message ShutdownRequest {
+  // Reason for shutdown (e.g., "pipeline_completed", "error")
+  string reason = 1;
+}
+
+// Shutdown acknowledgment from destination
+message ShutdownAck {
+  // Whether shutdown was acknowledged
+  bool acknowledged = 1;
+  // Optional message
+  string message = 2;
+}
