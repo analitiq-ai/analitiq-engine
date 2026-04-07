@@ -294,8 +294,6 @@ Extract -> Transform -> GrpcLoad   DestinationGRPCServer -> Handler
 
 **Protocol:** Opaque cursors, batch idempotency via `(run_id, stream_id, batch_seq)`, all-or-nothing batches.
 
-See [gRPC Architecture](docs/GRPC_STREAMING_ARCHITECTURE.md) for details.
-
 ## Destination Architecture
 
 Configuration-driven destination system with layered abstractions. Single Docker image handles all destination types based on `connector_type` defined in the connector (looked up via `connector_id` on the connection).
@@ -307,8 +305,6 @@ Configuration-driven destination system with layered abstractions. Single Docker
 **Storage:** `local`
 
 **Idempotency:** Database handlers use `_batch_commits` table; file handlers use `_manifest.json`
-
-See [Destination Config](docs/DESTINATION_CONFIG.md) for full reference.
 
 ## Arrow-Based Type System
 
@@ -390,7 +386,6 @@ cd docker && \
 - Deterministic behavior, idempotent writes, safe retries
 - Update README.md when modifying documented functionality
 - DO NOT ADD LEGACY SUPPORT OR BACKWARD COMPATIBILITY, UNLESS EXPLICITLY INSTRUCTED!
-- Use @codex-plan-reviewer agent to review plans before presenting them to me for execution.
 
 
 ## Working on Issues:
