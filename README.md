@@ -13,20 +13,31 @@ An open-source, AI-managed data synchronization engine. Tell Claude what data yo
 ## How It All Fits Together
 
 ```mermaid
-graph LR
-    You -- "natural language" --> Plugin["Pipeline Builder\n(Claude Code Plugin)"]
-    Plugin -- "downloads protocols" --> Registry["DIP Registry\n(GitHub)"]
-    Plugin -- "generates config" --> Engine["Data Sync Engine\n(this repo)"]
-    Engine -- "reads protocols" --> Registry
-    Source[(Source\nAPI / DB / File)] -- "data" --> Engine
-    Engine -- "data" --> Destination[(Destination\nDB / API / File)]
+---
+config:
+  layout: fixed
+---
+flowchart LR
+ subgraph Engine["Analitiq Engine (this repo)"]
+    direction LR
+        Destination(["Data Destination"])
+        Pipeline[["DATA PIPELINE"]]
+        Source(["Data Source"])
+  end
+    ConnectorPlugin["Claude Plugin<br>(Connector Builder)"] -. new connector .-> Registry["Analitiq DIP Registry<br>1000s of connectors"]
+    Source --> Pipeline
+    Pipeline --> Destination
+    Registry --> Pipeline
+    PipelinePlugin["Claude Plugin<br>(Pipeline Builder)"] -. builds .-> Pipeline
 
-    style You fill:#f0f4ff,stroke:#4a6cf7,color:#1a1a2e
-    style Plugin fill:#fdf6e3,stroke:#cb8a02,color:#1a1a2e
+     ConnectorPlugin:::plugin
+     PipelinePlugin:::plugin
+    classDef plugin fill:#fdf6e3,stroke:#cb8a02,stroke-dasharray: 5 5,color:#1a1a2e
+    style Destination fill:#e8f5e9,stroke:#43a047,color:#1a1a2e
+    style Pipeline fill:#f0f4ff,stroke:#4a6cf7,color:#1a1a2e
+    style Source fill:#e8f5e9,stroke:#43a047,color:#1a1a2e
     style Registry fill:#f0fff4,stroke:#38a169,color:#1a1a2e
     style Engine fill:#fff0f0,stroke:#e53e3e,color:#1a1a2e
-    style Source fill:#e8f5e9,stroke:#43a047,color:#1a1a2e
-    style Destination fill:#e8f5e9,stroke:#43a047,color:#1a1a2e
 ```
 
 | Component | Repository | Role |
