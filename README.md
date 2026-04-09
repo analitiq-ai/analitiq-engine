@@ -1,7 +1,12 @@
 # Analitiq Data Sync Engine
 
-An open-source, AI-managed data synchronization engine. Tell Claude what data you need to move — it builds the connectors, assembles the pipeline, and runs it. No coding required.
+An open-source, AI-managed data synchronization engine. Tell Claude what data you need to move — it builds the connectors, assembles the pipeline, and runs it. 
+ - No coding required
+ - No technical knowledge required
+ - No complexity
+ - Yes, it is open-source
 
+Move data from/to any system:
  - API -> Database
  - Database -> Database
  - API -> API
