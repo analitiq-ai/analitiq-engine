@@ -45,11 +45,12 @@ flowchart LR
     style Engine fill:#fff0f0,stroke:#e53e3e,color:#1a1a2e
 ```
 
-| Component | Repository | Role |
-|---|---|---|
-| **Pipeline Builder Plugin** | [ai-plugins-official](https://github.com/analitiq-ai/ai-plugins-official) | Claude Code plugin that assembles pipelines through conversation |
-| **DIP Registry** | [analitiq-dip-registry](https://github.com/analitiq-dip-registry) | Pre-built Data Integration Protocols for common systems (Pipedrive, Wise, Xero, PostgreSQL, ...) |
-| **Data Sync Engine** | [analitiq-core](https://github.com/analitiq-ai/analitiq-core) *(this repo)* | Runs the pipelines — extract, transform, load |
+| Component                                     | Repository | Role                                                                                                            |
+|-----------------------------------------------|---|-----------------------------------------------------------------------------------------------------------------|
+| **Connector Builder Plugin**                  | [ai-plugins-official](https://github.com/analitiq-ai/ai-plugins-official) | Claude Code plugin to create a connector (Data Integration Protocol) for new API or Database using AI           |
+| **Pipeline Builder Plugin**                   | [ai-plugins-official](https://github.com/analitiq-ai/ai-plugins-official) | Claude Code plugin to create a pipeline using using AI. Pipelines are created using connectors in DIP registry  |
+| **DIP (Data Integration Protocols) Registry** | [analitiq-dip-registry](https://github.com/analitiq-dip-registry) | A registry for Pre-built Data Integration Protocols for common systems (Pipedrive, Wise, Xero, PostgreSQL, ...) |
+| **Data Sync Engine**                          | [analitiq-core](https://github.com/analitiq-ai/analitiq-core) *(this repo)* | Runs the pipelines — extract, transform, load                                                                   |
 
 The DIP Registry already covers the most common systems. **Use the plugin** to pick a protocol and assemble a pipeline. **This engine** executes it. Or skip the setup and use **[Analitiq Cloud](https://analitiq-app.com)** for a fully managed experience.
 
