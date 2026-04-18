@@ -120,6 +120,13 @@ async def run_destination_mode() -> None:
     """
     logger.info("Starting in DESTINATION mode")
 
+    if not os.getenv("PIPELINE_ID"):
+        logger.warning(
+            "PIPELINE_ID not set; destination has nothing to configure. "
+            "Exiting gracefully. Set PIPELINE_ID and restart to run."
+        )
+        return
+
     # Import here to avoid circular imports
     from src.destination.server import DestinationGRPCServer
     from src.destination.connectors import get_handler
