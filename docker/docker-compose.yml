@@ -51,8 +51,8 @@ services:
           cpus: '0.25'
           memory: 256M
 
-    # Long-running server - restart on failure
-    restart: unless-stopped
+    # Long-running server - restart on failure only (exit 0 = intentional stop)
+    restart: on-failure
 
     # Logging configuration
     logging:
