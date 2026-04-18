@@ -177,6 +177,22 @@ def extract_connection_params(
 
 
 
+def _has_ssl_error_in_chain(exc: BaseException) -> bool:
+    """Return True if *exc* or any exception in its cause/context chain is an ssl.SSLError.
+
+    Drivers wrap ssl.SSLError inside their own exception types (asyncpg, aiomysql,
+    SQLAlchemy), so we walk __cause__ and __context__ to find the underlying cause.
+    """
+    seen: set[int] = set()
+    current: Optional[BaseException] = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, ssl.SSLError):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
 def canonical_ssl_to_connect_arg(ssl_mode: str) -> Union[bool, ssl.SSLContext]:
     """Convert a canonical ssl_mode to the Python ssl argument for asyncpg/aiomysql.
 
@@ -272,9 +288,10 @@ async def create_database_engine(
         async with engine.connect() as conn:
             await conn.execute(text("SELECT 1"))
     except Exception as e:
-        if ssl_mode == "prefer":
+        if ssl_mode == "prefer" and _has_ssl_error_in_chain(e):
             logger.warning(
-                "SSL failed with ssl_mode='prefer', retrying without SSL: %s", e
+                "SSL handshake failed with ssl_mode='prefer', retrying without SSL: %s",
+                e,
             )
             await engine.dispose()
             connect_args["ssl"] = False
