@@ -22,75 +22,69 @@ class TestMainPackageInit:
     def test_package_exports(self):
         """Test that all declared exports are available."""
         import src
-        
-        # Check that __all__ contains expected items
+
         expected_exports = [
             "StreamingEngine",
             "Pipeline",
             "RetryHandler",
             "CircuitBreaker",
             "DeadLetterQueue",
-            "SchemaManager",
             "BaseConnector",
             "DatabaseConnector",
             "APIConnector",
         ]
-        
+
         for export in expected_exports:
             assert export in src.__all__, f"Missing export: {export}"
             assert hasattr(src, export), f"Export not available: {export}"
-    
+
     def test_core_classes_importable(self):
         """Test that core classes can be imported directly."""
         from src import (
-            StreamingEngine, Pipeline,
-            RetryHandler, CircuitBreaker, DeadLetterQueue,
-            SchemaManager, BaseConnector, DatabaseConnector, APIConnector
+            APIConnector,
+            BaseConnector,
+            CircuitBreaker,
+            DatabaseConnector,
+            DeadLetterQueue,
+            Pipeline,
+            RetryHandler,
+            StreamingEngine,
         )
 
-        # Verify classes are not None
-        assert StreamingEngine is not None
-        assert Pipeline is not None
-        assert RetryHandler is not None
-        assert CircuitBreaker is not None
-        assert DeadLetterQueue is not None
-        assert SchemaManager is not None
-        assert BaseConnector is not None
-        assert DatabaseConnector is not None
-        assert APIConnector is not None
+        for cls in (
+            StreamingEngine,
+            Pipeline,
+            RetryHandler,
+            CircuitBreaker,
+            DeadLetterQueue,
+            BaseConnector,
+            DatabaseConnector,
+            APIConnector,
+        ):
+            assert cls is not None
 
 
 class TestSubPackageInits:
     """Test sub-package __init__.py files."""
     
-    def test_connectors_init(self):
-        """Test connectors package initialization."""
-        import src.connectors
-        
-        # Should be able to import the package
-        assert src.connectors is not None
-    
-    def test_fault_tolerance_init(self):
-        """Test fault_tolerance package initialization."""
-        import src.fault_tolerance
-        
-        # Should be able to import the package
-        assert src.fault_tolerance is not None
-    
+    def test_source_connectors_init(self):
+        """Source connectors package is importable at its new path."""
+        import src.source.connectors
+
+        assert src.source.connectors is not None
+
+    def test_state_init(self):
+        """State package (formerly ``fault_tolerance``) is importable."""
+        import src.state
+
+        assert src.state is not None
+
     def test_models_init(self):
         """Test models package initialization."""
         import src.models
-        
-        # Should be able to import the package
+
         assert src.models is not None
-    
-    def test_schema_init(self):
-        """Test schema package initialization."""
-        import src.schema
-        
-        # Should be able to import the package  
-        assert src.schema is not None
-    
+
     def test_database_init_already_covered(self):
         """Test database connector module is importable."""
         import src.source.connectors.database
@@ -169,12 +163,11 @@ class TestPackageStructure:
         metadata_attrs = ['__version__', '__author__', '__all__']
         code_attrs = [name for name in public_attrs if name not in metadata_attrs]
         
-        # All public code attributes should be in __all__ (except submodules)
-        # These are modules, not classes to export
+        # All public code attributes should be in __all__ (except submodules).
+        # These are modules, not classes to export.
         submodules = [
-            'cli', 'config', 'connectors', 'destination', 'engine',
-            'fault_tolerance', 'grpc', 'mapping', 'models', 'schema', 'secrets',
-            'shared', 'source', 'state', 'transformations'
+            "config", "destination", "engine", "grpc", "main", "models",
+            "runner", "secrets", "shared", "source", "state", "transformations",
         ]
         for attr in code_attrs:
             if attr not in submodules:
