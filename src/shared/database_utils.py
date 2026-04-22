@@ -15,6 +15,8 @@ from sqlalchemy import text
 from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
+from src.engine.type_map import SSLModeMapper
+
 logger = logging.getLogger(__name__)
 
 
@@ -97,16 +99,23 @@ def extract_connection_params(
     config: Dict[str, Any],
     *,
     require_port: bool = True,
+    ssl_mapper: Optional[SSLModeMapper] = None,
 ) -> DatabaseConnectionParams:
     """Extract and validate connection parameters from a config dict.
 
     Handles field name variations (username/user, database/dbname) and
-    builds a DatabaseConnectionParams with sensible defaults.
+    builds a DatabaseConnectionParams with sensible defaults. When a
+    connector ships an ``ssl-mode-map.json`` the caller should pass the
+    matching ``SSLModeMapper`` so native driver values (``prefer``,
+    ``VERIFY_IDENTITY``, …) are normalized to the canonical engine
+    vocabulary (``none`` / ``encrypt`` / ``verify`` / ``prefer``).
 
     Args:
         config: Raw connection config dictionary.
         require_port: If True, raise ValueError when port is missing.
                       If False, default to 5432.
+        ssl_mapper: Optional connector-owned mapper for native→canonical
+            ssl-mode translation.
 
     Returns:
         DatabaseConnectionParams frozen dataclass.
@@ -148,12 +157,20 @@ def extract_connection_params(
     else:
         port = int(port_value)
 
-    # SSL mode: expects canonical values (none/encrypt/verify) from connector.
-    # Default to "encrypt" for SSL dialects (encrypted, no cert verification).
+    # SSL mode: connectors store native driver values in the form
+    # (``prefer``, ``VERIFY_IDENTITY``, …); the ssl-mode-map translates
+    # them to the canonical engine vocabulary. Missing ssl_mode defaults to
+    # ``encrypt`` for SSL-capable dialects and ``none`` otherwise.
+    raw_ssl_mode = params.get("ssl_mode")
     if driver.lower() in SSL_DIALECTS:
-        ssl_mode = params.get("ssl_mode", "encrypt")
+        if raw_ssl_mode is None:
+            ssl_mode = "encrypt"
+        elif ssl_mapper is not None:
+            ssl_mode = ssl_mapper.to_canonical(raw_ssl_mode)
+        else:
+            ssl_mode = raw_ssl_mode
     else:
-        ssl_mode = params.get("ssl_mode", "none")
+        ssl_mode = raw_ssl_mode if raw_ssl_mode is not None else "none"
 
     # Pool configuration
     pool_config = params.get("connection_pool", {})
@@ -267,6 +284,7 @@ async def create_database_engine(
     config: Dict[str, Any],
     *,
     require_port: bool = True,
+    ssl_mapper: Optional[SSLModeMapper] = None,
 ) -> tuple[AsyncEngine, str]:
     """Create and probe a SQLAlchemy async engine from a connection config.
 
@@ -280,6 +298,8 @@ async def create_database_engine(
     Args:
         config: Raw connection config dictionary.
         require_port: If True, raise ValueError when port is missing.
+        ssl_mapper: Optional connector-owned mapper for native→canonical
+            ssl-mode translation.
 
     Returns:
         Tuple of (AsyncEngine, driver_string).
@@ -288,7 +308,9 @@ async def create_database_engine(
         ValueError: If required fields (e.g. port) are missing.
         Exception: Any connection error after disposal of failed engines.
     """
-    conn_params = extract_connection_params(config, require_port=require_port)
+    conn_params = extract_connection_params(
+        config, require_port=require_port, ssl_mapper=ssl_mapper
+    )
 
     url = conn_params.to_sqlalchemy_url()
     connect_args = conn_params.to_sqlalchemy_connect_args()

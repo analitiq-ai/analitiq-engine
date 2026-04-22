@@ -31,6 +31,8 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncConnection
 
 from ..base_handler import BaseDestinationHandler, BatchWriteResult
 from ..schema_contract import DestinationSchemaContract
+from ..sql_types import native_to_sqlalchemy
+from ...engine.type_map import TypeMapper
 from ...grpc.generated.analitiq.v1 import (
     AckStatus,
     Cursor,
@@ -94,6 +96,18 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
 
         # Arrow-based schema contract for vectorized type casting (built on schema configure)
         self._schema_contract: Optional[DestinationSchemaContract] = None
+
+    def _type_mapper(self) -> TypeMapper:
+        """Return the destination connector's type-mapper.
+
+        Schema contract and DDL both need it; routing through the runtime
+        keeps this handler free of any connector-slug knowledge.
+        """
+        if self._runtime is None:
+            raise RuntimeError(
+                "DatabaseDestinationHandler._type_mapper() called before connect()"
+            )
+        return self._runtime.type_mapper
 
     @property
     def connector_type(self) -> str:
@@ -187,9 +201,14 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
             # Create tables
             await self._ensure_tables_exist()
 
-            # Build schema contract for Arrow-based type casting
+            # Build schema contract for Arrow-based type casting. The
+            # connector's type-map resolves native column types (BIGINT,
+            # VARCHAR(50), …) into canonical Arrow strings.
             if self._json_schema:
-                self._schema_contract = DestinationSchemaContract(self._json_schema)
+                self._schema_contract = DestinationSchemaContract(
+                    self._json_schema,
+                    type_mapper=self._type_mapper(),
+                )
                 logger.debug(
                     f"Built schema contract with {len(self._schema_contract.column_types)} columns"
                 )
@@ -287,7 +306,12 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
                 col_name = col_def.get("name")
                 if not col_name:
                     continue
-                sa_type = self._db_type_to_sqlalchemy(col_def.get("type", "TEXT"))
+                native_type = col_def.get("type")
+                if not native_type:
+                    raise ValueError(
+                        f"column {col_name!r} has no 'type' field in destination schema"
+                    )
+                sa_type = native_to_sqlalchemy(native_type, self._type_mapper())
                 is_pk = col_name in primary_keys
                 nullable = col_def.get("nullable", True) and not is_pk
 
@@ -315,58 +339,6 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
             schema=self._schema_name,
             extend_existing=True,
         )
-
-    def _db_type_to_sqlalchemy(self, db_type: str) -> Any:
-        """
-        Convert database type string to SQLAlchemy type.
-
-        Args:
-            db_type: Database type string (e.g., 'BIGINT', 'VARCHAR(50)', 'TIMESTAMP')
-
-        Returns:
-            SQLAlchemy type
-        """
-        db_type_upper = db_type.upper()
-
-        # Integer types
-        if db_type_upper in ("BIGINT", "INT8"):
-            return BigInteger()
-        if db_type_upper in ("INTEGER", "INT", "INT4"):
-            return Integer()
-
-        # String types with length
-        if db_type_upper.startswith("VARCHAR"):
-            # Extract length from VARCHAR(n)
-            import re
-            match = re.search(r"\((\d+)\)", db_type_upper)
-            if match:
-                return String(int(match.group(1)))
-            return String(255)
-        if db_type_upper in ("TEXT", "CLOB"):
-            return Text()
-
-        # Numeric types
-        if db_type_upper.startswith("NUMERIC") or db_type_upper.startswith("DECIMAL"):
-            return Float()
-        if db_type_upper in ("FLOAT", "DOUBLE", "REAL"):
-            return Float()
-
-        # Date/time types
-        if db_type_upper in ("TIMESTAMP", "TIMESTAMPTZ", "DATETIME"):
-            return DateTime(timezone=True)
-        if db_type_upper == "DATE":
-            return DateTime()
-
-        # Boolean
-        if db_type_upper in ("BOOLEAN", "BOOL"):
-            return Boolean()
-
-        # Binary
-        if db_type_upper in ("BYTEA", "BLOB", "BINARY"):
-            return LargeBinary()
-
-        # Default to Text
-        return Text()
 
     def _json_type_to_sqlalchemy(self, prop: Dict[str, Any]) -> Any:
         """

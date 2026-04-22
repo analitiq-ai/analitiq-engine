@@ -87,19 +87,6 @@ def _serialize(obj: Any) -> Any:
     return obj
 
 
-@dataclass
-class GenericTypeMapping:
-    """Mapping of a field to its generic type representation."""
-    generic_type: TargetType
-
-
-@dataclass
-class DestinationTypeMapping:
-    """Mapping of a field to its destination-specific type."""
-    destination_type: str
-    nullable: bool = True
-
-
 # Expression AST Models
 
 @dataclass
@@ -177,7 +164,6 @@ class AssignmentTarget:
     """Target field specification for an assignment."""
     path: List[str] = field(default_factory=list)
     type: TargetType = TargetType.STRING
-    dest_type: Optional[str] = None
     nullable: bool = True
 
 
@@ -214,9 +200,6 @@ class MappingConfig:
     target_schema_id: Optional[str] = None
     defaults: Optional[Dict[str, Any]] = None
     assignments_hash: Optional[str] = None
-    source_to_generic: Optional[Dict[str, GenericTypeMapping]] = None
-    generic_to_destination: Optional[Dict[str, Dict[str, DestinationTypeMapping]]] = None
-    type_mapping_assignments_hash: Optional[str] = None
 
 
 # Source/Destination Configuration Models

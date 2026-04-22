@@ -7,6 +7,10 @@ This module provides the DestinationSchemaContract class that handles:
 
 The schema contract is built once per destination table and reused for every batch,
 providing efficient columnar type casting instead of row-by-row Python coercion.
+
+Native→Arrow translation is delegated to the destination connector's
+``type-map.json`` via :class:`TypeMapper`. There is no hardcoded type
+dictionary — an unmapped native type is a hard error, not a silent fallback.
 """
 
 import logging
@@ -17,6 +21,8 @@ from typing import Any, Dict, List, Optional
 import pyarrow as pa
 import pyarrow.compute as pc
 
+from src.engine.type_map import TypeMapper, canonical_to_arrow
+
 logger = logging.getLogger(__name__)
 
 
@@ -24,30 +30,45 @@ class DestinationSchemaContract:
     """Schema mapping object per destination table.
 
     Built once from destination endpoint schema, reused for every batch.
-    Maps destination native types to Arrow types for efficient columnar casting.
+    Column ``type`` strings are interpreted by the destination connector's
+    :class:`TypeMapper` — native → canonical Arrow → ``pa.DataType`` — so
+    there is no hardcoded dialect knowledge here.
 
     Supports two schema formats:
-    1. "columns" array: Database endpoint format with native types
-       [{"name": "id", "type": "BIGINT", "nullable": true}, ...]
-    2. JSON Schema "properties": API endpoint format
-       {"properties": {"id": {"type": "integer"}, ...}}
+    1. ``columns`` array: Database endpoint format with native types
+       ``[{"name": "id", "type": "BIGINT", "nullable": true}, ...]``
+    2. JSON Schema ``properties``: API endpoint format
+       ``{"properties": {"id": {"type": "integer"}, ...}}``
     """
 
-    def __init__(self, dest_endpoint_schema: Dict[str, Any]) -> None:
+    def __init__(
+        self,
+        dest_endpoint_schema: Dict[str, Any],
+        *,
+        type_mapper: Optional[TypeMapper] = None,
+    ) -> None:
         """Build Arrow schema from destination endpoint schema.
 
         Args:
-            dest_endpoint_schema: Schema definition (columns array or JSON Schema)
+            dest_endpoint_schema: Schema definition (columns array or JSON Schema).
+            type_mapper: Destination connector's ``TypeMapper``. Required
+                when the schema uses the ``columns`` array format (native
+                SQL types). JSON Schema payloads do not use it.
         """
         self._columns: List[Dict[str, Any]] = []
+        self._type_mapper = type_mapper
         self._arrow_schema: pa.Schema
 
         if "columns" in dest_endpoint_schema:
-            # Columns array format (database endpoints) - native types
+            if type_mapper is None:
+                raise ValueError(
+                    "DestinationSchemaContract: type_mapper is required for "
+                    "'columns' schema payloads (native SQL types cannot be "
+                    "interpreted without the connector's type-map)"
+                )
             self._columns = dest_endpoint_schema.get("columns", [])
             self._arrow_schema = self._build_arrow_schema()
         elif "properties" in dest_endpoint_schema:
-            # JSON Schema format (API endpoints) - build Arrow schema directly
             self._arrow_schema = self._build_arrow_schema_from_json_schema(
                 dest_endpoint_schema
             )
@@ -120,9 +141,11 @@ class DestinationSchemaContract:
     def _build_arrow_schema(self) -> pa.Schema:
         """Build canonical Arrow schema from destination column types.
 
-        Returns:
-            PyArrow Schema built from columns array
+        Each column's ``type`` is run through the connector's type-map
+        (native → canonical) then parsed into a ``pa.DataType``. Unmapped
+        natives raise from :class:`TypeMapper` — there is no silent default.
         """
+        assert self._type_mapper is not None  # guarded in __init__
         fields = []
 
         for col in self._columns:
@@ -130,82 +153,18 @@ class DestinationSchemaContract:
             if not col_name:
                 continue
 
-            col_type = col.get("type", "TEXT")
+            col_type = col.get("type")
+            if not col_type:
+                raise ValueError(
+                    f"column {col_name!r} has no 'type' field in destination schema"
+                )
             nullable = col.get("nullable", True)
 
-            arrow_type = self._native_to_arrow(col_type)
+            canonical = self._type_mapper.to_canonical(col_type)
+            arrow_type = canonical_to_arrow(canonical)
             fields.append(pa.field(col_name, arrow_type, nullable=nullable))
 
         return pa.schema(fields)
-
-    def _native_to_arrow(self, native_type: str) -> pa.DataType:
-        """Map destination native SQL type to Arrow type.
-
-        Args:
-            native_type: Native SQL type string (e.g., "BIGINT", "VARCHAR(50)")
-
-        Returns:
-            PyArrow DataType
-        """
-        # Get base type (strip parentheses for VARCHAR(n), DECIMAL(p,s), etc.)
-        base = native_type.split("(")[0].upper().strip()
-
-        # Parse precision/scale for DECIMAL/NUMERIC
-        if base in ("DECIMAL", "NUMERIC") and "(" in native_type:
-            try:
-                params = native_type.split("(")[1].rstrip(")").split(",")
-                precision = int(params[0].strip())
-                scale = int(params[1].strip()) if len(params) > 1 else 0
-                return pa.decimal128(precision, scale)
-            except (ValueError, IndexError):
-                return pa.decimal128(15, 2)  # Default precision
-
-        # Type mapping
-        type_map = {
-            # Integer types
-            "BIGINT": pa.int64(),
-            "INT8": pa.int64(),
-            "INT": pa.int32(),
-            "INTEGER": pa.int32(),
-            "INT4": pa.int32(),
-            "SMALLINT": pa.int16(),
-            "INT2": pa.int16(),
-            "TINYINT": pa.int8(),
-            # Float types
-            "FLOAT": pa.float32(),
-            "FLOAT4": pa.float32(),
-            "DOUBLE": pa.float64(),
-            "FLOAT8": pa.float64(),
-            "REAL": pa.float64(),
-            # String types
-            "VARCHAR": pa.string(),
-            "CHAR": pa.string(),
-            "TEXT": pa.string(),
-            "STRING": pa.string(),
-            "CLOB": pa.string(),
-            # Timestamp types
-            "TIMESTAMP": pa.timestamp("us"),
-            "TIMESTAMPTZ": pa.timestamp("us", tz="UTC"),
-            "TIMESTAMP_TZ": pa.timestamp("us", tz="UTC"),
-            "DATETIME": pa.timestamp("us"),
-            # Date/Time types
-            "DATE": pa.date32(),
-            "TIME": pa.time64("us"),
-            "TIMETZ": pa.time64("us"),
-            # Boolean
-            "BOOLEAN": pa.bool_(),
-            "BOOL": pa.bool_(),
-            # JSON types (stored as string)
-            "JSON": pa.string(),
-            "JSONB": pa.string(),
-            # Binary
-            "BYTEA": pa.binary(),
-            "BLOB": pa.binary(),
-            "BINARY": pa.binary(),
-            "VARBINARY": pa.binary(),
-        }
-
-        return type_map.get(base, pa.string())
 
     def cast_batch(self, records: List[Dict[str, Any]]) -> pa.Table:
         """Vectorized cast of batch to canonical Arrow schema.

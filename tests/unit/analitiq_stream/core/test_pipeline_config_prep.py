@@ -46,6 +46,14 @@ class ModularConfigHelper:
             "endpoints": [],
         }
         (definition_dir / "manifest.json").write_text(json.dumps(manifest))
+
+        # Every connector must ship a type-map.json (per GH #28). A minimal
+        # map is fine for tests that only exercise config loading.
+        type_map = [
+            {"match": "exact", "native": "BIGINT", "canonical": "Int64"},
+            {"match": "exact", "native": "TEXT", "canonical": "Utf8"},
+        ]
+        (definition_dir / "type-map.json").write_text(json.dumps(type_map))
         return definition_dir
 
     @staticmethod
