@@ -9,7 +9,7 @@ efficient columnar type conversion for batch operations.
 
 import logging
 from datetime import datetime
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, Mapping, Optional, TYPE_CHECKING
 
 from sqlalchemy import (
     Boolean,
@@ -97,17 +97,34 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         # Arrow-based schema contract for vectorized type casting (built on schema configure)
         self._schema_contract: Optional[DestinationSchemaContract] = None
 
-    def _type_mapper(self) -> TypeMapper:
-        """Return the destination connector's type-mapper.
+        # Stream-id -> endpoint_ref index so configure_schema() can pick
+        # the type-mapper matching the endpoint's scope (connector vs
+        # connection). Populated by set_endpoint_refs() at startup.
+        self._endpoint_refs: Dict[str, str] = {}
 
-        Schema contract and DDL both need it; routing through the runtime
-        keeps this handler free of any connector-slug knowledge.
+    def set_endpoint_refs(self, endpoint_refs: Mapping[str, str]) -> None:
+        """Register stream_id → endpoint_ref for each stream writing to this
+        destination. Called once by ``src.main`` before the gRPC server starts;
+        the handler consults the map per incoming ``SchemaMessage`` to decide
+        which ``TypeMapper`` applies (public endpoint → connector's map,
+        private endpoint → connection's map).
         """
+        self._endpoint_refs = dict(endpoint_refs)
+
+    def _type_mapper_for_stream(self, stream_id: str) -> TypeMapper:
+        """Resolve the type-mapper appropriate for ``stream_id``'s endpoint."""
         if self._runtime is None:
             raise RuntimeError(
-                "DatabaseDestinationHandler._type_mapper() called before connect()"
+                "DatabaseDestinationHandler._type_mapper_for_stream() called before connect()"
             )
-        return self._runtime.type_mapper
+        endpoint_ref = self._endpoint_refs.get(stream_id)
+        if endpoint_ref is None:
+            raise RuntimeError(
+                f"DatabaseDestinationHandler has no endpoint_ref registered for "
+                f"stream_id={stream_id!r}; call set_endpoint_refs() before the "
+                f"gRPC server starts"
+            )
+        return self._runtime.type_mapper_for(endpoint_ref)
 
     @property
     def connector_type(self) -> str:
@@ -198,16 +215,18 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
             else:
                 self._primary_keys = []
 
-            # Create tables
-            await self._ensure_tables_exist()
+            # Resolve the type-mapper for this stream's endpoint once —
+            # both DDL generation and the schema contract use it.
+            type_mapper = self._type_mapper_for_stream(schema_msg.stream_id)
 
-            # Build schema contract for Arrow-based type casting. The
-            # connector's type-map resolves native column types (BIGINT,
-            # VARCHAR(50), …) into canonical Arrow strings.
+            # Create tables (needs the mapper for SQLAlchemy type picks).
+            await self._ensure_tables_exist(type_mapper)
+
+            # Build schema contract for Arrow-based type casting.
             if self._json_schema:
                 self._schema_contract = DestinationSchemaContract(
                     self._json_schema,
-                    type_mapper=self._type_mapper(),
+                    type_mapper=type_mapper,
                 )
                 logger.debug(
                     f"Built schema contract with {len(self._schema_contract.column_types)} columns"
@@ -234,8 +253,13 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         }
         return mode_map.get(proto_write_mode, "upsert")
 
-    async def _ensure_tables_exist(self) -> None:
-        """Create target table and batch commits table if they don't exist."""
+    async def _ensure_tables_exist(self, type_mapper: TypeMapper) -> None:
+        """Create target table and batch commits table if they don't exist.
+
+        ``type_mapper`` is the endpoint-scoped mapper picked by
+        ``configure_schema``; it drives native → SQLAlchemy type resolution
+        for DDL.
+        """
         if not self._engine:
             return
 
@@ -259,6 +283,7 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
                 self._table_name,
                 self._json_schema,
                 self._primary_keys,
+                type_mapper,
             )
         else:
             # Minimal table structure if no schema provided
@@ -282,6 +307,7 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         table_name: str,
         json_schema: Dict[str, Any],
         primary_keys: List[str],
+        type_mapper: TypeMapper,
     ) -> Table:
         """
         Create SQLAlchemy Table from schema definition.
@@ -294,6 +320,7 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
             table_name: Target table name
             json_schema: Schema definition (JSON Schema or endpoint schema)
             primary_keys: List of primary key column names
+            type_mapper: Endpoint-scoped mapper for native → SQLAlchemy type resolution.
 
         Returns:
             SQLAlchemy Table object
@@ -311,7 +338,7 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
                     raise ValueError(
                         f"column {col_name!r} has no 'type' field in destination schema"
                     )
-                sa_type = native_to_sqlalchemy(native_type, self._type_mapper())
+                sa_type = native_to_sqlalchemy(native_type, type_mapper)
                 is_pk = col_name in primary_keys
                 nullable = col_def.get("nullable", True) and not is_pk
 

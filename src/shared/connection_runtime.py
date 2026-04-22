@@ -123,7 +123,8 @@ class ConnectionRuntime:
         connector_type: str,
         driver: Optional[str],
         resolver: SecretsResolver,
-        type_mapper: Optional[TypeMapper] = None,
+        connector_type_mapper: Optional[TypeMapper] = None,
+        connection_type_mapper: Optional[TypeMapper] = None,
         ssl_mapper: Optional[SSLModeMapper] = None,
     ):
         if connector_type not in VALID_CONNECTOR_TYPES:
@@ -137,7 +138,8 @@ class ConnectionRuntime:
         self._connector_type = connector_type
         self._driver = driver
         self._resolver = resolver
-        self._type_mapper = type_mapper
+        self._connector_type_mapper = connector_type_mapper
+        self._connection_type_mapper = connection_type_mapper
         self._ssl_mapper = ssl_mapper
 
         # Transport state — set by materialize()
@@ -178,19 +180,58 @@ class ConnectionRuntime:
         return copy.deepcopy(self._raw_config)
 
     @property
-    def type_mapper(self) -> TypeMapper:
+    def connector_type_mapper(self) -> TypeMapper:
         """Connector-owned native↔canonical type mapper.
 
         Always present for resolved connections because ``type-map.json`` is
         required for every connector. Raises if the runtime was constructed
         without one (bare unit tests).
         """
-        if self._type_mapper is None:
+        if self._connector_type_mapper is None:
             raise RuntimeError(
-                f"type_mapper not available for {self._connection_id!r}: "
+                f"connector_type_mapper not available for {self._connection_id!r}: "
                 f"runtime was constructed without one"
             )
-        return self._type_mapper
+        return self._connector_type_mapper
+
+    @property
+    def connection_type_mapper(self) -> Optional[TypeMapper]:
+        """Connection-owned type mapper for private endpoints.
+
+        Loaded from ``connections/{alias}/definition/type-map.json`` when
+        present. ``None`` when the connection has no private endpoints to
+        canonicalize (pure public-endpoint pipelines).
+        """
+        return self._connection_type_mapper
+
+    def type_mapper_for(self, endpoint_ref: str) -> TypeMapper:
+        """Pick the type mapper whose scope matches ``endpoint_ref``.
+
+        Refs like ``connector:{slug}/{name}`` resolve to the connector's
+        type-map; ``connection:{alias}/{name}`` resolves to the connection's
+        own. A connection-scoped ref with no connection-level type-map is a
+        hard error — there is no sensible fallback to the connector map
+        because private endpoints may use types the connector does not know.
+        """
+        if not isinstance(endpoint_ref, str) or ":" not in endpoint_ref:
+            raise ValueError(
+                f"type_mapper_for: {endpoint_ref!r} is not a scoped endpoint_ref"
+            )
+        scope, _ = endpoint_ref.split(":", 1)
+        if scope == "connector":
+            return self.connector_type_mapper
+        if scope == "connection":
+            if self._connection_type_mapper is None:
+                raise RuntimeError(
+                    f"endpoint {endpoint_ref!r} is connection-scoped but "
+                    f"connection {self._connection_id!r} has no type-map "
+                    f"(expected at connections/{self._connection_id}/definition/"
+                    f"type-map.json)"
+                )
+            return self._connection_type_mapper
+        raise ValueError(
+            f"type_mapper_for: unknown endpoint scope {scope!r} in {endpoint_ref!r}"
+        )
 
     @property
     def ssl_mapper(self) -> Optional[SSLModeMapper]:

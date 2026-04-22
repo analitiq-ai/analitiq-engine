@@ -166,8 +166,8 @@ class TestEndpointRefResolver:
 
     @pytest.mark.unit
     def test_resolve_connection_endpoint(self, tmp_path):
-        """Test resolving a private connection endpoint."""
-        endpoint_dir = tmp_path / "connections" / "prod-pg" / "endpoints"
+        """Test resolving a private connection endpoint (under definition/)."""
+        endpoint_dir = tmp_path / "connections" / "prod-pg" / "definition" / "endpoints"
         endpoint_dir.mkdir(parents=True)
         endpoint_file = endpoint_dir / "public_users.json"
         endpoint_file.write_text('{"endpoint": "public/users", "method": "DATABASE"}')

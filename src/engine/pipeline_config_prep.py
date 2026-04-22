@@ -13,7 +13,7 @@ Configuration is assembled at runtime from separate files:
 - Connectors: {paths.connectors}/{slug}/definition/connector.json (downloaded from GitHub)
 - Connections: {paths.connections}/{alias}/connection.json (user-created)
 - Public endpoints: {paths.connectors}/{slug}/definition/endpoints/{name}.json
-- Private endpoints: {paths.connections}/{alias}/endpoints/{name}.json
+- Private endpoints: {paths.connections}/{alias}/definition/endpoints/{name}.json
 - Secrets: {paths.connections}/{alias}/.secrets/credentials.json
 
 Endpoint references use scoped path format:
@@ -47,6 +47,7 @@ from src.config.connection_loader import load_connection, load_connector_for_con
 from src.engine.type_map import (
     SSLModeMapper,
     TypeMapper,
+    load_connection_type_map,
     load_ssl_mode_map,
     load_type_map,
 )
@@ -105,6 +106,10 @@ class PipelineConfigPrep:
         # without re-reading the filesystem.
         self._type_mappers: Dict[str, TypeMapper] = {}
         self._ssl_mappers: Dict[str, Optional[SSLModeMapper]] = {}
+
+        # Per-connection type mappers (keyed by alias). Optional — absent
+        # file means the connection only references public endpoints.
+        self._connection_type_mappers: Dict[str, Optional[TypeMapper]] = {}
 
         self.pipeline_id = os.getenv("PIPELINE_ID", "")
         if not self.pipeline_id:
@@ -368,6 +373,18 @@ class PipelineConfigPrep:
             self._load_connector(connector_slug)
         return self._ssl_mappers[connector_slug]
 
+    def _load_connection_type_mapper(self, alias: str) -> Optional[TypeMapper]:
+        """Load (and cache) the connection's own type-map for private endpoints."""
+        if alias not in self._connection_type_mappers:
+            self._connection_type_mappers[alias] = load_connection_type_map(
+                self._paths["connections"], alias
+            )
+        return self._connection_type_mappers[alias]
+
+    def get_connection_type_mapper(self, alias: str) -> Optional[TypeMapper]:
+        """Return the cached connection-scoped ``TypeMapper`` or ``None``."""
+        return self._load_connection_type_mapper(alias)
+
     def get_connector_for_connection(
         self, config: Dict[str, Any], alias: str
     ) -> Dict[str, Any]:
@@ -461,7 +478,8 @@ class PipelineConfigPrep:
             connector_type=connection_type,
             driver=connector.get("driver") if connection_type == "database" else None,
             resolver=resolver,
-            type_mapper=self._type_mappers.get(connector_slug),
+            connector_type_mapper=self._type_mappers.get(connector_slug),
+            connection_type_mapper=self._load_connection_type_mapper(alias),
             ssl_mapper=self._ssl_mappers.get(connector_slug),
         )
 

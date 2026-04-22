@@ -17,6 +17,7 @@ from .exceptions import (
 from .loader import (
     SSL_MODE_MAP_FILENAME,
     TYPE_MAP_FILENAME,
+    load_connection_type_map,
     load_ssl_mode_map,
     load_type_map,
 )
@@ -36,6 +37,7 @@ __all__ = [
     "UnmappedSSLModeError",
     "UnmappedTypeError",
     "canonical_to_arrow",
+    "load_connection_type_map",
     "load_ssl_mode_map",
     "load_type_map",
     "normalize_native_type",

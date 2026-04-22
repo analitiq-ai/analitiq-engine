@@ -90,7 +90,7 @@ class ModularConfigHelper:
         connections_dir: Path, alias: str, endpoint_name: str, endpoint_data: dict
     ):
         """Create a private endpoint file under a connection."""
-        ep_dir = connections_dir / alias / "endpoints"
+        ep_dir = connections_dir / alias / "definition" / "endpoints"
         ep_dir.mkdir(parents=True, exist_ok=True)
         (ep_dir / f"{endpoint_name}.json").write_text(json.dumps(endpoint_data))
 

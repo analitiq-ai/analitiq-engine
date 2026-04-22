@@ -27,6 +27,7 @@ from src.engine.type_map import (
     UnmappedSSLModeError,
     UnmappedTypeError,
     canonical_to_arrow,
+    load_connection_type_map,
     load_ssl_mode_map,
     load_type_map,
     normalize_native_type,
@@ -369,3 +370,40 @@ class TestLoaders:
         )
         mapper = load_type_map(tmp_path, "alt")
         assert mapper.to_canonical("TEXT") == "Utf8"
+
+
+class TestLoadConnectionTypeMap:
+    """Connection-scoped type-map lives under ``connections/{alias}/definition/``."""
+
+    def test_absent_returns_none(self, tmp_path: Path):
+        (tmp_path / "my-pg" / "definition").mkdir(parents=True)
+        assert load_connection_type_map(tmp_path, "my-pg") is None
+
+    def test_happy_path(self, tmp_path: Path):
+        definition = tmp_path / "my-pg" / "definition"
+        definition.mkdir(parents=True)
+        (definition / "type-map.json").write_text(
+            json.dumps(
+                [
+                    {"match": "exact", "native": "CUSTOM_ENUM", "canonical": "Utf8"},
+                ]
+            )
+        )
+        mapper = load_connection_type_map(tmp_path, "my-pg")
+        assert mapper is not None
+        assert mapper.connector_slug == "connection:my-pg"
+        assert mapper.to_canonical("CUSTOM_ENUM") == "Utf8"
+
+    def test_malformed_json_raises(self, tmp_path: Path):
+        definition = tmp_path / "broken" / "definition"
+        definition.mkdir(parents=True)
+        (definition / "type-map.json").write_text("not json")
+        with pytest.raises(InvalidTypeMapError, match="not valid JSON"):
+            load_connection_type_map(tmp_path, "broken")
+
+    def test_non_array_root_rejected(self, tmp_path: Path):
+        definition = tmp_path / "bad" / "definition"
+        definition.mkdir(parents=True)
+        (definition / "type-map.json").write_text("{}")
+        with pytest.raises(InvalidTypeMapError, match="must contain a JSON array"):
+            load_connection_type_map(tmp_path, "bad")

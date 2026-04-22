@@ -5,7 +5,7 @@ Resolves scoped endpoint references to endpoint configuration dicts.
 
 Reference format:
 - "connector:{slug}/{endpoint_name}" -> connectors/{slug}/definition/endpoints/{endpoint_name}.json
-- "connection:{alias}/{endpoint_name}" -> connections/{alias}/endpoints/{endpoint_name}.json
+- "connection:{alias}/{endpoint_name}" -> connections/{alias}/definition/endpoints/{endpoint_name}.json
 """
 
 import json
@@ -82,7 +82,7 @@ def resolve_endpoint_path(ref: str, paths: dict[str, Path]) -> Path:
         )
     else:  # connection
         file_path = (
-            paths["connections"] / identifier / "endpoints"
+            paths["connections"] / identifier / "definition" / "endpoints"
             / f"{endpoint_name}.json"
         )
 
