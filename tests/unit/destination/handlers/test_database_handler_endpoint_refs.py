@@ -86,3 +86,58 @@ class TestEndpointRefDispatch:
         handler._runtime = _runtime(connector_mapper=_mapper("pg"))
         # Original registration wins — set_endpoint_refs took a defensive copy.
         assert handler._endpoint_refs["s1"] == "connector:pg/transfers"
+
+
+class TestWriteBatchFatalOnTypeMapError:
+    """Deterministic type-map errors in write_batch must not be retried."""
+
+    @pytest.mark.asyncio
+    async def test_type_map_error_classified_as_fatal(self):
+        from contextlib import asynccontextmanager
+        from unittest.mock import AsyncMock, MagicMock
+
+        from src.destination.connectors.database import DatabaseDestinationHandler
+        from src.engine.type_map import UnmappedTypeError
+        from src.grpc.generated.analitiq.v1 import AckStatus, Cursor
+
+        handler = DatabaseDestinationHandler()
+        # Preconditions: connected, schema configured, idempotency check
+        # clean. We don't actually hit the DB because the schema-contract
+        # prepare_records call raises before any SQL runs.
+        handler._engine = MagicMock()
+        handler._connected = True
+        handler._table = MagicMock()
+        handler._batch_commits_table = MagicMock()
+        handler._write_mode = "insert"
+        handler._primary_keys = []
+
+        @asynccontextmanager
+        async def _fake_begin():
+            yield AsyncMock()
+
+        handler._engine.begin = _fake_begin
+
+        async def _not_committed(*_args, **_kwargs):
+            return False
+
+        handler._check_batch_committed = _not_committed  # type: ignore[method-assign]
+
+        # The schema contract's prepare_records is called inside _insert_records;
+        # route the UnmappedTypeError through that entry.
+        async def _raising_insert(_conn, _records):
+            raise UnmappedTypeError("pg", "forward", "MONEY")
+
+        handler._insert_records = _raising_insert  # type: ignore[method-assign]
+
+        result = await handler.write_batch(
+            run_id="run-1",
+            stream_id="s1",
+            batch_seq=1,
+            records=[{"id": 1}],
+            record_ids=["1"],
+            cursor=Cursor(token=b""),
+        )
+
+        assert result.success is False
+        assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+        assert "type-map" in result.failure_summary

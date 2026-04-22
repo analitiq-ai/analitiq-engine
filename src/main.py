@@ -185,10 +185,11 @@ async def run_destination_mode() -> None:
         dest_alias,
     )
 
-    # Create handler and start server
+    # Create handler and start server. ``set_endpoint_refs`` is defined on
+    # ``BaseDestinationHandler`` as a no-op default, so this call is safe
+    # for every handler type and fails loudly if an override is renamed.
     handler = get_handler(runtime.connector_type)
-    if hasattr(handler, "set_endpoint_refs"):
-        handler.set_endpoint_refs(endpoint_refs)
+    handler.set_endpoint_refs(endpoint_refs)
     await handler.connect(runtime)
 
     server = DestinationGRPCServer(handler, port=grpc_port)

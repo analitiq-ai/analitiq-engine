@@ -33,10 +33,13 @@ from ..base_handler import BaseDestinationHandler, BatchWriteResult
 from ..schema_contract import DestinationSchemaContract
 from ..sql_types import native_to_sqlalchemy
 from ...engine.type_map import (
+    InvalidSSLModeMapError,
     InvalidTypeMapError,
     TypeMapper,
+    UnmappedSSLModeError,
     UnmappedTypeError,
 )
+from ...secrets.exceptions import PlaceholderExpansionError
 from ...grpc.generated.analitiq.v1 import (
     AckStatus,
     Cursor,
@@ -161,6 +164,19 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         runtime.acquire()
         try:
             await runtime.materialize(require_port=False)
+        except (
+            InvalidTypeMapError,
+            UnmappedTypeError,
+            InvalidSSLModeMapError,
+            UnmappedSSLModeError,
+            PlaceholderExpansionError,
+            ValueError,
+        ):
+            # Deterministic configuration / secret-resolution errors: let
+            # them propagate with their real type so the caller can
+            # distinguish "your type-map is missing a rule" from "the DB
+            # is unreachable".
+            raise
         except Exception as e:
             logger.error(f"Database destination connection failed: {e}")
             raise ConnectionError(f"Database connection failed: {e}") from e

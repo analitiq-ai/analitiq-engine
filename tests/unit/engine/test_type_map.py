@@ -216,6 +216,31 @@ class TestCanonicalToArrow:
         assert canonical_to_arrow("Utf8") == pa.string()
         assert canonical_to_arrow("Date32") == pa.date32()
 
+    @pytest.mark.parametrize(
+        "canonical, expected",
+        [
+            ("Null", "null"),
+            ("UInt8", "uint8"),
+            ("UInt16", "uint16"),
+            ("UInt32", "uint32"),
+            ("UInt64", "uint64"),
+            ("Float16", "halffloat"),
+            ("Float32", "float"),
+            ("Float64", "double"),
+            ("LargeUtf8", "large_string"),
+            ("Binary", "binary"),
+            ("LargeBinary", "large_binary"),
+            ("Date64", "date64[ms]"),
+        ],
+    )
+    def test_primitive_parser_coverage(self, canonical, expected):
+        """Exercise every primitive family canonical_to_arrow dispatches on.
+
+        These cases previously went untested at the parser level — they
+        were only indirectly hit via sql_types' Arrow → SQLAlchemy map.
+        """
+        assert str(canonical_to_arrow(canonical)) == expected
+
     def test_timestamp_with_tz(self):
         import pyarrow as pa
 
