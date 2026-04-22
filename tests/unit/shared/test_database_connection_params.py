@@ -158,8 +158,11 @@ class TestExtractConnectionParams:
         assert params.port == 5432
         assert isinstance(params.port, int)
 
-    def test_ssl_mode_defaults_to_prefer(self):
-        """Test that SSL mode defaults to 'prefer' for SSL dialects."""
+    def test_ssl_mode_defaults_to_encrypt_for_ssl_dialects(self):
+        """SSL dialects without an explicit ssl_mode default to the canonical
+        ``encrypt`` (encrypted, no cert verification) rather than ``prefer``;
+        the latter would opt callers into plaintext fallback by default,
+        which we don't want."""
         config = {
             "driver": "postgresql",
             "host": "localhost",
@@ -171,13 +174,14 @@ class TestExtractConnectionParams:
             },
         }
         params = extract_connection_params(config, require_port=True)
-        assert params.ssl_mode == "prefer"
+        assert params.ssl_mode == "encrypt"
 
-    def test_sqlite_no_ssl_mode(self):
-        """Test that SQLite gets empty ssl_mode and doesn't require host/user/password."""
+    def test_sqlite_defaults_ssl_mode_to_none(self):
+        """SQLite is not an SSL dialect; ssl_mode defaults to the canonical
+        ``none``. SQLite also doesn't require host/user/password."""
         config = {"driver": "sqlite", "parameters": {"database": ":memory:"}}
         params = extract_connection_params(config, require_port=False)
-        assert params.ssl_mode == ""
+        assert params.ssl_mode == "none"
         assert params.host == ""
         assert params.username == ""
         assert params.password == ""
@@ -282,8 +286,11 @@ class TestDatabaseConnectionParamsConnectArgs:
         assert "ssl" in args
         assert args["command_timeout"] == 300
 
-    def test_ssl_disable(self):
-        """Test ssl_mode=disable returns ssl=False."""
+    def test_ssl_none_returns_ssl_false(self):
+        """Canonical ``none`` (what ``disable`` maps to via ssl-mode-map)
+        produces ssl=False on the SQLAlchemy connect args. The driver-native
+        ``disable`` token should never reach this layer — it's normalized
+        upstream in ``extract_connection_params``."""
         params = DatabaseConnectionParams(
             driver="postgresql",
             host="localhost",
@@ -291,7 +298,7 @@ class TestDatabaseConnectionParamsConnectArgs:
             username="user",
             password="pass",
             database="db",
-            ssl_mode="disable",
+            ssl_mode="none",
         )
         args = params.to_sqlalchemy_connect_args()
         assert args["ssl"] is False
