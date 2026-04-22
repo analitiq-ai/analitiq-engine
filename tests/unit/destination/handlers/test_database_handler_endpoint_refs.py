@@ -88,6 +88,28 @@ class TestEndpointRefDispatch:
         assert handler._endpoint_refs["s1"] == "connector:pg/transfers"
 
 
+class TestCreateTableFromSchemaStrictness:
+    """``_create_table_from_schema`` must refuse malformed payloads rather
+    than silently dropping columns. Covers the sibling raise of the
+    Arrow-side check in ``schema_contract``."""
+
+    def test_unnamed_column_raises(self):
+        handler = DatabaseDestinationHandler()
+        handler._runtime = _runtime(connector_mapper=_mapper("pg"))
+        handler._schema_name = "public"
+
+        schema = {
+            "columns": [
+                {"type": "BIGINT"},  # missing 'name'
+                {"name": "valid", "type": "BIGINT"},
+            ]
+        }
+        with pytest.raises(ValueError, match="has no 'name' field"):
+            handler._create_table_from_schema(
+                "t", schema, [], _mapper("pg")
+            )
+
+
 class TestJsonSchemaDdlMapping:
     """``_json_type_to_sqlalchemy`` must agree with the Arrow path on
     JSON-Schema formats — otherwise DDL and casting disagree silently."""
