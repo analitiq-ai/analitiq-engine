@@ -138,6 +138,20 @@ class TestDestinationSchemaContractJsonSchema:
         contract = DestinationSchemaContract(schema)
         assert "timestamp" in contract.column_types["created_at"].lower()
 
+    def test_json_schema_date_format_is_date32(self):
+        """``format: "date"`` must map to date32 on the Arrow path so it
+        agrees with the SQLAlchemy DDL path (which uses ``Date``). If
+        these drift, the column is cast to one shape at write time and
+        DDL'd as another — failures surface far from the root cause."""
+        schema = {"properties": {"dob": {"type": "string", "format": "date"}}}
+        contract = DestinationSchemaContract(schema)
+        assert "date32" in contract.column_types["dob"]
+
+    def test_json_schema_unknown_type_raises(self):
+        schema = {"properties": {"weird": {"type": "polygon"}}}
+        with pytest.raises(ValueError, match="unsupported type/format"):
+            DestinationSchemaContract(schema)
+
 
 class TestDestinationSchemaContractTypeMapping:
     """Native SQL type → Arrow type mapping, driven by the connector's type-map."""
@@ -208,14 +222,14 @@ class TestDestinationSchemaContractEdgeCases:
         with pytest.raises(UnmappedTypeError):
             DestinationSchemaContract(schema, type_mapper=type_mapper)
 
-    def test_column_without_name_skipped(self, type_mapper):
+    def test_column_without_name_raises(self, type_mapper):
+        """Unnamed columns are a malformed-payload signal, not something
+        to silently skip — silently dropping them hides author errors."""
         schema = {
             "columns": [
                 {"type": "BIGINT"},  # No name
                 {"name": "valid", "type": "BIGINT"},
             ]
         }
-        contract = DestinationSchemaContract(schema, type_mapper=type_mapper)
-
-        assert len(contract.arrow_schema) == 1
-        assert "valid" in contract.column_types
+        with pytest.raises(ValueError, match="has no 'name' field"):
+            DestinationSchemaContract(schema, type_mapper=type_mapper)

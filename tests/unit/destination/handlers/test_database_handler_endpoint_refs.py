@@ -88,6 +88,36 @@ class TestEndpointRefDispatch:
         assert handler._endpoint_refs["s1"] == "connector:pg/transfers"
 
 
+class TestJsonSchemaDdlMapping:
+    """``_json_type_to_sqlalchemy`` must agree with the Arrow path on
+    JSON-Schema formats — otherwise DDL and casting disagree silently."""
+
+    def test_date_format_is_date_not_datetime(self):
+        from sqlalchemy import Date, DateTime
+
+        handler = DatabaseDestinationHandler()
+        sa_type = handler._json_type_to_sqlalchemy({"type": "string", "format": "date"})
+        # Date, not DateTime — pa.date32() on the Arrow side has no time
+        # component, so a DateTime column would round-trip wrong.
+        assert isinstance(sa_type, Date)
+        assert not isinstance(sa_type, DateTime)
+
+    def test_date_time_format_is_tz_aware_datetime(self):
+        from sqlalchemy import DateTime
+
+        handler = DatabaseDestinationHandler()
+        sa_type = handler._json_type_to_sqlalchemy(
+            {"type": "string", "format": "date-time"}
+        )
+        assert isinstance(sa_type, DateTime)
+        assert sa_type.timezone is True
+
+    def test_unknown_type_raises(self):
+        handler = DatabaseDestinationHandler()
+        with pytest.raises(ValueError, match="unsupported type/format"):
+            handler._json_type_to_sqlalchemy({"type": "polygon"})
+
+
 class TestWriteBatchFatalOnTypeMapError:
     """Deterministic type-map errors in write_batch must not be retried."""
 

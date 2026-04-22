@@ -160,10 +160,13 @@ class DestinationSchemaContract:
         assert self._type_mapper is not None  # guarded in __init__
         fields = []
 
-        for col in self._columns:
+        for index, col in enumerate(self._columns):
             col_name = col.get("name")
             if not col_name:
-                continue
+                raise ValueError(
+                    f"destination schema column at index {index} has no 'name' "
+                    f"field; unnamed columns indicate a malformed endpoint payload"
+                )
 
             col_type = col.get("type")
             if not col_type:

@@ -12,8 +12,10 @@ from datetime import datetime
 from typing import Any, Dict, List, Mapping, Optional
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     Column,
+    Date,
     DateTime,
     Float,
     Integer,
@@ -22,7 +24,6 @@ from sqlalchemy import (
     String,
     Table,
     Text,
-    BigInteger,
     text,
 )
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -355,10 +356,14 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
 
         # Check for database endpoint schema format (columns array)
         if "columns" in json_schema:
-            for col_def in json_schema["columns"]:
+            for index, col_def in enumerate(json_schema["columns"]):
                 col_name = col_def.get("name")
                 if not col_name:
-                    continue
+                    raise ValueError(
+                        f"destination schema column at index {index} has no "
+                        f"'name' field; unnamed columns indicate a malformed "
+                        f"endpoint payload"
+                    )
                 native_type = col_def.get("type")
                 if not native_type:
                     raise ValueError(
@@ -413,7 +418,11 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
             if json_format == "date-time":
                 return DateTime(timezone=True)
             if json_format == "date":
-                return DateTime()
+                # Must agree with the Arrow-schema path, which maps
+                # ``format: "date"`` to ``pa.date32()``. A SQLAlchemy
+                # ``DateTime`` column would produce a cast failure at
+                # write time instead of surfacing the mismatch here.
+                return Date()
             if max_length and max_length <= 255:
                 return String(max_length)
             return Text()
