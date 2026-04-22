@@ -227,6 +227,50 @@ class TestCanonicalToArrow:
 
         assert canonical_to_arrow("Decimal128(18, 2)") == pa.decimal128(18, 2)
 
+    def test_time32(self):
+        import pyarrow as pa
+
+        assert canonical_to_arrow("Time32(s)") == pa.time32("s")
+        assert canonical_to_arrow("Time32(ms)") == pa.time32("ms")
+
+    def test_time64(self):
+        import pyarrow as pa
+
+        assert canonical_to_arrow("Time64(us)") == pa.time64("us")
+        assert canonical_to_arrow("Time64(ns)") == pa.time64("ns")
+
+    def test_time_rejects_wrong_unit(self):
+        with pytest.raises(InvalidTypeMapError, match="requires exactly one unit"):
+            canonical_to_arrow("Time32(us)")  # us is Time64-only
+        with pytest.raises(InvalidTypeMapError, match="requires exactly one unit"):
+            canonical_to_arrow("Time64(s)")  # s is Time32-only
+
+    def test_fixed_size_binary(self):
+        import pyarrow as pa
+
+        assert canonical_to_arrow("FixedSizeBinary(16)") == pa.binary(16)
+
+    def test_fixed_size_binary_rejects_non_integer(self):
+        with pytest.raises(InvalidTypeMapError, match="byte_width is not an integer"):
+            canonical_to_arrow("FixedSizeBinary(abc)")
+
+    def test_decimal256(self):
+        import pyarrow as pa
+
+        assert canonical_to_arrow("Decimal256(38, 10)") == pa.decimal256(38, 10)
+
+    def test_decimal_rejects_non_integer_params(self):
+        with pytest.raises(InvalidTypeMapError, match="non-integer parameters"):
+            canonical_to_arrow("Decimal128(a, b)")
+
+    def test_timestamp_requires_unit(self):
+        with pytest.raises(InvalidTypeMapError, match="at least a unit"):
+            canonical_to_arrow("Timestamp()")
+
+    def test_timestamp_rejects_bad_unit(self):
+        with pytest.raises(InvalidTypeMapError, match="unit must be one of"):
+            canonical_to_arrow("Timestamp(xs)")
+
     def test_unknown_family_rejected(self):
         with pytest.raises(InvalidTypeMapError, match="not supported"):
             canonical_to_arrow("Nope")

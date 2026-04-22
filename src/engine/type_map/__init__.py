@@ -1,8 +1,12 @@
 """Connector-owned type-map and ssl-mode-map runtime.
 
-Exposes the deterministic matcher used for native-to-canonical (and canonical-
-to-native) type translation, plus the SSL mode lookup used on the connection
-path. Everything in this package is pure logic; filesystem I/O lives in
+Exposes the deterministic native → canonical matcher, an Arrow-type parser
+for the canonical vocabulary, and the SSL mode lookup used on the connection
+path. The matcher is single-direction by design; a destination connector
+will ship its own file authored from the canonical end (same format, same
+matcher, different rules) when that ticket lands.
+
+Everything in this package is pure logic; filesystem I/O lives in
 :mod:`loader`.
 """
 

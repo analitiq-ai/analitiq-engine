@@ -6,9 +6,17 @@ A rule is one entry in ``type-map.json``:
     {"match": "regex", "native": "^VARCHAR\\((?<n>\\d+)\\)$", "canonical": "Utf8"}
 
 Regex rules must be written in an RE2-compatible subset so the same pattern
-behaves identically across engine languages. This module validates that
-subset at load time and rewrites ``(?<name>...)`` into Python's
-``(?P<name>...)`` so the compiled pattern works with ``re.fullmatch``.
+behaves identically across engine languages. The following Perl/Python
+extensions are rejected at load time:
+
+- lookahead ``(?=…)`` / negative lookahead ``(?!…)``
+- lookbehind ``(?<=…)`` / negative lookbehind ``(?<!…)``
+- atomic groups ``(?>…)``
+- numeric backreferences ``\\1``..``\\9``
+- named backreferences ``\\k<name>`` and Python-style ``(?P=name)``
+
+``(?<name>…)`` is rewritten to Python's ``(?P<name>…)`` so the compiled
+pattern works with ``re.fullmatch``.
 """
 
 from __future__ import annotations

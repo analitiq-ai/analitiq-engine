@@ -8,9 +8,16 @@ This module provides the DestinationSchemaContract class that handles:
 The schema contract is built once per destination table and reused for every batch,
 providing efficient columnar type casting instead of row-by-row Python coercion.
 
-Native→Arrow translation is delegated to the destination connector's
-``type-map.json`` via :class:`TypeMapper`. There is no hardcoded type
-dictionary — an unmapped native type is a hard error, not a silent fallback.
+Two schema shapes are supported, handled on distinct paths:
+
+- ``"columns"`` (database endpoints, native SQL types): native→Arrow
+  translation is delegated to the connector's ``type-map.json`` via
+  :class:`TypeMapper`.
+- ``"properties"`` (JSON-Schema endpoints, API-style types): translated
+  directly by :meth:`_json_schema_to_arrow`; the type-map is not consulted
+  because JSON-Schema types are self-describing.
+
+Either path raises on unknown types — no silent fallback to ``Utf8``.
 """
 
 import logging
@@ -112,31 +119,36 @@ class DestinationSchemaContract:
         return pa.schema(fields)
 
     def _json_schema_to_arrow(self, prop: Dict[str, Any]) -> pa.DataType:
-        """Map JSON Schema type directly to Arrow type.
+        """Map a JSON Schema property to an Arrow type.
 
-        Args:
-            prop: JSON Schema property definition
-
-        Returns:
-            PyArrow DataType
+        The JSON-Schema branch does not use the connector's type-map (API
+        endpoints are self-describing); this method is the authoritative
+        mapping. Unknown ``type``/``format`` combinations raise rather than
+        silently becoming ``Utf8`` — the same contract the type-map matcher
+        enforces on the SQL side.
         """
-        json_type = prop.get("type", "string")
+        json_type = prop.get("type")
         fmt = prop.get("format", "")
 
+        if fmt == "date-time":
+            return pa.timestamp("us")
+        if fmt == "date":
+            return pa.date32()
+        if json_type == "string":
+            return pa.string()
         if json_type == "integer":
             return pa.int64()
-        elif json_type == "number":
+        if json_type == "number":
             return pa.float64()
-        elif json_type == "boolean":
+        if json_type == "boolean":
             return pa.bool_()
-        elif fmt == "date-time":
-            return pa.timestamp("us")
-        elif fmt == "date":
-            return pa.date32()
-        elif json_type in ("object", "array"):
-            return pa.string()  # Serialize to JSON string
-        else:
+        if json_type in ("object", "array"):
+            # Serialized to JSON string at the storage boundary.
             return pa.string()
+        raise ValueError(
+            f"JSON Schema property has unsupported type/format "
+            f"(type={json_type!r}, format={fmt!r})"
+        )
 
     def _build_arrow_schema(self) -> pa.Schema:
         """Build canonical Arrow schema from destination column types.
@@ -181,14 +193,18 @@ class DestinationSchemaContract:
         if not records:
             return pa.table({}, schema=self._arrow_schema)
 
-        # Convert records to Arrow table (infers types)
+        # Convert records to Arrow table (infers types). A failure here
+        # means the batch shape is incompatible with Arrow's type inference
+        # — losing the records would be a silent data-loss bug, so we raise
+        # with enough context for the caller to classify the failure.
         try:
             table = pa.Table.from_pylist(records)
         except Exception as e:
-            logger.warning(f"Failed to create Arrow table: {e}, returning empty")
-            return pa.table({}, schema=self._arrow_schema)
+            raise ValueError(
+                f"could not build Arrow table from {len(records)} records: {e}"
+            ) from e
 
-        # Cast each column to target type (vectorized)
+        # Cast each column to target type (vectorized).
         arrays = []
         for field in self._arrow_schema:
             if field.name in table.column_names:
@@ -197,14 +213,20 @@ class DestinationSchemaContract:
                     try:
                         col = self._safe_cast_column(col, field.type, field.name)
                     except Exception as e:
-                        logger.warning(
-                            f"Failed to cast column {field.name} from {col.type} "
-                            f"to {field.type}: {e}"
-                        )
-                        # Keep original column on failure
+                        raise ValueError(
+                            f"column {field.name!r}: cannot cast "
+                            f"{col.type} → {field.type}: {e}"
+                        ) from e
                 arrays.append(col)
             else:
-                # Missing column - create null array
+                # Missing column in the source batch. Null-filling is
+                # semantically valid (nullable destination fields default
+                # to NULL) but surprising — emit a debug record so it can
+                # be correlated during investigations.
+                logger.debug(
+                    "column %r absent from batch; filling with nulls",
+                    field.name,
+                )
                 arrays.append(pa.nulls(len(table), type=field.type))
 
         return pa.Table.from_arrays(arrays, schema=self._arrow_schema)

@@ -125,6 +125,10 @@ class SSLModeMapper:
     Mappings are exact-match on the normalized native key (same normalization
     rules as :class:`TypeMapper` — trim, collapse whitespace, uppercase).
     Values must be drawn from :data:`CANONICAL_SSL_MODES`.
+
+    Inputs that are *already* a canonical value (case-insensitive) are
+    passed through unchanged so pipelines that bypass the form and store
+    canonical values directly still work — see :meth:`to_canonical`.
     """
 
     def __init__(self, connector_slug: str, mapping: Mapping[str, str]) -> None:

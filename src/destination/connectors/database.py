@@ -9,7 +9,7 @@ efficient columnar type conversion for batch operations.
 
 import logging
 from datetime import datetime
-from typing import Any, Dict, List, Mapping, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, Mapping, Optional
 
 from sqlalchemy import (
     Boolean,
@@ -32,7 +32,11 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncConnection
 from ..base_handler import BaseDestinationHandler, BatchWriteResult
 from ..schema_contract import DestinationSchemaContract
 from ..sql_types import native_to_sqlalchemy
-from ...engine.type_map import TypeMapper
+from ...engine.type_map import (
+    InvalidTypeMapError,
+    TypeMapper,
+    UnmappedTypeError,
+)
 from ...grpc.generated.analitiq.v1 import (
     AckStatus,
     Cursor,
@@ -238,8 +242,14 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
             )
             return True
 
+        except (UnmappedTypeError, InvalidTypeMapError):
+            # Type-map errors are deterministic and actionable — don't mask
+            # them behind a boolean. The gRPC server surfaces the exception
+            # in the schema ack so the operator sees the unmapped native
+            # type instead of a generic "configure failed" line.
+            raise
         except Exception as e:
-            logger.error(f"Failed to configure schema: {e}")
+            logger.error(f"Failed to configure schema: {e}", exc_info=True)
             return False
 
     def _get_write_mode(self, proto_write_mode: int) -> str:
@@ -377,14 +387,11 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         Returns:
             SQLAlchemy type
         """
-        json_type = prop.get("type", "string")
+        json_type = prop.get("type")
         json_format = prop.get("format")
 
-        # Handle arrays and objects as Text (JSON)
-        if json_type == "array" or json_type == "object":
-            return Text()
-
-        # String types
+        if json_type in ("array", "object"):
+            return Text()  # JSON-serialized
         if json_type == "string":
             max_length = prop.get("maxLength")
             if json_format == "date-time":
@@ -394,20 +401,17 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
             if max_length and max_length <= 255:
                 return String(max_length)
             return Text()
-
-        # Numeric types
         if json_type == "integer":
             return BigInteger()
-
         if json_type == "number":
             return Float()
-
-        # Boolean
         if json_type == "boolean":
             return Boolean()
-
-        # Default to Text
-        return Text()
+        raise ValueError(
+            f"JSON Schema property has unsupported type/format "
+            f"(type={json_type!r}, format={json_format!r}); "
+            f"add an explicit mapping rather than defaulting to Text"
+        )
 
     async def write_batch(
         self,
@@ -492,8 +496,19 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
                 committed_cursor=cursor,
             )
 
+        except (UnmappedTypeError, InvalidTypeMapError) as e:
+            # Type-map errors are deterministic — retrying cannot succeed.
+            # Classify as a fatal failure so the engine stops burning
+            # cycles on a batch that will never go through.
+            logger.error(f"Type-map error writing batch: {e}", exc_info=True)
+            return BatchWriteResult(
+                success=False,
+                status=AckStatus.ACK_STATUS_FATAL_FAILURE,
+                records_written=0,
+                failure_summary=f"type-map: {e}",
+            )
         except Exception as e:
-            logger.error(f"Error writing batch: {e}")
+            logger.error(f"Error writing batch: {e}", exc_info=True)
             return BatchWriteResult(
                 success=False,
                 status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,

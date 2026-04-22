@@ -136,8 +136,13 @@ class TestCreateDatabaseEngine:
         engine.dispose.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_ssl_require_does_not_fallback(self):
-        """ssl_mode=require should NOT retry without SSL."""
+    async def test_ssl_encrypt_does_not_fallback(self):
+        """Any non-prefer canonical ssl_mode should NOT retry without SSL.
+
+        Uses the canonical ``encrypt`` instead of a native driver value like
+        ``require``; the latter is rejected up-front unless an SSLModeMapper
+        is provided to translate it.
+        """
         engine = _make_engine(connect_side_effect=ssl.SSLError("SSL handshake failed"))
 
         with patch(
@@ -146,7 +151,7 @@ class TestCreateDatabaseEngine:
         ) as mock_create:
             with pytest.raises(ssl.SSLError):
                 await create_database_engine(
-                    _pg_config_with_ssl("require"),
+                    _pg_config_with_ssl("encrypt"),
                     require_port=True,
                 )
 
