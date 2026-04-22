@@ -15,6 +15,8 @@ from sqlalchemy import text
 from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
+from src.engine.type_map import CANONICAL_SSL_MODES, SSLModeMapper
+
 logger = logging.getLogger(__name__)
 
 
@@ -97,16 +99,23 @@ def extract_connection_params(
     config: Dict[str, Any],
     *,
     require_port: bool = True,
+    ssl_mapper: Optional[SSLModeMapper] = None,
 ) -> DatabaseConnectionParams:
     """Extract and validate connection parameters from a config dict.
 
     Handles field name variations (username/user, database/dbname) and
-    builds a DatabaseConnectionParams with sensible defaults.
+    builds a DatabaseConnectionParams with sensible defaults. When a
+    connector ships an ``ssl-mode-map.json`` the caller should pass the
+    matching ``SSLModeMapper`` so native driver values (``prefer``,
+    ``VERIFY_IDENTITY``, …) are normalized to the canonical engine
+    vocabulary (``none`` / ``encrypt`` / ``verify`` / ``prefer``).
 
     Args:
         config: Raw connection config dictionary.
         require_port: If True, raise ValueError when port is missing.
                       If False, default to 5432.
+        ssl_mapper: Optional connector-owned mapper for native→canonical
+            ssl-mode translation.
 
     Returns:
         DatabaseConnectionParams frozen dataclass.
@@ -148,12 +157,30 @@ def extract_connection_params(
     else:
         port = int(port_value)
 
-    # SSL mode: expects canonical values (none/encrypt/verify) from connector.
-    # Default to "encrypt" for SSL dialects (encrypted, no cert verification).
+    # SSL mode: connectors store native driver values in the form
+    # (``prefer``, ``VERIFY_IDENTITY``, …); the ssl-mode-map translates
+    # them to the canonical engine vocabulary. Missing ssl_mode defaults to
+    # ``encrypt`` for SSL-capable dialects and ``none`` otherwise. A
+    # raw value that is neither canonical nor in the mapper is rejected —
+    # silently downgrading (or worse, silently upgrading to full cert
+    # verification) has burned us before.
+    raw_ssl_mode = params.get("ssl_mode")
     if driver.lower() in SSL_DIALECTS:
-        ssl_mode = params.get("ssl_mode", "encrypt")
+        if raw_ssl_mode is None:
+            ssl_mode = "encrypt"
+        elif ssl_mapper is not None:
+            ssl_mode = ssl_mapper.to_canonical(raw_ssl_mode)
+        elif str(raw_ssl_mode).strip().lower() in CANONICAL_SSL_MODES:
+            ssl_mode = str(raw_ssl_mode).strip().lower()
+        else:
+            raise ValueError(
+                f"ssl_mode={raw_ssl_mode!r} is not a canonical value "
+                f"({sorted(CANONICAL_SSL_MODES)}) and no ssl-mode-map was "
+                f"provided to translate it; either wire the connector's "
+                f"ssl-mode-map.json or store a canonical value"
+            )
     else:
-        ssl_mode = params.get("ssl_mode", "none")
+        ssl_mode = raw_ssl_mode if raw_ssl_mode is not None else "none"
 
     # Pool configuration
     pool_config = params.get("connection_pool", {})
@@ -207,29 +234,31 @@ def _has_ssl_error_in_chain(exc: BaseException) -> bool:
 def canonical_ssl_to_connect_arg(ssl_mode: str) -> Union[bool, ssl.SSLContext]:
     """Convert a canonical ssl_mode to the Python ssl argument for asyncpg/aiomysql.
 
-    Canonical values (stored in connection config by the connection-creator agent):
-    - "none":    no SSL
-    - "encrypt": SSL without certificate verification
-    - "prefer":  same as encrypt (fallback to none is handled by create_database_engine)
-    - "verify":  SSL with certificate verification
+    Canonical values (stored in connection config after the connector's
+    ssl-mode-map has normalized native driver values):
 
-    Args:
-        ssl_mode: Canonical SSL mode string
+    - ``none``:    no SSL
+    - ``encrypt``: SSL without certificate verification
+    - ``prefer``:  same as encrypt (fallback to plaintext is handled by
+      ``create_database_engine``)
+    - ``verify``:  SSL with full certificate verification
 
-    Returns:
-        SSL parameter suitable for asyncpg/aiomysql connection
+    Any other input raises — silently upgrading a typo to cert verification
+    has masked real bugs before.
     """
     if ssl_mode == "none":
         return False
-
     if ssl_mode in ("encrypt", "prefer"):
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
         return ctx
-
-    # "verify" or any unrecognised value — full cert verification
-    return True
+    if ssl_mode == "verify":
+        return True
+    raise ValueError(
+        f"canonical_ssl_to_connect_arg: {ssl_mode!r} is not a canonical SSL mode; "
+        f"expected one of none / encrypt / prefer / verify"
+    )
 
 
 def validate_sql_identifier(identifier: str) -> bool:
@@ -267,6 +296,7 @@ async def create_database_engine(
     config: Dict[str, Any],
     *,
     require_port: bool = True,
+    ssl_mapper: Optional[SSLModeMapper] = None,
 ) -> tuple[AsyncEngine, str]:
     """Create and probe a SQLAlchemy async engine from a connection config.
 
@@ -280,6 +310,8 @@ async def create_database_engine(
     Args:
         config: Raw connection config dictionary.
         require_port: If True, raise ValueError when port is missing.
+        ssl_mapper: Optional connector-owned mapper for native→canonical
+            ssl-mode translation.
 
     Returns:
         Tuple of (AsyncEngine, driver_string).
@@ -288,7 +320,9 @@ async def create_database_engine(
         ValueError: If required fields (e.g. port) are missing.
         Exception: Any connection error after disposal of failed engines.
     """
-    conn_params = extract_connection_params(config, require_port=require_port)
+    conn_params = extract_connection_params(
+        config, require_port=require_port, ssl_mapper=ssl_mapper
+    )
 
     url = conn_params.to_sqlalchemy_url()
     connect_args = conn_params.to_sqlalchemy_connect_args()
@@ -314,9 +348,17 @@ async def create_database_engine(
             try:
                 async with engine.connect() as conn:
                     await conn.execute(text("SELECT 1"))
-            except Exception:
+            except Exception as plaintext_err:
+                # Log the original SSL error before re-raising the plaintext
+                # failure — otherwise the operator only sees the retry's
+                # error and loses the reason we tried plaintext at all.
+                logger.error(
+                    "Plaintext retry also failed after SSL negotiation error. "
+                    "Original SSL error: %s",
+                    e,
+                )
                 await engine.dispose()
-                raise
+                raise plaintext_err from e
         else:
             await engine.dispose()
             raise

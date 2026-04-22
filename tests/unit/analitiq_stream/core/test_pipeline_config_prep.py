@@ -46,6 +46,14 @@ class ModularConfigHelper:
             "endpoints": [],
         }
         (definition_dir / "manifest.json").write_text(json.dumps(manifest))
+
+        # Every connector must ship a type-map.json (per GH #28). A minimal
+        # map is fine for tests that only exercise config loading.
+        type_map = [
+            {"match": "exact", "native": "BIGINT", "canonical": "Int64"},
+            {"match": "exact", "native": "TEXT", "canonical": "Utf8"},
+        ]
+        (definition_dir / "type-map.json").write_text(json.dumps(type_map))
         return definition_dir
 
     @staticmethod
@@ -82,7 +90,7 @@ class ModularConfigHelper:
         connections_dir: Path, alias: str, endpoint_name: str, endpoint_data: dict
     ):
         """Create a private endpoint file under a connection."""
-        ep_dir = connections_dir / alias / "endpoints"
+        ep_dir = connections_dir / alias / "definition" / "endpoints"
         ep_dir.mkdir(parents=True, exist_ok=True)
         (ep_dir / f"{endpoint_name}.json").write_text(json.dumps(endpoint_data))
 

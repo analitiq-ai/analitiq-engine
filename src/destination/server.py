@@ -36,6 +36,7 @@ from ..grpc.generated.analitiq.v1 import (
 )
 from .base_handler import BaseDestinationHandler
 from .connectors import get_handler
+from ..engine.type_map import InvalidTypeMapError, UnmappedTypeError
 
 logger = logging.getLogger(__name__)
 
@@ -155,15 +156,28 @@ class DestinationServicer(DestinationServiceServicer):
                         f"version {schema_msg.version}"
                     )
 
-                    # Configure handler with schema
-                    accepted = await self.handler.configure_schema(schema_msg)
+                    # Configure handler with schema. Deterministic type-map
+                    # errors bubble out of the handler and we relay them in
+                    # the SchemaAck so the engine sees the exact unmapped
+                    # native type instead of an opaque stream abort.
+                    try:
+                        accepted = await self.handler.configure_schema(schema_msg)
+                        ack_message = "" if accepted else "Schema configuration failed"
+                    except (UnmappedTypeError, InvalidTypeMapError) as e:
+                        logger.error(
+                            "type-map error configuring stream %s: %s",
+                            schema_msg.stream_id,
+                            e,
+                        )
+                        accepted = False
+                        ack_message = f"type-map: {e}"
                     self._schema_configured = accepted
 
                     yield StreamResponse(
                         schema_ack=SchemaAck(
                             stream_id=schema_msg.stream_id,
                             accepted=accepted,
-                            message="" if accepted else "Schema configuration failed",
+                            message=ack_message,
                         )
                     )
 

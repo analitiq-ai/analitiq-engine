@@ -13,7 +13,7 @@ Configuration is assembled at runtime from separate files:
 - Connectors: {paths.connectors}/{slug}/definition/connector.json (downloaded from GitHub)
 - Connections: {paths.connections}/{alias}/connection.json (user-created)
 - Public endpoints: {paths.connectors}/{slug}/definition/endpoints/{name}.json
-- Private endpoints: {paths.connections}/{alias}/endpoints/{name}.json
+- Private endpoints: {paths.connections}/{alias}/definition/endpoints/{name}.json
 - Secrets: {paths.connections}/{alias}/.secrets/credentials.json
 
 Endpoint references use scoped path format:
@@ -44,6 +44,13 @@ from src.config import (
 )
 from src.config.endpoint_resolver import resolve_endpoint_ref
 from src.config.connection_loader import load_connection, load_connector_for_connection
+from src.engine.type_map import (
+    SSLModeMapper,
+    TypeMapper,
+    load_connection_type_map,
+    load_ssl_mode_map,
+    load_type_map,
+)
 from src.secrets import (
     SecretsResolver,
     LocalFileSecretsResolver,
@@ -93,6 +100,16 @@ class PipelineConfigPrep:
 
         # Cache for loaded connectors (keyed by slug)
         self._loaded_connectors: Dict[str, Dict[str, Any]] = {}
+
+        # Per-connector type and ssl-mode mappers (keyed by slug). Populated
+        # eagerly by _load_connector so downstream code can look them up
+        # without re-reading the filesystem.
+        self._type_mappers: Dict[str, TypeMapper] = {}
+        self._ssl_mappers: Dict[str, Optional[SSLModeMapper]] = {}
+
+        # Per-connection type mappers (keyed by alias). Optional — absent
+        # file means the connection only references public endpoints.
+        self._connection_type_mappers: Dict[str, Optional[TypeMapper]] = {}
 
         self.pipeline_id = os.getenv("PIPELINE_ID", "")
         if not self.pipeline_id:
@@ -319,11 +336,9 @@ class PipelineConfigPrep:
     def _load_connector(self, connector_slug: str) -> Dict[str, Any]:
         """Load a connector definition by slug, with caching.
 
-        Args:
-            connector_slug: Connector slug (directory name)
-
-        Returns:
-            Connector definition dict
+        Also eagerly loads the connector's ``type-map.json`` (required) and
+        ``ssl-mode-map.json`` (optional) so materialization and the schema
+        contract can pull them from memory.
         """
         if connector_slug in self._loaded_connectors:
             return self._loaded_connectors[connector_slug]
@@ -332,7 +347,43 @@ class PipelineConfigPrep:
             connector_slug, self._paths["connectors"]
         )
         self._loaded_connectors[connector_slug] = connector
+        self._type_mappers[connector_slug] = load_type_map(
+            self._paths["connectors"], connector_slug
+        )
+        self._ssl_mappers[connector_slug] = load_ssl_mode_map(
+            self._paths["connectors"], connector_slug
+        )
         return connector
+
+    def get_type_mapper(self, connector_slug: str) -> TypeMapper:
+        """Return the cached ``TypeMapper`` for a connector.
+
+        Raises ``KeyError`` if the connector has not been loaded yet — the
+        caller should always trigger loading via ``_resolve_connection`` or
+        ``_load_connector`` first.
+        """
+        if connector_slug not in self._type_mappers:
+            self._load_connector(connector_slug)
+        return self._type_mappers[connector_slug]
+
+    def get_ssl_mapper(self, connector_slug: str) -> Optional[SSLModeMapper]:
+        """Return the cached ``SSLModeMapper`` for a connector, or ``None``
+        when the connector does not ship an ``ssl-mode-map.json``."""
+        if connector_slug not in self._ssl_mappers:
+            self._load_connector(connector_slug)
+        return self._ssl_mappers[connector_slug]
+
+    def _load_connection_type_mapper(self, alias: str) -> Optional[TypeMapper]:
+        """Load (and cache) the connection's own type-map for private endpoints."""
+        if alias not in self._connection_type_mappers:
+            self._connection_type_mappers[alias] = load_connection_type_map(
+                self._paths["connections"], alias
+            )
+        return self._connection_type_mappers[alias]
+
+    def get_connection_type_mapper(self, alias: str) -> Optional[TypeMapper]:
+        """Return the cached connection-scoped ``TypeMapper`` or ``None``."""
+        return self._load_connection_type_mapper(alias)
 
     def get_connector_for_connection(
         self, config: Dict[str, Any], alias: str
@@ -419,6 +470,7 @@ class PipelineConfigPrep:
             config = self._normalize_database_connection(config, connector)
 
         resolver = self._create_secrets_resolver(alias)
+        connector_slug = config.get("connector_slug")
 
         runtime = ConnectionRuntime(
             raw_config=config,
@@ -426,6 +478,9 @@ class PipelineConfigPrep:
             connector_type=connection_type,
             driver=connector.get("driver") if connection_type == "database" else None,
             resolver=resolver,
+            connector_type_mapper=self._type_mappers.get(connector_slug),
+            connection_type_mapper=self._load_connection_type_mapper(alias),
+            ssl_mapper=self._ssl_mappers.get(connector_slug),
         )
 
         self._resolved_connections[alias] = runtime
@@ -596,17 +651,9 @@ class PipelineConfigPrep:
         if isinstance(version, str):
             version = int(float(version))
 
-        # Normalize mapping
-        raw_mapping = raw_stream.get("mapping", {})
-        dest_connection_ref = (
-            destinations_data[0].get("connection_ref") if destinations_data else None
-        )
-        normalized_mapping = (
-            self._normalize_mapping_config(raw_mapping, dest_connection_ref)
-            if raw_mapping
-            else {}
-        )
-
+        # Mapping is passed through verbatim — type resolution is owned by
+        # the connectors' type-map.json files applied at ingest and
+        # materialization time, not by a stream-level translation layer.
         return {
             "version": version,
             "stream_id": stream_id,
@@ -617,78 +664,12 @@ class PipelineConfigPrep:
             "destinations": [
                 self._normalize_destination_config(d) for d in destinations_data
             ],
-            "mapping": normalized_mapping or {},
+            "mapping": raw_stream.get("mapping", {}) or {},
             "tags": raw_stream.get("tags"),
             "runtime": raw_stream.get("runtime"),
             "created_at": raw_stream.get("created_at"),
             "updated_at": raw_stream.get("updated_at"),
         }
-
-    def _normalize_mapping_config(
-        self, mapping: Dict[str, Any], dest_connection_ref: Optional[str] = None
-    ) -> Dict[str, Any]:
-        """Normalize mapping using provided source_to_generic and generic_to_destination.
-
-        Sets target.type to generic type (for Pydantic validation) and
-        target.dest_type to native destination type (for DDL/casting).
-        """
-        normalized = dict(mapping)
-        assignments = list(normalized.get("assignments", []))
-
-        source_to_generic = mapping.get("source_to_generic", {}) or {}
-        generic_to_dest = (
-            mapping.get("generic_to_destination", {}).get(dest_connection_ref, {})
-            if dest_connection_ref
-            else {}
-        )
-
-        def _generic_from_source_path(path: List[str]) -> Optional[str]:
-            if not path:
-                return None
-            key = ".".join(path)
-            entry = source_to_generic.get(key, {})
-            return entry.get("generic_type")
-
-        def _resolve_generic_type(assignment: Dict[str, Any]) -> str:
-            target = assignment.get("target", {})
-            target_path = target.get("path") or []
-            generic = _generic_from_source_path(target_path)
-            if generic:
-                return generic
-
-            value = assignment.get("value", {})
-            if value.get("kind") == "expr":
-                expr = value.get("expr", {})
-                if expr.get("op") == "get":
-                    generic = _generic_from_source_path(expr.get("path") or [])
-                    if generic:
-                        return generic
-
-            return assignment.get("target", {}).get("type", "string")
-
-        normalized_assignments = []
-        for assignment in assignments:
-            updated = dict(assignment)
-            target = dict(updated.get("target", {}))
-            target_path = target.get("path") or []
-
-            generic_type = _resolve_generic_type(updated)
-            target["type"] = generic_type
-
-            if target_path:
-                field_name = ".".join(target_path)
-                dest_entry = generic_to_dest.get(field_name, {})
-                dest_type = dest_entry.get("destination_type")
-                if dest_type:
-                    target["dest_type"] = dest_type
-                if "nullable" in dest_entry:
-                    target["nullable"] = dest_entry["nullable"]
-
-            updated["target"] = target
-            normalized_assignments.append(updated)
-
-        normalized["assignments"] = normalized_assignments
-        return normalized
 
     def _normalize_source_config(self, source_data: Dict[str, Any]) -> Dict[str, Any]:
         """Normalize source configuration to match SourceConfig model."""

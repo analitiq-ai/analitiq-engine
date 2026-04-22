@@ -9,11 +9,13 @@ efficient columnar type conversion for batch operations.
 
 import logging
 from datetime import datetime
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, Mapping, Optional
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     Column,
+    Date,
     DateTime,
     Float,
     Integer,
@@ -22,7 +24,6 @@ from sqlalchemy import (
     String,
     Table,
     Text,
-    BigInteger,
     text,
 )
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -31,6 +32,15 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncConnection
 
 from ..base_handler import BaseDestinationHandler, BatchWriteResult
 from ..schema_contract import DestinationSchemaContract
+from ..sql_types import native_to_sqlalchemy
+from ...engine.type_map import (
+    InvalidSSLModeMapError,
+    InvalidTypeMapError,
+    TypeMapper,
+    UnmappedSSLModeError,
+    UnmappedTypeError,
+)
+from ...secrets.exceptions import PlaceholderExpansionError
 from ...grpc.generated.analitiq.v1 import (
     AckStatus,
     Cursor,
@@ -95,6 +105,35 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         # Arrow-based schema contract for vectorized type casting (built on schema configure)
         self._schema_contract: Optional[DestinationSchemaContract] = None
 
+        # Stream-id -> endpoint_ref index so configure_schema() can pick
+        # the type-mapper matching the endpoint's scope (connector vs
+        # connection). Populated by set_endpoint_refs() at startup.
+        self._endpoint_refs: Dict[str, str] = {}
+
+    def set_endpoint_refs(self, endpoint_refs: Mapping[str, str]) -> None:
+        """Register stream_id → endpoint_ref for each stream writing to this
+        destination. Called once by ``src.main`` before the gRPC server starts;
+        the handler consults the map per incoming ``SchemaMessage`` to decide
+        which ``TypeMapper`` applies (public endpoint → connector's map,
+        private endpoint → connection's map).
+        """
+        self._endpoint_refs = dict(endpoint_refs)
+
+    def _type_mapper_for_stream(self, stream_id: str) -> TypeMapper:
+        """Resolve the type-mapper appropriate for ``stream_id``'s endpoint."""
+        if self._runtime is None:
+            raise RuntimeError(
+                "DatabaseDestinationHandler._type_mapper_for_stream() called before connect()"
+            )
+        endpoint_ref = self._endpoint_refs.get(stream_id)
+        if endpoint_ref is None:
+            raise RuntimeError(
+                f"DatabaseDestinationHandler has no endpoint_ref registered for "
+                f"stream_id={stream_id!r}; call set_endpoint_refs() before the "
+                f"gRPC server starts"
+            )
+        return self._runtime.type_mapper_for(endpoint_ref)
+
     @property
     def connector_type(self) -> str:
         """Return the connector type identifier."""
@@ -126,6 +165,19 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         runtime.acquire()
         try:
             await runtime.materialize(require_port=False)
+        except (
+            InvalidTypeMapError,
+            UnmappedTypeError,
+            InvalidSSLModeMapError,
+            UnmappedSSLModeError,
+            PlaceholderExpansionError,
+            ValueError,
+        ):
+            # Deterministic configuration / secret-resolution errors: let
+            # them propagate with their real type so the caller can
+            # distinguish "your type-map is missing a rule" from "the DB
+            # is unreachable".
+            raise
         except Exception as e:
             logger.error(f"Database destination connection failed: {e}")
             raise ConnectionError(f"Database connection failed: {e}") from e
@@ -184,12 +236,19 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
             else:
                 self._primary_keys = []
 
-            # Create tables
-            await self._ensure_tables_exist()
+            # Resolve the type-mapper for this stream's endpoint once —
+            # both DDL generation and the schema contract use it.
+            type_mapper = self._type_mapper_for_stream(schema_msg.stream_id)
 
-            # Build schema contract for Arrow-based type casting
+            # Create tables (needs the mapper for SQLAlchemy type picks).
+            await self._ensure_tables_exist(type_mapper)
+
+            # Build schema contract for Arrow-based type casting.
             if self._json_schema:
-                self._schema_contract = DestinationSchemaContract(self._json_schema)
+                self._schema_contract = DestinationSchemaContract(
+                    self._json_schema,
+                    type_mapper=type_mapper,
+                )
                 logger.debug(
                     f"Built schema contract with {len(self._schema_contract.column_types)} columns"
                 )
@@ -200,8 +259,14 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
             )
             return True
 
+        except (UnmappedTypeError, InvalidTypeMapError):
+            # Type-map errors are deterministic and actionable — don't mask
+            # them behind a boolean. The gRPC server surfaces the exception
+            # in the schema ack so the operator sees the unmapped native
+            # type instead of a generic "configure failed" line.
+            raise
         except Exception as e:
-            logger.error(f"Failed to configure schema: {e}")
+            logger.error(f"Failed to configure schema: {e}", exc_info=True)
             return False
 
     def _get_write_mode(self, proto_write_mode: int) -> str:
@@ -215,8 +280,13 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         }
         return mode_map.get(proto_write_mode, "upsert")
 
-    async def _ensure_tables_exist(self) -> None:
-        """Create target table and batch commits table if they don't exist."""
+    async def _ensure_tables_exist(self, type_mapper: TypeMapper) -> None:
+        """Create target table and batch commits table if they don't exist.
+
+        ``type_mapper`` is the endpoint-scoped mapper picked by
+        ``configure_schema``; it drives native → SQLAlchemy type resolution
+        for DDL.
+        """
         if not self._engine:
             return
 
@@ -240,6 +310,7 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
                 self._table_name,
                 self._json_schema,
                 self._primary_keys,
+                type_mapper,
             )
         else:
             # Minimal table structure if no schema provided
@@ -263,6 +334,7 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         table_name: str,
         json_schema: Dict[str, Any],
         primary_keys: List[str],
+        type_mapper: TypeMapper,
     ) -> Table:
         """
         Create SQLAlchemy Table from schema definition.
@@ -275,6 +347,7 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
             table_name: Target table name
             json_schema: Schema definition (JSON Schema or endpoint schema)
             primary_keys: List of primary key column names
+            type_mapper: Endpoint-scoped mapper for native → SQLAlchemy type resolution.
 
         Returns:
             SQLAlchemy Table object
@@ -283,11 +356,20 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
 
         # Check for database endpoint schema format (columns array)
         if "columns" in json_schema:
-            for col_def in json_schema["columns"]:
+            for index, col_def in enumerate(json_schema["columns"]):
                 col_name = col_def.get("name")
                 if not col_name:
-                    continue
-                sa_type = self._db_type_to_sqlalchemy(col_def.get("type", "TEXT"))
+                    raise ValueError(
+                        f"destination schema column at index {index} has no "
+                        f"'name' field; unnamed columns indicate a malformed "
+                        f"endpoint payload"
+                    )
+                native_type = col_def.get("type")
+                if not native_type:
+                    raise ValueError(
+                        f"column {col_name!r} has no 'type' field in destination schema"
+                    )
+                sa_type = native_to_sqlalchemy(native_type, type_mapper)
                 is_pk = col_name in primary_keys
                 nullable = col_def.get("nullable", True) and not is_pk
 
@@ -316,58 +398,6 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
             extend_existing=True,
         )
 
-    def _db_type_to_sqlalchemy(self, db_type: str) -> Any:
-        """
-        Convert database type string to SQLAlchemy type.
-
-        Args:
-            db_type: Database type string (e.g., 'BIGINT', 'VARCHAR(50)', 'TIMESTAMP')
-
-        Returns:
-            SQLAlchemy type
-        """
-        db_type_upper = db_type.upper()
-
-        # Integer types
-        if db_type_upper in ("BIGINT", "INT8"):
-            return BigInteger()
-        if db_type_upper in ("INTEGER", "INT", "INT4"):
-            return Integer()
-
-        # String types with length
-        if db_type_upper.startswith("VARCHAR"):
-            # Extract length from VARCHAR(n)
-            import re
-            match = re.search(r"\((\d+)\)", db_type_upper)
-            if match:
-                return String(int(match.group(1)))
-            return String(255)
-        if db_type_upper in ("TEXT", "CLOB"):
-            return Text()
-
-        # Numeric types
-        if db_type_upper.startswith("NUMERIC") or db_type_upper.startswith("DECIMAL"):
-            return Float()
-        if db_type_upper in ("FLOAT", "DOUBLE", "REAL"):
-            return Float()
-
-        # Date/time types
-        if db_type_upper in ("TIMESTAMP", "TIMESTAMPTZ", "DATETIME"):
-            return DateTime(timezone=True)
-        if db_type_upper == "DATE":
-            return DateTime()
-
-        # Boolean
-        if db_type_upper in ("BOOLEAN", "BOOL"):
-            return Boolean()
-
-        # Binary
-        if db_type_upper in ("BYTEA", "BLOB", "BINARY"):
-            return LargeBinary()
-
-        # Default to Text
-        return Text()
-
     def _json_type_to_sqlalchemy(self, prop: Dict[str, Any]) -> Any:
         """
         Convert JSON Schema type to SQLAlchemy type.
@@ -378,37 +408,35 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         Returns:
             SQLAlchemy type
         """
-        json_type = prop.get("type", "string")
+        json_type = prop.get("type")
         json_format = prop.get("format")
 
-        # Handle arrays and objects as Text (JSON)
-        if json_type == "array" or json_type == "object":
-            return Text()
-
-        # String types
+        if json_type in ("array", "object"):
+            return Text()  # JSON-serialized
         if json_type == "string":
             max_length = prop.get("maxLength")
             if json_format == "date-time":
                 return DateTime(timezone=True)
             if json_format == "date":
-                return DateTime()
+                # Must agree with the Arrow-schema path, which maps
+                # ``format: "date"`` to ``pa.date32()``. A SQLAlchemy
+                # ``DateTime`` column would produce a cast failure at
+                # write time instead of surfacing the mismatch here.
+                return Date()
             if max_length and max_length <= 255:
                 return String(max_length)
             return Text()
-
-        # Numeric types
         if json_type == "integer":
             return BigInteger()
-
         if json_type == "number":
             return Float()
-
-        # Boolean
         if json_type == "boolean":
             return Boolean()
-
-        # Default to Text
-        return Text()
+        raise ValueError(
+            f"JSON Schema property has unsupported type/format "
+            f"(type={json_type!r}, format={json_format!r}); "
+            f"add an explicit mapping rather than defaulting to Text"
+        )
 
     async def write_batch(
         self,
@@ -493,8 +521,19 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
                 committed_cursor=cursor,
             )
 
+        except (UnmappedTypeError, InvalidTypeMapError) as e:
+            # Type-map errors are deterministic — retrying cannot succeed.
+            # Classify as a fatal failure so the engine stops burning
+            # cycles on a batch that will never go through.
+            logger.error(f"Type-map error writing batch: {e}", exc_info=True)
+            return BatchWriteResult(
+                success=False,
+                status=AckStatus.ACK_STATUS_FATAL_FAILURE,
+                records_written=0,
+                failure_summary=f"type-map: {e}",
+            )
         except Exception as e:
-            logger.error(f"Error writing batch: {e}")
+            logger.error(f"Error writing batch: {e}", exc_info=True)
             return BatchWriteResult(
                 success=False,
                 status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,

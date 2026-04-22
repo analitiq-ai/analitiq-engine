@@ -7,7 +7,7 @@ delegates all data operations to these handlers.
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 from ..grpc.generated.analitiq.v1 import (
     AckStatus,
@@ -43,6 +43,18 @@ class BaseDestinationHandler(ABC):
     - Duplicate batches should return ALREADY_COMMITTED with stored cursor
     - All writes within a batch must be atomic (all-or-nothing)
     """
+
+    def set_endpoint_refs(self, endpoint_refs: Mapping[str, str]) -> None:
+        """Register the ``stream_id → endpoint_ref`` index for this handler.
+
+        Called once by the destination entrypoint before the gRPC server
+        starts. The default implementation is a no-op; handlers that need
+        per-stream endpoint context (e.g. picking a type-mapper by scope)
+        override it. Defining the method on the base class means a rename
+        in a subclass fails loudly at call time rather than silently
+        dropping the registration.
+        """
+        _ = endpoint_refs  # no-op default
 
     @abstractmethod
     async def connect(self, runtime: "ConnectionRuntime") -> None:

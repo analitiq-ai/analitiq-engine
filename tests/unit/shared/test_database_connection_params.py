@@ -3,6 +3,7 @@
 import pytest
 from sqlalchemy.engine import URL
 
+from src.engine.type_map import SSLModeMapper
 from src.shared.database_utils import (
     DatabaseConnectionParams,
     extract_connection_params,
@@ -157,8 +158,11 @@ class TestExtractConnectionParams:
         assert params.port == 5432
         assert isinstance(params.port, int)
 
-    def test_ssl_mode_defaults_to_prefer(self):
-        """Test that SSL mode defaults to 'prefer' for SSL dialects."""
+    def test_ssl_mode_defaults_to_encrypt_for_ssl_dialects(self):
+        """SSL dialects without an explicit ssl_mode default to the canonical
+        ``encrypt`` (encrypted, no cert verification) rather than ``prefer``;
+        the latter would opt callers into plaintext fallback by default,
+        which we don't want."""
         config = {
             "driver": "postgresql",
             "host": "localhost",
@@ -170,13 +174,14 @@ class TestExtractConnectionParams:
             },
         }
         params = extract_connection_params(config, require_port=True)
-        assert params.ssl_mode == "prefer"
+        assert params.ssl_mode == "encrypt"
 
-    def test_sqlite_no_ssl_mode(self):
-        """Test that SQLite gets empty ssl_mode and doesn't require host/user/password."""
+    def test_sqlite_defaults_ssl_mode_to_none(self):
+        """SQLite is not an SSL dialect; ssl_mode defaults to the canonical
+        ``none``. SQLite also doesn't require host/user/password."""
         config = {"driver": "sqlite", "parameters": {"database": ":memory:"}}
         params = extract_connection_params(config, require_port=False)
-        assert params.ssl_mode == ""
+        assert params.ssl_mode == "none"
         assert params.host == ""
         assert params.username == ""
         assert params.password == ""
@@ -281,8 +286,11 @@ class TestDatabaseConnectionParamsConnectArgs:
         assert "ssl" in args
         assert args["command_timeout"] == 300
 
-    def test_ssl_disable(self):
-        """Test ssl_mode=disable returns ssl=False."""
+    def test_ssl_none_returns_ssl_false(self):
+        """Canonical ``none`` (what ``disable`` maps to via ssl-mode-map)
+        produces ssl=False on the SQLAlchemy connect args. The driver-native
+        ``disable`` token should never reach this layer — it's normalized
+        upstream in ``extract_connection_params``."""
         params = DatabaseConnectionParams(
             driver="postgresql",
             host="localhost",
@@ -290,7 +298,7 @@ class TestDatabaseConnectionParamsConnectArgs:
             username="user",
             password="pass",
             database="db",
-            ssl_mode="disable",
+            ssl_mode="none",
         )
         args = params.to_sqlalchemy_connect_args()
         assert args["ssl"] is False
@@ -347,6 +355,69 @@ class TestDatabaseConnectionParamsEngineKwargs:
         assert kwargs["max_overflow"] == 8
         assert kwargs["pool_pre_ping"] is True
         assert kwargs["echo"] is False
+
+
+class TestSSLModeMapperPlumbing:
+    """Ensure extract_connection_params honors the connector's SSLModeMapper."""
+
+    @pytest.fixture
+    def pg_ssl_mapper(self) -> SSLModeMapper:
+        return SSLModeMapper(
+            "postgresql",
+            {
+                "disable": "none",
+                "prefer": "prefer",
+                "require": "encrypt",
+                "verify-ca": "verify",
+                "verify-full": "verify",
+            },
+        )
+
+    def _cfg(self, ssl_mode: str | None = None) -> dict:
+        params = {
+            "port": 5432,
+            "database": "db",
+            "username": "user",
+            "password": "pass",
+        }
+        if ssl_mode is not None:
+            params["ssl_mode"] = ssl_mode
+        return {"driver": "postgresql", "host": "h", "parameters": params}
+
+    def test_mapper_translates_native_to_canonical(self, pg_ssl_mapper):
+        params = extract_connection_params(
+            self._cfg("require"), ssl_mapper=pg_ssl_mapper
+        )
+        assert params.ssl_mode == "encrypt"
+
+    def test_mapper_translates_verify_full(self, pg_ssl_mapper):
+        params = extract_connection_params(
+            self._cfg("verify-full"), ssl_mapper=pg_ssl_mapper
+        )
+        assert params.ssl_mode == "verify"
+
+    def test_absent_ssl_mode_defaults_to_encrypt_on_ssl_dialect(self, pg_ssl_mapper):
+        params = extract_connection_params(self._cfg(), ssl_mapper=pg_ssl_mapper)
+        assert params.ssl_mode == "encrypt"
+
+    def test_canonical_value_without_mapper_passes_through(self):
+        # No mapper supplied, but the stored value is already canonical.
+        params = extract_connection_params(self._cfg("encrypt"), ssl_mapper=None)
+        assert params.ssl_mode == "encrypt"
+
+    def test_non_canonical_value_without_mapper_rejected(self):
+        # No mapper supplied AND the value is native-only — we refuse to
+        # guess. Silent downgrades burned us before.
+        with pytest.raises(ValueError, match="not a canonical value"):
+            extract_connection_params(self._cfg("verify-full"), ssl_mapper=None)
+
+    def test_unknown_native_via_mapper_is_rejected(self, pg_ssl_mapper):
+        from src.engine.type_map import UnmappedSSLModeError
+
+        with pytest.raises(UnmappedSSLModeError):
+            extract_connection_params(
+                self._cfg("totally-made-up"), ssl_mapper=pg_ssl_mapper
+            )
 
 
 class TestConstants:

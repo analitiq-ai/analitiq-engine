@@ -88,6 +88,66 @@ class TestDatabaseHandlerConnect:
         assert handler._connected is False
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            pytest.param(
+                __import__(
+                    "src.engine.type_map", fromlist=["UnmappedTypeError"]
+                ).UnmappedTypeError("pg", "forward", "MONEY"),
+                id="unmapped-type",
+            ),
+            pytest.param(
+                __import__(
+                    "src.engine.type_map", fromlist=["InvalidTypeMapError"]
+                ).InvalidTypeMapError("rule 3 invalid"),
+                id="invalid-type-map",
+            ),
+            pytest.param(
+                __import__(
+                    "src.engine.type_map", fromlist=["UnmappedSSLModeError"]
+                ).UnmappedSSLModeError("pg", "totally-made-up"),
+                id="unmapped-ssl-mode",
+            ),
+            pytest.param(
+                __import__(
+                    "src.engine.type_map", fromlist=["InvalidSSLModeMapError"]
+                ).InvalidSSLModeMapError("bad canonical value"),
+                id="invalid-ssl-mode-map",
+            ),
+            pytest.param(
+                __import__(
+                    "src.secrets.exceptions", fromlist=["PlaceholderExpansionError"]
+                ).PlaceholderExpansionError(
+                    placeholder="password", connection_id="x", detail="not found"
+                ),
+                id="placeholder",
+            ),
+            pytest.param(
+                ValueError("Database port is required"),
+                id="value-error",
+            ),
+        ],
+    )
+    async def test_connect_propagates_deterministic_errors_unchanged(
+        self, handler, base_config, exc
+    ):
+        """Deterministic configuration errors must surface with their real
+        type — wrapping them as ConnectionError buries the root cause and
+        makes retry-classification impossible. Guards the ``connect()``
+        bypass clause in database.py against future refactors."""
+        runtime = _make_runtime(base_config)
+
+        with patch(
+            "src.shared.connection_runtime.create_database_engine",
+            side_effect=exc,
+        ):
+            with pytest.raises(type(exc)):
+                await handler.connect(runtime)
+
+        assert handler._connected is False
+
+    @pytest.mark.asyncio
     async def test_sqlite_connect(self, handler):
         """SQLite connections should work through runtime materialization."""
         sqlite_config = {

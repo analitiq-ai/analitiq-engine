@@ -97,7 +97,10 @@ class TestCreateDatabaseEngine:
 
     @pytest.mark.asyncio
     async def test_ssl_prefer_retry_failure_disposes(self):
-        """If plaintext retry also fails, both engines are disposed."""
+        """If plaintext retry also fails, both engines are disposed and the
+        original SSL error is preserved as ``__cause__`` on the raised
+        plaintext error. Losing the SSL context would leave operators with
+        only the retry's symptom, hiding the reason we retried at all."""
         ssl_error = ssl.SSLError("SSL handshake failed")
         engine_fail_ssl = _make_engine(connect_side_effect=ssl_error)
         engine_fail_plain = _make_engine(connect_side_effect=OSError("DB unreachable"))
@@ -108,12 +111,13 @@ class TestCreateDatabaseEngine:
             "src.shared.database_utils.create_async_engine",
             side_effect=engines,
         ):
-            with pytest.raises(OSError, match="DB unreachable"):
+            with pytest.raises(OSError, match="DB unreachable") as excinfo:
                 await create_database_engine(
                     _pg_config_with_ssl("prefer"),
                     require_port=True,
                 )
 
+        assert excinfo.value.__cause__ is ssl_error
         engine_fail_ssl.dispose.assert_awaited_once()
         engine_fail_plain.dispose.assert_awaited_once()
 
@@ -136,8 +140,13 @@ class TestCreateDatabaseEngine:
         engine.dispose.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_ssl_require_does_not_fallback(self):
-        """ssl_mode=require should NOT retry without SSL."""
+    async def test_ssl_encrypt_does_not_fallback(self):
+        """Any non-prefer canonical ssl_mode should NOT retry without SSL.
+
+        Uses the canonical ``encrypt`` instead of a native driver value like
+        ``require``; the latter is rejected up-front unless an SSLModeMapper
+        is provided to translate it.
+        """
         engine = _make_engine(connect_side_effect=ssl.SSLError("SSL handshake failed"))
 
         with patch(
@@ -146,7 +155,7 @@ class TestCreateDatabaseEngine:
         ) as mock_create:
             with pytest.raises(ssl.SSLError):
                 await create_database_engine(
-                    _pg_config_with_ssl("require"),
+                    _pg_config_with_ssl("encrypt"),
                     require_port=True,
                 )
 

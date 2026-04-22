@@ -34,6 +34,7 @@ import asyncio
 import logging
 import os
 import sys
+from typing import Dict
 
 # Set up logging
 log_level = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -168,8 +169,27 @@ async def run_destination_mode() -> None:
     logger.info(f"Connector type: {runtime.connector_type}")
     logger.info(f"gRPC port: {grpc_port}")
 
-    # Create handler and start server
+    # Build stream_id -> destination endpoint_ref index for streams that
+    # target this connection. The handler uses it to pick the right
+    # type-mapper per incoming SchemaMessage (connector-scoped vs
+    # connection-scoped endpoints).
+    endpoint_refs: Dict[str, str] = {}
+    for stream in stream_configs:
+        for dest in stream.get("destinations", []):
+            if dest.get("connection_ref") == dest_alias:
+                endpoint_refs[stream["stream_id"]] = dest["endpoint_ref"]
+                break
+    logger.info(
+        "Registered endpoint_refs for %d stream(s) targeting %s",
+        len(endpoint_refs),
+        dest_alias,
+    )
+
+    # Create handler and start server. ``set_endpoint_refs`` is defined on
+    # ``BaseDestinationHandler`` as a no-op default, so this call is safe
+    # for every handler type and fails loudly if an override is renamed.
     handler = get_handler(runtime.connector_type)
+    handler.set_endpoint_refs(endpoint_refs)
     await handler.connect(runtime)
 
     server = DestinationGRPCServer(handler, port=grpc_port)
