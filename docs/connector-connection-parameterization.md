@@ -1119,13 +1119,19 @@ JSON must not contain arbitrary executable code.
 
 Initial callable function catalog:
 
-| Function | Purpose |
-|---|---|
-| `basic_auth` | Build a Basic auth credential or header from username/password or client credentials |
-| `base64_encode` | Base64-encode a string or bytes value for provider auth formats |
-| `lookup` | Map an input value through a connector-declared inline map |
-| `pkce_challenge_s256` | Build a PKCE S256 challenge from a runtime verifier |
-| `jwt_sign` | Sign a JWT from connector-declared algorithm, headers, claims, and key material |
+| Function | Status | Purpose |
+|---|---|---|
+| `basic_auth` | implemented | Build a Basic auth credential or header from username/password or client credentials |
+| `base64_encode` | implemented | Base64-encode a string or bytes value for provider auth formats |
+| `lookup` | implemented | Map an input value through a connector-declared inline map |
+| `url_encode` | implemented | Percent-encode a scalar value for use inside a URL component (default `safe=""`; override with `safe` field for less aggressive encoding) |
+| `pkce_challenge_s256` | planned | Build a PKCE S256 challenge from a runtime verifier |
+| `jwt_sign` | planned | Sign a JWT from connector-declared algorithm, headers, claims, and key material |
+
+`implemented` functions are registered in `DEFAULT_FUNCTIONS` in
+`src/engine/derived_functions.py` and usable by connector definitions
+today. `planned` entries describe future additions; connectors must not
+reference them yet — connector validation rejects unknown function names.
 
 Recommended shape:
 

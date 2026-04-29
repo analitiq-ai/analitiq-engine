@@ -337,15 +337,9 @@ class TestBuildSqlAlchemyTransport:
     @pytest.mark.asyncio
     async def test_returns_sqlalchemy_transport_with_base_dialect(self):
         # Mock the engine creation + probe so this is a unit test, not
-        # an integration test.
+        # an integration test. The probe path is engine.connect() used
+        # as an async context manager whose body calls execute().
         fake_engine = MagicMock()
-
-        @ensure_async
-        async def _fake_begin():
-            yield AsyncMock()
-
-        # The probe path: engine.connect() context manager returning
-        # something with execute() coroutine.
         connect_cm = MagicMock()
         connect_cm.__aenter__ = AsyncMock(
             return_value=MagicMock(execute=AsyncMock())
@@ -373,11 +367,6 @@ class TestBuildSqlAlchemyTransport:
 # ---------------------------------------------------------------------------
 # build_http_transport
 # ---------------------------------------------------------------------------
-
-
-def ensure_async(fn):
-    """No-op decorator placeholder used for clarity in test mocks."""
-    return fn
 
 
 class TestBuildHttpTransport:
