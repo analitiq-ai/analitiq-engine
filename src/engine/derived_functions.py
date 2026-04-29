@@ -30,24 +30,34 @@ def _require(node: Mapping[str, Any], key: str) -> Any:
 def lookup_function(node: Mapping[str, Any], resolver: Resolver) -> Any:
     """Map a resolved input value through a connector-declared inline map.
 
-    The ``map`` keys are JSON strings; ``input`` may resolve to any
-    JSON-compatible scalar. Unknown inputs raise :class:`KeyError` so the
-    operator sees the bad value rather than a silent ``None``.
+    The ``map`` keys are JSON strings; ``input`` must resolve to a scalar
+    (``bool``, ``int``, ``float``, or ``str``). Non-scalar inputs are
+    rejected with :class:`TypeError` rather than stringified — a dict or
+    list silently coerced to ``"{'k': 'v'}"`` produces extremely confusing
+    "not present in map" errors. Unknown scalar inputs raise
+    :class:`KeyError`.
     """
     raw_input = _require(node, "input")
     table = _require(node, "map")
     if not isinstance(table, Mapping):
         raise TypeError("`lookup` `map` must be an object")
     key = resolver.resolve(raw_input)
+    if key is None:
+        raise KeyError(
+            f"`lookup` input resolved to None; known keys: {sorted(table)}"
+        )
+    if not isinstance(key, (bool, int, float, str)):
+        raise TypeError(
+            f"`lookup` input must resolve to a scalar (bool/int/float/str); "
+            f"got {type(key).__name__}"
+        )
     if isinstance(key, bool):
         # JSON has no boolean object keys; canonicalize to the strings the
         # author would have written in the map.
-        lookup_key: Any = "true" if key else "false"
-    elif key is None:
-        lookup_key = None
+        lookup_key: str = "true" if key else "false"
     else:
         lookup_key = str(key)
-    if lookup_key is None or lookup_key not in table:
+    if lookup_key not in table:
         raise KeyError(
             f"`lookup` input {key!r} not present in map; known keys: "
             f"{sorted(table)}"

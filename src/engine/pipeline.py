@@ -1,22 +1,19 @@
 """Pipeline management and configuration."""
 
 import logging
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
 
-from pydantic import ValidationError
-
 from .engine import StreamingEngine
 
-from ..models.enriched import (
-    EnrichedAPIConfig,
-    EnrichedDatabaseConfig,
-)
 from ..models.stream import EndpointRef
 from ..shared.connection_runtime import ConnectionRuntime
 from ..shared.placeholder import expand_placeholders
+
+_UNRESOLVED_PLACEHOLDER = re.compile(r"\$\{[^}]+\}")
 
 logger = logging.getLogger(__name__)
 
@@ -122,19 +119,6 @@ class Pipeline:
             logger.warning(f"Endpoint not found: {ref}")
             return {}
 
-        # Helper to validate connection config against enriched model
-        def validate_connection_config(config: Dict[str, Any], label: str) -> None:
-            connector_type = config.get("connector_type")
-            try:
-                if connector_type == "api":
-                    EnrichedAPIConfig(**config)
-                elif connector_type == "database":
-                    EnrichedDatabaseConfig(**config)
-                else:
-                    logger.debug(f"Unknown connector_type '{connector_type}', skipping validation")
-            except ValidationError as e:
-                logger.warning(f"{label} config validation failed: {e}")
-
         streams = {}
         for stream in self.stream_configs:
             source = stream["source"]
@@ -187,16 +171,27 @@ class Pipeline:
             # connection.discovered. New endpoint files should use the
             # spec's ``{"ref": "connection.selections.profile_id"}`` form;
             # this flat-merge stays as a transition shim until endpoint
-            # files migrate.
+            # files migrate (analitiq-engine#37).
+            #
+            # ``ignore_missing=True`` keeps stale ``${name}`` text in the
+            # resolved request rather than crashing; we log a WARNING for
+            # every unresolved placeholder so the symptom is visible at
+            # runtime instead of silently flowing into the provider call.
             placeholder_lookup = _flat_connection_lookup(source_conn)
             if placeholder_lookup:
                 if "filters" in source_config:
                     source_config["filters"] = expand_placeholders(
                         source_config["filters"], placeholder_lookup, ignore_missing=True
                     )
+                    _warn_unresolved_placeholders(
+                        source_config["filters"], "filters", stream["stream_id"]
+                    )
                 if "endpoint" in source_config:
                     source_config["endpoint"] = expand_placeholders(
                         source_config["endpoint"], placeholder_lookup, ignore_missing=True
+                    )
+                    _warn_unresolved_placeholders(
+                        source_config["endpoint"], "endpoint", stream["stream_id"]
                     )
 
             # Dest write config
@@ -219,9 +214,12 @@ class Pipeline:
                 "batch_size": batching.get("size", 1),
             }
 
-            # Validate configs against enriched models (logs warnings on failure)
-            validate_connection_config(source_config, "Source")
-            validate_connection_config(dest_config, "Destination")
+            # Validation lives downstream now: ConnectionRuntime validates
+            # connector definition + secret_refs at materialise time, and
+            # the transport factory validates the resolved transport spec
+            # before opening any session. Best-effort EnrichedConfig
+            # validation here only produced WARNING logs that masked real
+            # config bugs flowing into the transport.
 
             # Build mapping config for engine
             mapping = stream.get("mapping", {})
@@ -341,13 +339,57 @@ def _connection_host(
     return legacy if isinstance(legacy, str) else None
 
 
+def _warn_unresolved_placeholders(value: Any, field: str, stream_id: str) -> None:
+    """Emit a WARNING for any ``${name}`` placeholder still left in *value*.
+
+    The flat-merge shim uses ``ignore_missing=True`` so the engine does not
+    crash on legacy unresolved references; this helper makes the residue
+    visible at runtime instead of letting it flow silently into the
+    provider request.
+    """
+    leftover: List[str] = []
+
+    def _scan(node: Any) -> None:
+        if isinstance(node, str):
+            leftover.extend(_UNRESOLVED_PLACEHOLDER.findall(node))
+        elif isinstance(node, dict):
+            for child in node.values():
+                _scan(child)
+        elif isinstance(node, list):
+            for child in node:
+                _scan(child)
+
+    _scan(value)
+    if leftover:
+        logger.warning(
+            "stream %r: %s contains unresolved placeholders %s; "
+            "endpoint file uses legacy ${...} text not present in connection "
+            "parameters/selections/discovered (analitiq-engine#37).",
+            stream_id, field, sorted(set(leftover)),
+        )
+
+
 def _flat_connection_lookup(connection_config: Dict[str, Any]) -> Dict[str, str]:
     """Flat ``name -> str(value)`` map across ``parameters``, ``selections``,
     and ``discovered``. Used to expand legacy ``${name}`` placeholders in
     endpoint files until those files migrate to fully-qualified ``ref``
-    expressions.
+    expressions (tracked in analitiq-engine#37).
+
+    Precedence on key collision (highest wins):
+
+    1. ``connection.parameters`` — explicit, user-supplied connection values.
+    2. ``connection.selections`` — durable post-auth user choices.
+    3. ``connection.discovered`` — provider-returned values (e.g. api_domain).
+
+    Conflicts between scopes are logged at WARNING so silent precedence
+    surprises are visible in normal runs. The shim is intentionally
+    transitional: when endpoint files migrate to typed ``ref`` /
+    ``template`` expressions, this whole function disappears.
     """
     flat: Dict[str, str] = {}
+    origin: Dict[str, str] = {}
+    # Iterate lowest-precedence-first so the higher-precedence scope's
+    # write overwrites it. Conflicts are logged when a key is overwritten.
     for scope_name in ("discovered", "selections", "parameters"):
         scope = connection_config.get(scope_name) or {}
         if not isinstance(scope, dict):
@@ -357,5 +399,14 @@ def _flat_connection_lookup(connection_config: Dict[str, Any]) -> Dict[str, str]
                 continue
             if value is None:
                 continue
-            flat[key] = str(value)
+            stringified = str(value)
+            if key in flat and flat[key] != stringified:
+                logger.warning(
+                    "connection placeholder %r differs across scopes "
+                    "(%s=%r → %s=%r); using %s",
+                    key, origin[key], flat[key], scope_name, stringified,
+                    scope_name,
+                )
+            flat[key] = stringified
+            origin[key] = scope_name
     return flat

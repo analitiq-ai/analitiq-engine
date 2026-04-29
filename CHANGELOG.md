@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 2025-08-18
 
+### Changed
+
+#### Connector-driven engine (parameterise-connections-connectors)
+- **Typed `ResolutionContext`** - new `src/engine/resolver.py` walks
+  `ref` / `template` / `literal` / `function` JSON expressions over
+  scopes (`connector`, `connection.{parameters,selections,discovered,
+  auth_state}`, `secrets`, `auth`, `runtime`, `state`, `derived`,
+  `request`, `response`).
+- **Derived function registry** - new `src/engine/derived_functions.py`
+  with `lookup`, `basic_auth`, `base64_encode`, `url_encode`. Connector
+  authors can only call registered functions.
+- **Generic transport factory** - new `src/shared/transport_factory.py`
+  resolves `transports.<ref>` (with `transport_defaults` merge and
+  fixpoint evaluation of `connector.derived`) and dispatches on `kind`
+  (`sqlalchemy`, `http`) to materialise concrete transports.
+- **`ConnectionRuntime`** - drives materialisation through the transport
+  factory whenever the connector declares a `transports` block,
+  validates `secret_refs` against the loaded secret store, and exposes
+  the base SQL dialect via `runtime.driver` derived from
+  `transports.<default>.driver`.
+- **`PipelineConfigPrep`** - stops loading `ssl-mode-map.json` and the
+  legacy top-level `connector.driver` field; SSL is now a `lookup` over
+  `connection.parameters.ssl_mode` inside the connector's
+  `connect_args.ssl`.
+- **Aligned with `docs/connector-connection-parameterization.md`** -
+  spec is committed alongside this PR; module docstrings cite it as the
+  canonical reference.
+
+### Removed
+
+- Legacy hard-coded engine factory: `DIALECT_MAP`, `SSL_DIALECTS`,
+  `DatabaseConnectionParams`, `extract_connection_params`,
+  `create_database_engine`, `canonical_ssl_to_connect_arg`,
+  `_create_api_session`. `src/shared/database_utils.py` now contains
+  only pure SQL helpers (identifier validation, fully-qualified names,
+  `DEFAULT` clause synthesis, read-side type coercion).
+- Best-effort `EnrichedConfig` warning-only validation in
+  `pipeline.py:_build_config_dict`. `ConnectionRuntime.materialize()`
+  and the transport factory raise on bad config; the redundant warning
+  pass masked real bugs.
+- HTTP transport `rate_limit.time_window` alias. The single
+  `time_window_seconds` key is now mandatory when `max_requests` is set
+  (and vice versa).
+
 ### ✨ Added
 
 #### Modern Engine Architecture

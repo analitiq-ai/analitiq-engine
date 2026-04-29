@@ -213,7 +213,11 @@ sample_data/
 # Claude Code
 .claude/
 TODO.md
-docs/
+# `docs/*` (rather than `docs/`) so the directory itself is not excluded,
+# allowing the whitelist below to track the canonical connector/connection
+# spec referenced from module docstrings and the PR template.
+docs/*
+!docs/connector-connection-parameterization.md
 scripts/
 docker-cloud/
 

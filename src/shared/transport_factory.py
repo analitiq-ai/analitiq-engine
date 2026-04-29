@@ -54,10 +54,12 @@ def _materialize_derived(
     *context*. The resulting dict is what ``${derived.<name>}`` template
     substitutions will see.
 
-    Two passes give limited support for derived values that reference
-    earlier derived values: each pass adds whatever evaluates cleanly,
-    leaving anything that depends on an unresolved sibling for the next
-    pass. Cycles raise the original :class:`KeyError`.
+    Resolution iterates fixpoint-style: each pass evaluates every still-
+    pending entry against the values resolved so far. The loop terminates
+    cleanly only when no entries remain pending. If a pass makes no
+    forward progress (a cycle, or an entry that depends on something not
+    in any scope) the original :class:`KeyError` from re-resolving one of
+    the stuck entries is raised, naming the missing path.
     """
     declared = connector.get("derived") or {}
     if not declared:
@@ -66,11 +68,10 @@ def _materialize_derived(
         raise TypeError(
             f"connector {connector.get('slug')!r}: `derived` must be an object"
         )
+
     resolved: Dict[str, Any] = {}
-    pending = dict(declared)
-    for _pass in range(2):
-        if not pending:
-            break
+    pending: Dict[str, Any] = dict(declared)
+    while pending:
         progress = False
         next_pending: Dict[str, Any] = {}
         scratch_ctx = ResolutionContext(
@@ -92,9 +93,24 @@ def _materialize_derived(
             except KeyError:
                 next_pending[name] = expr
         if not progress:
-            # Surface the failure with the still-unresolved names rather
-            # than silently producing partial derived state.
-            scratch_resolver.resolve(next(iter(next_pending.values())))
+            # Re-resolve one of the stuck expressions so the operator
+            # sees the missing reference (or cycle) by name rather than
+            # an opaque "still pending" message.
+            stuck_name, stuck_expr = next(iter(next_pending.items()))
+            try:
+                scratch_resolver.resolve(stuck_expr)
+            except KeyError as err:
+                raise KeyError(
+                    f"connector {connector.get('slug')!r}: derived entry "
+                    f"{stuck_name!r} cannot be resolved (still pending: "
+                    f"{sorted(next_pending)}): {err}"
+                ) from err
+            # Defensive: progress was false but re-resolving did not
+            # raise, which means the resolver is non-deterministic.
+            raise RuntimeError(
+                f"connector {connector.get('slug')!r}: derived resolution "
+                f"made no progress on {sorted(next_pending)}"
+            )
         pending = next_pending
     return resolved
 
@@ -345,11 +361,13 @@ async def build_http_transport(spec: Mapping[str, Any]) -> HttpTransport:
     rate_limiter: Optional[RateLimiter] = None
     if raw_rate_limit:
         max_requests = raw_rate_limit.get("max_requests")
-        time_window = (
-            raw_rate_limit.get("time_window_seconds")
-            or raw_rate_limit.get("time_window")
-        )
-        if max_requests and time_window:
+        time_window = raw_rate_limit.get("time_window_seconds")
+        if (max_requests is None) != (time_window is None):
+            raise ValueError(
+                "http transport `rate_limit` requires both `max_requests` "
+                "and `time_window_seconds` (or neither)"
+            )
+        if max_requests is not None and time_window is not None:
             rate_limiter = RateLimiter(
                 max_requests=int(max_requests),
                 time_window=int(time_window),

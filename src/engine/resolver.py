@@ -128,6 +128,7 @@ class Resolver:
     """
 
     _EXPR_KEYS = {"ref", "template", "literal", "function"}
+    _FUNCTION_ALLOWED_SIBLINGS = {"function", "input", "map", "safe"}
 
     def __init__(
         self,
@@ -160,12 +161,34 @@ class Resolver:
         return value
 
     def _resolve_mapping(self, node: Mapping[str, Any]) -> Any:
-        # Detect single-key expression markers.
+        # Detect expression markers. Mixing markers (e.g. `ref` + `template`,
+        # or `function` + `ref`) is rejected outright so connector authors
+        # see the typo instead of one marker silently winning.
         keys = set(node.keys())
         marker = keys & self._EXPR_KEYS
+        if len(marker) > 1:
+            raise ValueError(
+                f"Expression node has conflicting markers {sorted(marker)}; "
+                f"use exactly one of {sorted(self._EXPR_KEYS)} per node"
+            )
         if "function" in marker:
+            extra = keys - self._FUNCTION_ALLOWED_SIBLINGS
+            if extra:
+                raise ValueError(
+                    f"`function` expression has unexpected sibling keys "
+                    f"{sorted(extra)}; allowed: "
+                    f"{sorted(self._FUNCTION_ALLOWED_SIBLINGS)}"
+                )
             return self._resolve_function(node)
-        if marker and len(marker) == 1 and len(keys) == 1:
+        if marker:
+            # Bare expression marker: must be the only key in the node so a
+            # stray sibling does not get silently dropped.
+            if len(keys) != 1:
+                (only,) = marker
+                raise ValueError(
+                    f"`{only}` expression must be the only key in the node; "
+                    f"got siblings {sorted(keys - {only})}"
+                )
             (only,) = marker
             if only == "ref":
                 return self._resolve_ref(node["ref"])
@@ -201,6 +224,16 @@ class Resolver:
             if value is None:
                 raise KeyError(
                     f"Template substitution {path!r} resolved to None in {template!r}"
+                )
+            # Templates are concatenation primitives; a non-scalar value
+            # would be silently spliced as its repr, masking the most
+            # common authoring mistake (referencing an object instead of
+            # a leaf field).
+            if not isinstance(value, (str, int, float, bool)):
+                raise TypeError(
+                    f"Template substitution {path!r} in {template!r} resolved "
+                    f"to {type(value).__name__}; only scalars (str/int/float/"
+                    f"bool) are allowed inside ${{...}}"
                 )
             out.append(str(value))
             i = k + 1
