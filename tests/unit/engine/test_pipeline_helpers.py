@@ -11,8 +11,6 @@ from __future__ import annotations
 
 import logging
 
-import pytest
-
 from src.engine.pipeline import (
     _flat_connection_lookup,
     _warn_unresolved_placeholders,
