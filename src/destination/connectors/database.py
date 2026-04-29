@@ -34,10 +34,8 @@ from ..base_handler import BaseDestinationHandler, BatchWriteResult
 from ..schema_contract import DestinationSchemaContract
 from ..sql_types import native_to_sqlalchemy
 from ...engine.type_map import (
-    InvalidSSLModeMapError,
     InvalidTypeMapError,
     TypeMapper,
-    UnmappedSSLModeError,
     UnmappedTypeError,
 )
 from ...secrets.exceptions import PlaceholderExpansionError
@@ -105,17 +103,20 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         # Arrow-based schema contract for vectorized type casting (built on schema configure)
         self._schema_contract: Optional[DestinationSchemaContract] = None
 
-        # Stream-id -> endpoint_ref index so configure_schema() can pick
-        # the type-mapper matching the endpoint's scope (connector vs
-        # connection). Populated by set_endpoint_refs() at startup.
-        self._endpoint_refs: Dict[str, str] = {}
+        # Stream-id -> structured endpoint_ref dict so configure_schema()
+        # can pick the type-mapper matching the endpoint's scope (connector
+        # vs connection). Populated by set_endpoint_refs() at startup.
+        self._endpoint_refs: Dict[str, Dict[str, Any]] = {}
 
-    def set_endpoint_refs(self, endpoint_refs: Mapping[str, str]) -> None:
+    def set_endpoint_refs(self, endpoint_refs: Mapping[str, Any]) -> None:
         """Register stream_id → endpoint_ref for each stream writing to this
         destination. Called once by ``src.main`` before the gRPC server starts;
         the handler consults the map per incoming ``SchemaMessage`` to decide
         which ``TypeMapper`` applies (public endpoint → connector's map,
         private endpoint → connection's map).
+
+        Values are dict-shape ``EndpointRef`` payloads
+        (``{"scope", "identifier", "endpoint"}``).
         """
         self._endpoint_refs = dict(endpoint_refs)
 
@@ -168,8 +169,6 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         except (
             InvalidTypeMapError,
             UnmappedTypeError,
-            InvalidSSLModeMapError,
-            UnmappedSSLModeError,
             PlaceholderExpansionError,
             ValueError,
         ):

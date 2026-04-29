@@ -171,7 +171,7 @@ class TestStreamHandlerSecretRetention:
             connection_id="conn-stream-test",
             connector_type="stdout",
             driver=None,
-            resolver=AsyncMock(),
+            resolver=AsyncMock(resolve=AsyncMock(return_value={})),
         )
         handler = StreamDestinationHandler()
         await handler.connect(runtime)
@@ -188,7 +188,7 @@ class TestStreamHandlerSecretRetention:
             connection_id="conn-stream-fail",
             connector_type="stdout",
             driver=None,
-            resolver=AsyncMock(),
+            resolver=AsyncMock(resolve=AsyncMock(return_value={})),
         )
         handler = StreamDestinationHandler()
 

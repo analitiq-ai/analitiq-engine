@@ -46,14 +46,14 @@ def _runtime(
 class TestEndpointRefDispatch:
     def test_pre_connect_raises(self):
         handler = DatabaseDestinationHandler()
-        handler.set_endpoint_refs({"s1": "connector:pg/transfers"})
+        handler.set_endpoint_refs({"s1": {"scope": "connector", "identifier": "pg", "endpoint": "transfers"}})
         with pytest.raises(RuntimeError, match="called before connect"):
             handler._type_mapper_for_stream("s1")
 
     def test_unknown_stream_id_raises(self):
         handler = DatabaseDestinationHandler()
         handler._runtime = _runtime(connector_mapper=_mapper("pg"))
-        handler.set_endpoint_refs({"s1": "connector:pg/transfers"})
+        handler.set_endpoint_refs({"s1": {"scope": "connector", "identifier": "pg", "endpoint": "transfers"}})
         with pytest.raises(RuntimeError, match="no endpoint_ref registered"):
             handler._type_mapper_for_stream("unregistered-stream")
 
@@ -64,7 +64,7 @@ class TestEndpointRefDispatch:
             connector_mapper=connector_map,
             connection_mapper=_mapper("connection:dest-conn"),
         )
-        handler.set_endpoint_refs({"s1": "connector:pg/transfers"})
+        handler.set_endpoint_refs({"s1": {"scope": "connector", "identifier": "pg", "endpoint": "transfers"}})
         assert handler._type_mapper_for_stream("s1") is connector_map
 
     def test_connection_scoped_uses_connection_mapper(self):
@@ -74,18 +74,20 @@ class TestEndpointRefDispatch:
             connector_mapper=_mapper("pg"),
             connection_mapper=connection_map,
         )
-        handler.set_endpoint_refs({"s1": "connection:dest-conn/orders"})
+        handler.set_endpoint_refs({"s1": {"scope": "connection", "identifier": "dest-conn", "endpoint": "orders"}})
         assert handler._type_mapper_for_stream("s1") is connection_map
 
     def test_set_endpoint_refs_copies_mapping(self):
         """External mutations must not leak into the handler's state."""
         handler = DatabaseDestinationHandler()
-        source = {"s1": "connector:pg/transfers"}
+        source = {"s1": {"scope": "connector", "identifier": "pg", "endpoint": "transfers"}}
         handler.set_endpoint_refs(source)
-        source["s1"] = "connector:evil/injected"
+        source["s1"] = {"scope": "connector", "identifier": "evil", "endpoint": "injected"}
         handler._runtime = _runtime(connector_mapper=_mapper("pg"))
         # Original registration wins — set_endpoint_refs took a defensive copy.
-        assert handler._endpoint_refs["s1"] == "connector:pg/transfers"
+        assert handler._endpoint_refs["s1"] == {
+            "scope": "connector", "identifier": "pg", "endpoint": "transfers",
+        }
 
 
 class TestCreateTableFromSchemaStrictness:

@@ -204,6 +204,74 @@ class MappingConfig:
 
 # Source/Destination Configuration Models
 
+@dataclass(frozen=True)
+class EndpointRef:
+    """Structured reference to an endpoint definition.
+
+    Resolution to a filesystem path:
+
+    - ``scope="connector"`` -> ``connectors/{identifier}/definition/endpoints/{endpoint}.json``
+    - ``scope="connection"`` -> ``connections/{identifier}/definition/endpoints/{endpoint}.json``
+
+    Frozen so instances are hashable and usable as dict keys (the engine
+    caches resolved endpoints by ref).
+    """
+    scope: str
+    identifier: str
+    endpoint: str
+
+    _VALID_SCOPES = ("connector", "connection")
+
+    def __post_init__(self) -> None:
+        if self.scope not in self._VALID_SCOPES:
+            raise ValueError(
+                f"EndpointRef.scope must be one of {self._VALID_SCOPES}, got {self.scope!r}"
+            )
+        if not self.identifier:
+            raise ValueError("EndpointRef.identifier cannot be empty")
+        if not self.endpoint:
+            raise ValueError("EndpointRef.endpoint cannot be empty")
+
+    def __str__(self) -> str:
+        return f"{self.scope}:{self.identifier}/{self.endpoint}"
+
+    @classmethod
+    def from_dict(cls, data: Any) -> "EndpointRef":
+        """Validate and construct from a plain dict (or pass through if already an EndpointRef)."""
+        if isinstance(data, EndpointRef):
+            return data
+        if not isinstance(data, dict):
+            raise TypeError(
+                f"endpoint_ref must be a dict with keys {{'scope','identifier','endpoint'}}, "
+                f"got {type(data).__name__}"
+            )
+        allowed = {"scope", "identifier", "endpoint"}
+        unknown = set(data.keys()) - allowed
+        if unknown:
+            raise ValueError(
+                f"endpoint_ref has unknown keys {sorted(unknown)}; "
+                f"allowed keys are {sorted(allowed)}"
+            )
+        missing = allowed - set(data.keys())
+        if missing:
+            raise ValueError(
+                f"endpoint_ref is missing required keys {sorted(missing)}"
+            )
+        return cls(
+            scope=data["scope"],
+            identifier=data["identifier"],
+            endpoint=data["endpoint"],
+        )
+
+    def to_dict(self) -> Dict[str, str]:
+        """Serialize to plain dict (for JSON output)."""
+        return {
+            "scope": self.scope,
+            "identifier": self.identifier,
+            "endpoint": self.endpoint,
+        }
+
+
 @dataclass
 class ReplicationConfig:
     """Source replication configuration."""
@@ -217,7 +285,7 @@ class ReplicationConfig:
 class SourceConfig:
     """Stream source configuration."""
     connection_ref: str = ""
-    endpoint_id: str = ""
+    endpoint_ref: Optional[EndpointRef] = None
     primary_key: List[str] = field(default_factory=list)
     replication: ReplicationConfig = field(default_factory=ReplicationConfig)
     source_schema_fingerprint: Optional[str] = None
@@ -249,7 +317,7 @@ class DestinationBatchingConfig:
 class DestinationConfig:
     """Stream destination configuration."""
     connection_ref: str = ""
-    endpoint_id: str = ""
+    endpoint_ref: Optional[EndpointRef] = None
     write: WriteModeConfig = field(default_factory=WriteModeConfig)
     target_schema_fingerprint: Optional[str] = None
     batching: Optional[DestinationBatchingConfig] = None

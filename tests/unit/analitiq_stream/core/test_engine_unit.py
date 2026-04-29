@@ -140,12 +140,20 @@ class TestStreamingEngine:
 
     def test_get_stream_name(self, engine):
         """Test stream name generation."""
-        # With endpoint ID
-        config = {"source": {"endpoint_id": "test-endpoint-123"}}
+        # With structured endpoint_ref
+        config = {
+            "source": {
+                "endpoint_ref": {
+                    "scope": "connector",
+                    "identifier": "wise",
+                    "endpoint": "transfers",
+                },
+            },
+        }
         result = engine._get_stream_name(config)
-        assert result == "endpoint.test-endpoint-123"
+        assert result == "endpoint.connector:wise/transfers"
 
-        # Without endpoint ID, with pipeline ID
+        # Without endpoint_ref, with pipeline ID
         config = {"pipeline_id": "test-pipeline"}
         result = engine._get_stream_name(config)
         assert result == "test-pipeline"

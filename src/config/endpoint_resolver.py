@@ -1,70 +1,39 @@
 """
 Endpoint reference resolver.
 
-Resolves scoped endpoint references to endpoint configuration dicts.
+Resolves a structured ``EndpointRef`` (or its plain-dict form) to the endpoint
+configuration JSON on disk.
 
-Reference format:
-- "connector:{slug}/{endpoint_name}" -> connectors/{slug}/definition/endpoints/{endpoint_name}.json
-- "connection:{alias}/{endpoint_name}" -> connections/{alias}/definition/endpoints/{endpoint_name}.json
+Reference shape (see ``src/models/stream.py:EndpointRef``):
+    {"scope": "connector",  "identifier": "<slug>",  "endpoint": "<name>"}
+        -> connectors/<slug>/definition/endpoints/<name>.json
+    {"scope": "connection", "identifier": "<alias>", "endpoint": "<name>"}
+        -> connections/<alias>/definition/endpoints/<name>.json
 """
 
 import json
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, Union
 
 from src.config.exceptions import EndpointNotFoundError
+from src.models.stream import EndpointRef
 
 logger = logging.getLogger(__name__)
 
-VALID_SCOPES = ("connector", "connection")
+EndpointRefInput = Union[EndpointRef, dict]
 
 
-def parse_endpoint_ref(ref: str) -> tuple[str, str, str]:
-    """Parse a scoped endpoint reference into (scope, identifier, endpoint_name).
-
-    Args:
-        ref: Endpoint reference string, e.g. "connector:pipedrive/deals"
-
-    Returns:
-        Tuple of (scope, identifier, endpoint_name)
-
-    Raises:
-        ValueError: If the reference format is invalid
-    """
-    if ":" not in ref:
-        raise ValueError(
-            f"Invalid endpoint_ref '{ref}': missing scope prefix. "
-            f"Expected format: 'connector:slug/name' or 'connection:alias/name'"
-        )
-
-    scope, path = ref.split(":", 1)
-    if scope not in VALID_SCOPES:
-        raise ValueError(
-            f"Invalid endpoint_ref scope '{scope}' in '{ref}'. "
-            f"Expected one of: {VALID_SCOPES}"
-        )
-
-    if "/" not in path:
-        raise ValueError(
-            f"Invalid endpoint_ref path '{path}' in '{ref}'. "
-            f"Expected format: 'identifier/endpoint_name'"
-        )
-
-    identifier, endpoint_name = path.split("/", 1)
-    if not identifier or not endpoint_name:
-        raise ValueError(
-            f"Invalid endpoint_ref '{ref}': identifier and endpoint_name cannot be empty"
-        )
-
-    return scope, identifier, endpoint_name
+def _coerce(ref: EndpointRefInput) -> EndpointRef:
+    """Validate and return an ``EndpointRef`` instance, accepting dicts too."""
+    return EndpointRef.from_dict(ref)
 
 
-def resolve_endpoint_path(ref: str, paths: dict[str, Path]) -> Path:
+def resolve_endpoint_path(ref: EndpointRefInput, paths: dict[str, Path]) -> Path:
     """Resolve an endpoint reference to its file path on disk.
 
     Args:
-        ref: Endpoint reference string
+        ref: ``EndpointRef`` instance or equivalent dict
         paths: Dict with 'connectors' and 'connections' Path objects
 
     Returns:
@@ -73,38 +42,34 @@ def resolve_endpoint_path(ref: str, paths: dict[str, Path]) -> Path:
     Raises:
         EndpointNotFoundError: If the endpoint file does not exist
     """
-    scope, identifier, endpoint_name = parse_endpoint_ref(ref)
+    parsed = _coerce(ref)
 
-    if scope == "connector":
-        file_path = (
-            paths["connectors"] / identifier / "definition" / "endpoints"
-            / f"{endpoint_name}.json"
-        )
-    else:  # connection
-        file_path = (
-            paths["connections"] / identifier / "definition" / "endpoints"
-            / f"{endpoint_name}.json"
-        )
+    root_key = "connectors" if parsed.scope == "connector" else "connections"
+    file_path = (
+        paths[root_key] / parsed.identifier / "definition" / "endpoints"
+        / f"{parsed.endpoint}.json"
+    )
 
     if not file_path.is_file():
         raise EndpointNotFoundError(
-            ref, detail=f"File not found: {file_path}"
+            parsed, detail=f"File not found: {file_path}"
         )
 
     return file_path
 
 
-def resolve_endpoint_ref(ref: str, paths: dict[str, Path]) -> dict[str, Any]:
+def resolve_endpoint_ref(ref: EndpointRefInput, paths: dict[str, Path]) -> dict[str, Any]:
     """Resolve an endpoint reference and return the endpoint configuration.
 
     Args:
-        ref: Endpoint reference string
+        ref: ``EndpointRef`` instance or equivalent dict
         paths: Dict with 'connectors' and 'connections' Path objects
 
     Returns:
         Parsed endpoint configuration dict
     """
-    file_path = resolve_endpoint_path(ref, paths)
+    parsed = _coerce(ref)
+    file_path = resolve_endpoint_path(parsed, paths)
 
     try:
         with open(file_path) as f:
@@ -112,5 +77,5 @@ def resolve_endpoint_ref(ref: str, paths: dict[str, Path]) -> dict[str, Any]:
     except json.JSONDecodeError as e:
         raise ValueError(f"Invalid JSON in endpoint file {file_path}: {e}")
 
-    logger.info(f"Resolved endpoint_ref '{ref}' from {file_path}")
+    logger.info(f"Resolved endpoint_ref {parsed} from {file_path}")
     return endpoint

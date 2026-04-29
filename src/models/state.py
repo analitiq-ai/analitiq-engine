@@ -80,7 +80,7 @@ class ReplicationConfig:
 @dataclass
 class SourceConfig:
     """Source configuration."""
-    endpoint_id: str = ""
+    endpoint_ref: Optional[Dict[str, str]] = None
     host_id: str = ""
     replication_method: str = "incremental"
     replication_key: Optional[str] = None
@@ -90,7 +90,7 @@ class SourceConfig:
 @dataclass
 class DestinationConfig:
     """Destination configuration."""
-    endpoint_id: str = ""
+    endpoint_ref: Optional[Dict[str, str]] = None
     host_id: str = ""
     refresh_mode: str = "upsert"
     batch_support: bool = False

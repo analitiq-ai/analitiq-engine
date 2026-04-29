@@ -44,15 +44,14 @@ class BaseDestinationHandler(ABC):
     - All writes within a batch must be atomic (all-or-nothing)
     """
 
-    def set_endpoint_refs(self, endpoint_refs: Mapping[str, str]) -> None:
+    def set_endpoint_refs(self, endpoint_refs: Mapping[str, Any]) -> None:
         """Register the ``stream_id → endpoint_ref`` index for this handler.
 
-        Called once by the destination entrypoint before the gRPC server
-        starts. The default implementation is a no-op; handlers that need
-        per-stream endpoint context (e.g. picking a type-mapper by scope)
-        override it. Defining the method on the base class means a rename
-        in a subclass fails loudly at call time rather than silently
-        dropping the registration.
+        ``endpoint_refs`` values are dict-shape ``EndpointRef`` payloads
+        (``{"scope", "identifier", "endpoint"}``). Called once by the
+        destination entrypoint before the gRPC server starts. The default
+        implementation is a no-op; handlers that need per-stream endpoint
+        context (e.g. picking a type-mapper by scope) override it.
         """
         _ = endpoint_refs  # no-op default
 

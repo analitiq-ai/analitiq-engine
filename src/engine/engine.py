@@ -833,12 +833,21 @@ class StreamingEngine:
 
 
     def _get_stream_name(self, config: Dict[str, Any]) -> str:
-        """Generate stream name for state management."""
-        # Use endpoint ID as stream name
-        if "source" in config and "endpoint_id" in config["source"]:
-            return f"endpoint.{config['source']['endpoint_id']}"
-        else:
-            return config.get("pipeline_id", "unknown-stream")
+        """Generate stream name for state management.
+
+        Derived from the source ``endpoint_ref`` (canonical
+        ``scope:identifier/endpoint`` form) so the metric path is stable
+        across runs.
+        """
+        source = config.get("source")
+        if isinstance(source, dict):
+            ref = source.get("endpoint_ref")
+            if isinstance(ref, dict):
+                return (
+                    f"endpoint.{ref.get('scope', '')}:"
+                    f"{ref.get('identifier', '')}/{ref.get('endpoint', '')}"
+                )
+        return config.get("pipeline_id", "unknown-stream")
 
     def get_metrics(self) -> PipelineMetrics:
         """Get pipeline execution metrics as a validated Pydantic model."""

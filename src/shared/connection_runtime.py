@@ -1,146 +1,110 @@
-"""ConnectionRuntime — unified connection materialization.
+"""ConnectionRuntime — connector-driven connection materialization.
 
-Constructed by PipelineConfigPrep with enriched config (connector_type, driver
-already baked in).
+A :class:`ConnectionRuntime` ties together a saved connection JSON, the
+connector definition that describes how to use it, and the secret store
+that fills in credential values. It is the single place the engine touches
+provider configuration: everything provider-specific is encoded in the
+connector's ``transports`` block, resolved through the typed
+:class:`~src.engine.resolver.ResolutionContext`, and turned into a
+concrete transport (:class:`~src.shared.transport_factory.SqlAlchemyTransport`
+or :class:`~src.shared.transport_factory.HttpTransport`) by the transport
+factory. The runtime never inspects host strings, header dicts, DSN
+formats, or SSL flags directly.
 
-Lifecycle per connector type:
-- database/api: resolve secrets -> create transport -> scrub immediately.
-- file/s3/stdout: resolve secrets -> retain resolved config -> handlers
-  consume config during connect() -> cooperative scrub via
-  scrub_resolved_config() once all consumers have signalled.
+Lifecycle:
 
-Shared ownership via reference counting: each consumer calls acquire() on
-connect and close() on disconnect. Transport is disposed only when the last
-consumer releases.
+* ``__init__`` records connection + connector + resolver references.
+* ``materialize()`` resolves secrets, builds a context, materializes the
+  transport, and scrubs secret values from memory.
+* Reference counting (:meth:`acquire`, :meth:`close`) lets multiple
+  source/destination connectors share one underlying engine/session.
+* ``file``/``s3``/``stdout`` connectors keep the legacy resolved-config
+  passthrough until those connector families adopt ``transports`` blocks.
 """
+
+from __future__ import annotations
 
 import copy
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Mapping, Optional
 
 import aiohttp
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from ..engine.type_map import SSLModeMapper, TypeMapper
-from ..secrets.protocol import SecretsResolver
-from ..secrets.exceptions import PlaceholderExpansionError
-from .database_utils import create_database_engine
-from .placeholder import PLACEHOLDER_PATTERN, expand_placeholders, has_placeholders
-from .rate_limiter import RateLimiter
+from src.engine.resolver import ResolutionContext
+from src.engine.type_map import TypeMapper
+from src.secrets.protocol import SecretsResolver
+from src.secrets.exceptions import SecretNotFoundError, SecretResolutionError
+from src.shared.rate_limiter import RateLimiter
+from src.shared.transport_factory import (
+    HttpTransport,
+    SqlAlchemyTransport,
+    build_transport,
+)
+
 
 logger = logging.getLogger(__name__)
+
 
 VALID_CONNECTOR_TYPES = frozenset({"database", "api", "file", "s3", "stdout"})
 
 
-async def _create_api_session(
-    config: Dict[str, Any],
-) -> tuple[aiohttp.ClientSession, str, Optional[RateLimiter]]:
-    """
-    Create an aiohttp session from resolved connection config.
-
-    Auth headers are built from the already-resolved config, so secret values
-    are baked into the session headers before the runtime scrubs the resolved
-    config from memory.
-
-    Returns:
-        Tuple of (session, base_url, rate_limiter)
-    """
-    parameters = config.get("parameters", {})
-    if "host" not in config or not config["host"]:
-        raise ValueError("API connection requires 'host' in configuration")
-    base_url = config["host"].rstrip("/")
-    headers = dict(parameters.get("headers", {}))
-
-    # Resolve auth into headers (operates on resolved config)
-    auth_config = config.get("auth")
-    if auth_config:
-        auth_type = auth_config.get("type", "").lower()
-        if auth_type in ("bearer_token", "bearer"):
-            token = auth_config.get("token", "")
-            if not token:
-                raise ValueError("Auth type 'bearer' requires a non-empty 'token' field")
-            headers["Authorization"] = f"Bearer {token}"
-        elif auth_type == "api_key":
-            header_name = auth_config.get("header_name", "X-API-Key")
-            api_key = auth_config.get("api_key", "")
-            if not api_key:
-                raise ValueError("Auth type 'api_key' requires a non-empty 'api_key' field")
-            headers[header_name] = api_key
-        elif auth_type == "basic":
-            import base64
-            username = auth_config.get("username", "")
-            password = auth_config.get("password", "")
-            if not username:
-                raise ValueError("Auth type 'basic' requires a non-empty 'username' field")
-            credentials = base64.b64encode(
-                f"{username}:{password}".encode()
-            ).decode()
-            headers["Authorization"] = f"Basic {credentials}"
-        else:
-            logger.warning(
-                f"Unknown auth type '{auth_type}', skipping auth header setup"
-            )
-
-    timeout = aiohttp.ClientTimeout(total=parameters.get("timeout", 30))
-    connector = aiohttp.TCPConnector(
-        limit=parameters.get("max_connections", 100),
-        limit_per_host=parameters.get("max_connections_per_host", 10),
-    )
-
-    session = aiohttp.ClientSession(
-        timeout=timeout, connector=connector, headers=headers
-    )
-
-    rate_limiter = None
-    rate_limit = parameters.get("rate_limit")
-    if rate_limit:
-        rate_limiter = RateLimiter(
-            max_requests=rate_limit.get("max_requests", 100),
-            time_window=rate_limit.get("time_window", 60),
-        )
-
-    return session, base_url, rate_limiter
+def _derive_dialect(connector_definition: Optional[Mapping[str, Any]]) -> Optional[str]:
+    """Return the base SQL dialect (e.g. ``postgresql``) from a connector
+    definition, or ``None`` if not a sqlalchemy connector."""
+    if not connector_definition:
+        return None
+    transports = connector_definition.get("transports") or {}
+    default_ref = connector_definition.get("default_transport")
+    if not default_ref or default_ref not in transports:
+        return None
+    transport = transports[default_ref]
+    if transport.get("kind") != "sqlalchemy":
+        return None
+    driver = transport.get("driver")
+    if not isinstance(driver, str) or not driver:
+        return None
+    return driver.split("+", 1)[0]
 
 
 class ConnectionRuntime:
-    """
-    Shared-ownership connection lifecycle with reference counting.
+    """Connector-driven connection lifecycle with shared ownership.
 
-    Constructed by PipelineConfigPrep with enriched config (connector_type,
-    driver already baked in). Multiple connectors may share the same instance
-    when streams reference the same connection_id.
-
-    Each consumer calls acquire() on connect and close() on disconnect.
-    Transport resources are only disposed when the last consumer releases.
+    Constructed by :class:`~src.engine.pipeline_config_prep.PipelineConfigPrep`
+    with the saved connection JSON, the connector definition, and a
+    per-connection secrets resolver. ``materialize()`` is idempotent and
+    safe to call from multiple consumers; the underlying transport is
+    only disposed when the last reference is released.
     """
 
     def __init__(
         self,
         *,
-        raw_config: Dict[str, Any],
+        raw_config: Mapping[str, Any],
         connection_id: str,
         connector_type: str,
-        driver: Optional[str],
         resolver: SecretsResolver,
+        connector_definition: Optional[Mapping[str, Any]] = None,
+        driver: Optional[str] = None,
         connector_type_mapper: Optional[TypeMapper] = None,
         connection_type_mapper: Optional[TypeMapper] = None,
-        ssl_mapper: Optional[SSLModeMapper] = None,
-    ):
+    ) -> None:
         if connector_type not in VALID_CONNECTOR_TYPES:
             raise ValueError(
                 f"Invalid connector_type: {connector_type!r}. "
                 f"Expected one of: {sorted(VALID_CONNECTOR_TYPES)}"
             )
 
-        self._raw_config = raw_config
+        self._raw_config: Dict[str, Any] = dict(raw_config)
         self._connection_id = connection_id
         self._connector_type = connector_type
-        self._driver = driver
+        self._connector_definition: Optional[Dict[str, Any]] = (
+            dict(connector_definition) if connector_definition else None
+        )
+        self._driver_override = driver
         self._resolver = resolver
         self._connector_type_mapper = connector_type_mapper
         self._connection_type_mapper = connection_type_mapper
-        self._ssl_mapper = ssl_mapper
 
         # Transport state — set by materialize()
         self._materialized = False
@@ -148,45 +112,53 @@ class ConnectionRuntime:
         self._session: Optional[aiohttp.ClientSession] = None
         self._base_url: Optional[str] = None
         self._rate_limiter: Optional[RateLimiter] = None
-        self._resolved_config: Optional[Dict] = None
+        self._resolved_config: Optional[Dict[str, Any]] = None
+        self._transport_dialect: Optional[str] = None
+        self._transport_driver: Optional[str] = None
 
         # Reference counting for shared ownership across streams
         self._ref_count = 0
 
-        # Secret resolution internals
-        self._secrets: Optional[Dict[str, str]] = None
+        # Cooperative scrub for legacy file/s3/stdout consumers.
+        self._scrub_requests = 0
 
-        # Cooperative scrub: handlers call scrub_resolved_config() after
-        # consuming the config.  We only actually clear when every acquirer
-        # has signalled.
-        self._scrub_requests: int = 0
-
-    # --- Read-only metadata (available before materialize) ---
+    # ------------------------------------------------------------------
+    # Read-only metadata
+    # ------------------------------------------------------------------
 
     @property
     def connector_type(self) -> str:
         return self._connector_type
 
     @property
-    def driver(self) -> Optional[str]:
-        return self._driver
-
-    @property
     def connection_id(self) -> str:
         return self._connection_id
+
+    @property
+    def driver(self) -> Optional[str]:
+        """Base SQL dialect (``postgresql``, ``mysql``, …) or ``None``."""
+        if self._transport_dialect is not None:
+            return self._transport_dialect
+        if self._driver_override is not None:
+            return self._driver_override
+        return _derive_dialect(self._connector_definition)
+
+    @property
+    def driver_string(self) -> Optional[str]:
+        """Full SQLAlchemy driver string (``postgresql+asyncpg``) once the
+        transport has been materialized."""
+        return self._transport_driver
 
     @property
     def raw_config(self) -> Dict[str, Any]:
         return copy.deepcopy(self._raw_config)
 
     @property
-    def connector_type_mapper(self) -> TypeMapper:
-        """Connector-owned native↔canonical type mapper.
+    def connector_definition(self) -> Optional[Dict[str, Any]]:
+        return copy.deepcopy(self._connector_definition) if self._connector_definition else None
 
-        Always present for resolved connections because ``type-map.json`` is
-        required for every connector. Raises if the runtime was constructed
-        without one (bare unit tests).
-        """
+    @property
+    def connector_type_mapper(self) -> TypeMapper:
         if self._connector_type_mapper is None:
             raise RuntimeError(
                 f"connector_type_mapper not available for {self._connection_id!r}: "
@@ -196,88 +168,91 @@ class ConnectionRuntime:
 
     @property
     def connection_type_mapper(self) -> Optional[TypeMapper]:
-        """Connection-owned type mapper for private endpoints.
-
-        Loaded from ``connections/{alias}/definition/type-map.json`` when
-        present. ``None`` when the connection has no private endpoints to
-        canonicalize (pure public-endpoint pipelines).
-        """
         return self._connection_type_mapper
 
-    def type_mapper_for(self, endpoint_ref: str) -> TypeMapper:
-        """Pick the type mapper whose scope matches ``endpoint_ref``.
+    def type_mapper_for(self, endpoint_ref: Any) -> TypeMapper:
+        """Pick the type mapper whose scope matches ``endpoint_ref``."""
+        from src.models.stream import EndpointRef
 
-        Refs like ``connector:{slug}/{name}`` resolve to the connector's
-        type-map; ``connection:{alias}/{name}`` resolves to the connection's
-        own. A connection-scoped ref with no connection-level type-map is a
-        hard error — there is no sensible fallback to the connector map
-        because private endpoints may use types the connector does not know.
-        """
-        if not isinstance(endpoint_ref, str) or ":" not in endpoint_ref:
-            raise ValueError(
-                f"type_mapper_for: {endpoint_ref!r} is not a scoped endpoint_ref"
-            )
-        scope, _ = endpoint_ref.split(":", 1)
-        if scope == "connector":
+        ref = EndpointRef.from_dict(endpoint_ref)
+        if ref.scope == "connector":
             return self.connector_type_mapper
-        if scope == "connection":
+        if ref.scope == "connection":
             if self._connection_type_mapper is None:
                 raise RuntimeError(
-                    f"endpoint {endpoint_ref!r} is connection-scoped but "
-                    f"connection {self._connection_id!r} has no type-map "
-                    f"(expected at connections/{self._connection_id}/definition/"
-                    f"type-map.json)"
+                    f"endpoint {ref} is connection-scoped but connection "
+                    f"{self._connection_id!r} has no type-map (expected at "
+                    f"connections/{self._connection_id}/definition/type-map.json)"
                 )
             return self._connection_type_mapper
-        raise ValueError(
-            f"type_mapper_for: unknown endpoint scope {scope!r} in {endpoint_ref!r}"
-        )
+        raise ValueError(f"type_mapper_for: unknown endpoint scope in {ref}")
 
-    @property
-    def ssl_mapper(self) -> Optional[SSLModeMapper]:
-        """Connector-owned SSL mode mapper, or ``None`` for non-SSL connectors."""
-        return self._ssl_mapper
-
-    # --- Materialization ---
+    # ------------------------------------------------------------------
+    # Materialization
+    # ------------------------------------------------------------------
 
     async def materialize(self, *, require_port: bool = True) -> None:
-        """
-        Resolve secrets, create transport, scrub secrets.
+        """Resolve secrets, build the resolution context, materialize the transport.
 
-        Args:
-            require_port: For database connections, whether port is required.
-                          Ignored for non-database connector types.
+        Any connector that declares a ``transports`` block goes through the
+        spec-driven transport factory regardless of its ``connector_type``.
+        Connectors without a ``transports`` block fall through to a
+        legacy passthrough that exposes ``resolved_config`` for handlers
+        that still consume a flat dict (file/s3/stdout adapters that have
+        not yet migrated to the new model).
 
-        Idempotent — second call is a no-op.
+        ``require_port`` is accepted for API compatibility with the
+        previous runtime; database transport DSN templates encode whether
+        a port is required, so the argument is no-op for spec-driven
+        connectors.
         """
         if self._materialized:
             return
 
-        resolved = await self._resolve_secrets()
+        secrets = await self._load_secrets()
+        self._validate_secret_refs(secrets)
 
-        try:
-            if self._connector_type == "database":
-                self._engine, _ = await create_database_engine(
-                    resolved,
-                    require_port=require_port,
-                    ssl_mapper=self._ssl_mapper,
+        has_transports = bool(
+            self._connector_definition
+            and self._connector_definition.get("transports")
+        )
+
+        if has_transports:
+            context = self._build_resolution_context(secrets)
+            try:
+                transport = await build_transport(
+                    self._connector_definition,
+                    context=context,
                 )
-            elif self._connector_type == "api":
-                self._session, self._base_url, self._rate_limiter = (
-                    await _create_api_session(resolved)
+            except Exception:
+                self._scrub_secrets()
+                raise
+
+            if isinstance(transport, SqlAlchemyTransport):
+                self._engine = transport.engine
+                self._transport_driver = transport.driver
+                self._transport_dialect = transport.dialect
+            elif isinstance(transport, HttpTransport):
+                self._session = transport.session
+                self._base_url = transport.base_url
+                self._rate_limiter = transport.rate_limiter
+            else:  # pragma: no cover — defensive
+                raise NotImplementedError(
+                    f"Unhandled transport result type: {type(transport).__name__}"
                 )
-            else:
-                # file, s3, stdout — no transport, just resolved config
-                self._resolved_config = resolved
-        except Exception:
-            # Clean up secrets on failure — don't leave them in memory
+
             self._scrub_secrets()
-            raise
+        else:
+            # Legacy passthrough for connectors that have not yet declared
+            # a ``transports`` block (typically file/s3/stdout). The
+            # handler consumes ``resolved_config`` directly.
+            self._resolved_config = self._merge_secrets_into_config(secrets)
 
-        self._scrub_secrets()
         self._materialized = True
 
-    # --- Transport accessors (available after materialize) ---
+    # ------------------------------------------------------------------
+    # Transport accessors
+    # ------------------------------------------------------------------
 
     @property
     def engine(self) -> AsyncEngine:
@@ -323,42 +298,29 @@ class ConnectionRuntime:
             )
         return self._resolved_config
 
-    # --- Reference counting ---
+    # ------------------------------------------------------------------
+    # Reference counting
+    # ------------------------------------------------------------------
 
     def acquire(self) -> None:
-        """Register a consumer of this runtime. Call before using transport."""
         self._ref_count += 1
         logger.debug(
             f"Runtime {self._connection_id} acquired (ref_count={self._ref_count})"
         )
 
     async def release(self) -> None:
-        """Alias for close() — decrement ref count and dispose if last."""
         await self.close()
 
     def scrub_resolved_config(self) -> None:
-        """Signal that the caller has consumed the resolved config.
-
-        For file/s3/stdout connections the resolved config is kept after
-        materialize() so handlers can pass it to storage backends during
-        connect().  Once a handler has finished consuming it, it calls this
-        method.  The config is actually cleared only when every acquirer has
-        signalled, so shared runtimes stay functional until the last consumer
-        is done.
-
-        For database/api connections the resolved config is already scrubbed
-        by materialize(), so calling this method is a safe no-op.
-        """
+        """Signal that the caller has consumed the resolved config (file/s3/stdout)."""
         if not self._materialized:
             logger.warning(
                 f"Runtime {self._connection_id}: scrub_resolved_config() "
                 f"called before materialize() — ignoring"
             )
             return
-
         if self._resolved_config is None:
             return
-
         if self._ref_count == 0:
             logger.warning(
                 f"Runtime {self._connection_id}: scrub_resolved_config() "
@@ -366,7 +328,6 @@ class ConnectionRuntime:
             )
             self._resolved_config = None
             return
-
         self._scrub_requests += 1
         if self._scrub_requests >= self._ref_count:
             self._resolved_config = None
@@ -375,16 +336,11 @@ class ConnectionRuntime:
                 f"(all {self._ref_count} consumers signalled)"
             )
 
-    # --- Teardown ---
+    # ------------------------------------------------------------------
+    # Teardown
+    # ------------------------------------------------------------------
 
     async def close(self) -> None:
-        """
-        Decrement ref count; dispose transport when last consumer releases.
-
-        Safe to call multiple times. When ref count reaches zero the
-        underlying engine/session is disposed and materialization state is
-        reset.
-        """
         self._ref_count = max(0, self._ref_count - 1)
         if self._ref_count > 0:
             logger.debug(
@@ -395,55 +351,120 @@ class ConnectionRuntime:
 
         logger.debug(f"Runtime {self._connection_id} closing (last reference)")
         try:
-            if self._engine:
+            if self._engine is not None:
                 try:
                     await self._engine.dispose()
                 except Exception as e:
-                    logger.error(f"Failed to dispose engine for {self._connection_id}: {e}")
+                    logger.error(
+                        f"Failed to dispose engine for {self._connection_id}: {e}"
+                    )
                 self._engine = None
         finally:
-            if self._session:
+            if self._session is not None:
                 try:
                     await self._session.close()
                 except Exception as e:
-                    logger.error(f"Failed to close session for {self._connection_id}: {e}")
+                    logger.error(
+                        f"Failed to close session for {self._connection_id}: {e}"
+                    )
                 self._session = None
             self._base_url = None
             self._rate_limiter = None
             self._resolved_config = None
             self._scrub_requests = 0
             self._materialized = False
+            self._transport_dialect = None
+            self._transport_driver = None
 
-    # --- Private ---
+    # ------------------------------------------------------------------
+    # Private helpers
+    # ------------------------------------------------------------------
 
-    async def _resolve_secrets(self) -> Dict[str, Any]:
-        """Resolve ${placeholder} values."""
-        if not has_placeholders(self._raw_config):
-            logger.debug(
-                f"No placeholders in connection {self._connection_id}, "
-                f"skipping secret resolution"
+    async def _load_secrets(self) -> Dict[str, Any]:
+        """Fetch the connection's secret store contents.
+
+        Returns an empty dict when the connection has no secrets file —
+        connectors with no required secrets (e.g. stdout) should not fail
+        materialization.
+        """
+        try:
+            secrets = await self._resolver.resolve(self._connection_id)
+        except SecretNotFoundError:
+            secrets = {}
+        except SecretResolutionError:
+            raise
+        if not isinstance(secrets, Mapping):
+            raise TypeError(
+                f"Secrets resolver for {self._connection_id} returned "
+                f"{type(secrets).__name__}, expected mapping"
             )
-            return copy.deepcopy(self._raw_config)
+        return dict(secrets)
 
-        self._secrets = await self._resolver.resolve(
-            self._connection_id,
+    def _validate_secret_refs(self, secrets: Mapping[str, Any]) -> None:
+        """Confirm every ``secret_refs.<name>`` declared by the connection
+        resolves to a value in the secret store."""
+        secret_refs = self._raw_config.get("secret_refs") or {}
+        if not isinstance(secret_refs, Mapping):
+            raise TypeError(
+                f"connection {self._connection_id!r}: `secret_refs` must be an object"
+            )
+        missing = [name for name in secret_refs if name not in secrets]
+        if missing:
+            raise SecretNotFoundError(
+                connection_id=self._connection_id,
+                detail=(
+                    f"connection {self._connection_id!r} declares secret_refs "
+                    f"{missing!r} but none were found in the secret store"
+                ),
+            )
+
+    def _build_resolution_context(
+        self, secrets: Mapping[str, Any]
+    ) -> ResolutionContext:
+        """Assemble a typed :class:`ResolutionContext` from the connection JSON."""
+        connection_scope = {
+            "parameters": dict(self._raw_config.get("parameters") or {}),
+            "selections": dict(self._raw_config.get("selections") or {}),
+            "discovered": dict(self._raw_config.get("discovered") or {}),
+            "secret_refs": dict(self._raw_config.get("secret_refs") or {}),
+            "auth_state": dict(self._raw_config.get("auth_state") or {}),
+            # Preserve any top-level address fields connectors may want to
+            # reference (kept only as a back-compat surface; new connectors
+            # encode address in transports).
+            "name": self._raw_config.get("name"),
+            "status": self._raw_config.get("status"),
+        }
+        return ResolutionContext(
+            connector=self._connector_definition or {},
+            connection=connection_scope,
+            secrets=dict(secrets),
+            auth=dict(self._raw_config.get("auth") or {}),
+            runtime={"connection_id": self._connection_id},
         )
 
-        try:
-            resolved = expand_placeholders(self._raw_config, self._secrets)
-        except KeyError as e:
-            raise PlaceholderExpansionError(
-                placeholder=str(e),
-                connection_id=self._connection_id,
-                detail=f"Secret key not found",
-            ) from e
-        logger.debug(f"Resolved secrets for connection: {self._connection_id}")
+    def _merge_secrets_into_config(
+        self, secrets: Mapping[str, Any]
+    ) -> Dict[str, Any]:
+        """For legacy file/s3/stdout connectors that still consume a
+        flat resolved-config dict, expose secrets under the same keys."""
+        resolved = copy.deepcopy(self._raw_config)
+        resolved.setdefault("parameters", {})
+        # Surface secrets at the top level for handlers that look them up
+        # directly. This is intentionally generic: each secret key maps to
+        # its value verbatim, no provider-specific shaping.
+        for name, value in secrets.items():
+            resolved.setdefault(name, value)
         return resolved
 
     def _scrub_secrets(self) -> None:
-        self._secrets = None
-        if self._connector_type in ("database", "api"):
-            self._resolved_config = None
+        # For transport-driven connector types we never expose
+        # ``resolved_config``; nothing to scrub beyond the in-flight dict
+        # which falls out of scope when materialize() returns.
+        pass
+
+    # ------------------------------------------------------------------
+    # Repr
+    # ------------------------------------------------------------------
 
     def __repr__(self) -> str:
         status = "materialized" if self._materialized else "pending"
