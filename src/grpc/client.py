@@ -134,7 +134,7 @@ class DestinationGRPCClient:
         self._stub = DestinationServiceStub(self._channel)
 
         # Attempt 1 failures are expected during concurrent engine/destination
-        # startup; later attempts escalate to WARNING.
+        # startup; attempts 2+ escalate to WARNING.
         last_failure: Optional[str] = None
         for attempt in range(1, max_connect_retries + 1):
             log_failure = logger.warning if attempt > 1 else logger.debug
@@ -153,7 +153,7 @@ class DestinationGRPCClient:
                     f"{response.message}"
                 )
             except grpc.aio.AioRpcError as e:
-                last_failure = str(e.code())
+                last_failure = e.code().name
                 log_failure(
                     f"Connection attempt {attempt}/{max_connect_retries} failed: {e.code()}"
                 )
