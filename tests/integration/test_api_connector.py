@@ -8,7 +8,7 @@ from aiohttp import ClientTimeout, TCPConnector, ClientSession
 
 from src.source.connectors.api import APIConnector
 from src.shared.rate_limiter import RateLimiter
-from src.source.connectors.base import ConnectionError, ReadError, WriteError
+from src.source.connectors.base import ConnectionError, ReadError
 from src.shared.connection_runtime import ConnectionRuntime
 from src.secrets.resolvers.memory import InMemorySecretsResolver
 from src.state.state_manager import StateManager
@@ -387,141 +387,12 @@ class TestReadOperations:
 
 class TestWriteOperations:
     """Test write operations."""
-    
+
     @pytest.mark.asyncio
-    async def test_write_batch_single_records(self, connector, mock_session):
-        """Test writing batch as individual records."""
-        connector.session = mock_session
-        connector.base_url = "https://api.example.com"
-        
-        # Mock successful responses
-        mock_response = AsyncMock()
-        mock_response.status = 200
-        mock_response.text.return_value = '{"status": "success"}'
-        mock_session.request.return_value.__aenter__.return_value = mock_response
-        
-        batch = [
-            {"id": 1, "name": "User 1"},
-            {"id": 2, "name": "User 2"}
-        ]
-        config = {
-            "endpoint": "/users",
-            "method": "POST",
-            "batch_support": False
-        }
-        
-        await connector.write_batch(batch, config)
-        
-        # Should make 2 individual requests
-        assert mock_session.request.call_count == 2
-        assert connector.metrics["records_written"] == 2
-        assert connector.metrics["batches_written"] == 1
-    
-    @pytest.mark.asyncio
-    async def test_write_batch_with_batch_support(self, connector, mock_session):
-        """Test writing batch in single request."""
-        connector.session = mock_session
-        connector.base_url = "https://api.example.com"
-        
-        batch = [
-            {"id": 1, "name": "User 1"},
-            {"id": 2, "name": "User 2"}
-        ]
-        config = {
-            "endpoint": "/users",
-            "method": "POST",
-            "batch_support": True
-        }
-        
-        # Since _write_batch_request doesn't exist in the implementation,
-        # we expect an error to be raised and caught, converting to WriteError
-        with pytest.raises(WriteError, match="API write failed"):
-            await connector.write_batch(batch, config)
-    
-    @pytest.mark.asyncio
-    async def test_write_single_record_success(self, connector, mock_session):
-        """Test writing single record successfully."""
-        connector.session = mock_session
-        
-        # Mock successful response
-        mock_response = AsyncMock()
-        mock_response.status = 200
-        mock_response.text.return_value = '{"id": 123, "status": "created"}'
-        mock_session.request.return_value.__aenter__.return_value = mock_response
-        
-        record = {"name": "Test User", "email": "test@example.com"}
-        config = {}
-        
-        await connector._write_single_record(
-            "https://api.example.com/users", "POST", record, config
-        )
-        
-        # Verify request was made with correct parameters
-        mock_session.request.assert_called_once_with(
-            "POST", 
-            "https://api.example.com/users",
-            json=record,
-            headers={"Content-Type": "application/json"}
-        )
-    
-    @pytest.mark.asyncio
-    async def test_write_single_record_with_rate_limiting(self, connector, mock_session):
-        """Test writing with rate limiting."""
-        connector.session = mock_session
-        connector.rate_limiter = MagicMock()
-        connector.rate_limiter.acquire = AsyncMock()
-        
-        # Mock successful response
-        mock_response = AsyncMock()
-        mock_response.status = 200
-        mock_response.text.return_value = '{"status": "success"}'
-        mock_session.request.return_value.__aenter__.return_value = mock_response
-        
-        record = {"name": "Test User"}
-        config = {}
-        
-        await connector._write_single_record(
-            "https://api.example.com/users", "POST", record, config
-        )
-        
-        # Verify rate limiter was called
-        connector.rate_limiter.acquire.assert_called_once()
-    
-    @pytest.mark.asyncio
-    async def test_write_single_record_error(self, connector, mock_session):
-        """Test handling write errors."""
-        connector.session = mock_session
-        
-        # Mock error response
-        mock_response = AsyncMock()
-        mock_response.status = 400
-        mock_response.text.return_value = '{"error": "Bad request"}'
-        mock_session.request.return_value.__aenter__.return_value = mock_response
-        
-        record = {"invalid": "data"}
-        config = {}
-        
-        with pytest.raises(WriteError, match="Record write failed with status 400"):
-            await connector._write_single_record(
-                "https://api.example.com/users", "POST", record, config
-            )
-    
-    @pytest.mark.asyncio
-    async def test_write_batch_error(self, connector, mock_session):
-        """Test handling batch write errors."""
-        connector.session = mock_session
-        connector.base_url = "https://api.example.com"
-        
-        # Mock connection error
-        mock_session.request.side_effect = Exception("Network error")
-        
-        batch = [{"id": 1}]
-        config = {"endpoint": "/users", "method": "POST"}
-        
-        with pytest.raises(WriteError, match="API write failed"):
-            await connector.write_batch(batch, config)
-        
-        assert connector.metrics["errors"] == 1
+    async def test_write_batch_raises(self, connector):
+        """Source connector write_batch should raise NotImplementedError."""
+        with pytest.raises(NotImplementedError, match="read-only"):
+            await connector.write_batch([{"id": 1}], {})
 
 
 class TestUtilityMethods:
