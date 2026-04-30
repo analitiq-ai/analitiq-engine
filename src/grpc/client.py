@@ -133,8 +133,12 @@ class DestinationGRPCClient:
         self._channel = grpc_aio.insecure_channel(self.address, options=options)
         self._stub = DestinationServiceStub(self._channel)
 
-        # Retry loop to wait for destination to be ready
+        # Retry loop to wait for destination to be ready.
+        # First-attempt failures are expected when engine and destination
+        # containers start concurrently, so they log at DEBUG; later attempts
+        # escalate to WARNING.
         for attempt in range(1, max_connect_retries + 1):
+            log_failure = logger.warning if attempt > 1 else logger.debug
             try:
                 response: HealthCheckResponse = await self._stub.HealthCheck(
                     HealthCheckRequest(),
@@ -145,17 +149,17 @@ class DestinationGRPCClient:
                     self._connected = True
                     return True
                 else:
-                    logger.warning(
+                    log_failure(
                         f"Destination not serving (attempt {attempt}/{max_connect_retries}): "
                         f"{response.message}"
                     )
             except grpc.aio.AioRpcError as e:
-                logger.warning(
+                log_failure(
                     f"Connection attempt {attempt}/{max_connect_retries} failed: {e.code()}"
                 )
 
             if attempt < max_connect_retries:
-                logger.info(f"Retrying in {retry_delay_seconds}s...")
+                logger.debug(f"Retrying in {retry_delay_seconds}s...")
                 await asyncio.sleep(retry_delay_seconds)
 
         logger.error(
