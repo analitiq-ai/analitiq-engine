@@ -1,4 +1,8 @@
-"""Dataclass models for Stream configuration (STREAM.yaml specification)."""
+"""Dataclass models for Stream configuration.
+
+The canonical schema lives in `k2m.models.stream` (see analitiq-infra
+lambda layer); these dataclasses are the engine-side runtime view.
+"""
 
 from dataclasses import dataclass, field, asdict
 from enum import Enum
@@ -332,7 +336,7 @@ class StreamEngineConfig:
 
 @dataclass
 class StreamConfig:
-    """Complete Stream configuration model based on STREAM.yaml specification."""
+    """Complete Stream configuration model (mirrors k2m.models.stream.StreamPayload)."""
     stream_id: str = ""
     pipeline_id: str = ""
     source: SourceConfig = field(default_factory=SourceConfig)
