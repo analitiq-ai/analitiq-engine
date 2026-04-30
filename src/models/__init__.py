@@ -48,14 +48,6 @@ from .transformations import (
 # Metrics models
 from .metrics import PipelineMetrics
 
-# Enriched config models (merged connection + endpoint config)
-from .enriched import (
-    EnrichedAPIConfig,
-    EnrichedDatabaseConfig,
-    EnrichedDestinationConfig,
-    EnrichedSourceConfig,
-)
-
 from .state import (
     CursorField,
     StreamCursor,
@@ -103,11 +95,6 @@ __all__ = [
     "TransformationType",
     # Metrics models
     "PipelineMetrics",
-    # Enriched config models
-    "EnrichedAPIConfig",
-    "EnrichedDatabaseConfig",
-    "EnrichedDestinationConfig",
-    "EnrichedSourceConfig",
     # State models
     "CursorField",
     "StreamCursor",
