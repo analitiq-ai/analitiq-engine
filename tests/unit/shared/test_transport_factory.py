@@ -25,7 +25,10 @@ from src.shared.transport_factory import (
     build_http_transport,
     build_sqlalchemy_transport,
     build_transport,
+    register_transport_kind,
+    registered_transport_kinds,
     resolve_transport_spec,
+    unregister_transport_kind,
 )
 
 
@@ -499,6 +502,21 @@ class TestBuildTransportDispatch:
             await build_transport(connector, context=ctx)
 
     @pytest.mark.asyncio
+    async def test_unknown_kind_error_lists_registered_kinds(self):
+        # The error message must enumerate the actually-registered kinds
+        # so plugin authors can see what got loaded into the process.
+        connector = {
+            "slug": "demo",
+            "default_transport": "api",
+            "transports": {"api": {"kind": "kafka", "base_url": "x"}},
+        }
+        ctx = ResolutionContext(connector=connector)
+        with pytest.raises(NotImplementedError) as excinfo:
+            await build_transport(connector, context=ctx)
+        assert "'http'" in str(excinfo.value)
+        assert "'sqlalchemy'" in str(excinfo.value)
+
+    @pytest.mark.asyncio
     async def test_missing_kind_rejected(self):
         connector = {
             "slug": "demo",
@@ -507,4 +525,72 @@ class TestBuildTransportDispatch:
         }
         ctx = ResolutionContext(connector=connector)
         with pytest.raises(ValueError, match="missing `kind`"):
+            await build_transport(connector, context=ctx)
+
+
+# ---------------------------------------------------------------------------
+# Transport kind registry (register / build / unregister lifecycle)
+# ---------------------------------------------------------------------------
+
+
+class TestTransportKindRegistry:
+    def test_built_in_kinds_registered_at_import_time(self):
+        kinds = registered_transport_kinds()
+        assert "sqlalchemy" in kinds
+        assert "http" in kinds
+
+    def test_register_rejects_empty_kind(self):
+        with pytest.raises(ValueError, match="non-empty string"):
+            register_transport_kind("", AsyncMock())
+
+    def test_register_rejects_non_string_kind(self):
+        with pytest.raises(ValueError, match="non-empty string"):
+            register_transport_kind(42, AsyncMock())  # type: ignore[arg-type]
+
+    def test_re_registering_existing_kind_rejected(self):
+        # Built-ins must not be silently overridden — replacement requires
+        # an explicit unregister first.
+        with pytest.raises(ValueError, match="already registered"):
+            register_transport_kind("http", AsyncMock())
+
+    def test_unregister_unknown_kind_raises(self):
+        with pytest.raises(KeyError):
+            unregister_transport_kind("nope-not-a-kind")
+
+    @pytest.mark.asyncio
+    async def test_register_build_unregister_cycle(self):
+        # Full lifecycle: a plugin-style registration teaches the engine a
+        # new kind, build_transport dispatches to it, unregister cleans up,
+        # and afterwards the engine rejects the kind again.
+        sentinel = object()
+        builder = AsyncMock(return_value=sentinel)
+        register_transport_kind("test_kind", builder)
+        try:
+            assert "test_kind" in registered_transport_kinds()
+
+            connector = {
+                "slug": "demo",
+                "default_transport": "api",
+                "transports": {
+                    "api": {"kind": "test_kind", "marker": "value"}
+                },
+            }
+            ctx = ResolutionContext(connector=connector)
+            result = await build_transport(connector, context=ctx)
+            assert result is sentinel
+            builder.assert_awaited_once()
+            (called_spec,) = builder.await_args.args
+            assert called_spec["kind"] == "test_kind"
+            assert called_spec["marker"] == "value"
+        finally:
+            unregister_transport_kind("test_kind")
+
+        assert "test_kind" not in registered_transport_kinds()
+        connector = {
+            "slug": "demo",
+            "default_transport": "api",
+            "transports": {"api": {"kind": "test_kind"}},
+        }
+        ctx = ResolutionContext(connector=connector)
+        with pytest.raises(NotImplementedError, match="Unsupported transport kind"):
             await build_transport(connector, context=ctx)

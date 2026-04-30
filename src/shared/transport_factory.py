@@ -17,7 +17,7 @@ import copy
 import logging
 import ssl as _ssl
 from dataclasses import dataclass
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Awaitable, Callable, Dict, Mapping, Optional
 
 import aiohttp
 from sqlalchemy import text as _sa_text
@@ -28,6 +28,8 @@ from src.engine.resolver import ResolutionContext, Resolver
 from src.shared.rate_limiter import RateLimiter
 
 logger = logging.getLogger(__name__)
+
+TransportBuilder = Callable[[Mapping[str, Any]], Awaitable[Any]]
 
 
 # ---------------------------------------------------------------------------
@@ -384,6 +386,53 @@ async def build_http_transport(spec: Mapping[str, Any]) -> HttpTransport:
 
 
 # ---------------------------------------------------------------------------
+# Transport kind registry
+# ---------------------------------------------------------------------------
+
+
+_TRANSPORT_BUILDERS: Dict[str, TransportBuilder] = {}
+
+
+def register_transport_kind(kind: str, builder: TransportBuilder) -> None:
+    """Register a builder for a transport ``kind``.
+
+    Plugin packages call this at import time to teach the engine new
+    transport families (kafka, s3, mongodb, …). The builder receives the
+    resolved transport spec and must return an awaitable that yields a
+    materialized transport object. Re-registering an existing kind raises
+    :class:`ValueError`; call :func:`unregister_transport_kind` first if
+    replacement is intended.
+    """
+    if not isinstance(kind, str) or not kind:
+        raise ValueError("transport kind must be a non-empty string")
+    if kind in _TRANSPORT_BUILDERS:
+        raise ValueError(
+            f"transport kind {kind!r} already registered; call "
+            f"unregister_transport_kind first to replace it"
+        )
+    _TRANSPORT_BUILDERS[kind] = builder
+
+
+def unregister_transport_kind(kind: str) -> None:
+    """Remove a previously registered transport ``kind``.
+
+    Raises :class:`KeyError` if the kind is not registered. Primarily
+    useful for test isolation and for plugins that need to swap an
+    implementation.
+    """
+    del _TRANSPORT_BUILDERS[kind]
+
+
+def registered_transport_kinds() -> list[str]:
+    """Return the sorted list of currently registered transport kinds."""
+    return sorted(_TRANSPORT_BUILDERS)
+
+
+register_transport_kind("sqlalchemy", build_sqlalchemy_transport)
+register_transport_kind("http", build_http_transport)
+
+
+# ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
 
@@ -396,9 +445,9 @@ async def build_transport(
 ):
     """Materialize a transport from a connector definition.
 
-    Returns a typed transport object — :class:`SqlAlchemyTransport` for
-    ``kind: sqlalchemy`` or :class:`HttpTransport` for ``kind: http``. New
-    transport families add a new ``kind`` here and a matching builder.
+    Dispatches via the transport kind registry. The two built-in families
+    (``sqlalchemy``, ``http``) are registered at import time; plugins can
+    add more via :func:`register_transport_kind`.
     """
     spec = resolve_transport_spec(
         connector, transport_ref=transport_ref, context=context
@@ -409,10 +458,10 @@ async def build_transport(
             f"Resolved transport spec missing `kind`; connector "
             f"{connector.get('slug')!r}, transport {transport_ref!r}"
         )
-    if kind == "sqlalchemy":
-        return await build_sqlalchemy_transport(spec)
-    if kind == "http":
-        return await build_http_transport(spec)
-    raise NotImplementedError(
-        f"Unsupported transport kind: {kind!r}; supported: ['sqlalchemy', 'http']"
-    )
+    builder = _TRANSPORT_BUILDERS.get(kind)
+    if builder is None:
+        raise NotImplementedError(
+            f"Unsupported transport kind: {kind!r}; "
+            f"registered: {registered_transport_kinds()}"
+        )
+    return await builder(spec)
