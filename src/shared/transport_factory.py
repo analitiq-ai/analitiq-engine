@@ -402,9 +402,18 @@ def register_transport_kind(kind: str, builder: TransportBuilder) -> None:
     materialized transport object. Re-registering an existing kind raises
     :class:`ValueError`; call :func:`unregister_transport_kind` first if
     replacement is intended.
+
+    A non-callable ``builder`` is rejected at registration time so the
+    failure surfaces near the bug rather than later inside
+    :func:`build_transport` when a pipeline tries to use it.
     """
     if not isinstance(kind, str) or not kind:
         raise ValueError("transport kind must be a non-empty string")
+    if not callable(builder):
+        raise TypeError(
+            f"transport builder for {kind!r} must be callable; got "
+            f"{type(builder).__name__}"
+        )
     if kind in _TRANSPORT_BUILDERS:
         raise ValueError(
             f"transport kind {kind!r} already registered; call "
@@ -416,10 +425,15 @@ def register_transport_kind(kind: str, builder: TransportBuilder) -> None:
 def unregister_transport_kind(kind: str) -> None:
     """Remove a previously registered transport ``kind``.
 
-    Raises :class:`KeyError` if the kind is not registered. Primarily
-    useful for test isolation and for plugins that need to swap an
-    implementation.
+    Raises :class:`KeyError` with the list of currently registered kinds
+    if ``kind`` is not registered. Primarily useful for test isolation
+    and for plugins that need to swap an implementation.
     """
+    if kind not in _TRANSPORT_BUILDERS:
+        raise KeyError(
+            f"transport kind {kind!r} not registered; "
+            f"registered: {registered_transport_kinds()}"
+        )
     del _TRANSPORT_BUILDERS[kind]
 
 

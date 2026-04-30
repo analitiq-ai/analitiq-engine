@@ -534,6 +534,20 @@ class TestBuildTransportDispatch:
 
 
 class TestTransportKindRegistry:
+    @pytest.fixture(autouse=True)
+    def _restore_registry(self):
+        # The registry is module-level; a test that fails mid-flight could
+        # leave state behind and corrupt sibling tests. Snapshot before,
+        # restore after — irrespective of what the test body did.
+        from src.shared.transport_factory import _TRANSPORT_BUILDERS
+
+        snapshot = dict(_TRANSPORT_BUILDERS)
+        try:
+            yield
+        finally:
+            _TRANSPORT_BUILDERS.clear()
+            _TRANSPORT_BUILDERS.update(snapshot)
+
     def test_built_in_kinds_registered_at_import_time(self):
         kinds = registered_transport_kinds()
         assert "sqlalchemy" in kinds
@@ -547,14 +561,24 @@ class TestTransportKindRegistry:
         with pytest.raises(ValueError, match="non-empty string"):
             register_transport_kind(42, AsyncMock())  # type: ignore[arg-type]
 
+    def test_register_rejects_non_callable_builder(self):
+        # Non-callable builders fail loudly at registration so the bug is
+        # near the registration site, not deep in build_transport.
+        with pytest.raises(TypeError, match="must be callable"):
+            register_transport_kind("test_bad_builder", None)  # type: ignore[arg-type]
+        with pytest.raises(TypeError, match="must be callable"):
+            register_transport_kind("test_bad_builder", "not a function")  # type: ignore[arg-type]
+
     def test_re_registering_existing_kind_rejected(self):
-        # Built-ins must not be silently overridden — replacement requires
-        # an explicit unregister first.
+        # Use a throwaway kind rather than "http" — if the assertion regex
+        # ever stops matching, registering against a built-in would silently
+        # overwrite it for the rest of the suite.
+        register_transport_kind("test_dup_kind", AsyncMock())
         with pytest.raises(ValueError, match="already registered"):
-            register_transport_kind("http", AsyncMock())
+            register_transport_kind("test_dup_kind", AsyncMock())
 
     def test_unregister_unknown_kind_raises(self):
-        with pytest.raises(KeyError):
+        with pytest.raises(KeyError, match="not registered"):
             unregister_transport_kind("nope-not-a-kind")
 
     @pytest.mark.asyncio
