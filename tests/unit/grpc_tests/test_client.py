@@ -1,5 +1,6 @@
 """Unit tests for gRPC client."""
 
+import grpc
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -138,6 +139,136 @@ class TestDestinationGRPCClient:
         # Should not raise
         await client.disconnect()
         assert client._connected is False
+
+
+class TestConnectRetryLogLevels:
+    """Attempt 1 logs at DEBUG (expected during concurrent startup);
+    attempts 2+ log at WARNING.
+    """
+
+    @staticmethod
+    def _unavailable_error() -> grpc.aio.AioRpcError:
+        return grpc.aio.AioRpcError(
+            code=grpc.StatusCode.UNAVAILABLE,
+            initial_metadata=grpc.aio.Metadata(),
+            trailing_metadata=grpc.aio.Metadata(),
+            details="destination not ready",
+        )
+
+    @pytest.mark.asyncio
+    async def test_first_attempt_failure_logs_at_debug(self):
+        """First attempt failure logs at DEBUG, never WARNING."""
+        client = DestinationGRPCClient()
+        mock_stub = MagicMock()
+        mock_stub.HealthCheck = AsyncMock(side_effect=self._unavailable_error())
+
+        with patch("src.grpc.client.grpc_aio.insecure_channel"), \
+             patch("src.grpc.client.DestinationServiceStub", return_value=mock_stub), \
+             patch("src.grpc.client.logger") as mock_logger:
+            result = await client.connect(
+                max_connect_retries=1,
+                retry_delay_seconds=0.0,
+            )
+
+        assert result is False
+        debug_msgs = [c.args[0] for c in mock_logger.debug.call_args_list]
+        warning_msgs = [c.args[0] for c in mock_logger.warning.call_args_list]
+        assert any("Connection attempt 1/1 failed" in m for m in debug_msgs)
+        assert not any("Connection attempt" in m for m in warning_msgs)
+
+    @pytest.mark.asyncio
+    async def test_subsequent_attempt_failures_log_at_warning(self):
+        """Failures on attempts 2+ escalate to WARNING; the terminal ERROR
+        carries the gRPC status code; Retrying tracks the failure level.
+        """
+        client = DestinationGRPCClient()
+        mock_stub = MagicMock()
+        mock_stub.HealthCheck = AsyncMock(side_effect=self._unavailable_error())
+
+        with patch("src.grpc.client.grpc_aio.insecure_channel"), \
+             patch("src.grpc.client.DestinationServiceStub", return_value=mock_stub), \
+             patch("src.grpc.client.logger") as mock_logger:
+            result = await client.connect(
+                max_connect_retries=3,
+                retry_delay_seconds=0.0,
+            )
+
+        assert result is False
+        debug_msgs = [c.args[0] for c in mock_logger.debug.call_args_list]
+        info_msgs = [c.args[0] for c in mock_logger.info.call_args_list]
+        warning_msgs = [c.args[0] for c in mock_logger.warning.call_args_list]
+        error_msgs = [c.args[0] for c in mock_logger.error.call_args_list]
+
+        assert any("Connection attempt 1/3 failed" in m for m in debug_msgs)
+        assert any("Connection attempt 2/3 failed" in m for m in warning_msgs)
+        assert any("Connection attempt 3/3 failed" in m for m in warning_msgs)
+        # Retrying after a DEBUG failure stays at DEBUG; after a WARNING
+        # failure it promotes to INFO so backoff cadence remains visible.
+        assert sum("Retrying" in m for m in debug_msgs) == 1
+        assert sum("Retrying" in m for m in info_msgs) == 1
+        # Final ERROR surfaces the failure mode for single-attempt callers
+        # (send_shutdown / main.py) where attempt 1 was DEBUG.
+        assert any("Failed to connect" in m and "UNAVAILABLE" in m for m in error_msgs)
+
+    @pytest.mark.asyncio
+    async def test_first_attempt_fails_then_succeeds(self):
+        """Production scenario: attempt 1 fails (DEBUG), attempt 2 connects
+        cleanly with INFO and no WARNING."""
+        from src.grpc.generated.analitiq.v1 import HealthCheckResponse
+
+        client = DestinationGRPCClient()
+        serving = HealthCheckResponse(
+            status=HealthCheckResponse.ServingStatus.SERVING,
+            message="ok",
+        )
+        mock_stub = MagicMock()
+        mock_stub.HealthCheck = AsyncMock(
+            side_effect=[self._unavailable_error(), serving]
+        )
+
+        with patch("src.grpc.client.grpc_aio.insecure_channel"), \
+             patch("src.grpc.client.DestinationServiceStub", return_value=mock_stub), \
+             patch("src.grpc.client.logger") as mock_logger:
+            result = await client.connect(
+                max_connect_retries=3,
+                retry_delay_seconds=0.0,
+            )
+
+        assert result is True
+        assert client._connected is True
+        debug_msgs = [c.args[0] for c in mock_logger.debug.call_args_list]
+        info_msgs = [c.args[0] for c in mock_logger.info.call_args_list]
+        warning_msgs = [c.args[0] for c in mock_logger.warning.call_args_list]
+        assert any("Connection attempt 1/3 failed" in m for m in debug_msgs)
+        assert any("Connected to destination" in m for m in info_msgs)
+        assert not any("Connection attempt" in m for m in warning_msgs)
+
+    @pytest.mark.asyncio
+    async def test_first_attempt_not_serving_logs_at_debug(self):
+        """A 'not serving' health response on attempt 1 also logs at DEBUG."""
+        from src.grpc.generated.analitiq.v1 import HealthCheckResponse
+
+        client = DestinationGRPCClient()
+        not_serving = HealthCheckResponse(
+            status=HealthCheckResponse.ServingStatus.NOT_SERVING,
+            message="warming up",
+        )
+        mock_stub = MagicMock()
+        mock_stub.HealthCheck = AsyncMock(return_value=not_serving)
+
+        with patch("src.grpc.client.grpc_aio.insecure_channel"), \
+             patch("src.grpc.client.DestinationServiceStub", return_value=mock_stub), \
+             patch("src.grpc.client.logger") as mock_logger:
+            result = await client.connect(
+                max_connect_retries=1,
+                retry_delay_seconds=0.0,
+            )
+
+        assert result is False
+        debug_msgs = [c.args[0] for c in mock_logger.debug.call_args_list]
+        warning_msgs = [c.args[0] for c in mock_logger.warning.call_args_list]
+        assert any("Destination not serving (attempt 1/1)" in m for m in debug_msgs)
+        assert not any("Destination not serving" in m for m in warning_msgs)
 
 
 class TestClientPayloadEncoding:

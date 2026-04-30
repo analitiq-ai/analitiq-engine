@@ -133,8 +133,11 @@ class DestinationGRPCClient:
         self._channel = grpc_aio.insecure_channel(self.address, options=options)
         self._stub = DestinationServiceStub(self._channel)
 
-        # Retry loop to wait for destination to be ready
+        # Attempt 1 failures are expected during concurrent engine/destination
+        # startup; attempts 2+ escalate to WARNING.
+        last_failure: Optional[str] = None
         for attempt in range(1, max_connect_retries + 1):
+            log_failure = logger.warning if attempt > 1 else logger.debug
             try:
                 response: HealthCheckResponse = await self._stub.HealthCheck(
                     HealthCheckRequest(),
@@ -144,23 +147,25 @@ class DestinationGRPCClient:
                     logger.info(f"Connected to destination at {self.address}")
                     self._connected = True
                     return True
-                else:
-                    logger.warning(
-                        f"Destination not serving (attempt {attempt}/{max_connect_retries}): "
-                        f"{response.message}"
-                    )
+                last_failure = f"not serving: {response.message}"
+                log_failure(
+                    f"Destination not serving (attempt {attempt}/{max_connect_retries}): "
+                    f"{response.message}"
+                )
             except grpc.aio.AioRpcError as e:
-                logger.warning(
+                last_failure = e.code().name
+                log_failure(
                     f"Connection attempt {attempt}/{max_connect_retries} failed: {e.code()}"
                 )
 
             if attempt < max_connect_retries:
-                logger.info(f"Retrying in {retry_delay_seconds}s...")
+                log_retry = logger.info if attempt > 1 else logger.debug
+                log_retry(f"Retrying in {retry_delay_seconds}s...")
                 await asyncio.sleep(retry_delay_seconds)
 
         logger.error(
             f"Failed to connect to destination at {self.address} "
-            f"after {max_connect_retries} attempts"
+            f"after {max_connect_retries} attempts: {last_failure or 'unknown'}"
         )
         return False
 
