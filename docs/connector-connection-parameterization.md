@@ -1107,6 +1107,43 @@ may run only during connection setup, while most pipeline runs use only the
 default API or database transport. Secret resolution and scrubbing semantics
 still apply, but they are scoped to the transport being materialized.
 
+### Transport Kind Registry
+
+The engine dispatches `build_transport` through a registry keyed by `kind`.
+Built-in entries (`sqlalchemy`, `http`) are registered at engine import time
+in `src/shared/transport_factory.py`. Plugins can teach the engine new
+transport families by calling the registration API at startup:
+
+```python
+from src.shared.transport_factory import (
+    register_transport_kind,
+    unregister_transport_kind,
+)
+
+async def build_kafka_transport(spec):
+    ...
+
+register_transport_kind("kafka", build_kafka_transport)
+```
+
+This mirrors the derived-function registration model: a plugin package's
+`__init__` performs a one-line call and the engine immediately accepts
+connector definitions that declare `"kind": "kafka"`. The registry never
+imports plugin code on its own — the plugin and any libraries the builder
+depends on must already be installed in the runtime environment. The
+registry only solves dispatch, not packaging.
+
+Rules:
+
+- `register_transport_kind(kind, builder)` rejects re-registration of an
+  existing kind. Plugins that need to override a built-in must call
+  `unregister_transport_kind(kind)` first.
+- The builder receives the resolved transport spec (a `Mapping`) and must
+  return an awaitable that yields a materialized transport object.
+- `build_transport` raises `NotImplementedError` if a connector references
+  an unregistered kind, and the error message lists the kinds currently
+  registered in the running process.
+
 ## Derived Values
 
 Derived values are values computed during resolution, but they must still be
