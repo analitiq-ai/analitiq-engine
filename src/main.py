@@ -34,7 +34,7 @@ import asyncio
 import logging
 import os
 import sys
-from typing import Dict
+from typing import Any, Dict
 
 # Set up logging
 log_level = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -172,8 +172,9 @@ async def run_destination_mode() -> None:
     # Build stream_id -> destination endpoint_ref index for streams that
     # target this connection. The handler uses it to pick the right
     # type-mapper per incoming SchemaMessage (connector-scoped vs
-    # connection-scoped endpoints).
-    endpoint_refs: Dict[str, str] = {}
+    # connection-scoped endpoints). Values are dict-shape EndpointRef
+    # payloads ({"scope", "identifier", "endpoint"}).
+    endpoint_refs: Dict[str, Dict[str, Any]] = {}
     for stream in stream_configs:
         for dest in stream.get("destinations", []):
             if dest.get("connection_ref") == dest_alias:

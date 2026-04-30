@@ -20,6 +20,9 @@ services:
       - DESTINATION_INDEX=${DESTINATION_INDEX:-0}
       # Pipeline identification (required at runtime)
       - PIPELINE_ID=${PIPELINE_ID}
+      # ENV=loc skips the cloud config fetcher; required for hand-written
+      # pipelines whose configs already live on disk.
+      - ENV=${ENV:-loc}
 
     # Volume mounts for modular config files
     # Convention-based discovery finds pipelines/manifest.json at /app/pipelines/
@@ -86,6 +89,8 @@ services:
       - DESTINATION_GRPC_PORT=50051
       # Pipeline identification (required at runtime)
       - PIPELINE_ID=${PIPELINE_ID}
+      # ENV=loc skips the cloud config fetcher; matches the destination.
+      - ENV=${ENV:-loc}
 
     # Volume mounts for modular config files
     # Convention-based discovery finds pipelines/manifest.json at /app/pipelines/

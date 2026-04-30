@@ -11,11 +11,18 @@ from pydantic import BaseModel, Field
 
 
 class EnrichedDatabaseConfig(BaseModel):
-    """Connection + endpoint config for database connectors."""
+    """Connection + endpoint config for database connectors.
+
+    ``driver`` and ``host`` are now derived at materialize time from the
+    connector's ``transports.<ref>`` block and the connection's
+    ``parameters``; they remain on this model only so legacy validation
+    can pass through and downstream code can read them when a value is
+    available.
+    """
 
     connector_type: Literal["database"] = Field("database", description="Connector type discriminator")
-    driver: str = Field(..., description="Database driver from connector metadata")
-    host: str = Field(..., description="Database host")
+    driver: Optional[str] = Field(None, description="Base SQL dialect derived from the connector transport")
+    host: Optional[str] = Field(None, description="Database host (from connection.parameters.host)")
     parameters: Dict[str, Any] = Field(default_factory=dict, description="Connection parameters")
 
     # Endpoint fields
@@ -24,10 +31,16 @@ class EnrichedDatabaseConfig(BaseModel):
 
 
 class EnrichedAPIConfig(BaseModel):
-    """Connection + endpoint config for API connectors."""
+    """Connection + endpoint config for API connectors.
+
+    ``host`` is the connector's transport base URL when known statically;
+    for connectors that template their base URL (e.g. region- or
+    tenant-specific), it is left ``None`` and the engine consumes the
+    materialized base URL from :class:`ConnectionRuntime` at request time.
+    """
 
     connector_type: Literal["api"] = Field("api", description="Connector type discriminator")
-    host: str = Field(..., description="API base URL")
+    host: Optional[str] = Field(None, description="API base URL (literal transport.base_url, if any)")
     parameters: Dict[str, Any] = Field(default_factory=dict, description="Connection parameters")
 
     # Endpoint fields

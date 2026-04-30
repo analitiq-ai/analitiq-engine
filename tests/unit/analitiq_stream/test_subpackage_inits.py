@@ -123,27 +123,35 @@ class TestSharedPackageInit:
 
     @pytest.mark.unit
     def test_shared_utilities(self):
-        """Direct imports from the shared package match its current __all__."""
+        """Direct imports from the shared package match its current __all__.
+
+        The legacy ``DIALECT_MAP``, ``SSL_DIALECTS``,
+        ``DatabaseConnectionParams``, ``extract_connection_params``, and
+        ``canonical_ssl_to_connect_arg`` exports were removed when
+        connector-driven transports replaced the hard-coded engine
+        factory; what remains are pure SQL helpers and shared lifecycle
+        primitives.
+        """
         from src.shared import (
-            DIALECT_MAP,
-            SSL_DIALECTS,
-            DatabaseConnectionParams,
+            ConnectionRuntime,
             RateLimiter,
-            canonical_ssl_to_connect_arg,
-            extract_connection_params,
+            acquire_connection,
+            convert_db_to_python,
+            convert_record_from_db,
+            get_default_clause,
             get_full_table_name,
             validate_sql_identifier,
         )
 
         for obj in (
-            canonical_ssl_to_connect_arg,
-            validate_sql_identifier,
-            get_full_table_name,
+            ConnectionRuntime,
             RateLimiter,
-            DatabaseConnectionParams,
-            extract_connection_params,
-            DIALECT_MAP,
-            SSL_DIALECTS,
+            acquire_connection,
+            convert_db_to_python,
+            convert_record_from_db,
+            get_default_clause,
+            get_full_table_name,
+            validate_sql_identifier,
         ):
             assert obj is not None
 

@@ -8,7 +8,6 @@ from .analitiq_config import (
 
 # Export endpoint resolver
 from .endpoint_resolver import (
-    parse_endpoint_ref,
     resolve_endpoint_ref,
     resolve_endpoint_path,
 )
@@ -37,7 +36,6 @@ __all__ = [
     "validate_pipeline_config",
     "validate_connection_config",
     # Endpoint resolver
-    "parse_endpoint_ref",
     "resolve_endpoint_ref",
     "resolve_endpoint_path",
     # Connection loader

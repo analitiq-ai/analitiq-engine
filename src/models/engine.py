@@ -91,7 +91,7 @@ class StreamProcessingConfig(BaseModel):
         if not isinstance(value, dict):
             raise TypeError("must be a dictionary of endpoint configuration values")
 
-        required_keys = ["endpoint_id", "connection_id"]
+        required_keys = ["endpoint_ref", "connection_id"]
         missing = [key for key in required_keys if key not in value]
         if missing:
             display = info.field_name

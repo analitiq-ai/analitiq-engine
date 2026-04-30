@@ -7,32 +7,52 @@ from typing import Any, Dict, List
 from src.source.connectors.database import DatabaseConnector
 from src.source.connectors.base import ConnectionError, ReadError
 from src.shared.connection_runtime import ConnectionRuntime
+from src.shared.transport_factory import SqlAlchemyTransport
 
 
 @pytest.fixture
 def database_config():
     """Sample database configuration for unit tests."""
     return {
-        "driver": "postgresql",
-        "host": "localhost",
+        "connector_slug": "postgres",
         "parameters": {
+            "host": "localhost",
             "port": 5432,
             "database": "test_db",
             "username": "test_user",
-            "password": "test_password",
+        },
+        "secret_refs": {"password": "tests/postgres/password"},
+    }
+
+
+@pytest.fixture
+def database_connector_def():
+    """Minimal connector definition with a sqlalchemy transport."""
+    return {
+        "slug": "postgres",
+        "connector_type": "database",
+        "default_transport": "database",
+        "transports": {
+            "database": {
+                "kind": "sqlalchemy",
+                "driver": "postgresql+asyncpg",
+                "dsn": {"template": "postgresql+asyncpg://u:p@h:5432/d"},
+            }
         },
     }
 
 
 @pytest.fixture
-def database_runtime(database_config):
-    """ConnectionRuntime for database tests."""
+def database_runtime(database_config, database_connector_def):
+    """ConnectionRuntime for database tests, wired for the new transport factory."""
+    resolver = AsyncMock()
+    resolver.resolve = AsyncMock(return_value={"password": "test_password"})
     return ConnectionRuntime(
         raw_config=database_config,
         connection_id="test-conn",
         connector_type="database",
-        driver="postgresql",
-        resolver=AsyncMock(),
+        resolver=resolver,
+        connector_definition=database_connector_def,
     )
 
 
@@ -95,10 +115,15 @@ class TestDatabaseConnectorConnection:
     async def test_connect_success(self, connector, database_runtime):
         """Test successful database connection."""
         mock_engine = AsyncMock()
+        transport = SqlAlchemyTransport(
+            engine=mock_engine,
+            driver="postgresql+asyncpg",
+            dialect="postgresql",
+        )
 
         with patch(
-            'src.shared.connection_runtime.create_database_engine',
-            return_value=(mock_engine, "postgresql"),
+            'src.shared.connection_runtime.build_transport',
+            new=AsyncMock(return_value=transport),
         ):
             await connector.connect(database_runtime)
 
@@ -111,8 +136,8 @@ class TestDatabaseConnectorConnection:
     async def test_connect_engine_error(self, connector, database_runtime):
         """Test connection failure at engine level."""
         with patch(
-            'src.shared.connection_runtime.create_database_engine',
-            side_effect=Exception("Engine creation failed"),
+            'src.shared.connection_runtime.build_transport',
+            new=AsyncMock(side_effect=Exception("Engine creation failed")),
         ):
             with pytest.raises(ConnectionError) as exc_info:
                 await connector.connect(database_runtime)
@@ -300,10 +325,15 @@ class TestDatabaseConnectorContextManager:
     async def test_context_manager_usage(self, database_runtime):
         """Test connector as context manager."""
         mock_engine = AsyncMock()
+        transport = SqlAlchemyTransport(
+            engine=mock_engine,
+            driver="postgresql+asyncpg",
+            dialect="postgresql",
+        )
 
         with patch(
-            'src.shared.connection_runtime.create_database_engine',
-            return_value=(mock_engine, "postgresql"),
+            'src.shared.connection_runtime.build_transport',
+            new=AsyncMock(return_value=transport),
         ):
             connector = DatabaseConnector("ContextTestConnector")
             await connector.connect(database_runtime)

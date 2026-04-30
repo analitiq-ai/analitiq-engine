@@ -44,11 +44,10 @@ from src.config import (
 )
 from src.config.endpoint_resolver import resolve_endpoint_ref
 from src.config.connection_loader import load_connection, load_connector_for_connection
+from src.models.stream import EndpointRef
 from src.engine.type_map import (
-    SSLModeMapper,
     TypeMapper,
     load_connection_type_map,
-    load_ssl_mode_map,
     load_type_map,
 )
 from src.secrets import (
@@ -96,16 +95,17 @@ class PipelineConfigPrep:
 
         # Cache for resolved connections and endpoints
         self._resolved_connections: Dict[str, ConnectionRuntime] = {}
-        self._resolved_endpoints: Dict[str, Dict[str, Any]] = {}
+        self._resolved_endpoints: Dict[EndpointRef, Dict[str, Any]] = {}
 
         # Cache for loaded connectors (keyed by slug)
         self._loaded_connectors: Dict[str, Dict[str, Any]] = {}
 
-        # Per-connector type and ssl-mode mappers (keyed by slug). Populated
-        # eagerly by _load_connector so downstream code can look them up
-        # without re-reading the filesystem.
+        # Per-connector type mappers (keyed by slug). Populated eagerly by
+        # _load_connector so downstream code can look them up without
+        # re-reading the filesystem. SSL handling is now driven by the
+        # connector's `transports.<ref>.connect_args.ssl` lookup; no separate
+        # mapper is loaded.
         self._type_mappers: Dict[str, TypeMapper] = {}
-        self._ssl_mappers: Dict[str, Optional[SSLModeMapper]] = {}
 
         # Per-connection type mappers (keyed by alias). Optional — absent
         # file means the connection only references public endpoints.
@@ -336,9 +336,10 @@ class PipelineConfigPrep:
     def _load_connector(self, connector_slug: str) -> Dict[str, Any]:
         """Load a connector definition by slug, with caching.
 
-        Also eagerly loads the connector's ``type-map.json`` (required) and
-        ``ssl-mode-map.json`` (optional) so materialization and the schema
-        contract can pull them from memory.
+        Also eagerly loads the connector's ``type-map.json`` (required for
+        the schema contract). SSL behavior is encoded in the connector's
+        ``transports.<ref>.connect_args.ssl`` lookup and resolved lazily by
+        the transport factory; no separate ssl-mode-map is read here.
         """
         if connector_slug in self._loaded_connectors:
             return self._loaded_connectors[connector_slug]
@@ -348,9 +349,6 @@ class PipelineConfigPrep:
         )
         self._loaded_connectors[connector_slug] = connector
         self._type_mappers[connector_slug] = load_type_map(
-            self._paths["connectors"], connector_slug
-        )
-        self._ssl_mappers[connector_slug] = load_ssl_mode_map(
             self._paths["connectors"], connector_slug
         )
         return connector
@@ -365,13 +363,6 @@ class PipelineConfigPrep:
         if connector_slug not in self._type_mappers:
             self._load_connector(connector_slug)
         return self._type_mappers[connector_slug]
-
-    def get_ssl_mapper(self, connector_slug: str) -> Optional[SSLModeMapper]:
-        """Return the cached ``SSLModeMapper`` for a connector, or ``None``
-        when the connector does not ship an ``ssl-mode-map.json``."""
-        if connector_slug not in self._ssl_mappers:
-            self._load_connector(connector_slug)
-        return self._ssl_mappers[connector_slug]
 
     def _load_connection_type_mapper(self, alias: str) -> Optional[TypeMapper]:
         """Load (and cache) the connection's own type-map for private endpoints."""
@@ -422,36 +413,14 @@ class PipelineConfigPrep:
             )
         return connector_type
 
-    def _normalize_database_connection(
-        self, config: Dict[str, Any], connector: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """Normalize database connection fields."""
-        result = config.copy()
-        params = result.get("parameters", {})
-
-        driver = connector.get("driver")
-        if driver:
-            result["driver"] = driver
-
-        if isinstance(params.get("port"), str):
-            params["port"] = int(params["port"])
-            result["parameters"] = params
-
-        return result
-
     def _resolve_connection(
         self, alias: str,
     ) -> ConnectionRuntime:
         """Resolve a connection by alias.
 
-        Creates a ConnectionRuntime with enriched metadata.
-        Secrets are resolved lazily via materialize().
-
-        Args:
-            alias: Connection alias (directory name, used as connection_id)
-
-        Returns:
-            ConnectionRuntime object
+        Creates a ConnectionRuntime with the connector definition attached.
+        The connector's ``transports`` block drives transport materialization
+        when ``materialize()`` is later called by source/destination handlers.
         """
         if alias in self._resolved_connections:
             return self._resolved_connections[alias]
@@ -466,9 +435,6 @@ class PipelineConfigPrep:
                 f"Expected one of: {sorted(VALID_CONNECTOR_TYPES)}"
             )
 
-        if connection_type == "database":
-            config = self._normalize_database_connection(config, connector)
-
         resolver = self._create_secrets_resolver(alias)
         connector_slug = config.get("connector_slug")
 
@@ -476,11 +442,10 @@ class PipelineConfigPrep:
             raw_config=config,
             connection_id=alias,
             connector_type=connection_type,
-            driver=connector.get("driver") if connection_type == "database" else None,
             resolver=resolver,
+            connector_definition=connector,
             connector_type_mapper=self._type_mappers.get(connector_slug),
             connection_type_mapper=self._load_connection_type_mapper(alias),
-            ssl_mapper=self._ssl_mappers.get(connector_slug),
         )
 
         self._resolved_connections[alias] = runtime
@@ -491,21 +456,23 @@ class PipelineConfigPrep:
     # Endpoint Resolution
     # =========================================================================
 
-    def _resolve_endpoint(self, endpoint_ref: str) -> Dict[str, Any]:
-        """Resolve an endpoint by its scoped reference.
+    def _resolve_endpoint(self, endpoint_ref: Any) -> Dict[str, Any]:
+        """Resolve an endpoint by its structured reference.
 
         Args:
-            endpoint_ref: Scoped reference, e.g. "connector:pipedrive/deals"
+            endpoint_ref: ``EndpointRef`` instance or equivalent dict
+                ``{"scope", "identifier", "endpoint"}``.
 
         Returns:
             Resolved endpoint configuration dict
         """
-        if endpoint_ref in self._resolved_endpoints:
-            return self._resolved_endpoints[endpoint_ref]
+        ref = EndpointRef.from_dict(endpoint_ref)
+        if ref in self._resolved_endpoints:
+            return self._resolved_endpoints[ref]
 
-        endpoint = resolve_endpoint_ref(endpoint_ref, self._paths)
-        self._resolved_endpoints[endpoint_ref] = endpoint
-        logger.info(f"Resolved endpoint: {endpoint_ref}")
+        endpoint = resolve_endpoint_ref(ref, self._paths)
+        self._resolved_endpoints[ref] = endpoint
+        logger.info(f"Resolved endpoint: {ref}")
         return endpoint
 
     # =========================================================================
@@ -675,13 +642,11 @@ class PipelineConfigPrep:
         """Normalize source configuration to match SourceConfig model."""
         replication = source_data.get("replication", {})
 
-        # Use endpoint_ref as the endpoint identifier
-        endpoint_ref = source_data.get("endpoint_ref", "")
+        endpoint_ref = EndpointRef.from_dict(source_data["endpoint_ref"])
 
         result = {
             "connection_ref": source_data["connection_ref"],
-            "endpoint_id": endpoint_ref,
-            "endpoint_ref": endpoint_ref,
+            "endpoint_ref": endpoint_ref.to_dict(),
             "primary_key": source_data.get("primary_key", []),
             "replication": {
                 "method": replication.get("method", "incremental"),
@@ -704,13 +669,11 @@ class PipelineConfigPrep:
         """Normalize destination configuration to match DestinationConfig model."""
         write = dest_data.get("write", {})
 
-        # Use endpoint_ref as the endpoint identifier
-        endpoint_ref = dest_data.get("endpoint_ref", "")
+        endpoint_ref = EndpointRef.from_dict(dest_data["endpoint_ref"])
 
         result = {
             "connection_ref": dest_data["connection_ref"],
-            "endpoint_id": endpoint_ref,
-            "endpoint_ref": endpoint_ref,
+            "endpoint_ref": endpoint_ref.to_dict(),
             "write": {
                 "mode": write.get("mode", "upsert"),
             },

@@ -57,15 +57,17 @@ class TestStreamProcessingConfig:
     
     def test_build_stream_processing_config_success(self, orchestrator):
         """Test successful stream processing config building."""
+        src_ref = {"scope": "connector", "identifier": "src", "endpoint": "transfers"}
+        dst_ref = {"scope": "connection", "identifier": "dst", "endpoint": "transfers"}
         stream_config = {
             "name": "Test Stream",
             "source": {
-                "endpoint_id": "src-endpoint",
+                "endpoint_ref": src_ref,
                 "endpoint": "/test",
                 "pagination": {"type": "offset"},
             },
             "destination": {
-                "endpoint_id": "dst-endpoint",
+                "endpoint_ref": dst_ref,
                 "endpoint": "/dest",
             },
             "replication_method": "incremental",
@@ -87,17 +89,21 @@ class TestStreamProcessingConfig:
         assert result.stream_id == "stream1"
         assert result.stream_name == "Test Stream"
         assert result.pipeline_id == "test-pipeline"
-        assert result.source["endpoint_id"] == "src-endpoint"
+        assert result.source["endpoint_ref"] == src_ref
         assert result.source["connection_id"] == "root-src"
-        assert result.destination["endpoint_id"] == "dst-endpoint"
+        assert result.destination["endpoint_ref"] == dst_ref
         assert result.destination["connection_id"] == "root-dst"
-    
+
     def test_build_stream_processing_config_failure(self, orchestrator):
         """Test stream processing config building failure."""
         invalid_stream_config = {
             "name": "Test Stream",
-            "source": {"endpoint_id": "src-endpoint"},
-            "destination": {"endpoint_id": "dst-endpoint"},
+            "source": {"endpoint_ref": {
+                "scope": "connector", "identifier": "src", "endpoint": "transfers",
+            }},
+            "destination": {"endpoint_ref": {
+                "scope": "connection", "identifier": "dst", "endpoint": "transfers",
+            }},
             "replication_method": "invalid_method"  # Invalid
         }
 
@@ -163,8 +169,12 @@ class TestStreamTaskCreation:
         streams = {
             "stream1": {
                 "name": "Stream 1",
-                "source": {"endpoint_id": "src-endpoint"},
-                "destination": {"endpoint_id": "dst-endpoint"},
+                "source": {"endpoint_ref": {
+                    "scope": "connector", "identifier": "src", "endpoint": "transfers",
+                }},
+                "destination": {"endpoint_ref": {
+                    "scope": "connection", "identifier": "dst", "endpoint": "transfers",
+                }},
                 "replication_method": "incremental",
                 "cursor_mode": "inclusive",
                 "refresh_mode": "upsert"

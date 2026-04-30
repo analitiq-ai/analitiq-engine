@@ -5,12 +5,12 @@ import pytest
 from src.config import (
     validate_pipeline_config,
     validate_connection_config,
-    parse_endpoint_ref,
     resolve_endpoint_ref,
     load_connection,
     load_connector_for_connection,
 )
 from src.config.exceptions import EndpointNotFoundError, ConnectorNotFoundError, ConnectionConfigError
+from src.models.stream import EndpointRef
 
 
 class TestConfig:
@@ -24,7 +24,6 @@ class TestConfig:
         expected_exports = [
             "validate_pipeline_config",
             "validate_connection_config",
-            "parse_endpoint_ref",
             "resolve_endpoint_ref",
             "load_connection",
             "load_connector_for_connection",
@@ -110,42 +109,87 @@ class TestConnectionConfigValidator:
             validate_connection_config({"host": "localhost"})
 
 
-class TestEndpointRefParser:
-    """Test suite for endpoint reference parsing."""
+class TestEndpointRefModel:
+    """Test suite for the EndpointRef dataclass."""
 
     @pytest.mark.unit
-    def test_parse_connector_ref(self):
-        scope, identifier, name = parse_endpoint_ref("connector:pipedrive/deals")
-        assert scope == "connector"
-        assert identifier == "pipedrive"
-        assert name == "deals"
+    def test_from_dict_connector(self):
+        ref = EndpointRef.from_dict({
+            "scope": "connector", "identifier": "pipedrive", "endpoint": "deals",
+        })
+        assert ref.scope == "connector"
+        assert ref.identifier == "pipedrive"
+        assert ref.endpoint == "deals"
 
     @pytest.mark.unit
-    def test_parse_connection_ref(self):
-        scope, identifier, name = parse_endpoint_ref("connection:prod-postgres/public_users")
-        assert scope == "connection"
-        assert identifier == "prod-postgres"
-        assert name == "public_users"
+    def test_from_dict_connection(self):
+        ref = EndpointRef.from_dict({
+            "scope": "connection", "identifier": "prod-postgres", "endpoint": "public_users",
+        })
+        assert ref.scope == "connection"
+        assert ref.identifier == "prod-postgres"
+        assert ref.endpoint == "public_users"
 
     @pytest.mark.unit
-    def test_missing_scope_raises(self):
-        with pytest.raises(ValueError, match="missing scope"):
-            parse_endpoint_ref("pipedrive/deals")
+    def test_from_dict_passes_through_existing_instance(self):
+        original = EndpointRef(scope="connector", identifier="x", endpoint="y")
+        assert EndpointRef.from_dict(original) is original
 
     @pytest.mark.unit
     def test_invalid_scope_raises(self):
-        with pytest.raises(ValueError, match="Invalid endpoint_ref scope"):
-            parse_endpoint_ref("unknown:pipedrive/deals")
+        with pytest.raises(ValueError, match="scope"):
+            EndpointRef.from_dict({
+                "scope": "unknown", "identifier": "x", "endpoint": "y",
+            })
 
     @pytest.mark.unit
-    def test_missing_slash_raises(self):
-        with pytest.raises(ValueError, match="identifier/endpoint_name"):
-            parse_endpoint_ref("connector:pipedrive")
+    def test_missing_keys_raises(self):
+        with pytest.raises(ValueError, match="missing required keys"):
+            EndpointRef.from_dict({"scope": "connector"})
 
     @pytest.mark.unit
-    def test_empty_parts_raises(self):
-        with pytest.raises(ValueError, match="cannot be empty"):
-            parse_endpoint_ref("connector:/deals")
+    def test_unknown_keys_raises(self):
+        with pytest.raises(ValueError, match="unknown keys"):
+            EndpointRef.from_dict({
+                "scope": "connector", "identifier": "x", "endpoint": "y", "extra": "z",
+            })
+
+    @pytest.mark.unit
+    def test_empty_identifier_raises(self):
+        with pytest.raises(ValueError, match="identifier cannot be empty"):
+            EndpointRef.from_dict({
+                "scope": "connector", "identifier": "", "endpoint": "y",
+            })
+
+    @pytest.mark.unit
+    def test_empty_endpoint_raises(self):
+        with pytest.raises(ValueError, match="endpoint cannot be empty"):
+            EndpointRef.from_dict({
+                "scope": "connector", "identifier": "x", "endpoint": "",
+            })
+
+    @pytest.mark.unit
+    def test_non_dict_input_raises(self):
+        with pytest.raises(TypeError, match="endpoint_ref must be a dict"):
+            EndpointRef.from_dict("connector:x/y")
+
+    @pytest.mark.unit
+    def test_to_dict_roundtrip(self):
+        d = {"scope": "connector", "identifier": "x", "endpoint": "y"}
+        assert EndpointRef.from_dict(d).to_dict() == d
+
+    @pytest.mark.unit
+    def test_str_canonical_form(self):
+        ref = EndpointRef(scope="connection", identifier="alias", endpoint="name")
+        assert str(ref) == "connection:alias/name"
+
+    @pytest.mark.unit
+    def test_hashable_for_dict_keys(self):
+        ref1 = EndpointRef(scope="connector", identifier="x", endpoint="y")
+        ref2 = EndpointRef(scope="connector", identifier="x", endpoint="y")
+        assert hash(ref1) == hash(ref2)
+        cache = {ref1: "value"}
+        assert cache[ref2] == "value"
 
 
 class TestEndpointRefResolver:
@@ -154,14 +198,16 @@ class TestEndpointRefResolver:
     @pytest.mark.unit
     def test_resolve_connector_endpoint(self, tmp_path):
         """Test resolving a public connector endpoint."""
-        # Set up connector directory structure
         endpoint_dir = tmp_path / "connectors" / "wise" / "definition" / "endpoints"
         endpoint_dir.mkdir(parents=True)
         endpoint_file = endpoint_dir / "transfers.json"
         endpoint_file.write_text('{"endpoint": "/v1/transfers", "method": "GET"}')
 
         paths = {"connectors": tmp_path / "connectors", "connections": tmp_path / "connections"}
-        result = resolve_endpoint_ref("connector:wise/transfers", paths)
+        result = resolve_endpoint_ref(
+            {"scope": "connector", "identifier": "wise", "endpoint": "transfers"},
+            paths,
+        )
         assert result["endpoint"] == "/v1/transfers"
 
     @pytest.mark.unit
@@ -173,15 +219,31 @@ class TestEndpointRefResolver:
         endpoint_file.write_text('{"endpoint": "public/users", "method": "DATABASE"}')
 
         paths = {"connectors": tmp_path / "connectors", "connections": tmp_path / "connections"}
-        result = resolve_endpoint_ref("connection:prod-pg/public_users", paths)
+        result = resolve_endpoint_ref(
+            {"scope": "connection", "identifier": "prod-pg", "endpoint": "public_users"},
+            paths,
+        )
         assert result["method"] == "DATABASE"
+
+    @pytest.mark.unit
+    def test_resolve_accepts_endpoint_ref_instance(self, tmp_path):
+        endpoint_dir = tmp_path / "connectors" / "wise" / "definition" / "endpoints"
+        endpoint_dir.mkdir(parents=True)
+        (endpoint_dir / "transfers.json").write_text('{"endpoint": "/v1/transfers"}')
+
+        paths = {"connectors": tmp_path / "connectors", "connections": tmp_path / "connections"}
+        ref = EndpointRef(scope="connector", identifier="wise", endpoint="transfers")
+        assert resolve_endpoint_ref(ref, paths)["endpoint"] == "/v1/transfers"
 
     @pytest.mark.unit
     def test_resolve_missing_endpoint_raises(self, tmp_path):
         """Test that missing endpoint file raises EndpointNotFoundError."""
         paths = {"connectors": tmp_path / "connectors", "connections": tmp_path / "connections"}
         with pytest.raises(EndpointNotFoundError):
-            resolve_endpoint_ref("connector:wise/nonexistent", paths)
+            resolve_endpoint_ref(
+                {"scope": "connector", "identifier": "wise", "endpoint": "nonexistent"},
+                paths,
+            )
 
 
 class TestConnectionLoader:

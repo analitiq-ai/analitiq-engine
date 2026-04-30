@@ -33,9 +33,33 @@ class ModularConfigHelper:
             "connector_name": slug.title(),
             "connector_type": connector_type,
             "slug": slug,
-            **({"driver": driver} if driver else {}),
             **(extra or {}),
         }
+        if connector_type == "database" and driver:
+            # Spec-compliant transports block so PipelineConfigPrep can
+            # derive the base dialect without a top-level ``driver`` field.
+            connector.setdefault("default_transport", "database")
+            connector.setdefault(
+                "transports",
+                {
+                    "database": {
+                        "kind": "sqlalchemy",
+                        "driver": f"{driver}+asyncpg",
+                        "dsn": {"template": f"{driver}+asyncpg://u:p@h:5432/d"},
+                    }
+                },
+            )
+        elif connector_type == "api":
+            connector.setdefault("default_transport", "api")
+            connector.setdefault(
+                "transports",
+                {
+                    "api": {
+                        "kind": "http",
+                        "base_url": "https://api.example.com",
+                    }
+                },
+            )
         (definition_dir / "connector.json").write_text(json.dumps(connector))
 
         manifest = {
@@ -250,13 +274,13 @@ def standard_setup(temp_config_dir, helper):
         "is_enabled": True,
         "source": {
             "connection_ref": "my-wise",
-            "endpoint_ref": "connector:wise/transfers",
+            "endpoint_ref": {"scope": "connector", "identifier": "wise", "endpoint": "transfers"},
             "primary_key": ["id"],
             "replication": {"method": "incremental", "cursor_field": ["created"]},
         },
         "destinations": [{
             "connection_ref": "prod-pg",
-            "endpoint_ref": "connection:prod-pg/public_transfers",
+            "endpoint_ref": {"scope": "connection", "identifier": "prod-pg", "endpoint": "public_transfers"},
             "write": {"mode": "upsert", "conflict_keys": ["id"]},
         }],
         "mapping": {
@@ -341,15 +365,22 @@ class TestConfigurationLoading:
     def test_endpoint_resolution(
         self, temp_config_dir, mock_paths, standard_setup
     ):
+        from src.models.stream import EndpointRef
+
         with patch.dict(os.environ, {"PIPELINE_ID": "test-pipeline-123"}):
             prep = PipelineConfigPrep()
             pipeline, streams, connections, endpoints, connectors = prep.create_config()
 
-            assert "connector:wise/transfers" in endpoints
-            assert endpoints["connector:wise/transfers"]["endpoint"] == "/v1/transfers"
-
-            assert "connection:prod-pg/public_transfers" in endpoints
-            assert endpoints["connection:prod-pg/public_transfers"]["method"] == "DATABASE"
+            wise_ref = EndpointRef(
+                scope="connector", identifier="wise", endpoint="transfers",
+            )
+            pg_ref = EndpointRef(
+                scope="connection", identifier="prod-pg", endpoint="public_transfers",
+            )
+            assert wise_ref in endpoints
+            assert endpoints[wise_ref]["endpoint"] == "/v1/transfers"
+            assert pg_ref in endpoints
+            assert endpoints[pg_ref]["method"] == "DATABASE"
 
     def test_connectors_collected(
         self, temp_config_dir, mock_paths, standard_setup
@@ -416,11 +447,11 @@ class TestConfigurationLoading:
             "stream_id": "stream-1",
             "source": {
                 "connection_ref": "my-wise",
-                "endpoint_ref": "connector:wise/transfers",
+                "endpoint_ref": {"scope": "connector", "identifier": "wise", "endpoint": "transfers"},
             },
             "destinations": [{
                 "connection_ref": "prod-pg",
-                "endpoint_ref": "connection:prod-pg/public_transfers",
+                "endpoint_ref": {"scope": "connection", "identifier": "prod-pg", "endpoint": "public_transfers"},
             }],
         }
         helper.write_pipeline(pipelines_dir, "draft-pipeline", pipeline_config, [stream])
@@ -490,11 +521,11 @@ class TestConfigurationLoading:
             "stream_id": "wrong-stream-id",
             "source": {
                 "connection_ref": "my-wise",
-                "endpoint_ref": "connector:wise/transfers",
+                "endpoint_ref": {"scope": "connector", "identifier": "wise", "endpoint": "transfers"},
             },
             "destinations": [{
                 "connection_ref": "prod-pg",
-                "endpoint_ref": "connection:prod-pg/public_transfers",
+                "endpoint_ref": {"scope": "connection", "identifier": "prod-pg", "endpoint": "public_transfers"},
             }],
         }
         (streams_dir / "expected-stream.json").write_text(json.dumps(wrong_stream))
@@ -518,25 +549,31 @@ class TestConfigurationLoading:
     def test_stream_source_has_endpoint_ref(
         self, temp_config_dir, mock_paths, standard_setup
     ):
-        """Test that normalized stream source contains endpoint_ref."""
+        """Test that normalized stream source contains a structured endpoint_ref."""
         with patch.dict(os.environ, {"PIPELINE_ID": "test-pipeline-123"}):
             prep = PipelineConfigPrep()
             _, stream_configs = prep.load_pipeline_config()
 
             source = stream_configs[0]["source"]
-            assert source["endpoint_ref"] == "connector:wise/transfers"
-            assert source["endpoint_id"] == "connector:wise/transfers"
+            assert source["endpoint_ref"] == {
+                "scope": "connector",
+                "identifier": "wise",
+                "endpoint": "transfers",
+            }
             assert source["connection_ref"] == "my-wise"
 
     def test_stream_destination_has_endpoint_ref(
         self, temp_config_dir, mock_paths, standard_setup
     ):
-        """Test that normalized stream destination contains endpoint_ref."""
+        """Test that normalized stream destination contains a structured endpoint_ref."""
         with patch.dict(os.environ, {"PIPELINE_ID": "test-pipeline-123"}):
             prep = PipelineConfigPrep()
             _, stream_configs = prep.load_pipeline_config()
 
             dest = stream_configs[0]["destinations"][0]
-            assert dest["endpoint_ref"] == "connection:prod-pg/public_transfers"
-            assert dest["endpoint_id"] == "connection:prod-pg/public_transfers"
+            assert dest["endpoint_ref"] == {
+                "scope": "connection",
+                "identifier": "prod-pg",
+                "endpoint": "public_transfers",
+            }
             assert dest["connection_ref"] == "prod-pg"
