@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Dict, List, Optional
 from urllib.parse import urljoin, urlencode
 
-from .base import BaseConnector, ConnectionError, ReadError, WriteError
+from .base import BaseConnector, ConnectionError, ReadError
 from ...shared.connection_runtime import ConnectionRuntime
 from ...state.state_manager import StateManager
 from ...models.state import StreamCursor, CursorField, StreamStats
@@ -774,62 +774,8 @@ class APIConnector(BaseConnector):
         return False
 
     async def write_batch(self, batch: List[Dict[str, Any]], config: Dict[str, Any]):
-        """Write a batch of records to API endpoint."""
-        logger.debug(f"API write_batch called with {len(batch)} records")
-        try:
-            endpoint = config.get("endpoint", config.get("path", "/"))
-            method = config.get("method", "POST")
-            full_url = urljoin(self.base_url, endpoint)
-            logger.debug(f"Target URL: {full_url}, Method: {method}")
-
-            batch_support = config.get("batch_support", False)
-            logger.debug(f"Batch support: {batch_support}")
-
-            if batch_support:
-                logger.debug("Using batch request")
-                await self._write_batch_request(full_url, method, batch, config)
-            else:
-                logger.debug(f"Using single record requests for {len(batch)} records")
-                for i, record in enumerate(batch):
-                    logger.debug(f"Writing record {i+1}/{len(batch)}")
-                    await self._write_single_record(full_url, method, record, config)
-                    logger.debug(f"Completed record {i+1}/{len(batch)}")
-
-            self.metrics["records_written"] += len(batch)
-            self.metrics["batches_written"] += 1
-
-        except Exception as e:
-            self.metrics["errors"] += 1
-            logger.error(f"API write failed: {str(e)}")
-            raise WriteError(f"API write failed: {str(e)}")
-
-    async def _write_single_record(
-        self, url: str, method: str, record: Dict[str, Any], config: Dict[str, Any]
-    ):
-        """Write single record to API."""
-        logger.debug(f"_write_single_record: URL={url}, record keys={list(record.keys())}")
-        
-        if self.rate_limiter:
-            logger.debug("Acquiring rate limit token")
-            await self.rate_limiter.acquire()
-            logger.debug("Rate limit token acquired")
-
-        headers = {"Content-Type": "application/json"}
-        logger.debug(f"Making {method} request to {url}")
-
-        async with self.session.request(
-            method, url, json=record, headers=headers
-        ) as response:
-            logger.debug(f"Response status: {response.status}")
-            if response.status >= 400:
-                error_text = await response.text()
-                logger.error(f"API error {response.status}: {error_text}")
-                raise WriteError(
-                    f"Record write failed with status {response.status}: {error_text}"
-                )
-            else:
-                response_text = await response.text()
-                logger.debug(f"Successful response: {response_text}")
+        """Source connector is read-only; writes are handled by the destination."""
+        raise NotImplementedError("Source connector is read-only")
 
     def supports_incremental_read(self) -> bool:
         """API supports incremental reading through timestamps."""
