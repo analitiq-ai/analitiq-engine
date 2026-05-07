@@ -24,6 +24,7 @@ from sqlalchemy import (
     String,
     Table,
     Text,
+    func,
     text,
 )
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -79,6 +80,12 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
 
     # Idempotency tracking table name
     BATCH_COMMITS_TABLE = "_batch_commits"
+
+    # Server-managed column added to every database destination table. Populated
+    # by the database via DEFAULT NOW() at INSERT time so the engine never has
+    # to ship a per-record timestamp. The handler also tries to ALTER TABLE ADD
+    # this column if a pre-existing table is missing it.
+    SYNCED_AT_COLUMN = "_synced_at"
 
     def __init__(self) -> None:
         """Initialize the database handler."""
@@ -326,7 +333,62 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
             # Create tables
             await conn.run_sync(self._metadata.create_all)
 
+            # Ensure `_synced_at` exists on the target table even when the table
+            # was created earlier (before this column was part of the contract)
+            # or when the endpoint document does not declare it. Idempotent ALTER
+            # — the IF NOT EXISTS clauses keep this no-op when the column is
+            # already there.
+            if self._table is not None:
+                await self._ensure_synced_at_column(conn)
+
         logger.debug(f"Ensured tables exist in schema {self._schema_name}")
+
+    async def _ensure_synced_at_column(self, conn: AsyncConnection) -> None:
+        """Add ``_synced_at`` to the target table if missing.
+
+        Postgres and MySQL 8+ both support ``ADD COLUMN IF NOT EXISTS``;
+        we wrap the statement in a try/except so older MySQL servers
+        (which don't support the clause) still succeed when the column
+        is already present.
+        """
+        if not self._table_name:
+            return
+        qualified = (
+            f"{self._schema_name}.{self._table_name}"
+            if self._schema_name
+            else self._table_name
+        )
+
+        if self._driver in ("postgresql", "postgres"):
+            stmt = (
+                f"ALTER TABLE {qualified} "
+                f"ADD COLUMN IF NOT EXISTS {self.SYNCED_AT_COLUMN} "
+                f"TIMESTAMP WITH TIME ZONE DEFAULT NOW()"
+            )
+        elif self._driver in ("mysql", "mariadb"):
+            stmt = (
+                f"ALTER TABLE {qualified} "
+                f"ADD COLUMN IF NOT EXISTS {self.SYNCED_AT_COLUMN} "
+                f"TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP"
+            )
+        else:
+            # Other dialects: skip — the engine will only run the
+            # destination-side change for drivers it knows the syntax for.
+            return
+
+        try:
+            await conn.execute(text(stmt))
+        except Exception as err:
+            # Older MySQL doesn't support IF NOT EXISTS — treat duplicate
+            # column errors as success.
+            message = str(err).lower()
+            if "duplicate column" in message or "already exists" in message:
+                logger.debug(
+                    "Skipping _synced_at ADD on %s — column already present",
+                    qualified,
+                )
+                return
+            raise
 
     def _create_table_from_schema(
         self,
@@ -352,6 +414,7 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
             SQLAlchemy Table object
         """
         columns = []
+        declared_names: set[str] = set()
 
         # Check for database endpoint schema format (columns array)
         if "columns" in json_schema:
@@ -363,18 +426,33 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
                         f"'name' field; unnamed columns indicate a malformed "
                         f"endpoint payload"
                     )
-                native_type = col_def.get("type")
+                # The published database-endpoint contract names the
+                # provider-native type field ``native_type``. Older
+                # callers may still send ``type``; accept either rather
+                # than failing the load.
+                native_type = col_def.get("native_type") or col_def.get("type")
                 if not native_type:
                     raise ValueError(
-                        f"column {col_name!r} has no 'type' field in destination schema"
+                        f"column {col_name!r} has no 'native_type' field in destination schema"
                     )
                 sa_type = native_to_sqlalchemy(native_type, type_mapper)
                 is_pk = col_name in primary_keys
                 nullable = col_def.get("nullable", True) and not is_pk
 
-                columns.append(
-                    Column(col_name, sa_type, primary_key=is_pk, nullable=nullable)
-                )
+                column_kwargs: Dict[str, Any] = {
+                    "primary_key": is_pk,
+                    "nullable": nullable,
+                }
+                # Honour the endpoint's declared ``default`` only when it
+                # is a SQL expression like ``now()``. Plain literal
+                # defaults flow through via ``server_default=text(...)``;
+                # arbitrary connector-specific values stay out of DDL.
+                raw_default = col_def.get("default")
+                if isinstance(raw_default, str) and raw_default.strip():
+                    column_kwargs["server_default"] = text(raw_default)
+
+                columns.append(Column(col_name, sa_type, **column_kwargs))
+                declared_names.add(col_name)
         else:
             # JSON Schema format with properties
             properties = json_schema.get("properties", {})
@@ -388,6 +466,22 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
                 columns.append(
                     Column(col_name, sa_type, primary_key=is_pk, nullable=nullable)
                 )
+                declared_names.add(col_name)
+
+        # Ensure every database destination table carries a server-managed
+        # ``_synced_at`` audit column. The endpoint document may declare it
+        # explicitly (in which case it's already in ``columns``); when it
+        # doesn't, the handler appends it with a NOW() default so newly
+        # created tables include it without authoring changes.
+        if self.SYNCED_AT_COLUMN not in declared_names:
+            columns.append(
+                Column(
+                    self.SYNCED_AT_COLUMN,
+                    DateTime(timezone=True),
+                    nullable=True,
+                    server_default=func.now(),
+                )
+            )
 
         return Table(
             table_name,

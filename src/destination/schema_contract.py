@@ -168,10 +168,13 @@ class DestinationSchemaContract:
                     f"field; unnamed columns indicate a malformed endpoint payload"
                 )
 
-            col_type = col.get("type")
+            # The published database-endpoint contract names the
+            # provider-native type field ``native_type``. Older
+            # callers may still send ``type`` — accept either.
+            col_type = col.get("native_type") or col.get("type")
             if not col_type:
                 raise ValueError(
-                    f"column {col_name!r} has no 'type' field in destination schema"
+                    f"column {col_name!r} has no 'native_type' field in destination schema"
                 )
             nullable = col.get("nullable", True)
 
@@ -254,20 +257,35 @@ class DestinationSchemaContract:
         """
         source_type = col.type
 
-        # Handle timestamp conversion from strings
+        # Handle timestamp conversion from strings.
+        #
+        # Provider APIs vary: ISO8601 with ``T`` separator, with or without
+        # offset, sometimes a space separator (Wise). Try a small set of
+        # known shapes; when the parsed result is naive but the target is
+        # tz-aware, attach the target's tz via ``assume_timezone``.
         if pa.types.is_timestamp(target_type) and pa.types.is_string(source_type):
-            # Parse ISO8601 timestamps
-            try:
-                return pc.strptime(col, format="%Y-%m-%dT%H:%M:%S", unit="us")
-            except Exception:
-                # Try with timezone
+            target_tz = getattr(target_type, "tz", None)
+            target_unit = getattr(target_type, "unit", "us") or "us"
+
+            for fmt in (
+                "%Y-%m-%dT%H:%M:%S%z",
+                "%Y-%m-%dT%H:%M:%S",
+                "%Y-%m-%d %H:%M:%S",
+                "%Y-%m-%d",
+            ):
                 try:
-                    return pc.strptime(
-                        col, format="%Y-%m-%dT%H:%M:%S%z", unit="us"
-                    )
+                    parsed = pc.strptime(col, format=fmt, unit=target_unit)
                 except Exception:
-                    # Fall back to cast
-                    pass
+                    continue
+                parsed_tz = getattr(parsed.type, "tz", None)
+                if target_tz and not parsed_tz:
+                    # Naive result, tz-aware target: assume the target's
+                    # timezone. This covers Wise-style ``"2026-03-23 10:18:24"``
+                    # being shipped to a ``timestamp with time zone`` column.
+                    parsed = pc.assume_timezone(parsed, target_tz)
+                if parsed.type != target_type:
+                    parsed = pc.cast(parsed, target_type, safe=False)
+                return parsed
 
         # Handle date conversion from strings
         if pa.types.is_date(target_type) and pa.types.is_string(source_type):

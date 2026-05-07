@@ -109,7 +109,12 @@ class Pipeline:
             )
 
             mapping = stream.get("mapping") or {}
-            mapping_config = {"assignments": mapping.get("assignments") or []}
+            mapping_config = {
+                "assignments": [
+                    _translate_assignment(a)
+                    for a in (mapping.get("assignments") or [])
+                ]
+            }
 
             streams[stream["stream_id"]] = {
                 "name": stream["stream_id"],
@@ -288,7 +293,16 @@ def _translate_destination_config(
         "connection_ref": destination["connection_ref"],
         "parameters": dict(runtime.raw_config.get("parameters") or {}),
         "refresh_mode": write.get("mode", "upsert"),
+        # ``write_mode`` is the legacy key the gRPC client reads when
+        # building the SchemaMessage. Keep both for back-compat.
+        "write_mode": write.get("mode", "upsert"),
         "conflict_keys": write.get("conflict_keys") or [],
+        # The destination handler needs the full endpoint document to
+        # build its SQLAlchemy table (column metadata, native types,
+        # primary keys). Pass it through verbatim under the legacy key
+        # the gRPC client uses.
+        "endpoint_schema": dict(endpoint),
+        "primary_key": endpoint.get("primary_keys") or [],
     }
 
     if execution.get("batch_size") is not None:
@@ -509,6 +523,72 @@ def _translate_api_destination(endpoint: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ---- generic helpers ------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Mapping translation (contract assignment shape -> AssignmentTransformer shape)
+# ---------------------------------------------------------------------------
+
+
+def _translate_assignment(assignment: Dict[str, Any]) -> Dict[str, Any]:
+    """Translate a contract-shaped assignment to the legacy transformer shape.
+
+    The contract authors targets with a dotted ``path`` string and an
+    Apache Arrow type label. The transformer's expected shape uses a list
+    path and a tagged ``value.kind`` (``"expr"`` or ``"const"``); this
+    function only reshapes those structural differences. It does NOT map
+    Arrow types to anything else — native ↔ Arrow translation is
+    connector/connection-owned (via each artifact's ``type-map.json``)
+    and is applied by the destination handler at write time.
+
+    Contract shape:
+        {
+          "target": {"path": "id", "arrow_type": "Int64", "nullable": false},
+          "value":  {"expression": {"op": "get", "path": "id"}}
+        }
+
+    Transformer shape:
+        {
+          "target": {"path": ["id"], "arrow_type": "Int64", "nullable": false},
+          "value":  {"kind": "expr", "expr": {"op": "get", "path": ["id"]}}
+        }
+    """
+    raw_target = assignment.get("target") or {}
+    raw_value = assignment.get("value") or {}
+
+    target_path_raw = raw_target.get("path", "")
+    if isinstance(target_path_raw, str):
+        target_path = [seg for seg in target_path_raw.split(".") if seg]
+    elif isinstance(target_path_raw, list):
+        target_path = list(target_path_raw)
+    else:
+        target_path = []
+
+    # Pass the contract-declared fields through unchanged. The transformer
+    # treats unknown ``type`` values as passthrough (no JSON coercion),
+    # which is the right behavior for Arrow-typed values headed to the
+    # destination's Arrow-based schema contract.
+    target = dict(raw_target)
+    target["path"] = target_path
+
+    value: Dict[str, Any]
+    if "expression" in raw_value:
+        expression = dict(raw_value["expression"])
+        expr_path = expression.get("path")
+        if isinstance(expr_path, str):
+            expression["path"] = [seg for seg in expr_path.split(".") if seg]
+        value = {"kind": "expr", "expr": expression}
+    elif "constant" in raw_value:
+        # Constant carries its own ``arrow_type``; preserve it verbatim
+        # for the destination to interpret via its type-map.
+        value = {"kind": "const", "const": dict(raw_value["constant"] or {})}
+    else:
+        value = dict(raw_value)
+
+    out: Dict[str, Any] = {"target": target, "value": value}
+    if "validate" in assignment:
+        out["validate"] = assignment["validate"]
+    return out
 
 
 def _connection_host(runtime: ConnectionRuntime) -> Optional[str]:

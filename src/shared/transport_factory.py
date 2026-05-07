@@ -162,64 +162,112 @@ _PLAIN_TLS_MODES = {"disable", "allow", "prefer", "require"}
 _VERIFIED_TLS_MODES = {"verify-ca", "verify-full"}
 
 
-def _materialize_tls_for_asyncpg(
+def _resolve_tls_mode(
     tls_spec: Optional[Mapping[str, Any]], resolver: Resolver
-) -> Any:
-    """Translate a connector ``transports.<ref>.tls`` block into an
-    asyncpg-ready ``ssl=`` value.
+) -> tuple[Optional[str], Optional[str]]:
+    """Resolve ``tls.mode`` and (when needed) ``tls.ca_certificate``.
 
-    Returns one of:
-
-    * ``None`` — TLS not declared; let the driver pick its default.
-    * a string in ``{disable, allow, prefer, require}`` — passed verbatim
-      to asyncpg.
-    * an :class:`ssl.SSLContext` — for ``verify-ca`` / ``verify-full``,
-      built from the resolved CA certificate.
+    Returns ``(mode, ca_pem)`` where:
+    * ``mode`` is one of the canonical strings or ``None`` when no TLS
+      block was declared.
+    * ``ca_pem`` is the PEM bundle string for verified modes (only
+      required for ``verify-ca`` / ``verify-full``).
     """
     if tls_spec is None:
-        return None
+        return None, None
     if not isinstance(tls_spec, Mapping):
         raise TypeError("transports.<ref>.tls must be an object")
 
     raw_mode = tls_spec.get("mode")
     if raw_mode is None:
-        return None
+        return None, None
     mode = resolver.resolve(raw_mode)
     if mode is None:
-        return None
+        return None, None
     if not isinstance(mode, str):
         raise TypeError(
             f"tls.mode must resolve to a string, got {type(mode).__name__}"
         )
-
-    if mode in _PLAIN_TLS_MODES:
-        return mode
-
-    if mode not in _VERIFIED_TLS_MODES:
+    if mode not in _PLAIN_TLS_MODES and mode not in _VERIFIED_TLS_MODES:
         raise ValueError(
             f"tls.mode {mode!r} is not in the canonical set "
             f"{sorted(_PLAIN_TLS_MODES | _VERIFIED_TLS_MODES)}"
         )
 
-    raw_ca = tls_spec.get("ca_certificate")
     ca_value: Optional[str] = None
-    if raw_ca is not None:
-        try:
-            resolved = resolver.resolve(raw_ca)
-        except KeyError:
-            resolved = None
-        if isinstance(resolved, str) and resolved:
-            ca_value = resolved
-    if ca_value is None:
-        raise ValueError(
-            f"tls.mode={mode!r} requires tls.ca_certificate to resolve to "
-            f"a PEM certificate bundle"
-        )
+    if mode in _VERIFIED_TLS_MODES:
+        raw_ca = tls_spec.get("ca_certificate")
+        if raw_ca is not None:
+            try:
+                resolved = resolver.resolve(raw_ca)
+            except KeyError:
+                resolved = None
+            if isinstance(resolved, str) and resolved:
+                ca_value = resolved
+        if ca_value is None:
+            raise ValueError(
+                f"tls.mode={mode!r} requires tls.ca_certificate to resolve "
+                f"to a PEM certificate bundle"
+            )
 
-    ctx = _ssl.create_default_context(cadata=ca_value)
+    return mode, ca_value
+
+
+def _build_verified_ssl_context(mode: str, ca_pem: str) -> _ssl.SSLContext:
+    ctx = _ssl.create_default_context(cadata=ca_pem)
     ctx.check_hostname = mode == "verify-full"
     ctx.verify_mode = _ssl.CERT_REQUIRED
     return ctx
+
+
+def _materialize_tls_for_driver(
+    driver: str,
+    tls_spec: Optional[Mapping[str, Any]],
+    resolver: Resolver,
+) -> Any:
+    """Dispatch TLS materialization based on the SQLAlchemy driver string.
+
+    asyncpg accepts plain ``"disable"``/``"allow"``/``"prefer"``/``"require"``
+    strings or an :class:`ssl.SSLContext`. aiomysql (and PyMySQL) only
+    accept ``True`` / ``False`` / an ``SSLContext`` — string modes raise
+    ``'str' object has no attribute 'wrap_bio'``. The connector contract
+    keeps a single canonical vocabulary; this helper translates it to
+    each driver's expected shape.
+    """
+    mode, ca_pem = _resolve_tls_mode(tls_spec, resolver)
+    if mode is None:
+        return None
+
+    base_driver = driver.split("+", 1)[0].lower()
+
+    if base_driver in ("postgresql", "postgres"):
+        # asyncpg understands the canonical string vocabulary directly
+        # and SSLContext for verified modes.
+        if mode in _VERIFIED_TLS_MODES:
+            return _build_verified_ssl_context(mode, ca_pem or "")
+        return mode
+
+    if base_driver in ("mysql", "mariadb"):
+        # aiomysql wants an SSLContext or no ssl arg at all.
+        if mode == "disable":
+            return None
+        if mode in _VERIFIED_TLS_MODES:
+            return _build_verified_ssl_context(mode, ca_pem or "")
+        # For ``allow`` / ``prefer`` / ``require`` we negotiate TLS but
+        # do not verify the server certificate — the user has not
+        # provided a CA bundle. ``check_hostname`` must be False for
+        # ``CERT_NONE`` or CPython raises.
+        ctx = _ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = _ssl.CERT_NONE
+        return ctx
+
+    # Unknown driver: pass the resolved mode through and let the
+    # downstream materializer decide. SSLContext for verified modes is
+    # the safest portable default.
+    if mode in _VERIFIED_TLS_MODES:
+        return _build_verified_ssl_context(mode, ca_pem or "")
+    return mode
 
 
 # ---------------------------------------------------------------------------
@@ -295,7 +343,7 @@ async def build_sqlalchemy_transport(
     dsn = _render_url_template_dsn(raw_dsn, resolver)
 
     connect_args: Dict[str, Any] = {}
-    tls_value = _materialize_tls_for_asyncpg(spec.get("tls"), resolver)
+    tls_value = _materialize_tls_for_driver(driver, spec.get("tls"), resolver)
     if tls_value is not None:
         connect_args["ssl"] = tls_value
 
