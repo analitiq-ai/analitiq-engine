@@ -1,14 +1,18 @@
 """Materialize transports from connector definitions.
 
-Reads a connector's ``transports.<ref>`` block, resolves expressions
-through a typed :class:`~src.engine.resolver.ResolutionContext`, and
-builds a concrete transport object: a SQLAlchemy ``AsyncEngine`` for
-``kind: sqlalchemy``, an ``aiohttp.ClientSession`` for ``kind: http``.
+The connector contract owns provider-specific transport recipes. This
+module reads ``connector.transports.<ref>``, resolves expressions via a
+typed :class:`~src.engine.resolver.ResolutionContext`, applies the
+declared per-binding encodings to render the DSN, and produces a
+concrete transport object.
 
-The engine never inspects connection or connector contents directly.
-Provider-specific shape lives in the connector definition; this factory
-simply walks the resolved JSON and feeds it to the matching transport
-adapter.
+Currently registered transport families:
+
+* ``sqlalchemy`` — SQLAlchemy ``AsyncEngine`` for database connectors.
+* ``http``       — ``aiohttp.ClientSession`` for API connectors.
+
+Plugin packages call :func:`register_transport_kind` at import time to
+add new families.
 """
 
 from __future__ import annotations
@@ -16,6 +20,7 @@ from __future__ import annotations
 import copy
 import logging
 import ssl as _ssl
+import urllib.parse
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, Mapping, Optional
 
@@ -33,12 +38,196 @@ TransportBuilder = Callable[[Mapping[str, Any]], Awaitable[Any]]
 
 
 # ---------------------------------------------------------------------------
+# DSN URL-template renderer
+# ---------------------------------------------------------------------------
+
+
+# Encodings declared by the connector contract for each DSN binding. The
+# engine never invents URL syntax — it applies the declared encoding to
+# the resolved value and substitutes into the connector-authored template.
+_ENCODING_QUOTES: Dict[str, str] = {
+    # ``raw`` keeps numeric and pass-through values unchanged.
+    "raw": "",
+    # Hostnames already use a permitted character set; do not re-encode
+    # dots, hyphens, or IDNA-ready labels. ``safe`` includes the entire
+    # hostname character set so quote() becomes effectively a no-op.
+    "host": "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~:[]",
+    # URL userinfo (user:pass@host) — percent-encode every reserved
+    # character. ``urllib.parse.quote`` with ``safe=""`` is correct;
+    # we add the unreserved set for clarity.
+    "url_userinfo": "",
+    # URL path segment — `/` is the segment separator, so it is NOT safe.
+    "url_path_segment": "",
+    # URL query key/value — `&`, `=`, `+`, `#`, `?` must be encoded.
+    "url_query_key": "",
+    "url_query_value": "",
+}
+
+
+def _render_url_template_dsn(
+    dsn_spec: Mapping[str, Any], resolver: Resolver
+) -> str:
+    """Render a connector-authored ``dsn.url_template`` recipe.
+
+    The recipe has shape::
+
+        {
+          "kind": "url_template",
+          "template": "postgresql+asyncpg://{username}:{password}@{host}:{port}/{database}",
+          "bindings": {
+            "username": {"value": {"ref": "connection.parameters.username"}, "encoding": "url_userinfo"},
+            ...
+          }
+        }
+
+    Each ``bindings[name].value`` is resolved through the active
+    :class:`Resolver`; the result is converted to a string using the
+    declared ``encoding``; the encoded values are then substituted into
+    ``template`` using ``str.format_map``-style replacement. Missing
+    placeholders, missing bindings, and unknown encodings are
+    configuration errors, not runtime warnings.
+    """
+    kind = dsn_spec.get("kind")
+    if kind != "url_template":
+        raise ValueError(
+            f"Unsupported dsn.kind {kind!r}; the connector contract currently "
+            f"defines only 'url_template'"
+        )
+    template = dsn_spec.get("template")
+    if not isinstance(template, str) or not template:
+        raise ValueError("dsn.template must be a non-empty string")
+
+    raw_bindings = dsn_spec.get("bindings") or {}
+    if not isinstance(raw_bindings, Mapping):
+        raise TypeError("dsn.bindings must be an object")
+
+    rendered: Dict[str, str] = {}
+    for name, entry in raw_bindings.items():
+        if not isinstance(entry, Mapping):
+            raise TypeError(
+                f"dsn.bindings.{name} must be an object with 'value' and 'encoding'"
+            )
+        if "value" not in entry or "encoding" not in entry:
+            raise ValueError(
+                f"dsn.bindings.{name} requires both 'value' and 'encoding'"
+            )
+        encoding = entry["encoding"]
+        if encoding not in _ENCODING_QUOTES:
+            raise ValueError(
+                f"dsn.bindings.{name}: unknown encoding {encoding!r}; "
+                f"allowed: {sorted(_ENCODING_QUOTES)}"
+            )
+        value = resolver.resolve(entry["value"])
+        rendered[name] = _apply_encoding(encoding, value, binding=name)
+
+    try:
+        return template.format_map(rendered)
+    except KeyError as err:
+        raise KeyError(
+            f"dsn.template references {err.args[0]!r} but no matching binding "
+            f"was declared (declared: {sorted(raw_bindings)})"
+        ) from None
+
+
+def _apply_encoding(encoding: str, value: Any, *, binding: str) -> str:
+    """Convert a resolved value to its DSN-segment string form."""
+    if value is None:
+        raise ValueError(
+            f"dsn.bindings.{binding}: resolved value is None; required for "
+            f"DSN rendering"
+        )
+    if encoding == "raw":
+        # ``raw`` is for numeric pass-through (port numbers, etc). Strings
+        # are accepted verbatim but URL-special characters are NOT
+        # encoded — the connector author is asserting the value is
+        # already in protocol form.
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        return str(value)
+    safe = _ENCODING_QUOTES[encoding]
+    return urllib.parse.quote(str(value), safe=safe)
+
+
+# ---------------------------------------------------------------------------
+# TLS materialization (database transports)
+# ---------------------------------------------------------------------------
+
+
+# Modes that skip server certificate verification entirely. Asyncpg accepts
+# these as plain strings.
+_PLAIN_TLS_MODES = {"disable", "allow", "prefer", "require"}
+# Modes that require certificate verification — we hand asyncpg a
+# pre-built SSLContext so the CA bundle declared on the connection is
+# honoured.
+_VERIFIED_TLS_MODES = {"verify-ca", "verify-full"}
+
+
+def _materialize_tls_for_asyncpg(
+    tls_spec: Optional[Mapping[str, Any]], resolver: Resolver
+) -> Any:
+    """Translate a connector ``transports.<ref>.tls`` block into an
+    asyncpg-ready ``ssl=`` value.
+
+    Returns one of:
+
+    * ``None`` — TLS not declared; let the driver pick its default.
+    * a string in ``{disable, allow, prefer, require}`` — passed verbatim
+      to asyncpg.
+    * an :class:`ssl.SSLContext` — for ``verify-ca`` / ``verify-full``,
+      built from the resolved CA certificate.
+    """
+    if tls_spec is None:
+        return None
+    if not isinstance(tls_spec, Mapping):
+        raise TypeError("transports.<ref>.tls must be an object")
+
+    raw_mode = tls_spec.get("mode")
+    if raw_mode is None:
+        return None
+    mode = resolver.resolve(raw_mode)
+    if mode is None:
+        return None
+    if not isinstance(mode, str):
+        raise TypeError(
+            f"tls.mode must resolve to a string, got {type(mode).__name__}"
+        )
+
+    if mode in _PLAIN_TLS_MODES:
+        return mode
+
+    if mode not in _VERIFIED_TLS_MODES:
+        raise ValueError(
+            f"tls.mode {mode!r} is not in the canonical set "
+            f"{sorted(_PLAIN_TLS_MODES | _VERIFIED_TLS_MODES)}"
+        )
+
+    raw_ca = tls_spec.get("ca_certificate")
+    ca_value: Optional[str] = None
+    if raw_ca is not None:
+        try:
+            resolved = resolver.resolve(raw_ca)
+        except KeyError:
+            resolved = None
+        if isinstance(resolved, str) and resolved:
+            ca_value = resolved
+    if ca_value is None:
+        raise ValueError(
+            f"tls.mode={mode!r} requires tls.ca_certificate to resolve to "
+            f"a PEM certificate bundle"
+        )
+
+    ctx = _ssl.create_default_context(cadata=ca_value)
+    ctx.check_hostname = mode == "verify-full"
+    ctx.verify_mode = _ssl.CERT_REQUIRED
+    return ctx
+
+
+# ---------------------------------------------------------------------------
 # Spec resolution
 # ---------------------------------------------------------------------------
 
 
 def _deep_merge(base: Mapping[str, Any], override: Mapping[str, Any]) -> Dict[str, Any]:
-    """Override-wins deep merge; non-mapping leaves are replaced wholesale."""
     out: Dict[str, Any] = {k: copy.deepcopy(v) for k, v in base.items()}
     for k, v in override.items():
         if k in out and isinstance(out[k], dict) and isinstance(v, Mapping):
@@ -48,121 +237,30 @@ def _deep_merge(base: Mapping[str, Any], override: Mapping[str, Any]) -> Dict[st
     return out
 
 
-def _materialize_derived(
-    connector: Mapping[str, Any],
-    context: ResolutionContext,
-) -> Dict[str, Any]:
-    """Eagerly evaluate every entry in ``connector.derived`` against
-    *context*. The resulting dict is what ``${derived.<name>}`` template
-    substitutions will see.
-
-    Resolution iterates fixpoint-style: each pass evaluates every still-
-    pending entry against the values resolved so far. The loop terminates
-    cleanly only when no entries remain pending. If a pass makes no
-    forward progress (a cycle, or an entry that depends on something not
-    in any scope) the original :class:`KeyError` from re-resolving one of
-    the stuck entries is raised, naming the missing path.
-    """
-    declared = connector.get("derived") or {}
-    if not declared:
-        return {}
-    if not isinstance(declared, Mapping):
-        raise TypeError(
-            f"connector {connector.get('slug')!r}: `derived` must be an object"
-        )
-
-    resolved: Dict[str, Any] = {}
-    pending: Dict[str, Any] = dict(declared)
-    while pending:
-        progress = False
-        next_pending: Dict[str, Any] = {}
-        scratch_ctx = ResolutionContext(
-            connector=context.connector,
-            connection=context.connection,
-            secrets=context.secrets,
-            auth=context.auth,
-            runtime=context.runtime,
-            state=context.state,
-            derived=resolved,
-            request=context.request,
-            response=context.response,
-        )
-        scratch_resolver = Resolver(scratch_ctx, functions=DEFAULT_FUNCTIONS)
-        for name, expr in pending.items():
-            try:
-                resolved[name] = scratch_resolver.resolve(expr)
-                progress = True
-            except KeyError:
-                next_pending[name] = expr
-        if not progress:
-            # Re-resolve one of the stuck expressions so the operator
-            # sees the missing reference (or cycle) by name rather than
-            # an opaque "still pending" message.
-            stuck_name, stuck_expr = next(iter(next_pending.items()))
-            try:
-                scratch_resolver.resolve(stuck_expr)
-            except KeyError as err:
-                raise KeyError(
-                    f"connector {connector.get('slug')!r}: derived entry "
-                    f"{stuck_name!r} cannot be resolved (still pending: "
-                    f"{sorted(next_pending)}): {err}"
-                ) from err
-            # Defensive: progress was false but re-resolving did not
-            # raise, which means the resolver is non-deterministic.
-            raise RuntimeError(
-                f"connector {connector.get('slug')!r}: derived resolution "
-                f"made no progress on {sorted(next_pending)}"
-            )
-        pending = next_pending
-    return resolved
-
-
-def resolve_transport_spec(
-    connector: Mapping[str, Any],
-    *,
-    transport_ref: Optional[str] = None,
-    context: ResolutionContext,
-) -> Dict[str, Any]:
-    """Pick ``transports[ref]``, merge ``transport_defaults``, resolve expressions.
-
-    The returned dict contains only resolved primitives ready for the
-    transport adapters. ``connector.derived`` entries are evaluated
-    first so the transport spec can reference them via
-    ``${derived.<name>}``.
-    """
+def _select_transport(
+    connector: Mapping[str, Any], transport_ref: Optional[str]
+) -> tuple[str, Mapping[str, Any]]:
+    """Pick the ``transports[ref]`` block, applying ``transport_defaults``."""
     transports = connector.get("transports") or {}
     if not transports:
         raise ValueError(
-            f"Connector {connector.get('slug')!r} has no `transports` block; "
+            f"Connector {connector.get('alias')!r} has no `transports` block; "
             f"cannot materialize transport"
         )
     ref = transport_ref or connector.get("default_transport")
     if not ref:
         raise ValueError(
-            f"Connector {connector.get('slug')!r}: `transport_ref` not given "
-            f"and `default_transport` not declared"
+            f"Connector {connector.get('alias')!r}: transport_ref not given "
+            f"and default_transport not declared"
         )
     if ref not in transports:
         raise KeyError(
-            f"Connector {connector.get('slug')!r}: transport {ref!r} not in "
+            f"Connector {connector.get('alias')!r}: transport {ref!r} not in "
             f"declared transports {sorted(transports)}"
         )
-    derived = _materialize_derived(connector, context)
-    enriched = ResolutionContext(
-        connector=context.connector,
-        connection=context.connection,
-        secrets=context.secrets,
-        auth=context.auth,
-        runtime=context.runtime,
-        state=context.state,
-        derived=derived,
-        request=context.request,
-        response=context.response,
-    )
     defaults = connector.get("transport_defaults") or {}
     merged = _deep_merge(defaults, transports[ref])
-    resolver = Resolver(enriched, functions=DEFAULT_FUNCTIONS)
-    return resolver.resolve(merged)
+    return ref, merged
 
 
 # ---------------------------------------------------------------------------
@@ -172,126 +270,34 @@ def resolve_transport_spec(
 
 @dataclass
 class SqlAlchemyTransport:
-    """Materialized SQLAlchemy transport.
-
-    ``driver`` is the full SQLAlchemy driver string (``postgresql+asyncpg``);
-    ``dialect`` is the base dialect (``postgresql``, ``mysql``) consumed by
-    SQL generation code that branches on dialect.
-    """
+    """Materialized SQLAlchemy transport."""
 
     engine: AsyncEngine
     driver: str
     dialect: str
 
 
-_VERIFY_MODES = {
-    "CERT_NONE": _ssl.CERT_NONE,
-    "CERT_OPTIONAL": _ssl.CERT_OPTIONAL,
-    "CERT_REQUIRED": _ssl.CERT_REQUIRED,
-}
-
-
-def _ssl_dict_to_context(spec: Mapping[str, Any]) -> _ssl.SSLContext:
-    """Translate a declarative SSL dict (from a connector's ``lookup``) into
-    an :class:`ssl.SSLContext`.
-
-    Recognized keys:
-
-    * ``verify_mode`` — one of ``CERT_NONE``, ``CERT_OPTIONAL``, ``CERT_REQUIRED``.
-    * ``check_hostname`` — boolean.
-    * ``ca_data`` — PEM string passed to :meth:`SSLContext.load_verify_locations`.
-    * ``ca_path`` — filesystem path passed to the same method.
-
-    CPython raises :class:`ValueError` if ``verify_mode`` is set to
-    ``CERT_NONE`` while ``check_hostname`` is still ``True``, and vice
-    versa, so the assignment order is computed explicitly here regardless
-    of what order the connector declared the keys in.
-    """
-    raw_verify = spec.get("verify_mode")
-    if raw_verify is not None and raw_verify not in _VERIFY_MODES:
-        raise ValueError(
-            f"connect_args.ssl.verify_mode {raw_verify!r} not recognized; "
-            f"expected one of {sorted(_VERIFY_MODES)}"
-        )
-    raw_check = spec.get("check_hostname")
-    if raw_check is not None and not isinstance(raw_check, bool):
-        raise TypeError("connect_args.ssl.check_hostname must be a boolean")
-
-    ctx = _ssl.create_default_context()
-
-    # Determine the final state, then assign in a CPython-safe order.
-    final_verify = (
-        _VERIFY_MODES[raw_verify] if raw_verify is not None else ctx.verify_mode
-    )
-    final_check = raw_check if raw_check is not None else ctx.check_hostname
-    if final_check and final_verify == _ssl.CERT_NONE:
-        # The connector asked for an impossible combination — surface it
-        # rather than silently flipping one of the two.
-        raise ValueError(
-            "connect_args.ssl: cannot set verify_mode=CERT_NONE with "
-            "check_hostname=True"
-        )
-
-    if final_check:
-        # Going to CERT_REQUIRED with hostname check: set verify_mode first,
-        # hostname check second.
-        ctx.verify_mode = final_verify
-        ctx.check_hostname = True
-    else:
-        # Going to no hostname check (often paired with CERT_NONE):
-        # disable hostname check first, then assign verify_mode.
-        ctx.check_hostname = False
-        ctx.verify_mode = final_verify
-
-    if spec.get("ca_data"):
-        ctx.load_verify_locations(cadata=spec["ca_data"])
-    if spec.get("ca_path"):
-        ctx.load_verify_locations(cafile=spec["ca_path"])
-    return ctx
-
-
-def _materialize_ssl_arg(value: Any) -> Any:
-    """Translate a resolved ``ssl`` value into a driver-acceptable form.
-
-    The connector lookup may produce booleans, dicts, or pass-through
-    strings (asyncpg accepts ``"prefer"``, ``"require"``, etc. natively).
-    Anything else is rejected — silent driver-default behavior has burned
-    us before.
-    """
-    if value is None or isinstance(value, (bool, str)):
-        return value
-    if isinstance(value, _ssl.SSLContext):
-        return value
-    if isinstance(value, Mapping):
-        return _ssl_dict_to_context(value)
-    raise TypeError(
-        f"Unsupported ssl arg type: {type(value).__name__}; "
-        f"the connector's `connect_args.ssl` lookup must produce a bool, "
-        f"string, or object with verify_mode/check_hostname"
-    )
-
-
-async def build_sqlalchemy_transport(spec: Mapping[str, Any]) -> SqlAlchemyTransport:
-    """Build a probed :class:`AsyncEngine` from a resolved transport spec."""
+async def build_sqlalchemy_transport(
+    spec: Mapping[str, Any], *, resolver: Resolver
+) -> SqlAlchemyTransport:
     driver = spec.get("driver")
     if not isinstance(driver, str) or not driver:
-        raise ValueError("sqlalchemy transport requires `driver` (e.g. 'postgresql+asyncpg')")
-    dsn = spec.get("dsn")
-    if not isinstance(dsn, str) or not dsn:
         raise ValueError(
-            "sqlalchemy transport `dsn` must resolve to a non-empty string; "
-            "use `{\"template\": \"<driver>://...\"}` in the connector definition"
+            "sqlalchemy transport requires `driver` (e.g. 'postgresql+asyncpg')"
         )
-    raw_connect_args = spec.get("connect_args") or {}
-    if not isinstance(raw_connect_args, Mapping):
-        raise TypeError("sqlalchemy transport `connect_args` must be an object")
-    connect_args: Dict[str, Any] = {k: v for k, v in raw_connect_args.items()}
-    if "ssl" in connect_args:
-        materialized = _materialize_ssl_arg(connect_args["ssl"])
-        if materialized is None:
-            del connect_args["ssl"]
-        else:
-            connect_args["ssl"] = materialized
+
+    raw_dsn = spec.get("dsn")
+    if not isinstance(raw_dsn, Mapping):
+        raise TypeError(
+            "sqlalchemy transport `dsn` must be the structured "
+            "{kind: url_template, template, bindings} object"
+        )
+    dsn = _render_url_template_dsn(raw_dsn, resolver)
+
+    connect_args: Dict[str, Any] = {}
+    tls_value = _materialize_tls_for_asyncpg(spec.get("tls"), resolver)
+    if tls_value is not None:
+        connect_args["ssl"] = tls_value
 
     options = spec.get("options") or {}
     if not isinstance(options, Mapping):
@@ -333,13 +339,16 @@ class HttpTransport:
     rate_limiter: Optional[RateLimiter] = None
 
 
-async def build_http_transport(spec: Mapping[str, Any]) -> HttpTransport:
-    base_url = spec.get("base_url")
+async def build_http_transport(
+    spec: Mapping[str, Any], *, resolver: Resolver
+) -> HttpTransport:
+    raw_base = spec.get("base_url")
+    if raw_base is None:
+        raise ValueError("http transport `base_url` is required")
+    base_url = resolver.resolve(raw_base)
     if not isinstance(base_url, str) or not base_url:
         raise ValueError(
-            "http transport `base_url` must resolve to a non-empty string; "
-            "use `{\"template\": \"https://${connection.discovered.api_domain}.example.com\"}` "
-            "or a literal URL in the connector definition"
+            "http transport `base_url` must resolve to a non-empty string"
         )
     base_url = base_url.rstrip("/")
 
@@ -348,9 +357,10 @@ async def build_http_transport(spec: Mapping[str, Any]) -> HttpTransport:
         raise TypeError("http transport `headers` must be an object")
     headers: Dict[str, str] = {}
     for name, value in raw_headers.items():
-        if value is None:
+        resolved = resolver.resolve(value)
+        if resolved is None:
             continue
-        headers[str(name)] = str(value)
+        headers[str(name)] = str(resolved)
 
     timeout_seconds = spec.get("timeout_seconds")
     if timeout_seconds is None:
@@ -358,10 +368,10 @@ async def build_http_transport(spec: Mapping[str, Any]) -> HttpTransport:
     timeout = aiohttp.ClientTimeout(total=float(timeout_seconds))
 
     raw_rate_limit = spec.get("rate_limit") or {}
-    if raw_rate_limit and not isinstance(raw_rate_limit, Mapping):
-        raise TypeError("http transport `rate_limit` must be an object")
     rate_limiter: Optional[RateLimiter] = None
     if raw_rate_limit:
+        if not isinstance(raw_rate_limit, Mapping):
+            raise TypeError("http transport `rate_limit` must be an object")
         max_requests = raw_rate_limit.get("max_requests")
         time_window = raw_rate_limit.get("time_window_seconds")
         if (max_requests is None) != (time_window is None):
@@ -371,8 +381,7 @@ async def build_http_transport(spec: Mapping[str, Any]) -> HttpTransport:
             )
         if max_requests is not None and time_window is not None:
             rate_limiter = RateLimiter(
-                max_requests=int(max_requests),
-                time_window=int(time_window),
+                max_requests=int(max_requests), time_window=int(time_window),
             )
 
     connector = aiohttp.TCPConnector(limit=100, limit_per_host=10)
@@ -386,59 +395,40 @@ async def build_http_transport(spec: Mapping[str, Any]) -> HttpTransport:
 
 
 # ---------------------------------------------------------------------------
-# Transport kind registry
+# Transport-type registry (closed enum from the connector contract)
 # ---------------------------------------------------------------------------
 
 
 _TRANSPORT_BUILDERS: Dict[str, TransportBuilder] = {}
 
 
-def register_transport_kind(kind: str, builder: TransportBuilder) -> None:
-    """Register a builder for a transport ``kind``.
-
-    Plugin packages call this at import time to teach the engine new
-    transport families (kafka, s3, mongodb, …). The builder receives the
-    resolved transport spec and must return an awaitable that yields a
-    materialized transport object. Re-registering an existing kind raises
-    :class:`ValueError`; call :func:`unregister_transport_kind` first if
-    replacement is intended.
-
-    A non-callable ``builder`` is rejected at registration time so the
-    failure surfaces near the bug rather than later inside
-    :func:`build_transport` when a pipeline tries to use it.
-    """
-    if not isinstance(kind, str) or not kind:
-        raise ValueError("transport kind must be a non-empty string")
+def register_transport_kind(transport_type: str, builder: TransportBuilder) -> None:
+    """Register a builder for a connector ``transport_type``."""
+    if not isinstance(transport_type, str) or not transport_type:
+        raise ValueError("transport_type must be a non-empty string")
     if not callable(builder):
         raise TypeError(
-            f"transport builder for {kind!r} must be callable; got "
-            f"{type(builder).__name__}"
+            f"transport builder for {transport_type!r} must be callable; "
+            f"got {type(builder).__name__}"
         )
-    if kind in _TRANSPORT_BUILDERS:
+    if transport_type in _TRANSPORT_BUILDERS:
         raise ValueError(
-            f"transport kind {kind!r} already registered; call "
-            f"unregister_transport_kind first to replace it"
+            f"transport_type {transport_type!r} already registered; "
+            f"call unregister_transport_kind first"
         )
-    _TRANSPORT_BUILDERS[kind] = builder
+    _TRANSPORT_BUILDERS[transport_type] = builder
 
 
-def unregister_transport_kind(kind: str) -> None:
-    """Remove a previously registered transport ``kind``.
-
-    Raises :class:`KeyError` with the list of currently registered kinds
-    if ``kind`` is not registered. Primarily useful for test isolation
-    and for plugins that need to swap an implementation.
-    """
-    if kind not in _TRANSPORT_BUILDERS:
+def unregister_transport_kind(transport_type: str) -> None:
+    if transport_type not in _TRANSPORT_BUILDERS:
         raise KeyError(
-            f"transport kind {kind!r} not registered; "
+            f"transport_type {transport_type!r} not registered; "
             f"registered: {registered_transport_kinds()}"
         )
-    del _TRANSPORT_BUILDERS[kind]
+    del _TRANSPORT_BUILDERS[transport_type]
 
 
 def registered_transport_kinds() -> list[str]:
-    """Return the sorted list of currently registered transport kinds."""
     return sorted(_TRANSPORT_BUILDERS)
 
 
@@ -457,25 +447,42 @@ async def build_transport(
     transport_ref: Optional[str] = None,
     context: ResolutionContext,
 ):
-    """Materialize a transport from a connector definition.
-
-    Dispatches via the transport kind registry. The two built-in families
-    (``sqlalchemy``, ``http``) are registered at import time; plugins can
-    add more via :func:`register_transport_kind`.
-    """
-    spec = resolve_transport_spec(
-        connector, transport_ref=transport_ref, context=context
-    )
-    kind = spec.get("kind")
-    if not kind:
+    """Materialize a transport from a connector definition."""
+    _ref, spec = _select_transport(connector, transport_ref)
+    transport_type = spec.get("transport_type")
+    if not transport_type:
         raise ValueError(
-            f"Resolved transport spec missing `kind`; connector "
-            f"{connector.get('slug')!r}, transport {transport_ref!r}"
+            f"Resolved transport spec missing `transport_type`; connector "
+            f"{connector.get('alias')!r}, transport {transport_ref!r}"
         )
-    builder = _TRANSPORT_BUILDERS.get(kind)
+    builder = _TRANSPORT_BUILDERS.get(transport_type)
     if builder is None:
         raise NotImplementedError(
-            f"Unsupported transport kind: {kind!r}; "
+            f"Unsupported transport_type: {transport_type!r}; "
             f"registered: {registered_transport_kinds()}"
         )
-    return await builder(spec)
+    resolver = Resolver(context, functions=DEFAULT_FUNCTIONS)
+    return await builder(spec, resolver=resolver)
+
+
+# ---------------------------------------------------------------------------
+# Deprecated, kept for callers that still import the helper
+# ---------------------------------------------------------------------------
+
+
+def resolve_transport_spec(
+    connector: Mapping[str, Any],
+    *,
+    transport_ref: Optional[str] = None,
+    context: ResolutionContext,
+) -> Dict[str, Any]:
+    """Resolve a transport spec into a primitives-only dict.
+
+    Retained as a back-compat seam: legacy callers that want the
+    pre-DSN-render flat dict can still introspect a connector's
+    transport. New code should call :func:`build_transport` and let the
+    factory materialise the live transport directly.
+    """
+    _ref, merged = _select_transport(connector, transport_ref)
+    resolver = Resolver(context, functions=DEFAULT_FUNCTIONS)
+    return resolver.resolve(merged)

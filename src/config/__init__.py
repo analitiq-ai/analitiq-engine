@@ -1,27 +1,27 @@
 """Configuration management for Analitiq Stream."""
 
-# Export config validators
 from .analitiq_config import (
     validate_pipeline_config,
     validate_connection_config,
 )
-
-# Export endpoint resolver
-from .endpoint_resolver import (
-    resolve_endpoint_ref,
-    resolve_endpoint_path,
+from .schema_validator import (
+    ContractValidationError,
+    validate as validate_artifact,
+    validate_file as validate_artifact_file,
+    ARTIFACT_KINDS,
 )
-
-# Export connection loader
+from .endpoint_resolver import (
+    ConnectionLookup,
+    resolve_endpoint_path,
+    resolve_endpoint_ref,
+)
 from .connection_loader import (
     load_connection,
-    load_connector_for_connection,
+    load_connection_file,
+    load_connector_definition,
+    load_connector_for_connection,  # legacy alias
 )
-
-# Export path-based config loader
 from .loader import PathBasedConfigLoader
-
-# Export exceptions
 from .exceptions import (
     ConfigError,
     ConfigNotFoundError,
@@ -32,16 +32,23 @@ from .exceptions import (
 )
 
 __all__ = [
-    # Pipeline and connection validation
+    # Schema validation
+    "ContractValidationError",
+    "validate_artifact",
+    "validate_artifact_file",
+    "ARTIFACT_KINDS",
     "validate_pipeline_config",
     "validate_connection_config",
     # Endpoint resolver
-    "resolve_endpoint_ref",
+    "ConnectionLookup",
     "resolve_endpoint_path",
+    "resolve_endpoint_ref",
     # Connection loader
     "load_connection",
+    "load_connection_file",
+    "load_connector_definition",
     "load_connector_for_connection",
-    # Path-based loader
+    # Path-based loader (legacy)
     "PathBasedConfigLoader",
     # Exceptions
     "ConfigError",

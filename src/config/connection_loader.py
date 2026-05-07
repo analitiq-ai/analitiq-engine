@@ -1,32 +1,48 @@
-"""
-Connection and connector file loading utilities.
+"""Connection and connector file loading utilities.
 
-Loads connection configs from connections/{alias}/connection.json
-and connector definitions from connectors/{slug}/definition/connector.json.
+Loads connection configs from ``connections/{alias}/connection.json`` and
+connector definitions from ``connectors/{connector_alias}/definition/connector.json``.
+
+Connection JSON references its connector by ``connector_alias``. The
+canonical connection identity at runtime is the versioned ``connection_id``
+declared in the saved connection document.
 """
+
+from __future__ import annotations
 
 import json
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict
 
 from src.config.exceptions import ConnectionConfigError, ConnectorNotFoundError
 
 logger = logging.getLogger(__name__)
 
 
-def load_connection(alias: str, connections_dir: Path) -> dict[str, Any]:
-    """Load a connection configuration by alias.
+def load_connection_file(path: Path) -> Dict[str, Any]:
+    """Read and JSON-parse a connection.json. Raises with file context on bad JSON."""
+    if not path.is_file():
+        raise FileNotFoundError(f"connection.json not found: {path}")
+    try:
+        with path.open() as fh:
+            return json.load(fh)
+    except json.JSONDecodeError as err:
+        raise ValueError(f"Invalid JSON in {path}: {err}") from err
+
+
+def load_connection(alias: str, connections_dir: Path) -> Dict[str, Any]:
+    """Load a connection configuration by directory alias.
 
     Args:
-        alias: Human-readable connection alias (directory name)
-        connections_dir: Path to the connections/ directory
+        alias: Connection directory name under ``connections/``.
+        connections_dir: Path to the ``connections/`` root.
 
     Returns:
-        Parsed connection configuration dict
+        Parsed connection configuration dict.
 
     Raises:
-        ConnectionConfigError: If the connection directory or file doesn't exist
+        ConnectionConfigError: If the directory or file is missing or malformed.
     """
     conn_dir = connections_dir / alias
     if not conn_dir.is_dir():
@@ -41,53 +57,48 @@ def load_connection(alias: str, connections_dir: Path) -> dict[str, Any]:
         )
 
     try:
-        with open(conn_file) as f:
-            config = json.load(f)
-    except json.JSONDecodeError as e:
-        raise ConnectionConfigError(
-            alias, detail=f"Invalid JSON in {conn_file}: {e}"
-        )
+        config = load_connection_file(conn_file)
+    except (ValueError, json.JSONDecodeError) as err:
+        raise ConnectionConfigError(alias, detail=str(err)) from err
 
-    logger.info(f"Loaded connection '{alias}' from {conn_file}")
+    logger.info("Loaded connection %r from %s", alias, conn_file)
     return config
 
 
-def load_connector_for_connection(
-    connector_slug: str, connectors_dir: Path
-) -> dict[str, Any]:
-    """Load a connector definition by slug.
+def load_connector_definition(
+    connector_alias: str, connectors_dir: Path
+) -> Dict[str, Any]:
+    """Load a connector definition by ``connector_alias``.
 
-    Args:
-        connector_slug: Connector slug (directory name under connectors/)
-        connectors_dir: Path to the connectors/ directory
-
-    Returns:
-        Parsed connector definition dict
-
-    Raises:
-        ConnectorNotFoundError: If the connector directory or definition doesn't exist
+    Connector directories may be named either ``{alias}`` or
+    ``connector-{alias}`` (legacy-tolerant lookup).
     """
-    # Connector directories may be named either {slug} or connector-{slug}
-    connector_file = (
-        connectors_dir / connector_slug / "definition" / "connector.json"
+    candidates = [
+        connectors_dir / connector_alias / "definition" / "connector.json",
+        connectors_dir / f"connector-{connector_alias}" / "definition" / "connector.json",
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            try:
+                with candidate.open() as fh:
+                    config = json.load(fh)
+            except json.JSONDecodeError as err:
+                raise ConnectorNotFoundError(
+                    connector_alias,
+                    detail=f"Invalid JSON in {candidate}: {err}",
+                ) from err
+            logger.info("Loaded connector %r from %s", connector_alias, candidate)
+            return config
+
+    raise ConnectorNotFoundError(
+        connector_alias,
+        detail=(
+            f"Connector definition not found at {candidates[0]} "
+            f"or {candidates[1]}"
+        ),
     )
-    if not connector_file.is_file():
-        connector_file = (
-            connectors_dir / f"connector-{connector_slug}" / "definition" / "connector.json"
-        )
-    if not connector_file.is_file():
-        raise ConnectorNotFoundError(
-            connector_slug,
-            detail=f"Connector definition not found: {connector_file}",
-        )
 
-    try:
-        with open(connector_file) as f:
-            config = json.load(f)
-    except json.JSONDecodeError as e:
-        raise ConnectorNotFoundError(
-            connector_slug, detail=f"Invalid JSON in {connector_file}: {e}"
-        )
 
-    logger.info(f"Loaded connector '{connector_slug}' from {connector_file}")
-    return config
+# Backward-compatible alias for older imports. Prefer
+# ``load_connector_definition`` going forward.
+load_connector_for_connection = load_connector_definition

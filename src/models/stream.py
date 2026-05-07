@@ -1,35 +1,37 @@
 """Dataclass models for Stream configuration.
 
-The canonical schema lives in `k2m.models.stream` (see analitiq-infra
-lambda layer); these dataclasses are the engine-side runtime view.
+Engine-side runtime view of streams, mirroring the published stream
+schema at ``https://schemas.analitiq.work/stream/latest.json``.
+
+The canonical artifact identity is the versioned UUID emitted by the
+saved-document services. References between artifacts always carry that
+versioned UUID; aliases are display-only.
 """
 
-from dataclasses import dataclass, field, asdict
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
 
 class ReplicationMethod(str, Enum):
     """Replication methods for data sync."""
+
+    FULL_REFRESH = "full_refresh"
     INCREMENTAL = "incremental"
-    FULL = "full"
-
-
-class CursorMode(str, Enum):
-    """Cursor boundary semantics."""
-    INCLUSIVE = "inclusive"
-    EXCLUSIVE = "exclusive"
 
 
 class WriteMode(str, Enum):
-    """Destination write modes."""
+    """Destination write modes (database)."""
+
     INSERT = "insert"
     UPSERT = "upsert"
-    UPDATE = "update"
 
 
 class TargetType(str, Enum):
     """Target field types for type-safe mapping."""
+
     STRING = "string"
     INTEGER = "integer"
     DECIMAL = "decimal"
@@ -41,36 +43,28 @@ class TargetType(str, Enum):
 
 
 class ExpressionOp(str, Enum):
-    """Expression AST operation types."""
+    """Stream mapping expression operations.
+
+    The published schema currently allows only ``get``; the broader
+    runtime tolerates the historical operator set so existing
+    transformation code keeps working until it is migrated.
+    """
+
     GET = "get"
-    CONST = "const"
-    PIPE = "pipe"
-    FN = "fn"
-    IF = "if"
-    EQ = "eq"
-    NEQ = "neq"
-    GT = "gt"
-    GTE = "gte"
-    LT = "lt"
-    LTE = "lte"
-    AND = "and"
-    OR = "or"
-    NOT = "not"
-    IN = "in"
-    CONCAT = "concat"
-    COALESCE = "coalesce"
 
 
 class ValueKind(str, Enum):
     """Value assignment kind."""
-    CONST = "const"
-    EXPR = "expr"
+
+    EXPRESSION = "expression"
+    CONSTANT = "constant"
 
 
 class ValidationType(str, Enum):
     """Validation rule types."""
-    NOT_NULL = "not_null"
+
     REQUIRED = "required"
+    NOT_NULL = "not_null"
     MIN_LENGTH = "min_length"
     MAX_LENGTH = "max_length"
     PATTERN = "pattern"
@@ -79,7 +73,7 @@ class ValidationType(str, Enum):
 
 
 def _serialize(obj: Any) -> Any:
-    """Recursively serialize dataclass instances, enums, and containers to plain dicts/values."""
+    """Recursively serialize dataclass instances, enums, and containers."""
     if isinstance(obj, Enum):
         return obj.value
     if hasattr(obj, "__dataclass_fields__"):
@@ -91,138 +85,32 @@ def _serialize(obj: Any) -> Any:
     return obj
 
 
-# Expression AST Models
+# ---------------------------------------------------------------------------
+# Endpoint reference
+# ---------------------------------------------------------------------------
 
-@dataclass
-class ExpressionNode:
-    """Base expression AST node."""
-    op: ExpressionOp
-
-
-@dataclass
-class GetExpression(ExpressionNode):
-    """Get field value from source record."""
-    path: List[str] = field(default_factory=list)
-
-
-@dataclass
-class ConstValue:
-    """Typed constant value."""
-    type: str
-    value: Any = None
-
-
-@dataclass
-class ConstExpression(ExpressionNode):
-    """Constant value expression."""
-    value: Any = None
-
-
-@dataclass
-class FnExpression(ExpressionNode):
-    """Function call expression."""
-    name: str = ""
-    version: int = 1
-    args: List[Any] = field(default_factory=list)
-
-
-@dataclass
-class PipeExpression(ExpressionNode):
-    """Pipeline of expressions (compose left-to-right)."""
-    args: List[Dict[str, Any]] = field(default_factory=list)
-
-
-@dataclass
-class IfExpression(ExpressionNode):
-    """Conditional expression."""
-    args: List[Dict[str, Any]] = field(default_factory=list)
-
-
-@dataclass
-class ComparisonExpression(ExpressionNode):
-    """Comparison expression (eq, neq, gt, gte, lt, lte)."""
-    args: List[Dict[str, Any]] = field(default_factory=list)
-
-
-# Validation Models
-
-@dataclass
-class ValidationRule:
-    """Single validation rule."""
-    type: ValidationType
-    value: Any = None
-    message: Optional[str] = None
-
-
-@dataclass
-class ValidationConfig:
-    """Validation configuration for an assignment."""
-    rules: List[ValidationRule] = field(default_factory=list)
-    on_error: str = "dlq"
-
-
-# Assignment (Mapping) Models
-
-@dataclass
-class AssignmentTarget:
-    """Target field specification for an assignment."""
-    path: List[str] = field(default_factory=list)
-    type: TargetType = TargetType.STRING
-    nullable: bool = True
-
-
-@dataclass
-class AssignmentValue:
-    """Value specification for an assignment (const or expr)."""
-    kind: ValueKind = ValueKind.EXPR
-    const: Optional[ConstValue] = None
-    expr: Optional[Dict[str, Any]] = None
-
-
-@dataclass
-class Assignment:
-    """Single field assignment rule."""
-    target: AssignmentTarget = field(default_factory=AssignmentTarget)
-    value: AssignmentValue = field(default_factory=AssignmentValue)
-    validation: Optional[ValidationConfig] = None
-
-    def model_dump(self) -> Dict[str, Any]:
-        """Serialize to dict. Uses 'validate' key for validation (matches data_transformer expectations)."""
-        result = _serialize(self)
-        # Rename 'validation' -> 'validate' for backward compat with data_transformer
-        val = result.pop("validation", None)
-        if val is not None:
-            result["validate"] = val
-        return result
-
-
-@dataclass
-class MappingConfig:
-    """Complete mapping configuration for a stream."""
-    assignments: List[Assignment] = field(default_factory=list)
-    source_schema_id: Optional[str] = None
-    target_schema_id: Optional[str] = None
-    defaults: Optional[Dict[str, Any]] = None
-    assignments_hash: Optional[str] = None
-
-
-# Source/Destination Configuration Models
 
 @dataclass(frozen=True)
 class EndpointRef:
     """Structured reference to an endpoint definition.
 
-    Resolution to a filesystem path:
+    ``connection_id`` is a versioned connection UUID
+    (``00000000-..._v1``). ``alias`` is the endpoint slug declared inside
+    the endpoint document. Resolution rules:
 
-    - ``scope="connector"`` -> ``connectors/{identifier}/definition/endpoints/{endpoint}.json``
-    - ``scope="connection"`` -> ``connections/{identifier}/definition/endpoints/{endpoint}.json``
+    - ``scope="connector"``: load the connection by ``connection_id``,
+      read its ``connector_alias``, then load
+      ``connectors/<connector_alias>/definition/endpoints/<alias>.json``.
+    - ``scope="connection"``: load the connection by ``connection_id``
+      and load
+      ``connections/<connection_dir>/definition/endpoints/<alias>.json``.
 
-    Frozen so instances are hashable and usable as dict keys (the engine
-    caches resolved endpoints by ref).
+    Frozen so instances are hashable and usable as dict keys.
     """
+
     scope: str
-    identifier: str
-    endpoint: str
+    connection_id: str
+    alias: str
 
     _VALID_SCOPES = ("connector", "connection")
 
@@ -231,30 +119,31 @@ class EndpointRef:
             raise ValueError(
                 f"EndpointRef.scope must be one of {self._VALID_SCOPES}, got {self.scope!r}"
             )
-        if not self.identifier:
-            raise ValueError("EndpointRef.identifier cannot be empty")
-        if not self.endpoint:
-            raise ValueError("EndpointRef.endpoint cannot be empty")
+        if not self.connection_id:
+            raise ValueError("EndpointRef.connection_id cannot be empty")
+        if not self.alias:
+            raise ValueError("EndpointRef.alias cannot be empty")
 
     def __str__(self) -> str:
-        return f"{self.scope}:{self.identifier}/{self.endpoint}"
+        return f"{self.scope}:{self.connection_id}/{self.alias}"
 
     @classmethod
     def from_dict(cls, data: Any) -> "EndpointRef":
-        """Validate and construct from a plain dict (or pass through if already an EndpointRef)."""
+        """Validate and construct from a dict (or pass-through if already typed)."""
         if isinstance(data, EndpointRef):
             return data
         if not isinstance(data, dict):
             raise TypeError(
-                f"endpoint_ref must be a dict with keys {{'scope','identifier','endpoint'}}, "
-                f"got {type(data).__name__}"
+                "endpoint_ref must be an object with keys "
+                "{'scope','connection_id','alias'}, got "
+                f"{type(data).__name__}"
             )
-        allowed = {"scope", "identifier", "endpoint"}
-        unknown = set(data.keys()) - allowed
+        allowed = {"scope", "connection_id", "alias"}
+        unknown = set(data.keys()) - allowed - {"x-" + k for k in data.keys() if k.startswith("x-")}
+        unknown = {k for k in unknown if not k.startswith("x-")}
         if unknown:
             raise ValueError(
-                f"endpoint_ref has unknown keys {sorted(unknown)}; "
-                f"allowed keys are {sorted(allowed)}"
+                f"endpoint_ref has unknown keys {sorted(unknown)}; allowed: {sorted(allowed)}"
             )
         missing = allowed - set(data.keys())
         if missing:
@@ -263,93 +152,194 @@ class EndpointRef:
             )
         return cls(
             scope=data["scope"],
-            identifier=data["identifier"],
-            endpoint=data["endpoint"],
+            connection_id=data["connection_id"],
+            alias=data["alias"],
         )
 
     def to_dict(self) -> Dict[str, str]:
-        """Serialize to plain dict (for JSON output)."""
         return {
             "scope": self.scope,
-            "identifier": self.identifier,
-            "endpoint": self.endpoint,
+            "connection_id": self.connection_id,
+            "alias": self.alias,
         }
+
+
+# ---------------------------------------------------------------------------
+# Mapping primitives
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class GetExpression:
+    """``{"op": "get", "path": "..."}`` source-field reference."""
+
+    op: ExpressionOp = ExpressionOp.GET
+    path: str = ""
+
+
+@dataclass
+class ConstantValue:
+    """Typed constant assignment."""
+
+    arrow_type: str = "Utf8"
+    value: Any = None
+
+
+@dataclass
+class AssignmentTarget:
+    """Target field specification for a stream mapping assignment."""
+
+    path: str = ""
+    arrow_type: str = "Utf8"
+    native_type: Optional[str] = None
+    nullable: bool = True
+
+
+@dataclass
+class AssignmentValue:
+    """Value specification (exactly one of ``expression`` or ``constant``)."""
+
+    expression: Optional[Dict[str, Any]] = None
+    constant: Optional[ConstantValue] = None
+
+
+@dataclass
+class ValidationRule:
+    """Single record-validation rule."""
+
+    type: ValidationType = ValidationType.NOT_NULL
+    field: str = ""
+    value: Any = None
+    message: Optional[str] = None
+
+
+@dataclass
+class ValidationConfig:
+    """Validation block (assignments).rules / ``validate`` block."""
+
+    rules: List[ValidationRule] = field(default_factory=list)
+    error_handling: Optional[Dict[str, Any]] = None
+
+
+@dataclass
+class Assignment:
+    """Single field assignment rule."""
+
+    target: AssignmentTarget = field(default_factory=AssignmentTarget)
+    value: AssignmentValue = field(default_factory=AssignmentValue)
+    validate: Optional[ValidationConfig] = None
+
+    def model_dump(self) -> Dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass
+class MappingConfig:
+    """Stream mapping configuration."""
+
+    assignments: List[Assignment] = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Source / destination
+# ---------------------------------------------------------------------------
 
 
 @dataclass
 class ReplicationConfig:
-    """Source replication configuration."""
-    method: ReplicationMethod = ReplicationMethod.INCREMENTAL
-    cursor_field: List[str] = field(default_factory=list)
+    """Source replication policy."""
+
+    method: ReplicationMethod = ReplicationMethod.FULL_REFRESH
+    cursor_field: Optional[str] = None
     safety_window_seconds: Optional[int] = None
-    tie_breaker_fields: Optional[List[List[str]]] = None
+    tie_breaker_fields: Optional[List[str]] = None
+
+
+@dataclass
+class StreamFilter:
+    """Stream-supplied read predicate."""
+
+    field: str = ""
+    operator: str = "eq"
+    value: Any = None
+
+
+@dataclass
+class DatabasePagination:
+    """Database read-page configuration (offset or keyset)."""
+
+    type: str = "offset"
+    page_size: Optional[int] = None
+    order_by_field: Optional[str] = None
 
 
 @dataclass
 class SourceConfig:
     """Stream source configuration."""
-    connection_ref: str = ""
+
     endpoint_ref: Optional[EndpointRef] = None
-    primary_key: List[str] = field(default_factory=list)
+    selected_columns: Optional[List[str]] = None
+    filters: List[StreamFilter] = field(default_factory=list)
     replication: ReplicationConfig = field(default_factory=ReplicationConfig)
-    source_schema_fingerprint: Optional[str] = None
-    parameters: Optional[Dict[str, Any]] = None
+    database_pagination: Optional[DatabasePagination] = None
+    primary_keys: Optional[List[str]] = None
 
 
 @dataclass
-class IdempotencyKeyConfig:
-    """Idempotency key configuration for safe retries."""
-    expr: Dict[str, Any] = field(default_factory=dict)
+class WriteConfig:
+    """Destination write behavior."""
 
-
-@dataclass
-class WriteModeConfig:
-    """Destination write mode configuration."""
-    mode: WriteMode = WriteMode.UPSERT
+    mode: WriteMode = WriteMode.INSERT
     conflict_keys: Optional[List[List[str]]] = None
-    idempotency_key: Optional[IdempotencyKeyConfig] = None
 
 
 @dataclass
-class DestinationBatchingConfig:
-    """Destination batching configuration."""
-    supported: bool = False
-    size: int = 1
+class ExecutionConfig:
+    """Per-stream destination execution overrides."""
+
+    batch_size: Optional[int] = None
+    max_concurrent_batches: Optional[int] = None
 
 
 @dataclass
 class DestinationConfig:
     """Stream destination configuration."""
-    connection_ref: str = ""
+
     endpoint_ref: Optional[EndpointRef] = None
-    write: WriteModeConfig = field(default_factory=WriteModeConfig)
-    target_schema_fingerprint: Optional[str] = None
-    batching: Optional[DestinationBatchingConfig] = None
-
-
-@dataclass
-class StreamEngineConfig:
-    """Stream-specific engine config overrides."""
-    error_handling: Optional[Dict[str, Any]] = None
-    rate_limits: Optional[Dict[str, Any]] = None
+    write: WriteConfig = field(default_factory=WriteConfig)
+    execution: Optional[ExecutionConfig] = None
 
 
 @dataclass
 class StreamConfig:
-    """Complete Stream configuration model (mirrors k2m.models.stream.StreamPayload)."""
+    """Complete Stream configuration model.
+
+    Mirrors the persisted stream document. Server-managed fields
+    (``stream_id``, ``version``, ``stream_schema_version``, ``org_id``,
+    ``created_at``, ``updated_at``) are present in the persisted document
+    and exposed here for convenience; engine code uses them only for
+    identity, idempotency, and observability.
+    """
+
     stream_id: str = ""
-    pipeline_id: str = ""
-    source: SourceConfig = field(default_factory=SourceConfig)
-    destinations: List[DestinationConfig] = field(default_factory=list)
     version: int = 1
+    stream_schema_version: int = 1
+    pipeline_id: str = ""
+    alias: str = ""
+    display_name: Optional[str] = None
+    description: Optional[str] = None
     status: str = "draft"
-    is_enabled: bool = True
-    mapping: MappingConfig = field(default_factory=MappingConfig)
     tags: Optional[List[str]] = None
-    runtime: Optional[StreamEngineConfig] = None
+    org_id: Optional[str] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
+    source: SourceConfig = field(default_factory=SourceConfig)
+    destinations: List[DestinationConfig] = field(default_factory=list)
+    mapping: MappingConfig = field(default_factory=MappingConfig)
 
     def get_primary_destination(self) -> DestinationConfig:
-        """Get the primary (first) destination."""
+        if not self.destinations:
+            raise ValueError(
+                f"Stream {self.stream_id!r} has no destinations configured"
+            )
         return self.destinations[0]
