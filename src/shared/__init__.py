@@ -10,10 +10,6 @@ from .database_utils import (
 )
 from .rate_limiter import RateLimiter
 from .connection_runtime import ConnectionRuntime
-from .connector_utils import (
-    find_connector,
-    get_connector_type_from_list,
-)
 from .run_id import (
     get_or_generate_run_id,
     get_run_id,
@@ -29,8 +25,6 @@ __all__ = [
     "validate_sql_identifier",
     "RateLimiter",
     "ConnectionRuntime",
-    "find_connector",
-    "get_connector_type_from_list",
     "get_run_id",
     "get_or_generate_run_id",
     "initialize_run_id",

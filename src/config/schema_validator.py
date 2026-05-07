@@ -1,25 +1,30 @@
 """JSON Schema validation against the published Analitiq contract schemas.
 
-Schemas are cached under ``src/schemas/cache/`` and are refreshed by
-``scripts/sync_schemas.py``. The engine validates every artifact at load
-time so contract drift surfaces with a clean error path instead of
-appearing as a ``KeyError`` deep inside the runtime.
+The engine fetches each schema from ``schemas.analitiq.work`` the first
+time an artifact of that kind is loaded, caches it in-process for the
+remainder of the run, and validates every artifact against it.
 
-Each artifact kind maps to one cached file:
+Each artifact kind maps to one URL:
 
-    ``connector``          -> ``connector.json``
-    ``connection``         -> ``connection.json``
-    ``pipeline``           -> ``pipeline.json``
-    ``stream``             -> ``stream.json``
-    ``endpoint``           -> ``endpoint.json``           (umbrella, oneOf)
-    ``api-endpoint``       -> ``api-endpoint.json``
-    ``database-endpoint``  -> ``database-endpoint.json``
+    ``connector``          -> ``/connector/latest.json``
+    ``connection``         -> ``/connection/latest.json``
+    ``pipeline``           -> ``/pipeline/latest.json``
+    ``stream``             -> ``/stream/latest.json``
+    ``endpoint``           -> ``/endpoint/latest.json``    (umbrella, oneOf)
+    ``api-endpoint``       -> ``/api-endpoint/latest.json``
+    ``database-endpoint``  -> ``/database-endpoint/latest.json``
+
+Set ``ANALITIQ_SCHEMA_BASE_URL`` to point at a different host (testing,
+staging, mirror).
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
+import urllib.error
+import urllib.request
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Iterable
@@ -30,7 +35,8 @@ from jsonschema.exceptions import ValidationError
 logger = logging.getLogger(__name__)
 
 
-_CACHE_DIR = Path(__file__).resolve().parent.parent / "schemas" / "cache"
+_DEFAULT_SCHEMA_BASE_URL = "https://schemas.analitiq.work"
+_FETCH_TIMEOUT_SECONDS = 15
 
 ARTIFACT_KINDS = (
     "connector",
@@ -61,20 +67,32 @@ class ContractValidationError(ValueError):
         super().__init__("\n".join(message_lines))
 
 
+def _schema_base_url() -> str:
+    return (os.getenv("ANALITIQ_SCHEMA_BASE_URL") or _DEFAULT_SCHEMA_BASE_URL).rstrip("/")
+
+
 @lru_cache(maxsize=None)
 def _load_schema(kind: str) -> Dict[str, Any]:
     if kind not in ARTIFACT_KINDS:
         raise ValueError(
             f"Unknown artifact kind {kind!r}; expected one of {ARTIFACT_KINDS}"
         )
-    schema_path = _CACHE_DIR / f"{kind}.json"
-    if not schema_path.is_file():
-        raise FileNotFoundError(
-            f"Cached schema not found at {schema_path}; "
-            f"run scripts/sync_schemas.py to populate the cache."
-        )
-    with schema_path.open() as fh:
-        return json.load(fh)
+    url = f"{_schema_base_url()}/{kind}/latest.json"
+    try:
+        with urllib.request.urlopen(url, timeout=_FETCH_TIMEOUT_SECONDS) as response:
+            payload = response.read()
+    except urllib.error.URLError as err:
+        raise RuntimeError(
+            f"Could not fetch {kind!r} schema from {url}: {err}"
+        ) from err
+    try:
+        schema = json.loads(payload)
+    except json.JSONDecodeError as err:
+        raise RuntimeError(
+            f"Schema fetched from {url} is not valid JSON: {err}"
+        ) from err
+    logger.debug("Loaded %r schema from %s", kind, url)
+    return schema
 
 
 def validate(kind: str, document: Dict[str, Any], *, source: str = "<inline>") -> None:
