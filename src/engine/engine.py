@@ -9,6 +9,8 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, AsyncIterator, Tuple
 
+import pyarrow as pa
+
 from ..source.connectors.base import BaseConnector
 from ..shared.connection_runtime import ConnectionRuntime
 from ..shared.run_id import get_or_generate_run_id
@@ -32,7 +34,7 @@ from .orchestrator import PipelineOrchestrator
 # gRPC imports for destination streaming
 from ..grpc.client import DestinationGRPCClient, BatchResult, generate_record_id
 from ..grpc.cursor import compute_max_cursor, cursor_to_state_dict
-from ..grpc.generated.analitiq.v1 import AckStatus, PayloadFormat
+from ..grpc.generated.analitiq.v1 import AckStatus
 
 logger = logging.getLogger(__name__)
 
@@ -415,7 +417,13 @@ class StreamingEngine:
         config: Dict[str, Any],
         stream_metrics: Dict[str, int],
     ):
-        """Transform data with field mappings and validation."""
+        """Transform data with field mappings and validation.
+
+        Sources emit ``pa.RecordBatch``; transformations operate on dict
+        shapes (mapping assignments, ``op: "get"`` expressions). This
+        stage is the single place in the engine where Arrow is
+        materialized to dicts and rebuilt afterwards.
+        """
         stream_name = config["stream_name"]
         logger.debug(f"Starting transform stage for stream {stream_name}")
 
@@ -426,9 +434,12 @@ class StreamingEngine:
                 if batch is None:
                     break
 
-                # Apply transformations using the modular transformer
-                transformed_batch = await self.data_transformer.apply_transformations(batch, config)
-                
+                pylist = batch.to_pylist()
+                transformed_pylist = await self.data_transformer.apply_transformations(
+                    pylist, config
+                )
+                transformed_batch = pa.RecordBatch.from_pylist(transformed_pylist)
+
                 await output_queue.put(transformed_batch)
                 batch_count += 1
 
@@ -492,9 +503,16 @@ class StreamingEngine:
                     break
 
                 batch_seq += 1
+
+                # Materialize once for record-id generation, cursor
+                # extraction, and DLQ payloads. The Arrow batch travels
+                # the wire untouched.
+                record_count = batch.num_rows
+                record_dicts = batch.to_pylist()
+
                 logger.debug(
                     f"Stream {stream_name}: Processing batch {batch_seq} "
-                    f"with {len(batch)} records"
+                    f"with {record_count} records"
                 )
 
                 # Generate stable record IDs for DLQ correlation
@@ -506,14 +524,14 @@ class StreamingEngine:
                         index=i,
                         primary_key_fields=primary_key_fields if primary_key_fields else None,
                     )
-                    for i, record in enumerate(batch)
+                    for i, record in enumerate(record_dicts)
                 ]
 
                 # Compute MAX cursor value in batch (batch may be unordered)
                 cursor = None
                 if cursor_field:
                     cursor = compute_max_cursor(
-                        batch=batch,
+                        batch=record_dicts,
                         cursor_field=cursor_field,
                         tie_breaker_fields=tie_breaker_fields,
                     )
@@ -541,10 +559,9 @@ class StreamingEngine:
                         run_id=run_id,
                         stream_id=stream_id,
                         batch_seq=batch_seq,
-                        records=batch,
+                        record_batch=batch,
                         record_ids=record_ids,
                         cursor=cursor,
-                        payload_format=PayloadFormat.PAYLOAD_FORMAT_JSONL,
                     )
 
                     if result.status == AckStatus.ACK_STATUS_SUCCESS:
@@ -639,13 +656,13 @@ class StreamingEngine:
                                 f"Stream {stream_name}: Batch {batch_seq} failed after "
                                 f"{max_retries} retries: {result.failure_summary}"
                             )
-                            self.metrics.increment_records_failed(len(batch))
+                            self.metrics.increment_records_failed(record_count)
                             self.metrics.increment_batches_failed()
-                            stream_metrics["records_failed"] += len(batch)
+                            stream_metrics["records_failed"] += record_count
                             stream_metrics["batches_failed"] += 1
                             if error_strategy == "dlq":
                                 await stream_dlq.send_batch(
-                                    batch, result.failure_summary, self.pipeline_id
+                                    record_dicts, result.failure_summary, self.pipeline_id
                                 )
                             break
 
@@ -664,15 +681,15 @@ class StreamingEngine:
                             f"Stream {stream_name}: Batch {batch_seq} fatal failure: "
                             f"{result.failure_summary}"
                         )
-                        self.metrics.increment_records_failed(len(batch))
+                        self.metrics.increment_records_failed(record_count)
                         self.metrics.increment_batches_failed()
-                        stream_metrics["records_failed"] += len(batch)
+                        stream_metrics["records_failed"] += record_count
                         stream_metrics["batches_failed"] += 1
 
                         # Send entire batch to DLQ with record_ids for correlation
                         if error_strategy == "dlq":
                             await stream_dlq.send_batch(
-                                batch, result.failure_summary, self.pipeline_id
+                                record_dicts, result.failure_summary, self.pipeline_id
                             )
 
                         # Raise exception to mark stream as failed
@@ -686,13 +703,13 @@ class StreamingEngine:
                             f"Stream {stream_name}: Batch {batch_seq} unknown status: "
                             f"{result.status}"
                         )
-                        self.metrics.increment_records_failed(len(batch))
+                        self.metrics.increment_records_failed(record_count)
                         self.metrics.increment_batches_failed()
-                        stream_metrics["records_failed"] += len(batch)
+                        stream_metrics["records_failed"] += record_count
                         stream_metrics["batches_failed"] += 1
                         if error_strategy == "dlq":
                             await stream_dlq.send_batch(
-                                batch, f"Unknown ACK status: {result.status}", self.pipeline_id
+                                record_dicts, f"Unknown ACK status: {result.status}", self.pipeline_id
                             )
                         break
 

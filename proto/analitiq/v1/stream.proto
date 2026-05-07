@@ -8,12 +8,12 @@ package analitiq.v1;
 option java_multiple_files = true;
 option java_package = "com.analitiq.v1";
 
-// Payload encoding format for record batches
+// Payload encoding format for record batches.
+// Arrow IPC is the only supported format: typed columnar data is
+// preserved end-to-end without a dict round-trip on either end.
 enum PayloadFormat {
   PAYLOAD_FORMAT_UNSPECIFIED = 0;
-  PAYLOAD_FORMAT_JSONL = 1;      // Newline-delimited JSON (default, human-readable)
-  PAYLOAD_FORMAT_MSGPACK = 2;    // MessagePack (compact binary)
-  PAYLOAD_FORMAT_AVRO = 3;       // Apache Avro (schema evolution)
+  PAYLOAD_FORMAT_ARROW_IPC = 1;
 }
 
 // Opaque cursor - produced by engine, stored/returned by destination
@@ -116,7 +116,7 @@ message RecordBatch {
 
   // Payload encoding
   PayloadFormat format = 4;
-  bytes payload = 5;       // Encoded records (JSONL, MessagePack, or Avro)
+  bytes payload = 5;       // Arrow IPC stream bytes (single record batch)
   uint32 record_count = 6;
 
   // Per-record identifiers for stable DLQ correlation

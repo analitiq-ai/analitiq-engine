@@ -1,14 +1,15 @@
-"""Tests for Arrow-based DestinationSchemaContract.
+"""Tests for the Arrow-based ``SchemaContract``.
 
-All ``columns`` payloads require a ``TypeMapper`` — the contract delegates
-native → canonical translation to the destination connector's type-map and
-no longer ships a hardcoded dispatch. These tests build a minimal mapper
-that covers the fixtures instead of reaching for the real connector files.
+The contract is a single class used at both source and destination
+boundaries. ``columns`` payloads require a ``TypeMapper`` — the contract
+delegates native → canonical translation to the connector's type-map and
+no longer ships a hardcoded dispatch.
 """
 
+import pyarrow as pa
 import pytest
 
-from src.destination.schema_contract import DestinationSchemaContract
+from src.destination.schema_contract import SchemaContract
 from src.engine.type_map import TypeMapper, UnmappedTypeError
 from src.engine.type_map.rules import parse_rules
 
@@ -37,8 +38,8 @@ def type_mapper() -> TypeMapper:
     return TypeMapper("test", parse_rules(TEST_TYPE_MAP_RULES, source="<test>"))
 
 
-class TestDestinationSchemaContractColumnsFormat:
-    """Test schema contract with database columns array format."""
+class TestSchemaContractColumnsFormat:
+    """Schema construction for database ``columns`` array payloads."""
 
     def test_basic_columns_schema(self, type_mapper):
         schema = {
@@ -49,74 +50,111 @@ class TestDestinationSchemaContractColumnsFormat:
             ]
         }
 
-        contract = DestinationSchemaContract(schema, type_mapper=type_mapper)
+        contract = SchemaContract(schema, type_mapper=type_mapper)
 
         assert len(contract.arrow_schema) == 3
         assert set(contract.column_types) == {"id", "name", "created"}
 
-    def test_cast_batch_basic(self, type_mapper):
+
+class TestSchemaContractCastArrowBatch:
+    """Casting an incoming ``pa.RecordBatch`` to the destination schema."""
+
+    def test_cast_arrow_batch_basic(self, type_mapper):
         schema = {
             "columns": [
                 {"name": "id", "type": "BIGINT", "nullable": False},
                 {"name": "name", "type": "VARCHAR(100)", "nullable": True},
             ]
         }
+        contract = SchemaContract(schema, type_mapper=type_mapper)
 
-        contract = DestinationSchemaContract(schema, type_mapper=type_mapper)
+        source = pa.RecordBatch.from_pylist(
+            [{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}]
+        )
+        cast = contract.cast_arrow_batch(source)
+        result = contract.to_dicts(cast)
 
-        records = [
-            {"id": 1, "name": "Alice"},
-            {"id": 2, "name": "Bob"},
-        ]
-        result = contract.prepare_records(records)
-
+        assert cast.schema == contract.arrow_schema
         assert len(result) == 2
-        assert result[0]["id"] == 1
-        assert result[0]["name"] == "Alice"
+        assert result[0] == {"id": 1, "name": "Alice"}
 
-    def test_cast_batch_with_type_coercion(self, type_mapper):
+    def test_cast_arrow_batch_with_type_coercion(self, type_mapper):
         schema = {
             "columns": [
                 {"name": "id", "type": "BIGINT", "nullable": False},
                 {"name": "value", "type": "FLOAT", "nullable": True},
             ]
         }
+        contract = SchemaContract(schema, type_mapper=type_mapper)
 
-        contract = DestinationSchemaContract(schema, type_mapper=type_mapper)
+        # Source happens to ship the columns as strings (e.g. an API
+        # source where everything came through JSON as text).
+        source = pa.RecordBatch.from_pylist(
+            [{"id": "1", "value": "3.14"}, {"id": "2", "value": "2.71"}]
+        )
+        cast = contract.cast_arrow_batch(source)
+        result = contract.to_dicts(cast)
 
-        # String numbers should be cast to proper types.
-        records = [
-            {"id": "1", "value": "3.14"},
-            {"id": "2", "value": "2.71"},
-        ]
-        result = contract.prepare_records(records)
-
-        assert len(result) == 2
         assert result[0]["id"] == 1
         assert isinstance(result[0]["value"], float)
 
-    def test_cast_batch_empty(self, type_mapper):
+    def test_cast_arrow_batch_empty(self, type_mapper):
         schema = {"columns": [{"name": "id", "type": "BIGINT", "nullable": False}]}
-        contract = DestinationSchemaContract(schema, type_mapper=type_mapper)
-        assert contract.prepare_records([]) == []
+        contract = SchemaContract(schema, type_mapper=type_mapper)
 
-    def test_missing_column_creates_nulls(self, type_mapper):
+        empty = pa.RecordBatch.from_pylist([], schema=contract.arrow_schema)
+        cast = contract.cast_arrow_batch(empty)
+
+        assert cast.num_rows == 0
+        assert contract.to_dicts(cast) == []
+
+    def test_cast_arrow_batch_missing_column_fills_nulls(self, type_mapper):
         schema = {
             "columns": [
                 {"name": "id", "type": "BIGINT", "nullable": False},
                 {"name": "optional_field", "type": "VARCHAR(50)", "nullable": True},
             ]
         }
-        contract = DestinationSchemaContract(schema, type_mapper=type_mapper)
+        contract = SchemaContract(schema, type_mapper=type_mapper)
 
-        result = contract.prepare_records([{"id": 1}])
+        source = pa.RecordBatch.from_pylist([{"id": 1}])
+        cast = contract.cast_arrow_batch(source)
+        result = contract.to_dicts(cast)
 
-        assert len(result) == 1
-        assert result[0]["id"] == 1
-        assert result[0]["optional_field"] is None
+        assert result == [{"id": 1, "optional_field": None}]
+
+    def test_cast_arrow_batch_drops_extra_columns(self, type_mapper):
+        schema = {
+            "columns": [{"name": "id", "type": "BIGINT", "nullable": False}]
+        }
+        contract = SchemaContract(schema, type_mapper=type_mapper)
+
+        source = pa.RecordBatch.from_pylist([{"id": 1, "extra": "drop me"}])
+        cast = contract.cast_arrow_batch(source)
+
+        assert cast.schema.names == ["id"]
+        assert contract.to_dicts(cast) == [{"id": 1}]
 
 
-class TestDestinationSchemaContractJsonSchema:
+class TestSchemaContractFromPylist:
+    """Source-side: building an Arrow batch from dicts."""
+
+    def test_from_pylist_with_schema(self, type_mapper):
+        schema = {
+            "columns": [
+                {"name": "id", "type": "BIGINT", "nullable": False},
+                {"name": "name", "type": "VARCHAR(100)", "nullable": True},
+            ]
+        }
+        contract = SchemaContract(schema, type_mapper=type_mapper)
+
+        batch = contract.from_pylist([{"id": 1, "name": "Alice"}])
+
+        assert batch.schema == contract.arrow_schema
+        assert batch.to_pylist() == [{"id": 1, "name": "Alice"}]
+
+
+class TestSchemaContractJsonSchema:
     """JSON Schema payloads do not use the type-map — they are self-describing."""
 
     def test_json_schema_format(self):
@@ -128,14 +166,14 @@ class TestDestinationSchemaContractJsonSchema:
             },
             "required": ["id"],
         }
-        contract = DestinationSchemaContract(schema)
+        contract = SchemaContract(schema)
 
         assert len(contract.arrow_schema) == 3
         assert set(contract.column_types) == {"id", "name", "active"}
 
     def test_json_schema_datetime_format(self):
         schema = {"properties": {"created_at": {"type": "string", "format": "date-time"}}}
-        contract = DestinationSchemaContract(schema)
+        contract = SchemaContract(schema)
         assert "timestamp" in contract.column_types["created_at"].lower()
 
     def test_json_schema_date_format_is_date32(self):
@@ -144,16 +182,16 @@ class TestDestinationSchemaContractJsonSchema:
         these drift, the column is cast to one shape at write time and
         DDL'd as another — failures surface far from the root cause."""
         schema = {"properties": {"dob": {"type": "string", "format": "date"}}}
-        contract = DestinationSchemaContract(schema)
+        contract = SchemaContract(schema)
         assert "date32" in contract.column_types["dob"]
 
     def test_json_schema_unknown_type_raises(self):
         schema = {"properties": {"weird": {"type": "polygon"}}}
         with pytest.raises(ValueError, match="unsupported type/format"):
-            DestinationSchemaContract(schema)
+            SchemaContract(schema)
 
 
-class TestDestinationSchemaContractTypeMapping:
+class TestSchemaContractTypeMapping:
     """Native SQL type → Arrow type mapping, driven by the connector's type-map."""
 
     def test_integer_types(self, type_mapper):
@@ -164,7 +202,7 @@ class TestDestinationSchemaContractTypeMapping:
                 {"name": "small", "type": "SMALLINT"},
             ]
         }
-        contract = DestinationSchemaContract(schema, type_mapper=type_mapper)
+        contract = SchemaContract(schema, type_mapper=type_mapper)
 
         assert "int64" in contract.column_types["big"]
         assert "int32" in contract.column_types["normal"]
@@ -177,7 +215,7 @@ class TestDestinationSchemaContractTypeMapping:
                 {"name": "text_col", "type": "TEXT"},
             ]
         }
-        contract = DestinationSchemaContract(schema, type_mapper=type_mapper)
+        contract = SchemaContract(schema, type_mapper=type_mapper)
 
         assert "string" in contract.column_types["var"]
         assert "string" in contract.column_types["text_col"]
@@ -190,37 +228,36 @@ class TestDestinationSchemaContractTypeMapping:
                 {"name": "dt", "type": "DATETIME"},
             ]
         }
-        contract = DestinationSchemaContract(schema, type_mapper=type_mapper)
+        contract = SchemaContract(schema, type_mapper=type_mapper)
 
         for col in ["ts", "tstz", "dt"]:
             assert "timestamp" in contract.column_types[col]
 
     def test_boolean_type(self, type_mapper):
         schema = {"columns": [{"name": "flag", "type": "BOOLEAN"}]}
-        contract = DestinationSchemaContract(schema, type_mapper=type_mapper)
+        contract = SchemaContract(schema, type_mapper=type_mapper)
         assert "bool" in contract.column_types["flag"]
 
     def test_decimal_type(self, type_mapper):
         schema = {"columns": [{"name": "price", "type": "DECIMAL(10,2)"}]}
-        contract = DestinationSchemaContract(schema, type_mapper=type_mapper)
+        contract = SchemaContract(schema, type_mapper=type_mapper)
         assert "decimal128" in contract.column_types["price"]
 
 
-class TestDestinationSchemaContractEdgeCases:
+class TestSchemaContractEdgeCases:
     def test_empty_schema(self):
-        contract = DestinationSchemaContract({})
+        contract = SchemaContract({})
         assert len(contract.arrow_schema) == 0
-        assert contract.prepare_records([]) == []
 
     def test_columns_payload_requires_type_mapper(self):
         schema = {"columns": [{"name": "id", "type": "BIGINT"}]}
         with pytest.raises(ValueError, match="type_mapper is required"):
-            DestinationSchemaContract(schema)
+            SchemaContract(schema)
 
     def test_unmapped_native_type_raises(self, type_mapper):
         schema = {"columns": [{"name": "custom", "type": "CUSTOM_UNKNOWN_TYPE"}]}
         with pytest.raises(UnmappedTypeError):
-            DestinationSchemaContract(schema, type_mapper=type_mapper)
+            SchemaContract(schema, type_mapper=type_mapper)
 
     def test_column_without_name_raises(self, type_mapper):
         """Unnamed columns are a malformed-payload signal, not something
@@ -232,4 +269,4 @@ class TestDestinationSchemaContractEdgeCases:
             ]
         }
         with pytest.raises(ValueError, match="has no 'name' field"):
-            DestinationSchemaContract(schema, type_mapper=type_mapper)
+            SchemaContract(schema, type_mapper=type_mapper)

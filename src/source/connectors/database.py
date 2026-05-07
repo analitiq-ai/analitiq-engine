@@ -3,6 +3,8 @@
 import logging
 from typing import Any, AsyncIterator, Dict, List, Optional
 
+import pyarrow as pa
+
 from .base import BaseConnector, ConnectionError, ReadError, WriteError
 from ...shared.connection_runtime import ConnectionRuntime
 from ...shared.database_utils import (
@@ -91,9 +93,15 @@ class DatabaseConnector(BaseConnector):
         stream_name: str,
         partition: Optional[Dict[str, Any]] = None,
         batch_size: int = 1000
-    ) -> AsyncIterator[List[Dict[str, Any]]]:
-        """
-        Read data in batches from database table with state management for incremental replication.
+    ) -> AsyncIterator[pa.RecordBatch]:
+        """Read data in batches as Arrow record batches.
+
+        The connector materializes Arrow once at the source boundary using
+        ``pa.RecordBatch.from_pylist``. Type inference is driven by the
+        DB driver's value types — datetimes, Decimals, ints, etc. are
+        already correctly typed by the time SQLAlchemy hands rows back.
+        The destination realigns to its own schema via
+        :meth:`SchemaContract.cast_arrow_batch`.
 
         Args:
             config: Read configuration
@@ -103,7 +111,7 @@ class DatabaseConnector(BaseConnector):
             batch_size: Number of records per batch
 
         Yields:
-            Batches of records as dictionaries
+            ``pa.RecordBatch`` per fetch chunk.
         """
         if not self._initialized:
             raise RuntimeError("Database connection not initialized. Call connect() first.")
@@ -163,7 +171,7 @@ class DatabaseConnector(BaseConnector):
                     self.metrics["records_read"] += len(rows)
                     self.metrics["batches_read"] += 1
 
-                    yield rows
+                    yield pa.RecordBatch.from_pylist(rows)
 
                     # Save cursor state after each batch
                     if last_cursor_value is not None:

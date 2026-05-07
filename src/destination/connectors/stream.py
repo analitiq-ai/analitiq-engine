@@ -8,6 +8,8 @@ import logging
 import sys
 from typing import Any, Dict, List
 
+import pyarrow as pa
+
 from ..base_handler import BaseDestinationHandler, BatchWriteResult
 from ..formatters import get_formatter
 from ..formatters.base import BaseFormatter
@@ -128,23 +130,14 @@ class StreamDestinationHandler(BaseDestinationHandler):
         run_id: str,
         stream_id: str,
         batch_seq: int,
-        records: List[Dict[str, Any]],
+        record_batch: pa.RecordBatch,
         record_ids: List[str],
         cursor: Cursor,
     ) -> BatchWriteResult:
-        """
-        Write a batch of records to stdout.
+        """Write an Arrow record batch to stdout.
 
-        Args:
-            run_id: Pipeline run identifier
-            stream_id: Stream identifier
-            batch_seq: Batch sequence number
-            records: Records to write
-            record_ids: Record identifiers (for logging)
-            cursor: Cursor to return on success
-
-        Returns:
-            BatchWriteResult with SUCCESS status
+        The stdout formatter consumes dicts, so the batch is materialized
+        once at this boundary.
         """
         if not self._connected or self._formatter is None:
             return BatchWriteResult(
@@ -153,6 +146,8 @@ class StreamDestinationHandler(BaseDestinationHandler):
                 records_written=0,
                 failure_summary="Handler not connected",
             )
+
+        records = record_batch.to_pylist()
 
         if not records:
             return BatchWriteResult(

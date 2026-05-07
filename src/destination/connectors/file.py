@@ -6,6 +6,8 @@ This handler writes records to files using configurable formatters and storage b
 import logging
 from typing import Any, Dict, List, Optional
 
+import pyarrow as pa
+
 from ..base_handler import BaseDestinationHandler, BatchWriteResult
 from ..formatters import get_formatter
 from ..formatters.base import BaseFormatter
@@ -163,23 +165,14 @@ class FileDestinationHandler(BaseDestinationHandler):
         run_id: str,
         stream_id: str,
         batch_seq: int,
-        records: List[Dict[str, Any]],
+        record_batch: pa.RecordBatch,
         record_ids: List[str],
         cursor: Cursor,
     ) -> BatchWriteResult:
-        """
-        Write a batch of records to a file.
+        """Write an Arrow record batch to a file.
 
-        Args:
-            run_id: Pipeline run identifier
-            stream_id: Stream identifier
-            batch_seq: Batch sequence number
-            records: Records to write
-            record_ids: Record identifiers
-            cursor: Cursor to return on success
-
-        Returns:
-            BatchWriteResult with status
+        Formatters consume dicts, so the batch is materialized once at
+        this boundary.
         """
         if not self._connected:
             return BatchWriteResult(
@@ -196,6 +189,8 @@ class FileDestinationHandler(BaseDestinationHandler):
                 records_written=0,
                 failure_summary="Handler components not initialized",
             )
+
+        records = record_batch.to_pylist()
 
         # Check idempotency - has this batch already been committed?
         existing_commit = await self._manifest.check_committed(run_id, stream_id, batch_seq)

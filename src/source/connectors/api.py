@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Dict, List, Optional
 from urllib.parse import urljoin, urlencode
 
+import pyarrow as pa
+
 from .base import BaseConnector, ConnectionError, ReadError
 from ...shared.connection_runtime import ConnectionRuntime
 from ...state.state_manager import StateManager
@@ -67,9 +69,13 @@ class APIConnector(BaseConnector):
         stream_name: str,
         partition: Optional[Dict[str, Any]] = None,
         batch_size: int = 1000
-    ) -> AsyncIterator[List[Dict[str, Any]]]:
-        """
-        Read data in batches with state management.
+    ) -> AsyncIterator[pa.RecordBatch]:
+        """Read data in batches as Arrow record batches.
+
+        JSON parse output is dict-shaped; this connector materializes
+        Arrow at the connector boundary using ``pa.RecordBatch.from_pylist``.
+        The destination realigns to its declared schema via
+        :meth:`SchemaContract.cast_arrow_batch`.
 
         Args:
             config: Read configuration
@@ -79,7 +85,7 @@ class APIConnector(BaseConnector):
             batch_size: Number of records per batch
 
         Yields:
-            Batches of records as dictionaries
+            ``pa.RecordBatch`` per upstream page.
         """
         if partition is None:
             partition = {}
@@ -129,10 +135,10 @@ class APIConnector(BaseConnector):
                             
                         # Update batch to use deduplicated version
                         batch = deduplicated_batch
-                        
+
                         # Only yield non-empty deduplicated batches
-                        yield batch
-                        
+                        yield pa.RecordBatch.from_pylist(batch)
+
                         batch_count += 1
                         total_records += len(batch)
                         
@@ -197,8 +203,8 @@ class APIConnector(BaseConnector):
                             
                         # Use deduplicated batch
                         batch = deduplicated_batch
-                        yield batch
-                    
+                        yield pa.RecordBatch.from_pylist(batch)
+
                         # Update state for single batch
                         total_records = len(batch)
                         last_record = batch[-1]

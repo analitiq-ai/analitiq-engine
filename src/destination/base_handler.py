@@ -7,7 +7,9 @@ delegates all data operations to these handlers.
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, List, Mapping, Optional
+
+import pyarrow as pa
 
 from ..grpc.generated.analitiq.v1 import (
     AckStatus,
@@ -102,12 +104,11 @@ class BaseDestinationHandler(ABC):
         run_id: str,
         stream_id: str,
         batch_seq: int,
-        records: List[Dict[str, Any]],
+        record_batch: pa.RecordBatch,
         record_ids: List[str],
         cursor: Cursor,
     ) -> BatchWriteResult:
-        """
-        Write a batch of records to the destination.
+        """Write a batch of records to the destination.
 
         Idempotency Requirements:
         - Must check if (run_id, stream_id, batch_seq) was already committed
@@ -119,7 +120,8 @@ class BaseDestinationHandler(ABC):
             run_id: Unique pipeline run identifier
             stream_id: Stream identifier
             batch_seq: Monotonically increasing batch sequence number
-            records: List of record dictionaries to write
+            record_batch: Records as a ``pa.RecordBatch``. Arrow IPC is
+                the only supported wire format.
             record_ids: Stable identifiers for each record (for DLQ correlation)
             cursor: Opaque cursor representing max watermark in batch
 

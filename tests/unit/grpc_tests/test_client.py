@@ -274,45 +274,30 @@ class TestConnectRetryLogLevels:
 class TestClientPayloadEncoding:
     """Tests for client payload encoding."""
 
-    def test_encode_jsonl_payload(self):
-        """Test JSONL payload encoding."""
-        from src.grpc.generated.analitiq.v1 import PayloadFormat
+    def test_encode_arrow_ipc_roundtrip(self):
+        """Arrow IPC encode → decode preserves typed columnar data.
 
-        client = DestinationGRPCClient()
-        records = [
+        Arrow IPC is the only supported wire format; the encoded bytes
+        carry both the schema and the record batch so the destination
+        decodes them together.
+        """
+        import io
+        import pyarrow as pa
+
+        batch = pa.RecordBatch.from_pylist(
+            [{"id": 1, "name": "first"}, {"id": 2, "name": "second"}]
+        )
+        payload = DestinationGRPCClient._encode_arrow_ipc(batch)
+
+        with pa.ipc.open_stream(io.BytesIO(payload)) as reader:
+            decoded = reader.read_all()
+
+        assert decoded.num_rows == 2
+        assert decoded.to_pylist() == [
             {"id": 1, "name": "first"},
             {"id": 2, "name": "second"},
         ]
-
-        payload = client._encode_payload(records, PayloadFormat.PAYLOAD_FORMAT_JSONL)
-
-        # Decode and verify
-        lines = payload.decode("utf-8").split("\n")
-        assert len(lines) == 2
-
-        import json
-        assert json.loads(lines[0]) == {"id": 1, "name": "first"}
-        assert json.loads(lines[1]) == {"id": 2, "name": "second"}
-
-    def test_encode_msgpack_payload(self):
-        """Test MessagePack payload encoding."""
-        pytest.importorskip("msgpack")
-
-        from src.grpc.generated.analitiq.v1 import PayloadFormat
-        import msgpack
-
-        client = DestinationGRPCClient()
-        records = [
-            {"id": 1, "name": "first"},
-            {"id": 2, "name": "second"},
-        ]
-
-        payload = client._encode_payload(records, PayloadFormat.PAYLOAD_FORMAT_MSGPACK)
-
-        # Decode and verify
-        decoded = msgpack.unpackb(payload, raw=False)
-        assert len(decoded) == 2
-        assert decoded[0] == {"id": 1, "name": "first"}
+        assert decoded.schema == batch.schema
 
 
 class TestClientSchemaBuilder:

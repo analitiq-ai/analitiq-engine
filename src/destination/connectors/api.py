@@ -9,6 +9,7 @@ import logging
 from typing import Any, Dict, List, Optional
 
 import aiohttp
+import pyarrow as pa
 from aiohttp_retry import ExponentialRetry, RetryClient
 
 from ..base_handler import BaseDestinationHandler, BatchWriteResult
@@ -194,23 +195,14 @@ class ApiDestinationHandler(BaseDestinationHandler):
         run_id: str,
         stream_id: str,
         batch_seq: int,
-        records: List[Dict[str, Any]],
+        record_batch: pa.RecordBatch,
         record_ids: List[str],
         cursor: Cursor,
     ) -> BatchWriteResult:
-        """
-        Write a batch of records to the API.
+        """Write an Arrow record batch to the API.
 
-        Args:
-            run_id: Pipeline run identifier
-            stream_id: Stream identifier
-            batch_seq: Batch sequence number
-            records: Records to write
-            record_ids: Record identifiers
-            cursor: Cursor to return on success
-
-        Returns:
-            BatchWriteResult with status
+        HTTP request bodies are dict-shaped, so the batch is materialized
+        once at this boundary.
         """
         if not self._session or not self._connected:
             return BatchWriteResult(
@@ -219,6 +211,8 @@ class ApiDestinationHandler(BaseDestinationHandler):
                 records_written=0,
                 failure_summary="Handler not connected",
             )
+
+        records = record_batch.to_pylist()
 
         if not records:
             return BatchWriteResult(

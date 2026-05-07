@@ -89,13 +89,16 @@ def compute_max_cursor(
     cursor_field: str,
     tie_breaker_fields: Optional[List[str]] = None,
 ) -> Cursor:
-    """
-    Compute the maximum cursor value from a batch of records.
+    """Compute the maximum cursor value from a batch of records.
 
-    The batch may not be ordered, so we find the MAX watermark across all records.
+    The batch may be unordered; this walks every record to find the
+    MAX watermark and (optional) tie-breaker. Cursor extraction is
+    per-record by design — tie-breakers may cross multiple columns.
 
     Args:
-        batch: List of records (dicts)
+        batch: Records as a list of dicts. The engine materializes the
+            Arrow batch once at the load stage; this function does not
+            re-materialize.
         cursor_field: Name of the cursor field
         tie_breaker_fields: Optional list of tie-breaker field names for ordering
 

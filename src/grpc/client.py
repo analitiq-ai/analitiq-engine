@@ -6,6 +6,7 @@ including schema negotiation, batch sending, and ACK handling.
 
 import asyncio
 import hashlib
+import io
 import json
 import logging
 import os
@@ -13,6 +14,7 @@ from dataclasses import dataclass
 from typing import Any, AsyncIterator, Dict, List, Optional
 
 import grpc
+import pyarrow as pa
 from grpc import aio as grpc_aio
 
 from .cursor import Cursor, encode_cursor
@@ -301,42 +303,25 @@ class DestinationGRPCClient:
         run_id: str,
         stream_id: str,
         batch_seq: int,
-        records: List[Dict[str, Any]],
+        record_batch: pa.RecordBatch,
         record_ids: List[str],
         cursor: Cursor,
-        payload_format: PayloadFormat = PayloadFormat.PAYLOAD_FORMAT_JSONL,
     ) -> BatchResult:
-        """
-        Send a batch of records and wait for ACK.
+        """Send a batch and wait for ACK.
 
-        This implements strict in-order: send batch -> await ACK -> return.
-
-        Args:
-            run_id: Unique run identifier
-            stream_id: Stream identifier
-            batch_seq: Monotonically increasing batch sequence number
-            records: List of records to send
-            record_ids: List of record identifiers for DLQ correlation
-            cursor: Opaque cursor representing max watermark in batch
-            payload_format: Encoding format for payload
-
-        Returns:
-            BatchResult with status and committed cursor
+        Strict in-order: send -> await ACK -> return. The wire format is
+        Arrow IPC; the engine ships ``pa.RecordBatch`` straight through.
         """
         if not self._stream_active:
             raise RuntimeError("Stream not active")
 
-        # Encode payload
-        payload = self._encode_payload(records, payload_format)
-
-        # Build record batch message
         batch_msg = RecordBatch(
             run_id=run_id,
             stream_id=stream_id,
             batch_seq=batch_seq,
-            format=payload_format,
-            payload=payload,
-            record_count=len(records),
+            format=PayloadFormat.PAYLOAD_FORMAT_ARROW_IPC,
+            payload=self._encode_arrow_ipc(record_batch),
+            record_count=record_batch.num_rows,
             record_ids=record_ids,
             cursor=cursor,
         )
@@ -527,21 +512,18 @@ class DestinationGRPCClient:
             schema_hash=schema_hash,
         )
 
-    def _encode_payload(
-        self,
-        records: List[Dict[str, Any]],
-        format: PayloadFormat,
-    ) -> bytes:
-        """Encode records to bytes based on format."""
-        if format == PayloadFormat.PAYLOAD_FORMAT_JSONL:
-            lines = [json.dumps(record, default=str) for record in records]
-            return "\n".join(lines).encode("utf-8")
-        elif format == PayloadFormat.PAYLOAD_FORMAT_MSGPACK:
-            import msgpack
+    @staticmethod
+    def _encode_arrow_ipc(record_batch: pa.RecordBatch) -> bytes:
+        """Serialize a ``pa.RecordBatch`` as a single-batch Arrow IPC stream.
 
-            return msgpack.packb(records, default=str)
-        else:
-            raise ValueError(f"Unsupported payload format: {format}")
+        The stream format carries the schema in the same buffer, so the
+        destination decodes batch and schema together without out-of-band
+        coordination.
+        """
+        sink = io.BytesIO()
+        with pa.ipc.new_stream(sink, record_batch.schema) as writer:
+            writer.write_batch(record_batch)
+        return sink.getvalue()
 
     def _process_ack(self, ack: BatchAck) -> BatchResult:
         """Process BatchAck into BatchResult."""

@@ -183,11 +183,12 @@ class TestWriteBatchFatalOnTypeMapError:
 
         handler._insert_records = _raising_insert  # type: ignore[method-assign]
 
+        import pyarrow as pa
         result = await handler.write_batch(
             run_id="run-1",
             stream_id="s1",
             batch_seq=1,
-            records=[{"id": 1}],
+            record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
             record_ids=["1"],
             cursor=Cursor(token=b""),
         )

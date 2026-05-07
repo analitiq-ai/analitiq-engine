@@ -7,12 +7,18 @@ Tests focus on failure handling scenarios to ensure:
 """
 
 import pytest
+import pyarrow as pa
 from unittest.mock import AsyncMock, MagicMock, patch
 from typing import Dict, Any, List
 
 from src.destination.connectors.api import ApiDestinationHandler
 from src.destination.base_handler import BatchWriteResult
 from src.grpc.generated.analitiq.v1 import AckStatus
+
+
+def _to_record_batch(records: List[Dict[str, Any]]) -> pa.RecordBatch:
+    """Helper: build an Arrow batch from sample dicts for the new write_batch contract."""
+    return pa.RecordBatch.from_pylist(records)
 
 
 @pytest.fixture
@@ -78,7 +84,7 @@ class TestApiHandlerWriteBatchFailures:
             run_id="test-run",
             stream_id="test-stream",
             batch_seq=1,
-            records=sample_records,
+            record_batch=_to_record_batch(sample_records),
             record_ids=sample_record_ids,
             cursor=mock_cursor,
         )
@@ -117,7 +123,7 @@ class TestApiHandlerWriteBatchFailures:
             run_id="test-run",
             stream_id="test-stream",
             batch_seq=1,
-            records=sample_records,
+            record_batch=_to_record_batch(sample_records),
             record_ids=sample_record_ids,
             cursor=mock_cursor,
         )
@@ -150,7 +156,7 @@ class TestApiHandlerWriteBatchFailures:
             run_id="test-run",
             stream_id="test-stream",
             batch_seq=1,
-            records=sample_records,
+            record_batch=_to_record_batch(sample_records),
             record_ids=sample_record_ids,
             cursor=mock_cursor,
         )
@@ -177,7 +183,7 @@ class TestApiHandlerWriteBatchFailures:
             run_id="test-run",
             stream_id="test-stream",
             batch_seq=1,
-            records=[],
+            record_batch=pa.RecordBatch.from_pylist([]),
             record_ids=[],
             cursor=mock_cursor,
         )
@@ -205,7 +211,7 @@ class TestApiHandlerWriteBatchFailures:
             run_id="test-run",
             stream_id="test-stream",
             batch_seq=1,
-            records=sample_records,
+            record_batch=_to_record_batch(sample_records),
             record_ids=sample_record_ids,
             cursor=mock_cursor,
         )
@@ -239,7 +245,7 @@ class TestApiHandlerWriteBatchFailures:
             run_id="test-run",
             stream_id="test-stream",
             batch_seq=1,
-            records=sample_records,
+            record_batch=_to_record_batch(sample_records),
             record_ids=sample_record_ids,
             cursor=mock_cursor,
         )
@@ -364,7 +370,7 @@ class TestApiHandlerBatchModes:
             run_id="test-run",
             stream_id="test-stream",
             batch_seq=1,
-            records=records,
+            record_batch=_to_record_batch(records),
             record_ids=record_ids,
             cursor=mock_cursor,
         )
@@ -397,7 +403,7 @@ class TestApiHandlerBatchModes:
             run_id="test-run",
             stream_id="test-stream",
             batch_seq=1,
-            records=records,
+            record_batch=_to_record_batch(records),
             record_ids=record_ids,
             cursor=mock_cursor,
         )

@@ -3,7 +3,7 @@
 This handler provides a unified interface for all SQL databases supported by SQLAlchemy.
 The specific database is determined by the `driver` field in the connection config.
 
-Type casting is handled by the Arrow-based DestinationSchemaContract which provides
+Type casting is handled by the Arrow-based SchemaContract, which provides
 efficient columnar type conversion for batch operations.
 """
 
@@ -11,6 +11,7 @@ import logging
 from datetime import datetime
 from typing import Any, Dict, List, Mapping, Optional
 
+import pyarrow as pa
 from sqlalchemy import (
     BigInteger,
     Boolean,
@@ -32,7 +33,7 @@ from sqlalchemy.dialects.mysql import insert as mysql_insert
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncConnection
 
 from ..base_handler import BaseDestinationHandler, BatchWriteResult
-from ..schema_contract import DestinationSchemaContract
+from ..schema_contract import SchemaContract
 from ..sql_types import native_to_sqlalchemy
 from ...engine.type_map import (
     InvalidTypeMapError,
@@ -108,7 +109,7 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         self._batch_commits_table: Table | None = None
 
         # Arrow-based schema contract for vectorized type casting (built on schema configure)
-        self._schema_contract: Optional[DestinationSchemaContract] = None
+        self._schema_contract: Optional[SchemaContract] = None
 
         # Stream-id -> structured endpoint_ref dict so configure_schema()
         # can pick the type-mapper matching the endpoint's scope (connector
@@ -251,7 +252,7 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
 
             # Build schema contract for Arrow-based type casting.
             if self._json_schema:
-                self._schema_contract = DestinationSchemaContract(
+                self._schema_contract = SchemaContract(
                     self._json_schema,
                     type_mapper=type_mapper,
                 )
@@ -536,23 +537,15 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         run_id: str,
         stream_id: str,
         batch_seq: int,
-        records: List[Dict[str, Any]],
+        record_batch: pa.RecordBatch,
         record_ids: List[str],
         cursor: Cursor,
     ) -> BatchWriteResult:
-        """
-        Write a batch of records to the database.
+        """Write an Arrow record batch to the database.
 
-        Args:
-            run_id: Pipeline run identifier
-            stream_id: Stream identifier
-            batch_seq: Batch sequence number
-            records: Records to write
-            record_ids: Record identifiers
-            cursor: Cursor to return on success
-
-        Returns:
-            BatchWriteResult with status
+        The batch is realigned to the destination schema in Arrow space
+        (``cast_arrow_batch``) and only materialized to dicts at the very
+        last SQLAlchemy boundary.
         """
         if not self._engine or not self._connected:
             return BatchWriteResult(
@@ -581,7 +574,8 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
                 committed_cursor=Cursor(token=existing["committed_cursor"]),
             )
 
-        if not records:
+        record_count = record_batch.num_rows
+        if record_count == 0:
             # Empty batch - still record for idempotency
             await self._record_batch_commit(run_id, stream_id, batch_seq, cursor.token, 0)
             return BatchWriteResult(
@@ -592,25 +586,27 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
             )
 
         try:
+            prepared = self._prepare_for_sqlalchemy(record_batch)
+
             async with self._engine.begin() as conn:
                 # Write records based on write mode
                 if self._write_mode == "truncate_insert":
-                    await self._truncate_and_insert(conn, records)
+                    await self._truncate_and_insert(conn, prepared)
                 elif self._write_mode == "upsert" and self._primary_keys:
-                    await self._upsert_records(conn, records)
+                    await self._upsert_records(conn, prepared)
                 else:
-                    await self._insert_records(conn, records)
+                    await self._insert_records(conn, prepared)
 
                 # Record batch commit
                 await self._record_batch_commit_in_txn(
-                    conn, run_id, stream_id, batch_seq, cursor.token, len(records)
+                    conn, run_id, stream_id, batch_seq, cursor.token, record_count
                 )
 
-            logger.info(f"Wrote batch {batch_seq}: {len(records)} records")
+            logger.info(f"Wrote batch {batch_seq}: {record_count} records")
             return BatchWriteResult(
                 success=True,
                 status=AckStatus.ACK_STATUS_SUCCESS,
-                records_written=len(records),
+                records_written=record_count,
                 committed_cursor=cursor,
             )
 
@@ -713,31 +709,26 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         conn: AsyncConnection,
         records: List[Dict[str, Any]],
     ) -> None:
-        """Insert records (plain INSERT)."""
-        if self._table is None:
+        """Insert pre-cast records (plain INSERT)."""
+        if self._table is None or not records:
             return
-
-        # Prepare records - convert complex types to JSON strings
-        prepared = self._prepare_records(records)
-        await conn.execute(self._table.insert(), prepared)
+        await conn.execute(self._table.insert(), records)
 
     async def _upsert_records(
         self,
         conn: AsyncConnection,
         records: List[Dict[str, Any]],
     ) -> None:
-        """Upsert records (INSERT ... ON CONFLICT)."""
+        """Upsert pre-cast records (INSERT ... ON CONFLICT)."""
         if self._table is None or not self._primary_keys:
             await self._insert_records(conn, records)
             return
-
-        prepared = self._prepare_records(records)
+        if not records:
+            return
 
         if self._driver in ("postgresql", "postgres"):
-            # PostgreSQL upsert
-            stmt = pg_insert(self._table).values(prepared)
-            # Get columns actually present in the records
-            record_columns = set(prepared[0].keys()) if prepared else set()
+            stmt = pg_insert(self._table).values(records)
+            record_columns = set(records[0].keys())
             update_cols = {
                 c.name: c for c in stmt.excluded
                 if c.name not in self._primary_keys and c.name in record_columns
@@ -749,10 +740,8 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
             await conn.execute(stmt)
 
         elif self._driver in ("mysql", "mariadb"):
-            # MySQL upsert
-            stmt = mysql_insert(self._table).values(prepared)
-            # Get columns actually present in the records
-            record_columns = set(prepared[0].keys()) if prepared else set()
+            stmt = mysql_insert(self._table).values(records)
+            record_columns = set(records[0].keys())
             update_cols = {
                 c.name: c for c in stmt.inserted
                 if c.name not in self._primary_keys and c.name in record_columns
@@ -769,52 +758,44 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         conn: AsyncConnection,
         records: List[Dict[str, Any]],
     ) -> None:
-        """Truncate table and insert records."""
+        """Truncate table and insert pre-cast records."""
         if self._table is None:
             return
-
-        # Truncate
         await conn.execute(self._table.delete())
-
-        # Insert
         await self._insert_records(conn, records)
 
-    def _prepare_records(self, records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _prepare_for_sqlalchemy(
+        self, record_batch: pa.RecordBatch
+    ) -> List[Dict[str, Any]]:
+        """Cast a batch to the destination schema and materialize for SQLAlchemy.
+
+        ``cast_arrow_batch`` does the column-by-column realignment in
+        Arrow space; ``to_pylist`` is the single materialization point
+        before the SQLAlchemy bulk insert.
         """
-        Prepare records for insertion using Arrow-based vectorized casting.
+        if self._schema_contract is not None:
+            record_batch = self._schema_contract.cast_arrow_batch(record_batch)
+        return self._json_serialize_complex(record_batch.to_pylist())
 
-        Uses the DestinationSchemaContract to efficiently cast all records
-        to the proper types for this database in a single columnar operation.
+    def _json_serialize_complex(
+        self, records: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """JSON-serialize dict/list values for non-Postgres drivers.
 
-        Args:
-            records: Raw records from transformation
-
-        Returns:
-            Prepared records with proper types for database insertion
+        Postgres handles JSON columns natively; MySQL/SQLite need the
+        complex types as strings. This is the only per-row work that
+        survives between Arrow and SQLAlchemy.
         """
-        if not records:
+        if not records or self._driver in ("postgresql", "postgres"):
             return records
-
-        # Use Arrow-based schema contract for vectorized type casting
-        if self._schema_contract:
-            records = self._schema_contract.prepare_records(records)
-
-        # Handle any remaining complex types (dicts/lists)
-        # For non-PostgreSQL databases, complex types need to be JSON-serialized
         import json
-        if self._driver not in ("postgresql", "postgres"):
-            prepared = []
-            for record in records:
-                row = {}
-                for key, value in record.items():
-                    if isinstance(value, (dict, list)):
-                        row[key] = json.dumps(value)
-                    else:
-                        row[key] = value
-                prepared.append(row)
-            return prepared
-
-        return records
+        return [
+            {
+                key: (json.dumps(value) if isinstance(value, (dict, list)) else value)
+                for key, value in record.items()
+            }
+            for record in records
+        ]
 
     async def health_check(self) -> bool:
         """Check database health."""

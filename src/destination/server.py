@@ -8,12 +8,13 @@ This server implements the DestinationService gRPC interface, handling:
 """
 
 import asyncio
-import json
+import io
 import logging
 import os
 from typing import Any, AsyncIterator, Dict, Optional
 
 import grpc
+import pyarrow as pa
 from grpc import aio as grpc_aio
 
 from ..grpc.generated.analitiq.v1 import (
@@ -204,17 +205,12 @@ class DestinationServicer(DestinationServiceServicer):
                         f"{batch_msg.stream_id} with {batch_msg.record_count} records"
                     )
 
-                    # Decode payload
-                    records = self._decode_payload(
-                        batch_msg.payload, batch_msg.format
-                    )
-
-                    # Write batch via handler
+                    record_batch = self._decode_arrow_ipc(batch_msg)
                     result = await self.handler.write_batch(
                         run_id=batch_msg.run_id,
                         stream_id=batch_msg.stream_id,
                         batch_seq=batch_msg.batch_seq,
-                        records=records,
+                        record_batch=record_batch,
                         record_ids=list(batch_msg.record_ids),
                         cursor=batch_msg.cursor,
                     )
@@ -295,10 +291,7 @@ class DestinationServicer(DestinationServiceServicer):
             supports_bulk_load=self.handler.supports_bulk_load,
             max_batch_size=self.handler.max_batch_size,
             max_batch_bytes=self.handler.max_batch_bytes,
-            supported_formats=[
-                PayloadFormat.PAYLOAD_FORMAT_JSONL,
-                PayloadFormat.PAYLOAD_FORMAT_MSGPACK,
-            ],
+            supported_formats=[PayloadFormat.PAYLOAD_FORMAT_ARROW_IPC],
             protocol_version="1.0.0",
         )
 
@@ -312,20 +305,24 @@ class DestinationServicer(DestinationServiceServicer):
         self._server.signal_shutdown()
         return ShutdownAck(acknowledged=True, message="Shutting down")
 
-    def _decode_payload(
-        self, payload: bytes, format: PayloadFormat
-    ) -> list[Dict[str, Any]]:
-        """Decode payload bytes to list of records."""
-        if format == PayloadFormat.PAYLOAD_FORMAT_JSONL:
-            lines = payload.decode("utf-8").strip().split("\n")
-            return [json.loads(line) for line in lines if line]
+    @staticmethod
+    def _decode_arrow_ipc(batch_msg: Any) -> pa.RecordBatch:
+        """Decode an Arrow IPC payload into a single ``pa.RecordBatch``.
 
-        elif format == PayloadFormat.PAYLOAD_FORMAT_MSGPACK:
-            import msgpack
-            return msgpack.unpackb(payload, raw=False)
-
-        else:
-            raise ValueError(f"Unsupported payload format: {format}")
+        ``combine_chunks`` collapses any multi-batch writers down to one
+        record batch; an empty payload produces an empty batch with the
+        schema preserved.
+        """
+        if batch_msg.format != PayloadFormat.PAYLOAD_FORMAT_ARROW_IPC:
+            raise ValueError(
+                f"Unsupported payload format: {batch_msg.format}; "
+                f"only PAYLOAD_FORMAT_ARROW_IPC is supported"
+            )
+        with pa.ipc.open_stream(io.BytesIO(batch_msg.payload)) as reader:
+            table = reader.read_all()
+        if table.num_rows == 0:
+            return pa.RecordBatch.from_pylist([], schema=table.schema)
+        return table.combine_chunks().to_batches()[0]
 
 
 async def run_destination_server(
