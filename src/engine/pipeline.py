@@ -237,7 +237,7 @@ def _translate_source_config(
     runtime: ConnectionRuntime,
 ) -> Dict[str, Any]:
     """Build the legacy source config dict from contract-shaped inputs."""
-    kind = endpoint.get("kind")
+    kind = runtime.connector_type
     replication = source.get("replication") or {}
     method = replication.get("method", "full_refresh")
     cursor_field = replication.get("cursor_field")
@@ -267,7 +267,7 @@ def _translate_source_config(
         base.update(_translate_api_source(source, endpoint, runtime))
     else:
         raise ValueError(
-            f"Unsupported source endpoint kind: {kind!r}; expected 'api' or 'database'"
+            f"Unsupported source connector kind: {kind!r}; expected 'api' or 'database'"
         )
 
     base["host"] = _connection_host(runtime)
@@ -283,7 +283,7 @@ def _translate_destination_config(
 ) -> Dict[str, Any]:
     write = destination.get("write") or {}
     execution = destination.get("execution") or {}
-    kind = endpoint.get("kind")
+    kind = runtime.connector_type
 
     base: Dict[str, Any] = {
         "connector_type": runtime.connector_type,
@@ -316,7 +316,7 @@ def _translate_destination_config(
         base.update(_translate_api_destination(endpoint))
     else:
         raise ValueError(
-            f"Unsupported destination endpoint kind: {kind!r}; expected 'api' or 'database'"
+            f"Unsupported destination connector kind: {kind!r}; expected 'api' or 'database'"
         )
 
     base["host"] = _connection_host(runtime)
