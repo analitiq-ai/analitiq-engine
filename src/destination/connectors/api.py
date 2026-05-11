@@ -6,6 +6,7 @@ rate limiting, retries, and different batch modes.
 
 import json
 import logging
+from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional
 
 import aiohttp
@@ -23,6 +24,32 @@ from ...shared.rate_limiter import RateLimiter
 
 
 logger = logging.getLogger(__name__)
+
+
+# Proto WriteMode int -> contract operations.write.<mode> key. The
+# api-endpoint contract's ``operations.write`` is a closed map keyed by
+# mode name (v1 keys: ``insert``, ``upsert``); the destination handler
+# must dispatch to the block matching the stream's write_mode.
+_API_WRITE_MODE_KEYS: Dict[int, str] = {
+    1: "insert",
+    2: "upsert",
+}
+
+
+@dataclass
+class _StreamState:
+    """Per-stream API destination state.
+
+    The handler instance is shared across every stream writing to this
+    destination; per-stream values (endpoint path, HTTP method, batching
+    hints) must live here keyed by ``stream_id`` so concurrent
+    ``configure_schema`` calls do not clobber each other.
+    """
+
+    endpoint: str = ""
+    method: str = "POST"
+    batch_mode: str = "single"
+    batch_size: int = 100
 
 
 class ApiDestinationHandler(BaseDestinationHandler):
@@ -69,16 +96,14 @@ class ApiDestinationHandler(BaseDestinationHandler):
         # Rate limiter
         self._rate_limiter: RateLimiter | None = None
 
-        # Endpoint settings, derived from the contract endpoint document
-        # at configure_schema() time.
-        self._endpoint: str = ""
-        self._method: str = "POST"
-        self._batch_mode: str = self.BATCH_MODE_SINGLE
-        self._batch_size: int = 100
+        # Per-stream endpoint settings derived from the contract document
+        # at configure_schema() time. Keyed by stream_id so concurrent
+        # streams sharing this handler do not race shared state.
+        self._streams: Dict[str, _StreamState] = {}
 
         # stream_id -> contract API endpoint document. Populated by
         # set_stream_endpoints() at startup so configure_schema() can read
-        # operations.write.* directly from the contract.
+        # operations.write.<mode>.* directly from the contract.
         self._stream_endpoints: Dict[str, Dict[str, Any]] = {}
 
         # Retry settings - statuses that trigger retry with exponential backoff
@@ -90,8 +115,10 @@ class ApiDestinationHandler(BaseDestinationHandler):
         self, stream_endpoints: Mapping[str, Mapping[str, Any]]
     ) -> None:
         """Register stream_id → contract API endpoint document. The handler
-        reads ``operations.write.request.{path,method}`` and batching hints
-        from the document at ``configure_schema`` time.
+        reads ``operations.write.<mode>.request.{path,method}`` and
+        optional ``operations.write.<mode>.batching`` from the document
+        at ``configure_schema`` time, where ``<mode>`` matches the
+        stream's ``write.mode``.
         """
         self._stream_endpoints = {
             sid: dict(doc) for sid, doc in stream_endpoints.items()
@@ -157,9 +184,10 @@ class ApiDestinationHandler(BaseDestinationHandler):
     async def configure_schema(self, schema_msg: SchemaMessage) -> bool:
         """Configure the API endpoint from the preloaded contract document.
 
-        Reads ``operations.write.request.{path,method}`` and the optional
-        ``operations.write.batching`` block from the contract API endpoint
-        document keyed by ``schema_msg.stream_id``.
+        ``operations.write`` is a closed map keyed by write mode in the
+        api-endpoint contract; dispatch into the block matching the
+        stream's ``write.mode`` and read its ``request.{path,method}``
+        plus optional ``batching`` block.
         """
         stream_id = schema_msg.stream_id
         endpoint_doc = self._stream_endpoints.get(stream_id)
@@ -171,36 +199,62 @@ class ApiDestinationHandler(BaseDestinationHandler):
             )
             return False
 
+        mode_key = _API_WRITE_MODE_KEYS.get(schema_msg.write_mode)
+        if mode_key is None:
+            logger.error(
+                "API destination does not support write_mode=%s for stream %r; "
+                "valid api-endpoint modes are %s",
+                schema_msg.write_mode,
+                stream_id,
+                sorted(_API_WRITE_MODE_KEYS.values()),
+            )
+            return False
+
         operations = endpoint_doc.get("operations") or {}
         write = operations.get("write") or {}
-        request = write.get("request") or {}
+        mode_block = write.get(mode_key)
+        if not isinstance(mode_block, dict):
+            logger.error(
+                "API endpoint document for stream %r is missing "
+                "operations.write.%s",
+                stream_id,
+                mode_key,
+            )
+            return False
+
+        request = mode_block.get("request") or {}
         path = request.get("path") or ""
         if not path:
             logger.error(
                 "API endpoint document for stream %r is missing "
-                "operations.write.request.path",
+                "operations.write.%s.request.path",
                 stream_id,
+                mode_key,
             )
             return False
 
-        self._endpoint = path
-        self._method = (request.get("method") or "POST").upper()
+        state = _StreamState(
+            endpoint=path,
+            method=(request.get("method") or "POST").upper(),
+        )
 
-        batching = write.get("batching") or {}
+        batching = mode_block.get("batching") or {}
         b_mode = (batching.get("mode") or "single").lower()
         if b_mode == "bulk":
-            self._batch_mode = self.BATCH_MODE_BULK
+            state.batch_mode = self.BATCH_MODE_BULK
         elif b_mode == "batch":
-            self._batch_mode = self.BATCH_MODE_BATCH
+            state.batch_mode = self.BATCH_MODE_BATCH
         else:
-            self._batch_mode = self.BATCH_MODE_SINGLE
-        self._batch_size = int(batching.get("size") or 100)
+            state.batch_mode = self.BATCH_MODE_SINGLE
+        state.batch_size = int(batching.get("size") or 100)
 
+        self._streams[stream_id] = state
         logger.info(
-            "API schema configured: endpoint=%s, method=%s, batch_mode=%s",
-            self._endpoint,
-            self._method,
-            self._batch_mode,
+            "API schema configured for stream %r: %s %s, batch_mode=%s",
+            stream_id,
+            state.method,
+            state.endpoint,
+            state.batch_mode,
         )
         return True
 
@@ -226,6 +280,15 @@ class ApiDestinationHandler(BaseDestinationHandler):
                 failure_summary="Handler not connected",
             )
 
+        state = self._streams.get(stream_id)
+        if state is None:
+            return BatchWriteResult(
+                success=False,
+                status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
+                records_written=0,
+                failure_summary="Schema not configured",
+            )
+
         records = record_batch.to_pylist()
 
         if not records:
@@ -238,12 +301,12 @@ class ApiDestinationHandler(BaseDestinationHandler):
 
         try:
             # Write records based on batch mode
-            if self._batch_mode == self.BATCH_MODE_SINGLE:
-                written = await self._write_single_mode(records, record_ids)
-            elif self._batch_mode == self.BATCH_MODE_BULK:
-                written = await self._write_bulk_mode(records)
+            if state.batch_mode == self.BATCH_MODE_SINGLE:
+                written = await self._write_single_mode(state, records, record_ids)
+            elif state.batch_mode == self.BATCH_MODE_BULK:
+                written = await self._write_bulk_mode(state, records)
             else:  # batch mode
-                written = await self._write_batch_mode(records)
+                written = await self._write_batch_mode(state, records)
 
             logger.info(f"API wrote batch {batch_seq}: {written}/{len(records)} records")
 
@@ -287,6 +350,7 @@ class ApiDestinationHandler(BaseDestinationHandler):
 
     async def _write_single_mode(
         self,
+        state: _StreamState,
         records: List[Dict[str, Any]],
         record_ids: List[str],
     ) -> int:
@@ -296,7 +360,7 @@ class ApiDestinationHandler(BaseDestinationHandler):
 
         for i, record in enumerate(records):
             try:
-                await self._send_request(record)
+                await self._send_request(state, record)
                 written += 1
             except Exception as e:
                 logger.warning(f"Failed to write record {record_ids[i]}: {e}")
@@ -307,23 +371,27 @@ class ApiDestinationHandler(BaseDestinationHandler):
 
         return written
 
-    async def _write_bulk_mode(self, records: List[Dict[str, Any]]) -> int:
+    async def _write_bulk_mode(
+        self, state: _StreamState, records: List[Dict[str, Any]]
+    ) -> int:
         """Write all records in a single request."""
-        await self._send_request(records)
+        await self._send_request(state, records)
         return len(records)
 
-    async def _write_batch_mode(self, records: List[Dict[str, Any]]) -> int:
+    async def _write_batch_mode(
+        self, state: _StreamState, records: List[Dict[str, Any]]
+    ) -> int:
         """Write records in batches."""
         written = 0
 
-        for i in range(0, len(records), self._batch_size):
-            batch = records[i : i + self._batch_size]
-            await self._send_request(batch)
+        for i in range(0, len(records), state.batch_size):
+            batch = records[i : i + state.batch_size]
+            await self._send_request(state, batch)
             written += len(batch)
 
         return written
 
-    async def _send_request(self, data: Any) -> Dict[str, Any]:
+    async def _send_request(self, state: _StreamState, data: Any) -> Dict[str, Any]:
         """
         Send HTTP request with rate limiting.
 
@@ -347,10 +415,13 @@ class ApiDestinationHandler(BaseDestinationHandler):
         if self._rate_limiter:
             await self._rate_limiter.acquire()
 
-        url = f"{self._base_url}{self._endpoint}"
+        # Preserve both the base URL's path (e.g. ``/api/v1``) and the
+        # endpoint's path; ``urljoin``-style behavior would drop the
+        # base's path when the endpoint starts with ``/``.
+        url = self._base_url.rstrip("/") + "/" + state.endpoint.lstrip("/")
 
         async with self._session.request(
-            method=self._method,
+            method=state.method,
             url=url,
             json=data,
         ) as response:
