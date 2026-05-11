@@ -142,22 +142,16 @@ class FileDestinationHandler(BaseDestinationHandler):
         logger.info("FileDestinationHandler disconnected")
 
     async def configure_schema(self, schema_msg: SchemaMessage) -> bool:
+        """Accept the schema for a stream.
+
+        File destinations don't pre-create anything; the formatter shapes
+        each batch on write. If a formatter ever needs the column list, it
+        can look up the contract endpoint via ``set_stream_endpoints``.
         """
-        Configure schema for file output.
-
-        For file destinations, schema configuration is used to:
-        - Configure formatter with schema information
-        - No actual schema creation needed
-
-        Args:
-            schema_msg: Schema configuration
-
-        Returns:
-            Always True for file destinations
-        """
-        # Store schema for formatter use (e.g., CSV headers, Parquet schema)
-        # The schema is available in schema_msg.json_schema
-        logger.info("FileDestinationHandler: Schema accepted")
+        logger.info(
+            "FileDestinationHandler: schema accepted for stream %s",
+            schema_msg.stream_id,
+        )
         return True
 
     async def write_batch(

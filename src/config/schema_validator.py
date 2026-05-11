@@ -1,6 +1,6 @@
 """JSON Schema validation against the published Analitiq contract schemas.
 
-The engine fetches each schema from ``schemas.analitiq.work`` the first
+The engine fetches each schema from ``schemas.analitiq.ai`` the first
 time an artifact of that kind is loaded, caches it in-process for the
 remainder of the run, and validates every artifact against it.
 
@@ -35,7 +35,7 @@ from jsonschema.exceptions import ValidationError
 logger = logging.getLogger(__name__)
 
 
-_DEFAULT_SCHEMA_BASE_URL = "https://schemas.analitiq.work"
+_DEFAULT_SCHEMA_BASE_URL = "https://schemas.analitiq.ai"
 _FETCH_TIMEOUT_SECONDS = 15
 
 ARTIFACT_KINDS = (

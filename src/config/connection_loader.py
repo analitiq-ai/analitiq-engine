@@ -4,8 +4,8 @@ Loads connection configs from ``connections/{alias}/connection.json`` and
 connector definitions from ``connectors/{connector_alias}/definition/connector.json``.
 
 Connection JSON references its connector by ``connector_alias``. The
-canonical connection identity at runtime is the versioned ``connection_id``
-declared in the saved connection document.
+canonical connection identity is the directory name (= alias) under
+``connections/``.
 """
 
 from __future__ import annotations

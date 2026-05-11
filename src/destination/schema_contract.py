@@ -206,7 +206,7 @@ class SchemaContract:
                     f"schema column at index {index} has no 'name' field; "
                     f"unnamed columns indicate a malformed endpoint payload"
                 )
-            col_type = col.get("native_type") or col.get("type")
+            col_type = col.get("native_type")
             if not col_type:
                 raise ValueError(
                     f"column {col_name!r} has no 'native_type' field"

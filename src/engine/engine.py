@@ -5,7 +5,6 @@ import json
 import logging
 import os
 from asyncio import Queue, Semaphore
-from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, AsyncIterator, Tuple
 
@@ -37,23 +36,6 @@ from ..grpc.cursor import compute_max_cursor, cursor_to_state_dict
 from ..grpc.generated.analitiq.v1 import AckStatus
 
 logger = logging.getLogger(__name__)
-
-
-def _deep_merge_dicts(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
-    """Recursively merge two dictionaries without mutating inputs."""
-
-    merged = deepcopy(base)
-
-    for key, value in override.items():
-        if (
-            isinstance(value, dict)
-            and isinstance(merged.get(key), dict)
-        ):
-            merged[key] = _deep_merge_dicts(merged[key], value)
-        else:
-            merged[key] = deepcopy(value)
-
-    return merged
 
 
 class StreamingEngine:
@@ -230,24 +212,18 @@ class StreamingEngine:
         error_message: Optional[str] = None
 
         try:
-            pipeline_src_config = pipeline_config.get("source", {})
-            pipeline_dst_config = pipeline_config.get("destination", {})
+            # The pipeline.py translator produces per-stream source and
+            # destination dicts directly on the stream config; no
+            # pipeline-level merging is needed.
+            source_cfg = stream_config["source"]
+            destination_cfg = stream_config["destination"]
 
-            stream_src_config = stream_config.get("source", {})
-            stream_dst_config = stream_config.get("destination", {})
+            source_connector = self._create_source_connector(source_cfg)
 
-            merged_src_config = _deep_merge_dicts(pipeline_src_config, stream_src_config)
-            merged_dst_config = _deep_merge_dicts(pipeline_dst_config, stream_dst_config)
-
-            # Get source connector
-            source_connector = self._create_source_connector(merged_src_config)
-
-            # Create stream-specific DLQ
             stream_dlq_path = f"{self.dlq.dlq_path}/{stream_id}"
             stream_dlq = DeadLetterQueue(stream_dlq_path)
 
-            # Connect source connector using runtime
-            runtime = merged_src_config.get("_runtime")
+            runtime = source_cfg.get("_runtime")
             if not runtime:
                 raise StreamConfigurationError(
                     "Missing _runtime in source config",
@@ -255,45 +231,43 @@ class StreamingEngine:
                 )
             await source_connector.connect(runtime)
 
-            # Get current run_id from centralized source
             run_id = self.state_manager.current_run_id or get_or_generate_run_id()
 
-            # Connect to destination via gRPC
-            grpc_client = self._create_grpc_client(merged_dst_config)
+            grpc_client = self._create_grpc_client(destination_cfg)
             connected = await grpc_client.connect()
             if not connected:
                 raise StreamProcessingError(
                     f"Failed to connect to gRPC destination for stream {stream_name}",
-                    stream_id=stream_id
+                    stream_id=stream_id,
                 )
 
-            # Start gRPC stream with schema
             schema_accepted = await grpc_client.start_stream(
                 run_id=run_id,
                 stream_id=stream_id,
-                schema_config=merged_dst_config,
+                schema_config=destination_cfg,
             )
             if not schema_accepted:
                 raise StreamProcessingError(
                     f"Destination rejected schema for stream {stream_name}",
-                    stream_id=stream_id
+                    stream_id=stream_id,
                 )
             logger.info(f"Stream {stream_name}: gRPC stream started, schema accepted")
 
-            # Create async queues for pipeline stages
             extract_queue = Queue(maxsize=self.buffer_size)
             transform_queue = Queue(maxsize=self.buffer_size)
             load_queue = Queue(maxsize=self.buffer_size)
 
-            # Build stream processing config
+            # Per-stream context handed to each pipeline stage. Carries
+            # only what the stages actually read; the contract source and
+            # destination dicts are nested verbatim.
             stream_processing_config = {
-                **pipeline_config,
-                **stream_config,  # Stream config should override pipeline config
+                "pipeline_id": pipeline_config["pipeline_id"],
                 "stream_id": stream_id,
                 "stream_name": stream_name,
-                "stream_config": stream_config,  # Keep original for reference
-                "source": merged_src_config,
-                "destination": merged_dst_config,
+                "source": source_cfg,
+                "destination": destination_cfg,
+                "mapping": stream_config.get("mapping") or {},
+                "runtime": pipeline_config.get("runtime") or {},
             }
 
             # Start pipeline stages for this stream
@@ -338,7 +312,7 @@ class StreamingEngine:
                 logger.warning(f"Failed to disconnect connectors for stream {stream_name}: {str(e)}")
 
             try:
-                pipeline_name = pipeline_config.get("name") or pipeline_config.get("pipeline", {}).get("name")
+                pipeline_name = pipeline_config.get("name")
                 record = create_metrics_record(
                     run_id=self.state_manager.current_run_id or get_or_generate_run_id(),
                     pipeline_id=self.pipeline_id,
@@ -369,33 +343,20 @@ class StreamingEngine:
         logger.debug(f"Starting extract stage for stream {stream_name}")
 
         try:
-            source_config = config["source"].copy()
-            # Add full config for state access
-            source_config["pipeline_config"] = config
-            
-            # Add stream-level replication settings to source config
-            from src.models.state import ReplicationConfig
-            replication_fields = ReplicationConfig.get_replication_field_names()
-            for field in replication_fields:
-                if field in config:
-                    source_config[field] = config[field]
-            
-            logger.debug(f"Stream {stream_name}: Built source config with keys: {list(source_config.keys())}")
-            logger.debug(f"Stream {stream_name}: Source config cursor_field = {source_config.get('cursor_field')}")
-            
-            # Use stream_id as the stream name for state management
+            # The connectors read the contract documents directly off the
+            # source config (``endpoint_document``, ``stream_source``).
+            # No flattening or replication-field injection is needed.
+            source_config = config["source"]
             state_stream_name = config["stream_id"]
-            partition = {}  # Single partition per stream for now
+            partition: Dict[str, Any] = {}
 
             batch_count = 0
-            
-            # Use state management with API connector
             async for batch in source_connector.read_batches(
                 source_config,
                 state_manager=self.state_manager,
                 stream_name=state_stream_name,
                 partition=partition,
-                batch_size=self.batch_size
+                batch_size=self.batch_size,
             ):
                 await queue.put(batch)
                 batch_count += 1
@@ -482,12 +443,18 @@ class StreamingEngine:
         """
         stream_name = config["stream_name"]
         stream_id = config["stream_id"]
-        dest_config = config.get("destination", {})
 
-        # Extract cursor configuration
-        cursor_field = config.get("cursor_field") or config.get("replication_key")
-        tie_breaker_fields = config.get("tie_breaker_fields")
-        primary_key_fields = dest_config.get("primary_key", [])
+        # Source-side contract dict carries replication and primary-key
+        # metadata. Record IDs hash the source primary key (stable across
+        # the pipeline); cursor field comes from the same replication
+        # block the source connector uses.
+        stream_source = (config.get("source") or {}).get("stream_source") or {}
+        replication = stream_source.get("replication") or {}
+        cursor_field = replication.get("cursor_field")
+        if isinstance(cursor_field, list):
+            cursor_field = cursor_field[0] if cursor_field else None
+        tie_breaker_fields = replication.get("tie_breaker_fields")
+        primary_key_fields = list(stream_source.get("primary_key") or [])
 
         logger.info(f"Stream {stream_name}: Starting gRPC load stage")
 

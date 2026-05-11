@@ -32,79 +32,24 @@ enum WriteMode {
   WRITE_MODE_TRUNCATE_INSERT = 3;  // Truncate table before insert (full refresh)
 }
 
-// Schema message - sent once at stream start
+// Schema message - sent once at stream start.
+//
+// Only carries enough to identify which preloaded contract endpoint the
+// destination should configure for. Both engine and destination load the
+// contract artifacts via PipelineConfigPrep from the same PIPELINE_ID, so
+// schema details (columns, primary keys, target table, etc.) are not
+// transmitted on the wire — the destination reads them from the contract
+// endpoint document keyed by stream_id.
 message SchemaMessage {
-  // Stream identification
+  // Stream identification - the destination looks up its preloaded
+  // contract endpoint document by this ID.
   string stream_id = 1;
 
-  // Schema version for evolution tracking
+  // Schema version for evolution tracking.
   uint32 version = 2;
 
-  // JSON Schema encoded as string
-  string json_schema = 3;
-
-  // Primary key fields for upsert operations
-  repeated string primary_key = 4;
-
-  // Write mode for this stream
-  WriteMode write_mode = 5;
-
-  // Destination-specific configuration
-  DestinationConfig destination_config = 6;
-
-  // Hash of schema for drift detection
-  string schema_hash = 7;
-}
-
-// Destination-specific configuration (sent with schema)
-message DestinationConfig {
-  // Type of destination connector (postgresql, mysql, api, etc.)
-  string connector_type = 1;
-
-  // Database-specific config
-  DatabaseConfig database = 10;
-
-  // API-specific config (future)
-  ApiConfig api = 11;
-}
-
-message DatabaseConfig {
-  string schema_name = 1;
-  string table_name = 2;
-  repeated string unique_constraints = 3;
-
-  // Conflict resolution for upserts
-  ConflictResolution conflict_resolution = 4;
-
-  // Auto-configuration options
-  AutoConfigureOptions auto_configure = 5;
-}
-
-message ConflictResolution {
-  string on_conflict = 1;              // Column(s) for conflict detection
-  string action = 2;                   // "update" or "nothing"
-  repeated string update_columns = 3;  // Columns to update on conflict
-}
-
-message AutoConfigureOptions {
-  bool auto_create_schema = 1;
-  bool auto_create_table = 2;
-  repeated IndexDefinition auto_create_indexes = 3;
-}
-
-message IndexDefinition {
-  string name = 1;
-  repeated string columns = 2;
-  string type = 3;  // btree, hash, gin, gist, etc.
-  bool unique = 4;
-}
-
-message ApiConfig {
-  string endpoint = 1;
-  string method = 2;
-  bool batch_support = 3;
-  uint32 batch_size = 4;
-  string idempotency_header = 5;
+  // Write mode for this stream (insert, upsert, truncate_insert).
+  WriteMode write_mode = 3;
 }
 
 // Record batch message - contains a batch of data records

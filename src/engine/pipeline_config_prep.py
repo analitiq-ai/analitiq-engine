@@ -7,29 +7,28 @@ runtime consumes.
 Layout (rooted at the project containing ``pipelines/manifest.json``):
 
     pipelines/manifest.json
-    pipelines/<pipeline-dir>/pipeline.json
-    pipelines/<pipeline-dir>/streams/<stream-file>.json
-    connections/<connection-dir>/connection.json
-    connections/<connection-dir>/.secrets/credentials.json
-    connections/<connection-dir>/definition/endpoints/<alias>.json   (private endpoints)
-    connections/<connection-dir>/definition/type-map.json            (optional)
+    pipelines/<pipeline-alias>/pipeline.json
+    pipelines/<pipeline-alias>/streams/<stream-alias>.json
+    connections/<connection-alias>/connection.json
+    connections/<connection-alias>/.secrets/credentials.json
+    connections/<connection-alias>/definition/endpoints/<alias>.json   (private endpoints)
+    connections/<connection-alias>/definition/type-map.json            (optional)
     connectors/<connector-alias>/definition/connector.json
     connectors/<connector-alias>/definition/type-map.json
     connectors/<connector-alias>/definition/endpoints/<alias>.json   (public endpoints)
 
-The new contract identifies cross-document references by versioned UUIDs:
+Identity is alias-based throughout. Cross-document references carry
+aliases (matching the directory name on disk):
 
-    pipeline.connections.source      -> "<uuid>_v<n>"  -> versioned connection_id
-    pipeline.connections.destinations -> ["<uuid>_v<n>"]
-    pipeline.streams                 -> ["<uuid>_v<n>"] -> versioned stream_id
-    stream.source.endpoint_ref       -> {scope, connection_id, alias}
-    stream.destinations[].endpoint_ref -> {scope, connection_id, alias}
+    pipeline.connections.source       -> "<connection-alias>"
+    pipeline.connections.destinations -> ["<connection-alias>", ...]
+    pipeline.streams                  -> ["<stream-alias>", ...]
+    stream.pipeline_id                -> "<pipeline-alias>"
+    stream.source.endpoint_ref        -> {scope, connection_id, alias}  (connection_id = connection alias)
+    stream.destinations[].endpoint_ref-> {scope, connection_id, alias}
 
-Filesystem directories are still alias-named for human navigability;
-this loader scans the connection and stream JSON files once at config
-load time and builds an in-memory map from versioned UUIDs to directory
-or file paths. Every artifact is JSON-Schema validated against the
-published Analitiq contract before it is consumed.
+Every artifact is JSON-Schema validated against the published Analitiq
+contract before it is consumed.
 """
 
 from __future__ import annotations
@@ -73,19 +72,18 @@ VALID_CONNECTOR_KINDS = {"api", "database", "file", "s3", "stdout"}
 
 @dataclass
 class _ConnectionRecord:
-    """One entry in the on-disk connection index."""
+    """One entry in the on-disk connection index, keyed by alias."""
 
-    directory: str           # directory name under connections/ (alias)
-    versioned_id: str        # ``<uuid>_v<n>``
+    alias: str               # directory name under connections/
     connector_alias: str
     raw_config: Dict[str, Any]
 
 
 @dataclass
 class _StreamRecord:
-    """One entry in the on-disk stream index."""
+    """One entry in the on-disk stream index, keyed by alias."""
 
-    versioned_id: str        # ``<uuid>_v<n>``
+    alias: str
     file_path: Path
     raw_document: Dict[str, Any]
 
@@ -110,13 +108,12 @@ class PipelineConfigPrep:
         self._pipeline_dir: Optional[Path] = None
         self._pipeline_document: Optional[Dict[str, Any]] = None
 
-        # Indexes built once per create_config() call
-        self._connection_records: Dict[str, _ConnectionRecord] = {}      # by versioned_id
-        self._connection_records_by_dir: Dict[str, _ConnectionRecord] = {}
-        self._stream_records: Dict[str, _StreamRecord] = {}              # by versioned_id
+        # Indexes built once per create_config() call, both keyed by alias.
+        self._connection_records: Dict[str, _ConnectionRecord] = {}
+        self._stream_records: Dict[str, _StreamRecord] = {}
 
         # Resolved artifacts
-        self._resolved_connections: Dict[str, ConnectionRuntime] = {}    # by directory alias
+        self._resolved_connections: Dict[str, ConnectionRuntime] = {}    # by connection alias
         self._resolved_endpoints: Dict[EndpointRef, Dict[str, Any]] = {}
         self._loaded_connectors: Dict[str, Dict[str, Any]] = {}          # by connector_alias
         self._connector_type_mappers: Dict[str, TypeMapper] = {}
@@ -170,21 +167,14 @@ class PipelineConfigPrep:
         return manifest
 
     def _find_manifest_entry(self, manifest: Dict[str, Any]) -> Dict[str, Any]:
-        """Match manifest entry by alias, falling back to pipeline_id (UUID)."""
+        """Match manifest entry by alias (``PIPELINE_ID`` is the alias)."""
         target = self.pipeline_id_input
         for entry in manifest["pipelines"]:
             if entry.get("alias") == target:
                 return entry
-        for entry in manifest["pipelines"]:
-            if entry.get("pipeline_id") == target:
-                return entry
-
-        choices = sorted(
-            f"{e.get('alias') or '?'} ({e.get('pipeline_id') or '?'})"
-            for e in manifest["pipelines"]
-        )
+        choices = sorted(e.get("alias") or "?" for e in manifest["pipelines"])
         raise ValueError(
-            f"Pipeline {target!r} not found in manifest. Available: {choices}"
+            f"Pipeline alias {target!r} not found in manifest. Available: {choices}"
         )
 
     def _load_pipeline_document(self) -> Dict[str, Any]:
@@ -216,9 +206,8 @@ class PipelineConfigPrep:
     # ------------------------------------------------------------------
 
     def _build_connection_index(self) -> None:
-        """Scan connections/ and index every connection by ``connection_id_v<n>``."""
+        """Scan ``connections/`` and index every connection by its directory alias."""
         self._connection_records.clear()
-        self._connection_records_by_dir.clear()
         connections_dir = self._paths["connections"]
         if not connections_dir.is_dir():
             raise FileNotFoundError(
@@ -235,29 +224,27 @@ class PipelineConfigPrep:
             raw_config = load_connection_file(connection_file)
             validate_artifact("connection", raw_config, source=str(connection_file))
 
-            base_id = raw_config.get("connection_id")
-            version = raw_config.get("version")
             connector_alias = raw_config.get("connector_alias")
-            if not base_id or version is None or not connector_alias:
+            if not connector_alias:
                 raise ValueError(
-                    f"Connection {connection_file} is missing one of "
-                    f"required fields: connection_id, version, connector_alias"
+                    f"Connection {connection_file} missing required field "
+                    f"'connector_alias'"
                 )
-            versioned_id = f"{base_id}_v{int(version)}"
-
-            record = _ConnectionRecord(
-                directory=child.name,
-                versioned_id=versioned_id,
+            alias = raw_config.get("alias") or child.name
+            if alias != child.name:
+                raise ValueError(
+                    f"Connection alias mismatch in {connection_file}: "
+                    f"directory={child.name!r} but document alias={alias!r}"
+                )
+            if alias in self._connection_records:
+                raise ValueError(
+                    f"Duplicate connection alias {alias!r} under {connections_dir}"
+                )
+            self._connection_records[alias] = _ConnectionRecord(
+                alias=alias,
                 connector_alias=connector_alias,
                 raw_config=raw_config,
             )
-            if versioned_id in self._connection_records:
-                raise ValueError(
-                    f"Duplicate connection_id {versioned_id!r}: "
-                    f"{self._connection_records[versioned_id].directory!r} vs {child.name!r}"
-                )
-            self._connection_records[versioned_id] = record
-            self._connection_records_by_dir[child.name] = record
 
         logger.info(
             "Indexed %d connection(s) under %s",
@@ -266,7 +253,7 @@ class PipelineConfigPrep:
         )
 
     def _build_stream_index(self) -> None:
-        """Scan the active pipeline's streams/ and index every stream by versioned id."""
+        """Scan the active pipeline's ``streams/`` and index every stream by alias."""
         self._stream_records.clear()
         if self._pipeline_dir is None:
             raise RuntimeError("Pipeline document must be loaded before stream indexing")
@@ -281,18 +268,18 @@ class PipelineConfigPrep:
                 except json.JSONDecodeError as err:
                     raise ValueError(f"Invalid JSON in {stream_file}: {err}") from err
             validate_artifact("stream", document, source=str(stream_file))
-            stream_id = document.get("stream_id")
-            if not stream_id:
+            alias = document.get("alias")
+            if not alias:
                 raise ValueError(
-                    f"Stream document {stream_file} missing 'stream_id'"
+                    f"Stream document {stream_file} missing 'alias'"
                 )
-            if stream_id in self._stream_records:
+            if alias in self._stream_records:
                 raise ValueError(
-                    f"Duplicate stream_id {stream_id!r} in "
-                    f"{streams_dir} ({self._stream_records[stream_id].file_path}, {stream_file})"
+                    f"Duplicate stream alias {alias!r} in {streams_dir} "
+                    f"({self._stream_records[alias].file_path}, {stream_file})"
                 )
-            self._stream_records[stream_id] = _StreamRecord(
-                versioned_id=stream_id,
+            self._stream_records[alias] = _StreamRecord(
+                alias=alias,
                 file_path=stream_file,
                 raw_document=document,
             )
@@ -306,11 +293,11 @@ class PipelineConfigPrep:
     def _connection_lookup(self) -> ConnectionLookup:
         return ConnectionLookup(
             directory_by_id={
-                vid: rec.directory for vid, rec in self._connection_records.items()
+                alias: rec.alias for alias, rec in self._connection_records.items()
             },
             connector_alias_by_id={
-                vid: rec.connector_alias
-                for vid, rec in self._connection_records.items()
+                alias: rec.connector_alias
+                for alias, rec in self._connection_records.items()
             },
         )
 
@@ -361,24 +348,16 @@ class PipelineConfigPrep:
         secrets_dir = self._paths["connections"] / directory / ".secrets"
         return LocalFileSecretsResolver(secrets_dir)
 
-    def _resolve_connection_by_versioned_id(
-        self, versioned_id: str
-    ) -> ConnectionRuntime:
-        """Materialize (or return cached) ConnectionRuntime for a versioned UUID."""
-        record = self._connection_records.get(versioned_id)
+    def _resolve_connection_by_alias(self, alias: str) -> ConnectionRuntime:
+        """Materialize (or return cached) ConnectionRuntime for a connection alias."""
+        record = self._connection_records.get(alias)
         if record is None:
             raise ValueError(
-                f"connection_id {versioned_id!r} is not present under "
+                f"Connection alias {alias!r} is not present under "
                 f"{self._paths['connections']}; known: {sorted(self._connection_records)}"
             )
-        return self._resolve_connection_by_directory(record)
-
-    def _resolve_connection_by_directory(
-        self, record: _ConnectionRecord
-    ) -> ConnectionRuntime:
-        directory = record.directory
-        if directory in self._resolved_connections:
-            return self._resolved_connections[directory]
+        if alias in self._resolved_connections:
+            return self._resolved_connections[alias]
 
         connector = self._load_connector(record.connector_alias)
         kind = connector.get("kind")
@@ -390,18 +369,17 @@ class PipelineConfigPrep:
 
         runtime = ConnectionRuntime(
             raw_config=record.raw_config,
-            connection_id=directory,
+            connection_id=alias,
             connector_type=kind,
-            resolver=self._create_secrets_resolver(directory),
+            resolver=self._create_secrets_resolver(alias),
             connector_definition=connector,
             connector_type_mapper=self._connector_type_mappers.get(record.connector_alias),
-            connection_type_mapper=self._connection_type_mapper(directory),
+            connection_type_mapper=self._connection_type_mapper(alias),
         )
-        self._resolved_connections[directory] = runtime
+        self._resolved_connections[alias] = runtime
         logger.info(
-            "Resolved connection: directory=%s id=%s connector=%s",
-            directory,
-            record.versioned_id,
+            "Resolved connection: alias=%s connector=%s",
+            alias,
             record.connector_alias,
         )
         return runtime
@@ -415,10 +393,22 @@ class PipelineConfigPrep:
         if ref in self._resolved_endpoints:
             return self._resolved_endpoints[ref]
         document = resolve_endpoint_ref(ref, self._paths, self._connection_lookup())
-        # The endpoint umbrella schema discriminates by ``kind``; validate
-        # against it to surface contract drift before downstream code
-        # touches the document.
-        validate_artifact("endpoint", document, source=str(ref))
+        # Dispatch to the variant endpoint schema (``api-endpoint`` or
+        # ``database-endpoint``) by the document's declared ``$schema``
+        # URL. The umbrella ``endpoint`` schema is not currently
+        # published, and the variant schemas pin the expected URL anyway,
+        # so this also catches mislabelled documents at validation time.
+        schema_url = document.get("$schema") or ""
+        if "api-endpoint" in schema_url:
+            endpoint_kind = "api-endpoint"
+        elif "database-endpoint" in schema_url:
+            endpoint_kind = "database-endpoint"
+        else:
+            raise ValueError(
+                f"Endpoint {ref!s} has no recognized $schema URL "
+                f"({schema_url!r}); expected api-endpoint or database-endpoint"
+            )
+        validate_artifact(endpoint_kind, document, source=str(ref))
         self._resolved_endpoints[ref] = document
         logger.info("Resolved endpoint: %s", ref)
         return document
@@ -457,57 +447,40 @@ class PipelineConfigPrep:
         self._build_stream_index()
 
         connections = pipeline_doc["connections"]
-        source_id = connections["source"]
-        dest_ids = list(connections.get("destinations") or [])
-        if not dest_ids:
+        source_alias = connections["source"]
+        dest_aliases = list(connections.get("destinations") or [])
+        if not dest_aliases:
             raise ValueError("Pipeline must declare at least one destination")
 
-        source_runtime = self._resolve_connection_by_versioned_id(source_id)
-        dest_runtimes: List[ConnectionRuntime] = []
-        for dest_id in dest_ids:
-            dest_runtimes.append(self._resolve_connection_by_versioned_id(dest_id))
+        self._resolve_connection_by_alias(source_alias)
+        for dest_alias in dest_aliases:
+            self._resolve_connection_by_alias(dest_alias)
 
         # Stream configs
-        pipeline_stream_ids = list(pipeline_doc.get("streams") or [])
+        pipeline_stream_aliases = list(pipeline_doc.get("streams") or [])
         stream_configs: List[Dict[str, Any]] = []
-        for stream_id in pipeline_stream_ids:
-            record = self._stream_records.get(stream_id)
+        for stream_alias in pipeline_stream_aliases:
+            record = self._stream_records.get(stream_alias)
             if record is None:
                 raise ValueError(
-                    f"pipeline.streams references {stream_id!r} but no stream "
-                    f"file in {self._pipeline_dir}/streams declares that id; "
+                    f"pipeline.streams references {stream_alias!r} but no stream "
+                    f"file in {self._pipeline_dir}/streams declares that alias; "
                     f"known: {sorted(self._stream_records)}"
                 )
             stream_configs.append(self._build_stream_config(record))
 
-        # Translate UUIDs back to directory-alias strings for downstream
-        # code that still uses alias-keyed lookups (main.py, gRPC config
-        # builder, etc.).
-        source_dir = self._connection_records[source_id].directory
-        dest_dirs = [self._connection_records[d].directory for d in dest_ids]
-
+        pipeline_alias = pipeline_doc.get("alias")
         pipeline_config = {
-            "pipeline_id": pipeline_doc.get("pipeline_id"),
-            "version": pipeline_doc.get("version", 1),
-            "pipeline_schema_version": pipeline_doc.get("pipeline_schema_version", 1),
-            "alias": pipeline_doc.get("alias"),
-            "name": pipeline_doc.get("display_name") or pipeline_doc.get("alias"),
+            "pipeline_id": pipeline_alias,
+            "alias": pipeline_alias,
+            "name": pipeline_doc.get("display_name") or pipeline_alias,
             "display_name": pipeline_doc.get("display_name"),
             "description": pipeline_doc.get("description"),
             "status": pipeline_doc.get("status", "draft"),
             "tags": pipeline_doc.get("tags") or [],
-            "org_id": pipeline_doc.get("org_id"),
-            "created_at": pipeline_doc.get("created_at"),
-            "updated_at": pipeline_doc.get("updated_at"),
-            # Versioned UUIDs preserved for any consumer that needs them.
-            "connection_ids": {
-                "source": source_id,
-                "destinations": dest_ids,
-            },
-            # Alias-keyed view used by main.py / destination handler.
             "connections": {
-                "source": source_dir,
-                "destinations": dest_dirs,
+                "source": source_alias,
+                "destinations": dest_aliases,
             },
             "schedule": pipeline_doc.get("schedule") or {"type": "manual"},
             "engine": pipeline_doc.get("engine") or {"vcpu": 1, "memory": 8192},
@@ -518,7 +491,7 @@ class PipelineConfigPrep:
         logger.info(
             "Configuration assembled: pipeline=%s, streams=%d, connections=%d, "
             "endpoints=%d, connectors=%d",
-            pipeline_config["alias"],
+            pipeline_alias,
             len(stream_configs),
             len(self._resolved_connections),
             len(self._resolved_endpoints),
@@ -539,23 +512,23 @@ class PipelineConfigPrep:
     def _build_stream_config(self, record: _StreamRecord) -> Dict[str, Any]:
         """Translate a saved stream document into the runtime-facing dict."""
         document = record.raw_document
-        stream_id = document["stream_id"]
+        alias = record.alias
 
         # ---- source ----
         source = dict(document["source"])
         source_endpoint_ref_dict = source.get("endpoint_ref")
         if not source_endpoint_ref_dict:
             raise ValueError(
-                f"Stream {stream_id} source missing 'endpoint_ref'"
+                f"Stream {alias} source missing 'endpoint_ref'"
             )
         source_endpoint_ref = EndpointRef.from_dict(source_endpoint_ref_dict)
-        source_runtime = self._resolve_connection_by_versioned_id(
+        source_runtime = self._resolve_connection_by_alias(
             source_endpoint_ref.connection_id
         )
         source_endpoint = self._resolve_endpoint(source_endpoint_ref)
 
         source["endpoint_ref"] = source_endpoint_ref.to_dict()
-        source["connection_ref"] = source_runtime.connection_id  # alias for back-compat
+        source["connection_ref"] = source_runtime.connection_id
         source["_runtime"] = source_runtime
         source["_endpoint"] = source_endpoint
 
@@ -566,33 +539,28 @@ class PipelineConfigPrep:
             dest_endpoint_ref_dict = dest.get("endpoint_ref")
             if not dest_endpoint_ref_dict:
                 raise ValueError(
-                    f"Stream {stream_id} destination missing 'endpoint_ref'"
+                    f"Stream {alias} destination missing 'endpoint_ref'"
                 )
             dest_endpoint_ref = EndpointRef.from_dict(dest_endpoint_ref_dict)
-            dest_runtime = self._resolve_connection_by_versioned_id(
+            dest_runtime = self._resolve_connection_by_alias(
                 dest_endpoint_ref.connection_id
             )
             dest_endpoint = self._resolve_endpoint(dest_endpoint_ref)
 
             dest["endpoint_ref"] = dest_endpoint_ref.to_dict()
-            dest["connection_ref"] = dest_runtime.connection_id  # alias
+            dest["connection_ref"] = dest_runtime.connection_id
             dest["_runtime"] = dest_runtime
             dest["_endpoint"] = dest_endpoint
             destinations.append(dest)
 
         return {
-            "stream_id": stream_id,
-            "version": document.get("version", 1),
-            "stream_schema_version": document.get("stream_schema_version", 1),
-            "alias": document.get("alias"),
+            "stream_id": alias,
+            "alias": alias,
             "display_name": document.get("display_name"),
             "description": document.get("description"),
             "pipeline_id": document.get("pipeline_id"),
             "status": document.get("status", "draft"),
             "is_enabled": document.get("status") == "active",
-            "org_id": document.get("org_id"),
-            "created_at": document.get("created_at"),
-            "updated_at": document.get("updated_at"),
             "tags": document.get("tags") or [],
             "source": source,
             "destinations": destinations,
@@ -603,22 +571,22 @@ class PipelineConfigPrep:
     # Convenience accessors
     # ------------------------------------------------------------------
 
-    def get_resolved_connection(self, directory_alias: str) -> ConnectionRuntime:
-        if directory_alias not in self._resolved_connections:
+    def get_resolved_connection(self, alias: str) -> ConnectionRuntime:
+        if alias not in self._resolved_connections:
             raise KeyError(
-                f"Connection {directory_alias!r} not resolved; "
+                f"Connection {alias!r} not resolved; "
                 f"known: {sorted(self._resolved_connections)}"
             )
-        return self._resolved_connections[directory_alias]
+        return self._resolved_connections[alias]
 
     def get_connectors(self) -> List[Dict[str, Any]]:
         return list(self._loaded_connectors.values())
 
-    def get_connector_for_directory(self, directory_alias: str) -> Dict[str, Any]:
-        record = self._connection_records_by_dir.get(directory_alias)
+    def get_connector_for_alias(self, alias: str) -> Dict[str, Any]:
+        record = self._connection_records.get(alias)
         if record is None:
             raise KeyError(
-                f"Connection directory {directory_alias!r} not indexed; "
-                f"known: {sorted(self._connection_records_by_dir)}"
+                f"Connection alias {alias!r} not indexed; "
+                f"known: {sorted(self._connection_records)}"
             )
         return self._loaded_connectors[record.connector_alias]

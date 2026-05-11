@@ -96,50 +96,21 @@ class TestCreateTableFromSchemaStrictness:
     Arrow-side check in ``schema_contract``."""
 
     def test_unnamed_column_raises(self):
+        from sqlalchemy import MetaData
+
         handler = DatabaseDestinationHandler()
         handler._runtime = _runtime(connector_mapper=_mapper("pg"))
-        handler._schema_name = "public"
 
         schema = {
             "columns": [
-                {"type": "BIGINT"},  # missing 'name'
-                {"name": "valid", "type": "BIGINT"},
+                {"native_type": "BIGINT"},  # missing 'name'
+                {"name": "valid", "native_type": "BIGINT"},
             ]
         }
         with pytest.raises(ValueError, match="has no 'name' field"):
             handler._create_table_from_schema(
-                "t", schema, [], _mapper("pg")
+                "t", schema, [], "public", MetaData(), _mapper("pg")
             )
-
-
-class TestJsonSchemaDdlMapping:
-    """``_json_type_to_sqlalchemy`` must agree with the Arrow path on
-    JSON-Schema formats — otherwise DDL and casting disagree silently."""
-
-    def test_date_format_is_date_not_datetime(self):
-        from sqlalchemy import Date, DateTime
-
-        handler = DatabaseDestinationHandler()
-        sa_type = handler._json_type_to_sqlalchemy({"type": "string", "format": "date"})
-        # Date, not DateTime — pa.date32() on the Arrow side has no time
-        # component, so a DateTime column would round-trip wrong.
-        assert isinstance(sa_type, Date)
-        assert not isinstance(sa_type, DateTime)
-
-    def test_date_time_format_is_tz_aware_datetime(self):
-        from sqlalchemy import DateTime
-
-        handler = DatabaseDestinationHandler()
-        sa_type = handler._json_type_to_sqlalchemy(
-            {"type": "string", "format": "date-time"}
-        )
-        assert isinstance(sa_type, DateTime)
-        assert sa_type.timezone is True
-
-    def test_unknown_type_raises(self):
-        handler = DatabaseDestinationHandler()
-        with pytest.raises(ValueError, match="unsupported type/format"):
-            handler._json_type_to_sqlalchemy({"type": "polygon"})
 
 
 class TestWriteBatchFatalOnTypeMapError:
@@ -150,7 +121,10 @@ class TestWriteBatchFatalOnTypeMapError:
         from contextlib import asynccontextmanager
         from unittest.mock import AsyncMock, MagicMock
 
-        from src.destination.connectors.database import DatabaseDestinationHandler
+        from src.destination.connectors.database import (
+            DatabaseDestinationHandler,
+            _StreamState,
+        )
         from src.engine.type_map import UnmappedTypeError
         from src.grpc.generated.analitiq.v1 import AckStatus, Cursor
 
@@ -160,10 +134,12 @@ class TestWriteBatchFatalOnTypeMapError:
         # prepare_records call raises before any SQL runs.
         handler._engine = MagicMock()
         handler._connected = True
-        handler._table = MagicMock()
-        handler._batch_commits_table = MagicMock()
-        handler._write_mode = "insert"
-        handler._primary_keys = []
+        handler._streams["s1"] = _StreamState(
+            table=MagicMock(),
+            batch_commits_table=MagicMock(),
+            write_mode="insert",
+            primary_keys=[],
+        )
 
         @asynccontextmanager
         async def _fake_begin():
@@ -178,7 +154,7 @@ class TestWriteBatchFatalOnTypeMapError:
 
         # The schema contract's prepare_records is called inside _insert_records;
         # route the UnmappedTypeError through that entry.
-        async def _raising_insert(_conn, _records):
+        async def _raising_insert(_conn, _state, _records):
             raise UnmappedTypeError("pg", "forward", "MONEY")
 
         handler._insert_records = _raising_insert  # type: ignore[method-assign]

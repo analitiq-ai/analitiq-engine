@@ -7,7 +7,6 @@ including schema negotiation, batch sending, and ACK handling.
 import asyncio
 import hashlib
 import io
-import json
 import logging
 import os
 from dataclasses import dataclass
@@ -20,17 +19,11 @@ from grpc import aio as grpc_aio
 from .cursor import Cursor, encode_cursor
 from .generated.analitiq.v1 import (
     AckStatus,
-    ApiConfig,
-    AutoConfigureOptions,
     BatchAck,
-    ConflictResolution,
-    DatabaseConfig,
-    DestinationConfig,
     GetCapabilitiesRequest,
     GetCapabilitiesResponse,
     HealthCheckRequest,
     HealthCheckResponse,
-    IndexDefinition,
     PayloadFormat,
     RecordBatch,
     SchemaAck,
@@ -422,70 +415,14 @@ class DestinationGRPCClient:
         stream_id: str,
         config: Dict[str, Any],
     ) -> SchemaMessage:
-        """Build SchemaMessage from configuration dict."""
-        # Determine connector type (prefer connector_type, then driver, then type for legacy)
-        connector_type = config.get("connector_type") or config.get("driver") or config.get("type") or "database"
+        """Build the slim SchemaMessage for ``stream_id``.
 
-        # Extract database config if present
-        db_config = None
-        api_config = None
-
-        if connector_type in ("api",):
-            # Build API config for API destinations
-            api_config = ApiConfig(
-                endpoint=config.get("endpoint", ""),
-                method=config.get("method", "POST"),
-                batch_support=config.get("batch_support", False),
-                batch_size=config.get("batch_size", 100),
-                idempotency_header=config.get("idempotency_header", ""),
-            )
-        elif connector_type == "database" or "endpoint" in config:
-            conflict_res = config.get("conflict_resolution", {})
-            auto_config = config.get("configure", {})
-
-            indexes = []
-            for idx in auto_config.get("auto_create_indexes", []):
-                indexes.append(
-                    IndexDefinition(
-                        name=idx.get("name", ""),
-                        columns=idx.get("columns", []),
-                        type=idx.get("type", "btree"),
-                        unique=idx.get("unique", False),
-                    )
-                )
-
-            # Parse schema and table from endpoint field (format: "schema/table")
-            # Falls back to explicit schema/table config if endpoint not present
-            schema_name = config.get("schema", "public")
-            table_name = config.get("table", "")
-
-            endpoint = config.get("endpoint", "")
-            if endpoint and "/" in endpoint:
-                parts = endpoint.split("/", 1)
-                schema_name = parts[0] or "public"
-                table_name = parts[1]
-            elif endpoint:
-                # No slash - treat as table name only
-                table_name = endpoint
-
-            db_config = DatabaseConfig(
-                schema_name=schema_name,
-                table_name=table_name,
-                unique_constraints=config.get("unique_constraints", []),
-                conflict_resolution=ConflictResolution(
-                    on_conflict=conflict_res.get("on_conflict", ""),
-                    action=conflict_res.get("action", "update"),
-                    update_columns=conflict_res.get("update_columns", []),
-                ),
-                auto_configure=AutoConfigureOptions(
-                    auto_create_schema=auto_config.get("auto_create_schema", False),
-                    auto_create_table=auto_config.get("auto_create_table", False),
-                    auto_create_indexes=indexes,
-                ),
-            )
-
-        # Determine write mode
-        write_mode_str = config.get("write_mode", "upsert").lower()
+        The destination loads the contract endpoint document via
+        ``PipelineConfigPrep`` using the same ``PIPELINE_ID`` as the
+        engine, so this message only carries the identification fields
+        needed to look it up and the write mode for this stream.
+        """
+        write_mode_str = str(config.get("write_mode", "upsert")).lower()
         write_mode_map = {
             "insert": WriteMode.WRITE_MODE_INSERT,
             "upsert": WriteMode.WRITE_MODE_UPSERT,
@@ -493,23 +430,10 @@ class DestinationGRPCClient:
         }
         write_mode = write_mode_map.get(write_mode_str, WriteMode.WRITE_MODE_UPSERT)
 
-        # Build schema hash
-        schema_json = config.get("endpoint_schema", {})
-        schema_str = json.dumps(schema_json, sort_keys=True)
-        schema_hash = hashlib.sha256(schema_str.encode()).hexdigest()[:16]
-
         return SchemaMessage(
             stream_id=stream_id,
-            version=config.get("schema_version", 1),
-            json_schema=json.dumps(schema_json),
-            primary_key=config.get("primary_key", []),
+            version=int(config.get("schema_version", 1)),
             write_mode=write_mode,
-            destination_config=DestinationConfig(
-                connector_type=connector_type,
-                database=db_config,
-                api=api_config,
-            ),
-            schema_hash=schema_hash,
         )
 
     @staticmethod

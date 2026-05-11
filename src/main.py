@@ -169,28 +169,45 @@ async def run_destination_mode() -> None:
     logger.info(f"Connector type: {runtime.connector_type}")
     logger.info(f"gRPC port: {grpc_port}")
 
-    # Build stream_id -> destination endpoint_ref index for streams that
-    # target this connection. The handler uses it to pick the right
-    # type-mapper per incoming SchemaMessage (connector-scoped vs
-    # connection-scoped endpoints). Values are dict-shape EndpointRef
-    # payloads ({"scope", "identifier", "endpoint"}).
+    # Build per-stream context for streams that target this destination:
+    #   - endpoint_refs: stream_id -> dict-shape EndpointRef payload, used
+    #     by the handler to pick the right TypeMapper (connector-scoped
+    #     vs connection-scoped endpoints) for each SchemaMessage.
+    #   - stream_endpoints: stream_id -> resolved contract endpoint
+    #     document. Engine and destination both load these via
+    #     PipelineConfigPrep, so handlers read schema details from this
+    #     map instead of unpacking them off the wire.
     endpoint_refs: Dict[str, Dict[str, Any]] = {}
+    stream_endpoints: Dict[str, Dict[str, Any]] = {}
     for stream in stream_configs:
         for dest in stream.get("destinations", []):
-            if dest.get("connection_ref") == dest_alias:
-                endpoint_refs[stream["stream_id"]] = dest["endpoint_ref"]
-                break
+            if dest.get("connection_ref") != dest_alias:
+                continue
+            stream_id = stream["stream_id"]
+            endpoint_refs[stream_id] = dest["endpoint_ref"]
+            endpoint_doc = dest.get("_endpoint")
+            if endpoint_doc is None:
+                logger.error(
+                    "Destination for stream %s has no resolved endpoint document; "
+                    "PipelineConfigPrep should have populated _endpoint",
+                    stream_id,
+                )
+                sys.exit(1)
+            stream_endpoints[stream_id] = endpoint_doc
+            break
     logger.info(
-        "Registered endpoint_refs for %d stream(s) targeting %s",
+        "Registered %d stream(s) targeting %s",
         len(endpoint_refs),
         dest_alias,
     )
 
-    # Create handler and start server. ``set_endpoint_refs`` is defined on
-    # ``BaseDestinationHandler`` as a no-op default, so this call is safe
-    # for every handler type and fails loudly if an override is renamed.
+    # Create handler and start server. ``set_endpoint_refs`` and
+    # ``set_stream_endpoints`` are defined on ``BaseDestinationHandler``
+    # as no-op defaults, so these calls are safe for every handler type
+    # and fail loudly if an override is renamed.
     handler = get_handler(runtime.connector_type)
     handler.set_endpoint_refs(endpoint_refs)
+    handler.set_stream_endpoints(stream_endpoints)
     await handler.connect(runtime)
 
     server = DestinationGRPCServer(handler, port=grpc_port)

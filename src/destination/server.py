@@ -122,8 +122,6 @@ class DestinationServicer(DestinationServiceServicer):
     ):
         self.handler = handler
         self._server = server
-        self._schema_configured = False
-        self._current_stream_id: Optional[str] = None
 
     async def StreamRecords(
         self,
@@ -140,8 +138,12 @@ class DestinationServicer(DestinationServiceServicer):
         4. Server responds with BatchAck for each batch
         """
         logger.info("StreamRecords: New stream started")
-        self._schema_configured = False
-        self._current_stream_id = None
+        # Per-RPC state must be function-local: the servicer instance is
+        # shared across every concurrent ``StreamRecords`` call, so storing
+        # ``schema_configured`` / ``current_stream_id`` on ``self`` would
+        # let one stream's bookkeeping clobber another's.
+        schema_configured = False
+        current_stream_id: Optional[str] = None
 
         try:
             async for request in request_iterator:
@@ -150,7 +152,7 @@ class DestinationServicer(DestinationServiceServicer):
                 if msg_type == "schema":
                     # Handle schema message
                     schema_msg = request.schema
-                    self._current_stream_id = schema_msg.stream_id
+                    current_stream_id = schema_msg.stream_id
 
                     logger.info(
                         f"Received schema for stream {schema_msg.stream_id}, "
@@ -172,7 +174,7 @@ class DestinationServicer(DestinationServiceServicer):
                         )
                         accepted = False
                         ack_message = f"type-map: {e}"
-                    self._schema_configured = accepted
+                    schema_configured = accepted
 
                     yield StreamResponse(
                         schema_ack=SchemaAck(
@@ -186,7 +188,7 @@ class DestinationServicer(DestinationServiceServicer):
                     # Handle record batch
                     batch_msg = request.batch
 
-                    if not self._schema_configured:
+                    if not schema_configured:
                         logger.error("Received batch before schema was configured")
                         yield StreamResponse(
                             ack=BatchAck(
@@ -237,9 +239,10 @@ class DestinationServicer(DestinationServiceServicer):
             raise
 
         finally:
-            logger.info("StreamRecords: Stream ended")
-            self._schema_configured = False
-            self._current_stream_id = None
+            logger.info(
+                "StreamRecords: Stream ended%s",
+                f" (stream_id={current_stream_id!r})" if current_stream_id else "",
+            )
 
     async def HealthCheck(
         self,

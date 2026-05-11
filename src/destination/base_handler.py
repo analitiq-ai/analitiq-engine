@@ -57,6 +57,24 @@ class BaseDestinationHandler(ABC):
         """
         _ = endpoint_refs  # no-op default
 
+    def set_stream_endpoints(
+        self, stream_endpoints: Mapping[str, Mapping[str, Any]]
+    ) -> None:
+        """Register the ``stream_id → contract endpoint document`` index.
+
+        The destination loads its configuration with the same
+        ``PipelineConfigPrep`` as the engine, so the contract endpoint
+        document (database object, columns, primary keys, API operations,
+        …) is already on disk by the time ``configure_schema`` fires for
+        an incoming :class:`SchemaMessage`. Handlers read from this map
+        instead of unpacking the message.
+
+        Called once by the destination entrypoint before the gRPC server
+        starts. Default is a no-op; handlers that need the document
+        override it.
+        """
+        _ = stream_endpoints  # no-op default
+
     @abstractmethod
     async def connect(self, runtime: "ConnectionRuntime") -> None:
         """

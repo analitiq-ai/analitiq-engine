@@ -5,20 +5,16 @@ JSON document.
 
 Reference shape (see ``src/models/stream.py:EndpointRef``):
 
-    ``{"scope": "connector",  "connection_id": "<uuid_v#>", "alias": "<name>"}``
+    ``{"scope": "connector",  "connection_id": "<connection-alias>", "alias": "<name>"}``
         -> connectors/<connector_alias>/definition/endpoints/<name>.json
 
-    ``{"scope": "connection", "connection_id": "<uuid_v#>", "alias": "<name>"}``
-        -> connections/<connection_dir>/definition/endpoints/<name>.json
+    ``{"scope": "connection", "connection_id": "<connection-alias>", "alias": "<name>"}``
+        -> connections/<connection-alias>/definition/endpoints/<name>.json
 
-Resolution requires two facts about the connection identified by
-``connection_id``:
-
-* its directory name on disk (used for connection-scoped endpoints);
-* its ``connector_alias`` (used for connector-scoped endpoints).
-
-The :class:`PipelineConfigPrep` layer scans ``connections/`` once at
-config-load time and supplies these maps via :class:`ConnectionLookup`.
+``EndpointRef.connection_id`` carries the connection alias (= directory
+name on disk). The :class:`PipelineConfigPrep` layer scans
+``connections/`` once at config-load time and supplies the
+alias→connector mapping via :class:`ConnectionLookup`.
 """
 
 from __future__ import annotations
@@ -39,31 +35,31 @@ EndpointRefInput = Union[EndpointRef, Mapping[str, Any]]
 
 @dataclass(frozen=True)
 class ConnectionLookup:
-    """Indexed view of saved connections, keyed by versioned ``connection_id``.
+    """Indexed view of saved connections, keyed by connection alias.
 
-    ``directory`` is the connection directory name under
-    ``connections/`` (typically the connection alias). ``connector_alias``
-    is the connector slug declared by the connection's
-    ``connector_alias`` field.
+    ``directory_by_id`` and ``connector_alias_by_id`` are both keyed by
+    connection alias (= directory name under ``connections/``). The
+    ``_id`` suffix on the field names is retained for back-compat with
+    callers; semantically the key is the alias.
     """
 
     directory_by_id: Mapping[str, str]
     connector_alias_by_id: Mapping[str, str]
 
-    def directory_for(self, connection_id: str) -> str:
-        if connection_id not in self.directory_by_id:
+    def directory_for(self, connection_alias: str) -> str:
+        if connection_alias not in self.directory_by_id:
             raise KeyError(
-                f"Unknown connection_id {connection_id!r}; "
+                f"Unknown connection alias {connection_alias!r}; "
                 f"known: {sorted(self.directory_by_id)}"
             )
-        return self.directory_by_id[connection_id]
+        return self.directory_by_id[connection_alias]
 
-    def connector_alias_for(self, connection_id: str) -> str:
-        if connection_id not in self.connector_alias_by_id:
+    def connector_alias_for(self, connection_alias: str) -> str:
+        if connection_alias not in self.connector_alias_by_id:
             raise KeyError(
-                f"Connection {connection_id!r} has no connector_alias mapping"
+                f"Connection {connection_alias!r} has no connector_alias mapping"
             )
-        return self.connector_alias_by_id[connection_id]
+        return self.connector_alias_by_id[connection_alias]
 
 
 def _coerce(ref: EndpointRefInput) -> EndpointRef:

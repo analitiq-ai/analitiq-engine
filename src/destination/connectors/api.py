@@ -6,7 +6,7 @@ rate limiting, retries, and different batch modes.
 
 import json
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 import aiohttp
 import pyarrow as pa
@@ -69,16 +69,33 @@ class ApiDestinationHandler(BaseDestinationHandler):
         # Rate limiter
         self._rate_limiter: RateLimiter | None = None
 
-        # Endpoint settings from SchemaMessage
+        # Endpoint settings, derived from the contract endpoint document
+        # at configure_schema() time.
         self._endpoint: str = ""
         self._method: str = "POST"
         self._batch_mode: str = self.BATCH_MODE_SINGLE
         self._batch_size: int = 100
 
+        # stream_id -> contract API endpoint document. Populated by
+        # set_stream_endpoints() at startup so configure_schema() can read
+        # operations.write.* directly from the contract.
+        self._stream_endpoints: Dict[str, Dict[str, Any]] = {}
+
         # Retry settings - statuses that trigger retry with exponential backoff
         # 429 (rate limit), 500, 503, 504 (server errors) get up to 3 attempts
         # 502 and other 4xx errors are not retried (single attempt)
         self._retry_statuses: set = {429, 500, 503, 504}
+
+    def set_stream_endpoints(
+        self, stream_endpoints: Mapping[str, Mapping[str, Any]]
+    ) -> None:
+        """Register stream_id → contract API endpoint document. The handler
+        reads ``operations.write.request.{path,method}`` and batching hints
+        from the document at ``configure_schema`` time.
+        """
+        self._stream_endpoints = {
+            sid: dict(doc) for sid, doc in stream_endpoints.items()
+        }
 
     @property
     def connector_type(self) -> str:
@@ -138,57 +155,54 @@ class ApiDestinationHandler(BaseDestinationHandler):
         logger.info("ApiDestinationHandler disconnected")
 
     async def configure_schema(self, schema_msg: SchemaMessage) -> bool:
+        """Configure the API endpoint from the preloaded contract document.
+
+        Reads ``operations.write.request.{path,method}`` and the optional
+        ``operations.write.batching`` block from the contract API endpoint
+        document keyed by ``schema_msg.stream_id``.
         """
-        Configure API endpoint from SchemaMessage.
-
-        For API destinations, schema configuration extracts:
-        - endpoint: API endpoint path
-        - method: HTTP method
-        - batch_mode: How to send records
-
-        Args:
-            schema_msg: Schema configuration from engine
-
-        Returns:
-            True if configuration succeeded
-        """
-        try:
-            # Extract API configuration from destination config
-            api_config = schema_msg.destination_config.api if schema_msg.destination_config.api else None
-
-            if api_config:
-                self._endpoint = api_config.endpoint or ""
-                self._method = api_config.method or "POST"
-                # Derive batch_mode from batch_support boolean
-                # False/unset = single mode (one record per request, safest)
-                # True = batch mode (chunked requests using batch_size)
-                if api_config.batch_support:
-                    self._batch_mode = self.BATCH_MODE_BATCH
-                else:
-                    self._batch_mode = self.BATCH_MODE_SINGLE
-                self._batch_size = api_config.batch_size or 100
-            else:
-                # Try to get from database config as fallback (endpoint stored there)
-                db_config = schema_msg.destination_config.database
-                if db_config and db_config.table_name:
-                    # Use table_name as endpoint path
-                    self._endpoint = db_config.table_name
-                    if not self._endpoint.startswith("/"):
-                        self._endpoint = f"/{self._endpoint}"
-
-            if not self._endpoint:
-                logger.error("API endpoint is required in schema configuration")
-                return False
-
-            logger.info(
-                f"API schema configured: endpoint={self._endpoint}, "
-                f"method={self._method}, batch_mode={self._batch_mode}"
+        stream_id = schema_msg.stream_id
+        endpoint_doc = self._stream_endpoints.get(stream_id)
+        if endpoint_doc is None:
+            logger.error(
+                "No preloaded endpoint document for stream_id=%r; "
+                "call set_stream_endpoints() before the gRPC server starts",
+                stream_id,
             )
-            return True
-
-        except Exception as e:
-            logger.error(f"Failed to configure API schema: {e}")
             return False
+
+        operations = endpoint_doc.get("operations") or {}
+        write = operations.get("write") or {}
+        request = write.get("request") or {}
+        path = request.get("path") or ""
+        if not path:
+            logger.error(
+                "API endpoint document for stream %r is missing "
+                "operations.write.request.path",
+                stream_id,
+            )
+            return False
+
+        self._endpoint = path
+        self._method = (request.get("method") or "POST").upper()
+
+        batching = write.get("batching") or {}
+        b_mode = (batching.get("mode") or "single").lower()
+        if b_mode == "bulk":
+            self._batch_mode = self.BATCH_MODE_BULK
+        elif b_mode == "batch":
+            self._batch_mode = self.BATCH_MODE_BATCH
+        else:
+            self._batch_mode = self.BATCH_MODE_SINGLE
+        self._batch_size = int(batching.get("size") or 100)
+
+        logger.info(
+            "API schema configured: endpoint=%s, method=%s, batch_mode=%s",
+            self._endpoint,
+            self._method,
+            self._batch_mode,
+        )
+        return True
 
     async def write_batch(
         self,

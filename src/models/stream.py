@@ -1,11 +1,12 @@
 """Dataclass models for Stream configuration.
 
 Engine-side runtime view of streams, mirroring the published stream
-schema at ``https://schemas.analitiq.work/stream/latest.json``.
+schema at ``https://schemas.analitiq.ai/stream/latest.json``.
 
-The canonical artifact identity is the versioned UUID emitted by the
-saved-document services. References between artifacts always carry that
-versioned UUID; aliases are display-only.
+Identity is alias-based: connections, streams, and pipelines are all
+keyed by their alias (= directory name on disk). ``EndpointRef``'s
+``connection_id`` field carries the connection alias (the schema field
+name is retained for the published contract's sake).
 """
 
 from __future__ import annotations
@@ -94,16 +95,15 @@ def _serialize(obj: Any) -> Any:
 class EndpointRef:
     """Structured reference to an endpoint definition.
 
-    ``connection_id`` is a versioned connection UUID
-    (``00000000-..._v1``). ``alias`` is the endpoint slug declared inside
-    the endpoint document. Resolution rules:
+    ``connection_id`` carries the connection alias (= directory name
+    under ``connections/``). ``alias`` is the endpoint slug declared
+    inside the endpoint document. Resolution rules:
 
-    - ``scope="connector"``: load the connection by ``connection_id``,
-      read its ``connector_alias``, then load
+    - ``scope="connector"``: load the connection by alias, read its
+      ``connector_alias``, then load
       ``connectors/<connector_alias>/definition/endpoints/<alias>.json``.
-    - ``scope="connection"``: load the connection by ``connection_id``
-      and load
-      ``connections/<connection_dir>/definition/endpoints/<alias>.json``.
+    - ``scope="connection"``: load
+      ``connections/<connection-alias>/definition/endpoints/<alias>.json``.
 
     Frozen so instances are hashable and usable as dict keys.
     """
@@ -314,25 +314,15 @@ class DestinationConfig:
 class StreamConfig:
     """Complete Stream configuration model.
 
-    Mirrors the persisted stream document. Server-managed fields
-    (``stream_id``, ``version``, ``stream_schema_version``, ``org_id``,
-    ``created_at``, ``updated_at``) are present in the persisted document
-    and exposed here for convenience; engine code uses them only for
-    identity, idempotency, and observability.
+    Mirrors the persisted stream document. Identity is the alias.
     """
 
-    stream_id: str = ""
-    version: int = 1
-    stream_schema_version: int = 1
-    pipeline_id: str = ""
     alias: str = ""
+    pipeline_id: str = ""
     display_name: Optional[str] = None
     description: Optional[str] = None
     status: str = "draft"
     tags: Optional[List[str]] = None
-    org_id: Optional[str] = None
-    created_at: Optional[str] = None
-    updated_at: Optional[str] = None
     source: SourceConfig = field(default_factory=SourceConfig)
     destinations: List[DestinationConfig] = field(default_factory=list)
     mapping: MappingConfig = field(default_factory=MappingConfig)
@@ -340,6 +330,6 @@ class StreamConfig:
     def get_primary_destination(self) -> DestinationConfig:
         if not self.destinations:
             raise ValueError(
-                f"Stream {self.stream_id!r} has no destinations configured"
+                f"Stream {self.alias!r} has no destinations configured"
             )
         return self.destinations[0]
