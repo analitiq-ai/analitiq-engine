@@ -142,7 +142,6 @@ class StreamDestinationHandler(BaseDestinationHandler):
         """
         if not self._connected or self._formatter is None:
             return BatchWriteResult(
-                success=False,
                 status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
                 records_written=0,
                 failure_summary="Handler not connected",
@@ -152,7 +151,6 @@ class StreamDestinationHandler(BaseDestinationHandler):
 
         if not records:
             return BatchWriteResult(
-                success=True,
                 status=AckStatus.ACK_STATUS_SUCCESS,
                 records_written=0,
                 committed_cursor=cursor,
@@ -170,7 +168,6 @@ class StreamDestinationHandler(BaseDestinationHandler):
             )
 
             return BatchWriteResult(
-                success=True,
                 status=AckStatus.ACK_STATUS_SUCCESS,
                 records_written=len(records),
                 committed_cursor=cursor,
@@ -191,7 +188,6 @@ class StreamDestinationHandler(BaseDestinationHandler):
                 e, exc_info=True,
             )
             return BatchWriteResult(
-                success=False,
                 status=status,
                 records_written=0,
                 failure_summary=f"OSError[{errno.errorcode.get(e.errno, e.errno)}]: {e}",
@@ -199,7 +195,6 @@ class StreamDestinationHandler(BaseDestinationHandler):
         except Exception as e:
             logger.error("Fatal error writing to stdout: %s", e, exc_info=True)
             return BatchWriteResult(
-                success=False,
                 status=AckStatus.ACK_STATUS_FATAL_FAILURE,
                 records_written=0,
                 failure_summary=f"{type(e).__name__}: {e}",

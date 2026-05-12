@@ -24,13 +24,14 @@ _SUCCESS_STATUSES = frozenset({
 })
 
 
-@dataclass
+@dataclass(frozen=True)
 class BatchWriteResult:
-    """Result of writing a batch to the destination.
+    """Immutable result of writing a batch to the destination.
 
-    ``success`` is derived from ``status`` so the two cannot drift.
-    Callers may still pass ``success`` for clarity at construction; if
-    they do, it must agree with ``status``.
+    ``success`` is a derived property: a result is successful when its
+    ``status`` is SUCCESS or ALREADY_COMMITTED. Modeling it as a property
+    (instead of a constructor argument) makes status the single source
+    of truth — callers cannot construct an inconsistent result.
     """
 
     status: AckStatus
@@ -38,17 +39,16 @@ class BatchWriteResult:
     committed_cursor: Optional[Cursor] = None
     failed_record_ids: List[str] = field(default_factory=list)
     failure_summary: str = ""
-    success: Optional[bool] = None
 
     def __post_init__(self) -> None:
-        derived = self.status in _SUCCESS_STATUSES
-        if self.success is None:
-            self.success = derived
-        elif self.success is not derived:
+        if self.records_written < 0:
             raise ValueError(
-                f"BatchWriteResult.success={self.success} disagrees with "
-                f"status={self.status}; expected success={derived}"
+                f"records_written must be non-negative, got {self.records_written}"
             )
+
+    @property
+    def success(self) -> bool:
+        return self.status in _SUCCESS_STATUSES
 
 
 class BaseDestinationHandler(ABC):

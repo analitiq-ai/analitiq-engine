@@ -19,7 +19,8 @@ Environment Variables:
     RUN_MODE: "source" (default) or "destination"
 
     Common (both modes):
-        PIPELINE_ID: UUID of the pipeline to execute
+        PIPELINE_ID: Pipeline alias to execute (matches `pipeline_id` in
+            `pipelines/manifest.json`).
 
     Engine Mode:
         DESTINATION_GRPC_HOST: Hostname of destination gRPC server
@@ -193,7 +194,31 @@ async def run_destination_mode() -> None:
                     stream_id,
                 )
                 sys.exit(1)
-            stream_endpoints[stream_id] = endpoint_doc
+            # Resolve effective conflict keys via WriteConfig so the
+            # destination handler can use them without re-implementing
+            # the UPSERT-falls-back-to-primary-keys rule. The result is
+            # a flat list of column names (the database handler does not
+            # support composite multi-tuple conflict targets today).
+            from src.models.stream import WriteConfig, WriteMode
+            write_block = dest.get("write") or {}
+            mode_value = write_block.get("mode") or "upsert"
+            primary_keys = list(endpoint_doc.get("primary_keys") or [])
+            conflict_keys: list[str] = []
+            try:
+                wc = WriteConfig(
+                    mode=WriteMode(mode_value),
+                    conflict_keys=write_block.get("conflict_keys"),
+                )
+                composites = wc.effective_conflict_keys(primary_keys) or []
+                # Database handler uses a single flat list; flatten the
+                # first composite (or fall back to primary_keys).
+                if composites:
+                    conflict_keys = list(composites[0])
+            except (ValueError, TypeError):
+                conflict_keys = primary_keys
+            enriched_endpoint = dict(endpoint_doc)
+            enriched_endpoint["_write_conflict_keys"] = conflict_keys
+            stream_endpoints[stream_id] = enriched_endpoint
             break
     logger.info(
         "Registered %d stream(s) targeting %s",

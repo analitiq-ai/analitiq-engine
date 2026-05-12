@@ -684,40 +684,39 @@ class DataTransformer:
         return value
 
     async def _parse_iso_date(self, value: str) -> str:
-        """Parse ISO datetime string to date format."""
+        """Parse ISO datetime string to date format. On parse failure
+        the original string is returned unchanged — this transformation
+        is used for output-side reformatting, not cursor math, so
+        passing the bad value through to the destination's schema is a
+        more localized failure than raising mid-batch."""
         try:
             if value.endswith('Z'):
                 value = value.replace('Z', '+00:00')
             dt = datetime.fromisoformat(value)
             return dt.strftime('%Y-%m-%d')
         except ValueError as e:
-            logger.warning(f"Failed to parse ISO date '{value}': {e}")
+            logger.warning("Failed to parse ISO date '%s': %s", value, e)
             return value
 
     async def _parse_iso_timestamp(self, value: str) -> datetime:
-        """Parse ISO datetime string to datetime object."""
-        try:
-            if value.endswith('Z'):
-                value = value.replace('Z', '+00:00')
-            return datetime.fromisoformat(value)
-        except ValueError as e:
-            logger.warning(f"Failed to parse ISO timestamp '{value}': {e}")
-            return datetime.now()
+        """Parse ISO datetime string to datetime object. Raises on
+        unparseable input — a ``datetime.now()`` fallback would silently
+        re-window cursors and corrupt incremental sync."""
+        if value.endswith('Z'):
+            value = value.replace('Z', '+00:00')
+        return datetime.fromisoformat(value)
 
     async def _parse_iso_to_datetime_object(self, value: Any) -> datetime:
-        """Convert ISO timestamp string or datetime to datetime object."""
-        try:
-            if value is None:
-                raise ValueError("Cannot convert None to datetime")
+        """Convert ISO timestamp string or datetime to datetime object.
+        Raises on unparseable input — see ``_parse_iso_timestamp``."""
+        if value is None:
+            raise ValueError("Cannot convert None to datetime")
 
-            if isinstance(value, datetime):
-                return value
+        if isinstance(value, datetime):
+            return value
 
-            iso_string = str(value)
-            if iso_string.endswith('Z'):
-                iso_string = iso_string.replace('Z', '+00:00')
+        iso_string = str(value)
+        if iso_string.endswith('Z'):
+            iso_string = iso_string.replace('Z', '+00:00')
 
-            return datetime.fromisoformat(iso_string)
-        except (ValueError, TypeError) as e:
-            logger.warning(f"Failed to parse value '{value}' to datetime: {e}")
-            return datetime.now()
+        return datetime.fromisoformat(iso_string)

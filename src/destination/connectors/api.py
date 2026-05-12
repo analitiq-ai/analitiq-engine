@@ -275,7 +275,6 @@ class ApiDestinationHandler(BaseDestinationHandler):
         """
         if not self._session or not self._connected:
             return BatchWriteResult(
-                success=False,
                 status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
                 records_written=0,
                 failure_summary="Handler not connected",
@@ -284,7 +283,6 @@ class ApiDestinationHandler(BaseDestinationHandler):
         state = self._streams.get(stream_id)
         if state is None:
             return BatchWriteResult(
-                success=False,
                 status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
                 records_written=0,
                 failure_summary="Schema not configured",
@@ -294,28 +292,24 @@ class ApiDestinationHandler(BaseDestinationHandler):
 
         if not records:
             return BatchWriteResult(
-                success=True,
                 status=AckStatus.ACK_STATUS_SUCCESS,
                 records_written=0,
                 committed_cursor=cursor,
             )
 
         try:
-            # Write records based on batch mode
             if state.batch_mode == self.BATCH_MODE_SINGLE:
                 written = await self._write_single_mode(state, records, record_ids)
             elif state.batch_mode == self.BATCH_MODE_BULK:
                 written = await self._write_bulk_mode(state, records)
-            else:  # batch mode
+            else:
                 written = await self._write_batch_mode(state, records)
 
             logger.info(f"API wrote batch {batch_seq}: {written}/{len(records)} records")
 
-            # Determine success based on how many records were written
             if written == 0:
                 # All records failed - this is a failure
                 return BatchWriteResult(
-                    success=False,
                     status=AckStatus.ACK_STATUS_FATAL_FAILURE,
                     records_written=0,
                     failure_summary=f"All {len(records)} records failed to write to API",
@@ -325,7 +319,6 @@ class ApiDestinationHandler(BaseDestinationHandler):
                 # Use FATAL_FAILURE since retrying would duplicate successful records
                 failed_count = len(records) - written
                 return BatchWriteResult(
-                    success=False,
                     status=AckStatus.ACK_STATUS_FATAL_FAILURE,
                     records_written=written,
                     failure_summary=f"{failed_count}/{len(records)} records failed to write to API",
@@ -334,7 +327,6 @@ class ApiDestinationHandler(BaseDestinationHandler):
             else:
                 # All records succeeded
                 return BatchWriteResult(
-                    success=True,
                     status=AckStatus.ACK_STATUS_SUCCESS,
                     records_written=written,
                     committed_cursor=cursor,
@@ -343,7 +335,6 @@ class ApiDestinationHandler(BaseDestinationHandler):
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
             logger.error("Transport error writing to API: %s", e, exc_info=True)
             return BatchWriteResult(
-                success=False,
                 status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
                 records_written=0,
                 failure_summary=f"{type(e).__name__}: {e}",
@@ -351,7 +342,6 @@ class ApiDestinationHandler(BaseDestinationHandler):
         except Exception as e:
             logger.error("Fatal error writing to API: %s", e, exc_info=True)
             return BatchWriteResult(
-                success=False,
                 status=AckStatus.ACK_STATUS_FATAL_FAILURE,
                 records_written=0,
                 failure_summary=f"{type(e).__name__}: {e}",

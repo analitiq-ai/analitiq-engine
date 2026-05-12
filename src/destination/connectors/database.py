@@ -66,6 +66,11 @@ class _StreamState:
     table: Optional[Table] = None
     batch_commits_table: Optional[Table] = None
     primary_keys: List[str] = field(default_factory=list)
+    # Columns used as the ON CONFLICT target for upsert. Defaults to
+    # ``primary_keys`` via WriteConfig.effective_conflict_keys; an
+    # explicit stream-level ``write.conflict_keys`` (e.g. a composite
+    # natural key) overrides at configure_schema time.
+    conflict_keys: List[str] = field(default_factory=list)
     write_mode: str = "upsert"
     endpoint_document: Dict[str, Any] = field(default_factory=dict)
     schema_contract: Optional[SchemaContract] = None
@@ -98,7 +103,6 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
     carries ``stream_id``, ``version``, and ``write_mode``.
     """
 
-    # Idempotency tracking table name
     BATCH_COMMITS_TABLE = "_batch_commits"
 
     # Server-managed column added to every database destination table.
@@ -268,12 +272,21 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
                 )
                 return False
 
+            primary_keys = list(endpoint_doc.get("primary_keys") or [])
+            # ``_write_conflict_keys`` is populated at startup by main.py
+            # from the stream's WriteConfig — a flat list of column names
+            # representing the ON CONFLICT target for upsert. Falls back
+            # to primary_keys when the stream omits an explicit override.
+            conflict_keys = list(
+                endpoint_doc.get("_write_conflict_keys") or primary_keys
+            )
             state = _StreamState(
                 schema_name=database_object.get("schema") or "public",
                 table_name=table_name,
                 endpoint_document=dict(endpoint_doc),
                 write_mode=self._get_write_mode(schema_msg.write_mode),
-                primary_keys=list(endpoint_doc.get("primary_keys") or []),
+                primary_keys=primary_keys,
+                conflict_keys=conflict_keys,
             )
 
             # Resolve the type-mapper for this stream's endpoint once —
@@ -302,6 +315,8 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
             UnmappedTypeError,
             InvalidTypeMapError,
             PlaceholderExpansionError,
+            KeyError,
+            TypeError,
             ValueError,
         ):
             # Deterministic, actionable errors propagate with their real
@@ -469,7 +484,6 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         """
         if not self._engine or not self._connected:
             return BatchWriteResult(
-                success=False,
                 status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
                 records_written=0,
                 failure_summary="Handler not connected",
@@ -478,18 +492,15 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         state = self._streams.get(stream_id)
         if state is None or state.table is None or state.batch_commits_table is None:
             return BatchWriteResult(
-                success=False,
                 status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
                 records_written=0,
                 failure_summary="Schema not configured",
             )
 
-        # Check idempotency
         existing = await self._check_batch_committed(state, run_id, stream_id, batch_seq)
         if existing:
             logger.info(f"Batch already committed: {run_id}/{stream_id}/{batch_seq}")
             return BatchWriteResult(
-                success=True,
                 status=AckStatus.ACK_STATUS_ALREADY_COMMITTED,
                 records_written=existing["records_written"],
                 committed_cursor=Cursor(token=existing["committed_cursor"]),
@@ -500,7 +511,6 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
             # Empty batch - still record for idempotency
             await self._record_batch_commit(state, run_id, stream_id, batch_seq, cursor.token, 0)
             return BatchWriteResult(
-                success=True,
                 status=AckStatus.ACK_STATUS_SUCCESS,
                 records_written=0,
                 committed_cursor=cursor,
@@ -510,10 +520,11 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
             prepared = self._prepare_for_sqlalchemy(state, record_batch)
 
             async with self._engine.begin() as conn:
-                # Write records based on write mode
                 if state.write_mode == "truncate_insert":
                     await self._truncate_and_insert(conn, state, prepared)
-                elif state.write_mode == "upsert" and state.primary_keys:
+                elif state.write_mode == "upsert" and (
+                    state.conflict_keys or state.primary_keys
+                ):
                     await self._upsert_records(conn, state, prepared)
                 else:
                     await self._insert_records(conn, state, prepared)
@@ -525,7 +536,6 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
 
             logger.info(f"Wrote batch {batch_seq}: {record_count} records")
             return BatchWriteResult(
-                success=True,
                 status=AckStatus.ACK_STATUS_SUCCESS,
                 records_written=record_count,
                 committed_cursor=cursor,
@@ -537,7 +547,6 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
             # cycles on a batch that will never go through.
             logger.error(f"Type-map error writing batch: {e}", exc_info=True)
             return BatchWriteResult(
-                success=False,
                 status=AckStatus.ACK_STATUS_FATAL_FAILURE,
                 records_written=0,
                 failure_summary=f"type-map: {e}",
@@ -545,7 +554,6 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         except Exception as e:
             logger.error(f"Error writing batch: {e}", exc_info=True)
             return BatchWriteResult(
-                success=False,
                 status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
                 records_written=0,
                 failure_summary=str(e),
@@ -647,7 +655,8 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         records: List[Dict[str, Any]],
     ) -> None:
         """Upsert pre-cast records (INSERT ... ON CONFLICT)."""
-        if state.table is None or not state.primary_keys:
+        conflict_keys = state.conflict_keys or state.primary_keys
+        if state.table is None or not conflict_keys:
             await self._insert_records(conn, state, records)
             return
         if not records:
@@ -658,10 +667,10 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
             record_columns = set(records[0].keys())
             update_cols = {
                 c.name: c for c in stmt.excluded
-                if c.name not in state.primary_keys and c.name in record_columns
+                if c.name not in conflict_keys and c.name in record_columns
             }
             stmt = stmt.on_conflict_do_update(
-                index_elements=state.primary_keys,
+                index_elements=conflict_keys,
                 set_=update_cols,
             )
             await conn.execute(stmt)
@@ -671,7 +680,7 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
             record_columns = set(records[0].keys())
             update_cols = {
                 c.name: c for c in stmt.inserted
-                if c.name not in state.primary_keys and c.name in record_columns
+                if c.name not in conflict_keys and c.name in record_columns
             }
             stmt = stmt.on_duplicate_key_update(**update_cols)
             await conn.execute(stmt)

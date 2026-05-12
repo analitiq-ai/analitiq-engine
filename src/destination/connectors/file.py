@@ -171,7 +171,6 @@ class FileDestinationHandler(BaseDestinationHandler):
         """
         if not self._connected:
             return BatchWriteResult(
-                success=False,
                 status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
                 records_written=0,
                 failure_summary="Handler not connected",
@@ -179,7 +178,6 @@ class FileDestinationHandler(BaseDestinationHandler):
 
         if self._storage is None or self._formatter is None or self._manifest is None:
             return BatchWriteResult(
-                success=False,
                 status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
                 records_written=0,
                 failure_summary="Handler components not initialized",
@@ -187,14 +185,12 @@ class FileDestinationHandler(BaseDestinationHandler):
 
         records = record_batch.to_pylist()
 
-        # Check idempotency - has this batch already been committed?
         existing_commit = await self._manifest.check_committed(run_id, stream_id, batch_seq)
         if existing_commit:
             logger.info(
                 f"Batch already committed: run={run_id}, stream={stream_id}, seq={batch_seq}"
             )
             return BatchWriteResult(
-                success=True,
                 status=AckStatus.ACK_STATUS_ALREADY_COMMITTED,
                 records_written=existing_commit.records_written,
                 committed_cursor=Cursor(token=existing_commit.cursor_bytes),
@@ -211,7 +207,6 @@ class FileDestinationHandler(BaseDestinationHandler):
                 file_path="",
             )
             return BatchWriteResult(
-                success=True,
                 status=AckStatus.ACK_STATUS_SUCCESS,
                 records_written=0,
                 committed_cursor=cursor,
@@ -254,7 +249,6 @@ class FileDestinationHandler(BaseDestinationHandler):
             )
 
             return BatchWriteResult(
-                success=True,
                 status=AckStatus.ACK_STATUS_SUCCESS,
                 records_written=len(records),
                 committed_cursor=cursor,
@@ -271,14 +265,12 @@ class FileDestinationHandler(BaseDestinationHandler):
                     errno.errorcode.get(e.errno, e.errno), e, exc_info=True,
                 )
                 return BatchWriteResult(
-                    success=False,
                     status=AckStatus.ACK_STATUS_FATAL_FAILURE,
                     records_written=0,
                     failure_summary=f"OSError[{errno.errorcode.get(e.errno, e.errno)}]: {e}",
                 )
             logger.error("Retryable I/O error writing batch: %s", e, exc_info=True)
             return BatchWriteResult(
-                success=False,
                 status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
                 records_written=0,
                 failure_summary=f"{type(e).__name__}: {e}",
@@ -286,7 +278,6 @@ class FileDestinationHandler(BaseDestinationHandler):
         except Exception as e:
             logger.error("Fatal error writing batch: %s", e, exc_info=True)
             return BatchWriteResult(
-                success=False,
                 status=AckStatus.ACK_STATUS_FATAL_FAILURE,
                 records_written=0,
                 failure_summary=f"{type(e).__name__}: {e}",

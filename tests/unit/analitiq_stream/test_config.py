@@ -231,37 +231,63 @@ class TestWriteConfigDefaults:
 
 
 class TestBatchWriteResultInvariant:
-    """``success`` is derived from ``status`` so the two cannot drift.
-    A regression that returned success=True with FATAL_FAILURE would
-    silently mis-report bad writes."""
+    """``success`` is a derived property of ``status`` — the dataclass is
+    frozen and ``success`` is not constructor-settable. Status is the
+    single source of truth, so the two cannot drift."""
 
     @pytest.mark.unit
-    def test_success_derived_when_omitted(self):
+    def test_success_derived_from_status(self):
         from src.destination.base_handler import BatchWriteResult
         from src.grpc.generated.analitiq.v1 import AckStatus
 
-        ok = BatchWriteResult(status=AckStatus.ACK_STATUS_SUCCESS, records_written=3)
-        assert ok.success is True
-        fail = BatchWriteResult(
+        assert BatchWriteResult(
+            status=AckStatus.ACK_STATUS_SUCCESS, records_written=3
+        ).success is True
+        assert BatchWriteResult(
             status=AckStatus.ACK_STATUS_FATAL_FAILURE, records_written=0
-        )
-        assert fail.success is False
-        replay = BatchWriteResult(
+        ).success is False
+        assert BatchWriteResult(
+            status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE, records_written=0
+        ).success is False
+        assert BatchWriteResult(
             status=AckStatus.ACK_STATUS_ALREADY_COMMITTED, records_written=5
-        )
-        assert replay.success is True
+        ).success is True
 
     @pytest.mark.unit
-    def test_explicit_success_disagreeing_with_status_raises(self):
+    def test_success_is_not_constructor_kwarg(self):
+        """Removing the ``success`` constructor arg prevents the
+        success/status drift bug entirely."""
         from src.destination.base_handler import BatchWriteResult
         from src.grpc.generated.analitiq.v1 import AckStatus
 
-        with pytest.raises(ValueError, match="disagrees with status"):
+        with pytest.raises(TypeError):
             BatchWriteResult(
-                success=True,
+                success=True,  # type: ignore[call-arg]
                 status=AckStatus.ACK_STATUS_FATAL_FAILURE,
                 records_written=0,
             )
+
+    @pytest.mark.unit
+    def test_negative_records_written_raises(self):
+        from src.destination.base_handler import BatchWriteResult
+        from src.grpc.generated.analitiq.v1 import AckStatus
+
+        with pytest.raises(ValueError, match="non-negative"):
+            BatchWriteResult(
+                status=AckStatus.ACK_STATUS_SUCCESS, records_written=-1
+            )
+
+    @pytest.mark.unit
+    def test_frozen_rejects_mutation(self):
+        from dataclasses import FrozenInstanceError
+        from src.destination.base_handler import BatchWriteResult
+        from src.grpc.generated.analitiq.v1 import AckStatus
+
+        r = BatchWriteResult(
+            status=AckStatus.ACK_STATUS_SUCCESS, records_written=1
+        )
+        with pytest.raises(FrozenInstanceError):
+            r.records_written = 99  # type: ignore[misc]
 
 
 class TestEndpointRefResolver:

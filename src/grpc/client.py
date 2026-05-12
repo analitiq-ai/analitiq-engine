@@ -106,9 +106,10 @@ class DestinationGRPCClient:
         # underlying error instead of "Timeout waiting for ACK".
         self._task_failure: Optional[BaseException] = None
         # True when the reader observed the server closing the stream
-        # without an error AND before all expected ACKs were delivered.
-        # Distinguishes graceful peer-close from an in-task exception so
-        # the surfaced diagnostic is actionable.
+        # without an error. Distinguishes graceful peer-close from an
+        # in-task exception so send_batch / start_stream can surface a
+        # specific diagnostic ("destination closed stream") instead of
+        # a generic "stream signaled failure".
         self._peer_closed_stream: bool = False
 
         # Connection state
@@ -264,6 +265,11 @@ class DestinationGRPCClient:
         if not self._connected:
             raise RuntimeError("Not connected to destination")
 
+        # Reset stream-lifetime state so a previous failed run cannot
+        # poison the diagnostic surfaced by this run's send_batch.
+        self._task_failure = None
+        self._peer_closed_stream = False
+
         # Create queues for bidirectional communication
         self._request_queue = asyncio.Queue()
         self._response_queue = asyncio.Queue()
@@ -300,9 +306,14 @@ class DestinationGRPCClient:
                         "Stream reader/writer exited before schema ACK: %s",
                         cause,
                     )
-                else:
+                elif self._peer_closed_stream:
                     logger.error(
                         "Destination closed stream before sending schema ACK"
+                    )
+                else:
+                    logger.error(
+                        "Stream signaled failure before schema ACK without "
+                        "a recorded cause"
                     )
                 return False
 
@@ -365,10 +376,15 @@ class DestinationGRPCClient:
                         f"Stream reader/writer task exited before ACK: "
                         f"{type(cause).__name__}: {cause}"
                     )
-                else:
+                elif self._peer_closed_stream:
                     summary = (
                         "Destination closed stream before sending ACK "
                         f"for batch {batch_seq}"
+                    )
+                else:
+                    summary = (
+                        f"Stream signaled failure before ACK for batch "
+                        f"{batch_seq} without a recorded cause"
                     )
                 logger.error("Batch %d: %s", batch_seq, summary)
                 return BatchResult(
@@ -429,6 +445,11 @@ class DestinationGRPCClient:
                 pass
 
         self._stream_active = False
+        self._stream = None
+        self._request_queue = None
+        self._response_queue = None
+        self._reader_task = None
+        self._writer_task = None
         logger.info("Stream ended")
 
     async def _write_requests(self) -> None:

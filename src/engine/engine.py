@@ -843,9 +843,9 @@ class StreamingEngine:
     def _get_stream_name(self, config: Dict[str, Any]) -> str:
         """Generate stream name for state management.
 
-        Derived from the source ``endpoint_ref`` (canonical
-        ``scope:connection_id/alias`` form) so the metric path is stable
-        across runs.
+        Returns ``endpoint.<scope>:<connection_id>/<alias>`` (the
+        ``endpoint.`` prefix namespaces the key in shared state stores)
+        so the metric path is stable across runs.
         """
         source = config.get("source")
         if isinstance(source, dict):

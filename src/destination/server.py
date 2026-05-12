@@ -159,10 +159,12 @@ class DestinationServicer(DestinationServiceServicer):
                         f"version {schema_msg.version}"
                     )
 
-                    # Configure handler with schema. Deterministic type-map
-                    # errors bubble out of the handler and we relay them in
-                    # the SchemaAck so the engine sees the exact unmapped
-                    # native type instead of an opaque stream abort.
+                    # Configure handler with schema. Deterministic errors
+                    # (type-map, KeyError/ValueError/TypeError on a malformed
+                    # endpoint document) surface in the SchemaAck with the
+                    # exception type and message, so the engine can route
+                    # them to DLQ instead of treating them as a transient
+                    # "schema configuration failed".
                     try:
                         accepted = await self.handler.configure_schema(schema_msg)
                         ack_message = "" if accepted else "Schema configuration failed"
@@ -174,6 +176,13 @@ class DestinationServicer(DestinationServiceServicer):
                         )
                         accepted = False
                         ack_message = f"type-map: {e}"
+                    except (KeyError, TypeError, ValueError) as e:
+                        logger.exception(
+                            "deterministic error configuring stream %s",
+                            schema_msg.stream_id,
+                        )
+                        accepted = False
+                        ack_message = f"{type(e).__name__}: {e}"
                     schema_configured = accepted
 
                     yield StreamResponse(
@@ -235,7 +244,7 @@ class DestinationServicer(DestinationServiceServicer):
                     logger.warning(f"Unknown message type: {msg_type}")
 
         except Exception as e:
-            logger.error(f"StreamRecords error: {e}")
+            logger.exception("StreamRecords error: %s", e)
             raise
 
         finally:
@@ -267,10 +276,10 @@ class DestinationServicer(DestinationServiceServicer):
                 )
 
         except Exception as e:
-            logger.error(f"Health check failed: {e}")
+            logger.exception("Health check failed: %s", e)
             return HealthCheckResponse(
                 status=HealthCheckResponse.ServingStatus.NOT_SERVING,
-                message=str(e),
+                message=f"{type(e).__name__}: {e}",
                 db_connection=ConnectionStatus.CONNECTION_STATUS_DISCONNECTED,
             )
 
