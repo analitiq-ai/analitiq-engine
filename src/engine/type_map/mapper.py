@@ -1,16 +1,16 @@
 """Deterministic matchers for type-map and ssl-mode-map.
 
-``TypeMapper`` walks a rule list top-to-bottom and returns the canonical
-type of the first matching rule. It never defaults, never invokes an LLM,
+``TypeMapper`` walks a rule list top-to-bottom and returns the Arrow-type
+string of the first matching rule. It never defaults, never invokes an LLM,
 and never performs implicit coercion — a miss is a hard error so upstream
 pipelines fail loudly on unmapped types.
 
-Rule files are deliberately single-direction (native → canonical). Source
-connectors author their own file (many source-natives → one canonical);
+Rule files are deliberately single-direction (native → Arrow). Source
+connectors author their own file (many source-natives → one Arrow type);
 destination connectors author a separate file in the opposite direction
-(one canonical → one opinionated destination-native) using the same
-matcher. Inverting one side's rules at runtime would be lossy and ambiguous,
-so this module does not attempt it.
+(one Arrow type → one opinionated destination-native) using the same
+matcher. Inverting one side's rules at runtime would be lossy and
+ambiguous, so this module does not attempt it.
 
 ``SSLModeMapper`` is a flat dictionary lookup from native driver SSL modes
 (``prefer``, ``VERIFY_IDENTITY``, …) to the canonical engine vocabulary
@@ -79,10 +79,14 @@ class TypeMapper:
     def rules(self) -> tuple[TypeMapRule, ...]:
         return self._rules
 
-    def to_canonical(self, native: str) -> str:
-        """Map a native type string to its canonical form.
+    def to_arrow_type(self, native: str) -> str:
+        """Map a native type string to its Arrow-type-string form.
 
-        Raises :class:`UnmappedTypeError` when no rule matches — never defaults.
+        Returns the Arrow type as a string (e.g. ``"Int64"``,
+        ``"Decimal128(18, 2)"``). Parse the result with
+        :func:`~src.engine.type_map.arrow.parse_arrow_type` to obtain a
+        ``pa.DataType``. Raises :class:`UnmappedTypeError` when no rule
+        matches — never defaults.
         """
         normalized = normalize_native_type(native)
         for rule, compiled, exact in zip(

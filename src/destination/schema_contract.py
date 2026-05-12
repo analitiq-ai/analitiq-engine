@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional
 import pyarrow as pa
 import pyarrow.compute as pc
 
-from src.engine.type_map import canonical_to_arrow
+from src.engine.type_map import resolve_arrow_type
 from src.engine.type_map.exceptions import InvalidTypeMapError
 
 logger = logging.getLogger(__name__)
@@ -204,17 +204,15 @@ class SchemaContract:
 
     @staticmethod
     def _require_arrow_type(field_def: Dict[str, Any], name: str) -> pa.DataType:
-        canonical = field_def.get("arrow_type")
-        if not canonical:
+        if not field_def.get("arrow_type"):
             raise ValueError(
                 f"field {name!r} has no 'arrow_type' declaration; "
-                f"endpoint contracts must declare a fully-qualified "
-                f"canonical Arrow type for every field"
+                f"endpoint contracts must declare an Arrow type for every field"
             )
         try:
-            return canonical_to_arrow(canonical)
+            return resolve_arrow_type(field_def, where=f"field {name!r}")
         except InvalidTypeMapError as e:
             raise ValueError(
                 f"field {name!r}: cannot parse arrow_type "
-                f"{canonical!r}: {e}"
+                f"{field_def.get('arrow_type')!r}: {e}"
             ) from e

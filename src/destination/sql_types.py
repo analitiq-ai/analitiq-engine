@@ -1,12 +1,12 @@
-"""Canonical Arrow → SQLAlchemy type translation for destination DDL.
+"""Arrow → SQLAlchemy type translation for destination DDL.
 
 The destination handler receives native SQL type strings (e.g. ``BIGINT``,
-``VARCHAR(255)``) from the endpoint schema, normalises them through the
-connector's ``type-map.json`` to a canonical Arrow type, and then picks a
-SQLAlchemy type from the canonical. This module owns the second leg —
+``VARCHAR(255)``) from the endpoint schema, maps them through the
+connector's ``type-map.json`` to an Arrow type, and then picks a
+SQLAlchemy type from the Arrow type. This module owns the second leg —
 translating ``pa.DataType`` into a SQLAlchemy column type for ``CREATE TABLE``.
 
-The mapping is intentionally small and explicit: the canonical vocabulary
+The mapping is intentionally small and explicit: the Arrow vocabulary
 already abstracts over dialect quirks, so we only need one SQLAlchemy pick
 per Arrow family.
 """
@@ -17,6 +17,7 @@ from typing import Any
 
 import pyarrow as pa
 from sqlalchemy import (
+    JSON,
     BigInteger,
     Boolean,
     Date,
@@ -29,8 +30,9 @@ from sqlalchemy import (
     Text,
     Time,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 
-from src.engine.type_map import TypeMapper, canonical_to_arrow
+from src.engine.type_map import TypeMapper, parse_arrow_type
 
 
 def arrow_to_sqlalchemy(dtype: pa.DataType) -> Any:
@@ -39,6 +41,10 @@ def arrow_to_sqlalchemy(dtype: pa.DataType) -> Any:
     Raises ``ValueError`` for Arrow families the engine cannot currently
     materialize — callers should either extend this mapping or reject the
     schema at load time.
+
+    Nested types (``pa.struct``, ``pa.list_``) map to a SQLAlchemy ``JSON``
+    column with a PostgreSQL ``JSONB`` variant so SA serializes Python
+    dicts/lists straight into the column without per-record encoding.
     """
     if pa.types.is_boolean(dtype):
         return Boolean()
@@ -64,12 +70,18 @@ def arrow_to_sqlalchemy(dtype: pa.DataType) -> Any:
         return Time()
     if pa.types.is_timestamp(dtype):
         return DateTime(timezone=dtype.tz is not None)
+    if (
+        pa.types.is_struct(dtype)
+        or pa.types.is_list(dtype)
+        or pa.types.is_large_list(dtype)
+    ):
+        return JSON().with_variant(JSONB(), "postgresql")
     raise ValueError(
         f"Arrow type {dtype!s} has no SQLAlchemy mapping in destination DDL"
     )
 
 
 def native_to_sqlalchemy(native_type: str, type_mapper: TypeMapper) -> Any:
-    """Convenience wrapper: native SQL type → canonical → SQLAlchemy type."""
-    canonical = type_mapper.to_canonical(native_type)
-    return arrow_to_sqlalchemy(canonical_to_arrow(canonical))
+    """Convenience wrapper: native SQL type → Arrow type → SQLAlchemy type."""
+    arrow_type = type_mapper.to_arrow_type(native_type)
+    return arrow_to_sqlalchemy(parse_arrow_type(arrow_type))

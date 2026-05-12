@@ -14,7 +14,7 @@ import pyarrow as pa
 
 from .exceptions import TransformationError
 from .expression_evaluator import SecureExpressionEvaluator
-from .type_map.arrow import canonical_to_arrow
+from .type_map.arrow import resolve_arrow_type
 from .type_map.exceptions import InvalidTypeMapError
 
 logger = logging.getLogger(__name__)
@@ -710,26 +710,32 @@ def _normalize_path(path: Any) -> str:
 def build_output_schema(
     assignments: List[Dict[str, Any]],
 ) -> pa.Schema:
-    """Build the post-transform Arrow schema from a stream's assignments."""
+    """Build the post-transform Arrow schema from a stream's assignments.
+
+    Object/List targets declare ``arrow_type: "Object"`` with a
+    ``target.properties`` map, or ``arrow_type: "List"`` with
+    ``target.items`` — :func:`resolve_arrow_type` handles the recursion.
+    """
     fields: List[pa.Field] = []
     for index, assignment in enumerate(assignments):
         target = assignment.get("target") or {}
         target_name = _normalize_path(target.get("path"))
         nullable = bool(target.get("nullable", True))
 
-        canonical = target.get("arrow_type")
-        if not canonical:
+        if not target.get("arrow_type"):
             raise TransformationError(
                 f"assignment[{index}] target={target_name!r}: missing "
-                f"target.arrow_type; every assignment must declare a "
-                f"fully-qualified canonical Arrow type"
+                f"target.arrow_type; every assignment must declare an "
+                f"Arrow type"
             )
         try:
-            arrow_type = canonical_to_arrow(canonical)
+            arrow_type = resolve_arrow_type(
+                target, where=f"assignment[{index}] target={target_name!r}"
+            )
         except InvalidTypeMapError as e:
             raise TransformationError(
                 f"assignment[{index}] target={target_name!r}: cannot "
-                f"parse target.arrow_type={canonical!r}: {e}"
+                f"parse target.arrow_type={target.get('arrow_type')!r}: {e}"
             ) from e
 
         fields.append(pa.field(target_name, arrow_type, nullable=nullable))

@@ -10,7 +10,7 @@ Everything in this package is pure logic; filesystem I/O lives in
 :mod:`loader`.
 """
 
-from .arrow import canonical_to_arrow
+from .arrow import parse_arrow_type, resolve_arrow_type
 from .exceptions import (
     InvalidSSLModeMapError,
     InvalidTypeMapError,
@@ -40,7 +40,8 @@ __all__ = [
     "TypeMapper",
     "UnmappedSSLModeError",
     "UnmappedTypeError",
-    "canonical_to_arrow",
+    "parse_arrow_type",
+    "resolve_arrow_type",
     "load_connection_type_map",
     "load_ssl_mode_map",
     "load_type_map",

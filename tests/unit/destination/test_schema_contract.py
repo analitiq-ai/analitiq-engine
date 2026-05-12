@@ -287,3 +287,130 @@ class TestSchemaContractValidation:
         schema = {"columns": [{"name": "id", "arrow_type": "Decimal128"}]}
         with pytest.raises(ValueError, match="cannot parse arrow_type"):
             SchemaContract(schema)
+
+
+class TestSchemaContractNestedObject:
+    """``arrow_type: 'Object'`` recurses into the property's sub-properties
+    to build a ``pa.struct`` column; dicts round-trip end-to-end without
+    string-encoding."""
+
+    def test_object_property_builds_struct(self):
+        schema = {
+            "properties": {
+                "id": {"type": "string", "arrow_type": "Utf8"},
+                "checkAccount": {
+                    "type": "object",
+                    "arrow_type": "Object",
+                    "required": ["id", "objectName"],
+                    "properties": {
+                        "id": {"type": "string", "arrow_type": "Utf8"},
+                        "objectName": {"type": "string", "arrow_type": "Utf8"},
+                    },
+                },
+            },
+            "required": ["id", "checkAccount"],
+        }
+        contract = SchemaContract(schema)
+        field = contract.arrow_schema.field("checkAccount")
+        assert pa.types.is_struct(field.type)
+        assert {f.name for f in field.type} == {"id", "objectName"}
+
+    def test_object_round_trips_dict(self):
+        schema = {
+            "properties": {
+                "checkAccount": {
+                    "type": "object",
+                    "arrow_type": "Object",
+                    "properties": {
+                        "id": {"arrow_type": "Utf8"},
+                        "objectName": {"arrow_type": "Utf8"},
+                    },
+                },
+            },
+        }
+        contract = SchemaContract(schema)
+        batch = contract.from_pylist(
+            [{"checkAccount": {"id": "42", "objectName": "CheckAccount"}}]
+        )
+        assert batch.to_pylist() == [
+            {"checkAccount": {"id": "42", "objectName": "CheckAccount"}}
+        ]
+
+    def test_object_empty_properties_raises(self):
+        schema = {
+            "properties": {
+                "thing": {"arrow_type": "Object", "properties": {}},
+            }
+        }
+        with pytest.raises(ValueError, match="non-empty 'properties' map"):
+            SchemaContract(schema)
+
+    def test_object_missing_properties_raises(self):
+        schema = {"properties": {"thing": {"arrow_type": "Object"}}}
+        with pytest.raises(ValueError, match="non-empty 'properties' map"):
+            SchemaContract(schema)
+
+    def test_list_of_scalars(self):
+        schema = {
+            "properties": {
+                "tags": {
+                    "type": "array",
+                    "arrow_type": "List",
+                    "items": {"arrow_type": "Utf8"},
+                }
+            }
+        }
+        contract = SchemaContract(schema)
+        field = contract.arrow_schema.field("tags")
+        assert pa.types.is_list(field.type)
+        assert pa.types.is_string(field.type.value_type)
+
+        batch = contract.from_pylist([{"tags": ["a", "b"]}, {"tags": []}])
+        assert batch.to_pylist() == [{"tags": ["a", "b"]}, {"tags": []}]
+
+    def test_list_of_objects_round_trips(self):
+        schema = {
+            "properties": {
+                "positions": {
+                    "type": "array",
+                    "arrow_type": "List",
+                    "items": {
+                        "arrow_type": "Object",
+                        "properties": {
+                            "sku": {"arrow_type": "Utf8"},
+                            "qty": {"arrow_type": "Int32"},
+                        },
+                    },
+                }
+            }
+        }
+        contract = SchemaContract(schema)
+        batch = contract.from_pylist(
+            [{"positions": [{"sku": "A", "qty": 2}, {"sku": "B", "qty": 5}]}]
+        )
+        assert batch.to_pylist() == [
+            {"positions": [{"sku": "A", "qty": 2}, {"sku": "B", "qty": 5}]}
+        ]
+
+    def test_list_missing_items_raises(self):
+        schema = {"properties": {"tags": {"arrow_type": "List"}}}
+        with pytest.raises(ValueError, match="'items' object"):
+            SchemaContract(schema)
+
+    def test_columns_payload_supports_object_marker(self):
+        schema = {
+            "columns": [
+                {"name": "id", "arrow_type": "Utf8", "nullable": False},
+                {
+                    "name": "payload",
+                    "arrow_type": "Object",
+                    "nullable": True,
+                    "properties": {
+                        "k": {"arrow_type": "Utf8"},
+                        "v": {"arrow_type": "Int64"},
+                    },
+                },
+            ]
+        }
+        contract = SchemaContract(schema)
+        assert pa.types.is_struct(contract.arrow_schema.field("payload").type)

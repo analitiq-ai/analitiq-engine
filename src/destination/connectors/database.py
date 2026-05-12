@@ -710,31 +710,13 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
 
         ``cast_arrow_batch`` does the column-by-column realignment in
         Arrow space; ``to_pylist`` is the single materialization point
-        before the SQLAlchemy bulk insert.
+        before the SQLAlchemy bulk insert. Nested columns reach SQLAlchemy
+        as Python ``dict``/``list`` values against ``JSON`` columns, which
+        SA serialises natively on every dialect (JSONB on Postgres).
         """
         if state.schema_contract is not None:
             record_batch = state.schema_contract.cast_arrow_batch(record_batch)
-        return self._json_serialize_complex(record_batch.to_pylist())
-
-    def _json_serialize_complex(
-        self, records: List[Dict[str, Any]]
-    ) -> List[Dict[str, Any]]:
-        """JSON-serialize dict/list values for non-Postgres drivers.
-
-        Postgres handles JSON columns natively; MySQL/SQLite need the
-        complex types as strings. This is the only per-row work that
-        survives between Arrow and SQLAlchemy.
-        """
-        if not records or self._driver in ("postgresql", "postgres"):
-            return records
-        import json
-        return [
-            {
-                key: (json.dumps(value) if isinstance(value, (dict, list)) else value)
-                for key, value in record.items()
-            }
-            for record in records
-        ]
+        return record_batch.to_pylist()
 
     async def health_check(self) -> bool:
         """Check database health."""

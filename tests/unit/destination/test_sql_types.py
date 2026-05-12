@@ -84,14 +84,28 @@ class TestArrowToSqlAlchemyParameterized:
         assert sa_type.timezone is True
 
 
-class TestArrowToSqlAlchemyRejection:
-    def test_list_type_rejected(self):
-        with pytest.raises(ValueError, match="has no SQLAlchemy mapping"):
-            arrow_to_sqlalchemy(pa.list_(pa.int32()))
+class TestArrowToSqlAlchemyNested:
+    """Nested Arrow types map to a SA JSON column (JSONB on Postgres)."""
 
-    def test_struct_type_rejected(self):
-        with pytest.raises(ValueError, match="has no SQLAlchemy mapping"):
-            arrow_to_sqlalchemy(pa.struct([pa.field("x", pa.int32())]))
+    def test_list_maps_to_json(self):
+        from sqlalchemy import JSON
+
+        sa_type = arrow_to_sqlalchemy(pa.list_(pa.int32()))
+        assert isinstance(sa_type, JSON)
+
+    def test_struct_maps_to_json(self):
+        from sqlalchemy import JSON
+
+        sa_type = arrow_to_sqlalchemy(pa.struct([pa.field("x", pa.int32())]))
+        assert isinstance(sa_type, JSON)
+
+    def test_struct_variant_is_jsonb_on_postgres(self):
+        from sqlalchemy.dialects import postgresql
+        from sqlalchemy.dialects.postgresql import JSONB
+
+        sa_type = arrow_to_sqlalchemy(pa.struct([pa.field("x", pa.int32())]))
+        impl = sa_type.dialect_impl(postgresql.dialect())
+        assert isinstance(impl, JSONB)
 
 
 class TestNativeToSqlAlchemyChain:
