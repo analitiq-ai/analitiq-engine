@@ -104,8 +104,7 @@ class APIConnector(BaseConnector):
         if not endpoint_ref:
             raise ReadError(
                 "APIConnector: stream_source missing 'endpoint_ref'; "
-                "the source contract must declare it so batches carry typed "
-                "Arrow columns (no inferred 'null' types)"
+                "the source contract requires it to declare per-field types"
             )
         read_spec = ((endpoint_doc.get("operations") or {}).get("read") or {})
         records_items_schema = self._resolve_records_items_schema(
@@ -198,24 +197,16 @@ class APIConnector(BaseConnector):
                     batch_count=batch_count,
                 )
 
-    # ------------------------------------------------------------------
-    # Schema resolution
-    # ------------------------------------------------------------------
-
     @staticmethod
     def _resolve_records_items_schema(
         endpoint_doc: Dict[str, Any], read_spec: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """Locate the JSON-Schema object describing one upstream record.
+        """Walk operations.read.response.schema via records.ref to the per-record items block.
 
-        API endpoints publish the response shape under
-        ``operations.read.response.schema`` and address the records
-        array via ``operations.read.response.records.ref`` (e.g.
-        ``response.body`` for ``[ {...}, {...} ]`` payloads,
-        ``response.body.objects`` for ``{ "objects": [...] }``). The
-        SchemaContract consumes the per-record ``properties`` block, so
-        this walks the response schema to the corresponding ``items``.
+        Accepted records.ref forms: ``response.body`` and
+        ``response.body.<field>[.<field>...]``.
         """
+        endpoint_alias = endpoint_doc.get("alias")
         response_block = read_spec.get("response") or {}
         response_schema = response_block.get("schema") or {}
         records_ref = (response_block.get("records") or {}).get(
@@ -227,10 +218,18 @@ class APIConnector(BaseConnector):
         elif records_ref.startswith("response.body."):
             node = response_schema
             for field in records_ref[len("response.body."):].split("."):
-                node = (node.get("properties") or {}).get(field) or {}
+                properties = node.get("properties") if isinstance(node, dict) else None
+                if not isinstance(properties, dict) or field not in properties:
+                    available = sorted(properties.keys()) if isinstance(properties, dict) else []
+                    raise ReadError(
+                        f"endpoint {endpoint_alias!r}: records.ref "
+                        f"{records_ref!r} references field {field!r} that is "
+                        f"not declared under properties; available: {available}"
+                    )
+                node = properties[field]
         else:
             raise ReadError(
-                f"endpoint {endpoint_doc.get('alias')!r}: unsupported "
+                f"endpoint {endpoint_alias!r}: unsupported "
                 f"records.ref {records_ref!r}; expected 'response.body' "
                 f"or 'response.body.<field>[.<field>...]'"
             )
@@ -238,16 +237,11 @@ class APIConnector(BaseConnector):
         items = node.get("items") if node.get("type") == "array" else node
         if not isinstance(items, dict) or not items.get("properties"):
             raise ReadError(
-                f"endpoint {endpoint_doc.get('alias')!r}: cannot resolve "
+                f"endpoint {endpoint_alias!r}: cannot resolve "
                 f"record schema at {records_ref!r} (no 'properties' under "
-                f"the addressed items); every record field must be declared "
-                f"so Arrow columns carry typed values"
+                f"the addressed items)"
             )
         return items
-
-    # ------------------------------------------------------------------
-    # Parameter assembly
-    # ------------------------------------------------------------------
 
     def _build_base_params(
         self,

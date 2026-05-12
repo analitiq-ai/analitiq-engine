@@ -383,17 +383,12 @@ class StreamingEngine:
         config: Dict[str, Any],
         stream_metrics: Dict[str, int],
     ):
-        """Transform data with field mappings and validation.
-
-        Sources emit ``pa.RecordBatch``; transformations operate on dict
-        shapes (mapping assignments, ``op: "get"`` expressions). This
-        stage is the single place in the engine where Arrow is
-        materialized to dicts and rebuilt afterwards.
-        """
+        """Transform data with field mappings and validation."""
         stream_name = config["stream_name"]
         logger.debug(f"Starting transform stage for stream {stream_name}")
 
         assignments = (config.get("mapping") or {}).get("assignments") or []
+        output_schema = build_output_schema(assignments) if assignments else None
         batch_count = 0
         try:
             while True:
@@ -402,18 +397,12 @@ class StreamingEngine:
                     break
 
                 if not assignments:
-                    # Passthrough: source schema (with native types from
-                    # the source contract) carries straight to the
-                    # destination's cast_arrow_batch.
                     transformed_batch = batch
                 else:
                     pylist = batch.to_pylist()
                     transformed_pylist = await self.data_transformer.apply_transformations(
                         pylist, config
                     )
-                    # Every assignment declares its target.arrow_type
-                    # fully; the transform stage does not infer.
-                    output_schema = build_output_schema(assignments)
                     transformed_batch = pa.RecordBatch.from_pylist(
                         transformed_pylist, schema=output_schema,
                     )

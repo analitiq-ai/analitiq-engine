@@ -15,6 +15,7 @@ import pyarrow as pa
 from .exceptions import TransformationError
 from .expression_evaluator import SecureExpressionEvaluator
 from .type_map.arrow import canonical_to_arrow
+from .type_map.exceptions import InvalidTypeMapError
 
 logger = logging.getLogger(__name__)
 
@@ -109,10 +110,6 @@ class AssignmentTransformer:
                     })
                     continue
 
-                # Set value in result (supports nested paths). No
-                # legacy JSON-string coercion: the post-transform batch
-                # is bound into Arrow via the contract's declared
-                # arrow_type, which accepts driver-native Python values.
                 self._set_nested_value(result, target_path, value)
 
             except Exception as e:
@@ -697,10 +694,6 @@ class DataTransformer:
 
 
 def _normalize_path(path: Any) -> str:
-    """Reduce an assignment ``path`` (str or list) to a single column
-    name. Post-transform batches are flat columns, so nested paths are
-    rejected explicitly.
-    """
     if isinstance(path, str):
         return path
     if isinstance(path, list):
@@ -717,15 +710,7 @@ def _normalize_path(path: Any) -> str:
 def build_output_schema(
     assignments: List[Dict[str, Any]],
 ) -> pa.Schema:
-    """Build the post-transform Arrow schema from a stream's assignments.
-
-    Every assignment MUST declare a fully-qualified canonical
-    ``target.arrow_type`` (e.g. ``Decimal128(38, 9)``,
-    ``Timestamp(MICROSECOND, UTC)``). The transform stage does not
-    infer from the source schema, does not default, and does not fall
-    back. Missing or unparseable declarations raise
-    :class:`TransformationError`.
-    """
+    """Build the post-transform Arrow schema from a stream's assignments."""
     fields: List[pa.Field] = []
     for index, assignment in enumerate(assignments):
         target = assignment.get("target") or {}
@@ -741,7 +726,7 @@ def build_output_schema(
             )
         try:
             arrow_type = canonical_to_arrow(canonical)
-        except Exception as e:
+        except InvalidTypeMapError as e:
             raise TransformationError(
                 f"assignment[{index}] target={target_name!r}: cannot "
                 f"parse target.arrow_type={canonical!r}: {e}"

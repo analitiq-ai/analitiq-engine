@@ -86,15 +86,7 @@ class DatabaseConnector(BaseConnector):
         partition: Optional[Dict[str, Any]] = None,
         batch_size: int = 1000,
     ) -> AsyncIterator[pa.RecordBatch]:
-        """Read upstream rows as Arrow batches.
-
-        Batches are materialized through the source-side
-        :class:`SchemaContract` so every column carries the declared
-        Arrow type from the endpoint's ``columns`` (via the connector or
-        connection ``type-map.json``). All-null columns retain their
-        declared type rather than degrading to Arrow's ``null`` type,
-        which the destination's cast branches refuse.
-        """
+        """Read upstream rows as Arrow batches typed via the endpoint contract."""
         if not self._initialized or self._engine is None:
             raise ReadError(
                 "DatabaseConnector.read_batches() called before connect()"
