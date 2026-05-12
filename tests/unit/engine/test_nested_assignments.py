@@ -113,6 +113,43 @@ class TestDictConstantsEndToEnd:
         }
 
     @pytest.mark.asyncio
+    async def test_json_target_serializes_dict_to_string(self):
+        """A target with ``arrow_type: "Json"`` accepts a dict constant and
+        the transformer emits a JSON-encoded string the Arrow schema
+        (``pa.large_string``) can ingest."""
+        contract = [
+            {
+                "target": {"path": "id", "arrow_type": "Utf8", "nullable": False},
+                "value": {"expression": {"op": "get", "path": "id"}},
+            },
+            {
+                "target": {
+                    "path": "metadata",
+                    "arrow_type": "Json",
+                    "nullable": True,
+                },
+                "value": {
+                    "constant": {
+                        "arrow_type": "Json",
+                        "value": {"some_key": "some_value", "n": 42},
+                    }
+                },
+            },
+        ]
+        translated = [_translate_assignment(a) for a in contract]
+        pylist = await DataTransformer().apply_transformations(
+            [{"id": "r1"}], {"mapping": {"assignments": translated}},
+        )
+        # After transform the dict has been serialized to a JSON string so
+        # pa.large_string can hold it.
+        assert isinstance(pylist[0]["metadata"], str)
+        assert pylist[0]["metadata"] == '{"some_key": "some_value", "n": 42}'
+
+        schema = build_output_schema(translated)
+        batch = pa.RecordBatch.from_pylist(pylist, schema=schema)
+        assert pa.types.is_large_string(batch.schema.field("metadata").type)
+
+    @pytest.mark.asyncio
     async def test_full_pipeline_builds_struct_column(self):
         """Translator + transformer + Arrow schema: the dict constant
         survives intact and the output column type is ``pa.struct``."""

@@ -82,6 +82,15 @@ def arrow_to_sqlalchemy(dtype: pa.DataType) -> Any:
 
 
 def native_to_sqlalchemy(native_type: str, type_mapper: TypeMapper) -> Any:
-    """Convenience wrapper: native SQL type → Arrow type → SQLAlchemy type."""
+    """Convenience wrapper: native SQL type → Arrow type → SQLAlchemy type.
+
+    Native columns whose type-map points to the opaque ``"Json"`` marker
+    short-circuit to a SQLAlchemy ``JSON`` column (``JSONB`` on Postgres)
+    — ``parse_arrow_type("Json")`` returns ``pa.large_string()`` (the
+    wire shape), which alone would land in a ``TEXT`` column and lose
+    the per-dialect JSON semantics.
+    """
     arrow_type = type_mapper.to_arrow_type(native_type)
+    if arrow_type == "Json":
+        return JSON().with_variant(JSONB(), "postgresql")
     return arrow_to_sqlalchemy(parse_arrow_type(arrow_type))

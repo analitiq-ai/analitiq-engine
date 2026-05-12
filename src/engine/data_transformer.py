@@ -6,6 +6,7 @@ fixture-driven tests.
 """
 
 import asyncio
+import json
 import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
@@ -518,6 +519,11 @@ class DataTransformer:
         emitted with no count reconciliation, no DLQ routing, and no
         FATAL signal — the engine's error_strategy is the right place
         to decide retry vs DLQ, not this transformer.
+
+        Fields whose target ``arrow_type`` is ``"Json"`` are JSON-encoded
+        here so the engine's Arrow batch (``pa.large_string`` column) can
+        accept them. Destination handlers reverse this at the write
+        boundary.
         """
         transformed_batch: List[Dict[str, Any]] = []
         all_errors: List[Dict[str, Any]] = []
@@ -542,6 +548,14 @@ class DataTransformer:
                 f"Assignment transformations produced {len(all_errors)} error(s): "
                 f"{summary}{suffix}"
             )
+
+        json_cols = _json_target_names(assignments)
+        if json_cols:
+            for record in transformed_batch:
+                for col in json_cols:
+                    value = record.get(col)
+                    if isinstance(value, (dict, list)):
+                        record[col] = json.dumps(value)
 
         return transformed_batch
 
@@ -691,6 +705,21 @@ class DataTransformer:
             iso_string = iso_string.replace('Z', '+00:00')
 
         return datetime.fromisoformat(iso_string)
+
+
+def _json_target_names(assignments: List[Dict[str, Any]]) -> set:
+    """Return target column names whose ``target.arrow_type`` is ``"Json"``.
+
+    Used by the transform stage to serialize dict/list values into JSON
+    strings just before Arrow batch construction — ``pa.large_string``
+    (what ``Json`` resolves to) does not accept dicts directly.
+    """
+    names: set = set()
+    for a in assignments:
+        target = a.get("target") or {}
+        if target.get("arrow_type") == "Json":
+            names.add(_normalize_path(target.get("path")))
+    return names
 
 
 def _normalize_path(path: Any) -> str:

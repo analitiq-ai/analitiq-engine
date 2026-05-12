@@ -120,6 +120,11 @@ def parse_arrow_type(canonical: str) -> pa.DataType:
             return _parse_decimal(args, pa.decimal256, head)
         case "FixedSizeBinary":
             return _parse_fixed_binary(args, head)
+        case "Json":
+            # Opaque JSON blob — shape not declared. Carried over the wire as
+            # a JSON-encoded string; destinations json.loads it back to a
+            # dict/list at the write boundary.
+            return pa.large_string()
         case "Object" | "List":
             raise InvalidTypeMapError(
                 f"arrow_type {head!r} describes a nested type and cannot be "

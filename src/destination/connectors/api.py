@@ -7,8 +7,8 @@ rate limiting, retries, and different batch modes.
 import asyncio
 import json
 import logging
-from dataclasses import dataclass
-from typing import Any, Dict, List, Mapping
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Mapping, Set
 
 import aiohttp
 import pyarrow as pa
@@ -37,6 +37,23 @@ _API_WRITE_MODE_KEYS: Dict[int, str] = {
 }
 
 
+def _collect_json_fields(mode_block: Mapping[str, Any]) -> Set[str]:
+    """Find body fields declared with ``arrow_type: "Json"`` in the
+    endpoint's write input schema.
+
+    Looks under ``input.schema.properties.<name>.arrow_type``. Returns an
+    empty set when the schema is absent or declares no Json fields —
+    callers treat that as "nothing to decode".
+    """
+    schema = (mode_block.get("input") or {}).get("schema") or {}
+    properties = schema.get("properties") or {}
+    return {
+        name
+        for name, prop in properties.items()
+        if isinstance(prop, dict) and prop.get("arrow_type") == "Json"
+    }
+
+
 @dataclass
 class _StreamState:
     """Per-stream API destination state.
@@ -51,6 +68,13 @@ class _StreamState:
     method: str = "POST"
     batch_mode: str = "single"
     batch_size: int = 100
+    # Names of body fields declared with ``arrow_type: "Json"`` in the
+    # endpoint's write input schema. The wire carries them as
+    # JSON-encoded strings (so they fit a ``pa.large_string`` column);
+    # the handler must ``json.loads`` them before aiohttp serializes the
+    # body, otherwise the API receives a quoted string instead of a
+    # nested object.
+    json_fields: Set[str] = field(default_factory=set)
 
 
 class ApiDestinationHandler(BaseDestinationHandler):
@@ -238,6 +262,7 @@ class ApiDestinationHandler(BaseDestinationHandler):
         state = _StreamState(
             endpoint=path,
             method=(request.get("method") or "POST").upper(),
+            json_fields=_collect_json_fields(mode_block),
         )
 
         batching = mode_block.get("batching") or {}
@@ -290,6 +315,12 @@ class ApiDestinationHandler(BaseDestinationHandler):
             )
 
         records = record_batch.to_pylist()
+        if state.json_fields:
+            for record in records:
+                for col in state.json_fields:
+                    value = record.get(col)
+                    if isinstance(value, str):
+                        record[col] = json.loads(value)
 
         if not records:
             return BatchWriteResult(

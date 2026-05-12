@@ -314,6 +314,13 @@ class TestParseArrowType:
         with pytest.raises(InvalidTypeMapError, match="nested type"):
             parse_arrow_type("List")
 
+    def test_json_marker_resolves_to_large_string(self):
+        import pyarrow as pa
+
+        # Opaque-blob marker: shape unknown, wire type is a JSON-encoded
+        # string. Handlers undo the encoding at write time.
+        assert parse_arrow_type("Json") == pa.large_string()
+
 
 # ---------------------------------------------------------------------------
 # resolve_arrow_type — JSON-Schema-shaped walker

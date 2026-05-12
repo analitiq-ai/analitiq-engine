@@ -397,6 +397,65 @@ class TestSchemaContractNestedObject:
         with pytest.raises(ValueError, match="'items' object"):
             SchemaContract(schema)
 
+    def test_json_marker_round_trips_dict_as_string(self):
+        schema = {
+            "properties": {
+                "metadata": {"type": "object", "arrow_type": "Json"},
+            }
+        }
+        contract = SchemaContract(schema)
+        f = contract.arrow_schema.field("metadata")
+        assert pa.types.is_large_string(f.type)
+        assert "metadata" in contract.json_columns
+
+        batch = contract.from_pylist(
+            [{"metadata": {"k": "v", "n": 1}}, {"metadata": None}]
+        )
+        # Wire value is a JSON-encoded string, not a struct
+        first = batch.column("metadata")[0].as_py()
+        assert isinstance(first, str)
+        assert first == '{"k": "v", "n": 1}'
+
+    def test_json_marker_accepts_list_value(self):
+        schema = {
+            "properties": {"tags": {"type": "array", "arrow_type": "Json"}}
+        }
+        contract = SchemaContract(schema)
+        batch = contract.from_pylist([{"tags": ["a", "b", "c"]}])
+        assert batch.column("tags")[0].as_py() == '["a", "b", "c"]'
+
+    def test_json_marker_passes_through_existing_string(self):
+        # An upstream that already serialized the blob should not be
+        # double-encoded — decode_json_columns reverses each layer exactly
+        # once, and from_pylist only json.dumps dict/list inputs.
+        schema = {
+            "properties": {"metadata": {"type": "object", "arrow_type": "Json"}}
+        }
+        contract = SchemaContract(schema)
+        batch = contract.from_pylist([{"metadata": '{"already": "json"}'}])
+        assert batch.column("metadata")[0].as_py() == '{"already": "json"}'
+
+    def test_decode_json_columns_inverts_serialization(self):
+        schema = {
+            "properties": {"metadata": {"type": "object", "arrow_type": "Json"}}
+        }
+        contract = SchemaContract(schema)
+        batch = contract.from_pylist([{"metadata": {"k": "v"}}])
+        records = batch.to_pylist()
+        decoded = contract.decode_json_columns(records)
+        assert decoded == [{"metadata": {"k": "v"}}]
+
+    def test_decode_json_columns_is_idempotent_on_dicts(self):
+        # If a caller decodes twice (or the value already came as a dict),
+        # the second pass must not raise.
+        schema = {
+            "properties": {"metadata": {"type": "object", "arrow_type": "Json"}}
+        }
+        contract = SchemaContract(schema)
+        decoded = contract.decode_json_columns([{"metadata": {"k": "v"}}])
+        decoded = contract.decode_json_columns(decoded)
+        assert decoded == [{"metadata": {"k": "v"}}]
+
     def test_columns_payload_supports_object_marker(self):
         schema = {
             "columns": [

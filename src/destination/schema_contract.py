@@ -1,5 +1,6 @@
 """Build pa.Schema from endpoint arrow_type declarations."""
 
+import json
 import logging
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
@@ -11,6 +12,17 @@ from src.engine.type_map import resolve_arrow_type
 from src.engine.type_map.exceptions import InvalidTypeMapError
 
 logger = logging.getLogger(__name__)
+
+
+# Sentinel for the opaque-blob marker — fields declared with this arrow_type
+# carry dict/list values that are JSON-serialized on the source side and
+# JSON-parsed on the destination side. The Arrow column itself is a
+# ``pa.large_string`` so PyArrow has no opinion on the inner structure.
+_JSON_ARROW_TYPE: str = "Json"
+
+
+def _is_json_field(field_def: Dict[str, Any]) -> bool:
+    return field_def.get("arrow_type") == _JSON_ARROW_TYPE
 
 
 class SchemaContract:
@@ -60,6 +72,32 @@ class SchemaContract:
     def column_types(self) -> Dict[str, str]:
         return self._column_types
 
+    @property
+    def json_columns(self) -> set:
+        """Names of columns declared with ``arrow_type: "Json"``."""
+        return {n for n, defn in self._field_defs.items() if _is_json_field(defn)}
+
+    def decode_json_columns(
+        self, records: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """Parse JSON-encoded string values back into Python dict/list.
+
+        Called at destination write boundaries (HTTP body, SQL JSON column)
+        so the on-wire string representation is reversed before SA or
+        aiohttp serialize the value again. ``None`` and already-parsed
+        dict/list values are passed through unchanged so callers can apply
+        this idempotently.
+        """
+        json_cols = self.json_columns
+        if not json_cols or not records:
+            return records
+        for record in records:
+            for col in json_cols:
+                value = record.get(col)
+                if isinstance(value, str):
+                    record[col] = json.loads(value)
+        return records
+
     def from_pylist(self, records: List[Dict[str, Any]]) -> pa.RecordBatch:
         """Build a record batch from dict rows using this endpoint's schema."""
         if not records:
@@ -69,9 +107,8 @@ class SchemaContract:
         for field in self._arrow_schema:
             values = [r.get(field.name) for r in records]
             field_def = self._field_defs.get(field.name) or {}
-            source_format = field_def.get("source_format")
             try:
-                arrays.append(self._build_column(field, values, source_format))
+                arrays.append(self._build_column(field, values, field_def))
             except (pa.ArrowTypeError, pa.ArrowInvalid, ValueError) as e:
                 bad_index = next(
                     (i for i, v in enumerate(values) if v is not None), None
@@ -128,8 +165,9 @@ class SchemaContract:
     def _build_column(
         field: pa.Field,
         values: List[Any],
-        source_format: Optional[str],
+        field_def: Dict[str, Any],
     ) -> pa.Array:
+        source_format = field_def.get("source_format")
         if all(v is None for v in values):
             if not field.nullable:
                 raise ValueError(
@@ -137,6 +175,19 @@ class SchemaContract:
                     f"source value is None"
                 )
             return pa.nulls(len(values), type=field.type)
+
+        if _is_json_field(field_def):
+            # Opaque JSON blob: serialize dict/list to a JSON string so it
+            # fits a pa.large_string column. Already-stringified values pass
+            # through untouched (idempotent — the source may have emitted
+            # JSON text directly).
+            serialized = [
+                None
+                if v is None
+                else (json.dumps(v) if isinstance(v, (dict, list)) else v)
+                for v in values
+            ]
+            return pa.array(serialized, type=field.type)
 
         if source_format and (
             pa.types.is_timestamp(field.type) or pa.types.is_date(field.type)

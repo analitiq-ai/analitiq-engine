@@ -152,3 +152,23 @@ class TestNativeToSqlAlchemyChain:
 
         with pytest.raises(UnmappedTypeError):
             native_to_sqlalchemy("MONEY", mapper)
+
+    def test_native_mapping_to_json_marker_yields_json_column(self):
+        # If the connector's type-map points a native (JSONB / VARIANT / …)
+        # at the "Json" arrow marker, the SA column type must be JSON, not
+        # TEXT — otherwise dict values would be stored as quoted strings.
+        from sqlalchemy import JSON
+        from sqlalchemy.dialects import postgresql
+        from sqlalchemy.dialects.postgresql import JSONB
+
+        mapper = TypeMapper(
+            "test",
+            parse_rules(
+                [{"match": "exact", "native": "JSONB", "canonical": "Json"}],
+                source="<test>",
+            ),
+        )
+        sa_type = native_to_sqlalchemy("JSONB", mapper)
+        assert isinstance(sa_type, JSON)
+        impl = sa_type.dialect_impl(postgresql.dialect())
+        assert isinstance(impl, JSONB)

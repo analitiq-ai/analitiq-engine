@@ -710,13 +710,20 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
 
         ``cast_arrow_batch`` does the column-by-column realignment in
         Arrow space; ``to_pylist`` is the single materialization point
-        before the SQLAlchemy bulk insert. Nested columns reach SQLAlchemy
-        as Python ``dict``/``list`` values against ``JSON`` columns, which
-        SA serialises natively on every dialect (JSONB on Postgres).
+        before the SQLAlchemy bulk insert. Nested columns declared as
+        ``Struct``/``List`` (via the Object/List markers) already reach
+        SQLAlchemy as Python ``dict``/``list`` values against ``JSON``
+        columns, which SA serialises natively. Opaque ``Json`` columns
+        carry a JSON-encoded string on the wire — decode them here so
+        SA's ``JSON`` column receives the original ``dict``/``list``
+        rather than a double-quoted string.
         """
         if state.schema_contract is not None:
             record_batch = state.schema_contract.cast_arrow_batch(record_batch)
-        return record_batch.to_pylist()
+        records = record_batch.to_pylist()
+        if state.schema_contract is not None:
+            records = state.schema_contract.decode_json_columns(records)
+        return records
 
     async def health_check(self) -> bool:
         """Check database health."""
