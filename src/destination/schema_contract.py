@@ -114,7 +114,12 @@ class SchemaContract:
             field_def = self._field_defs.get(field.name) or {}
             try:
                 arrays.append(self._build_column(field, values, field_def))
-            except (pa.ArrowTypeError, pa.ArrowInvalid, ValueError) as e:
+            except ValueError:
+                # _build_column already names the offending row; passing
+                # it through preserves that precision instead of pinning
+                # the blame on the first-non-null heuristic below.
+                raise
+            except (pa.ArrowTypeError, pa.ArrowInvalid) as e:
                 bad_index = next(
                     (i for i, v in enumerate(values) if v is not None), None
                 )

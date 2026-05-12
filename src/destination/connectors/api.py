@@ -43,8 +43,9 @@ def _decode_json_fields(
     """Reverse the source-side ``json.dumps`` on Json columns in place.
 
     Malformed input raises ``ValueError`` with the offending column and
-    row so the caller can classify it as a data-shape failure rather
-    than letting a bare ``JSONDecodeError`` escape.
+    row. ``write_batch`` catches it in its broad ``except Exception``
+    branch and returns ``ACK_STATUS_FATAL_FAILURE`` — bad JSON is a
+    data-shape failure, not a transport one, so retrying cannot help.
     """
     if not json_fields:
         return
@@ -63,14 +64,23 @@ def _decode_json_fields(
 
 
 def _collect_json_fields(mode_block: Mapping[str, Any]) -> Set[str]:
-    """Body field names declared with ``arrow_type: "Json"``."""
+    """Body field names declared with ``arrow_type: "Json"``.
+
+    Handles both shapes the api-endpoint contract permits:
+    JSON-Schema-style ``input.schema.properties`` (most common) and the
+    flat ``input.schema.columns`` array.
+    """
     schema = (mode_block.get("input") or {}).get("schema") or {}
-    properties = schema.get("properties") or {}
-    return {
-        name
-        for name, prop in properties.items()
-        if isinstance(prop, dict) and prop.get("arrow_type") == "Json"
-    }
+    names: Set[str] = set()
+    for name, prop in (schema.get("properties") or {}).items():
+        if isinstance(prop, dict) and prop.get("arrow_type") == "Json":
+            names.add(name)
+    for col in schema.get("columns") or []:
+        if isinstance(col, dict) and col.get("arrow_type") == "Json":
+            col_name = col.get("name")
+            if col_name:
+                names.add(col_name)
+    return names
 
 
 @dataclass

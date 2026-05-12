@@ -658,6 +658,39 @@ class TestApiHandlerJsonFields:
         assert sent_payloads == [{"id": "r1", "metadata": {"k": "v", "n": 42}}]
 
     @pytest.mark.asyncio
+    async def test_configure_schema_collects_json_fields_columns_shape(self):
+        """Some api-endpoint authors use the flat ``columns`` array under
+        ``input.schema`` instead of JSON-Schema-style ``properties``. The
+        collector must find Json fields in either shape, otherwise
+        columns-style endpoints silently ship JSON strings to the API."""
+        handler = ApiDestinationHandler()
+        handler._connected = True
+        handler._session = MagicMock()
+        doc = {
+            "operations": {
+                "write": {
+                    "insert": {
+                        "request": {"method": "POST", "path": "/v1/things"},
+                        "input": {
+                            "schema": {
+                                "columns": [
+                                    {"name": "id", "arrow_type": "Utf8"},
+                                    {"name": "metadata", "arrow_type": "Json"},
+                                ]
+                            }
+                        },
+                    }
+                }
+            }
+        }
+        handler.set_stream_endpoints({"s1": doc})
+        ok = await handler.configure_schema(
+            SchemaMessage(stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT)
+        )
+        assert ok is True
+        assert handler._streams["s1"].json_fields == {"metadata"}
+
+    @pytest.mark.asyncio
     async def test_write_batch_malformed_json_returns_fatal(self):
         """A non-JSON string in a Json column is a data-shape failure,
         not a transport failure — must classify FATAL and surface the

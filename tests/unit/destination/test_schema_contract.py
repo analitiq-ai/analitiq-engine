@@ -447,6 +447,21 @@ class TestSchemaContractNestedObject:
                 {"metadata": 42},
             ])
 
+    def test_from_pylist_preserves_inner_row_index(self):
+        """The encoder names the exact offending row; the outer
+        ``from_pylist`` wrapper must not overwrite it with the
+        first-non-null heuristic intended for opaque PyArrow errors."""
+        schema = {
+            "properties": {"metadata": {"type": "object", "arrow_type": "Json"}}
+        }
+        contract = SchemaContract(schema)
+        rows = [{"metadata": {"ok": 1}}] * 5 + [{"metadata": 99}]
+        with pytest.raises(ValueError, match="row 5 carries int") as exc_info:
+            contract.from_pylist(rows)
+        # The misleading wrapper would have prefixed with "first non-null
+        # at row 0"; assert that string is absent.
+        assert "first non-null" not in str(exc_info.value)
+
     def test_decode_json_columns_inverts_serialization(self):
         schema = {
             "properties": {"metadata": {"type": "object", "arrow_type": "Json"}}

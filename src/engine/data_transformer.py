@@ -525,39 +525,61 @@ class DataTransformer:
         accept them. Destination handlers reverse this at the write
         boundary.
         """
-        transformed_batch: List[Dict[str, Any]] = []
+        kept: List[tuple[int, Dict[str, Any]]] = []
         all_errors: List[Dict[str, Any]] = []
 
-        for record in batch:
+        for source_row, record in enumerate(batch):
             await asyncio.sleep(0)  # Yield for async safety
             result, errors = await self.assignment_transformer.transform_record(
                 record, assignments
             )
             if errors:
+                for err in errors:
+                    err.setdefault("row", source_row)
                 all_errors.extend(errors)
             if result is not None:
-                transformed_batch.append(result)
+                kept.append((source_row, result))
 
-        json_cols = _json_target_names(assignments)
-        if json_cols:
-            for row, record in enumerate(transformed_batch):
-                for col in json_cols:
-                    value = record.get(col)
-                    if not isinstance(value, (dict, list)):
-                        continue
-                    try:
-                        record[col] = json.dumps(value)
-                    except TypeError as exc:
-                        # Non-JSON-serializable values (datetime, Decimal,
-                        # UUID, …) belong in the all_errors stream so they
-                        # follow the same DLQ / retry policy as every other
-                        # per-record transform failure.
-                        all_errors.append({
-                            "field": col,
-                            "row": row,
-                            "error": f"Json target value is not JSON-serializable: {exc}",
-                            "action": "dlq",
-                        })
+        # Skip the Json-encoding pass when prior errors exist — those
+        # records will be discarded by the raise below, and mutating
+        # their Json columns in-place beforehand would leak a partially
+        # transformed view to anyone introspecting them.
+        if not all_errors:
+            json_cols = _json_target_names(assignments)
+            if json_cols:
+                for source_row, record in kept:
+                    for col in json_cols:
+                        value = record.get(col)
+                        if value is None or isinstance(value, str):
+                            # Strings pass through to pa.large_string
+                            # unchanged — the destination decoder will
+                            # json.loads them. Useful when the assignment
+                            # is ``get`` from a Json source column.
+                            continue
+                        if not isinstance(value, (dict, list)):
+                            all_errors.append({
+                                "field": col,
+                                "row": source_row,
+                                "error": (
+                                    f"Json target requires dict/list/str/None, "
+                                    f"got {type(value).__name__}"
+                                ),
+                                "action": "dlq",
+                            })
+                            continue
+                        try:
+                            record[col] = json.dumps(value)
+                        except TypeError as exc:
+                            # Non-JSON-serializable values (datetime,
+                            # Decimal, UUID, …) join the per-record error
+                            # stream so they follow the same DLQ / retry
+                            # policy as every other transform failure.
+                            all_errors.append({
+                                "field": col,
+                                "row": source_row,
+                                "error": f"Json target value is not JSON-serializable: {exc}",
+                                "action": "dlq",
+                            })
 
         if all_errors:
             summary = "; ".join(
@@ -570,7 +592,7 @@ class DataTransformer:
                 f"{summary}{suffix}"
             )
 
-        return transformed_batch
+        return [record for _, record in kept]
 
     async def _apply_legacy_transformations(
         self,

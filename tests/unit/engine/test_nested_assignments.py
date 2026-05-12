@@ -113,6 +113,56 @@ class TestDictConstantsEndToEnd:
         }
 
     @pytest.mark.asyncio
+    async def test_json_target_rejects_non_dict_non_str_non_none(self):
+        """A Json target receiving an int (or any non-dict/list/str/None)
+        is an author mistake — the transformer must collect it as a
+        per-record error rather than silently dropping it through to
+        ``pa.RecordBatch.from_pylist``, which would raise a vague Arrow
+        error far from the source."""
+        from src.engine.exceptions import TransformationError
+
+        translated = [
+            _translate_assignment({
+                "target": {
+                    "path": "metadata",
+                    "arrow_type": "Json",
+                    "nullable": True,
+                },
+                "value": {
+                    "expression": {"op": "get", "path": "bad_field"},
+                },
+            })
+        ]
+        with pytest.raises(TransformationError, match="dict/list/str/None"):
+            await DataTransformer().apply_transformations(
+                [{"bad_field": 42}], {"mapping": {"assignments": translated}},
+            )
+
+    @pytest.mark.asyncio
+    async def test_json_target_get_expression_string_passes_through(self):
+        """A get-expression pulling a value from a Json source column
+        yields a string (already encoded upstream). It must pass through
+        the transformer unchanged so the destination's
+        ``decode_json_columns`` can reverse it."""
+        translated = [
+            _translate_assignment({
+                "target": {
+                    "path": "metadata",
+                    "arrow_type": "Json",
+                    "nullable": True,
+                },
+                "value": {
+                    "expression": {"op": "get", "path": "upstream_blob"},
+                },
+            })
+        ]
+        out = await DataTransformer().apply_transformations(
+            [{"upstream_blob": '{"k": "v"}'}],
+            {"mapping": {"assignments": translated}},
+        )
+        assert out == [{"metadata": '{"k": "v"}'}]
+
+    @pytest.mark.asyncio
     async def test_json_target_serializes_dict_to_string(self):
         """A target with ``arrow_type: "Json"`` accepts a dict constant and
         the transformer emits a JSON-encoded string the Arrow schema
