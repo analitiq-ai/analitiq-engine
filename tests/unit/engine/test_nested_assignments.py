@@ -212,11 +212,14 @@ class TestDictConstantsEndToEnd:
         assert "got datetime" in msg
         # Negative: post-filter index would have reported row 1.
         assert "(row 1)" not in msg
+
+    @pytest.mark.asyncio
+    async def test_json_target_rejects_non_dict_non_str_non_none(self):
         """A Json target receiving an int (or any non-dict/list/str/None)
         is an author mistake — the transformer must collect it as a
-        per-record error rather than silently dropping it through to
-        ``pa.RecordBatch.from_pylist``, which would raise a vague Arrow
-        error far from the source."""
+        per-record error rather than silently passing the value through
+        to ``pa.RecordBatch.from_pylist``, which would raise a vague
+        Arrow error far from the source."""
         from src.engine.exceptions import TransformationError
 
         translated = [
