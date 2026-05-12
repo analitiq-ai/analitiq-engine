@@ -5,17 +5,19 @@ rate limiting, retries, and different batch modes.
 """
 
 import asyncio
+import base64
 import json
 import logging
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import Any, Dict, List, Mapping, Set
 
 import aiohttp
+import orjson
 import pyarrow as pa
 from aiohttp_retry import ExponentialRetry, RetryClient
 
 from ..base_handler import BaseDestinationHandler, BatchWriteResult
-from ..schema_contract import arrow_to_json_shape
 from ...grpc.generated.analitiq.v1 import (
     AckStatus,
     Cursor,
@@ -36,6 +38,25 @@ _API_WRITE_MODE_KEYS: Dict[int, str] = {
     1: "insert",
     2: "upsert",
 }
+
+
+def _orjson_default(obj: Any) -> Any:
+    """orjson default-hook for types it does not natively serialise.
+
+    orjson handles ``datetime`` / ``date`` / ``time`` / ``UUID`` /
+    dataclasses / enums / numpy scalars directly — only ``Decimal`` and
+    ``bytes`` reach this hook. ``Decimal`` is rendered as a string to
+    preserve precision (most APIs accept string-or-number for numeric
+    fields); ``bytes`` is base64-encoded per JSON convention.
+    """
+    if isinstance(obj, Decimal):
+        return str(obj)
+    if isinstance(obj, (bytes, bytearray, memoryview)):
+        return base64.b64encode(bytes(obj)).decode("ascii")
+    raise TypeError(
+        f"orjson cannot serialise {type(obj).__name__}; add a handler "
+        f"if this type should appear in API destination bodies"
+    )
 
 
 def _decode_json_fields(
@@ -344,13 +365,13 @@ class ApiDestinationHandler(BaseDestinationHandler):
                 failure_summary="Schema not configured",
             )
 
-        # Cast non-JSON-native Arrow types (timestamp, decimal, date,
-        # time, binary) into canonical string columns before
-        # materialisation, so ``to_pylist`` produces a dict that
-        # ``json.dumps`` can serialise without a custom encoder. Mirrors
-        # the DB handler's pattern of doing all destination-specific
-        # shaping in Arrow space before the single ``to_pylist`` call.
-        records = arrow_to_json_shape(record_batch).to_pylist()
+        # Materialise once, stay row-oriented. Arrow-native Python types
+        # (``datetime`` / ``Decimal`` / ``date`` / ``time``) survive into
+        # the records dict — ``orjson`` handles them at the serialisation
+        # boundary (natively for datetime/date/time, via the default-hook
+        # for Decimal/bytes). Pre-casting in Arrow space would be a
+        # second pass for no gain.
+        records = record_batch.to_pylist()
 
         if not records:
             return BatchWriteResult(
@@ -489,10 +510,18 @@ class ApiDestinationHandler(BaseDestinationHandler):
         # base's path when the endpoint starts with ``/``.
         url = self._base_url.rstrip("/") + "/" + state.endpoint.lstrip("/")
 
+        # ``aiohttp.request(json=...)`` would call stdlib ``json.dumps``
+        # which doesn't understand ``datetime`` / ``Decimal``. orjson is
+        # C-based, handles ``datetime`` natively, and falls through to
+        # the explicit default-hook only for ``Decimal`` / ``bytes`` —
+        # one C-speed pass instead of a separate Python or Arrow cast.
+        body = orjson.dumps(data, default=_orjson_default)
+
         async with self._session.request(
             method=state.method,
             url=url,
-            json=data,
+            data=body,
+            headers={"Content-Type": "application/json"},
         ) as response:
             # Check for non-success status
             if response.status >= 400:

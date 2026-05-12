@@ -691,16 +691,19 @@ class TestApiHandlerJsonFields:
         assert handler._streams["s1"].json_fields == {"metadata"}
 
     @pytest.mark.asyncio
-    async def test_write_batch_casts_datetime_and_decimal_to_strings(self):
-        """The HTTP body delivered to ``_send_request`` must carry
-        JSON-native values for typed Arrow columns — datetime → ISO
-        string, Decimal → numeric string — so aiohttp's ``json.dumps``
-        succeeds without a custom encoder. Catches the silent
-        regression where ``to_pylist`` runs before the JSON-shape cast.
+    async def test_write_batch_preserves_native_types_for_orjson(self):
+        """The dict delivered to ``_send_request`` carries Arrow-native
+        Python types (``datetime``, ``Decimal``). orjson at the HTTP
+        boundary handles datetime natively and routes Decimal through
+        the default-hook — both end up as canonical JSON strings on the
+        wire. Asserting on the dict shape locks in that we don't waste
+        cycles pre-converting in Arrow space.
         """
         from datetime import datetime, timezone
         from decimal import Decimal
-        import json as _json
+        import orjson
+
+        from src.destination.connectors.api import _orjson_default
 
         handler = ApiDestinationHandler()
         handler._connected = True
@@ -740,9 +743,6 @@ class TestApiHandlerJsonFields:
         sent_payloads = []
 
         async def _capture(state, data):
-            # Round-trip through json.dumps confirms the dict is fully
-            # JSON-native — same contract aiohttp's json= relies on.
-            _json.dumps(data)
             sent_payloads.append(data)
             return {}
 
@@ -756,11 +756,18 @@ class TestApiHandlerJsonFields:
             cursor=MagicMock(),
         )
         assert result.status == AckStatus.ACK_STATUS_SUCCESS
+
         sent = sent_payloads[0]
+        # No pre-conversion: types are still Python-native here.
         assert sent["id"] == 1
-        assert isinstance(sent["created"], str)
-        assert "T" in sent["created"]
-        assert sent["amount"] == "42.5000"
+        assert isinstance(sent["created"], datetime)
+        assert isinstance(sent["amount"], Decimal)
+
+        # And the orjson boundary turns them into RFC 3339 / canonical
+        # forms without any Arrow-side cast pass.
+        encoded = orjson.dumps(sent, default=_orjson_default).decode("utf-8")
+        assert '"created":"2026-03-23T10:18:24+00:00"' in encoded
+        assert '"amount":"42.5000"' in encoded
 
     @pytest.mark.asyncio
     async def test_write_batch_malformed_json_returns_fatal(self):
@@ -790,3 +797,58 @@ class TestApiHandlerJsonFields:
         )
         assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
         assert "metadata" in (result.failure_summary or "")
+
+@pytest.mark.unit
+class TestOrjsonDefault:
+    """The default-hook is the only seam where Decimal and bytes reach
+    orjson — everything else (datetime, date, time, UUID, dataclass,
+    enum, numpy) orjson serialises natively."""
+
+    def test_decimal_becomes_canonical_string(self):
+        from decimal import Decimal
+        from src.destination.connectors.api import _orjson_default
+
+        assert _orjson_default(Decimal("42.5000")) == "42.5000"
+        assert _orjson_default(Decimal("-0.00001")) == "-0.00001"
+
+    def test_bytes_become_base64(self):
+        import base64
+        from src.destination.connectors.api import _orjson_default
+
+        out = _orjson_default(b"hello")
+        assert out == base64.b64encode(b"hello").decode("ascii")
+        # bytearray and memoryview share the path.
+        assert _orjson_default(bytearray(b"\xff\xfe")) == base64.b64encode(
+            b"\xff\xfe"
+        ).decode("ascii")
+
+    def test_unknown_type_raises_typeerror(self):
+        from src.destination.connectors.api import _orjson_default
+
+        class Custom:
+            pass
+
+        with pytest.raises(TypeError, match="cannot serialise Custom"):
+            _orjson_default(Custom())
+
+    def test_orjson_uses_default_for_decimal_in_nested_dict(self):
+        """The hook fires per-value inside nested structures — proves
+        no Arrow-level recursion needed to handle nested Decimals."""
+        from datetime import datetime, timezone
+        from decimal import Decimal
+        import orjson
+
+        from src.destination.connectors.api import _orjson_default
+
+        payload = {
+            "id": 1,
+            "created": datetime(2026, 5, 12, 10, 0, tzinfo=timezone.utc),
+            "items": [
+                {"sku": "A", "price": Decimal("9.99")},
+                {"sku": "B", "price": Decimal("12.50")},
+            ],
+        }
+        encoded = orjson.dumps(payload, default=_orjson_default).decode("utf-8")
+        assert '"price":"9.99"' in encoded
+        assert '"price":"12.50"' in encoded
+        assert '"created":"2026-05-12T10:00:00+00:00"' in encoded
