@@ -66,10 +66,12 @@ class _StreamState:
     table: Optional[Table] = None
     batch_commits_table: Optional[Table] = None
     primary_keys: List[str] = field(default_factory=list)
-    # Columns used as the ON CONFLICT target for upsert. Defaults to
-    # ``primary_keys`` via WriteConfig.effective_conflict_keys; an
-    # explicit stream-level ``write.conflict_keys`` (e.g. a composite
-    # natural key) overrides at configure_schema time.
+    # Columns used as the ON CONFLICT target for upsert. Set at
+    # configure_schema time from ``endpoint_doc["_write_conflict_keys"]``
+    # — main.py computes that via WriteConfig.effective_conflict_keys,
+    # which uses the stream's explicit ``write.conflict_keys`` when
+    # set and falls back to ``primary_keys``. Empty here means INSERT
+    # mode or no conflict target available.
     conflict_keys: List[str] = field(default_factory=list)
     write_mode: str = "upsert"
     endpoint_document: Dict[str, Any] = field(default_factory=dict)
@@ -274,12 +276,15 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
 
             primary_keys = list(endpoint_doc.get("primary_keys") or [])
             # ``_write_conflict_keys`` is populated at startup by main.py
-            # from the stream's WriteConfig — a flat list of column names
-            # representing the ON CONFLICT target for upsert. Falls back
-            # to primary_keys when the stream omits an explicit override.
-            conflict_keys = list(
-                endpoint_doc.get("_write_conflict_keys") or primary_keys
-            )
+            # from the stream's WriteConfig (already resolved against the
+            # endpoint's primary keys). A missing key means INSERT mode
+            # — main.py always sets the field for UPSERT streams. An
+            # explicit empty list also means "no conflict target", so we
+            # only fall back to primary_keys when the key is absent.
+            if "_write_conflict_keys" in endpoint_doc:
+                conflict_keys = list(endpoint_doc["_write_conflict_keys"] or [])
+            else:
+                conflict_keys = list(primary_keys)
             state = _StreamState(
                 schema_name=database_object.get("schema") or "public",
                 table_name=table_name,

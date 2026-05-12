@@ -223,7 +223,10 @@ class DestinationGRPCClient:
             logger.info(f"Shutdown acknowledged: {response.message}")
             return response.acknowledged
         except grpc.aio.AioRpcError as e:
-            logger.warning(f"Shutdown request failed: {e.code()}")
+            logger.warning(
+                "Shutdown request failed: code=%s details=%s",
+                e.code(), e.details(), exc_info=True,
+            )
             return False
 
     async def get_capabilities(self) -> Optional[GetCapabilitiesResponse]:
@@ -242,7 +245,10 @@ class DestinationGRPCClient:
                 timeout=10.0,
             )
         except grpc.aio.AioRpcError as e:
-            logger.error(f"Failed to get capabilities: {e}")
+            logger.error(
+                "Failed to get capabilities: code=%s details=%s",
+                e.code(), e.details(), exc_info=True,
+            )
             return None
 
     async def start_stream(

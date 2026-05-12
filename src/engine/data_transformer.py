@@ -557,24 +557,37 @@ class DataTransformer:
         batch: List[Dict[str, Any]],
         assignments: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
-        """Apply assignment-based transformations."""
-        transformed_batch = []
-        all_errors = []
+        """Apply assignment-based transformations.
+
+        Any per-record transform error fails the whole batch. Silently
+        dropping records would deliver a shorter batch than the source
+        emitted with no count reconciliation, no DLQ routing, and no
+        FATAL signal — the engine's error_strategy is the right place
+        to decide retry vs DLQ, not this transformer.
+        """
+        transformed_batch: List[Dict[str, Any]] = []
+        all_errors: List[Dict[str, Any]] = []
 
         for record in batch:
             await asyncio.sleep(0)  # Yield for async safety
             result, errors = await self.assignment_transformer.transform_record(
                 record, assignments
             )
-            if result is not None:
-                transformed_batch.append(result)
             if errors:
                 all_errors.extend(errors)
+            if result is not None:
+                transformed_batch.append(result)
 
         if all_errors:
-            logger.warning(f"Transformation completed with {len(all_errors)} errors")
-            for error in all_errors[:5]:  # Log first 5 errors
-                logger.warning(f"  Field '{error['field']}': {error['error']}")
+            summary = "; ".join(
+                f"{err.get('field', '?')}: {err.get('error', err)}"
+                for err in all_errors[:5]
+            )
+            suffix = f" (+{len(all_errors) - 5} more)" if len(all_errors) > 5 else ""
+            raise TransformationError(
+                f"Assignment transformations produced {len(all_errors)} error(s): "
+                f"{summary}{suffix}"
+            )
 
         return transformed_batch
 
@@ -669,13 +682,17 @@ class DataTransformer:
                 case "to_int" if isinstance(value, (str, float)):
                     try:
                         value = int(float(value))
-                    except (ValueError, TypeError):
-                        logger.warning(f"Failed to convert {value} to int")
+                    except (ValueError, TypeError) as e:
+                        raise TransformationError(
+                            f"to_int: cannot convert {value!r} ({type(value).__name__}) to int: {e}"
+                        ) from e
                 case "to_float" if isinstance(value, (str, int)):
                     try:
                         value = float(value)
-                    except (ValueError, TypeError):
-                        logger.warning(f"Failed to convert {value} to float")
+                    except (ValueError, TypeError) as e:
+                        raise TransformationError(
+                            f"to_float: cannot convert {value!r} ({type(value).__name__}) to float: {e}"
+                        ) from e
                 case "to_str":
                     value = str(value) if value is not None else ""
                 case _:

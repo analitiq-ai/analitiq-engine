@@ -454,9 +454,11 @@ class APIConnector(BaseConnector):
         async with self.session.request(method, url, params=params) as response:
             if response.status != 200:
                 body = await response.text()
-                logger.error("API %d: %s", response.status, body[:500])
+                body_snippet = body[:500]
+                logger.error("API %d %s %s: %s", response.status, method, url, body_snippet)
                 raise ReadError(
-                    f"API request failed with status {response.status}"
+                    f"API request failed: {method} {url} -> status {response.status}; "
+                    f"params={params}; body[:500]={body_snippet!r}"
                 )
             data = await response.json()
         self.metrics["records_read"] += 0  # incremented below per page

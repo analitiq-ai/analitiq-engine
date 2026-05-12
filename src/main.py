@@ -37,6 +37,8 @@ import os
 import sys
 from typing import Any, Dict
 
+from src.models.stream import WriteConfig, WriteMode
+
 # Set up logging
 log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
@@ -102,7 +104,10 @@ async def _send_shutdown_to_destination() -> None:
         else:
             logger.warning("Could not connect to destination to send shutdown signal")
     except Exception as e:
-        logger.warning(f"Failed to send shutdown signal: {e}")
+        logger.warning(
+            "Failed to send shutdown signal: %s: %s",
+            type(e).__name__, e, exc_info=True,
+        )
     finally:
         await client.disconnect()
 
@@ -194,28 +199,28 @@ async def run_destination_mode() -> None:
                     stream_id,
                 )
                 sys.exit(1)
-            # Resolve effective conflict keys via WriteConfig so the
-            # destination handler can use them without re-implementing
-            # the UPSERT-falls-back-to-primary-keys rule. The result is
-            # a flat list of column names (the database handler does not
-            # support composite multi-tuple conflict targets today).
-            from src.models.stream import WriteConfig, WriteMode
+            # Resolve effective conflict keys via WriteConfig. The
+            # database handler uses a single flat list, so we flatten
+            # the first composite returned by the helper. Errors
+            # (unknown mode, UPSERT without keys) propagate so a
+            # misconfigured pipeline fails at startup instead of
+            # silently downgrading UPSERT to INSERT.
             write_block = dest.get("write") or {}
             mode_value = write_block.get("mode") or "upsert"
             primary_keys = list(endpoint_doc.get("primary_keys") or [])
-            conflict_keys: list[str] = []
             try:
-                wc = WriteConfig(
-                    mode=WriteMode(mode_value),
-                    conflict_keys=write_block.get("conflict_keys"),
-                )
-                composites = wc.effective_conflict_keys(primary_keys) or []
-                # Database handler uses a single flat list; flatten the
-                # first composite (or fall back to primary_keys).
-                if composites:
-                    conflict_keys = list(composites[0])
-            except (ValueError, TypeError):
-                conflict_keys = primary_keys
+                write_mode = WriteMode(mode_value)
+            except ValueError as e:
+                raise ValueError(
+                    f"Stream {stream_id!r} destination has unknown write.mode "
+                    f"{mode_value!r}; expected one of {[m.value for m in WriteMode]}"
+                ) from e
+            wc = WriteConfig(
+                mode=write_mode,
+                conflict_keys=write_block.get("conflict_keys"),
+            )
+            composites = wc.effective_conflict_keys(primary_keys) or []
+            conflict_keys: list[str] = list(composites[0]) if composites else []
             enriched_endpoint = dict(endpoint_doc)
             enriched_endpoint["_write_conflict_keys"] = conflict_keys
             stream_endpoints[stream_id] = enriched_endpoint

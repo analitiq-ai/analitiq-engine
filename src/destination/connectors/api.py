@@ -109,7 +109,8 @@ class ApiDestinationHandler(BaseDestinationHandler):
 
         # HTTP statuses that trigger retry with exponential backoff; the
         # attempt count comes from ``runtime.raw_config["max_retries"]`` at
-        # connect() time. Other 4xx (incl. 502) are single-attempt.
+        # connect() time. Everything else (4xx other than 429, and 5xx
+        # other than 500/503/504 such as 502) is single-attempt.
         self._retry_statuses: set = {429, 500, 503, 504}
 
     def set_stream_endpoints(

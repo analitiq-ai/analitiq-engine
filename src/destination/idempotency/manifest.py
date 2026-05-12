@@ -104,26 +104,34 @@ class ManifestTracker:
         return f"{run_id}:{stream_id}:{batch_seq}"
 
     async def load(self) -> None:
-        """Load the manifest from storage."""
+        """Load the manifest from storage.
+
+        A missing manifest is a legitimate fresh start. A corrupted or
+        unreadable manifest is fatal — silently emptying ``_commits``
+        would let previously-committed batches re-write on the next
+        run, breaking the idempotency contract.
+        """
+        if not await self._storage.file_exists(self._manifest_path):
+            logger.info("No existing manifest found, starting fresh")
+            self._loaded = True
+            return
+
+        data = await self._storage.read_file(self._manifest_path)
         try:
-            if await self._storage.file_exists(self._manifest_path):
-                data = await self._storage.read_file(self._manifest_path)
-                manifest = json.loads(data.decode("utf-8"))
+            manifest = json.loads(data.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            raise RuntimeError(
+                f"Manifest at {self._manifest_path} is corrupted; refusing "
+                f"to start fresh because that would re-write already-committed "
+                f"batches. Inspect the file and remove or repair it manually."
+            ) from e
 
-                # Load commits
-                for commit_data in manifest.get("commits", []):
-                    commit = BatchCommit.from_dict(commit_data)
-                    key = self._make_key(commit.run_id, commit.stream_id, commit.batch_seq)
-                    self._commits[key] = commit
+        for commit_data in manifest.get("commits", []):
+            commit = BatchCommit.from_dict(commit_data)
+            key = self._make_key(commit.run_id, commit.stream_id, commit.batch_seq)
+            self._commits[key] = commit
 
-                logger.info(f"Loaded manifest with {len(self._commits)} commits")
-            else:
-                logger.info("No existing manifest found, starting fresh")
-
-        except Exception as e:
-            logger.warning(f"Error loading manifest, starting fresh: {e}")
-            self._commits = {}
-
+        logger.info(f"Loaded manifest with {len(self._commits)} commits")
         self._loaded = True
 
     async def save(self) -> None:

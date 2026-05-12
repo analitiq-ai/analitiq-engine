@@ -1,6 +1,7 @@
-"""File destination handler for writing to local filesystem or S3.
+"""File destination handler for writing to the local filesystem.
 
-This handler writes records to files using configurable formatters and storage backends.
+This handler writes records to files using configurable formatters and a
+local storage backend.
 """
 
 import errno
