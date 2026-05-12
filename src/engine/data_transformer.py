@@ -1,8 +1,8 @@
 """Data transformation utilities for the streaming engine.
 
-Supports both:
-- New assignment-based mapping (MAPPING_AND_TRANSFORMATIONS.md spec)
-- Legacy field_mappings + computed_fields format (for backwards compatibility)
+Supports assignment-based mapping (per MAPPING_AND_TRANSFORMATIONS.md)
+and a flat ``field_mappings`` + ``computed_fields`` format used by
+fixture-driven tests.
 """
 
 import asyncio
@@ -10,8 +10,12 @@ import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
+import pyarrow as pa
+
 from .exceptions import TransformationError
 from .expression_evaluator import SecureExpressionEvaluator
+from .type_map.arrow import canonical_to_arrow
+from .type_map.exceptions import InvalidTypeMapError
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +77,6 @@ class AssignmentTransformer:
                 validate = assignment.get("validate")
 
                 target_path = target.get("path", [])
-                target_type = target.get("type", "string")
                 nullable = target.get("nullable", True)
 
                 # Evaluate the value
@@ -107,10 +110,6 @@ class AssignmentTransformer:
                     })
                     continue
 
-                # Type coercion
-                value = self._coerce_type(value, target_type)
-
-                # Set value in result (supports nested paths)
                 self._set_nested_value(result, target_path, value)
 
             except Exception as e:
@@ -463,59 +462,9 @@ class AssignmentTransformer:
 
         return None
 
-    def _coerce_type(self, value: Any, target_type: str) -> Any:
-        """
-        Coerce value to JSON-compatible type for transmission.
-
-        NOTE: Datetime/date/time coercion is intentionally NOT done here.
-        Type coercion to destination-specific types (e.g., Python datetime
-        objects for PostgreSQL) is handled by the destination-side type
-        coercer based on the JSON schema. This avoids losing type information
-        during JSON serialization over gRPC.
-
-        This method only handles basic JSON-native type coercion:
-        - string, integer, number, boolean
-        """
-        if value is None:
-            return None
-
-        match target_type:
-            case "string":
-                return str(value) if value is not None else None
-            case "integer":
-                try:
-                    return int(float(value))
-                except (ValueError, TypeError):
-                    return value
-            case "decimal" | "number":
-                try:
-                    return float(value)
-                except (ValueError, TypeError):
-                    return value
-            case "boolean":
-                if isinstance(value, bool):
-                    return value
-                if isinstance(value, str):
-                    return value.lower() in ("true", "1", "yes")
-                return bool(value)
-            case "date" | "datetime" | "time":
-                # Pass through as-is - destination handles type coercion
-                # based on JSON schema and database requirements
-                return value
-            case "object" | "array":
-                return value
-            case _:
-                return value
-
-
 class DataTransformer:
-    """
-    Handles field mappings, transformations, and computed fields.
-
-    Supports both:
-    - New assignment-based mapping (assignments array)
-    - Legacy field_mappings + computed_fields format
-    """
+    """Apply contract mapping assignments (and the ``field_mappings`` /
+    ``computed_fields`` fixture shape) to a batch of records."""
 
     def __init__(self):
         self.expression_evaluator = SecureExpressionEvaluator()
@@ -562,24 +511,37 @@ class DataTransformer:
         batch: List[Dict[str, Any]],
         assignments: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
-        """Apply assignment-based transformations."""
-        transformed_batch = []
-        all_errors = []
+        """Apply assignment-based transformations.
+
+        Any per-record transform error fails the whole batch. Silently
+        dropping records would deliver a shorter batch than the source
+        emitted with no count reconciliation, no DLQ routing, and no
+        FATAL signal — the engine's error_strategy is the right place
+        to decide retry vs DLQ, not this transformer.
+        """
+        transformed_batch: List[Dict[str, Any]] = []
+        all_errors: List[Dict[str, Any]] = []
 
         for record in batch:
             await asyncio.sleep(0)  # Yield for async safety
             result, errors = await self.assignment_transformer.transform_record(
                 record, assignments
             )
-            if result is not None:
-                transformed_batch.append(result)
             if errors:
                 all_errors.extend(errors)
+            if result is not None:
+                transformed_batch.append(result)
 
         if all_errors:
-            logger.warning(f"Transformation completed with {len(all_errors)} errors")
-            for error in all_errors[:5]:  # Log first 5 errors
-                logger.warning(f"  Field '{error['field']}': {error['error']}")
+            summary = "; ".join(
+                f"{err.get('field', '?')}: {err.get('error', err)}"
+                for err in all_errors[:5]
+            )
+            suffix = f" (+{len(all_errors) - 5} more)" if len(all_errors) > 5 else ""
+            raise TransformationError(
+                f"Assignment transformations produced {len(all_errors)} error(s): "
+                f"{summary}{suffix}"
+            )
 
         return transformed_batch
 
@@ -674,13 +636,17 @@ class DataTransformer:
                 case "to_int" if isinstance(value, (str, float)):
                     try:
                         value = int(float(value))
-                    except (ValueError, TypeError):
-                        logger.warning(f"Failed to convert {value} to int")
+                    except (ValueError, TypeError) as e:
+                        raise TransformationError(
+                            f"to_int: cannot convert {value!r} ({type(value).__name__}) to int: {e}"
+                        ) from e
                 case "to_float" if isinstance(value, (str, int)):
                     try:
                         value = float(value)
-                    except (ValueError, TypeError):
-                        logger.warning(f"Failed to convert {value} to float")
+                    except (ValueError, TypeError) as e:
+                        raise TransformationError(
+                            f"to_float: cannot convert {value!r} ({type(value).__name__}) to float: {e}"
+                        ) from e
                 case "to_str":
                     value = str(value) if value is not None else ""
                 case _:
@@ -689,40 +655,82 @@ class DataTransformer:
         return value
 
     async def _parse_iso_date(self, value: str) -> str:
-        """Parse ISO datetime string to date format."""
+        """Parse ISO datetime string to date format. On parse failure
+        the original string is returned unchanged — this transformation
+        is used for output-side reformatting, not cursor math, so
+        passing the bad value through to the destination's schema is a
+        more localized failure than raising mid-batch."""
         try:
             if value.endswith('Z'):
                 value = value.replace('Z', '+00:00')
             dt = datetime.fromisoformat(value)
             return dt.strftime('%Y-%m-%d')
         except ValueError as e:
-            logger.warning(f"Failed to parse ISO date '{value}': {e}")
+            logger.warning("Failed to parse ISO date '%s': %s", value, e)
             return value
 
     async def _parse_iso_timestamp(self, value: str) -> datetime:
-        """Parse ISO datetime string to datetime object."""
-        try:
-            if value.endswith('Z'):
-                value = value.replace('Z', '+00:00')
-            return datetime.fromisoformat(value)
-        except ValueError as e:
-            logger.warning(f"Failed to parse ISO timestamp '{value}': {e}")
-            return datetime.now()
+        """Parse ISO datetime string to datetime object. Raises on
+        unparseable input — a ``datetime.now()`` fallback would silently
+        re-window cursors and corrupt incremental sync."""
+        if value.endswith('Z'):
+            value = value.replace('Z', '+00:00')
+        return datetime.fromisoformat(value)
 
     async def _parse_iso_to_datetime_object(self, value: Any) -> datetime:
-        """Convert ISO timestamp string or datetime to datetime object."""
+        """Convert ISO timestamp string or datetime to datetime object.
+        Raises on unparseable input — see ``_parse_iso_timestamp``."""
+        if value is None:
+            raise ValueError("Cannot convert None to datetime")
+
+        if isinstance(value, datetime):
+            return value
+
+        iso_string = str(value)
+        if iso_string.endswith('Z'):
+            iso_string = iso_string.replace('Z', '+00:00')
+
+        return datetime.fromisoformat(iso_string)
+
+
+def _normalize_path(path: Any) -> str:
+    if isinstance(path, str):
+        return path
+    if isinstance(path, list):
+        if len(path) != 1 or not isinstance(path[0], str):
+            raise TransformationError(
+                f"assignment path must be a single column name; got {path!r}"
+            )
+        return path[0]
+    raise TransformationError(
+        f"assignment path must be str or [str]; got {type(path).__name__}"
+    )
+
+
+def build_output_schema(
+    assignments: List[Dict[str, Any]],
+) -> pa.Schema:
+    """Build the post-transform Arrow schema from a stream's assignments."""
+    fields: List[pa.Field] = []
+    for index, assignment in enumerate(assignments):
+        target = assignment.get("target") or {}
+        target_name = _normalize_path(target.get("path"))
+        nullable = bool(target.get("nullable", True))
+
+        canonical = target.get("arrow_type")
+        if not canonical:
+            raise TransformationError(
+                f"assignment[{index}] target={target_name!r}: missing "
+                f"target.arrow_type; every assignment must declare a "
+                f"fully-qualified canonical Arrow type"
+            )
         try:
-            if value is None:
-                raise ValueError("Cannot convert None to datetime")
+            arrow_type = canonical_to_arrow(canonical)
+        except InvalidTypeMapError as e:
+            raise TransformationError(
+                f"assignment[{index}] target={target_name!r}: cannot "
+                f"parse target.arrow_type={canonical!r}: {e}"
+            ) from e
 
-            if isinstance(value, datetime):
-                return value
-
-            iso_string = str(value)
-            if iso_string.endswith('Z'):
-                iso_string = iso_string.replace('Z', '+00:00')
-
-            return datetime.fromisoformat(iso_string)
-        except (ValueError, TypeError) as e:
-            logger.warning(f"Failed to parse value '{value}' to datetime: {e}")
-            return datetime.now()
+        fields.append(pa.field(target_name, arrow_type, nullable=nullable))
+    return pa.schema(fields)

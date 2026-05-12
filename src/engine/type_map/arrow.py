@@ -22,6 +22,19 @@ from .exceptions import InvalidTypeMapError
 _PARAM_SPLIT: Final[Pattern[str]] = re.compile(r"\s*,\s*")
 
 
+_UNIT_ALIASES: Final[dict[str, str]] = {
+    "SECOND": "s",
+    "MILLISECOND": "ms",
+    "MICROSECOND": "us",
+    "NANOSECOND": "ns",
+}
+
+
+def _normalize_unit(unit: str) -> str:
+    """Map the schema's long unit names to PyArrow's short codes."""
+    return _UNIT_ALIASES.get(unit, unit)
+
+
 def _parse_head(canonical: str) -> tuple[str, tuple[str, ...]]:
     """Split ``Name(arg1, arg2)`` into (``Name``, (``arg1``, ``arg2``))."""
     trimmed = canonical.strip()
@@ -90,6 +103,8 @@ def canonical_to_arrow(canonical: str) -> pa.DataType:
             return pa.time32(_require_unit(args, head, ("s", "ms")))
         case "Time64":
             return pa.time64(_require_unit(args, head, ("us", "ns")))
+        case "Duration":
+            return pa.duration(_require_unit(args, head, ("s", "ms", "us", "ns")))
         case "Timestamp":
             return _parse_timestamp(args)
         case "Decimal128":
@@ -106,24 +121,30 @@ def canonical_to_arrow(canonical: str) -> pa.DataType:
 def _require_unit(
     args: tuple[str, ...], head: str, allowed: tuple[str, ...]
 ) -> str:
-    if len(args) != 1 or args[0] not in allowed:
+    if len(args) != 1:
         raise InvalidTypeMapError(
             f"{head}{args} requires exactly one unit from {allowed}"
         )
-    return args[0]
+    unit = _normalize_unit(args[0])
+    if unit not in allowed:
+        raise InvalidTypeMapError(
+            f"{head}{args} requires exactly one unit from {allowed}"
+        )
+    return unit
 
 
 def _parse_timestamp(args: tuple[str, ...]) -> pa.DataType:
     if not args:
         raise InvalidTypeMapError(
-            "Timestamp requires at least a unit (e.g. Timestamp(us))"
+            "Timestamp requires at least a unit (e.g. Timestamp(MICROSECOND))"
         )
-    unit = args[0]
+    unit = _normalize_unit(args[0])
     if unit not in ("s", "ms", "us", "ns"):
         raise InvalidTypeMapError(
-            f"Timestamp unit must be one of s/ms/us/ns, got {unit!r}"
+            f"Timestamp unit must be one of "
+            f"SECOND/MILLISECOND/MICROSECOND/NANOSECOND, got {args[0]!r}"
         )
-    tz = args[1] if len(args) > 1 and args[1] else None
+    tz = args[1] if len(args) > 1 and args[1] and args[1] != "null" else None
     return pa.timestamp(unit, tz=tz)
 
 

@@ -19,7 +19,8 @@ Environment Variables:
     RUN_MODE: "source" (default) or "destination"
 
     Common (both modes):
-        PIPELINE_ID: UUID of the pipeline to execute
+        PIPELINE_ID: Pipeline alias to execute (matches `pipeline_id` in
+            `pipelines/manifest.json`).
 
     Engine Mode:
         DESTINATION_GRPC_HOST: Hostname of destination gRPC server
@@ -35,6 +36,8 @@ import logging
 import os
 import sys
 from typing import Any, Dict
+
+from src.models.stream import WriteConfig, WriteMode
 
 # Set up logging
 log_level = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -101,7 +104,10 @@ async def _send_shutdown_to_destination() -> None:
         else:
             logger.warning("Could not connect to destination to send shutdown signal")
     except Exception as e:
-        logger.warning(f"Failed to send shutdown signal: {e}")
+        logger.warning(
+            "Failed to send shutdown signal: %s: %s",
+            type(e).__name__, e, exc_info=True,
+        )
     finally:
         await client.disconnect()
 
@@ -169,28 +175,69 @@ async def run_destination_mode() -> None:
     logger.info(f"Connector type: {runtime.connector_type}")
     logger.info(f"gRPC port: {grpc_port}")
 
-    # Build stream_id -> destination endpoint_ref index for streams that
-    # target this connection. The handler uses it to pick the right
-    # type-mapper per incoming SchemaMessage (connector-scoped vs
-    # connection-scoped endpoints). Values are dict-shape EndpointRef
-    # payloads ({"scope", "identifier", "endpoint"}).
+    # Build per-stream context for streams that target this destination:
+    #   - endpoint_refs: stream_id -> dict-shape EndpointRef payload, used
+    #     by the handler to pick the right TypeMapper (connector-scoped
+    #     vs connection-scoped endpoints) for each SchemaMessage.
+    #   - stream_endpoints: stream_id -> resolved contract endpoint
+    #     document. Engine and destination both load these via
+    #     PipelineConfigPrep, so handlers read schema details from this
+    #     map instead of unpacking them off the wire.
     endpoint_refs: Dict[str, Dict[str, Any]] = {}
+    stream_endpoints: Dict[str, Dict[str, Any]] = {}
     for stream in stream_configs:
         for dest in stream.get("destinations", []):
-            if dest.get("connection_ref") == dest_alias:
-                endpoint_refs[stream["stream_id"]] = dest["endpoint_ref"]
-                break
+            if dest.get("connection_ref") != dest_alias:
+                continue
+            stream_id = stream["stream_id"]
+            endpoint_refs[stream_id] = dest["endpoint_ref"]
+            endpoint_doc = dest.get("_endpoint")
+            if endpoint_doc is None:
+                logger.error(
+                    "Destination for stream %s has no resolved endpoint document; "
+                    "PipelineConfigPrep should have populated _endpoint",
+                    stream_id,
+                )
+                sys.exit(1)
+            # Resolve effective conflict keys via WriteConfig. The
+            # database handler uses a single flat list, so we flatten
+            # the first composite returned by the helper. Errors
+            # (unknown mode, UPSERT without keys) propagate so a
+            # misconfigured pipeline fails at startup instead of
+            # silently downgrading UPSERT to INSERT.
+            write_block = dest.get("write") or {}
+            mode_value = write_block.get("mode") or "upsert"
+            primary_keys = list(endpoint_doc.get("primary_keys") or [])
+            try:
+                write_mode = WriteMode(mode_value)
+            except ValueError as e:
+                raise ValueError(
+                    f"Stream {stream_id!r} destination has unknown write.mode "
+                    f"{mode_value!r}; expected one of {[m.value for m in WriteMode]}"
+                ) from e
+            wc = WriteConfig(
+                mode=write_mode,
+                conflict_keys=write_block.get("conflict_keys"),
+            )
+            composites = wc.effective_conflict_keys(primary_keys) or []
+            conflict_keys: list[str] = list(composites[0]) if composites else []
+            enriched_endpoint = dict(endpoint_doc)
+            enriched_endpoint["_write_conflict_keys"] = conflict_keys
+            stream_endpoints[stream_id] = enriched_endpoint
+            break
     logger.info(
-        "Registered endpoint_refs for %d stream(s) targeting %s",
+        "Registered %d stream(s) targeting %s",
         len(endpoint_refs),
         dest_alias,
     )
 
-    # Create handler and start server. ``set_endpoint_refs`` is defined on
-    # ``BaseDestinationHandler`` as a no-op default, so this call is safe
-    # for every handler type and fails loudly if an override is renamed.
+    # Create handler and start server. ``set_endpoint_refs`` and
+    # ``set_stream_endpoints`` are defined on ``BaseDestinationHandler``
+    # as no-op defaults, so these calls are safe for every handler type
+    # and fail loudly if an override is renamed.
     handler = get_handler(runtime.connector_type)
     handler.set_endpoint_refs(endpoint_refs)
+    handler.set_stream_endpoints(stream_endpoints)
     await handler.connect(runtime)
 
     server = DestinationGRPCServer(handler, port=grpc_port)

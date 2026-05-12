@@ -7,7 +7,9 @@ delegates all data operations to these handlers.
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, List, Mapping, Optional
+
+import pyarrow as pa
 
 from ..grpc.generated.analitiq.v1 import (
     AckStatus,
@@ -16,16 +18,37 @@ from ..grpc.generated.analitiq.v1 import (
 )
 
 
-@dataclass
-class BatchWriteResult:
-    """Result of writing a batch to the destination."""
+_SUCCESS_STATUSES = frozenset({
+    AckStatus.ACK_STATUS_SUCCESS,
+    AckStatus.ACK_STATUS_ALREADY_COMMITTED,
+})
 
-    success: bool
+
+@dataclass(frozen=True)
+class BatchWriteResult:
+    """Immutable result of writing a batch to the destination.
+
+    ``success`` is a derived property: a result is successful when its
+    ``status`` is SUCCESS or ALREADY_COMMITTED. Modeling it as a property
+    (instead of a constructor argument) makes status the single source
+    of truth — callers cannot construct an inconsistent result.
+    """
+
     status: AckStatus
     records_written: int
     committed_cursor: Optional[Cursor] = None
     failed_record_ids: List[str] = field(default_factory=list)
     failure_summary: str = ""
+
+    def __post_init__(self) -> None:
+        if self.records_written < 0:
+            raise ValueError(
+                f"records_written must be non-negative, got {self.records_written}"
+            )
+
+    @property
+    def success(self) -> bool:
+        return self.status in _SUCCESS_STATUSES
 
 
 class BaseDestinationHandler(ABC):
@@ -48,12 +71,31 @@ class BaseDestinationHandler(ABC):
         """Register the ``stream_id → endpoint_ref`` index for this handler.
 
         ``endpoint_refs`` values are dict-shape ``EndpointRef`` payloads
-        (``{"scope", "identifier", "endpoint"}``). Called once by the
+        (``{"scope", "connection_id", "alias"}`` plus optional ``x-*``
+        extension keys). Called once by the
         destination entrypoint before the gRPC server starts. The default
         implementation is a no-op; handlers that need per-stream endpoint
         context (e.g. picking a type-mapper by scope) override it.
         """
         _ = endpoint_refs  # no-op default
+
+    def set_stream_endpoints(
+        self, stream_endpoints: Mapping[str, Mapping[str, Any]]
+    ) -> None:
+        """Register the ``stream_id → contract endpoint document`` index.
+
+        The destination loads its configuration with the same
+        ``PipelineConfigPrep`` as the engine, so the contract endpoint
+        document (database object, columns, primary keys, API operations,
+        …) is already on disk by the time ``configure_schema`` fires for
+        an incoming :class:`SchemaMessage`. Handlers read from this map
+        instead of unpacking the message.
+
+        Called once by the destination entrypoint before the gRPC server
+        starts. Default is a no-op; handlers that need the document
+        override it.
+        """
+        _ = stream_endpoints  # no-op default
 
     @abstractmethod
     async def connect(self, runtime: "ConnectionRuntime") -> None:
@@ -102,12 +144,11 @@ class BaseDestinationHandler(ABC):
         run_id: str,
         stream_id: str,
         batch_seq: int,
-        records: List[Dict[str, Any]],
+        record_batch: pa.RecordBatch,
         record_ids: List[str],
         cursor: Cursor,
     ) -> BatchWriteResult:
-        """
-        Write a batch of records to the destination.
+        """Write a batch of records to the destination.
 
         Idempotency Requirements:
         - Must check if (run_id, stream_id, batch_seq) was already committed
@@ -119,7 +160,8 @@ class BaseDestinationHandler(ABC):
             run_id: Unique pipeline run identifier
             stream_id: Stream identifier
             batch_seq: Monotonically increasing batch sequence number
-            records: List of record dictionaries to write
+            record_batch: Records as a ``pa.RecordBatch``. Arrow IPC is
+                the only supported wire format.
             record_ids: Stable identifiers for each record (for DLQ correlation)
             cursor: Opaque cursor representing max watermark in batch
 

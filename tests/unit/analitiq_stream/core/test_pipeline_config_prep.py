@@ -274,13 +274,13 @@ def standard_setup(temp_config_dir, helper):
         "is_enabled": True,
         "source": {
             "connection_ref": "my-wise",
-            "endpoint_ref": {"scope": "connector", "identifier": "wise", "endpoint": "transfers"},
+            "endpoint_ref": {"scope": "connector", "connection_id": "wise", "alias": "transfers"},
             "primary_key": ["id"],
             "replication": {"method": "incremental", "cursor_field": ["created"]},
         },
         "destinations": [{
             "connection_ref": "prod-pg",
-            "endpoint_ref": {"scope": "connection", "identifier": "prod-pg", "endpoint": "public_transfers"},
+            "endpoint_ref": {"scope": "connection", "connection_id": "prod-pg", "alias": "public_transfers"},
             "write": {"mode": "upsert", "conflict_keys": ["id"]},
         }],
         "mapping": {
@@ -372,10 +372,10 @@ class TestConfigurationLoading:
             pipeline, streams, connections, endpoints, connectors = prep.create_config()
 
             wise_ref = EndpointRef(
-                scope="connector", identifier="wise", endpoint="transfers",
+                scope="connector", connection_id="my-wise", alias="transfers",
             )
             pg_ref = EndpointRef(
-                scope="connection", identifier="prod-pg", endpoint="public_transfers",
+                scope="connection", connection_id="prod-pg", alias="public_transfers",
             )
             assert wise_ref in endpoints
             assert endpoints[wise_ref]["endpoint"] == "/v1/transfers"
@@ -447,11 +447,11 @@ class TestConfigurationLoading:
             "stream_id": "stream-1",
             "source": {
                 "connection_ref": "my-wise",
-                "endpoint_ref": {"scope": "connector", "identifier": "wise", "endpoint": "transfers"},
+                "endpoint_ref": {"scope": "connector", "connection_id": "wise", "alias": "transfers"},
             },
             "destinations": [{
                 "connection_ref": "prod-pg",
-                "endpoint_ref": {"scope": "connection", "identifier": "prod-pg", "endpoint": "public_transfers"},
+                "endpoint_ref": {"scope": "connection", "connection_id": "prod-pg", "alias": "public_transfers"},
             }],
         }
         helper.write_pipeline(pipelines_dir, "draft-pipeline", pipeline_config, [stream])
@@ -521,11 +521,11 @@ class TestConfigurationLoading:
             "stream_id": "wrong-stream-id",
             "source": {
                 "connection_ref": "my-wise",
-                "endpoint_ref": {"scope": "connector", "identifier": "wise", "endpoint": "transfers"},
+                "endpoint_ref": {"scope": "connector", "connection_id": "wise", "alias": "transfers"},
             },
             "destinations": [{
                 "connection_ref": "prod-pg",
-                "endpoint_ref": {"scope": "connection", "identifier": "prod-pg", "endpoint": "public_transfers"},
+                "endpoint_ref": {"scope": "connection", "connection_id": "prod-pg", "alias": "public_transfers"},
             }],
         }
         (streams_dir / "expected-stream.json").write_text(json.dumps(wrong_stream))
@@ -557,8 +557,8 @@ class TestConfigurationLoading:
             source = stream_configs[0]["source"]
             assert source["endpoint_ref"] == {
                 "scope": "connector",
-                "identifier": "wise",
-                "endpoint": "transfers",
+                "connection_id": "wise",
+                "alias": "transfers",
             }
             assert source["connection_ref"] == "my-wise"
 
@@ -573,7 +573,7 @@ class TestConfigurationLoading:
             dest = stream_configs[0]["destinations"][0]
             assert dest["endpoint_ref"] == {
                 "scope": "connection",
-                "identifier": "prod-pg",
-                "endpoint": "public_transfers",
+                "connection_id": "prod-pg",
+                "alias": "public_transfers",
             }
             assert dest["connection_ref"] == "prod-pg"

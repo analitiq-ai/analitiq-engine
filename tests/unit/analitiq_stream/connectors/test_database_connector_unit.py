@@ -223,8 +223,10 @@ class TestDatabaseConnectorReadBatches:
                 batches.append(batch)
 
         assert len(batches) == 1
-        assert len(batches[0]) == 2
-        assert batches[0][0]["id"] == 1
+        # Source connectors emit pa.RecordBatch; materialize for assertions.
+        first = batches[0].to_pylist()
+        assert len(first) == 2
+        assert first[0]["id"] == 1
         assert connector.metrics["records_read"] == 2
         assert connector.metrics["batches_read"] == 1
 

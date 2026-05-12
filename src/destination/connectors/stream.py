@@ -4,9 +4,12 @@ This handler writes records to stdout, useful for testing and debugging.
 It does not implement idempotency since stdout is not persistent.
 """
 
+import errno
 import logging
 import sys
 from typing import Any, Dict, List
+
+import pyarrow as pa
 
 from ..base_handler import BaseDestinationHandler, BatchWriteResult
 from ..formatters import get_formatter
@@ -128,35 +131,26 @@ class StreamDestinationHandler(BaseDestinationHandler):
         run_id: str,
         stream_id: str,
         batch_seq: int,
-        records: List[Dict[str, Any]],
+        record_batch: pa.RecordBatch,
         record_ids: List[str],
         cursor: Cursor,
     ) -> BatchWriteResult:
-        """
-        Write a batch of records to stdout.
+        """Write an Arrow record batch to stdout.
 
-        Args:
-            run_id: Pipeline run identifier
-            stream_id: Stream identifier
-            batch_seq: Batch sequence number
-            records: Records to write
-            record_ids: Record identifiers (for logging)
-            cursor: Cursor to return on success
-
-        Returns:
-            BatchWriteResult with SUCCESS status
+        The stdout formatter consumes dicts, so the batch is materialized
+        once at this boundary.
         """
         if not self._connected or self._formatter is None:
             return BatchWriteResult(
-                success=False,
                 status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
                 records_written=0,
                 failure_summary="Handler not connected",
             )
 
+        records = record_batch.to_pylist()
+
         if not records:
             return BatchWriteResult(
-                success=True,
                 status=AckStatus.ACK_STATUS_SUCCESS,
                 records_written=0,
                 committed_cursor=cursor,
@@ -174,19 +168,36 @@ class StreamDestinationHandler(BaseDestinationHandler):
             )
 
             return BatchWriteResult(
-                success=True,
                 status=AckStatus.ACK_STATUS_SUCCESS,
                 records_written=len(records),
                 committed_cursor=cursor,
             )
 
-        except Exception as e:
-            logger.error(f"Error writing to stdout: {e}")
+        except OSError as e:
+            # Closed/broken stdout (EPIPE), permissions, disk-full on a
+            # redirected stream — none are recoverable by retry.
+            fatal_errnos = {errno.EPIPE, errno.ENOSPC, errno.EACCES, errno.EBADF}
+            status = (
+                AckStatus.ACK_STATUS_FATAL_FAILURE
+                if e.errno in fatal_errnos
+                else AckStatus.ACK_STATUS_RETRYABLE_FAILURE
+            )
+            logger.error(
+                "%s I/O error writing to stdout: %s",
+                "Fatal" if status == AckStatus.ACK_STATUS_FATAL_FAILURE else "Retryable",
+                e, exc_info=True,
+            )
             return BatchWriteResult(
-                success=False,
-                status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
+                status=status,
                 records_written=0,
-                failure_summary=str(e),
+                failure_summary=f"OSError[{errno.errorcode.get(e.errno, e.errno)}]: {e}",
+            )
+        except Exception as e:
+            logger.error("Fatal error writing to stdout: %s", e, exc_info=True)
+            return BatchWriteResult(
+                status=AckStatus.ACK_STATUS_FATAL_FAILURE,
+                records_written=0,
+                failure_summary=f"{type(e).__name__}: {e}",
             )
 
     async def health_check(self) -> bool:
@@ -202,5 +213,9 @@ class StreamDestinationHandler(BaseDestinationHandler):
         try:
             # Check if stdout is writable
             return sys.stdout.writable()
-        except Exception:
+        except (ValueError, OSError) as e:
+            logger.warning(
+                "stdout health check failed: %s: %s",
+                type(e).__name__, e, exc_info=True,
+            )
             return False

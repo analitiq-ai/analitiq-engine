@@ -1,10 +1,14 @@
-"""File destination handler for writing to local filesystem or S3.
+"""File destination handler for writing to the local filesystem.
 
-This handler writes records to files using configurable formatters and storage backends.
+This handler writes records to files using configurable formatters and a
+local storage backend.
 """
 
+import errno
 import logging
 from typing import Any, Dict, List, Optional
+
+import pyarrow as pa
 
 from ..base_handler import BaseDestinationHandler, BatchWriteResult
 from ..formatters import get_formatter
@@ -140,22 +144,16 @@ class FileDestinationHandler(BaseDestinationHandler):
         logger.info("FileDestinationHandler disconnected")
 
     async def configure_schema(self, schema_msg: SchemaMessage) -> bool:
+        """Accept the schema for a stream.
+
+        File destinations don't pre-create anything; the formatter shapes
+        each batch on write. If a formatter ever needs the column list, it
+        can look up the contract endpoint via ``set_stream_endpoints``.
         """
-        Configure schema for file output.
-
-        For file destinations, schema configuration is used to:
-        - Configure formatter with schema information
-        - No actual schema creation needed
-
-        Args:
-            schema_msg: Schema configuration
-
-        Returns:
-            Always True for file destinations
-        """
-        # Store schema for formatter use (e.g., CSV headers, Parquet schema)
-        # The schema is available in schema_msg.json_schema
-        logger.info("FileDestinationHandler: Schema accepted")
+        logger.info(
+            "FileDestinationHandler: schema accepted for stream %s",
+            schema_msg.stream_id,
+        )
         return True
 
     async def write_batch(
@@ -163,27 +161,17 @@ class FileDestinationHandler(BaseDestinationHandler):
         run_id: str,
         stream_id: str,
         batch_seq: int,
-        records: List[Dict[str, Any]],
+        record_batch: pa.RecordBatch,
         record_ids: List[str],
         cursor: Cursor,
     ) -> BatchWriteResult:
-        """
-        Write a batch of records to a file.
+        """Write an Arrow record batch to a file.
 
-        Args:
-            run_id: Pipeline run identifier
-            stream_id: Stream identifier
-            batch_seq: Batch sequence number
-            records: Records to write
-            record_ids: Record identifiers
-            cursor: Cursor to return on success
-
-        Returns:
-            BatchWriteResult with status
+        Formatters consume dicts, so the batch is materialized once at
+        this boundary.
         """
         if not self._connected:
             return BatchWriteResult(
-                success=False,
                 status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
                 records_written=0,
                 failure_summary="Handler not connected",
@@ -191,20 +179,19 @@ class FileDestinationHandler(BaseDestinationHandler):
 
         if self._storage is None or self._formatter is None or self._manifest is None:
             return BatchWriteResult(
-                success=False,
                 status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
                 records_written=0,
                 failure_summary="Handler components not initialized",
             )
 
-        # Check idempotency - has this batch already been committed?
+        records = record_batch.to_pylist()
+
         existing_commit = await self._manifest.check_committed(run_id, stream_id, batch_seq)
         if existing_commit:
             logger.info(
                 f"Batch already committed: run={run_id}, stream={stream_id}, seq={batch_seq}"
             )
             return BatchWriteResult(
-                success=True,
                 status=AckStatus.ACK_STATUS_ALREADY_COMMITTED,
                 records_written=existing_commit.records_written,
                 committed_cursor=Cursor(token=existing_commit.cursor_bytes),
@@ -221,7 +208,6 @@ class FileDestinationHandler(BaseDestinationHandler):
                 file_path="",
             )
             return BatchWriteResult(
-                success=True,
                 status=AckStatus.ACK_STATUS_SUCCESS,
                 records_written=0,
                 committed_cursor=cursor,
@@ -264,19 +250,38 @@ class FileDestinationHandler(BaseDestinationHandler):
             )
 
             return BatchWriteResult(
-                success=True,
                 status=AckStatus.ACK_STATUS_SUCCESS,
                 records_written=len(records),
                 committed_cursor=cursor,
             )
 
-        except Exception as e:
-            logger.error(f"Error writing batch: {e}")
+        except OSError as e:
+            # ENOSPC / EACCES / EROFS / EDQUOT are not transient — retrying
+            # without operator intervention is hopeless. Classify as FATAL
+            # so the engine routes to DLQ instead of looping.
+            fatal_errnos = {errno.ENOSPC, errno.EACCES, errno.EROFS, errno.EDQUOT}
+            if e.errno in fatal_errnos:
+                logger.error(
+                    "Fatal filesystem error writing batch (%s): %s",
+                    errno.errorcode.get(e.errno, e.errno), e, exc_info=True,
+                )
+                return BatchWriteResult(
+                    status=AckStatus.ACK_STATUS_FATAL_FAILURE,
+                    records_written=0,
+                    failure_summary=f"OSError[{errno.errorcode.get(e.errno, e.errno)}]: {e}",
+                )
+            logger.error("Retryable I/O error writing batch: %s", e, exc_info=True)
             return BatchWriteResult(
-                success=False,
                 status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
                 records_written=0,
-                failure_summary=str(e),
+                failure_summary=f"{type(e).__name__}: {e}",
+            )
+        except Exception as e:
+            logger.error("Fatal error writing batch: %s", e, exc_info=True)
+            return BatchWriteResult(
+                status=AckStatus.ACK_STATUS_FATAL_FAILURE,
+                records_written=0,
+                failure_summary=f"{type(e).__name__}: {e}",
             )
 
     async def health_check(self) -> bool:

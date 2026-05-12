@@ -18,8 +18,8 @@ Lifecycle:
   transport, and scrubs secret values from memory.
 * Reference counting (:meth:`acquire`, :meth:`close`) lets multiple
   source/destination connectors share one underlying engine/session.
-* ``file``/``s3``/``stdout`` connectors keep the legacy resolved-config
-  passthrough until those connector families adopt ``transports`` blocks.
+* ``file``/``s3``/``stdout`` connectors expose a resolved-config dict via
+  :attr:`resolved_config`; they have no shared transport to manage.
 """
 
 from __future__ import annotations
@@ -59,7 +59,7 @@ def _derive_dialect(connector_definition: Optional[Mapping[str, Any]]) -> Option
     if not default_ref or default_ref not in transports:
         return None
     transport = transports[default_ref]
-    if transport.get("kind") != "sqlalchemy":
+    if transport.get("transport_type") != "sqlalchemy":
         return None
     driver = transport.get("driver")
     if not isinstance(driver, str) or not driver:
@@ -119,7 +119,6 @@ class ConnectionRuntime:
         # Reference counting for shared ownership across streams
         self._ref_count = 0
 
-        # Cooperative scrub for legacy file/s3/stdout consumers.
         self._scrub_requests = 0
 
     # ------------------------------------------------------------------
@@ -194,17 +193,10 @@ class ConnectionRuntime:
     async def materialize(self, *, require_port: bool = True) -> None:
         """Resolve secrets, build the resolution context, materialize the transport.
 
-        Any connector that declares a ``transports`` block goes through the
-        spec-driven transport factory regardless of its ``connector_type``.
-        Connectors without a ``transports`` block fall through to a
-        legacy passthrough that exposes ``resolved_config`` for handlers
-        that still consume a flat dict (file/s3/stdout adapters that have
-        not yet migrated to the new model).
-
-        ``require_port`` is accepted for API compatibility with the
-        previous runtime; database transport DSN templates encode whether
-        a port is required, so the argument is no-op for spec-driven
-        connectors.
+        Connectors that declare a ``transports`` block go through the
+        spec-driven transport factory. Connectors without a ``transports``
+        block (file/s3/stdout) expose ``resolved_config`` directly — they
+        have no shared transport to manage.
         """
         if self._materialized:
             return
@@ -243,9 +235,8 @@ class ConnectionRuntime:
 
             self._scrub_secrets()
         else:
-            # Legacy passthrough for connectors that have not yet declared
-            # a ``transports`` block (typically file/s3/stdout). The
-            # handler consumes ``resolved_config`` directly.
+            # file/s3/stdout connectors: expose ``resolved_config``
+            # directly. They have no transports block by design.
             self._resolved_config = self._merge_secrets_into_config(secrets)
 
         self._materialized = True
@@ -428,9 +419,9 @@ class ConnectionRuntime:
             "discovered": dict(self._raw_config.get("discovered") or {}),
             "secret_refs": dict(self._raw_config.get("secret_refs") or {}),
             "auth_state": dict(self._raw_config.get("auth_state") or {}),
-            # Preserve any top-level address fields connectors may want to
-            # reference (kept only as a back-compat surface; new connectors
-            # encode address in transports).
+            # Top-level fields that connector value expressions may
+            # reference directly (e.g. ``connection.name`` for logging
+            # decorators). Address fields live in transports.
             "name": self._raw_config.get("name"),
             "status": self._raw_config.get("status"),
         }
@@ -445,8 +436,9 @@ class ConnectionRuntime:
     def _merge_secrets_into_config(
         self, secrets: Mapping[str, Any]
     ) -> Dict[str, Any]:
-        """For legacy file/s3/stdout connectors that still consume a
-        flat resolved-config dict, expose secrets under the same keys."""
+        """Merge secrets into a flat resolved-config dict for file/s3/stdout
+        consumers, which expose ``resolved_config`` directly instead of
+        a transport object."""
         resolved = copy.deepcopy(self._raw_config)
         resolved.setdefault("parameters", {})
         # Surface secrets at the top level for handlers that look them up

@@ -6,29 +6,24 @@ including schema negotiation, batch sending, and ACK handling.
 
 import asyncio
 import hashlib
-import json
+import io
 import logging
 import os
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Dict, List, Optional
 
 import grpc
+import pyarrow as pa
 from grpc import aio as grpc_aio
 
 from .cursor import Cursor, encode_cursor
 from .generated.analitiq.v1 import (
     AckStatus,
-    ApiConfig,
-    AutoConfigureOptions,
     BatchAck,
-    ConflictResolution,
-    DatabaseConfig,
-    DestinationConfig,
     GetCapabilitiesRequest,
     GetCapabilitiesResponse,
     HealthCheckRequest,
     HealthCheckResponse,
-    IndexDefinition,
     PayloadFormat,
     RecordBatch,
     SchemaAck,
@@ -42,6 +37,12 @@ from .generated.analitiq.v1 import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+_STREAM_TASK_FAILED = object()  # Sentinel pushed onto the response queue when
+                                # the reader/writer task exits abnormally so
+                                # send_batch / start_stream fail fast instead of
+                                # blocking on `response_queue.get` until timeout.
 
 
 # Default configuration from environment
@@ -98,6 +99,18 @@ class DestinationGRPCClient:
         self._response_queue: Optional[asyncio.Queue] = None
         self._reader_task: Optional[asyncio.Task] = None
         self._writer_task: Optional[asyncio.Task] = None
+
+        # Last exception observed by the reader or writer task. Read by
+        # send_batch / start_stream after seeing the _STREAM_TASK_FAILED
+        # sentinel so the failure reason in the BatchResult is the real
+        # underlying error instead of "Timeout waiting for ACK".
+        self._task_failure: Optional[BaseException] = None
+        # True when the reader observed the server closing the stream
+        # without an error. Distinguishes graceful peer-close from an
+        # in-task exception so send_batch / start_stream can surface a
+        # specific diagnostic ("destination closed stream") instead of
+        # a generic "stream signaled failure".
+        self._peer_closed_stream: bool = False
 
         # Connection state
         self._connected = False
@@ -210,7 +223,10 @@ class DestinationGRPCClient:
             logger.info(f"Shutdown acknowledged: {response.message}")
             return response.acknowledged
         except grpc.aio.AioRpcError as e:
-            logger.warning(f"Shutdown request failed: {e.code()}")
+            logger.warning(
+                "Shutdown request failed: code=%s details=%s",
+                e.code(), e.details(), exc_info=True,
+            )
             return False
 
     async def get_capabilities(self) -> Optional[GetCapabilitiesResponse]:
@@ -229,7 +245,10 @@ class DestinationGRPCClient:
                 timeout=10.0,
             )
         except grpc.aio.AioRpcError as e:
-            logger.error(f"Failed to get capabilities: {e}")
+            logger.error(
+                "Failed to get capabilities: code=%s details=%s",
+                e.code(), e.details(), exc_info=True,
+            )
             return None
 
     async def start_stream(
@@ -251,6 +270,11 @@ class DestinationGRPCClient:
         """
         if not self._connected:
             raise RuntimeError("Not connected to destination")
+
+        # Reset stream-lifetime state so a previous failed run cannot
+        # poison the diagnostic surfaced by this run's send_batch.
+        self._task_failure = None
+        self._peer_closed_stream = False
 
         # Create queues for bidirectional communication
         self._request_queue = asyncio.Queue()
@@ -281,16 +305,33 @@ class DestinationGRPCClient:
                 timeout=self.timeout,
             )
 
+            if response is _STREAM_TASK_FAILED:
+                cause = self._task_failure
+                if cause is not None:
+                    logger.error(
+                        "Stream reader/writer exited before schema ACK: %s",
+                        cause,
+                    )
+                elif self._peer_closed_stream:
+                    logger.error(
+                        "Destination closed stream before sending schema ACK"
+                    )
+                else:
+                    logger.error(
+                        "Stream signaled failure before schema ACK without "
+                        "a recorded cause"
+                    )
+                return False
+
             if isinstance(response, SchemaAck):
                 if response.accepted:
                     logger.info(f"Schema accepted for stream {stream_id}")
                     return True
-                else:
-                    logger.error(f"Schema rejected: {response.message}")
-                    return False
-            else:
-                logger.error(f"Unexpected response type: {type(response)}")
+                logger.error(f"Schema rejected: {response.message}")
                 return False
+
+            logger.error(f"Unexpected response type: {type(response)}")
+            return False
 
         except asyncio.TimeoutError:
             logger.error("Timeout waiting for schema ACK")
@@ -301,42 +342,25 @@ class DestinationGRPCClient:
         run_id: str,
         stream_id: str,
         batch_seq: int,
-        records: List[Dict[str, Any]],
+        record_batch: pa.RecordBatch,
         record_ids: List[str],
         cursor: Cursor,
-        payload_format: PayloadFormat = PayloadFormat.PAYLOAD_FORMAT_JSONL,
     ) -> BatchResult:
-        """
-        Send a batch of records and wait for ACK.
+        """Send a batch and wait for ACK.
 
-        This implements strict in-order: send batch -> await ACK -> return.
-
-        Args:
-            run_id: Unique run identifier
-            stream_id: Stream identifier
-            batch_seq: Monotonically increasing batch sequence number
-            records: List of records to send
-            record_ids: List of record identifiers for DLQ correlation
-            cursor: Opaque cursor representing max watermark in batch
-            payload_format: Encoding format for payload
-
-        Returns:
-            BatchResult with status and committed cursor
+        Strict in-order: send -> await ACK -> return. The wire format is
+        Arrow IPC; the engine ships ``pa.RecordBatch`` straight through.
         """
         if not self._stream_active:
             raise RuntimeError("Stream not active")
 
-        # Encode payload
-        payload = self._encode_payload(records, payload_format)
-
-        # Build record batch message
         batch_msg = RecordBatch(
             run_id=run_id,
             stream_id=stream_id,
             batch_seq=batch_seq,
-            format=payload_format,
-            payload=payload,
-            record_count=len(records),
+            format=PayloadFormat.PAYLOAD_FORMAT_ARROW_IPC,
+            payload=self._encode_arrow_ipc(record_batch),
+            record_count=record_batch.num_rows,
             record_ids=record_ids,
             cursor=cursor,
         )
@@ -351,18 +375,45 @@ class DestinationGRPCClient:
                 timeout=self.timeout,
             )
 
-            if isinstance(response, BatchAck):
-                return self._process_ack(response)
-            else:
-                logger.error(f"Unexpected response type: {type(response)}")
+            if response is _STREAM_TASK_FAILED:
+                cause = self._task_failure
+                if cause is not None:
+                    summary = (
+                        f"Stream reader/writer task exited before ACK: "
+                        f"{type(cause).__name__}: {cause}"
+                    )
+                elif self._peer_closed_stream:
+                    summary = (
+                        "Destination closed stream before sending ACK "
+                        f"for batch {batch_seq}"
+                    )
+                else:
+                    summary = (
+                        f"Stream signaled failure before ACK for batch "
+                        f"{batch_seq} without a recorded cause"
+                    )
+                logger.error("Batch %d: %s", batch_seq, summary)
                 return BatchResult(
                     success=False,
                     status=AckStatus.ACK_STATUS_FATAL_FAILURE,
                     records_written=0,
                     committed_cursor=None,
                     failed_record_ids=[],
-                    failure_summary="Unexpected response type",
+                    failure_summary=summary,
                 )
+
+            if isinstance(response, BatchAck):
+                return self._process_ack(response)
+
+            logger.error(f"Unexpected response type: {type(response)}")
+            return BatchResult(
+                success=False,
+                status=AckStatus.ACK_STATUS_FATAL_FAILURE,
+                records_written=0,
+                committed_cursor=None,
+                failed_record_ids=[],
+                failure_summary="Unexpected response type",
+            )
 
         except asyncio.TimeoutError:
             logger.error(f"Timeout waiting for ACK on batch {batch_seq}")
@@ -400,6 +451,11 @@ class DestinationGRPCClient:
                 pass
 
         self._stream_active = False
+        self._stream = None
+        self._request_queue = None
+        self._response_queue = None
+        self._reader_task = None
+        self._writer_task = None
         logger.info("Stream ended")
 
     async def _write_requests(self) -> None:
@@ -412,8 +468,14 @@ class DestinationGRPCClient:
                     await self._stream.done_writing()
                     break
                 await self._stream.write(request)
-        except Exception as e:
-            logger.error(f"Writer task error: {e}")
+        except asyncio.CancelledError:
+            raise
+        except BaseException as e:
+            logger.error("Writer task error: %s", e, exc_info=True)
+            self._task_failure = e
+            # Unblock any send_batch / start_stream waiting on a response.
+            if self._response_queue is not None:
+                self._response_queue.put_nowait(_STREAM_TASK_FAILED)
             raise
 
     async def _read_responses(self) -> None:
@@ -427,121 +489,64 @@ class DestinationGRPCClient:
                     await self._response_queue.put(response.schema_ack)
                 else:
                     logger.warning(f"Unknown response type: {msg_type}")
-        except grpc.aio.AioRpcError as e:
-            logger.error(f"Reader task error: {e}")
         except asyncio.CancelledError:
-            pass
+            return
+        except BaseException as e:
+            logger.error("Reader task error: %s", e, exc_info=True)
+            self._task_failure = e
+            if self._response_queue is not None:
+                self._response_queue.put_nowait(_STREAM_TASK_FAILED)
+            raise
+        else:
+            # Stream closed by the server with no further responses;
+            # signal waiters so they don't block until timeout.
+            self._peer_closed_stream = True
+            if self._response_queue is not None:
+                self._response_queue.put_nowait(_STREAM_TASK_FAILED)
 
     def _build_schema_message(
         self,
         stream_id: str,
         config: Dict[str, Any],
     ) -> SchemaMessage:
-        """Build SchemaMessage from configuration dict."""
-        # Determine connector type (prefer connector_type, then driver, then type for legacy)
-        connector_type = config.get("connector_type") or config.get("driver") or config.get("type") or "database"
+        """Build the slim SchemaMessage for ``stream_id``.
 
-        # Extract database config if present
-        db_config = None
-        api_config = None
-
-        if connector_type in ("api",):
-            # Build API config for API destinations
-            api_config = ApiConfig(
-                endpoint=config.get("endpoint", ""),
-                method=config.get("method", "POST"),
-                batch_support=config.get("batch_support", False),
-                batch_size=config.get("batch_size", 100),
-                idempotency_header=config.get("idempotency_header", ""),
-            )
-        elif connector_type == "database" or "endpoint" in config:
-            conflict_res = config.get("conflict_resolution", {})
-            auto_config = config.get("configure", {})
-
-            indexes = []
-            for idx in auto_config.get("auto_create_indexes", []):
-                indexes.append(
-                    IndexDefinition(
-                        name=idx.get("name", ""),
-                        columns=idx.get("columns", []),
-                        type=idx.get("type", "btree"),
-                        unique=idx.get("unique", False),
-                    )
-                )
-
-            # Parse schema and table from endpoint field (format: "schema/table")
-            # Falls back to explicit schema/table config if endpoint not present
-            schema_name = config.get("schema", "public")
-            table_name = config.get("table", "")
-
-            endpoint = config.get("endpoint", "")
-            if endpoint and "/" in endpoint:
-                parts = endpoint.split("/", 1)
-                schema_name = parts[0] or "public"
-                table_name = parts[1]
-            elif endpoint:
-                # No slash - treat as table name only
-                table_name = endpoint
-
-            db_config = DatabaseConfig(
-                schema_name=schema_name,
-                table_name=table_name,
-                unique_constraints=config.get("unique_constraints", []),
-                conflict_resolution=ConflictResolution(
-                    on_conflict=conflict_res.get("on_conflict", ""),
-                    action=conflict_res.get("action", "update"),
-                    update_columns=conflict_res.get("update_columns", []),
-                ),
-                auto_configure=AutoConfigureOptions(
-                    auto_create_schema=auto_config.get("auto_create_schema", False),
-                    auto_create_table=auto_config.get("auto_create_table", False),
-                    auto_create_indexes=indexes,
-                ),
-            )
-
-        # Determine write mode
-        write_mode_str = config.get("write_mode", "upsert").lower()
+        The destination loads the contract endpoint document via
+        ``PipelineConfigPrep`` using the same ``PIPELINE_ID`` as the
+        engine, so this message only carries the identification fields
+        needed to look it up and the write mode for this stream.
+        """
+        write_mode_str = str(config.get("write_mode", "upsert")).lower()
         write_mode_map = {
             "insert": WriteMode.WRITE_MODE_INSERT,
             "upsert": WriteMode.WRITE_MODE_UPSERT,
             "truncate_insert": WriteMode.WRITE_MODE_TRUNCATE_INSERT,
         }
-        write_mode = write_mode_map.get(write_mode_str, WriteMode.WRITE_MODE_UPSERT)
-
-        # Build schema hash
-        schema_json = config.get("endpoint_schema", {})
-        schema_str = json.dumps(schema_json, sort_keys=True)
-        schema_hash = hashlib.sha256(schema_str.encode()).hexdigest()[:16]
+        if write_mode_str not in write_mode_map:
+            raise ValueError(
+                f"Unknown write_mode {write_mode_str!r}; expected one of "
+                f"{sorted(write_mode_map)}"
+            )
+        write_mode = write_mode_map[write_mode_str]
 
         return SchemaMessage(
             stream_id=stream_id,
-            version=config.get("schema_version", 1),
-            json_schema=json.dumps(schema_json),
-            primary_key=config.get("primary_key", []),
+            version=int(config.get("schema_version", 1)),
             write_mode=write_mode,
-            destination_config=DestinationConfig(
-                connector_type=connector_type,
-                database=db_config,
-                api=api_config,
-            ),
-            schema_hash=schema_hash,
         )
 
-    def _encode_payload(
-        self,
-        records: List[Dict[str, Any]],
-        format: PayloadFormat,
-    ) -> bytes:
-        """Encode records to bytes based on format."""
-        if format == PayloadFormat.PAYLOAD_FORMAT_JSONL:
-            lines = [json.dumps(record, default=str) for record in records]
-            return "\n".join(lines).encode("utf-8")
-        elif format == PayloadFormat.PAYLOAD_FORMAT_MSGPACK:
-            import msgpack
+    @staticmethod
+    def _encode_arrow_ipc(record_batch: pa.RecordBatch) -> bytes:
+        """Serialize a ``pa.RecordBatch`` as a single-batch Arrow IPC stream.
 
-            return msgpack.packb(records, default=str)
-        else:
-            raise ValueError(f"Unsupported payload format: {format}")
+        The stream format carries the schema in the same buffer, so the
+        destination decodes batch and schema together without out-of-band
+        coordination.
+        """
+        sink = io.BytesIO()
+        with pa.ipc.new_stream(sink, record_batch.schema) as writer:
+            writer.write_batch(record_batch)
+        return sink.getvalue()
 
     def _process_ack(self, ack: BatchAck) -> BatchResult:
         """Process BatchAck into BatchResult."""

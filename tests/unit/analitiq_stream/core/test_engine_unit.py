@@ -5,7 +5,8 @@ from typing import Any, Dict, List
 
 import pytest
 
-from src.engine.engine import StreamingEngine, _deep_merge_dicts
+from src.engine.engine import StreamingEngine
+from src.engine.orchestrator import _deep_merge_dicts
 from src.engine.exceptions import ConfigurationError, StreamProcessingError
 from src.source.connectors.base import BaseConnector
 
@@ -145,8 +146,8 @@ class TestStreamingEngine:
             "source": {
                 "endpoint_ref": {
                     "scope": "connector",
-                    "identifier": "wise",
-                    "endpoint": "transfers",
+                    "connection_id": "wise",
+                    "alias": "transfers",
                 },
             },
         }

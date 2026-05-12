@@ -3,27 +3,27 @@
 This handler provides a unified interface for all SQL databases supported by SQLAlchemy.
 The specific database is determined by the `driver` field in the connection config.
 
-Type casting is handled by the Arrow-based DestinationSchemaContract which provides
+Type casting is handled by the Arrow-based SchemaContract, which provides
 efficient columnar type conversion for batch operations.
 """
 
+import asyncio
 import logging
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Mapping, Optional
 
+import pyarrow as pa
 from sqlalchemy import (
     BigInteger,
-    Boolean,
     Column,
-    Date,
     DateTime,
-    Float,
     Integer,
     LargeBinary,
     MetaData,
     String,
     Table,
-    Text,
+    func,
     text,
 )
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -31,7 +31,7 @@ from sqlalchemy.dialects.mysql import insert as mysql_insert
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncConnection
 
 from ..base_handler import BaseDestinationHandler, BatchWriteResult
-from ..schema_contract import DestinationSchemaContract
+from ..schema_contract import SchemaContract
 from ..sql_types import native_to_sqlalchemy
 from ...engine.type_map import (
     InvalidTypeMapError,
@@ -48,6 +48,35 @@ from ...shared.connection_runtime import ConnectionRuntime
 
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _StreamState:
+    """Per-stream destination state.
+
+    The handler is a single instance shared across all streams writing to
+    this destination, so every field that depends on a specific stream's
+    endpoint document lives here, keyed by ``stream_id``. Sharing handler
+    instance fields directly across streams would race when the engine
+    fires schema/configure calls in parallel.
+    """
+
+    schema_name: str = "public"
+    table_name: str = ""
+    table: Optional[Table] = None
+    batch_commits_table: Optional[Table] = None
+    primary_keys: List[str] = field(default_factory=list)
+    # Columns used as the ON CONFLICT target for upsert. Set at
+    # configure_schema time from ``endpoint_doc["_write_conflict_keys"]``
+    # — main.py computes that via WriteConfig.effective_conflict_keys,
+    # which uses the stream's explicit ``write.conflict_keys`` when
+    # set and falls back to ``primary_keys``. Empty here means INSERT
+    # mode or no conflict target available.
+    conflict_keys: List[str] = field(default_factory=list)
+    write_mode: str = "upsert"
+    endpoint_document: Dict[str, Any] = field(default_factory=dict)
+    schema_contract: Optional[SchemaContract] = None
+    metadata: MetaData = field(default_factory=MetaData)
 
 
 class DatabaseDestinationHandler(BaseDestinationHandler):
@@ -70,43 +99,50 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
     - password: Database password
     - ssl_mode: Optional SSL mode
 
-    Configuration (endpoint config via SchemaMessage):
-    - schema: Database schema name (default: public for PostgreSQL)
-    - table: Target table name
-    - primary_key: List of primary key columns
-    - write_mode: insert, upsert, or truncate_insert
+    Per-stream destination settings (schema, table, primary keys,
+    columns) are read from the preloaded contract endpoint document at
+    ``configure_schema`` time. The SchemaMessage off the wire only
+    carries ``stream_id``, ``version``, and ``write_mode``.
     """
 
-    # Idempotency tracking table name
     BATCH_COMMITS_TABLE = "_batch_commits"
+
+    # Server-managed column added to every database destination table.
+    # Populated by the database via DEFAULT NOW() at INSERT time so the
+    # engine never has to ship a per-record timestamp.
+    SYNCED_AT_COLUMN = "_synced_at"
 
     def __init__(self) -> None:
         """Initialize the database handler."""
         self._runtime: ConnectionRuntime | None = None
         self._engine: AsyncEngine | None = None
-        self._metadata: MetaData = MetaData()
         self._config: Dict[str, Any] = {}
         self._connected: bool = False
         self._driver: str = ""
 
-        # Schema configuration from SchemaMessage
-        self._schema_name: str = "public"
-        self._table_name: str = ""
-        self._table: Table | None = None
-        self._primary_keys: List[str] = []
-        self._write_mode: str = "upsert"
-        self._json_schema: Dict[str, Any] = {}
+        # Per-stream state derived from the contract endpoint document at
+        # configure_schema() time. The SchemaMessage off the wire only
+        # carries stream_id, version, and write_mode; everything else comes
+        # from the preloaded ``stream_endpoints`` map. Keyed by stream_id
+        # so concurrent streams sharing this handler instance do not race
+        # on shared mutable fields.
+        self._streams: Dict[str, _StreamState] = {}
 
-        # Batch commits table for idempotency
-        self._batch_commits_table: Table | None = None
-
-        # Arrow-based schema contract for vectorized type casting (built on schema configure)
-        self._schema_contract: Optional[DestinationSchemaContract] = None
+        # Serializes CREATE TABLE statements across streams. Even when each
+        # stream owns its own SQLAlchemy ``MetaData``, two concurrent
+        # ``create_all`` calls can still race the database's catalog
+        # writes (e.g. PostgreSQL's ``pg_type_typname_nsp_index``).
+        self._ddl_lock: asyncio.Lock = asyncio.Lock()
 
         # Stream-id -> structured endpoint_ref dict so configure_schema()
         # can pick the type-mapper matching the endpoint's scope (connector
         # vs connection). Populated by set_endpoint_refs() at startup.
         self._endpoint_refs: Dict[str, Dict[str, Any]] = {}
+
+        # Stream-id -> contract endpoint document (database_object,
+        # columns, primary_keys, …). Populated by set_stream_endpoints()
+        # at startup.
+        self._stream_endpoints: Dict[str, Dict[str, Any]] = {}
 
     def set_endpoint_refs(self, endpoint_refs: Mapping[str, Any]) -> None:
         """Register stream_id → endpoint_ref for each stream writing to this
@@ -116,9 +152,22 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         private endpoint → connection's map).
 
         Values are dict-shape ``EndpointRef`` payloads
-        (``{"scope", "identifier", "endpoint"}``).
+        (``{"scope", "connection_id", "alias"}`` plus optional ``x-*``
+        extension keys).
         """
         self._endpoint_refs = dict(endpoint_refs)
+
+    def set_stream_endpoints(
+        self, stream_endpoints: Mapping[str, Mapping[str, Any]]
+    ) -> None:
+        """Register stream_id → contract endpoint document for streams
+        writing to this destination. The handler reads the database object
+        (catalog/schema/name), columns, and primary keys from this map at
+        ``configure_schema`` time rather than unpacking them off the wire.
+        """
+        self._stream_endpoints = {
+            sid: dict(doc) for sid, doc in stream_endpoints.items()
+        }
 
     def _type_mapper_for_stream(self, stream_id: str) -> TypeMapper:
         """Resolve the type-mapper appropriate for ``stream_id``'s endpoint."""
@@ -193,248 +242,231 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         logger.info("DatabaseDestinationHandler disconnected")
 
     async def configure_schema(self, schema_msg: SchemaMessage) -> bool:
-        """
-        Configure database schema from SchemaMessage.
+        """Configure the destination from the preloaded contract endpoint.
 
-        Creates target table and idempotency tracking table if needed.
-
-        Args:
-            schema_msg: Schema configuration from engine
-
-        Returns:
-            True if configuration succeeded
+        The SchemaMessage only carries identification fields; this method
+        looks up the contract database endpoint document by stream_id and
+        reads its ``database_object``, ``columns``, and ``primary_keys``
+        directly. Both engine and destination load the same artifacts via
+        ``PipelineConfigPrep``, so no schema details cross the wire.
         """
         if not self._engine:
             logger.error("Cannot configure schema: not connected")
             return False
 
-        try:
-            # Extract configuration from SchemaMessage
-            db_config = schema_msg.destination_config.database
-            self._schema_name = db_config.schema_name or "public"
-            self._table_name = db_config.table_name
+        stream_id = schema_msg.stream_id
+        endpoint_doc = self._stream_endpoints.get(stream_id)
+        if endpoint_doc is None:
+            logger.error(
+                "No preloaded endpoint document for stream_id=%r; "
+                "call set_stream_endpoints() before the gRPC server starts",
+                stream_id,
+            )
+            return False
 
-            if not self._table_name:
-                logger.error("Table name is required in schema configuration")
+        try:
+            database_object = endpoint_doc.get("database_object") or {}
+            table_name = database_object.get("name") or ""
+            if not table_name:
+                logger.error(
+                    "Endpoint document for stream %r has no database_object.name",
+                    stream_id,
+                )
                 return False
 
-            # Get write mode
-            self._write_mode = self._get_write_mode(schema_msg.write_mode)
-
-            # Parse JSON schema
-            if schema_msg.json_schema:
-                import json
-                self._json_schema = json.loads(schema_msg.json_schema)
-
-            # Get primary keys - prefer schema_msg, fallback to json_schema
-            if schema_msg.primary_key:
-                self._primary_keys = list(schema_msg.primary_key)
-            elif self._json_schema.get("primary_keys"):
-                # Database endpoint schema format uses 'primary_keys'
-                self._primary_keys = list(self._json_schema["primary_keys"])
+            primary_keys = list(endpoint_doc.get("primary_keys") or [])
+            # ``_write_conflict_keys`` is populated at startup by main.py
+            # from the stream's WriteConfig (already resolved against the
+            # endpoint's primary keys). A missing key means INSERT mode
+            # — main.py always sets the field for UPSERT streams. An
+            # explicit empty list also means "no conflict target", so we
+            # only fall back to primary_keys when the key is absent.
+            if "_write_conflict_keys" in endpoint_doc:
+                conflict_keys = list(endpoint_doc["_write_conflict_keys"] or [])
             else:
-                self._primary_keys = []
+                conflict_keys = list(primary_keys)
+            state = _StreamState(
+                schema_name=database_object.get("schema") or "public",
+                table_name=table_name,
+                endpoint_document=dict(endpoint_doc),
+                write_mode=self._get_write_mode(schema_msg.write_mode),
+                primary_keys=primary_keys,
+                conflict_keys=conflict_keys,
+            )
 
             # Resolve the type-mapper for this stream's endpoint once —
             # both DDL generation and the schema contract use it.
-            type_mapper = self._type_mapper_for_stream(schema_msg.stream_id)
+            type_mapper = self._type_mapper_for_stream(stream_id)
 
-            # Create tables (needs the mapper for SQLAlchemy type picks).
-            await self._ensure_tables_exist(type_mapper)
+            await self._ensure_tables_exist(state, type_mapper)
 
-            # Build schema contract for Arrow-based type casting.
-            if self._json_schema:
-                self._schema_contract = DestinationSchemaContract(
-                    self._json_schema,
-                    type_mapper=type_mapper,
-                )
-                logger.debug(
-                    f"Built schema contract with {len(self._schema_contract.column_types)} columns"
-                )
+            state.schema_contract = SchemaContract(state.endpoint_document)
 
+            self._streams[stream_id] = state
             logger.info(
-                f"Schema configured: {self._schema_name}.{self._table_name}, "
-                f"mode={self._write_mode}, pk={self._primary_keys}"
+                "Schema configured for stream %r: %s.%s, mode=%s, pk=%s",
+                stream_id,
+                state.schema_name,
+                state.table_name,
+                state.write_mode,
+                state.primary_keys,
             )
             return True
 
-        except (UnmappedTypeError, InvalidTypeMapError):
-            # Type-map errors are deterministic and actionable — don't mask
-            # them behind a boolean. The gRPC server surfaces the exception
-            # in the schema ack so the operator sees the unmapped native
-            # type instead of a generic "configure failed" line.
+        except (
+            UnmappedTypeError,
+            InvalidTypeMapError,
+            PlaceholderExpansionError,
+            KeyError,
+            TypeError,
+            ValueError,
+        ):
+            # Deterministic, actionable errors propagate with their real
+            # type so the schema-ack carries the precise reason (unmapped
+            # native type, malformed type-map, missing secret, bad endpoint
+            # document) instead of a generic "configure failed".
             raise
         except Exception as e:
-            logger.error(f"Failed to configure schema: {e}", exc_info=True)
+            logger.error("Failed to configure schema: %s", e, exc_info=True)
             return False
 
     def _get_write_mode(self, proto_write_mode: int) -> str:
-        """Convert protobuf write mode to string."""
-        # WriteMode enum values from proto
         mode_map = {
-            0: "unspecified",
             1: "insert",
             2: "upsert",
             3: "truncate_insert",
         }
-        return mode_map.get(proto_write_mode, "upsert")
+        if proto_write_mode not in mode_map:
+            raise ValueError(
+                f"Unsupported proto write_mode={proto_write_mode}; expected one "
+                f"of {sorted(mode_map)} (WRITE_MODE_INSERT/UPSERT/TRUNCATE_INSERT)"
+            )
+        return mode_map[proto_write_mode]
 
-    async def _ensure_tables_exist(self, type_mapper: TypeMapper) -> None:
-        """Create target table and batch commits table if they don't exist.
+    async def _ensure_tables_exist(
+        self, state: _StreamState, type_mapper: TypeMapper
+    ) -> None:
+        """Create the target table and batch commits table if they don't exist.
 
-        ``type_mapper`` is the endpoint-scoped mapper picked by
-        ``configure_schema``; it drives native → SQLAlchemy type resolution
-        for DDL.
+        ``state`` owns the SQLAlchemy ``MetaData`` for this stream so each
+        ``create_all`` only emits DDL for this stream's tables. The DDL
+        itself is serialized with ``self._ddl_lock`` so concurrent streams
+        do not race the database catalog (e.g. PostgreSQL's
+        ``pg_type_typname_nsp_index``).
         """
         if not self._engine:
             return
 
-        # Create batch commits table for idempotency
-        self._batch_commits_table = Table(
+        state.batch_commits_table = Table(
             self.BATCH_COMMITS_TABLE,
-            self._metadata,
+            state.metadata,
             Column("run_id", String(255), primary_key=True),
             Column("stream_id", String(255), primary_key=True),
             Column("batch_seq", BigInteger, primary_key=True),
             Column("committed_cursor", LargeBinary),
             Column("records_written", Integer),
             Column("committed_at", DateTime, default=datetime.utcnow),
-            schema=self._schema_name,
-            extend_existing=True,
+            schema=state.schema_name,
         )
 
-        # Create target table from JSON schema
-        if self._json_schema:
-            self._table = self._create_table_from_schema(
-                self._table_name,
-                self._json_schema,
-                self._primary_keys,
+        # Build the target table from the contract endpoint document.
+        if state.endpoint_document:
+            state.table = self._create_table_from_schema(
+                state.table_name,
+                state.endpoint_document,
+                state.primary_keys,
+                state.schema_name,
+                state.metadata,
                 type_mapper,
             )
         else:
-            # Minimal table structure if no schema provided
-            logger.warning("No JSON schema provided, table must already exist")
+            logger.warning(
+                "No endpoint document available; table must already exist"
+            )
 
-        # Create tables in database
-        async with self._engine.begin() as conn:
-            # Create schema if needed (PostgreSQL)
-            if self._driver in ("postgresql", "postgres") and self._schema_name != "public":
-                await conn.execute(
-                    text(f"CREATE SCHEMA IF NOT EXISTS {self._schema_name}")
-                )
+        # Serialize DDL across concurrent streams. ``create_all`` only
+        # adds tables that don't yet exist; pre-existing tables are left
+        # untouched. New tables get ``_synced_at`` because
+        # ``_create_table_from_schema`` appends it when the endpoint
+        # document doesn't declare it.
+        async with self._ddl_lock:
+            async with self._engine.begin() as conn:
+                if self._driver in ("postgresql", "postgres") and state.schema_name != "public":
+                    await conn.execute(
+                        text(f"CREATE SCHEMA IF NOT EXISTS {state.schema_name}")
+                    )
+                await conn.run_sync(state.metadata.create_all)
 
-            # Create tables
-            await conn.run_sync(self._metadata.create_all)
-
-        logger.debug(f"Ensured tables exist in schema {self._schema_name}")
+        logger.debug(f"Ensured tables exist in schema {state.schema_name}")
 
     def _create_table_from_schema(
         self,
         table_name: str,
-        json_schema: Dict[str, Any],
+        endpoint_document: Dict[str, Any],
         primary_keys: List[str],
+        schema_name: str,
+        metadata: MetaData,
         type_mapper: TypeMapper,
     ) -> Table:
+        """Build a SQLAlchemy :class:`Table` from a database-endpoint document.
+
+        The document is the contract ``database-endpoint`` payload — a
+        ``columns`` array where each entry declares ``name``, ``native_type``,
+        ``nullable``, and (optionally) a SQL-expression ``default``. The
+        connector's ``type-map.json`` resolves ``native_type`` to a
+        SQLAlchemy type.
         """
-        Create SQLAlchemy Table from schema definition.
+        columns: List[Column] = []
+        declared_names: set[str] = set()
 
-        Supports two formats:
-        1. JSON Schema format with 'properties' dict
-        2. Database endpoint schema format with 'columns' array
-
-        Args:
-            table_name: Target table name
-            json_schema: Schema definition (JSON Schema or endpoint schema)
-            primary_keys: List of primary key column names
-            type_mapper: Endpoint-scoped mapper for native → SQLAlchemy type resolution.
-
-        Returns:
-            SQLAlchemy Table object
-        """
-        columns = []
-
-        # Check for database endpoint schema format (columns array)
-        if "columns" in json_schema:
-            for index, col_def in enumerate(json_schema["columns"]):
-                col_name = col_def.get("name")
-                if not col_name:
-                    raise ValueError(
-                        f"destination schema column at index {index} has no "
-                        f"'name' field; unnamed columns indicate a malformed "
-                        f"endpoint payload"
-                    )
-                native_type = col_def.get("type")
-                if not native_type:
-                    raise ValueError(
-                        f"column {col_name!r} has no 'type' field in destination schema"
-                    )
-                sa_type = native_to_sqlalchemy(native_type, type_mapper)
-                is_pk = col_name in primary_keys
-                nullable = col_def.get("nullable", True) and not is_pk
-
-                columns.append(
-                    Column(col_name, sa_type, primary_key=is_pk, nullable=nullable)
+        for index, col_def in enumerate(endpoint_document.get("columns") or []):
+            col_name = col_def.get("name")
+            if not col_name:
+                raise ValueError(
+                    f"endpoint column at index {index} has no 'name' field"
                 )
-        else:
-            # JSON Schema format with properties
-            properties = json_schema.get("properties", {})
-            required = set(json_schema.get("required", []))
-
-            for col_name, col_schema in properties.items():
-                sa_type = self._json_type_to_sqlalchemy(col_schema)
-                is_pk = col_name in primary_keys
-                nullable = col_name not in required and not is_pk
-
-                columns.append(
-                    Column(col_name, sa_type, primary_key=is_pk, nullable=nullable)
+            native_type = col_def.get("native_type")
+            if not native_type:
+                raise ValueError(
+                    f"column {col_name!r} has no 'native_type' field"
                 )
+            sa_type = native_to_sqlalchemy(native_type, type_mapper)
+            is_pk = col_name in primary_keys
+            nullable = col_def.get("nullable", True) and not is_pk
+
+            column_kwargs: Dict[str, Any] = {
+                "primary_key": is_pk,
+                "nullable": nullable,
+            }
+            # Honour the endpoint's declared ``default`` only when it is a
+            # SQL expression like ``now()`` — passed through as
+            # ``server_default=text(...)``. Non-string defaults are
+            # connector-specific values that do not belong in DDL.
+            raw_default = col_def.get("default")
+            if isinstance(raw_default, str) and raw_default.strip():
+                column_kwargs["server_default"] = text(raw_default)
+
+            columns.append(Column(col_name, sa_type, **column_kwargs))
+            declared_names.add(col_name)
+
+        # Every database destination table carries a server-managed
+        # ``_synced_at`` audit column. If the endpoint declares it, it is
+        # already in ``columns``; otherwise append one with a NOW() default.
+        if self.SYNCED_AT_COLUMN not in declared_names:
+            columns.append(
+                Column(
+                    self.SYNCED_AT_COLUMN,
+                    DateTime(timezone=True),
+                    nullable=True,
+                    server_default=func.now(),
+                )
+            )
 
         return Table(
             table_name,
-            self._metadata,
+            metadata,
             *columns,
-            schema=self._schema_name,
-            extend_existing=True,
-        )
-
-    def _json_type_to_sqlalchemy(self, prop: Dict[str, Any]) -> Any:
-        """
-        Convert JSON Schema type to SQLAlchemy type.
-
-        Args:
-            prop: JSON Schema property definition
-
-        Returns:
-            SQLAlchemy type
-        """
-        json_type = prop.get("type")
-        json_format = prop.get("format")
-
-        if json_type in ("array", "object"):
-            return Text()  # JSON-serialized
-        if json_type == "string":
-            max_length = prop.get("maxLength")
-            if json_format == "date-time":
-                return DateTime(timezone=True)
-            if json_format == "date":
-                # Must agree with the Arrow-schema path, which maps
-                # ``format: "date"`` to ``pa.date32()``. A SQLAlchemy
-                # ``DateTime`` column would produce a cast failure at
-                # write time instead of surfacing the mismatch here.
-                return Date()
-            if max_length and max_length <= 255:
-                return String(max_length)
-            return Text()
-        if json_type == "integer":
-            return BigInteger()
-        if json_type == "number":
-            return Float()
-        if json_type == "boolean":
-            return Boolean()
-        raise ValueError(
-            f"JSON Schema property has unsupported type/format "
-            f"(type={json_type!r}, format={json_format!r}); "
-            f"add an explicit mapping rather than defaulting to Text"
+            schema=schema_name,
         )
 
     async def write_batch(
@@ -442,81 +474,72 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         run_id: str,
         stream_id: str,
         batch_seq: int,
-        records: List[Dict[str, Any]],
+        record_batch: pa.RecordBatch,
         record_ids: List[str],
         cursor: Cursor,
     ) -> BatchWriteResult:
-        """
-        Write a batch of records to the database.
+        """Write an Arrow record batch to the database.
 
-        Args:
-            run_id: Pipeline run identifier
-            stream_id: Stream identifier
-            batch_seq: Batch sequence number
-            records: Records to write
-            record_ids: Record identifiers
-            cursor: Cursor to return on success
-
-        Returns:
-            BatchWriteResult with status
+        The batch is realigned to the destination schema in Arrow space
+        (``cast_arrow_batch``) and only materialized to dicts at the very
+        last SQLAlchemy boundary.
         """
         if not self._engine or not self._connected:
             return BatchWriteResult(
-                success=False,
                 status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
                 records_written=0,
                 failure_summary="Handler not connected",
             )
 
-        if self._table is None or self._batch_commits_table is None:
+        state = self._streams.get(stream_id)
+        if state is None or state.table is None or state.batch_commits_table is None:
             return BatchWriteResult(
-                success=False,
                 status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
                 records_written=0,
                 failure_summary="Schema not configured",
             )
 
-        # Check idempotency
-        existing = await self._check_batch_committed(run_id, stream_id, batch_seq)
+        existing = await self._check_batch_committed(state, run_id, stream_id, batch_seq)
         if existing:
             logger.info(f"Batch already committed: {run_id}/{stream_id}/{batch_seq}")
             return BatchWriteResult(
-                success=True,
                 status=AckStatus.ACK_STATUS_ALREADY_COMMITTED,
                 records_written=existing["records_written"],
                 committed_cursor=Cursor(token=existing["committed_cursor"]),
             )
 
-        if not records:
+        record_count = record_batch.num_rows
+        if record_count == 0:
             # Empty batch - still record for idempotency
-            await self._record_batch_commit(run_id, stream_id, batch_seq, cursor.token, 0)
+            await self._record_batch_commit(state, run_id, stream_id, batch_seq, cursor.token, 0)
             return BatchWriteResult(
-                success=True,
                 status=AckStatus.ACK_STATUS_SUCCESS,
                 records_written=0,
                 committed_cursor=cursor,
             )
 
         try:
+            prepared = self._prepare_for_sqlalchemy(state, record_batch)
+
             async with self._engine.begin() as conn:
-                # Write records based on write mode
-                if self._write_mode == "truncate_insert":
-                    await self._truncate_and_insert(conn, records)
-                elif self._write_mode == "upsert" and self._primary_keys:
-                    await self._upsert_records(conn, records)
+                if state.write_mode == "truncate_insert":
+                    await self._truncate_and_insert(conn, state, prepared)
+                elif state.write_mode == "upsert" and (
+                    state.conflict_keys or state.primary_keys
+                ):
+                    await self._upsert_records(conn, state, prepared)
                 else:
-                    await self._insert_records(conn, records)
+                    await self._insert_records(conn, state, prepared)
 
                 # Record batch commit
                 await self._record_batch_commit_in_txn(
-                    conn, run_id, stream_id, batch_seq, cursor.token, len(records)
+                    conn, state, run_id, stream_id, batch_seq, cursor.token, record_count
                 )
 
-            logger.info(f"Wrote batch {batch_seq}: {len(records)} records")
+            logger.info(f"Wrote batch {batch_seq}: {record_count} records")
             return BatchWriteResult(
-                success=True,
                 status=AckStatus.ACK_STATUS_SUCCESS,
-                records_written=len(records),
+                records_written=record_count,
                 committed_cursor=cursor,
             )
 
@@ -526,7 +549,6 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
             # cycles on a batch that will never go through.
             logger.error(f"Type-map error writing batch: {e}", exc_info=True)
             return BatchWriteResult(
-                success=False,
                 status=AckStatus.ACK_STATUS_FATAL_FAILURE,
                 records_written=0,
                 failure_summary=f"type-map: {e}",
@@ -534,7 +556,6 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         except Exception as e:
             logger.error(f"Error writing batch: {e}", exc_info=True)
             return BatchWriteResult(
-                success=False,
                 status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
                 records_written=0,
                 failure_summary=str(e),
@@ -542,20 +563,22 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
 
     async def _check_batch_committed(
         self,
+        state: _StreamState,
         run_id: str,
         stream_id: str,
         batch_seq: int,
     ) -> Optional[Dict[str, Any]]:
         """Check if batch was already committed."""
-        if self._engine is None or self._batch_commits_table is None:
+        if self._engine is None or state.batch_commits_table is None:
             return None
 
+        commits = state.batch_commits_table
         async with self._engine.connect() as conn:
             result = await conn.execute(
-                self._batch_commits_table.select().where(
-                    (self._batch_commits_table.c.run_id == run_id) &
-                    (self._batch_commits_table.c.stream_id == stream_id) &
-                    (self._batch_commits_table.c.batch_seq == batch_seq)
+                commits.select().where(
+                    (commits.c.run_id == run_id) &
+                    (commits.c.stream_id == stream_id) &
+                    (commits.c.batch_seq == batch_seq)
                 )
             )
             row = result.fetchone()
@@ -568,6 +591,7 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
 
     async def _record_batch_commit(
         self,
+        state: _StreamState,
         run_id: str,
         stream_id: str,
         batch_seq: int,
@@ -575,12 +599,12 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         records_written: int,
     ) -> None:
         """Record batch commit (outside transaction)."""
-        if self._engine is None or self._batch_commits_table is None:
+        if self._engine is None or state.batch_commits_table is None:
             return
 
         async with self._engine.begin() as conn:
             await conn.execute(
-                self._batch_commits_table.insert().values(
+                state.batch_commits_table.insert().values(
                     run_id=run_id,
                     stream_id=stream_id,
                     batch_seq=batch_seq,
@@ -593,6 +617,7 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
     async def _record_batch_commit_in_txn(
         self,
         conn: AsyncConnection,
+        state: _StreamState,
         run_id: str,
         stream_id: str,
         batch_seq: int,
@@ -600,11 +625,11 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         records_written: int,
     ) -> None:
         """Record batch commit within existing transaction."""
-        if self._batch_commits_table is None:
+        if state.batch_commits_table is None:
             return
 
         await conn.execute(
-            self._batch_commits_table.insert().values(
+            state.batch_commits_table.insert().values(
                 run_id=run_id,
                 stream_id=stream_id,
                 batch_seq=batch_seq,
@@ -617,110 +642,99 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
     async def _insert_records(
         self,
         conn: AsyncConnection,
+        state: _StreamState,
         records: List[Dict[str, Any]],
     ) -> None:
-        """Insert records (plain INSERT)."""
-        if self._table is None:
+        """Insert pre-cast records (plain INSERT)."""
+        if state.table is None or not records:
             return
-
-        # Prepare records - convert complex types to JSON strings
-        prepared = self._prepare_records(records)
-        await conn.execute(self._table.insert(), prepared)
+        await conn.execute(state.table.insert(), records)
 
     async def _upsert_records(
         self,
         conn: AsyncConnection,
+        state: _StreamState,
         records: List[Dict[str, Any]],
     ) -> None:
-        """Upsert records (INSERT ... ON CONFLICT)."""
-        if self._table is None or not self._primary_keys:
-            await self._insert_records(conn, records)
+        """Upsert pre-cast records (INSERT ... ON CONFLICT)."""
+        conflict_keys = state.conflict_keys or state.primary_keys
+        if state.table is None or not conflict_keys:
+            await self._insert_records(conn, state, records)
+            return
+        if not records:
             return
 
-        prepared = self._prepare_records(records)
-
         if self._driver in ("postgresql", "postgres"):
-            # PostgreSQL upsert
-            stmt = pg_insert(self._table).values(prepared)
-            # Get columns actually present in the records
-            record_columns = set(prepared[0].keys()) if prepared else set()
+            stmt = pg_insert(state.table).values(records)
+            record_columns = set(records[0].keys())
             update_cols = {
                 c.name: c for c in stmt.excluded
-                if c.name not in self._primary_keys and c.name in record_columns
+                if c.name not in conflict_keys and c.name in record_columns
             }
             stmt = stmt.on_conflict_do_update(
-                index_elements=self._primary_keys,
+                index_elements=conflict_keys,
                 set_=update_cols,
             )
             await conn.execute(stmt)
 
         elif self._driver in ("mysql", "mariadb"):
-            # MySQL upsert
-            stmt = mysql_insert(self._table).values(prepared)
-            # Get columns actually present in the records
-            record_columns = set(prepared[0].keys()) if prepared else set()
+            stmt = mysql_insert(state.table).values(records)
+            record_columns = set(records[0].keys())
             update_cols = {
                 c.name: c for c in stmt.inserted
-                if c.name not in self._primary_keys and c.name in record_columns
+                if c.name not in conflict_keys and c.name in record_columns
             }
             stmt = stmt.on_duplicate_key_update(**update_cols)
             await conn.execute(stmt)
 
         else:
             # Fallback to plain insert for other databases
-            await self._insert_records(conn, records)
+            await self._insert_records(conn, state, records)
 
     async def _truncate_and_insert(
         self,
         conn: AsyncConnection,
+        state: _StreamState,
         records: List[Dict[str, Any]],
     ) -> None:
-        """Truncate table and insert records."""
-        if self._table is None:
+        """Truncate table and insert pre-cast records."""
+        if state.table is None:
             return
+        await conn.execute(state.table.delete())
+        await self._insert_records(conn, state, records)
 
-        # Truncate
-        await conn.execute(self._table.delete())
+    def _prepare_for_sqlalchemy(
+        self, state: _StreamState, record_batch: pa.RecordBatch
+    ) -> List[Dict[str, Any]]:
+        """Cast a batch to the destination schema and materialize for SQLAlchemy.
 
-        # Insert
-        await self._insert_records(conn, records)
-
-    def _prepare_records(self, records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        ``cast_arrow_batch`` does the column-by-column realignment in
+        Arrow space; ``to_pylist`` is the single materialization point
+        before the SQLAlchemy bulk insert.
         """
-        Prepare records for insertion using Arrow-based vectorized casting.
+        if state.schema_contract is not None:
+            record_batch = state.schema_contract.cast_arrow_batch(record_batch)
+        return self._json_serialize_complex(record_batch.to_pylist())
 
-        Uses the DestinationSchemaContract to efficiently cast all records
-        to the proper types for this database in a single columnar operation.
+    def _json_serialize_complex(
+        self, records: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """JSON-serialize dict/list values for non-Postgres drivers.
 
-        Args:
-            records: Raw records from transformation
-
-        Returns:
-            Prepared records with proper types for database insertion
+        Postgres handles JSON columns natively; MySQL/SQLite need the
+        complex types as strings. This is the only per-row work that
+        survives between Arrow and SQLAlchemy.
         """
-        if not records:
+        if not records or self._driver in ("postgresql", "postgres"):
             return records
-
-        # Use Arrow-based schema contract for vectorized type casting
-        if self._schema_contract:
-            records = self._schema_contract.prepare_records(records)
-
-        # Handle any remaining complex types (dicts/lists)
-        # For non-PostgreSQL databases, complex types need to be JSON-serialized
         import json
-        if self._driver not in ("postgresql", "postgres"):
-            prepared = []
-            for record in records:
-                row = {}
-                for key, value in record.items():
-                    if isinstance(value, (dict, list)):
-                        row[key] = json.dumps(value)
-                    else:
-                        row[key] = value
-                prepared.append(row)
-            return prepared
-
-        return records
+        return [
+            {
+                key: (json.dumps(value) if isinstance(value, (dict, list)) else value)
+                for key, value in record.items()
+            }
+            for record in records
+        ]
 
     async def health_check(self) -> bool:
         """Check database health."""

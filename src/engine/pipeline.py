@@ -1,52 +1,39 @@
-"""Pipeline management and configuration."""
+"""Pipeline management and configuration.
+
+This module bridges the contract-shaped output of
+:class:`PipelineConfigPrep` to the runtime-side ``StreamingEngine`` and
+its source/destination connectors. The engine and connectors consume a
+flat per-stream config dict; this module is the single seam where the
+structured contract documents are translated to that shape.
+"""
+
+from __future__ import annotations
 
 import logging
-import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
 
 from .engine import StreamingEngine
-
 from ..models.stream import EndpointRef
 from ..shared.connection_runtime import ConnectionRuntime
-from ..shared.placeholder import expand_placeholders
-
-_UNRESOLVED_PLACEHOLDER = re.compile(r"\$\{[^}]+\}")
 
 logger = logging.getLogger(__name__)
 
 
 class Pipeline:
-    """
-    High-level pipeline management class for loading modular configuration
-    and orchestrating streaming operations.
-
-    Accepts pipeline_config and stream_configs as plain dicts (from JSON).
-    """
+    """Compose the runtime config dict and start the streaming engine."""
 
     def __init__(
         self,
         pipeline_config: Dict[str, Any],
         stream_configs: Optional[List[Dict[str, Any]]] = None,
-        resolved_connections: Optional[Dict[str, Dict[str, Any]]] = None,
-        resolved_endpoints: Optional[Dict[str, Dict[str, Any]]] = None,
+        resolved_connections: Optional[Dict[str, ConnectionRuntime]] = None,
+        resolved_endpoints: Optional[Dict[Any, Dict[str, Any]]] = None,
         connectors: Optional[List[Dict[str, Any]]] = None,
         state_dir: Optional[str] = None,
     ):
-        """
-        Initialize pipeline with configuration.
-
-        Args:
-            pipeline_config: Pipeline configuration dict
-            stream_configs: List of stream config dicts
-            resolved_connections: Dict mapping connection_id to resolved config dict
-            resolved_endpoints: Dict mapping endpoint_id to resolved endpoint config dict
-            connectors: List of connector definitions (connector_id -> connector_type mapping)
-            state_dir: Optional directory for state files (if None, uses default)
-        """
-        # Load .env file if it exists
         load_dotenv()
 
         self.pipeline_config = pipeline_config
@@ -55,176 +42,70 @@ class Pipeline:
         self.resolved_endpoints = resolved_endpoints or {}
         self.connectors = connectors or []
 
-        # Extract configuration values
         pipeline_id = pipeline_config["pipeline_id"]
-
-        # Setup directory structure using centralized paths
         project_root = Path(__file__).parent.parent.parent
         self.state_dir = state_dir or str(project_root / "state")
         self.dlq_dir = str(project_root / "deadletter" / pipeline_id)
-
-        # Create required directories
         self._ensure_directories()
 
-        runtime = pipeline_config["runtime"]
-        batching = runtime["batching"]
-        error_handling = runtime["error_handling"]
+        runtime = pipeline_config.get("runtime") or {}
+        batching = runtime.get("batching") or {"batch_size": 100, "max_concurrent_batches": 3}
+        error_handling = runtime.get("error_handling") or {
+            "max_retries": 3,
+            "retry_delay_seconds": 5,
+        }
         self.engine = StreamingEngine(
             pipeline_id=pipeline_id,
-            batch_size=batching["batch_size"],
-            max_concurrent_batches=batching["max_concurrent_batches"],
-            buffer_size=runtime["buffer_size"],
+            batch_size=batching.get("batch_size", 100),
+            max_concurrent_batches=batching.get("max_concurrent_batches", 3),
+            buffer_size=runtime.get("buffer_size", 5000),
             dlq_path=self.dlq_dir,
-            max_retries=error_handling["max_retries"],
-            retry_delay=error_handling["retry_delay"],
+            max_retries=error_handling.get("max_retries", 3),
+            retry_delay=error_handling.get("retry_delay_seconds", 5),
         )
 
-    def _ensure_directories(self):
-        """Create required directories for pipeline operation."""
+    def _ensure_directories(self) -> None:
         Path(self.state_dir).mkdir(parents=True, exist_ok=True)
         Path(self.dlq_dir).mkdir(parents=True, exist_ok=True)
 
+    # ------------------------------------------------------------------
+    # Contract -> connector config translation
+    # ------------------------------------------------------------------
+
     def _build_config_dict(self) -> Dict[str, Any]:
-        """Build a config dict from pipeline and stream configs for engine."""
-        connections = self.pipeline_config.get("connections", {})
+        streams: Dict[str, Dict[str, Any]] = {}
 
-        # Helper to get resolved connection config by alias
-        def get_connection_config(connection_ref: str) -> Dict[str, Any]:
-            if connection_ref not in self.resolved_connections:
-                raise ValueError(
-                    f"Connection '{connection_ref}' was not resolved"
-                )
-            runtime = self.resolved_connections[connection_ref]
-            if isinstance(runtime, ConnectionRuntime):
-                result = runtime.raw_config
-                result["_runtime"] = runtime
-                return result
-            elif isinstance(runtime, dict):
-                return runtime.copy()
-            raise ValueError(
-                f"Unexpected connection type for '{connection_ref}': {type(runtime)}"
-            )
-
-        # Helper to get resolved endpoint config by structured endpoint_ref.
-        # ``self.resolved_endpoints`` is keyed by ``EndpointRef`` instances (see
-        # ``PipelineConfigPrep._resolved_endpoints``); accept dict input from
-        # serialized stream configs and validate.
-        def get_endpoint_config(endpoint_ref: Any) -> Dict[str, Any]:
-            ref = EndpointRef.from_dict(endpoint_ref)
-            logger.debug(f"Looking up endpoint_ref: {ref}")
-            if ref in self.resolved_endpoints:
-                result = self.resolved_endpoints[ref].copy()
-                logger.debug(f"Found endpoint with keys: {list(result.keys())}")
-                return result
-            logger.warning(f"Endpoint not found: {ref}")
-            return {}
-
-        streams = {}
         for stream in self.stream_configs:
             source = stream["source"]
-            dest = stream["destinations"][0]
+            destinations = stream.get("destinations") or []
+            if not destinations:
+                raise ValueError(
+                    f"Stream {stream['stream_id']!r} has no destinations"
+                )
+            dest = destinations[0]
 
-            # Get resolved connection configs and merge with stream configs
-            source_conn = get_connection_config(source["connection_ref"])
-            dest_conn = get_connection_config(dest["connection_ref"])
+            # Source connectors run in this process and need the runtime
+            # handle + resolved endpoint document. Destination handlers
+            # run in the destination container and load both for
+            # themselves via PipelineConfigPrep + set_stream_endpoints, so
+            # only the engine-facing summary (write mode) is built here.
+            source_runtime: ConnectionRuntime = source["_runtime"]
+            source_endpoint = source["_endpoint"]
 
-            # Get resolved endpoint configs
-            source_endpoint = get_endpoint_config(source["endpoint_ref"])
-            dest_endpoint = get_endpoint_config(dest["endpoint_ref"])
+            source_config = _translate_source_config(
+                stream=stream,
+                source=source,
+                endpoint=source_endpoint,
+                runtime=source_runtime,
+            )
+            dest_config = _build_destination_config(dest)
 
-            # Read connector metadata from runtime
-            source_runtime = source_conn.get("_runtime")
-            dest_runtime = dest_conn.get("_runtime")
-            source_connector_type = source_runtime.connector_type if source_runtime else None
-            dest_connector_type = dest_runtime.connector_type if dest_runtime else None
-
-            # Source replication config
-            replication = source.get("replication", {})
-            cursor_field_list = replication.get("cursor_field", [])
-
-            # Build source config. ``host`` for database connectors comes
-            # from ``parameters.host`` (the connection-owned address);
-            # ``host`` for API connectors is whatever literal base URL the
-            # connector declared, or None if the transport is templated
-            # (the engine consumes the base URL via runtime.base_url).
-            source_params = source_conn.get("parameters", {}) or {}
-            source_host = _connection_host(source_conn, source_runtime, source_connector_type)
-            source_config = {
-                "host": source_host,
-                "parameters": source_params,
-                "connector_type": source_connector_type,
-                "driver": source_runtime.driver if source_runtime else None,
-                "_runtime": source_runtime,
-                **source_endpoint,
-                "endpoint_ref": source["endpoint_ref"],
-                "connection_ref": source["connection_ref"],
-                "replication_method": replication.get("method", "incremental"),
-                "cursor_field": cursor_field_list[0] if cursor_field_list else None,
-                "cursor_mode": "inclusive",
-                "safety_window_seconds": replication.get("safety_window_seconds"),
-                "primary_key": source.get("primary_key", []),
-            }
-
-            # Legacy ``${name}`` placeholders in endpoint files (e.g. wise's
-            # transfers filter ``"default": "${profile_id}"``) resolve from
-            # the union of connection.parameters, connection.selections and
-            # connection.discovered. New endpoint files should use the
-            # spec's ``{"ref": "connection.selections.profile_id"}`` form;
-            # this flat-merge stays as a transition shim until endpoint
-            # files migrate (analitiq-engine#37).
-            #
-            # ``ignore_missing=True`` keeps stale ``${name}`` text in the
-            # resolved request rather than crashing; we log a WARNING for
-            # every unresolved placeholder so the symptom is visible at
-            # runtime instead of silently flowing into the provider call.
-            placeholder_lookup = _flat_connection_lookup(source_conn)
-            if placeholder_lookup:
-                if "filters" in source_config:
-                    source_config["filters"] = expand_placeholders(
-                        source_config["filters"], placeholder_lookup, ignore_missing=True
-                    )
-                    _warn_unresolved_placeholders(
-                        source_config["filters"], "filters", stream["stream_id"]
-                    )
-                if "endpoint" in source_config:
-                    source_config["endpoint"] = expand_placeholders(
-                        source_config["endpoint"], placeholder_lookup, ignore_missing=True
-                    )
-                    _warn_unresolved_placeholders(
-                        source_config["endpoint"], "endpoint", stream["stream_id"]
-                    )
-
-            # Dest write config
-            write = dest.get("write", {})
-            batching = dest.get("batching", {})
-
-            dest_params = dest_conn.get("parameters", {}) or {}
-            dest_host = _connection_host(dest_conn, dest_runtime, dest_connector_type)
-            dest_config = {
-                "host": dest_host,
-                "parameters": dest_params,
-                "connector_type": dest_connector_type,
-                "driver": dest_runtime.driver if dest_runtime else None,
-                "_runtime": dest_runtime,
-                **dest_endpoint,
-                "endpoint_ref": dest["endpoint_ref"],
-                "connection_ref": dest["connection_ref"],
-                "refresh_mode": write.get("mode", "upsert"),
-                "batch_support": batching.get("supported", False),
-                "batch_size": batching.get("size", 1),
-            }
-
-            # Validation lives downstream now: ConnectionRuntime validates
-            # connector definition + secret_refs at materialise time, and
-            # the transport factory validates the resolved transport spec
-            # before opening any session. Best-effort EnrichedConfig
-            # validation here only produced WARNING logs that masked real
-            # config bugs flowing into the transport.
-
-            # Build mapping config for engine
-            mapping = stream.get("mapping", {})
+            mapping = stream.get("mapping") or {}
             mapping_config = {
-                "assignments": mapping.get("assignments", [])
+                "assignments": [
+                    _translate_assignment(a)
+                    for a in (mapping.get("assignments") or [])
+                ]
             }
 
             streams[stream["stream_id"]] = {
@@ -234,179 +115,189 @@ class Pipeline:
                 "mapping": mapping_config,
             }
 
-        # Build pipeline-level source/destination from first stream for engine compatibility
-        first_stream = self.stream_configs[0] if self.stream_configs else None
-        if first_stream:
-            first_source = first_stream["source"]
-            first_dest = first_stream["destinations"][0]
-            first_source_conn = get_connection_config(first_source["connection_ref"])
-            first_dest_conn = get_connection_config(first_dest["connection_ref"])
-
-            source_host_id = first_source["connection_ref"]
-            dest_host_id = first_dest["connection_ref"]
-
-            first_source_runtime = first_source_conn.get("_runtime")
-            first_dest_runtime = first_dest_conn.get("_runtime")
-            first_source_type = (
-                first_source_runtime.connector_type if first_source_runtime else None
-            )
-            first_dest_type = (
-                first_dest_runtime.connector_type if first_dest_runtime else None
-            )
-
-            pipeline_source_config = {
-                "host": _connection_host(
-                    first_source_conn, first_source_runtime, first_source_type
-                ),
-                "parameters": first_source_conn.get("parameters", {}),
-                "endpoint_ref": first_source["endpoint_ref"],
-                "host_id": source_host_id,
-            }
-            pipeline_dest_config = {
-                "host": _connection_host(
-                    first_dest_conn, first_dest_runtime, first_dest_type
-                ),
-                "parameters": first_dest_conn.get("parameters", {}),
-                "endpoint_ref": first_dest["endpoint_ref"],
-                "host_id": dest_host_id,
-            }
-        else:
-            pipeline_source_config = {}
-            pipeline_dest_config = {}
-
         return {
             "pipeline_id": self.pipeline_config["pipeline_id"],
-            "name": self.pipeline_config.get("name", ""),
-            "version": self.pipeline_config.get("version", 1),
-            "connections": connections,
-            "resolved_connections": self.resolved_connections,
-            "source": pipeline_source_config,
-            "destination": pipeline_dest_config,
+            "name": self.pipeline_config.get("display_name")
+            or self.pipeline_config.get("alias")
+            or self.pipeline_config["pipeline_id"],
             "streams": streams,
-            "runtime": self.pipeline_config["runtime"],
-            "connectors": self.connectors,
+            "runtime": self.pipeline_config.get("runtime") or {},
         }
 
-    async def run(self):
-        """Execute the pipeline."""
-        pipeline_id = self.pipeline_config["pipeline_id"]
-
+    async def run(self) -> None:
         config_dict = self._build_config_dict()
-
         try:
             await self.engine.stream_data(config_dict)
-            logger.info(f"Pipeline {pipeline_id} completed successfully")
-        except Exception as e:
-            logger.debug(f"Pipeline {pipeline_id} failed: {str(e)}")
+            logger.info(
+                "Pipeline %s completed successfully",
+                self.pipeline_config["pipeline_id"],
+            )
+        except Exception:
+            logger.exception(
+                "Pipeline %s failed", self.pipeline_config["pipeline_id"]
+            )
             raise
 
     def get_metrics(self) -> Dict[str, Any]:
-        """Get pipeline execution metrics."""
         return self.engine.get_metrics()
 
 
-def _connection_host(
-    connection_config: Dict[str, Any],
-    runtime: Optional[ConnectionRuntime],
-    connector_type: Optional[str],  # accepted for legacy callers; unused
-) -> Optional[str]:
-    """Best-effort ``host`` for legacy consumers of the engine config dict.
+# ---------------------------------------------------------------------------
+# Translation helpers
+# ---------------------------------------------------------------------------
 
-    Resolution order (no connector-type branching):
 
-    1. ``connection.parameters.host`` — addresses owned by the connection.
-    2. The connector's default transport ``base_url`` when present as a
-       literal string (resolved transports are not yet available here).
-    3. The legacy top-level ``host`` field, if any.
+def _translate_source_config(
+    *,
+    stream: Dict[str, Any],
+    source: Dict[str, Any],
+    endpoint: Dict[str, Any],
+    runtime: ConnectionRuntime,
+) -> Dict[str, Any]:
+    """Attach the contract documents to the source-side runtime payload.
 
-    Returns ``None`` if none of the above produce a string. Callers that
-    actually need the materialized address should consume
-    :attr:`ConnectionRuntime.base_url` after ``materialize()``.
+    The connectors (API + database) read replication, filters, columns,
+    pagination, etc. directly off the contract ``endpoint_document`` and
+    ``stream_source`` dicts. The translator only injects the runtime
+    handle and the connector type discriminator so the engine knows which
+    connector class to instantiate.
     """
-    del connector_type  # legacy parameter kept for callers
-    params = connection_config.get("parameters") or {}
-    if isinstance(params, dict) and isinstance(params.get("host"), str):
-        return params["host"]
-    if runtime is not None:
-        connector_def = runtime.connector_definition or {}
-        transports = connector_def.get("transports") or {}
-        default_ref = connector_def.get("default_transport")
-        if default_ref and default_ref in transports:
-            base_url = transports[default_ref].get("base_url")
-            if isinstance(base_url, str):
-                return base_url
-    legacy = connection_config.get("host")
-    return legacy if isinstance(legacy, str) else None
-
-
-def _warn_unresolved_placeholders(value: Any, field: str, stream_id: str) -> None:
-    """Emit a WARNING for any ``${name}`` placeholder still left in *value*.
-
-    The flat-merge shim uses ``ignore_missing=True`` so the engine does not
-    crash on legacy unresolved references; this helper makes the residue
-    visible at runtime instead of letting it flow silently into the
-    provider request.
-    """
-    leftover: List[str] = []
-
-    def _scan(node: Any) -> None:
-        if isinstance(node, str):
-            leftover.extend(_UNRESOLVED_PLACEHOLDER.findall(node))
-        elif isinstance(node, dict):
-            for child in node.values():
-                _scan(child)
-        elif isinstance(node, list):
-            for child in node:
-                _scan(child)
-
-    _scan(value)
-    if leftover:
-        logger.warning(
-            "stream %r: %s contains unresolved placeholders %s; "
-            "endpoint file uses legacy ${...} text not present in connection "
-            "parameters/selections/discovered (analitiq-engine#37).",
-            stream_id, field, sorted(set(leftover)),
+    _ = stream  # signature parity with the destination translator
+    kind = runtime.connector_type
+    base: Dict[str, Any] = {
+        "connector_type": kind,
+        "_runtime": runtime,
+        "endpoint_ref": source["endpoint_ref"],
+        "connection_ref": source["connection_ref"],
+    }
+    if kind == "database":
+        base.update(_translate_database_source(source, endpoint))
+    elif kind == "api":
+        base.update(_translate_api_source(source, endpoint, runtime))
+    else:
+        raise ValueError(
+            f"Unsupported source connector kind: {kind!r}; expected 'api' or 'database'"
         )
+    return base
 
 
-def _flat_connection_lookup(connection_config: Dict[str, Any]) -> Dict[str, str]:
-    """Flat ``name -> str(value)`` map across ``parameters``, ``selections``,
-    and ``discovered``. Used to expand legacy ``${name}`` placeholders in
-    endpoint files until those files migrate to fully-qualified ``ref``
-    expressions (tracked in analitiq-engine#37).
+def _build_destination_config(
+    destination: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Engine-facing destination dict.
 
-    Precedence on key collision (highest wins):
-
-    1. ``connection.parameters`` — explicit, user-supplied connection values.
-    2. ``connection.selections`` — durable post-auth user choices.
-    3. ``connection.discovered`` — provider-returned values (e.g. api_domain).
-
-    Conflicts between scopes are logged at WARNING so silent precedence
-    surprises are visible in normal runs. The shim is intentionally
-    transitional: when endpoint files migrate to typed ``ref`` /
-    ``template`` expressions, this whole function disappears.
+    The engine only needs the write mode (forwarded to the gRPC
+    ``SchemaMessage``). Everything else about the destination — table
+    name, columns, primary keys, conflict keys, batching — is consumed
+    by the destination container, which loads the contract endpoint
+    document via :class:`PipelineConfigPrep`.
     """
-    flat: Dict[str, str] = {}
-    origin: Dict[str, str] = {}
-    # Iterate lowest-precedence-first so the higher-precedence scope's
-    # write overwrites it. Conflicts are logged when a key is overwritten.
-    for scope_name in ("discovered", "selections", "parameters"):
-        scope = connection_config.get(scope_name) or {}
-        if not isinstance(scope, dict):
-            continue
-        for key, value in scope.items():
-            if isinstance(value, (dict, list)):
-                continue
-            if value is None:
-                continue
-            stringified = str(value)
-            if key in flat and flat[key] != stringified:
-                logger.warning(
-                    "connection placeholder %r differs across scopes "
-                    "(%s=%r → %s=%r); using %s",
-                    key, origin[key], flat[key], scope_name, stringified,
-                    scope_name,
-                )
-            flat[key] = stringified
-            origin[key] = scope_name
-    return flat
+    write = destination.get("write") or {}
+    return {"write_mode": write.get("mode", "upsert")}
+
+
+def _translate_database_source(
+    source: Dict[str, Any], endpoint: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Pass the contract documents through to :class:`DatabaseConnector`.
+
+    The connector consumes ``database_object``, ``columns``,
+    ``primary_keys``, plus the stream's ``selected_columns``, ``filters``,
+    and ``replication`` block directly. This seam only attaches the
+    documents to the source config dict.
+    """
+    return {
+        "endpoint_document": endpoint,
+        "stream_source": source,
+    }
+
+
+def _translate_api_source(
+    source: Dict[str, Any],
+    endpoint: Dict[str, Any],
+    runtime: ConnectionRuntime,
+) -> Dict[str, Any]:
+    """Pass the contract documents through to :class:`APIConnector`.
+
+    The connector consumes ``operations.read.{request,params,pagination,
+    response,replication}`` directly and resolves value expressions
+    against the connection runtime; this seam only attaches the
+    documents to the source config dict.
+    """
+    _ = runtime  # signature parity with the database path
+    return {
+        "endpoint_document": endpoint,
+        "stream_source": source,
+        "stream_filters": list(source.get("filters") or []),
+    }
+
+
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Mapping translation (contract assignment shape -> AssignmentTransformer shape)
+# ---------------------------------------------------------------------------
+
+
+def _translate_assignment(assignment: Dict[str, Any]) -> Dict[str, Any]:
+    """Translate a contract-shaped assignment to the transformer's shape.
+
+    The contract authors targets with a dotted ``path`` string and an
+    Apache Arrow type label. The transformer's expected shape uses a list
+    path and a tagged ``value.kind`` (``"expr"`` or ``"const"``); this
+    function only reshapes those structural differences. It does NOT map
+    Arrow types to anything else — native ↔ Arrow translation is
+    connector/connection-owned (via each artifact's ``type-map.json``)
+    and is applied by the destination handler at write time.
+
+    Contract shape:
+        {
+          "target": {"path": "id", "arrow_type": "Int64", "nullable": false},
+          "value":  {"expression": {"op": "get", "path": "id"}}
+        }
+
+    Transformer shape:
+        {
+          "target": {"path": ["id"], "arrow_type": "Int64", "nullable": false},
+          "value":  {"kind": "expr", "expr": {"op": "get", "path": ["id"]}}
+        }
+    """
+    raw_target = assignment.get("target") or {}
+    raw_value = assignment.get("value") or {}
+
+    target_path_raw = raw_target.get("path", "")
+    if isinstance(target_path_raw, str):
+        target_path = [seg for seg in target_path_raw.split(".") if seg]
+    elif isinstance(target_path_raw, list):
+        target_path = list(target_path_raw)
+    else:
+        target_path = []
+
+    # Pass the contract-declared fields through unchanged. The transformer
+    # treats unknown ``type`` values as passthrough (no JSON coercion),
+    # which is the right behavior for Arrow-typed values headed to the
+    # destination's Arrow-based schema contract.
+    target = dict(raw_target)
+    target["path"] = target_path
+
+    value: Dict[str, Any]
+    if "expression" in raw_value:
+        expression = dict(raw_value["expression"])
+        expr_path = expression.get("path")
+        if isinstance(expr_path, str):
+            expression["path"] = [seg for seg in expr_path.split(".") if seg]
+        value = {"kind": "expr", "expr": expression}
+    elif "constant" in raw_value:
+        # Constant carries its own ``arrow_type``; preserve it verbatim
+        # for the destination to interpret via its type-map.
+        value = {"kind": "const", "const": dict(raw_value["constant"] or {})}
+    else:
+        value = dict(raw_value)
+
+    out: Dict[str, Any] = {"target": target, "value": value}
+    if "validate" in assignment:
+        out["validate"] = assignment["validate"]
+    return out
+
+
