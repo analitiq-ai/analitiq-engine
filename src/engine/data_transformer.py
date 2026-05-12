@@ -583,7 +583,8 @@ class DataTransformer:
 
         if all_errors:
             summary = "; ".join(
-                f"{err.get('field', '?')}: {err.get('error', err)}"
+                f"{err.get('field', '?')} (row {err.get('row', '?')}): "
+                f"{err.get('error', err)}"
                 for err in all_errors[:5]
             )
             suffix = f" (+{len(all_errors) - 5} more)" if len(all_errors) > 5 else ""

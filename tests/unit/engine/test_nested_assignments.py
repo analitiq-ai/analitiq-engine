@@ -113,7 +113,105 @@ class TestDictConstantsEndToEnd:
         }
 
     @pytest.mark.asyncio
-    async def test_json_target_rejects_non_dict_non_str_non_none(self):
+    async def test_dlq_bound_records_skip_json_encode_pass(self):
+        """If the transform loop already produced errors, the json.dumps
+        pass must not run — otherwise it could surface a SECOND class of
+        error (non-JSON-serializable values) on records that will be
+        discarded anyway. The user sees only the actionable, first-class
+        failure.
+
+        Setup: one record produces a transform error (non-nullable target
+        gets None). A separate record places a non-serializable
+        ``datetime`` in a Json target. If the dumps pass ran, the raised
+        message would mention both errors; correct behavior surfaces
+        only the original transform error."""
+        from datetime import datetime as _dt
+        from src.engine.exceptions import TransformationError
+
+        translated = [
+            _translate_assignment({
+                "target": {
+                    "path": "required",
+                    "arrow_type": "Utf8",
+                    "nullable": False,
+                },
+                "value": {"expression": {"op": "get", "path": "missing_field"}},
+            }),
+            _translate_assignment({
+                "target": {
+                    "path": "metadata",
+                    "arrow_type": "Json",
+                    "nullable": True,
+                },
+                "value": {"expression": {"op": "get", "path": "blob"}},
+            }),
+        ]
+        batch = [
+            {"missing_field": None, "blob": _dt(2026, 5, 12)},
+            {"missing_field": "ok", "blob": _dt(2026, 5, 12)},
+        ]
+        with pytest.raises(TransformationError) as exc_info:
+            await DataTransformer().apply_transformations(
+                batch, {"mapping": {"assignments": translated}},
+            )
+        # The first-class (transform) error must surface; the json-encode
+        # secondary error must NOT — that's the load-bearing property.
+        msg = str(exc_info.value)
+        assert "not JSON-serializable" not in msg
+
+    @pytest.mark.asyncio
+    async def test_dumps_error_reports_original_source_row(self):
+        """When upstream transforms drop a record (return None), the
+        source-row index in the dumps-step error must point at the
+        ORIGINAL batch position, not the post-filter slot."""
+        from datetime import datetime as _dt
+        from src.engine.exceptions import TransformationError
+
+        translated = [
+            _translate_assignment({
+                "target": {
+                    "path": "id",
+                    "arrow_type": "Utf8",
+                    "nullable": True,
+                },
+                "value": {"expression": {"op": "get", "path": "id"}},
+            }),
+            _translate_assignment({
+                "target": {
+                    "path": "metadata",
+                    "arrow_type": "Json",
+                    "nullable": True,
+                },
+                "value": {"expression": {"op": "get", "path": "blob"}},
+            }),
+        ]
+        # Patch the assignment transformer to drop the second record so
+        # the post-filter index for the third record is 1 while its
+        # source-batch index is 2.
+        transformer = DataTransformer()
+        original = transformer.assignment_transformer.transform_record
+
+        async def _selective(record, assignments, default_on_error="dlq"):
+            result, errors = await original(record, assignments, default_on_error)
+            if record.get("drop_me"):
+                return None, errors
+            return result, errors
+
+        transformer.assignment_transformer.transform_record = _selective  # type: ignore[assignment]
+
+        batch = [
+            {"id": "r0", "blob": {"ok": 1}},
+            {"id": "r1", "blob": {"ok": 2}, "drop_me": True},
+            {"id": "r2", "blob": _dt(2026, 5, 12)},
+        ]
+        with pytest.raises(TransformationError, match=r"\(row 2\)") as exc_info:
+            await transformer.apply_transformations(
+                batch, {"mapping": {"assignments": translated}},
+            )
+        msg = str(exc_info.value)
+        assert "got datetime" in msg
+        # Negative: post-filter index would have reported row 1.
+        assert "(row 1)" not in msg
         """A Json target receiving an int (or any non-dict/list/str/None)
         is an author mistake — the transformer must collect it as a
         per-record error rather than silently dropping it through to
