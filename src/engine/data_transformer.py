@@ -6,6 +6,7 @@ fixture-driven tests.
 """
 
 import asyncio
+import json
 import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
@@ -14,7 +15,7 @@ import pyarrow as pa
 
 from .exceptions import TransformationError
 from .expression_evaluator import SecureExpressionEvaluator
-from .type_map.arrow import canonical_to_arrow
+from .type_map.arrow import resolve_arrow_type
 from .type_map.exceptions import InvalidTypeMapError
 
 logger = logging.getLogger(__name__)
@@ -518,23 +519,72 @@ class DataTransformer:
         emitted with no count reconciliation, no DLQ routing, and no
         FATAL signal — the engine's error_strategy is the right place
         to decide retry vs DLQ, not this transformer.
+
+        Fields whose target ``arrow_type`` is ``"Json"`` are JSON-encoded
+        here so the engine's Arrow batch (``pa.large_string`` column) can
+        accept them. Destination handlers reverse this at the write
+        boundary.
         """
-        transformed_batch: List[Dict[str, Any]] = []
+        kept: List[tuple[int, Dict[str, Any]]] = []
         all_errors: List[Dict[str, Any]] = []
 
-        for record in batch:
+        for source_row, record in enumerate(batch):
             await asyncio.sleep(0)  # Yield for async safety
             result, errors = await self.assignment_transformer.transform_record(
                 record, assignments
             )
             if errors:
+                for err in errors:
+                    err.setdefault("row", source_row)
                 all_errors.extend(errors)
             if result is not None:
-                transformed_batch.append(result)
+                kept.append((source_row, result))
+
+        # Skip the Json-encoding pass when prior errors exist — those
+        # records will be discarded by the raise below, and mutating
+        # their Json columns in-place beforehand would leak a partially
+        # transformed view to anyone introspecting them.
+        if not all_errors:
+            json_cols = _json_target_names(assignments)
+            if json_cols:
+                for source_row, record in kept:
+                    for col in json_cols:
+                        value = record.get(col)
+                        if value is None or isinstance(value, str):
+                            # Strings pass through to pa.large_string
+                            # unchanged — the destination decoder will
+                            # json.loads them. Useful when the assignment
+                            # is ``get`` from a Json source column.
+                            continue
+                        if not isinstance(value, (dict, list)):
+                            all_errors.append({
+                                "field": col,
+                                "row": source_row,
+                                "error": (
+                                    f"Json target requires dict/list/str/None, "
+                                    f"got {type(value).__name__}"
+                                ),
+                                "action": "dlq",
+                            })
+                            continue
+                        try:
+                            record[col] = json.dumps(value)
+                        except TypeError as exc:
+                            # Non-JSON-serializable values (datetime,
+                            # Decimal, UUID, …) join the per-record error
+                            # stream so they follow the same DLQ / retry
+                            # policy as every other transform failure.
+                            all_errors.append({
+                                "field": col,
+                                "row": source_row,
+                                "error": f"Json target value is not JSON-serializable: {exc}",
+                                "action": "dlq",
+                            })
 
         if all_errors:
             summary = "; ".join(
-                f"{err.get('field', '?')}: {err.get('error', err)}"
+                f"{err.get('field', '?')} (row {err.get('row', '?')}): "
+                f"{err.get('error', err)}"
                 for err in all_errors[:5]
             )
             suffix = f" (+{len(all_errors) - 5} more)" if len(all_errors) > 5 else ""
@@ -543,7 +593,7 @@ class DataTransformer:
                 f"{summary}{suffix}"
             )
 
-        return transformed_batch
+        return [record for _, record in kept]
 
     async def _apply_legacy_transformations(
         self,
@@ -693,6 +743,16 @@ class DataTransformer:
         return datetime.fromisoformat(iso_string)
 
 
+def _json_target_names(assignments: List[Dict[str, Any]]) -> set:
+    """Target column names whose ``target.arrow_type`` is ``"Json"``."""
+    names: set = set()
+    for a in assignments:
+        target = a.get("target") or {}
+        if target.get("arrow_type") == "Json":
+            names.add(_normalize_path(target.get("path")))
+    return names
+
+
 def _normalize_path(path: Any) -> str:
     if isinstance(path, str):
         return path
@@ -710,26 +770,32 @@ def _normalize_path(path: Any) -> str:
 def build_output_schema(
     assignments: List[Dict[str, Any]],
 ) -> pa.Schema:
-    """Build the post-transform Arrow schema from a stream's assignments."""
+    """Build the post-transform Arrow schema from a stream's assignments.
+
+    Object/List targets declare ``arrow_type: "Object"`` with a
+    ``target.properties`` map, or ``arrow_type: "List"`` with
+    ``target.items`` — :func:`resolve_arrow_type` handles the recursion.
+    """
     fields: List[pa.Field] = []
     for index, assignment in enumerate(assignments):
         target = assignment.get("target") or {}
         target_name = _normalize_path(target.get("path"))
         nullable = bool(target.get("nullable", True))
 
-        canonical = target.get("arrow_type")
-        if not canonical:
+        if not target.get("arrow_type"):
             raise TransformationError(
                 f"assignment[{index}] target={target_name!r}: missing "
-                f"target.arrow_type; every assignment must declare a "
-                f"fully-qualified canonical Arrow type"
+                f"target.arrow_type; every assignment must declare an "
+                f"Arrow type"
             )
         try:
-            arrow_type = canonical_to_arrow(canonical)
+            arrow_type = resolve_arrow_type(
+                target, where=f"assignment[{index}] target={target_name!r}"
+            )
         except InvalidTypeMapError as e:
             raise TransformationError(
                 f"assignment[{index}] target={target_name!r}: cannot "
-                f"parse target.arrow_type={canonical!r}: {e}"
+                f"parse target.arrow_type={target.get('arrow_type')!r}: {e}"
             ) from e
 
         fields.append(pa.field(target_name, arrow_type, nullable=nullable))

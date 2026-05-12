@@ -1,5 +1,6 @@
 """Build pa.Schema from endpoint arrow_type declarations."""
 
+import json
 import logging
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
@@ -7,10 +8,19 @@ from typing import Any, Dict, List, Optional
 import pyarrow as pa
 import pyarrow.compute as pc
 
-from src.engine.type_map import canonical_to_arrow
+from src.engine.type_map import resolve_arrow_type
 from src.engine.type_map.exceptions import InvalidTypeMapError
 
 logger = logging.getLogger(__name__)
+
+
+# Opaque-blob marker. The Arrow wire shape is ``pa.large_string``;
+# encode/decode happens at the source and handler boundaries.
+_JSON_ARROW_TYPE: str = "Json"
+
+
+def _is_json_field(field_def: Dict[str, Any]) -> bool:
+    return field_def.get("arrow_type") == _JSON_ARROW_TYPE
 
 
 class SchemaContract:
@@ -60,6 +70,58 @@ class SchemaContract:
     def column_types(self) -> Dict[str, str]:
         return self._column_types
 
+    @property
+    def json_columns(self) -> set:
+        return {n for n, defn in self._field_defs.items() if _is_json_field(defn)}
+
+    def to_db_records(
+        self, record_batch: pa.RecordBatch
+    ) -> List[Dict[str, Any]]:
+        """Materialise a batch for a SQL destination.
+
+        Arrow-space schema alignment, then ``to_pylist``, then Json wire-
+        strings → dicts. SQLAlchemy is the wire-format-aware receiver
+        beyond this point — it serialises ``datetime`` / ``Decimal`` /
+        ``dict`` natively into their column types.
+
+        JSON-emitting destinations (the API handler) use this same
+        materialisation and let ``orjson`` handle the ``datetime`` /
+        ``Decimal`` conversion at serialisation time rather than
+        pre-casting in Arrow space.
+        """
+        record_batch = self.cast_arrow_batch(record_batch)
+        records = record_batch.to_pylist()
+        return self.decode_json_columns(records)
+
+    def decode_json_columns(
+        self, records: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """Parse JSON-encoded string values back into Python dict/list.
+
+        Decode is idempotent: ``None`` and already-parsed dict/list values
+        pass through untouched so the caller can apply this more than
+        once. Malformed strings raise ``ValueError`` carrying the column
+        name and row index — the destination handler classifies that as
+        a data-shape failure rather than letting a bare
+        ``JSONDecodeError`` escape from deep in the stack.
+        """
+        json_cols = self.json_columns
+        if not json_cols or not records:
+            return records
+        for row, record in enumerate(records):
+            for col in json_cols:
+                value = record.get(col)
+                if not isinstance(value, str):
+                    continue
+                try:
+                    record[col] = json.loads(value)
+                except json.JSONDecodeError as exc:
+                    raise ValueError(
+                        f"Json column {col!r} at row {row}: value is not "
+                        f"valid JSON ({exc})"
+                    ) from exc
+        return records
+
     def from_pylist(self, records: List[Dict[str, Any]]) -> pa.RecordBatch:
         """Build a record batch from dict rows using this endpoint's schema."""
         if not records:
@@ -69,10 +131,14 @@ class SchemaContract:
         for field in self._arrow_schema:
             values = [r.get(field.name) for r in records]
             field_def = self._field_defs.get(field.name) or {}
-            source_format = field_def.get("source_format")
             try:
-                arrays.append(self._build_column(field, values, source_format))
-            except (pa.ArrowTypeError, pa.ArrowInvalid, ValueError) as e:
+                arrays.append(self._build_column(field, values, field_def))
+            except ValueError:
+                # _build_column already names the offending row; passing
+                # it through preserves that precision instead of pinning
+                # the blame on the first-non-null heuristic below.
+                raise
+            except (pa.ArrowTypeError, pa.ArrowInvalid) as e:
                 bad_index = next(
                     (i for i, v in enumerate(values) if v is not None), None
                 )
@@ -128,8 +194,9 @@ class SchemaContract:
     def _build_column(
         field: pa.Field,
         values: List[Any],
-        source_format: Optional[str],
+        field_def: Dict[str, Any],
     ) -> pa.Array:
+        source_format = field_def.get("source_format")
         if all(v is None for v in values):
             if not field.nullable:
                 raise ValueError(
@@ -137,6 +204,27 @@ class SchemaContract:
                     f"source value is None"
                 )
             return pa.nulls(len(values), type=field.type)
+
+        if _is_json_field(field_def):
+            # Opaque JSON blob: a Json column may carry only None, a dict,
+            # or a list. Anything else (int, datetime, raw string) is an
+            # author mistake — fail loud with the offending row index so
+            # the source author can locate the bad value, rather than
+            # letting a string round-trip through the decoder where
+            # ``json.loads`` would raise far from the source.
+            serialized: List[Any] = []
+            for row, v in enumerate(values):
+                if v is None:
+                    serialized.append(None)
+                elif isinstance(v, (dict, list)):
+                    serialized.append(json.dumps(v))
+                else:
+                    raise ValueError(
+                        f"column {field.name!r} declared arrow_type='Json' "
+                        f"but row {row} carries {type(v).__name__}; only "
+                        f"dict, list, or None are accepted"
+                    )
+            return pa.array(serialized, type=field.type)
 
         if source_format and (
             pa.types.is_timestamp(field.type) or pa.types.is_date(field.type)
@@ -204,17 +292,15 @@ class SchemaContract:
 
     @staticmethod
     def _require_arrow_type(field_def: Dict[str, Any], name: str) -> pa.DataType:
-        canonical = field_def.get("arrow_type")
-        if not canonical:
+        if not field_def.get("arrow_type"):
             raise ValueError(
                 f"field {name!r} has no 'arrow_type' declaration; "
-                f"endpoint contracts must declare a fully-qualified "
-                f"canonical Arrow type for every field"
+                f"endpoint contracts must declare an Arrow type for every field"
             )
         try:
-            return canonical_to_arrow(canonical)
+            return resolve_arrow_type(field_def, where=f"field {name!r}")
         except InvalidTypeMapError as e:
             raise ValueError(
                 f"field {name!r}: cannot parse arrow_type "
-                f"{canonical!r}: {e}"
+                f"{field_def.get('arrow_type')!r}: {e}"
             ) from e

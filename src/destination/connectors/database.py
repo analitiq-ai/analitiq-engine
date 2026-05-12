@@ -706,35 +706,17 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
     def _prepare_for_sqlalchemy(
         self, state: _StreamState, record_batch: pa.RecordBatch
     ) -> List[Dict[str, Any]]:
-        """Cast a batch to the destination schema and materialize for SQLAlchemy.
+        """Materialise a batch for SQLAlchemy via the schema contract.
 
-        ``cast_arrow_batch`` does the column-by-column realignment in
-        Arrow space; ``to_pylist`` is the single materialization point
-        before the SQLAlchemy bulk insert.
+        SQLAlchemy is the wire-format-aware receiver: ``datetime`` /
+        ``Decimal`` / ``dict`` go straight into their column types.
+        ``to_db_records`` aligns the batch to the destination schema,
+        materialises once, and reverses the Json wire-string encoding so
+        a JSONB column receives a real dict, not a quoted string.
         """
-        if state.schema_contract is not None:
-            record_batch = state.schema_contract.cast_arrow_batch(record_batch)
-        return self._json_serialize_complex(record_batch.to_pylist())
-
-    def _json_serialize_complex(
-        self, records: List[Dict[str, Any]]
-    ) -> List[Dict[str, Any]]:
-        """JSON-serialize dict/list values for non-Postgres drivers.
-
-        Postgres handles JSON columns natively; MySQL/SQLite need the
-        complex types as strings. This is the only per-row work that
-        survives between Arrow and SQLAlchemy.
-        """
-        if not records or self._driver in ("postgresql", "postgres"):
-            return records
-        import json
-        return [
-            {
-                key: (json.dumps(value) if isinstance(value, (dict, list)) else value)
-                for key, value in record.items()
-            }
-            for record in records
-        ]
+        if state.schema_contract is None:
+            return record_batch.to_pylist()
+        return state.schema_contract.to_db_records(record_batch)
 
     async def health_check(self) -> bool:
         """Check database health."""

@@ -49,14 +49,14 @@ class Pipeline:
         self._ensure_directories()
 
         runtime = pipeline_config.get("runtime") or {}
-        batching = runtime.get("batching") or {"batch_size": 100, "max_concurrent_batches": 3}
+        batching = runtime.get("batching") or {"batch_size": 1000, "max_concurrent_batches": 3}
         error_handling = runtime.get("error_handling") or {
             "max_retries": 3,
             "retry_delay_seconds": 5,
         }
         self.engine = StreamingEngine(
             pipeline_id=pipeline_id,
-            batch_size=batching.get("batch_size", 100),
+            batch_size=batching.get("batch_size", 1000),
             max_concurrent_batches=batching.get("max_concurrent_batches", 3),
             buffer_size=runtime.get("buffer_size", 5000),
             dlq_path=self.dlq_dir,

@@ -26,7 +26,7 @@ from src.engine.type_map import (
     TypeMapper,
     UnmappedSSLModeError,
     UnmappedTypeError,
-    canonical_to_arrow,
+    parse_arrow_type,
     load_connection_type_map,
     load_ssl_mode_map,
     load_type_map,
@@ -132,22 +132,22 @@ def _mapper(rules: list[dict]) -> TypeMapper:
 class TestTypeMapperExact:
     def test_exact_hit(self):
         m = _mapper([{"match": "exact", "native": "JSONB", "canonical": "Utf8"}])
-        assert m.to_canonical("JSONB") == "Utf8"
+        assert m.to_arrow_type("JSONB") == "Utf8"
 
     def test_normalization_lower_to_upper(self):
         m = _mapper([{"match": "exact", "native": "BIGINT", "canonical": "Int64"}])
-        assert m.to_canonical("bigint") == "Int64"
+        assert m.to_arrow_type("bigint") == "Int64"
 
     def test_normalization_internal_whitespace(self):
         m = _mapper(
             [{"match": "exact", "native": "DOUBLE PRECISION", "canonical": "Float64"}]
         )
-        assert m.to_canonical("double   precision") == "Float64"
+        assert m.to_arrow_type("double   precision") == "Float64"
 
     def test_unmapped_raises(self):
         m = _mapper([{"match": "exact", "native": "TEXT", "canonical": "Utf8"}])
         with pytest.raises(UnmappedTypeError) as exc:
-            m.to_canonical("MONEY")
+            m.to_arrow_type("MONEY")
         assert exc.value.direction == "forward"
         assert exc.value.value == "MONEY"
         assert "MONEY" in str(exc.value)
@@ -162,15 +162,15 @@ class TestTypeMapperRegex:
                 "canonical": "Decimal128(${p}, ${s})",
             }
         ])
-        assert m.to_canonical("NUMERIC(18, 2)") == "Decimal128(18, 2)"
-        assert m.to_canonical("numeric( 10,4 )") == "Decimal128(10, 4)"
+        assert m.to_arrow_type("NUMERIC(18, 2)") == "Decimal128(18, 2)"
+        assert m.to_arrow_type("numeric( 10,4 )") == "Decimal128(10, 4)"
 
     def test_regex_without_tokens(self):
         m = _mapper([
             {"match": "regex", "native": r"^VARCHAR\(\s*\d+\s*\)$", "canonical": "Utf8"}
         ])
-        assert m.to_canonical("VARCHAR(50)") == "Utf8"
-        assert m.to_canonical("varchar(1024)") == "Utf8"
+        assert m.to_arrow_type("VARCHAR(50)") == "Utf8"
+        assert m.to_arrow_type("varchar(1024)") == "Utf8"
 
 
 class TestSpecificityOrdering:
@@ -185,9 +185,9 @@ class TestSpecificityOrdering:
                 "canonical": "Int8",
             },
         ])
-        assert m.to_canonical("TINYINT(1)") == "Boolean"
-        assert m.to_canonical("TINYINT(4)") == "Int8"
-        assert m.to_canonical("TINYINT") == "Int8"
+        assert m.to_arrow_type("TINYINT(1)") == "Boolean"
+        assert m.to_arrow_type("TINYINT(4)") == "Int8"
+        assert m.to_arrow_type("TINYINT") == "Int8"
 
     def test_reordering_changes_result(self):
         m = _mapper([
@@ -199,22 +199,22 @@ class TestSpecificityOrdering:
             {"match": "exact", "native": "TINYINT(1)", "canonical": "Boolean"},
         ])
         # Broader rule now wins — the exact rule is shadowed.
-        assert m.to_canonical("TINYINT(1)") == "Int8"
+        assert m.to_arrow_type("TINYINT(1)") == "Int8"
 
 
 # ---------------------------------------------------------------------------
-# canonical_to_arrow parser
+# parse_arrow_type parser
 # ---------------------------------------------------------------------------
 
 
-class TestCanonicalToArrow:
+class TestParseArrowType:
     def test_primitives(self):
         import pyarrow as pa
 
-        assert canonical_to_arrow("Int64") == pa.int64()
-        assert canonical_to_arrow("Boolean") == pa.bool_()
-        assert canonical_to_arrow("Utf8") == pa.string()
-        assert canonical_to_arrow("Date32") == pa.date32()
+        assert parse_arrow_type("Int64") == pa.int64()
+        assert parse_arrow_type("Boolean") == pa.bool_()
+        assert parse_arrow_type("Utf8") == pa.string()
+        assert parse_arrow_type("Date32") == pa.date32()
 
     @pytest.mark.parametrize(
         "canonical, expected",
@@ -234,75 +234,184 @@ class TestCanonicalToArrow:
         ],
     )
     def test_primitive_parser_coverage(self, canonical, expected):
-        """Exercise every primitive family canonical_to_arrow dispatches on.
+        """Exercise every primitive family parse_arrow_type dispatches on.
 
         These cases previously went untested at the parser level — they
         were only indirectly hit via sql_types' Arrow → SQLAlchemy map.
         """
-        assert str(canonical_to_arrow(canonical)) == expected
+        assert str(parse_arrow_type(canonical)) == expected
 
     def test_timestamp_with_tz(self):
         import pyarrow as pa
 
-        assert canonical_to_arrow("Timestamp(us, UTC)") == pa.timestamp("us", tz="UTC")
-        assert canonical_to_arrow("Timestamp(ms)") == pa.timestamp("ms")
+        assert parse_arrow_type("Timestamp(us, UTC)") == pa.timestamp("us", tz="UTC")
+        assert parse_arrow_type("Timestamp(ms)") == pa.timestamp("ms")
 
     def test_decimal(self):
         import pyarrow as pa
 
-        assert canonical_to_arrow("Decimal128(18, 2)") == pa.decimal128(18, 2)
+        assert parse_arrow_type("Decimal128(18, 2)") == pa.decimal128(18, 2)
 
     def test_time32(self):
         import pyarrow as pa
 
-        assert canonical_to_arrow("Time32(s)") == pa.time32("s")
-        assert canonical_to_arrow("Time32(ms)") == pa.time32("ms")
+        assert parse_arrow_type("Time32(s)") == pa.time32("s")
+        assert parse_arrow_type("Time32(ms)") == pa.time32("ms")
 
     def test_time64(self):
         import pyarrow as pa
 
-        assert canonical_to_arrow("Time64(us)") == pa.time64("us")
-        assert canonical_to_arrow("Time64(ns)") == pa.time64("ns")
+        assert parse_arrow_type("Time64(us)") == pa.time64("us")
+        assert parse_arrow_type("Time64(ns)") == pa.time64("ns")
 
     def test_time_rejects_wrong_unit(self):
         with pytest.raises(InvalidTypeMapError, match="requires exactly one unit"):
-            canonical_to_arrow("Time32(us)")  # us is Time64-only
+            parse_arrow_type("Time32(us)")  # us is Time64-only
         with pytest.raises(InvalidTypeMapError, match="requires exactly one unit"):
-            canonical_to_arrow("Time64(s)")  # s is Time32-only
+            parse_arrow_type("Time64(s)")  # s is Time32-only
 
     def test_fixed_size_binary(self):
         import pyarrow as pa
 
-        assert canonical_to_arrow("FixedSizeBinary(16)") == pa.binary(16)
+        assert parse_arrow_type("FixedSizeBinary(16)") == pa.binary(16)
 
     def test_fixed_size_binary_rejects_non_integer(self):
         with pytest.raises(InvalidTypeMapError, match="byte_width is not an integer"):
-            canonical_to_arrow("FixedSizeBinary(abc)")
+            parse_arrow_type("FixedSizeBinary(abc)")
 
     def test_decimal256(self):
         import pyarrow as pa
 
-        assert canonical_to_arrow("Decimal256(38, 10)") == pa.decimal256(38, 10)
+        assert parse_arrow_type("Decimal256(38, 10)") == pa.decimal256(38, 10)
 
     def test_decimal_rejects_non_integer_params(self):
         with pytest.raises(InvalidTypeMapError, match="non-integer parameters"):
-            canonical_to_arrow("Decimal128(a, b)")
+            parse_arrow_type("Decimal128(a, b)")
 
     def test_timestamp_requires_unit(self):
         with pytest.raises(InvalidTypeMapError, match="at least a unit"):
-            canonical_to_arrow("Timestamp()")
+            parse_arrow_type("Timestamp()")
 
     def test_timestamp_rejects_bad_unit(self):
         with pytest.raises(InvalidTypeMapError, match="unit must be one of"):
-            canonical_to_arrow("Timestamp(xs)")
+            parse_arrow_type("Timestamp(xs)")
 
     def test_unknown_family_rejected(self):
         with pytest.raises(InvalidTypeMapError, match="not supported"):
-            canonical_to_arrow("Nope")
+            parse_arrow_type("Nope")
 
     def test_unbalanced_parens_rejected(self):
         with pytest.raises(InvalidTypeMapError, match="unbalanced"):
-            canonical_to_arrow("Int64(")
+            parse_arrow_type("Int64(")
+
+    def test_object_marker_rejected_at_string_parser(self):
+        # parse_arrow_type only sees the string; Object needs the property's
+        # sub-schema, which only resolve_arrow_type / SchemaContract have.
+        with pytest.raises(InvalidTypeMapError, match="nested type"):
+            parse_arrow_type("Object")
+
+    def test_list_marker_rejected_at_string_parser(self):
+        with pytest.raises(InvalidTypeMapError, match="nested type"):
+            parse_arrow_type("List")
+
+    def test_json_marker_resolves_to_large_string(self):
+        import pyarrow as pa
+
+        # Opaque-blob marker: shape unknown, wire type is a JSON-encoded
+        # string. Handlers undo the encoding at write time.
+        assert parse_arrow_type("Json") == pa.large_string()
+
+
+# ---------------------------------------------------------------------------
+# resolve_arrow_type — JSON-Schema-shaped walker
+# ---------------------------------------------------------------------------
+
+
+class TestResolveArrowType:
+    def test_scalar_forwards_to_parse(self):
+        from src.engine.type_map import resolve_arrow_type
+        import pyarrow as pa
+
+        assert resolve_arrow_type({"arrow_type": "Int64"}) == pa.int64()
+
+    def test_object_builds_struct(self):
+        from src.engine.type_map import resolve_arrow_type
+        import pyarrow as pa
+
+        dt = resolve_arrow_type(
+            {
+                "arrow_type": "Object",
+                "properties": {
+                    "id": {"arrow_type": "Utf8"},
+                    "objectName": {"arrow_type": "Utf8"},
+                },
+            }
+        )
+        assert pa.types.is_struct(dt)
+        assert [f.name for f in dt] == ["id", "objectName"]
+
+    def test_object_respects_required(self):
+        from src.engine.type_map import resolve_arrow_type
+
+        dt = resolve_arrow_type(
+            {
+                "arrow_type": "Object",
+                "required": ["id"],
+                "properties": {
+                    "id": {"arrow_type": "Utf8"},
+                    "objectName": {"arrow_type": "Utf8"},
+                },
+            }
+        )
+        names = {f.name: f.nullable for f in dt}
+        assert names == {"id": False, "objectName": True}
+
+    def test_list_of_scalars(self):
+        from src.engine.type_map import resolve_arrow_type
+        import pyarrow as pa
+
+        dt = resolve_arrow_type(
+            {"arrow_type": "List", "items": {"arrow_type": "Int32"}}
+        )
+        assert pa.types.is_list(dt)
+        assert pa.types.is_int32(dt.value_type)
+
+    def test_nested_list_of_objects(self):
+        from src.engine.type_map import resolve_arrow_type
+        import pyarrow as pa
+
+        dt = resolve_arrow_type(
+            {
+                "arrow_type": "List",
+                "items": {
+                    "arrow_type": "Object",
+                    "properties": {
+                        "sku": {"arrow_type": "Utf8"},
+                        "qty": {"arrow_type": "Int32"},
+                    },
+                },
+            }
+        )
+        assert pa.types.is_list(dt)
+        assert pa.types.is_struct(dt.value_type)
+
+    def test_missing_arrow_type_raises(self):
+        from src.engine.type_map import resolve_arrow_type
+
+        with pytest.raises(InvalidTypeMapError, match="missing 'arrow_type'"):
+            resolve_arrow_type({})
+
+    def test_object_missing_properties_raises(self):
+        from src.engine.type_map import resolve_arrow_type
+
+        with pytest.raises(InvalidTypeMapError, match="non-empty 'properties'"):
+            resolve_arrow_type({"arrow_type": "Object"})
+
+    def test_list_missing_items_raises(self):
+        from src.engine.type_map import resolve_arrow_type
+
+        with pytest.raises(InvalidTypeMapError, match="'items' object"):
+            resolve_arrow_type({"arrow_type": "List"})
 
 
 # ---------------------------------------------------------------------------
@@ -402,7 +511,7 @@ class TestLoaders:
         )
         mapper = load_type_map(tmp_path, "demo")
         assert mapper.connector_slug == "demo"
-        assert mapper.to_canonical("text") == "Utf8"
+        assert mapper.to_arrow_type("text") == "Utf8"
 
     def test_ssl_mode_map_absent_is_ok(self, tmp_path: Path):
         _write_connector(
@@ -438,7 +547,7 @@ class TestLoaders:
             json.dumps([{"match": "exact", "native": "TEXT", "canonical": "Utf8"}])
         )
         mapper = load_type_map(tmp_path, "alt")
-        assert mapper.to_canonical("TEXT") == "Utf8"
+        assert mapper.to_arrow_type("TEXT") == "Utf8"
 
 
 class TestLoadConnectionTypeMap:
@@ -461,7 +570,7 @@ class TestLoadConnectionTypeMap:
         mapper = load_connection_type_map(tmp_path, "my-pg")
         assert mapper is not None
         assert mapper.connector_slug == "connection:my-pg"
-        assert mapper.to_canonical("CUSTOM_ENUM") == "Utf8"
+        assert mapper.to_arrow_type("CUSTOM_ENUM") == "Utf8"
 
     def test_malformed_json_raises(self, tmp_path: Path):
         definition = tmp_path / "broken" / "definition"

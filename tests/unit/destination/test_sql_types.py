@@ -84,14 +84,28 @@ class TestArrowToSqlAlchemyParameterized:
         assert sa_type.timezone is True
 
 
-class TestArrowToSqlAlchemyRejection:
-    def test_list_type_rejected(self):
-        with pytest.raises(ValueError, match="has no SQLAlchemy mapping"):
-            arrow_to_sqlalchemy(pa.list_(pa.int32()))
+class TestArrowToSqlAlchemyNested:
+    """Nested Arrow types map to a SA JSON column (JSONB on Postgres)."""
 
-    def test_struct_type_rejected(self):
-        with pytest.raises(ValueError, match="has no SQLAlchemy mapping"):
-            arrow_to_sqlalchemy(pa.struct([pa.field("x", pa.int32())]))
+    def test_list_maps_to_json(self):
+        from sqlalchemy import JSON
+
+        sa_type = arrow_to_sqlalchemy(pa.list_(pa.int32()))
+        assert isinstance(sa_type, JSON)
+
+    def test_struct_maps_to_json(self):
+        from sqlalchemy import JSON
+
+        sa_type = arrow_to_sqlalchemy(pa.struct([pa.field("x", pa.int32())]))
+        assert isinstance(sa_type, JSON)
+
+    def test_struct_variant_is_jsonb_on_postgres(self):
+        from sqlalchemy.dialects import postgresql
+        from sqlalchemy.dialects.postgresql import JSONB
+
+        sa_type = arrow_to_sqlalchemy(pa.struct([pa.field("x", pa.int32())]))
+        impl = sa_type.dialect_impl(postgresql.dialect())
+        assert isinstance(impl, JSONB)
 
 
 class TestNativeToSqlAlchemyChain:
@@ -138,3 +152,23 @@ class TestNativeToSqlAlchemyChain:
 
         with pytest.raises(UnmappedTypeError):
             native_to_sqlalchemy("MONEY", mapper)
+
+    def test_native_mapping_to_json_marker_yields_json_column(self):
+        # If the connector's type-map points a native (JSONB / VARIANT / …)
+        # at the "Json" arrow marker, the SA column type must be JSON, not
+        # TEXT — otherwise dict values would be stored as quoted strings.
+        from sqlalchemy import JSON
+        from sqlalchemy.dialects import postgresql
+        from sqlalchemy.dialects.postgresql import JSONB
+
+        mapper = TypeMapper(
+            "test",
+            parse_rules(
+                [{"match": "exact", "native": "JSONB", "canonical": "Json"}],
+                source="<test>",
+            ),
+        )
+        sa_type = native_to_sqlalchemy("JSONB", mapper)
+        assert isinstance(sa_type, JSON)
+        impl = sa_type.dialect_impl(postgresql.dialect())
+        assert isinstance(impl, JSONB)

@@ -5,12 +5,15 @@ rate limiting, retries, and different batch modes.
 """
 
 import asyncio
+import base64
 import json
 import logging
-from dataclasses import dataclass
-from typing import Any, Dict, List, Mapping
+from dataclasses import dataclass, field
+from decimal import Decimal
+from typing import Any, Dict, List, Mapping, Set
 
 import aiohttp
+import orjson
 import pyarrow as pa
 from aiohttp_retry import ExponentialRetry, RetryClient
 
@@ -37,6 +40,71 @@ _API_WRITE_MODE_KEYS: Dict[int, str] = {
 }
 
 
+def _orjson_default(obj: Any) -> Any:
+    """orjson default-hook for types it does not natively serialise.
+
+    orjson handles ``datetime`` / ``date`` / ``time`` / ``UUID`` /
+    dataclasses / enums / numpy scalars directly — only ``Decimal`` and
+    ``bytes`` reach this hook. ``Decimal`` is rendered as a string to
+    preserve precision (most APIs accept string-or-number for numeric
+    fields); ``bytes`` is base64-encoded per JSON convention.
+    """
+    if isinstance(obj, Decimal):
+        return str(obj)
+    if isinstance(obj, (bytes, bytearray, memoryview)):
+        return base64.b64encode(bytes(obj)).decode("ascii")
+    raise TypeError(
+        f"orjson cannot serialise {type(obj).__name__}; add a handler "
+        f"if this type should appear in API destination bodies"
+    )
+
+
+def _decode_json_fields(
+    records: List[Dict[str, Any]], json_fields: Set[str]
+) -> None:
+    """Reverse the source-side ``json.dumps`` on Json columns in place.
+
+    Malformed input raises ``ValueError`` with the offending column and
+    row. ``write_batch`` catches it in its broad ``except Exception``
+    branch and returns ``ACK_STATUS_FATAL_FAILURE`` — bad JSON is a
+    data-shape failure, not a transport one, so retrying cannot help.
+    """
+    if not json_fields:
+        return
+    for row, record in enumerate(records):
+        for col in json_fields:
+            value = record.get(col)
+            if not isinstance(value, str):
+                continue
+            try:
+                record[col] = json.loads(value)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"Json field {col!r} at row {row}: value is not "
+                    f"valid JSON ({exc})"
+                ) from exc
+
+
+def _collect_json_fields(mode_block: Mapping[str, Any]) -> Set[str]:
+    """Body field names declared with ``arrow_type: "Json"``.
+
+    Handles both shapes the api-endpoint contract permits:
+    JSON-Schema-style ``input.schema.properties`` (most common) and the
+    flat ``input.schema.columns`` array.
+    """
+    schema = (mode_block.get("input") or {}).get("schema") or {}
+    names: Set[str] = set()
+    for name, prop in (schema.get("properties") or {}).items():
+        if isinstance(prop, dict) and prop.get("arrow_type") == "Json":
+            names.add(name)
+    for col in schema.get("columns") or []:
+        if isinstance(col, dict) and col.get("arrow_type") == "Json":
+            col_name = col.get("name")
+            if col_name:
+                names.add(col_name)
+    return names
+
+
 @dataclass
 class _StreamState:
     """Per-stream API destination state.
@@ -51,6 +119,13 @@ class _StreamState:
     method: str = "POST"
     batch_mode: str = "single"
     batch_size: int = 100
+    # Names of body fields declared with ``arrow_type: "Json"`` in the
+    # endpoint's write input schema. The wire carries them as
+    # JSON-encoded strings (so they fit a ``pa.large_string`` column);
+    # the handler must ``json.loads`` them before aiohttp serializes the
+    # body, otherwise the API receives a quoted string instead of a
+    # nested object.
+    json_fields: Set[str] = field(default_factory=set)
 
 
 class ApiDestinationHandler(BaseDestinationHandler):
@@ -238,6 +313,7 @@ class ApiDestinationHandler(BaseDestinationHandler):
         state = _StreamState(
             endpoint=path,
             method=(request.get("method") or "POST").upper(),
+            json_fields=_collect_json_fields(mode_block),
         )
 
         batching = mode_block.get("batching") or {}
@@ -289,6 +365,12 @@ class ApiDestinationHandler(BaseDestinationHandler):
                 failure_summary="Schema not configured",
             )
 
+        # Materialise once, stay row-oriented. Arrow-native Python types
+        # (``datetime`` / ``Decimal`` / ``date`` / ``time``) survive into
+        # the records dict — ``orjson`` handles them at the serialisation
+        # boundary (natively for datetime/date/time, via the default-hook
+        # for Decimal/bytes). Pre-casting in Arrow space would be a
+        # second pass for no gain.
         records = record_batch.to_pylist()
 
         if not records:
@@ -299,6 +381,7 @@ class ApiDestinationHandler(BaseDestinationHandler):
             )
 
         try:
+            _decode_json_fields(records, state.json_fields)
             if state.batch_mode == self.BATCH_MODE_SINGLE:
                 written = await self._write_single_mode(state, records, record_ids)
             elif state.batch_mode == self.BATCH_MODE_BULK:
@@ -427,10 +510,18 @@ class ApiDestinationHandler(BaseDestinationHandler):
         # base's path when the endpoint starts with ``/``.
         url = self._base_url.rstrip("/") + "/" + state.endpoint.lstrip("/")
 
+        # ``aiohttp.request(json=...)`` would call stdlib ``json.dumps``
+        # which doesn't understand ``datetime`` / ``Decimal``. orjson is
+        # C-based, handles ``datetime`` natively, and falls through to
+        # the explicit default-hook only for ``Decimal`` / ``bytes`` —
+        # one C-speed pass instead of a separate Python or Arrow cast.
+        body = orjson.dumps(data, default=_orjson_default)
+
         async with self._session.request(
             method=state.method,
             url=url,
-            json=data,
+            data=body,
+            headers={"Content-Type": "application/json"},
         ) as response:
             # Check for non-success status
             if response.status >= 400:

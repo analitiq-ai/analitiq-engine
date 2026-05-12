@@ -578,3 +578,277 @@ class TestApiHandlerConfigureSchemaModeDispatch:
         DB-only mode); leaving it out is what makes the unsupported-mode
         branch reachable."""
         assert set(_API_WRITE_MODE_KEYS.values()) == {"insert", "upsert"}
+
+
+@pytest.mark.unit
+class TestApiHandlerJsonFields:
+    """Json-typed body fields travel as JSON-encoded ``pa.large_string``
+    over the wire; the handler must reverse the encoding so aiohttp posts
+    a nested object, not a quoted string."""
+
+    def _doc_with_json_field(self):
+        """An api-endpoint document declaring one Json-typed body field."""
+        return {
+            "operations": {
+                "write": {
+                    "insert": {
+                        "request": {"method": "POST", "path": "/v1/things"},
+                        "input": {
+                            "schema": {
+                                "properties": {
+                                    "id": {"arrow_type": "Utf8"},
+                                    "metadata": {"arrow_type": "Json"},
+                                }
+                            }
+                        },
+                    }
+                }
+            }
+        }
+
+    @pytest.mark.asyncio
+    async def test_configure_schema_collects_json_fields(self):
+        handler = ApiDestinationHandler()
+        handler._connected = True
+        handler._session = MagicMock()
+        handler.set_stream_endpoints({"s1": self._doc_with_json_field()})
+        ok = await handler.configure_schema(
+            SchemaMessage(stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT)
+        )
+        assert ok is True
+        assert handler._streams["s1"].json_fields == {"metadata"}
+
+    @pytest.mark.asyncio
+    async def test_write_batch_decodes_json_field_before_post(self):
+        """The body delivered to ``_send_request`` must carry a dict for the
+        Json column — not a string. Regression catcher for: 'drops the
+        decode loop', 'mis-spells json_fields', 'configure_schema forgets
+        to populate'."""
+        handler = ApiDestinationHandler()
+        handler._connected = True
+        handler._session = MagicMock()
+        handler.set_stream_endpoints({"s1": self._doc_with_json_field()})
+        await handler.configure_schema(
+            SchemaMessage(stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT)
+        )
+
+        # Wire batch — metadata is the JSON-encoded string produced by the
+        # source/transform stage.
+        batch = pa.RecordBatch.from_pylist(
+            [{"id": "r1", "metadata": '{"k": "v", "n": 42}'}]
+        )
+
+        sent_payloads = []
+
+        async def _capture(state, data):
+            sent_payloads.append(data)
+            return {}
+
+        handler._send_request = _capture  # type: ignore[assignment]
+        result = await handler.write_batch(
+            run_id="run",
+            stream_id="s1",
+            batch_seq=0,
+            record_batch=batch,
+            record_ids=["r1"],
+            cursor=MagicMock(),
+        )
+
+        assert result.status == AckStatus.ACK_STATUS_SUCCESS
+        assert sent_payloads == [{"id": "r1", "metadata": {"k": "v", "n": 42}}]
+
+    @pytest.mark.asyncio
+    async def test_configure_schema_collects_json_fields_columns_shape(self):
+        """Some api-endpoint authors use the flat ``columns`` array under
+        ``input.schema`` instead of JSON-Schema-style ``properties``. The
+        collector must find Json fields in either shape, otherwise
+        columns-style endpoints silently ship JSON strings to the API."""
+        handler = ApiDestinationHandler()
+        handler._connected = True
+        handler._session = MagicMock()
+        doc = {
+            "operations": {
+                "write": {
+                    "insert": {
+                        "request": {"method": "POST", "path": "/v1/things"},
+                        "input": {
+                            "schema": {
+                                "columns": [
+                                    {"name": "id", "arrow_type": "Utf8"},
+                                    {"name": "metadata", "arrow_type": "Json"},
+                                ]
+                            }
+                        },
+                    }
+                }
+            }
+        }
+        handler.set_stream_endpoints({"s1": doc})
+        ok = await handler.configure_schema(
+            SchemaMessage(stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT)
+        )
+        assert ok is True
+        assert handler._streams["s1"].json_fields == {"metadata"}
+
+    @pytest.mark.asyncio
+    async def test_write_batch_preserves_native_types_for_orjson(self):
+        """The dict delivered to ``_send_request`` carries Arrow-native
+        Python types (``datetime``, ``Decimal``). orjson at the HTTP
+        boundary handles datetime natively and routes Decimal through
+        the default-hook — both end up as canonical JSON strings on the
+        wire. Asserting on the dict shape locks in that we don't waste
+        cycles pre-converting in Arrow space.
+        """
+        from datetime import datetime, timezone
+        from decimal import Decimal
+        import orjson
+
+        from src.destination.connectors.api import _orjson_default
+
+        handler = ApiDestinationHandler()
+        handler._connected = True
+        handler._session = MagicMock()
+        doc = {
+            "operations": {
+                "write": {
+                    "insert": {
+                        "request": {"method": "POST", "path": "/v1/things"},
+                        "input": {"schema": {"properties": {}}},
+                    }
+                }
+            }
+        }
+        handler.set_stream_endpoints({"s1": doc})
+        await handler.configure_schema(
+            SchemaMessage(stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT)
+        )
+
+        batch_schema = pa.schema([
+            pa.field("id", pa.int64()),
+            pa.field("created", pa.timestamp("us", tz="UTC")),
+            pa.field("amount", pa.decimal128(18, 4)),
+        ])
+        batch = pa.RecordBatch.from_arrays(
+            [
+                pa.array([1], type=pa.int64()),
+                pa.array(
+                    [datetime(2026, 3, 23, 10, 18, 24, tzinfo=timezone.utc)],
+                    type=pa.timestamp("us", tz="UTC"),
+                ),
+                pa.array([Decimal("42.5000")], type=pa.decimal128(18, 4)),
+            ],
+            schema=batch_schema,
+        )
+
+        sent_payloads = []
+
+        async def _capture(state, data):
+            sent_payloads.append(data)
+            return {}
+
+        handler._send_request = _capture  # type: ignore[assignment]
+        result = await handler.write_batch(
+            run_id="run",
+            stream_id="s1",
+            batch_seq=0,
+            record_batch=batch,
+            record_ids=["r1"],
+            cursor=MagicMock(),
+        )
+        assert result.status == AckStatus.ACK_STATUS_SUCCESS
+
+        sent = sent_payloads[0]
+        # No pre-conversion: types are still Python-native here.
+        assert sent["id"] == 1
+        assert isinstance(sent["created"], datetime)
+        assert isinstance(sent["amount"], Decimal)
+
+        # And the orjson boundary turns them into RFC 3339 / canonical
+        # forms without any Arrow-side cast pass.
+        encoded = orjson.dumps(sent, default=_orjson_default).decode("utf-8")
+        assert '"created":"2026-03-23T10:18:24+00:00"' in encoded
+        assert '"amount":"42.5000"' in encoded
+
+    @pytest.mark.asyncio
+    async def test_write_batch_malformed_json_returns_fatal(self):
+        """A non-JSON string in a Json column is a data-shape failure,
+        not a transport failure — must classify FATAL and surface the
+        offending column."""
+        handler = ApiDestinationHandler()
+        handler._connected = True
+        handler._session = MagicMock()
+        handler.set_stream_endpoints({"s1": self._doc_with_json_field()})
+        await handler.configure_schema(
+            SchemaMessage(stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT)
+        )
+
+        batch = pa.RecordBatch.from_pylist(
+            [{"id": "r1", "metadata": "this is not json"}]
+        )
+        handler._send_request = AsyncMock(return_value={})
+
+        result = await handler.write_batch(
+            run_id="run",
+            stream_id="s1",
+            batch_seq=0,
+            record_batch=batch,
+            record_ids=["r1"],
+            cursor=MagicMock(),
+        )
+        assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+        assert "metadata" in (result.failure_summary or "")
+
+@pytest.mark.unit
+class TestOrjsonDefault:
+    """The default-hook is the only seam where Decimal and bytes reach
+    orjson — everything else (datetime, date, time, UUID, dataclass,
+    enum, numpy) orjson serialises natively."""
+
+    def test_decimal_becomes_canonical_string(self):
+        from decimal import Decimal
+        from src.destination.connectors.api import _orjson_default
+
+        assert _orjson_default(Decimal("42.5000")) == "42.5000"
+        assert _orjson_default(Decimal("-0.00001")) == "-0.00001"
+
+    def test_bytes_become_base64(self):
+        import base64
+        from src.destination.connectors.api import _orjson_default
+
+        out = _orjson_default(b"hello")
+        assert out == base64.b64encode(b"hello").decode("ascii")
+        # bytearray and memoryview share the path.
+        assert _orjson_default(bytearray(b"\xff\xfe")) == base64.b64encode(
+            b"\xff\xfe"
+        ).decode("ascii")
+
+    def test_unknown_type_raises_typeerror(self):
+        from src.destination.connectors.api import _orjson_default
+
+        class Custom:
+            pass
+
+        with pytest.raises(TypeError, match="cannot serialise Custom"):
+            _orjson_default(Custom())
+
+    def test_orjson_uses_default_for_decimal_in_nested_dict(self):
+        """The hook fires per-value inside nested structures — proves
+        no Arrow-level recursion needed to handle nested Decimals."""
+        from datetime import datetime, timezone
+        from decimal import Decimal
+        import orjson
+
+        from src.destination.connectors.api import _orjson_default
+
+        payload = {
+            "id": 1,
+            "created": datetime(2026, 5, 12, 10, 0, tzinfo=timezone.utc),
+            "items": [
+                {"sku": "A", "price": Decimal("9.99")},
+                {"sku": "B", "price": Decimal("12.50")},
+            ],
+        }
+        encoded = orjson.dumps(payload, default=_orjson_default).decode("utf-8")
+        assert '"price":"9.99"' in encoded
+        assert '"price":"12.50"' in encoded
+        assert '"created":"2026-05-12T10:00:00+00:00"' in encoded

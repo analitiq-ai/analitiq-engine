@@ -1,18 +1,14 @@
-"""Parse canonical Arrow type strings into PyArrow ``DataType`` objects.
+"""Arrow type string ↔ PyArrow ``DataType``.
 
-Canonical type strings are the output of :class:`TypeMapper`. They follow the
-Apache Arrow naming convention defined in the plugin repo's
-``canonical-types.json`` (``$id``: ``https://analitiq.dev/schemas/canonical-types.json``).
-
-Only the families the engine materializes today are supported here — adding
-further families is a matter of adding one branch to
-:func:`canonical_to_arrow`.
+:func:`parse_arrow_type` handles scalar types only — nested ``Object`` /
+``List`` markers need the field's sub-schema (``properties`` / ``items``)
+which only :func:`resolve_arrow_type` has access to.
 """
 
 from __future__ import annotations
 
 import re
-from typing import Final, Pattern
+from typing import Any, Final, Mapping, Pattern
 
 import pyarrow as pa
 
@@ -52,12 +48,16 @@ def _parse_head(canonical: str) -> tuple[str, tuple[str, ...]]:
     return head.strip(), args
 
 
-def canonical_to_arrow(canonical: str) -> pa.DataType:
-    """Parse a canonical Arrow type string into a PyArrow ``DataType``.
+def parse_arrow_type(canonical: str) -> pa.DataType:
+    """Parse an Arrow type string into a PyArrow ``DataType``.
 
     Raises :class:`InvalidTypeMapError` for malformed input or unsupported
     families. The matcher is deliberately strict — an unknown family
     indicates an author-time mistake that should surface loudly.
+
+    Nested-type markers (``Object``, ``List``) are intentionally rejected
+    here: they need the property's sub-schema, which only the
+    :class:`SchemaContract` walker has access to.
     """
     head, args = _parse_head(canonical)
     match head:
@@ -113,9 +113,59 @@ def canonical_to_arrow(canonical: str) -> pa.DataType:
             return _parse_decimal(args, pa.decimal256, head)
         case "FixedSizeBinary":
             return _parse_fixed_binary(args, head)
+        case "Json":
+            # Opaque JSON blob — shape not declared. Carried over the wire as
+            # a JSON-encoded string; destinations json.loads it back to a
+            # dict/list at the write boundary.
+            return pa.large_string()
+        case "Object" | "List":
+            raise InvalidTypeMapError(
+                f"arrow_type {head!r} describes a nested type and cannot be "
+                f"parsed in isolation; SchemaContract reads the property's "
+                f"'properties' (Object) or 'items' (List) sub-schema to build it"
+            )
     raise InvalidTypeMapError(
-        f"canonical type family {head!r} (from {canonical!r}) is not supported"
+        f"arrow_type family {head!r} (from {canonical!r}) is not supported"
     )
+
+
+def resolve_arrow_type(spec: Mapping[str, Any], where: str = "field") -> pa.DataType:
+    """Walk a JSON-Schema-shaped field spec into a ``pa.DataType``.
+
+    ``where`` is a caller-supplied breadcrumb (e.g. ``"field 'checkAccount'"``)
+    threaded into error messages so authors can locate the offending
+    declaration without reading the recursion stack.
+    """
+    arrow_type = spec.get("arrow_type")
+    if not arrow_type:
+        raise InvalidTypeMapError(
+            f"{where}: missing 'arrow_type' declaration"
+        )
+    if arrow_type == "Object":
+        sub = spec.get("properties")
+        if not isinstance(sub, dict) or not sub:
+            raise InvalidTypeMapError(
+                f"{where}: arrow_type='Object' requires a non-empty "
+                f"'properties' map declaring each sub-field"
+            )
+        fields = [
+            pa.field(
+                name,
+                resolve_arrow_type(child, where=f"{where}.{name}"),
+                nullable=name not in set(spec.get("required") or ()),
+            )
+            for name, child in sub.items()
+        ]
+        return pa.struct(fields)
+    if arrow_type == "List":
+        items = spec.get("items")
+        if not isinstance(items, dict):
+            raise InvalidTypeMapError(
+                f"{where}: arrow_type='List' requires an 'items' object "
+                f"declaring the element type"
+            )
+        return pa.list_(resolve_arrow_type(items, where=f"{where}[]"))
+    return parse_arrow_type(arrow_type)
 
 
 def _require_unit(
