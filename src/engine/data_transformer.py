@@ -1,8 +1,8 @@
 """Data transformation utilities for the streaming engine.
 
-Supports both:
-- New assignment-based mapping (MAPPING_AND_TRANSFORMATIONS.md spec)
-- Legacy field_mappings + computed_fields format (for backwards compatibility)
+Supports assignment-based mapping (per MAPPING_AND_TRANSFORMATIONS.md)
+and a flat ``field_mappings`` + ``computed_fields`` format used by
+fixture-driven tests.
 """
 
 import asyncio
@@ -509,13 +509,8 @@ class AssignmentTransformer:
 
 
 class DataTransformer:
-    """
-    Handles field mappings, transformations, and computed fields.
-
-    Supports both:
-    - New assignment-based mapping (assignments array)
-    - Legacy field_mappings + computed_fields format
-    """
+    """Apply contract mapping assignments (and the ``field_mappings`` /
+    ``computed_fields`` fixture shape) to a batch of records."""
 
     def __init__(self):
         self.expression_evaluator = SecureExpressionEvaluator()

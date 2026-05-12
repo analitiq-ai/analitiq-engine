@@ -372,10 +372,10 @@ class TestConfigurationLoading:
             pipeline, streams, connections, endpoints, connectors = prep.create_config()
 
             wise_ref = EndpointRef(
-                scope="connector", identifier="wise", endpoint="transfers",
+                scope="connector", connection_alias="my-wise", alias="transfers",
             )
             pg_ref = EndpointRef(
-                scope="connection", identifier="prod-pg", endpoint="public_transfers",
+                scope="connection", connection_alias="prod-pg", alias="public_transfers",
             )
             assert wise_ref in endpoints
             assert endpoints[wise_ref]["endpoint"] == "/v1/transfers"

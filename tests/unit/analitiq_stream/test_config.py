@@ -7,7 +7,7 @@ from src.config import (
     validate_connection_config,
     resolve_endpoint_ref,
     load_connection,
-    load_connector_for_connection,
+    load_connector_definition,
 )
 from src.config.exceptions import EndpointNotFoundError, ConnectorNotFoundError, ConnectionConfigError
 from src.models.stream import EndpointRef
@@ -26,7 +26,7 @@ class TestConfig:
             "validate_connection_config",
             "resolve_endpoint_ref",
             "load_connection",
-            "load_connector_for_connection",
+            "load_connector_definition",
             "PathBasedConfigLoader",
         ]
 
@@ -115,31 +115,31 @@ class TestEndpointRefModel:
     @pytest.mark.unit
     def test_from_dict_connector(self):
         ref = EndpointRef.from_dict({
-            "scope": "connector", "identifier": "pipedrive", "endpoint": "deals",
+            "scope": "connector", "connection_alias": "pipedrive", "alias": "deals",
         })
         assert ref.scope == "connector"
-        assert ref.identifier == "pipedrive"
-        assert ref.endpoint == "deals"
+        assert ref.connection_alias == "pipedrive"
+        assert ref.alias == "deals"
 
     @pytest.mark.unit
     def test_from_dict_connection(self):
         ref = EndpointRef.from_dict({
-            "scope": "connection", "identifier": "prod-postgres", "endpoint": "public_users",
+            "scope": "connection", "connection_alias": "prod-postgres", "alias": "public_users",
         })
         assert ref.scope == "connection"
-        assert ref.identifier == "prod-postgres"
-        assert ref.endpoint == "public_users"
+        assert ref.connection_alias == "prod-postgres"
+        assert ref.alias == "public_users"
 
     @pytest.mark.unit
     def test_from_dict_passes_through_existing_instance(self):
-        original = EndpointRef(scope="connector", identifier="x", endpoint="y")
+        original = EndpointRef(scope="connector", connection_alias="x", alias="y")
         assert EndpointRef.from_dict(original) is original
 
     @pytest.mark.unit
     def test_invalid_scope_raises(self):
         with pytest.raises(ValueError, match="scope"):
             EndpointRef.from_dict({
-                "scope": "unknown", "identifier": "x", "endpoint": "y",
+                "scope": "unknown", "connection_alias": "x", "alias": "y",
             })
 
     @pytest.mark.unit
@@ -151,42 +151,42 @@ class TestEndpointRefModel:
     def test_unknown_keys_raises(self):
         with pytest.raises(ValueError, match="unknown keys"):
             EndpointRef.from_dict({
-                "scope": "connector", "identifier": "x", "endpoint": "y", "extra": "z",
+                "scope": "connector", "connection_alias": "x", "alias": "y", "extra": "z",
             })
 
     @pytest.mark.unit
-    def test_empty_identifier_raises(self):
-        with pytest.raises(ValueError, match="identifier cannot be empty"):
+    def test_empty_connection_alias_raises(self):
+        with pytest.raises(ValueError, match="connection_alias cannot be empty"):
             EndpointRef.from_dict({
-                "scope": "connector", "identifier": "", "endpoint": "y",
+                "scope": "connector", "connection_alias": "", "alias": "y",
             })
 
     @pytest.mark.unit
-    def test_empty_endpoint_raises(self):
-        with pytest.raises(ValueError, match="endpoint cannot be empty"):
+    def test_empty_alias_raises(self):
+        with pytest.raises(ValueError, match="alias cannot be empty"):
             EndpointRef.from_dict({
-                "scope": "connector", "identifier": "x", "endpoint": "",
+                "scope": "connector", "connection_alias": "x", "alias": "",
             })
 
     @pytest.mark.unit
     def test_non_dict_input_raises(self):
-        with pytest.raises(TypeError, match="endpoint_ref must be a dict"):
+        with pytest.raises(TypeError, match="endpoint_ref must be"):
             EndpointRef.from_dict("connector:x/y")
 
     @pytest.mark.unit
     def test_to_dict_roundtrip(self):
-        d = {"scope": "connector", "identifier": "x", "endpoint": "y"}
+        d = {"scope": "connector", "connection_alias": "x", "alias": "y"}
         assert EndpointRef.from_dict(d).to_dict() == d
 
     @pytest.mark.unit
     def test_str_canonical_form(self):
-        ref = EndpointRef(scope="connection", identifier="alias", endpoint="name")
+        ref = EndpointRef(scope="connection", connection_alias="alias", alias="name")
         assert str(ref) == "connection:alias/name"
 
     @pytest.mark.unit
     def test_hashable_for_dict_keys(self):
-        ref1 = EndpointRef(scope="connector", identifier="x", endpoint="y")
-        ref2 = EndpointRef(scope="connector", identifier="x", endpoint="y")
+        ref1 = EndpointRef(scope="connector", connection_alias="x", alias="y")
+        ref2 = EndpointRef(scope="connector", connection_alias="x", alias="y")
         assert hash(ref1) == hash(ref2)
         cache = {ref1: "value"}
         assert cache[ref2] == "value"
@@ -232,7 +232,7 @@ class TestEndpointRefResolver:
         (endpoint_dir / "transfers.json").write_text('{"endpoint": "/v1/transfers"}')
 
         paths = {"connectors": tmp_path / "connectors", "connections": tmp_path / "connections"}
-        ref = EndpointRef(scope="connector", identifier="wise", endpoint="transfers")
+        ref = EndpointRef(scope="connector", connection_alias="wise", alias="transfers")
         assert resolve_endpoint_ref(ref, paths)["endpoint"] == "/v1/transfers"
 
     @pytest.mark.unit
@@ -266,17 +266,17 @@ class TestConnectionLoader:
             load_connection("nonexistent", tmp_path)
 
     @pytest.mark.unit
-    def test_load_connector_for_connection(self, tmp_path):
+    def test_load_connector_definition(self, tmp_path):
         connector_dir = tmp_path / "wise" / "definition"
         connector_dir.mkdir(parents=True)
         (connector_dir / "connector.json").write_text(
             '{"connector_type": "api", "slug": "wise"}'
         )
 
-        result = load_connector_for_connection("wise", tmp_path)
+        result = load_connector_definition("wise", tmp_path)
         assert result["connector_type"] == "api"
 
     @pytest.mark.unit
     def test_load_missing_connector_raises(self, tmp_path):
         with pytest.raises(ConnectorNotFoundError):
-            load_connector_for_connection("nonexistent", tmp_path)
+            load_connector_definition("nonexistent", tmp_path)

@@ -39,6 +39,12 @@ from .generated.analitiq.v1 import (
 logger = logging.getLogger(__name__)
 
 
+_STREAM_TASK_FAILED = object()  # Sentinel pushed onto the response queue when
+                                # the reader/writer task exits abnormally so
+                                # send_batch / start_stream fail fast instead of
+                                # blocking on `response_queue.get` until timeout.
+
+
 # Default configuration from environment
 DEFAULT_GRPC_HOST = os.getenv("DESTINATION_GRPC_HOST", "localhost")
 DEFAULT_GRPC_PORT = int(os.getenv("DESTINATION_GRPC_PORT", "50051"))
@@ -93,6 +99,12 @@ class DestinationGRPCClient:
         self._response_queue: Optional[asyncio.Queue] = None
         self._reader_task: Optional[asyncio.Task] = None
         self._writer_task: Optional[asyncio.Task] = None
+
+        # Last exception observed by the reader or writer task. Read by
+        # send_batch / start_stream after seeing the _STREAM_TASK_FAILED
+        # sentinel so the failure reason in the BatchResult is the real
+        # underlying error instead of "Timeout waiting for ACK".
+        self._task_failure: Optional[BaseException] = None
 
         # Connection state
         self._connected = False
@@ -276,16 +288,23 @@ class DestinationGRPCClient:
                 timeout=self.timeout,
             )
 
+            if response is _STREAM_TASK_FAILED:
+                cause = self._task_failure
+                logger.error(
+                    "Stream reader/writer exited before schema ACK: %s",
+                    cause,
+                )
+                return False
+
             if isinstance(response, SchemaAck):
                 if response.accepted:
                     logger.info(f"Schema accepted for stream {stream_id}")
                     return True
-                else:
-                    logger.error(f"Schema rejected: {response.message}")
-                    return False
-            else:
-                logger.error(f"Unexpected response type: {type(response)}")
+                logger.error(f"Schema rejected: {response.message}")
                 return False
+
+            logger.error(f"Unexpected response type: {type(response)}")
+            return False
 
         except asyncio.TimeoutError:
             logger.error("Timeout waiting for schema ACK")
@@ -329,18 +348,34 @@ class DestinationGRPCClient:
                 timeout=self.timeout,
             )
 
-            if isinstance(response, BatchAck):
-                return self._process_ack(response)
-            else:
-                logger.error(f"Unexpected response type: {type(response)}")
+            if response is _STREAM_TASK_FAILED:
+                cause = self._task_failure
+                summary = (
+                    f"Stream reader/writer task exited before ACK: "
+                    f"{type(cause).__name__ if cause else 'stream closed'}: {cause}"
+                )
+                logger.error("Batch %d: %s", batch_seq, summary)
                 return BatchResult(
                     success=False,
                     status=AckStatus.ACK_STATUS_FATAL_FAILURE,
                     records_written=0,
                     committed_cursor=None,
                     failed_record_ids=[],
-                    failure_summary="Unexpected response type",
+                    failure_summary=summary,
                 )
+
+            if isinstance(response, BatchAck):
+                return self._process_ack(response)
+
+            logger.error(f"Unexpected response type: {type(response)}")
+            return BatchResult(
+                success=False,
+                status=AckStatus.ACK_STATUS_FATAL_FAILURE,
+                records_written=0,
+                committed_cursor=None,
+                failed_record_ids=[],
+                failure_summary="Unexpected response type",
+            )
 
         except asyncio.TimeoutError:
             logger.error(f"Timeout waiting for ACK on batch {batch_seq}")
@@ -390,8 +425,14 @@ class DestinationGRPCClient:
                     await self._stream.done_writing()
                     break
                 await self._stream.write(request)
-        except Exception as e:
-            logger.error(f"Writer task error: {e}")
+        except asyncio.CancelledError:
+            raise
+        except BaseException as e:
+            logger.error("Writer task error: %s", e, exc_info=True)
+            self._task_failure = e
+            # Unblock any send_batch / start_stream waiting on a response.
+            if self._response_queue is not None:
+                self._response_queue.put_nowait(_STREAM_TASK_FAILED)
             raise
 
     async def _read_responses(self) -> None:
@@ -405,10 +446,19 @@ class DestinationGRPCClient:
                     await self._response_queue.put(response.schema_ack)
                 else:
                     logger.warning(f"Unknown response type: {msg_type}")
-        except grpc.aio.AioRpcError as e:
-            logger.error(f"Reader task error: {e}")
         except asyncio.CancelledError:
-            pass
+            return
+        except BaseException as e:
+            logger.error("Reader task error: %s", e, exc_info=True)
+            self._task_failure = e
+            if self._response_queue is not None:
+                self._response_queue.put_nowait(_STREAM_TASK_FAILED)
+            raise
+        else:
+            # Stream closed by the server with no further responses;
+            # signal waiters so they don't block until timeout.
+            if self._response_queue is not None:
+                self._response_queue.put_nowait(_STREAM_TASK_FAILED)
 
     def _build_schema_message(
         self,
@@ -428,7 +478,12 @@ class DestinationGRPCClient:
             "upsert": WriteMode.WRITE_MODE_UPSERT,
             "truncate_insert": WriteMode.WRITE_MODE_TRUNCATE_INSERT,
         }
-        write_mode = write_mode_map.get(write_mode_str, WriteMode.WRITE_MODE_UPSERT)
+        if write_mode_str not in write_mode_map:
+            raise ValueError(
+                f"Unknown write_mode {write_mode_str!r}; expected one of "
+                f"{sorted(write_mode_map)}"
+            )
+        write_mode = write_mode_map[write_mode_str]
 
         return SchemaMessage(
             stream_id=stream_id,

@@ -1,10 +1,10 @@
 """Pipeline management and configuration.
 
-This module bridges the new contract-shaped output of
+This module bridges the contract-shaped output of
 :class:`PipelineConfigPrep` to the runtime-side ``StreamingEngine`` and
-its source/destination connectors. The engine and connectors still
-consume a flat per-stream config dict, so this module is the single
-seam where the structured contract documents are translated.
+its source/destination connectors. The engine and connectors consume a
+flat per-stream config dict; this module is the single seam where the
+structured contract documents are translated to that shape.
 """
 
 from __future__ import annotations
@@ -69,7 +69,7 @@ class Pipeline:
         Path(self.dlq_dir).mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------
-    # Contract -> legacy connector config translation
+    # Contract -> connector config translation
     # ------------------------------------------------------------------
 
     def _build_config_dict(self) -> Dict[str, Any]:
@@ -241,7 +241,7 @@ def _translate_api_source(
 
 
 def _translate_assignment(assignment: Dict[str, Any]) -> Dict[str, Any]:
-    """Translate a contract-shaped assignment to the legacy transformer shape.
+    """Translate a contract-shaped assignment to the transformer's shape.
 
     The contract authors targets with a dotted ``path`` string and an
     Apache Arrow type label. The transformer's expected shape uses a list

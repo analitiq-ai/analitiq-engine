@@ -35,7 +35,7 @@ def _db_connector(slug: str = "pg") -> dict:
         "default_transport": "database",
         "transports": {
             "database": {
-                "kind": "sqlalchemy",
+                "transport_type": "sqlalchemy",
                 "driver": "postgresql+asyncpg",
                 "dsn": {"template": "postgresql+asyncpg://u:p@h:5432/d"},
             }
@@ -50,7 +50,7 @@ def _api_connector() -> dict:
         "default_transport": "api",
         "transports": {
             "api": {
-                "kind": "http",
+                "transport_type": "http",
                 "base_url": "https://api.example.com",
             }
         },

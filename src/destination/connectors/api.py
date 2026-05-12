@@ -70,11 +70,11 @@ class ApiDestinationHandler(BaseDestinationHandler):
       - max_requests: Max requests per time window
       - time_window: Time window in seconds
 
-    Configuration (endpoint config via SchemaMessage):
-    - endpoint: API endpoint path (e.g., /v1/records)
-    - method: HTTP method (default: POST)
-    - batch_mode: single, bulk, or batch (default: single)
-    - batch_size: Records per batch for batch mode (default: 100)
+    Per-stream endpoint settings (path, method, batch mode, batch size)
+    are read from the preloaded contract API endpoint document at
+    ``configure_schema`` time, keyed by ``operations.write.<mode>``. The
+    SchemaMessage off the wire only carries ``stream_id``, ``version``,
+    and ``write_mode``.
     """
 
     # Batch modes
@@ -106,9 +106,9 @@ class ApiDestinationHandler(BaseDestinationHandler):
         # operations.write.<mode>.* directly from the contract.
         self._stream_endpoints: Dict[str, Dict[str, Any]] = {}
 
-        # Retry settings - statuses that trigger retry with exponential backoff
-        # 429 (rate limit), 500, 503, 504 (server errors) get up to 3 attempts
-        # 502 and other 4xx errors are not retried (single attempt)
+        # HTTP statuses that trigger retry with exponential backoff; the
+        # attempt count comes from ``runtime.raw_config["max_retries"]`` at
+        # connect() time. Other 4xx (incl. 502) are single-attempt.
         self._retry_statuses: set = {429, 500, 503, 504}
 
     def set_stream_endpoints(
@@ -435,11 +435,14 @@ class ApiDestinationHandler(BaseDestinationHandler):
                     message=f"API error {response.status}: {text[:200]}",
                 )
 
-            # Try to parse JSON response
             try:
-                return await response.json()
-            except Exception:
-                return {"status": "ok", "status_code": response.status}
+                return await response.json(content_type=None)
+            except (json.JSONDecodeError, aiohttp.ContentTypeError, UnicodeDecodeError) as err:
+                body = (await response.text())[:500]
+                raise aiohttp.ClientPayloadError(
+                    f"API returned status {response.status} with non-JSON body: "
+                    f"{err}; body[:500]={body!r}"
+                ) from err
 
     async def health_check(self) -> bool:
         """

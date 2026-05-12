@@ -92,20 +92,18 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
     - password: Database password
     - ssl_mode: Optional SSL mode
 
-    Configuration (endpoint config via SchemaMessage):
-    - schema: Database schema name (default: public for PostgreSQL)
-    - table: Target table name
-    - primary_key: List of primary key columns
-    - write_mode: insert, upsert, or truncate_insert
+    Per-stream destination settings (schema, table, primary keys,
+    columns) are read from the preloaded contract endpoint document at
+    ``configure_schema`` time. The SchemaMessage off the wire only
+    carries ``stream_id``, ``version``, and ``write_mode``.
     """
 
     # Idempotency tracking table name
     BATCH_COMMITS_TABLE = "_batch_commits"
 
-    # Server-managed column added to every database destination table. Populated
-    # by the database via DEFAULT NOW() at INSERT time so the engine never has
-    # to ship a per-record timestamp. The handler also tries to ALTER TABLE ADD
-    # this column if a pre-existing table is missing it.
+    # Server-managed column added to every database destination table.
+    # Populated by the database via DEFAULT NOW() at INSERT time so the
+    # engine never has to ship a per-record timestamp.
     SYNCED_AT_COLUMN = "_synced_at"
 
     def __init__(self) -> None:
@@ -281,17 +279,11 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
             # both DDL generation and the schema contract use it.
             type_mapper = self._type_mapper_for_stream(stream_id)
 
-            # Create tables (needs the mapper for SQLAlchemy type picks).
             await self._ensure_tables_exist(state, type_mapper)
 
-            # Build the schema contract for vectorized type casting.
             state.schema_contract = SchemaContract(
                 state.endpoint_document,
                 type_mapper=type_mapper,
-            )
-            logger.debug(
-                "Built schema contract with %d columns",
-                len(state.schema_contract.column_types),
             )
 
             self._streams[stream_id] = state
@@ -305,26 +297,33 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
             )
             return True
 
-        except (UnmappedTypeError, InvalidTypeMapError):
-            # Type-map errors are deterministic and actionable — don't mask
-            # them behind a boolean. The gRPC server surfaces the exception
-            # in the schema ack so the operator sees the unmapped native
-            # type instead of a generic "configure failed" line.
+        except (
+            UnmappedTypeError,
+            InvalidTypeMapError,
+            PlaceholderExpansionError,
+            ValueError,
+        ):
+            # Deterministic, actionable errors propagate with their real
+            # type so the schema-ack carries the precise reason (unmapped
+            # native type, malformed type-map, missing secret, bad endpoint
+            # document) instead of a generic "configure failed".
             raise
         except Exception as e:
             logger.error("Failed to configure schema: %s", e, exc_info=True)
             return False
 
     def _get_write_mode(self, proto_write_mode: int) -> str:
-        """Convert protobuf write mode to string."""
-        # WriteMode enum values from proto
         mode_map = {
-            0: "unspecified",
             1: "insert",
             2: "upsert",
             3: "truncate_insert",
         }
-        return mode_map.get(proto_write_mode, "upsert")
+        if proto_write_mode not in mode_map:
+            raise ValueError(
+                f"Unsupported proto write_mode={proto_write_mode}; expected one "
+                f"of {sorted(mode_map)} (WRITE_MODE_INSERT/UPSERT/TRUNCATE_INSERT)"
+            )
+        return mode_map[proto_write_mode]
 
     async def _ensure_tables_exist(
         self, state: _StreamState, type_mapper: TypeMapper
@@ -340,8 +339,6 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         if not self._engine:
             return
 
-        # Batch commits table for idempotency, in the same schema as the
-        # stream's target table.
         state.batch_commits_table = Table(
             self.BATCH_COMMITS_TABLE,
             state.metadata,

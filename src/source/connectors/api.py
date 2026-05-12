@@ -15,8 +15,8 @@ This connector consumes the published API-endpoint contract directly:
 * ``operations.read.replication.cursor_mappings`` — cursor-field ↔
   query-param map used to build incremental ``WHERE`` filters.
 
-No legacy flat shape is consumed; the source-config dict only carries
-the resolved contract documents and per-stream overrides.
+The source-config dict carries the resolved contract documents and
+per-stream overrides; nothing else.
 """
 
 from __future__ import annotations
@@ -134,11 +134,12 @@ class APIConnector(BaseConnector):
         # stored cursor, then write the value into the cursor's mapped
         # param.
         if replication_method == "incremental":
-            self._apply_incremental_replication(
+            await self._apply_incremental_replication(
                 base_params,
                 read_spec,
                 state_manager,
                 stream_name,
+                partition,
                 cursor_field,
                 safety_window,
             )
@@ -235,12 +236,13 @@ class APIConnector(BaseConnector):
     # Incremental replication
     # ------------------------------------------------------------------
 
-    def _apply_incremental_replication(
+    async def _apply_incremental_replication(
         self,
         params: Dict[str, Any],
         read_spec: Dict[str, Any],
         state_manager: StateManager,
         stream_name: str,
+        partition: Dict[str, Any],
         cursor_field: Optional[str],
         safety_window_seconds: Optional[int],
     ) -> None:
@@ -258,19 +260,19 @@ class APIConnector(BaseConnector):
                 cursor_field,
             )
             return
-        bookmarks = self._load_bookmarks(state_manager, stream_name)
-        if not bookmarks:
-            logger.info("No bookmarks found, performing full replication for first run")
-            return
-        cursor_value = (bookmarks[0] or {}).get("cursor")
+        cursor_state = await state_manager.get_cursor(stream_name, partition)
+        cursor_value = (cursor_state or {}).get("primary", {}).get("value")
         if not cursor_value:
-            logger.info("No cursor found in bookmark, performing full replication")
-            return
-        if safety_window_seconds is None:
-            logger.warning(
-                "safety_window_seconds not configured; skipping incremental filter"
+            logger.info(
+                "No prior cursor for stream %r; first run performs full replication",
+                stream_name,
             )
             return
+        if safety_window_seconds is None:
+            raise ReadError(
+                f"stream {stream_name!r}: incremental replication requires "
+                f"safety_window_seconds in the replication block"
+            )
         effective_start = self._compute_effective_start(
             cursor_value, safety_window_seconds
         )
@@ -283,31 +285,27 @@ class APIConnector(BaseConnector):
         )
 
     @staticmethod
-    def _load_bookmarks(state_manager: StateManager, stream_name: str) -> List[Dict[str, Any]]:
-        try:
-            doc = state_manager.load_stream_state(stream_name)
-        except Exception:
-            return []
-        return list((doc or {}).get("bookmarks") or [])
-
-    @staticmethod
     def _compute_effective_start(cursor: Any, safety_window_seconds: int) -> str:
         from datetime import timedelta
 
         from dateutil.parser import isoparse
 
+        cursor_str = str(cursor)
         try:
-            cursor_dt = isoparse(str(cursor))
-            if cursor_dt.tzinfo is None:
-                cursor_dt = cursor_dt.replace(tzinfo=timezone.utc)
-            effective_dt = cursor_dt - timedelta(seconds=safety_window_seconds)
-            return effective_dt.isoformat().replace("+00:00", "Z")
+            cursor_dt = isoparse(cursor_str)
         except (ValueError, TypeError):
             try:
-                cursor_id = int(str(cursor))
-                return str(max(0, cursor_id - safety_window_seconds))
-            except ValueError:
-                return str(cursor)
+                cursor_id = int(cursor_str)
+            except ValueError as err:
+                raise ReadError(
+                    f"cursor value {cursor!r} is neither an ISO timestamp nor "
+                    f"an integer; cannot apply safety window"
+                ) from err
+            return str(max(0, cursor_id - safety_window_seconds))
+        if cursor_dt.tzinfo is None:
+            cursor_dt = cursor_dt.replace(tzinfo=timezone.utc)
+        effective_dt = cursor_dt - timedelta(seconds=safety_window_seconds)
+        return effective_dt.isoformat().replace("+00:00", "Z")
 
     # ------------------------------------------------------------------
     # Pagination
@@ -480,10 +478,14 @@ class APIConnector(BaseConnector):
         tie_breaker_fields: List[str],
     ) -> List[Dict[str, Any]]:
         bookmarks = state.get("bookmarks") or []
-        if not bookmarks or not cursor_field or not tie_breaker_fields:
+        if not bookmarks or not cursor_field:
             return batch
         bookmark = bookmarks[0]
-        return [r for r in batch if _is_record_new(r, bookmark, cursor_field, tie_breaker_fields)]
+        return [
+            r
+            for r in batch
+            if _is_record_new(r, bookmark, cursor_field, tie_breaker_fields or [])
+        ]
 
     def _save_checkpoint(
         self,

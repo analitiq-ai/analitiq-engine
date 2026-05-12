@@ -212,9 +212,6 @@ class StreamingEngine:
         error_message: Optional[str] = None
 
         try:
-            # The pipeline.py translator produces per-stream source and
-            # destination dicts directly on the stream config; no
-            # pipeline-level merging is needed.
             source_cfg = stream_config["source"]
             destination_cfg = stream_config["destination"]
 
@@ -388,6 +385,7 @@ class StreamingEngine:
         stream_name = config["stream_name"]
         logger.debug(f"Starting transform stage for stream {stream_name}")
 
+        assignments = (config.get("mapping") or {}).get("assignments") or []
         batch_count = 0
         try:
             while True:
@@ -395,11 +393,21 @@ class StreamingEngine:
                 if batch is None:
                     break
 
-                pylist = batch.to_pylist()
-                transformed_pylist = await self.data_transformer.apply_transformations(
-                    pylist, config
-                )
-                transformed_batch = pa.RecordBatch.from_pylist(transformed_pylist)
+                if not assignments:
+                    # Passthrough: source schema (with native types from
+                    # the source contract) carries straight to the
+                    # destination's cast_arrow_batch.
+                    transformed_batch = batch
+                else:
+                    pylist = batch.to_pylist()
+                    transformed_pylist = await self.data_transformer.apply_transformations(
+                        pylist, config
+                    )
+                    # Mapping changes shape; type inference is the only
+                    # option here. The destination's SchemaContract will
+                    # realign all-null / decimal / date columns against
+                    # its own canonical schema.
+                    transformed_batch = pa.RecordBatch.from_pylist(transformed_pylist)
 
                 await output_queue.put(transformed_batch)
                 batch_count += 1
@@ -454,14 +462,16 @@ class StreamingEngine:
         if isinstance(cursor_field, list):
             cursor_field = cursor_field[0] if cursor_field else None
         tie_breaker_fields = replication.get("tie_breaker_fields")
-        primary_key_fields = list(stream_source.get("primary_key") or [])
+        primary_key_fields = list(stream_source.get("primary_keys") or [])
 
         logger.info(f"Stream {stream_name}: Starting gRPC load stage")
 
         batch_seq = 0
         max_retries = self.max_retries
         retry_base_delay = self.retry_delay
-        error_strategy = config["runtime"]["error_handling"]["strategy"]
+        error_strategy = (
+            (config.get("runtime") or {}).get("error_handling") or {}
+        ).get("strategy", "fail")
 
         try:
             while True:
@@ -843,16 +853,13 @@ class StreamingEngine:
 
     @property
     def state_manager(self) -> StateManager:
-        """State manager accessor for backward compatibility with legacy tests."""
         return self._state_manager
 
     @state_manager.setter
     def state_manager(self, value: StateManager) -> None:
-        """Allow tests to override the state manager and keep aliases in sync."""
         self._state_manager = value
         self.sharded_state_manager = value
 
     @state_manager.deleter
     def state_manager(self) -> None:
-        """Restore the default state manager when patched contexts exit."""
         self._state_manager = self.sharded_state_manager

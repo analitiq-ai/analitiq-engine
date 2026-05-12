@@ -44,9 +44,9 @@ class TestSchemaContractColumnsFormat:
     def test_basic_columns_schema(self, type_mapper):
         schema = {
             "columns": [
-                {"name": "id", "type": "BIGINT", "nullable": False},
-                {"name": "name", "type": "VARCHAR(100)", "nullable": True},
-                {"name": "created", "type": "TIMESTAMP", "nullable": True},
+                {"name": "id", "native_type": "BIGINT", "nullable": False},
+                {"name": "name", "native_type": "VARCHAR(100)", "nullable": True},
+                {"name": "created", "native_type": "TIMESTAMP", "nullable": True},
             ]
         }
 
@@ -62,8 +62,8 @@ class TestSchemaContractCastArrowBatch:
     def test_cast_arrow_batch_basic(self, type_mapper):
         schema = {
             "columns": [
-                {"name": "id", "type": "BIGINT", "nullable": False},
-                {"name": "name", "type": "VARCHAR(100)", "nullable": True},
+                {"name": "id", "native_type": "BIGINT", "nullable": False},
+                {"name": "name", "native_type": "VARCHAR(100)", "nullable": True},
             ]
         }
         contract = SchemaContract(schema, type_mapper=type_mapper)
@@ -81,8 +81,8 @@ class TestSchemaContractCastArrowBatch:
     def test_cast_arrow_batch_with_type_coercion(self, type_mapper):
         schema = {
             "columns": [
-                {"name": "id", "type": "BIGINT", "nullable": False},
-                {"name": "value", "type": "FLOAT", "nullable": True},
+                {"name": "id", "native_type": "BIGINT", "nullable": False},
+                {"name": "value", "native_type": "FLOAT", "nullable": True},
             ]
         }
         contract = SchemaContract(schema, type_mapper=type_mapper)
@@ -99,7 +99,7 @@ class TestSchemaContractCastArrowBatch:
         assert isinstance(result[0]["value"], float)
 
     def test_cast_arrow_batch_empty(self, type_mapper):
-        schema = {"columns": [{"name": "id", "type": "BIGINT", "nullable": False}]}
+        schema = {"columns": [{"name": "id", "native_type": "BIGINT", "nullable": False}]}
         contract = SchemaContract(schema, type_mapper=type_mapper)
 
         empty = pa.RecordBatch.from_pylist([], schema=contract.arrow_schema)
@@ -111,8 +111,8 @@ class TestSchemaContractCastArrowBatch:
     def test_cast_arrow_batch_missing_column_fills_nulls(self, type_mapper):
         schema = {
             "columns": [
-                {"name": "id", "type": "BIGINT", "nullable": False},
-                {"name": "optional_field", "type": "VARCHAR(50)", "nullable": True},
+                {"name": "id", "native_type": "BIGINT", "nullable": False},
+                {"name": "optional_field", "native_type": "VARCHAR(50)", "nullable": True},
             ]
         }
         contract = SchemaContract(schema, type_mapper=type_mapper)
@@ -125,7 +125,7 @@ class TestSchemaContractCastArrowBatch:
 
     def test_cast_arrow_batch_drops_extra_columns(self, type_mapper):
         schema = {
-            "columns": [{"name": "id", "type": "BIGINT", "nullable": False}]
+            "columns": [{"name": "id", "native_type": "BIGINT", "nullable": False}]
         }
         contract = SchemaContract(schema, type_mapper=type_mapper)
 
@@ -142,8 +142,8 @@ class TestSchemaContractFromPylist:
     def test_from_pylist_with_schema(self, type_mapper):
         schema = {
             "columns": [
-                {"name": "id", "type": "BIGINT", "nullable": False},
-                {"name": "name", "type": "VARCHAR(100)", "nullable": True},
+                {"name": "id", "native_type": "BIGINT", "nullable": False},
+                {"name": "name", "native_type": "VARCHAR(100)", "nullable": True},
             ]
         }
         contract = SchemaContract(schema, type_mapper=type_mapper)
@@ -197,9 +197,9 @@ class TestSchemaContractTypeMapping:
     def test_integer_types(self, type_mapper):
         schema = {
             "columns": [
-                {"name": "big", "type": "BIGINT"},
-                {"name": "normal", "type": "INTEGER"},
-                {"name": "small", "type": "SMALLINT"},
+                {"name": "big", "native_type": "BIGINT"},
+                {"name": "normal", "native_type": "INTEGER"},
+                {"name": "small", "native_type": "SMALLINT"},
             ]
         }
         contract = SchemaContract(schema, type_mapper=type_mapper)
@@ -211,8 +211,8 @@ class TestSchemaContractTypeMapping:
     def test_string_types(self, type_mapper):
         schema = {
             "columns": [
-                {"name": "var", "type": "VARCHAR(100)"},
-                {"name": "text_col", "type": "TEXT"},
+                {"name": "var", "native_type": "VARCHAR(100)"},
+                {"name": "text_col", "native_type": "TEXT"},
             ]
         }
         contract = SchemaContract(schema, type_mapper=type_mapper)
@@ -223,9 +223,9 @@ class TestSchemaContractTypeMapping:
     def test_timestamp_types(self, type_mapper):
         schema = {
             "columns": [
-                {"name": "ts", "type": "TIMESTAMP"},
-                {"name": "tstz", "type": "TIMESTAMPTZ"},
-                {"name": "dt", "type": "DATETIME"},
+                {"name": "ts", "native_type": "TIMESTAMP"},
+                {"name": "tstz", "native_type": "TIMESTAMPTZ"},
+                {"name": "dt", "native_type": "DATETIME"},
             ]
         }
         contract = SchemaContract(schema, type_mapper=type_mapper)
@@ -234,12 +234,12 @@ class TestSchemaContractTypeMapping:
             assert "timestamp" in contract.column_types[col]
 
     def test_boolean_type(self, type_mapper):
-        schema = {"columns": [{"name": "flag", "type": "BOOLEAN"}]}
+        schema = {"columns": [{"name": "flag", "native_type": "BOOLEAN"}]}
         contract = SchemaContract(schema, type_mapper=type_mapper)
         assert "bool" in contract.column_types["flag"]
 
     def test_decimal_type(self, type_mapper):
-        schema = {"columns": [{"name": "price", "type": "DECIMAL(10,2)"}]}
+        schema = {"columns": [{"name": "price", "native_type": "DECIMAL(10,2)"}]}
         contract = SchemaContract(schema, type_mapper=type_mapper)
         assert "decimal128" in contract.column_types["price"]
 
@@ -250,12 +250,12 @@ class TestSchemaContractEdgeCases:
         assert len(contract.arrow_schema) == 0
 
     def test_columns_payload_requires_type_mapper(self):
-        schema = {"columns": [{"name": "id", "type": "BIGINT"}]}
+        schema = {"columns": [{"name": "id", "native_type": "BIGINT"}]}
         with pytest.raises(ValueError, match="type_mapper is required"):
             SchemaContract(schema)
 
     def test_unmapped_native_type_raises(self, type_mapper):
-        schema = {"columns": [{"name": "custom", "type": "CUSTOM_UNKNOWN_TYPE"}]}
+        schema = {"columns": [{"name": "custom", "native_type": "CUSTOM_UNKNOWN_TYPE"}]}
         with pytest.raises(UnmappedTypeError):
             SchemaContract(schema, type_mapper=type_mapper)
 
@@ -264,8 +264,8 @@ class TestSchemaContractEdgeCases:
         to silently skip — silently dropping them hides author errors."""
         schema = {
             "columns": [
-                {"type": "BIGINT"},  # No name
-                {"name": "valid", "type": "BIGINT"},
+                {"native_type": "BIGINT"},  # No name
+                {"name": "valid", "native_type": "BIGINT"},
             ]
         }
         with pytest.raises(ValueError, match="has no 'name' field"):

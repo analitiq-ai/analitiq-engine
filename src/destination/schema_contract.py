@@ -124,7 +124,12 @@ class SchemaContract:
         for field in self._arrow_schema:
             col = existing.get(field.name)
             if col is None:
-                logger.debug(
+                if not field.nullable:
+                    raise ValueError(
+                        f"column {field.name!r} is required by the destination "
+                        f"schema but absent from the incoming batch"
+                    )
+                logger.warning(
                     "column %r absent from batch; filling with nulls", field.name
                 )
                 arrays.append(pa.nulls(record_batch.num_rows, type=field.type))
@@ -150,10 +155,6 @@ class SchemaContract:
         in Arrow.
         """
         return batch.to_pylist()
-
-    # ------------------------------------------------------------------
-    # Schema construction
-    # ------------------------------------------------------------------
 
     def _build_arrow_schema_from_json_schema(
         self, json_schema: Dict[str, Any]
@@ -217,10 +218,6 @@ class SchemaContract:
             fields.append(pa.field(col_name, arrow_type, nullable=nullable))
         return pa.schema(fields)
 
-    # ------------------------------------------------------------------
-    # Casting helpers
-    # ------------------------------------------------------------------
-
     def _safe_cast_array(
         self, col: pa.Array, target_type: pa.DataType, col_name: str
     ) -> pa.Array:
@@ -229,22 +226,27 @@ class SchemaContract:
         Handles the messy real-world conversions: string→timestamp with
         multiple format fallbacks, naive→tz-aware promotion (e.g. Wise's
         ``"2026-03-23 10:18:24"`` shipped to a tz-aware timestamp column),
-        and string/numeric→decimal via float.
+        and string/numeric→decimal via float. Each branch raises with
+        the exhausted format list / underlying error rather than falling
+        through to a generic cast that would mask the real diagnostic.
         """
         source_type = col.type
+        timestamp_formats = (
+            "%Y-%m-%dT%H:%M:%S%z",
+            "%Y-%m-%dT%H:%M:%S",
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%d",
+        )
 
         if pa.types.is_timestamp(target_type) and pa.types.is_string(source_type):
             target_tz = getattr(target_type, "tz", None)
             target_unit = getattr(target_type, "unit", "us") or "us"
-            for fmt in (
-                "%Y-%m-%dT%H:%M:%S%z",
-                "%Y-%m-%dT%H:%M:%S",
-                "%Y-%m-%d %H:%M:%S",
-                "%Y-%m-%d",
-            ):
+            last_err: Optional[Exception] = None
+            for fmt in timestamp_formats:
                 try:
                     parsed = pc.strptime(col, format=fmt, unit=target_unit)
-                except Exception:
+                except Exception as err:
+                    last_err = err
                     continue
                 parsed_tz = getattr(parsed.type, "tz", None)
                 if target_tz and not parsed_tz:
@@ -252,21 +254,34 @@ class SchemaContract:
                 if parsed.type != target_type:
                     parsed = pc.cast(parsed, target_type, safe=False)
                 return parsed
+            raise ValueError(
+                f"column {col_name!r}: no timestamp format matched "
+                f"(tried {list(timestamp_formats)}); last error: {last_err}"
+            )
 
         if pa.types.is_date(target_type) and pa.types.is_string(source_type):
             try:
                 return pc.strptime(col, format="%Y-%m-%d", unit="s").cast(target_type)
-            except Exception:
-                pass
+            except Exception as err:
+                raise ValueError(
+                    f"column {col_name!r}: failed to parse date as %Y-%m-%d: {err}"
+                ) from err
 
         if pa.types.is_decimal(target_type):
             if pa.types.is_string(source_type):
                 try:
                     float_col = pc.cast(col, pa.float64())
-                    return pc.cast(float_col, target_type, safe=False)
-                except Exception:
-                    pass
-            elif pa.types.is_floating(source_type) or pa.types.is_integer(source_type):
+                except Exception as err:
+                    raise ValueError(
+                        f"column {col_name!r}: cannot coerce string to float "
+                        f"prior to decimal cast: {err}"
+                    ) from err
+                return pc.cast(float_col, target_type, safe=False)
+            if pa.types.is_floating(source_type) or pa.types.is_integer(source_type):
                 return pc.cast(col, target_type, safe=False)
+            raise ValueError(
+                f"column {col_name!r}: cannot cast {source_type} to decimal "
+                f"{target_type}; only string/integer/float sources are supported"
+            )
 
         return pc.cast(col, target_type, safe=False)

@@ -24,8 +24,8 @@ aliases (matching the directory name on disk):
     pipeline.connections.destinations -> ["<connection-alias>", ...]
     pipeline.streams                  -> ["<stream-alias>", ...]
     stream.pipeline_id                -> "<pipeline-alias>"
-    stream.source.endpoint_ref        -> {scope, connection_id, alias}  (connection_id = connection alias)
-    stream.destinations[].endpoint_ref-> {scope, connection_id, alias}
+    stream.source.endpoint_ref        -> {scope, connection_alias, alias}
+    stream.destinations[].endpoint_ref-> {scope, connection_alias, alias}
 
 Every artifact is JSON-Schema validated against the published Analitiq
 contract before it is consumed.
@@ -51,6 +51,7 @@ from src.config.connection_loader import (
     load_connector_definition,
 )
 from src.engine.type_map import (
+    InvalidTypeMapError,
     TypeMapper,
     load_connection_type_map,
     load_type_map,
@@ -292,10 +293,10 @@ class PipelineConfigPrep:
 
     def _connection_lookup(self) -> ConnectionLookup:
         return ConnectionLookup(
-            directory_by_id={
+            directory_by_alias={
                 alias: rec.alias for alias, rec in self._connection_records.items()
             },
-            connector_alias_by_id={
+            connector_alias_by_alias={
                 alias: rec.connector_alias
                 for alias, rec in self._connection_records.items()
             },
@@ -327,12 +328,23 @@ class PipelineConfigPrep:
         validate_artifact("connector", document, source=str(connector_file))
         self._loaded_connectors[connector_alias] = document
 
-        # Optional connector-scoped type map.
+        # Connector type-map is optional from this layer's perspective:
+        # API-only connectors that never expose SQL native types do not
+        # ship one. The loader raises InvalidTypeMapError when the file
+        # is absent; downstream code that actually needs a mapper (e.g.
+        # the database destination) will surface the missing-mapper
+        # condition with a precise error.
         try:
             self._connector_type_mappers[connector_alias] = load_type_map(
                 self._paths["connectors"], connector_alias
             )
-        except FileNotFoundError:
+        except InvalidTypeMapError as err:
+            logger.info(
+                "No connector type-map for %r (%s); native SQL types will not "
+                "be resolvable for this connector",
+                connector_alias,
+                err,
+            )
             self._connector_type_mappers[connector_alias] = None  # type: ignore[assignment]
 
         return document
@@ -523,7 +535,7 @@ class PipelineConfigPrep:
             )
         source_endpoint_ref = EndpointRef.from_dict(source_endpoint_ref_dict)
         source_runtime = self._resolve_connection_by_alias(
-            source_endpoint_ref.connection_id
+            source_endpoint_ref.connection_alias
         )
         source_endpoint = self._resolve_endpoint(source_endpoint_ref)
 
@@ -543,7 +555,7 @@ class PipelineConfigPrep:
                 )
             dest_endpoint_ref = EndpointRef.from_dict(dest_endpoint_ref_dict)
             dest_runtime = self._resolve_connection_by_alias(
-                dest_endpoint_ref.connection_id
+                dest_endpoint_ref.connection_alias
             )
             dest_endpoint = self._resolve_endpoint(dest_endpoint_ref)
 

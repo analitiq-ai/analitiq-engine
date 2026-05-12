@@ -13,7 +13,7 @@ Stream-level overrides come from the contract source block:
   tie_breaker_fields}`` — incremental cursor configuration.
 
 The query builder consumes typed :class:`Filter` / :class:`QueryConfig`
-inputs; nothing legacy crosses the boundary.
+inputs.
 """
 
 from __future__ import annotations
@@ -24,6 +24,8 @@ from typing import Any, AsyncIterator, Dict, List, Optional
 import pyarrow as pa
 
 from .base import BaseConnector, ConnectionError, ReadError
+from ...engine.type_map import InvalidTypeMapError, UnmappedTypeError
+from ...secrets.exceptions import PlaceholderExpansionError
 from ...shared.connection_runtime import ConnectionRuntime
 from ...shared.database_utils import acquire_connection, convert_record_from_db
 from ...shared.query_builder import Filter, QueryBuilder, QueryConfig
@@ -43,18 +45,28 @@ class DatabaseConnector(BaseConnector):
         self._initialized = False
 
     async def connect(self, runtime: ConnectionRuntime):
+        self._runtime = runtime
+        runtime.acquire()
         try:
-            self._runtime = runtime
-            runtime.acquire()
             await runtime.materialize(require_port=True)
-            self._engine = runtime.engine
-            self._driver = runtime.driver or ""
-            self.is_connected = True
-            self._initialized = True
-            logger.info("Connected to database via %s", self._driver)
+        except (
+            InvalidTypeMapError,
+            UnmappedTypeError,
+            PlaceholderExpansionError,
+            ValueError,
+        ):
+            # Deterministic configuration / secret errors propagate with
+            # their real type so callers distinguish "your type-map is
+            # missing a rule" from "the DB is unreachable".
+            raise
         except Exception as e:
             logger.error("Failed to connect to database: %s", e)
             raise ConnectionError(f"Database connection failed: {e}") from e
+        self._engine = runtime.engine
+        self._driver = runtime.driver or ""
+        self.is_connected = True
+        self._initialized = True
+        logger.info("Connected to database via %s", self._driver)
 
     async def disconnect(self):
         if self._runtime:

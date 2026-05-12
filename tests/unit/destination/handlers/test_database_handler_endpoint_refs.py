@@ -46,14 +46,14 @@ def _runtime(
 class TestEndpointRefDispatch:
     def test_pre_connect_raises(self):
         handler = DatabaseDestinationHandler()
-        handler.set_endpoint_refs({"s1": {"scope": "connector", "identifier": "pg", "endpoint": "transfers"}})
+        handler.set_endpoint_refs({"s1": {"scope": "connector", "connection_alias": "pg", "alias": "transfers"}})
         with pytest.raises(RuntimeError, match="called before connect"):
             handler._type_mapper_for_stream("s1")
 
     def test_unknown_stream_id_raises(self):
         handler = DatabaseDestinationHandler()
         handler._runtime = _runtime(connector_mapper=_mapper("pg"))
-        handler.set_endpoint_refs({"s1": {"scope": "connector", "identifier": "pg", "endpoint": "transfers"}})
+        handler.set_endpoint_refs({"s1": {"scope": "connector", "connection_alias": "pg", "alias": "transfers"}})
         with pytest.raises(RuntimeError, match="no endpoint_ref registered"):
             handler._type_mapper_for_stream("unregistered-stream")
 
@@ -64,7 +64,7 @@ class TestEndpointRefDispatch:
             connector_mapper=connector_map,
             connection_mapper=_mapper("connection:dest-conn"),
         )
-        handler.set_endpoint_refs({"s1": {"scope": "connector", "identifier": "pg", "endpoint": "transfers"}})
+        handler.set_endpoint_refs({"s1": {"scope": "connector", "connection_alias": "pg", "alias": "transfers"}})
         assert handler._type_mapper_for_stream("s1") is connector_map
 
     def test_connection_scoped_uses_connection_mapper(self):
@@ -74,19 +74,19 @@ class TestEndpointRefDispatch:
             connector_mapper=_mapper("pg"),
             connection_mapper=connection_map,
         )
-        handler.set_endpoint_refs({"s1": {"scope": "connection", "identifier": "dest-conn", "endpoint": "orders"}})
+        handler.set_endpoint_refs({"s1": {"scope": "connection", "connection_alias": "dest-conn", "alias": "orders"}})
         assert handler._type_mapper_for_stream("s1") is connection_map
 
     def test_set_endpoint_refs_copies_mapping(self):
         """External mutations must not leak into the handler's state."""
         handler = DatabaseDestinationHandler()
-        source = {"s1": {"scope": "connector", "identifier": "pg", "endpoint": "transfers"}}
+        source = {"s1": {"scope": "connector", "connection_alias": "pg", "alias": "transfers"}}
         handler.set_endpoint_refs(source)
-        source["s1"] = {"scope": "connector", "identifier": "evil", "endpoint": "injected"}
+        source["s1"] = {"scope": "connector", "connection_alias": "evil", "alias": "injected"}
         handler._runtime = _runtime(connector_mapper=_mapper("pg"))
         # Original registration wins — set_endpoint_refs took a defensive copy.
         assert handler._endpoint_refs["s1"] == {
-            "scope": "connector", "identifier": "pg", "endpoint": "transfers",
+            "scope": "connector", "connection_alias": "pg", "alias": "transfers",
         }
 
 
@@ -172,3 +172,81 @@ class TestWriteBatchFatalOnTypeMapError:
         assert result.success is False
         assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
         assert "type-map" in result.failure_summary
+
+
+class TestDDLLockSerialization:
+    """``_ddl_lock`` must serialize concurrent _ensure_tables_exist calls
+    so two streams sharing the handler do not race the database catalog
+    (the failure that motivated commit 5bf2e00)."""
+
+    @pytest.mark.asyncio
+    async def test_ddl_lock_serializes_concurrent_table_creation(self):
+        import asyncio
+
+        from src.destination.connectors.database import (
+            DatabaseDestinationHandler,
+            _StreamState,
+        )
+
+        handler = DatabaseDestinationHandler()
+        # Pretend the engine is connected; we'll intercept create_all
+        # before any real SQL is dispatched.
+        handler._engine = AsyncMock()
+
+        in_flight = 0
+        max_concurrent = 0
+        order: list[str] = []
+
+        async def _fake_run_sync(_callable, *_args, **_kwargs):
+            nonlocal in_flight, max_concurrent
+            in_flight += 1
+            max_concurrent = max(max_concurrent, in_flight)
+            # Yield control to give a parallel coroutine a chance to enter
+            # this critical section if the lock isn't holding.
+            await asyncio.sleep(0.01)
+            in_flight -= 1
+
+        async def _fake_begin():
+            ctx = AsyncMock()
+            conn = AsyncMock()
+            conn.run_sync = _fake_run_sync
+            ctx.__aenter__.return_value = conn
+            return ctx
+
+        # The handler's _ensure_tables_exist uses engine.begin() as an async
+        # context manager; bypass with a coroutine returning a prepared ctx.
+        from contextlib import asynccontextmanager
+
+        @asynccontextmanager
+        async def _begin_ctx():
+            conn = AsyncMock()
+            conn.run_sync = _fake_run_sync
+            yield conn
+
+        handler._engine.begin = _begin_ctx
+
+        type_mapper = _mapper("pg")
+
+        async def _drive(stream_id: str):
+            state = _StreamState(
+                schema_name="public",
+                table_name=f"t_{stream_id}",
+                endpoint_document={
+                    "columns": [{"name": "id", "native_type": "BIGINT", "nullable": False}],
+                    "primary_keys": ["id"],
+                    "database_object": {"name": f"t_{stream_id}", "schema": "public"},
+                },
+                primary_keys=["id"],
+            )
+            order.append(f"enter:{stream_id}")
+            await handler._ensure_tables_exist(state, type_mapper)
+            order.append(f"exit:{stream_id}")
+
+        await asyncio.gather(_drive("a"), _drive("b"), _drive("c"))
+
+        # If the lock works, run_sync is never executed concurrently —
+        # max_concurrent across all three coroutines must be 1.
+        assert max_concurrent == 1, (
+            f"DDL lock did not serialize create_all calls "
+            f"(max_concurrent={max_concurrent}, order={order})"
+        )

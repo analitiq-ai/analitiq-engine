@@ -4,9 +4,7 @@ Engine-side runtime view of streams, mirroring the published stream
 schema at ``https://schemas.analitiq.ai/stream/latest.json``.
 
 Identity is alias-based: connections, streams, and pipelines are all
-keyed by their alias (= directory name on disk). ``EndpointRef``'s
-``connection_id`` field carries the connection alias (the schema field
-name is retained for the published contract's sake).
+keyed by their alias (= directory name on disk).
 """
 
 from __future__ import annotations
@@ -44,12 +42,7 @@ class TargetType(str, Enum):
 
 
 class ExpressionOp(str, Enum):
-    """Stream mapping expression operations.
-
-    The published schema currently allows only ``get``; the broader
-    runtime tolerates the historical operator set so existing
-    transformation code keeps working until it is migrated.
-    """
+    """Stream mapping expression operations supported by the contract."""
 
     GET = "get"
 
@@ -95,21 +88,22 @@ def _serialize(obj: Any) -> Any:
 class EndpointRef:
     """Structured reference to an endpoint definition.
 
-    ``connection_id`` carries the connection alias (= directory name
-    under ``connections/``). ``alias`` is the endpoint slug declared
-    inside the endpoint document. Resolution rules:
+    ``connection_alias`` is the directory name under ``connections/`` of
+    the saved connection that owns (or hosts a connector that owns) the
+    endpoint. ``alias`` is the endpoint slug declared inside the endpoint
+    document. Resolution rules:
 
     - ``scope="connector"``: load the connection by alias, read its
       ``connector_alias``, then load
       ``connectors/<connector_alias>/definition/endpoints/<alias>.json``.
     - ``scope="connection"``: load
-      ``connections/<connection-alias>/definition/endpoints/<alias>.json``.
+      ``connections/<connection_alias>/definition/endpoints/<alias>.json``.
 
     Frozen so instances are hashable and usable as dict keys.
     """
 
     scope: str
-    connection_id: str
+    connection_alias: str
     alias: str
 
     _VALID_SCOPES = ("connector", "connection")
@@ -119,13 +113,13 @@ class EndpointRef:
             raise ValueError(
                 f"EndpointRef.scope must be one of {self._VALID_SCOPES}, got {self.scope!r}"
             )
-        if not self.connection_id:
-            raise ValueError("EndpointRef.connection_id cannot be empty")
+        if not self.connection_alias:
+            raise ValueError("EndpointRef.connection_alias cannot be empty")
         if not self.alias:
             raise ValueError("EndpointRef.alias cannot be empty")
 
     def __str__(self) -> str:
-        return f"{self.scope}:{self.connection_id}/{self.alias}"
+        return f"{self.scope}:{self.connection_alias}/{self.alias}"
 
     @classmethod
     def from_dict(cls, data: Any) -> "EndpointRef":
@@ -135,31 +129,30 @@ class EndpointRef:
         if not isinstance(data, dict):
             raise TypeError(
                 "endpoint_ref must be an object with keys "
-                "{'scope','connection_id','alias'}, got "
+                "{'scope','connection_alias','alias'}, got "
                 f"{type(data).__name__}"
             )
-        allowed = {"scope", "connection_id", "alias"}
-        unknown = set(data.keys()) - allowed - {"x-" + k for k in data.keys() if k.startswith("x-")}
-        unknown = {k for k in unknown if not k.startswith("x-")}
+        allowed = {"scope", "connection_alias", "alias"}
+        unknown = set(data) - allowed
         if unknown:
             raise ValueError(
                 f"endpoint_ref has unknown keys {sorted(unknown)}; allowed: {sorted(allowed)}"
             )
-        missing = allowed - set(data.keys())
+        missing = allowed - set(data)
         if missing:
             raise ValueError(
                 f"endpoint_ref is missing required keys {sorted(missing)}"
             )
         return cls(
             scope=data["scope"],
-            connection_id=data["connection_id"],
+            connection_alias=data["connection_alias"],
             alias=data["alias"],
         )
 
     def to_dict(self) -> Dict[str, str]:
         return {
             "scope": self.scope,
-            "connection_id": self.connection_id,
+            "connection_alias": self.connection_alias,
             "alias": self.alias,
         }
 
@@ -289,7 +282,7 @@ class SourceConfig:
 class WriteConfig:
     """Destination write behavior."""
 
-    mode: WriteMode = WriteMode.INSERT
+    mode: WriteMode = WriteMode.UPSERT
     conflict_keys: Optional[List[List[str]]] = None
 
 

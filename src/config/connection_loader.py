@@ -71,7 +71,7 @@ def load_connector_definition(
     """Load a connector definition by ``connector_alias``.
 
     Connector directories may be named either ``{alias}`` or
-    ``connector-{alias}`` (legacy-tolerant lookup).
+    ``connector-{alias}``; the lookup tries both.
     """
     candidates = [
         connectors_dir / connector_alias / "definition" / "connector.json",
@@ -97,8 +97,3 @@ def load_connector_definition(
             f"or {candidates[1]}"
         ),
     )
-
-
-# Backward-compatible alias for older imports. Prefer
-# ``load_connector_definition`` going forward.
-load_connector_for_connection = load_connector_definition

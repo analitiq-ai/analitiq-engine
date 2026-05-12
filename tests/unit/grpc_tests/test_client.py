@@ -303,34 +303,23 @@ class TestClientPayloadEncoding:
 class TestClientSchemaBuilder:
     """Tests for schema message building."""
 
-    def test_build_schema_message(self):
-        """Test building a schema message from config."""
+    def test_build_schema_message_carries_identification_and_mode(self):
+        """The slim SchemaMessage carries only stream_id, version, and
+        write_mode — every other field comes from the preloaded contract
+        endpoint document on the destination side."""
+        from src.grpc.generated.analitiq.v1 import WriteMode
+
         client = DestinationGRPCClient()
-
-        config = {
-            "type": "database",
-            "driver": "postgresql",
-            "endpoint": "public/users",
-            "primary_key": ["id"],
-            "write_mode": "upsert",
-            "endpoint_schema": {
-                "type": "object",
-                "properties": {
-                    "id": {"type": "integer"},
-                    "name": {"type": "string"},
-                },
-            },
-            "conflict_resolution": {
-                "on_conflict": "id",
-                "action": "update",
-                "update_columns": ["name"],
-            },
-        }
-
-        schema_msg = client._build_schema_message("stream-1", config)
-
+        schema_msg = client._build_schema_message(
+            "stream-1", {"write_mode": "upsert", "schema_version": 7}
+        )
         assert schema_msg.stream_id == "stream-1"
-        assert len(schema_msg.primary_key) == 1
-        assert schema_msg.primary_key[0] == "id"
-        assert schema_msg.destination_config.connector_type == "postgresql"
-        assert schema_msg.destination_config.database.table_name == "users"
+        assert schema_msg.version == 7
+        assert schema_msg.write_mode == WriteMode.WRITE_MODE_UPSERT
+
+    def test_build_schema_message_rejects_unknown_mode(self):
+        """Unknown write_mode strings must surface instead of silently
+        defaulting to UPSERT (which would mask config typos)."""
+        client = DestinationGRPCClient()
+        with pytest.raises(ValueError, match="Unknown write_mode"):
+            client._build_schema_message("s", {"write_mode": "upsert_typo"})

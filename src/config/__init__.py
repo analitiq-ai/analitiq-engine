@@ -19,7 +19,6 @@ from .connection_loader import (
     load_connection,
     load_connection_file,
     load_connector_definition,
-    load_connector_for_connection,  # legacy alias
 )
 from .loader import PathBasedConfigLoader
 from .exceptions import (
@@ -47,8 +46,6 @@ __all__ = [
     "load_connection",
     "load_connection_file",
     "load_connector_definition",
-    "load_connector_for_connection",
-    # Path-based loader (legacy)
     "PathBasedConfigLoader",
     # Exceptions
     "ConfigError",

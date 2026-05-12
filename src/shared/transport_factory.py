@@ -513,11 +513,6 @@ async def build_transport(
     return await builder(spec, resolver=resolver)
 
 
-# ---------------------------------------------------------------------------
-# Deprecated, kept for callers that still import the helper
-# ---------------------------------------------------------------------------
-
-
 def resolve_transport_spec(
     connector: Mapping[str, Any],
     *,
@@ -526,10 +521,9 @@ def resolve_transport_spec(
 ) -> Dict[str, Any]:
     """Resolve a transport spec into a primitives-only dict.
 
-    Retained as a back-compat seam: legacy callers that want the
-    pre-DSN-render flat dict can still introspect a connector's
-    transport. New code should call :func:`build_transport` and let the
-    factory materialise the live transport directly.
+    Used by introspection callers that need the pre-build dict (e.g.
+    tests asserting DSN rendering). Production code should call
+    :func:`build_transport` instead.
     """
     _ref, merged = _select_transport(connector, transport_ref)
     resolver = Resolver(context, functions=DEFAULT_FUNCTIONS)
