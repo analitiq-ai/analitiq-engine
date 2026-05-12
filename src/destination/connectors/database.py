@@ -300,10 +300,7 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
 
             await self._ensure_tables_exist(state, type_mapper)
 
-            state.schema_contract = SchemaContract(
-                state.endpoint_document,
-                type_mapper=type_mapper,
-            )
+            state.schema_contract = SchemaContract(state.endpoint_document)
 
             self._streams[stream_id] = state
             logger.info(

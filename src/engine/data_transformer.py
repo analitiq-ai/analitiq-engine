@@ -10,8 +10,11 @@ import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
+import pyarrow as pa
+
 from .exceptions import TransformationError
 from .expression_evaluator import SecureExpressionEvaluator
+from .type_map.arrow import canonical_to_arrow
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +76,6 @@ class AssignmentTransformer:
                 validate = assignment.get("validate")
 
                 target_path = target.get("path", [])
-                target_type = target.get("type", "string")
                 nullable = target.get("nullable", True)
 
                 # Evaluate the value
@@ -107,10 +109,10 @@ class AssignmentTransformer:
                     })
                     continue
 
-                # Type coercion
-                value = self._coerce_type(value, target_type)
-
-                # Set value in result (supports nested paths)
+                # Set value in result (supports nested paths). No
+                # legacy JSON-string coercion: the post-transform batch
+                # is bound into Arrow via the contract's declared
+                # arrow_type, which accepts driver-native Python values.
                 self._set_nested_value(result, target_path, value)
 
             except Exception as e:
@@ -463,51 +465,6 @@ class AssignmentTransformer:
 
         return None
 
-    def _coerce_type(self, value: Any, target_type: str) -> Any:
-        """
-        Coerce value to JSON-compatible type for transmission.
-
-        NOTE: Datetime/date/time coercion is intentionally NOT done here.
-        Type coercion to destination-specific types (e.g., Python datetime
-        objects for PostgreSQL) is handled by the destination-side type
-        coercer based on the JSON schema. This avoids losing type information
-        during JSON serialization over gRPC.
-
-        This method only handles basic JSON-native type coercion:
-        - string, integer, number, boolean
-        """
-        if value is None:
-            return None
-
-        match target_type:
-            case "string":
-                return str(value) if value is not None else None
-            case "integer":
-                try:
-                    return int(float(value))
-                except (ValueError, TypeError):
-                    return value
-            case "decimal" | "number":
-                try:
-                    return float(value)
-                except (ValueError, TypeError):
-                    return value
-            case "boolean":
-                if isinstance(value, bool):
-                    return value
-                if isinstance(value, str):
-                    return value.lower() in ("true", "1", "yes")
-                return bool(value)
-            case "date" | "datetime" | "time":
-                # Pass through as-is - destination handles type coercion
-                # based on JSON schema and database requirements
-                return value
-            case "object" | "array":
-                return value
-            case _:
-                return value
-
-
 class DataTransformer:
     """Apply contract mapping assignments (and the ``field_mappings`` /
     ``computed_fields`` fixture shape) to a batch of records."""
@@ -737,3 +694,58 @@ class DataTransformer:
             iso_string = iso_string.replace('Z', '+00:00')
 
         return datetime.fromisoformat(iso_string)
+
+
+def _normalize_path(path: Any) -> str:
+    """Reduce an assignment ``path`` (str or list) to a single column
+    name. Post-transform batches are flat columns, so nested paths are
+    rejected explicitly.
+    """
+    if isinstance(path, str):
+        return path
+    if isinstance(path, list):
+        if len(path) != 1 or not isinstance(path[0], str):
+            raise TransformationError(
+                f"assignment path must be a single column name; got {path!r}"
+            )
+        return path[0]
+    raise TransformationError(
+        f"assignment path must be str or [str]; got {type(path).__name__}"
+    )
+
+
+def build_output_schema(
+    assignments: List[Dict[str, Any]],
+) -> pa.Schema:
+    """Build the post-transform Arrow schema from a stream's assignments.
+
+    Every assignment MUST declare a fully-qualified canonical
+    ``target.arrow_type`` (e.g. ``Decimal128(38, 9)``,
+    ``Timestamp(MICROSECOND, UTC)``). The transform stage does not
+    infer from the source schema, does not default, and does not fall
+    back. Missing or unparseable declarations raise
+    :class:`TransformationError`.
+    """
+    fields: List[pa.Field] = []
+    for index, assignment in enumerate(assignments):
+        target = assignment.get("target") or {}
+        target_name = _normalize_path(target.get("path"))
+        nullable = bool(target.get("nullable", True))
+
+        canonical = target.get("arrow_type")
+        if not canonical:
+            raise TransformationError(
+                f"assignment[{index}] target={target_name!r}: missing "
+                f"target.arrow_type; every assignment must declare a "
+                f"fully-qualified canonical Arrow type"
+            )
+        try:
+            arrow_type = canonical_to_arrow(canonical)
+        except Exception as e:
+            raise TransformationError(
+                f"assignment[{index}] target={target_name!r}: cannot "
+                f"parse target.arrow_type={canonical!r}: {e}"
+            ) from e
+
+        fields.append(pa.field(target_name, arrow_type, nullable=nullable))
+    return pa.schema(fields)

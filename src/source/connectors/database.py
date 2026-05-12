@@ -24,10 +24,11 @@ from typing import Any, AsyncIterator, Dict, List, Optional
 import pyarrow as pa
 
 from .base import BaseConnector, ConnectionError, ReadError
+from ...destination.schema_contract import SchemaContract
 from ...engine.type_map import InvalidTypeMapError, UnmappedTypeError
 from ...secrets.exceptions import PlaceholderExpansionError
 from ...shared.connection_runtime import ConnectionRuntime
-from ...shared.database_utils import acquire_connection, convert_record_from_db
+from ...shared.database_utils import acquire_connection
 from ...shared.query_builder import Filter, QueryBuilder, QueryConfig
 from ...state.state_manager import StateManager
 
@@ -87,10 +88,12 @@ class DatabaseConnector(BaseConnector):
     ) -> AsyncIterator[pa.RecordBatch]:
         """Read upstream rows as Arrow batches.
 
-        The driver returns rows with native Python types (datetime,
-        Decimal, ints), which Arrow infers correctly via
-        ``pa.RecordBatch.from_pylist``. The destination realigns to its
-        own schema via :meth:`SchemaContract.cast_arrow_batch`.
+        Batches are materialized through the source-side
+        :class:`SchemaContract` so every column carries the declared
+        Arrow type from the endpoint's ``columns`` (via the connector or
+        connection ``type-map.json``). All-null columns retain their
+        declared type rather than degrading to Arrow's ``null`` type,
+        which the destination's cast branches refuse.
         """
         if not self._initialized or self._engine is None:
             raise ReadError(
@@ -110,7 +113,12 @@ class DatabaseConnector(BaseConnector):
             )
         schema_name = database_object.get("schema") or "public"
 
+        if self._runtime is None:
+            raise ReadError(
+                "DatabaseConnector.read_batches() called before connect()"
+            )
         stream_source = config.get("stream_source") or {}
+        schema_contract = SchemaContract(endpoint_doc)
         column_names = self._select_columns(endpoint_doc, stream_source)
         filters = self._build_filters(stream_source.get("filters") or [])
 
@@ -148,9 +156,7 @@ class DatabaseConnector(BaseConnector):
                 else:
                     result = await conn.exec_driver_sql(paged_query)
 
-                rows = [
-                    convert_record_from_db(dict(row._mapping)) for row in result
-                ]
+                rows = [dict(row._mapping) for row in result]
                 if not rows:
                     break
 
@@ -160,7 +166,7 @@ class DatabaseConnector(BaseConnector):
                 self.metrics["records_read"] += len(rows)
                 self.metrics["batches_read"] += 1
 
-                yield pa.RecordBatch.from_pylist(rows)
+                yield schema_contract.from_pylist(rows)
 
                 if last_cursor_value is not None:
                     await state_manager.save_cursor(

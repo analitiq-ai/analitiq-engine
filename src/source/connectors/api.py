@@ -30,6 +30,7 @@ from typing import Any, AsyncIterator, Dict, List, Optional
 import pyarrow as pa
 
 from .base import BaseConnector, ConnectionError, ReadError
+from ...destination.schema_contract import SchemaContract
 from ...models.state import CursorField, StreamCursor, StreamStats
 from ...shared.connection_runtime import ConnectionRuntime
 from ...shared.expressions import resolve_value_expression
@@ -98,7 +99,19 @@ class APIConnector(BaseConnector):
             raise ReadError(
                 "APIConnector: source config missing 'endpoint_document'"
             )
+        stream_source = config.get("stream_source") or {}
+        endpoint_ref = stream_source.get("endpoint_ref")
+        if not endpoint_ref:
+            raise ReadError(
+                "APIConnector: stream_source missing 'endpoint_ref'; "
+                "the source contract must declare it so batches carry typed "
+                "Arrow columns (no inferred 'null' types)"
+            )
         read_spec = ((endpoint_doc.get("operations") or {}).get("read") or {})
+        records_items_schema = self._resolve_records_items_schema(
+            endpoint_doc, read_spec,
+        )
+        schema_contract = SchemaContract(records_items_schema)
         request = read_spec.get("request") or {}
         path = request.get("path")
         method = (request.get("method") or "GET").upper()
@@ -113,7 +126,6 @@ class APIConnector(BaseConnector):
         # ``https://host/Foo``.
         full_url = self.base_url.rstrip("/") + "/" + path.lstrip("/")
 
-        stream_source = config.get("stream_source") or {}
         replication_block = stream_source.get("replication") or {}
         replication_method = replication_block.get("method", "full_refresh")
         cursor_field = replication_block.get("cursor_field")
@@ -170,7 +182,7 @@ class APIConnector(BaseConnector):
             deduped = self._deduplicate_records(batch, state, cursor_field, tie_breaker_fields)
             if not deduped:
                 continue
-            yield pa.RecordBatch.from_pylist(deduped)
+            yield schema_contract.from_pylist(deduped)
 
             batch_count += 1
             total_records += len(deduped)
@@ -185,6 +197,53 @@ class APIConnector(BaseConnector):
                     total_records=total_records,
                     batch_count=batch_count,
                 )
+
+    # ------------------------------------------------------------------
+    # Schema resolution
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _resolve_records_items_schema(
+        endpoint_doc: Dict[str, Any], read_spec: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Locate the JSON-Schema object describing one upstream record.
+
+        API endpoints publish the response shape under
+        ``operations.read.response.schema`` and address the records
+        array via ``operations.read.response.records.ref`` (e.g.
+        ``response.body`` for ``[ {...}, {...} ]`` payloads,
+        ``response.body.objects`` for ``{ "objects": [...] }``). The
+        SchemaContract consumes the per-record ``properties`` block, so
+        this walks the response schema to the corresponding ``items``.
+        """
+        response_block = read_spec.get("response") or {}
+        response_schema = response_block.get("schema") or {}
+        records_ref = (response_block.get("records") or {}).get(
+            "ref", "response.body"
+        )
+
+        if records_ref == "response.body":
+            node = response_schema
+        elif records_ref.startswith("response.body."):
+            node = response_schema
+            for field in records_ref[len("response.body."):].split("."):
+                node = (node.get("properties") or {}).get(field) or {}
+        else:
+            raise ReadError(
+                f"endpoint {endpoint_doc.get('alias')!r}: unsupported "
+                f"records.ref {records_ref!r}; expected 'response.body' "
+                f"or 'response.body.<field>[.<field>...]'"
+            )
+
+        items = node.get("items") if node.get("type") == "array" else node
+        if not isinstance(items, dict) or not items.get("properties"):
+            raise ReadError(
+                f"endpoint {endpoint_doc.get('alias')!r}: cannot resolve "
+                f"record schema at {records_ref!r} (no 'properties' under "
+                f"the addressed items); every record field must be declared "
+                f"so Arrow columns carry typed values"
+            )
+        return items
 
     # ------------------------------------------------------------------
     # Parameter assembly

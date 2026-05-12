@@ -23,7 +23,7 @@ from ..models.engine import (
     StreamProcessingConfig, PipelineStagesConfig,
     StreamStageConfig, PipelineMetricsSnapshot
 )
-from .data_transformer import DataTransformer
+from .data_transformer import DataTransformer, build_output_schema
 from .exceptions import (
     ConfigurationError, StreamProcessingError, StreamExecutionError,
     StreamConfigurationError, StageConfigurationError
@@ -411,11 +411,12 @@ class StreamingEngine:
                     transformed_pylist = await self.data_transformer.apply_transformations(
                         pylist, config
                     )
-                    # Mapping changes shape; type inference is the only
-                    # option here. The destination's SchemaContract will
-                    # realign all-null / decimal / date columns against
-                    # its own canonical schema.
-                    transformed_batch = pa.RecordBatch.from_pylist(transformed_pylist)
+                    # Every assignment declares its target.arrow_type
+                    # fully; the transform stage does not infer.
+                    output_schema = build_output_schema(assignments)
+                    transformed_batch = pa.RecordBatch.from_pylist(
+                        transformed_pylist, schema=output_schema,
+                    )
 
                 await output_queue.put(transformed_batch)
                 batch_count += 1

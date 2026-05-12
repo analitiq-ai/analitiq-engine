@@ -2,8 +2,6 @@
 
 from .database_utils import (
     acquire_connection,
-    convert_db_to_python,
-    convert_record_from_db,
     get_default_clause,
     get_full_table_name,
     validate_sql_identifier,
@@ -18,8 +16,6 @@ from .run_id import (
 
 __all__ = [
     "acquire_connection",
-    "convert_db_to_python",
-    "convert_record_from_db",
     "get_default_clause",
     "get_full_table_name",
     "validate_sql_identifier",
