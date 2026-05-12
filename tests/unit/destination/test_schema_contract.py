@@ -7,10 +7,14 @@ fully-qualified canonical ``arrow_type`` — no inference, no type-map
 lookup on the destination side.
 """
 
+import json
+from datetime import date, datetime, time, timezone
+from decimal import Decimal
+
 import pyarrow as pa
 import pytest
 
-from src.destination.schema_contract import SchemaContract
+from src.destination.schema_contract import SchemaContract, arrow_to_json_shape
 
 
 class TestSchemaContractColumnsFormat:
@@ -513,3 +517,250 @@ class TestSchemaContractNestedObject:
         }
         contract = SchemaContract(schema)
         assert pa.types.is_struct(contract.arrow_schema.field("payload").type)
+
+
+class TestArrowToJsonShape:
+    """``arrow_to_json_shape`` is the Arrow-space cast that turns non-
+    JSON-native types into canonical strings before ``to_pylist``. It is
+    the API-destination's equivalent of ``cast_arrow_batch`` — schema-
+    driven, vectorised, type-preserving for already-JSON-native columns.
+    """
+
+    def test_timestamp_utc_becomes_iso_string(self):
+        col = pa.array(
+            [datetime(2026, 3, 23, 10, 18, 24, 123456, tzinfo=timezone.utc), None],
+            type=pa.timestamp("us", tz="UTC"),
+        )
+        batch = pa.RecordBatch.from_arrays(
+            [col], schema=pa.schema([pa.field("ts", col.type)])
+        )
+        out = arrow_to_json_shape(batch)
+        assert pa.types.is_string(out.schema.field("ts").type)
+        values = out.column("ts").to_pylist()
+        # Must be T-separated (not space) and carry the offset.
+        assert values[0] is not None
+        assert "T" in values[0]
+        assert values[0].endswith("+0000")
+        assert values[1] is None
+
+    def test_naive_timestamp_omits_offset(self):
+        col = pa.array(
+            [datetime(2026, 3, 23, 10, 18, 24)], type=pa.timestamp("us")
+        )
+        batch = pa.RecordBatch.from_arrays(
+            [col], schema=pa.schema([pa.field("ts", col.type)])
+        )
+        out = arrow_to_json_shape(batch)
+        v = out.column("ts").to_pylist()[0]
+        assert "T" in v
+        assert "+" not in v  # no tz suffix
+        assert v.startswith("2026-03-23T10:18:24")
+
+    def test_date_becomes_iso_date(self):
+        col = pa.array([date(2026, 3, 23), None], type=pa.date32())
+        batch = pa.RecordBatch.from_arrays(
+            [col], schema=pa.schema([pa.field("d", col.type)])
+        )
+        out = arrow_to_json_shape(batch)
+        assert out.column("d").to_pylist() == ["2026-03-23", None]
+
+    def test_time_becomes_iso_time(self):
+        col = pa.array([time(10, 18, 24), None], type=pa.time64("us"))
+        batch = pa.RecordBatch.from_arrays(
+            [col], schema=pa.schema([pa.field("t", col.type)])
+        )
+        out = arrow_to_json_shape(batch)
+        values = out.column("t").to_pylist()
+        assert values[0].startswith("10:18:24")
+        assert values[1] is None
+
+    def test_decimal_becomes_string(self):
+        col = pa.array(
+            [Decimal("42.5000"), Decimal("3.1400"), None],
+            type=pa.decimal128(18, 4),
+        )
+        batch = pa.RecordBatch.from_arrays(
+            [col], schema=pa.schema([pa.field("amt", col.type)])
+        )
+        out = arrow_to_json_shape(batch)
+        assert out.column("amt").to_pylist() == ["42.5000", "3.1400", None]
+
+    def test_binary_becomes_base64_string(self):
+        col = pa.array([b"hello", b"\xff\xfe", None], type=pa.binary())
+        batch = pa.RecordBatch.from_arrays(
+            [col], schema=pa.schema([pa.field("blob", col.type)])
+        )
+        out = arrow_to_json_shape(batch)
+        vals = out.column("blob").to_pylist()
+        import base64
+        assert vals[0] == base64.b64encode(b"hello").decode("ascii")
+        assert vals[1] == base64.b64encode(b"\xff\xfe").decode("ascii")
+        assert vals[2] is None
+
+    def test_json_native_types_passthrough_unchanged(self):
+        schema = pa.schema([
+            pa.field("id", pa.int64()),
+            pa.field("name", pa.string()),
+            pa.field("active", pa.bool_()),
+            pa.field("score", pa.float64()),
+        ])
+        batch = pa.RecordBatch.from_pylist(
+            [{"id": 1, "name": "Alice", "active": True, "score": 9.5}],
+            schema=schema,
+        )
+        out = arrow_to_json_shape(batch)
+        assert out.schema == schema
+        assert out.to_pylist() == batch.to_pylist()
+
+    def test_struct_with_nested_timestamp_recurses(self):
+        struct_t = pa.struct([
+            pa.field("id", pa.int64()),
+            pa.field("created", pa.timestamp("us", tz="UTC")),
+        ])
+        struct_arr = pa.array(
+            [
+                {"id": 1, "created": datetime(2026, 3, 23, 10, 18, 24, tzinfo=timezone.utc)},
+                None,
+            ],
+            type=struct_t,
+        )
+        batch = pa.RecordBatch.from_arrays(
+            [struct_arr],
+            schema=pa.schema([pa.field("payload", struct_t)]),
+        )
+        out = arrow_to_json_shape(batch)
+        new_struct_type = out.schema.field("payload").type
+        # The struct's `created` sub-field is now a string.
+        assert pa.types.is_string(new_struct_type.field("created").type)
+        assert pa.types.is_int64(new_struct_type.field("id").type)
+        # And the parent null mask is preserved.
+        records = out.to_pylist()
+        assert records[0]["payload"]["id"] == 1
+        assert "T" in records[0]["payload"]["created"]
+        assert records[1]["payload"] is None
+
+    def test_list_of_struct_with_decimal_recurses(self):
+        struct_t = pa.struct([
+            pa.field("sku", pa.string()),
+            pa.field("price", pa.decimal128(18, 2)),
+        ])
+        list_t = pa.list_(struct_t)
+        list_arr = pa.array(
+            [[
+                {"sku": "A", "price": Decimal("9.99")},
+                {"sku": "B", "price": Decimal("12.50")},
+            ]],
+            type=list_t,
+        )
+        batch = pa.RecordBatch.from_arrays(
+            [list_arr],
+            schema=pa.schema([pa.field("items", list_t)]),
+        )
+        out = arrow_to_json_shape(batch)
+        records = out.to_pylist()
+        assert records[0]["items"][0]["price"] == "9.99"
+        assert records[0]["items"][1]["price"] == "12.50"
+
+    def test_output_dict_is_json_dumps_safe(self):
+        """The full point of the cast: the produced dict must serialise
+        with stdlib ``json.dumps`` and no ``default=`` handler."""
+        struct_t = pa.struct([
+            pa.field("id", pa.int64()),
+            pa.field("created", pa.timestamp("us", tz="UTC")),
+            pa.field("amount", pa.decimal128(18, 2)),
+        ])
+        batch = pa.RecordBatch.from_arrays(
+            [pa.array([
+                {
+                    "id": 1,
+                    "created": datetime(2026, 3, 23, 10, 18, 24, tzinfo=timezone.utc),
+                    "amount": Decimal("42.50"),
+                },
+            ], type=struct_t)],
+            schema=pa.schema([pa.field("rec", struct_t)]),
+        )
+        records = arrow_to_json_shape(batch).to_pylist()
+        # No TypeError — that's the contract.
+        serialised = json.dumps(records)
+        assert '"amount": "42.50"' in serialised
+        assert "T10:18:24" in serialised
+
+
+class TestToDbRecordsAndToJsonRecords:
+    """Symmetric materialisation entry points on SchemaContract: one per
+    destination kind, each one shortest-path to its receiver."""
+
+    def test_to_db_records_keeps_native_python_types(self):
+        schema = {
+            "columns": [
+                {"name": "id", "arrow_type": "Int64", "nullable": False},
+                {
+                    "name": "created",
+                    "arrow_type": "Timestamp(MICROSECOND, UTC)",
+                    "nullable": True,
+                },
+                {"name": "amount", "arrow_type": "Decimal128(18, 4)", "nullable": True},
+            ]
+        }
+        contract = SchemaContract(schema)
+        batch = pa.RecordBatch.from_pylist(
+            [{
+                "id": 1,
+                "created": datetime(2026, 3, 23, 10, 18, 24, tzinfo=timezone.utc),
+                "amount": Decimal("42.5000"),
+            }],
+            schema=contract.arrow_schema,
+        )
+        records = contract.to_db_records(batch)
+        # SA receives Python-native datetime/Decimal here.
+        assert isinstance(records[0]["created"], datetime)
+        assert isinstance(records[0]["amount"], Decimal)
+
+    def test_to_json_records_stringifies_for_json_dumps(self):
+        schema = {
+            "columns": [
+                {"name": "id", "arrow_type": "Int64", "nullable": False},
+                {
+                    "name": "created",
+                    "arrow_type": "Timestamp(MICROSECOND, UTC)",
+                    "nullable": True,
+                },
+                {"name": "amount", "arrow_type": "Decimal128(18, 4)", "nullable": True},
+            ]
+        }
+        contract = SchemaContract(schema)
+        batch = pa.RecordBatch.from_pylist(
+            [{
+                "id": 1,
+                "created": datetime(2026, 3, 23, 10, 18, 24, tzinfo=timezone.utc),
+                "amount": Decimal("42.5000"),
+            }],
+            schema=contract.arrow_schema,
+        )
+        records = contract.to_json_records(batch)
+        # Boundary contract: stdlib json.dumps must work.
+        json.dumps(records)
+        assert isinstance(records[0]["created"], str)
+        assert "T" in records[0]["created"]
+        assert records[0]["amount"] == "42.5000"
+
+    def test_to_json_records_decodes_json_columns_after_cast(self):
+        schema = {
+            "properties": {
+                "metadata": {"type": "object", "arrow_type": "Json"},
+                "ts": {"arrow_type": "Timestamp(MICROSECOND, UTC)"},
+            }
+        }
+        contract = SchemaContract(schema)
+        batch = contract.from_pylist(
+            [{
+                "metadata": {"k": "v"},
+                "ts": datetime(2026, 3, 23, 10, 18, 24, tzinfo=timezone.utc),
+            }]
+        )
+        records = contract.to_json_records(batch)
+        # metadata back to a dict; ts to an ISO string. Both safe for
+        # json.dumps.
+        json.dumps(records)
+        assert records[0]["metadata"] == {"k": "v"}
+        assert "T" in records[0]["ts"]

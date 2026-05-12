@@ -1,5 +1,6 @@
 """Build pa.Schema from endpoint arrow_type declarations."""
 
+import base64
 import json
 import logging
 from decimal import Decimal
@@ -21,6 +22,99 @@ _JSON_ARROW_TYPE: str = "Json"
 
 def _is_json_field(field_def: Dict[str, Any]) -> bool:
     return field_def.get("arrow_type") == _JSON_ARROW_TYPE
+
+
+# ---------------------------------------------------------------------------
+# Arrow → JSON-shape cast (used by JSON-emitting destinations)
+# ---------------------------------------------------------------------------
+
+
+def arrow_to_json_shape(batch: pa.RecordBatch) -> pa.RecordBatch:
+    """Cast Arrow columns into JSON-native shape.
+
+    Arrow's native ``to_pylist`` materialises ``pa.timestamp`` as
+    ``datetime``, ``pa.decimal128`` as ``Decimal``, ``pa.binary`` as
+    ``bytes``, ``pa.time`` as ``time`` — none of which ``json.dumps``
+    serialises. This helper does the conversion in Arrow space (vectorised
+    via ``pc.strftime`` / ``pc.cast``) so the materialised dict carries only
+    JSON-native primitives and the destination handler stops needing a
+    custom JSON encoder.
+
+    Recurses into struct and list types so a nested timestamp inside an
+    Object marker or List(Object) gets converted too. Null masks on
+    parent struct rows are preserved.
+    """
+    new_fields: List[pa.Field] = []
+    new_arrays: List[pa.Array] = []
+    for index, field in enumerate(batch.schema):
+        f, arr = _column_to_json_shape(field, batch.column(index))
+        new_fields.append(f)
+        new_arrays.append(arr)
+    return pa.RecordBatch.from_arrays(new_arrays, schema=pa.schema(new_fields))
+
+
+def _retype(field: pa.Field, new_type: pa.DataType) -> pa.Field:
+    return pa.field(field.name, new_type, nullable=field.nullable)
+
+
+def _column_to_json_shape(
+    field: pa.Field, column: pa.Array
+) -> tuple[pa.Field, pa.Array]:
+    t = field.type
+    if pa.types.is_timestamp(t):
+        # %S in PyArrow strftime includes the fractional second for
+        # sub-second-unit timestamps; %z renders the offset as ``+HHMM``
+        # (no colon). Both are RFC 3339-acceptable.
+        fmt = "%Y-%m-%dT%H:%M:%S%z" if t.tz else "%Y-%m-%dT%H:%M:%S"
+        return _retype(field, pa.string()), pc.strftime(column, format=fmt)
+    if pa.types.is_date(t):
+        return _retype(field, pa.string()), pc.strftime(column, format="%Y-%m-%d")
+    if pa.types.is_time(t):
+        # pc.strftime doesn't operate on Time types; cast is the only
+        # vectorised path. Output is ``HH:MM:SS[.ffffff]``.
+        return _retype(field, pa.string()), pc.cast(column, pa.string())
+    if pa.types.is_decimal(t):
+        return _retype(field, pa.string()), pc.cast(column, pa.string())
+    if (
+        pa.types.is_binary(t)
+        or pa.types.is_large_binary(t)
+        or pa.types.is_fixed_size_binary(t)
+    ):
+        # PyArrow has no vectorised base64. Per-element encode is
+        # acceptable because binary columns are rare in API payloads.
+        encoded = [
+            None if v is None else base64.b64encode(v).decode("ascii")
+            for v in column.to_pylist()
+        ]
+        return _retype(field, pa.string()), pa.array(encoded, type=pa.string())
+    if pa.types.is_struct(t):
+        sub_fields: List[pa.Field] = []
+        sub_arrays: List[pa.Array] = []
+        for j, sub_field in enumerate(t):
+            sf, sa = _column_to_json_shape(sub_field, column.field(j))
+            sub_fields.append(sf)
+            sub_arrays.append(sa)
+        # Preserve the parent's null mask — pa.StructArray.from_arrays
+        # otherwise treats every row as non-null even if the original
+        # struct had nulls (its children carry placeholder values for
+        # those slots).
+        mask = column.is_null() if column.null_count else None
+        new_array = pa.StructArray.from_arrays(
+            sub_arrays, fields=sub_fields, mask=mask
+        )
+        return _retype(field, pa.struct(sub_fields)), new_array
+    if pa.types.is_list(t) or pa.types.is_large_list(t):
+        element_field = pa.field("item", t.value_type)
+        ef, ea = _column_to_json_shape(element_field, column.values)
+        if pa.types.is_list(t):
+            new_array = pa.ListArray.from_arrays(column.offsets, ea)
+            new_type = pa.list_(ef.type)
+        else:
+            new_array = pa.LargeListArray.from_arrays(column.offsets, ea)
+            new_type = pa.large_list(ef.type)
+        return _retype(field, new_type), new_array
+    # JSON-native already: bool, integer, float, string, null.
+    return field, column
 
 
 class SchemaContract:
@@ -73,6 +167,36 @@ class SchemaContract:
     @property
     def json_columns(self) -> set:
         return {n for n, defn in self._field_defs.items() if _is_json_field(defn)}
+
+    def to_db_records(
+        self, record_batch: pa.RecordBatch
+    ) -> List[Dict[str, Any]]:
+        """Materialise a batch for a SQL destination.
+
+        Arrow-space schema alignment, then ``to_pylist``, then Json wire-
+        strings → dicts. SQLAlchemy is the wire-format-aware receiver
+        beyond this point — it serialises ``datetime`` / ``Decimal`` /
+        ``dict`` natively into their column types.
+        """
+        record_batch = self.cast_arrow_batch(record_batch)
+        records = record_batch.to_pylist()
+        return self.decode_json_columns(records)
+
+    def to_json_records(
+        self, record_batch: pa.RecordBatch
+    ) -> List[Dict[str, Any]]:
+        """Materialise a batch for a JSON-emitting destination.
+
+        Same pipeline as :meth:`to_db_records` plus one extra Arrow-space
+        cast (:func:`arrow_to_json_shape`) so timestamp / date / time /
+        decimal / binary columns become canonical JSON strings before
+        ``to_pylist``. The result is safe to pass to ``json.dumps`` with
+        no custom encoder.
+        """
+        record_batch = self.cast_arrow_batch(record_batch)
+        record_batch = arrow_to_json_shape(record_batch)
+        records = record_batch.to_pylist()
+        return self.decode_json_columns(records)
 
     def decode_json_columns(
         self, records: List[Dict[str, Any]]

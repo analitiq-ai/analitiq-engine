@@ -15,6 +15,7 @@ import pyarrow as pa
 from aiohttp_retry import ExponentialRetry, RetryClient
 
 from ..base_handler import BaseDestinationHandler, BatchWriteResult
+from ..schema_contract import arrow_to_json_shape
 from ...grpc.generated.analitiq.v1 import (
     AckStatus,
     Cursor,
@@ -343,7 +344,13 @@ class ApiDestinationHandler(BaseDestinationHandler):
                 failure_summary="Schema not configured",
             )
 
-        records = record_batch.to_pylist()
+        # Cast non-JSON-native Arrow types (timestamp, decimal, date,
+        # time, binary) into canonical string columns before
+        # materialisation, so ``to_pylist`` produces a dict that
+        # ``json.dumps`` can serialise without a custom encoder. Mirrors
+        # the DB handler's pattern of doing all destination-specific
+        # shaping in Arrow space before the single ``to_pylist`` call.
+        records = arrow_to_json_shape(record_batch).to_pylist()
 
         if not records:
             return BatchWriteResult(

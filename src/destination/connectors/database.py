@@ -706,24 +706,17 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
     def _prepare_for_sqlalchemy(
         self, state: _StreamState, record_batch: pa.RecordBatch
     ) -> List[Dict[str, Any]]:
-        """Cast a batch to the destination schema and materialize for SQLAlchemy.
+        """Materialise a batch for SQLAlchemy via the schema contract.
 
-        ``cast_arrow_batch`` does the column-by-column realignment in
-        Arrow space; ``to_pylist`` is the single materialization point
-        before the SQLAlchemy bulk insert. Nested columns declared as
-        ``Struct``/``List`` (via the Object/List markers) already reach
-        SQLAlchemy as Python ``dict``/``list`` values against ``JSON``
-        columns, which SA serialises natively. Opaque ``Json`` columns
-        carry a JSON-encoded string on the wire — decode them here so
-        SA's ``JSON`` column receives the original ``dict``/``list``
-        rather than a double-quoted string.
+        SQLAlchemy is the wire-format-aware receiver: ``datetime`` /
+        ``Decimal`` / ``dict`` go straight into their column types.
+        ``to_db_records`` aligns the batch to the destination schema,
+        materialises once, and reverses the Json wire-string encoding so
+        a JSONB column receives a real dict, not a quoted string.
         """
-        if state.schema_contract is not None:
-            record_batch = state.schema_contract.cast_arrow_batch(record_batch)
-        records = record_batch.to_pylist()
-        if state.schema_contract is not None:
-            records = state.schema_contract.decode_json_columns(records)
-        return records
+        if state.schema_contract is None:
+            return record_batch.to_pylist()
+        return state.schema_contract.to_db_records(record_batch)
 
     async def health_check(self) -> bool:
         """Check database health."""

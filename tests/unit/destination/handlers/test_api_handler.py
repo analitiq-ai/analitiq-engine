@@ -691,6 +691,78 @@ class TestApiHandlerJsonFields:
         assert handler._streams["s1"].json_fields == {"metadata"}
 
     @pytest.mark.asyncio
+    async def test_write_batch_casts_datetime_and_decimal_to_strings(self):
+        """The HTTP body delivered to ``_send_request`` must carry
+        JSON-native values for typed Arrow columns — datetime → ISO
+        string, Decimal → numeric string — so aiohttp's ``json.dumps``
+        succeeds without a custom encoder. Catches the silent
+        regression where ``to_pylist`` runs before the JSON-shape cast.
+        """
+        from datetime import datetime, timezone
+        from decimal import Decimal
+        import json as _json
+
+        handler = ApiDestinationHandler()
+        handler._connected = True
+        handler._session = MagicMock()
+        doc = {
+            "operations": {
+                "write": {
+                    "insert": {
+                        "request": {"method": "POST", "path": "/v1/things"},
+                        "input": {"schema": {"properties": {}}},
+                    }
+                }
+            }
+        }
+        handler.set_stream_endpoints({"s1": doc})
+        await handler.configure_schema(
+            SchemaMessage(stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT)
+        )
+
+        batch_schema = pa.schema([
+            pa.field("id", pa.int64()),
+            pa.field("created", pa.timestamp("us", tz="UTC")),
+            pa.field("amount", pa.decimal128(18, 4)),
+        ])
+        batch = pa.RecordBatch.from_arrays(
+            [
+                pa.array([1], type=pa.int64()),
+                pa.array(
+                    [datetime(2026, 3, 23, 10, 18, 24, tzinfo=timezone.utc)],
+                    type=pa.timestamp("us", tz="UTC"),
+                ),
+                pa.array([Decimal("42.5000")], type=pa.decimal128(18, 4)),
+            ],
+            schema=batch_schema,
+        )
+
+        sent_payloads = []
+
+        async def _capture(state, data):
+            # Round-trip through json.dumps confirms the dict is fully
+            # JSON-native — same contract aiohttp's json= relies on.
+            _json.dumps(data)
+            sent_payloads.append(data)
+            return {}
+
+        handler._send_request = _capture  # type: ignore[assignment]
+        result = await handler.write_batch(
+            run_id="run",
+            stream_id="s1",
+            batch_seq=0,
+            record_batch=batch,
+            record_ids=["r1"],
+            cursor=MagicMock(),
+        )
+        assert result.status == AckStatus.ACK_STATUS_SUCCESS
+        sent = sent_payloads[0]
+        assert sent["id"] == 1
+        assert isinstance(sent["created"], str)
+        assert "T" in sent["created"]
+        assert sent["amount"] == "42.5000"
+
+    @pytest.mark.asyncio
     async def test_write_batch_malformed_json_returns_fatal(self):
         """A non-JSON string in a Json column is a data-shape failure,
         not a transport failure — must classify FATAL and surface the
