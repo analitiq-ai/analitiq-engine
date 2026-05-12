@@ -724,6 +724,8 @@ def _is_record_new(
                     return False
                 continue
         except (ValueError, TypeError):
+            # Non-integer digit-strings (e.g. Unicode digits) fall through
+            # to the lexicographic compare below.
             pass
         if str(record_value) > str(stored_value):
             return True

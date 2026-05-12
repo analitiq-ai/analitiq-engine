@@ -224,13 +224,6 @@ class TestDDLLockSerialization:
             await asyncio.sleep(0.01)
             in_flight -= 1
 
-        async def _fake_begin():
-            ctx = AsyncMock()
-            conn = AsyncMock()
-            conn.run_sync = _fake_run_sync
-            ctx.__aenter__.return_value = conn
-            return ctx
-
         # The handler's _ensure_tables_exist uses engine.begin() as an async
         # context manager; bypass with a coroutine returning a prepared ctx.
         from contextlib import asynccontextmanager

@@ -214,15 +214,6 @@ class TestStartStreamStateReset:
 
         # Make start_stream's schema-ack wait complete immediately via a
         # task that fails — we only care about the pre-send reset.
-        sent: list[bool] = []
-
-        async def _fake_create_task(coro, name=None):
-            sent.append(True)
-            coro.close()
-            t = MagicMock()
-            t.__class__ = asyncio.Task
-            return t
-
         import asyncio as _asyncio
         original_create_task = _asyncio.create_task
 
