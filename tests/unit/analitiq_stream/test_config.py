@@ -115,31 +115,31 @@ class TestEndpointRefModel:
     @pytest.mark.unit
     def test_from_dict_connector(self):
         ref = EndpointRef.from_dict({
-            "scope": "connector", "connection_alias": "pipedrive", "alias": "deals",
+            "scope": "connector", "connection_id": "pipedrive", "alias": "deals",
         })
         assert ref.scope == "connector"
-        assert ref.connection_alias == "pipedrive"
+        assert ref.connection_id == "pipedrive"
         assert ref.alias == "deals"
 
     @pytest.mark.unit
     def test_from_dict_connection(self):
         ref = EndpointRef.from_dict({
-            "scope": "connection", "connection_alias": "prod-postgres", "alias": "public_users",
+            "scope": "connection", "connection_id": "prod-postgres", "alias": "public_users",
         })
         assert ref.scope == "connection"
-        assert ref.connection_alias == "prod-postgres"
+        assert ref.connection_id == "prod-postgres"
         assert ref.alias == "public_users"
 
     @pytest.mark.unit
     def test_from_dict_passes_through_existing_instance(self):
-        original = EndpointRef(scope="connector", connection_alias="x", alias="y")
+        original = EndpointRef(scope="connector", connection_id="x", alias="y")
         assert EndpointRef.from_dict(original) is original
 
     @pytest.mark.unit
     def test_invalid_scope_raises(self):
         with pytest.raises(ValueError, match="scope"):
             EndpointRef.from_dict({
-                "scope": "unknown", "connection_alias": "x", "alias": "y",
+                "scope": "unknown", "connection_id": "x", "alias": "y",
             })
 
     @pytest.mark.unit
@@ -151,21 +151,34 @@ class TestEndpointRefModel:
     def test_unknown_keys_raises(self):
         with pytest.raises(ValueError, match="unknown keys"):
             EndpointRef.from_dict({
-                "scope": "connector", "connection_alias": "x", "alias": "y", "extra": "z",
+                "scope": "connector", "connection_id": "x", "alias": "y", "extra": "z",
             })
 
     @pytest.mark.unit
-    def test_empty_connection_alias_raises(self):
-        with pytest.raises(ValueError, match="connection_alias cannot be empty"):
+    def test_x_extension_keys_are_accepted(self):
+        """The stream contract allows ``x-*`` extension metadata
+        alongside the required fields."""
+        ref = EndpointRef.from_dict({
+            "scope": "connector",
+            "connection_id": "x",
+            "alias": "y",
+            "x-owner": "platform",
+            "x-tags": ["wise", "transfers"],
+        })
+        assert ref.connection_id == "x"
+
+    @pytest.mark.unit
+    def test_empty_connection_id_raises(self):
+        with pytest.raises(ValueError, match="connection_id cannot be empty"):
             EndpointRef.from_dict({
-                "scope": "connector", "connection_alias": "", "alias": "y",
+                "scope": "connector", "connection_id": "", "alias": "y",
             })
 
     @pytest.mark.unit
     def test_empty_alias_raises(self):
         with pytest.raises(ValueError, match="alias cannot be empty"):
             EndpointRef.from_dict({
-                "scope": "connector", "connection_alias": "x", "alias": "",
+                "scope": "connector", "connection_id": "x", "alias": "",
             })
 
     @pytest.mark.unit
@@ -175,18 +188,18 @@ class TestEndpointRefModel:
 
     @pytest.mark.unit
     def test_to_dict_roundtrip(self):
-        d = {"scope": "connector", "connection_alias": "x", "alias": "y"}
+        d = {"scope": "connector", "connection_id": "x", "alias": "y"}
         assert EndpointRef.from_dict(d).to_dict() == d
 
     @pytest.mark.unit
     def test_str_canonical_form(self):
-        ref = EndpointRef(scope="connection", connection_alias="alias", alias="name")
+        ref = EndpointRef(scope="connection", connection_id="alias", alias="name")
         assert str(ref) == "connection:alias/name"
 
     @pytest.mark.unit
     def test_hashable_for_dict_keys(self):
-        ref1 = EndpointRef(scope="connector", connection_alias="x", alias="y")
-        ref2 = EndpointRef(scope="connector", connection_alias="x", alias="y")
+        ref1 = EndpointRef(scope="connector", connection_id="x", alias="y")
+        ref2 = EndpointRef(scope="connector", connection_id="x", alias="y")
         assert hash(ref1) == hash(ref2)
         cache = {ref1: "value"}
         assert cache[ref2] == "value"
@@ -232,7 +245,7 @@ class TestEndpointRefResolver:
         (endpoint_dir / "transfers.json").write_text('{"endpoint": "/v1/transfers"}')
 
         paths = {"connectors": tmp_path / "connectors", "connections": tmp_path / "connections"}
-        ref = EndpointRef(scope="connector", connection_alias="wise", alias="transfers")
+        ref = EndpointRef(scope="connector", connection_id="wise", alias="transfers")
         assert resolve_endpoint_ref(ref, paths)["endpoint"] == "/v1/transfers"
 
     @pytest.mark.unit

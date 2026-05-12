@@ -88,22 +88,29 @@ def _serialize(obj: Any) -> Any:
 class EndpointRef:
     """Structured reference to an endpoint definition.
 
-    ``connection_alias`` is the directory name under ``connections/`` of
-    the saved connection that owns (or hosts a connector that owns) the
-    endpoint. ``alias`` is the endpoint slug declared inside the endpoint
-    document. Resolution rules:
+    Contract shape (stream document):
 
-    - ``scope="connector"``: load the connection by alias, read its
-      ``connector_alias``, then load
+        {
+          "scope":         "connector" | "connection",
+          "connection_id": "<versioned connection id selected in the pipeline>",
+          "alias":         "<stable endpoint alias from endpoint discovery>",
+          # plus optional "x-*" extension metadata
+        }
+
+    Resolution rules:
+
+    - ``scope="connector"``: look up the connection by ``connection_id``,
+      read its ``connector_alias``, then load
       ``connectors/<connector_alias>/definition/endpoints/<alias>.json``.
     - ``scope="connection"``: load
-      ``connections/<connection_alias>/definition/endpoints/<alias>.json``.
+      ``connections/<directory>/definition/endpoints/<alias>.json`` where
+      ``<directory>`` is the on-disk path mapped from ``connection_id``.
 
     Frozen so instances are hashable and usable as dict keys.
     """
 
     scope: str
-    connection_alias: str
+    connection_id: str
     alias: str
 
     _VALID_SCOPES = ("connector", "connection")
@@ -113,46 +120,54 @@ class EndpointRef:
             raise ValueError(
                 f"EndpointRef.scope must be one of {self._VALID_SCOPES}, got {self.scope!r}"
             )
-        if not self.connection_alias:
-            raise ValueError("EndpointRef.connection_alias cannot be empty")
+        if not self.connection_id:
+            raise ValueError("EndpointRef.connection_id cannot be empty")
         if not self.alias:
             raise ValueError("EndpointRef.alias cannot be empty")
 
     def __str__(self) -> str:
-        return f"{self.scope}:{self.connection_alias}/{self.alias}"
+        return f"{self.scope}:{self.connection_id}/{self.alias}"
 
     @classmethod
     def from_dict(cls, data: Any) -> "EndpointRef":
-        """Validate and construct from a dict (or pass-through if already typed)."""
+        """Validate and construct from a dict (or pass-through if already typed).
+
+        Accepts ``x-*`` extension keys verbatim per the stream contract —
+        they are not loaded onto the dataclass but do not trigger an
+        unknown-key error either.
+        """
         if isinstance(data, EndpointRef):
             return data
         if not isinstance(data, dict):
             raise TypeError(
                 "endpoint_ref must be an object with keys "
-                "{'scope','connection_alias','alias'}, got "
-                f"{type(data).__name__}"
+                "{'scope','connection_id','alias'} (plus optional 'x-*' "
+                f"extensions), got {type(data).__name__}"
             )
-        allowed = {"scope", "connection_alias", "alias"}
-        unknown = set(data) - allowed
+        required = {"scope", "connection_id", "alias"}
+        unknown = {
+            k for k in set(data) - required if not k.startswith("x-")
+        }
         if unknown:
             raise ValueError(
-                f"endpoint_ref has unknown keys {sorted(unknown)}; allowed: {sorted(allowed)}"
+                f"endpoint_ref has unknown keys {sorted(unknown)}; allowed: "
+                f"{sorted(required)} plus optional 'x-*' extension keys"
             )
-        missing = allowed - set(data)
+        missing = required - set(data)
         if missing:
             raise ValueError(
                 f"endpoint_ref is missing required keys {sorted(missing)}"
             )
         return cls(
             scope=data["scope"],
-            connection_alias=data["connection_alias"],
+            connection_id=data["connection_id"],
             alias=data["alias"],
         )
 
     def to_dict(self) -> Dict[str, str]:
         return {
             "scope": self.scope,
-            "connection_alias": self.connection_alias,
+            "connection_id": self.connection_id,
             "alias": self.alias,
         }
 

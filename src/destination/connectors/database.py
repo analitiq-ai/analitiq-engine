@@ -146,7 +146,8 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         private endpoint → connection's map).
 
         Values are dict-shape ``EndpointRef`` payloads
-        (``{"scope", "identifier", "endpoint"}``).
+        (``{"scope", "connection_id", "alias"}`` plus optional ``x-*``
+        extension keys).
         """
         self._endpoint_refs = dict(endpoint_refs)
 

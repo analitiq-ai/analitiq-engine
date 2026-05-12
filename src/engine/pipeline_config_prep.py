@@ -24,8 +24,8 @@ aliases (matching the directory name on disk):
     pipeline.connections.destinations -> ["<connection-alias>", ...]
     pipeline.streams                  -> ["<stream-alias>", ...]
     stream.pipeline_id                -> "<pipeline-alias>"
-    stream.source.endpoint_ref        -> {scope, connection_alias, alias}
-    stream.destinations[].endpoint_ref-> {scope, connection_alias, alias}
+    stream.source.endpoint_ref        -> {scope, connection_id, alias[, x-*]}
+    stream.destinations[].endpoint_ref-> {scope, connection_id, alias[, x-*]}
 
 Every artifact is JSON-Schema validated against the published Analitiq
 contract before it is consumed.
@@ -293,10 +293,10 @@ class PipelineConfigPrep:
 
     def _connection_lookup(self) -> ConnectionLookup:
         return ConnectionLookup(
-            directory_by_alias={
+            directory_by_id={
                 alias: rec.alias for alias, rec in self._connection_records.items()
             },
-            connector_alias_by_alias={
+            connector_alias_by_id={
                 alias: rec.connector_alias
                 for alias, rec in self._connection_records.items()
             },
@@ -535,7 +535,7 @@ class PipelineConfigPrep:
             )
         source_endpoint_ref = EndpointRef.from_dict(source_endpoint_ref_dict)
         source_runtime = self._resolve_connection_by_alias(
-            source_endpoint_ref.connection_alias
+            source_endpoint_ref.connection_id
         )
         source_endpoint = self._resolve_endpoint(source_endpoint_ref)
 
@@ -555,7 +555,7 @@ class PipelineConfigPrep:
                 )
             dest_endpoint_ref = EndpointRef.from_dict(dest_endpoint_ref_dict)
             dest_runtime = self._resolve_connection_by_alias(
-                dest_endpoint_ref.connection_alias
+                dest_endpoint_ref.connection_id
             )
             dest_endpoint = self._resolve_endpoint(dest_endpoint_ref)
 

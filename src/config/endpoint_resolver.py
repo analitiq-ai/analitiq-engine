@@ -5,15 +5,16 @@ JSON document.
 
 Reference shape (see ``src/models/stream.py:EndpointRef``):
 
-    ``{"scope": "connector",  "connection_alias": "<connection-alias>", "alias": "<name>"}``
+    ``{"scope": "connector",  "connection_id": "<connection-id>", "alias": "<name>"}``
         -> connectors/<connector_alias>/definition/endpoints/<name>.json
 
-    ``{"scope": "connection", "connection_alias": "<connection-alias>", "alias": "<name>"}``
-        -> connections/<connection-alias>/definition/endpoints/<name>.json
+    ``{"scope": "connection", "connection_id": "<connection-id>", "alias": "<name>"}``
+        -> connections/<directory>/definition/endpoints/<name>.json
 
-The :class:`PipelineConfigPrep` layer scans ``connections/`` once at
-config-load time and supplies the alias→connector mapping via
-:class:`ConnectionLookup`.
+``connection_id`` is the versioned connection id from the stream
+contract; :class:`PipelineConfigPrep` scans ``connections/`` once at
+config-load time and supplies the id → directory / connector_alias maps
+via :class:`ConnectionLookup`.
 """
 
 from __future__ import annotations
@@ -34,25 +35,25 @@ EndpointRefInput = Union[EndpointRef, Mapping[str, Any]]
 
 @dataclass(frozen=True)
 class ConnectionLookup:
-    """Indexed view of saved connections, keyed by connection alias."""
+    """Indexed view of saved connections, keyed by ``connection_id``."""
 
-    directory_by_alias: Mapping[str, str]
-    connector_alias_by_alias: Mapping[str, str]
+    directory_by_id: Mapping[str, str]
+    connector_alias_by_id: Mapping[str, str]
 
-    def directory_for(self, connection_alias: str) -> str:
-        if connection_alias not in self.directory_by_alias:
+    def directory_for(self, connection_id: str) -> str:
+        if connection_id not in self.directory_by_id:
             raise KeyError(
-                f"Unknown connection alias {connection_alias!r}; "
-                f"known: {sorted(self.directory_by_alias)}"
+                f"Unknown connection_id {connection_id!r}; "
+                f"known: {sorted(self.directory_by_id)}"
             )
-        return self.directory_by_alias[connection_alias]
+        return self.directory_by_id[connection_id]
 
-    def connector_alias_for(self, connection_alias: str) -> str:
-        if connection_alias not in self.connector_alias_by_alias:
+    def connector_alias_for(self, connection_id: str) -> str:
+        if connection_id not in self.connector_alias_by_id:
             raise KeyError(
-                f"Connection {connection_alias!r} has no connector_alias mapping"
+                f"Connection {connection_id!r} has no connector_alias mapping"
             )
-        return self.connector_alias_by_alias[connection_alias]
+        return self.connector_alias_by_id[connection_id]
 
 
 def _coerce(ref: EndpointRefInput) -> EndpointRef:
@@ -68,7 +69,7 @@ def resolve_endpoint_path(
     parsed = _coerce(ref)
 
     if parsed.scope == "connector":
-        connector_alias = lookup.connector_alias_for(parsed.connection_alias)
+        connector_alias = lookup.connector_alias_for(parsed.connection_id)
         file_path = (
             paths["connectors"]
             / connector_alias
@@ -77,7 +78,7 @@ def resolve_endpoint_path(
             / f"{parsed.alias}.json"
         )
     elif parsed.scope == "connection":
-        directory = lookup.directory_for(parsed.connection_alias)
+        directory = lookup.directory_for(parsed.connection_id)
         file_path = (
             paths["connections"]
             / directory
