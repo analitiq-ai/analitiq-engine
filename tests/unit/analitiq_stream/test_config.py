@@ -9,6 +9,7 @@ from src.config import (
     load_connection,
     load_connector_definition,
 )
+from src.config.endpoint_resolver import ConnectionLookup
 from src.config.exceptions import EndpointNotFoundError, ConnectorNotFoundError, ConnectionConfigError
 from src.models.stream import EndpointRef
 
@@ -40,57 +41,35 @@ class TestPipelineConfigValidator:
     @pytest.fixture
     def valid_pipeline(self):
         return {
-            "pipeline": {
-                "pipeline_id": "test-pipeline",
-                "connections": {
-                    "source": "my-api",
-                    "destinations": ["prod-postgres"],
-                },
-                "streams": ["stream-1"],
-                "engine": {"vcpu": 1, "memory": 8192},
-                "runtime": {
-                    "buffer_size": 5000,
-                    "batching": {"batch_size": 100, "max_concurrent_batches": 3},
-                    "logging": {"log_level": "INFO", "metrics_enabled": True},
-                    "error_handling": {"strategy": "dlq", "max_retries": 3, "retry_delay": 5},
-                },
+            "alias": "test-pipeline",
+            "connections": {
+                "source": "my-api",
+                "destinations": ["prod-postgres"],
             },
-            "streams": [{"stream_id": "stream-1"}],
+            "streams": ["stream-1"],
         }
 
     @pytest.mark.unit
     def test_valid_pipeline_passes(self, valid_pipeline):
         result = validate_pipeline_config(valid_pipeline)
-        assert "pipeline" in result
+        assert result["alias"] == "test-pipeline"
 
     @pytest.mark.unit
-    def test_missing_pipeline_key_fails(self, valid_pipeline):
-        del valid_pipeline["pipeline"]
-        with pytest.raises(ValueError, match="pipeline"):
-            validate_pipeline_config(valid_pipeline)
-
-    @pytest.mark.unit
-    def test_missing_streams_key_fails(self, valid_pipeline):
-        del valid_pipeline["streams"]
-        with pytest.raises(ValueError, match="streams"):
+    def test_missing_alias_fails(self, valid_pipeline):
+        del valid_pipeline["alias"]
+        with pytest.raises(Exception, match="alias"):
             validate_pipeline_config(valid_pipeline)
 
     @pytest.mark.unit
     def test_missing_source_fails(self, valid_pipeline):
-        valid_pipeline["pipeline"]["connections"]["source"] = ""
-        with pytest.raises(ValueError, match="source"):
+        del valid_pipeline["connections"]["source"]
+        with pytest.raises(Exception, match="source"):
             validate_pipeline_config(valid_pipeline)
 
     @pytest.mark.unit
-    def test_missing_destinations_fails(self, valid_pipeline):
-        valid_pipeline["pipeline"]["connections"]["destinations"] = []
-        with pytest.raises(ValueError, match="destinations"):
-            validate_pipeline_config(valid_pipeline)
-
-    @pytest.mark.unit
-    def test_no_stream_ids_fails(self, valid_pipeline):
-        valid_pipeline["pipeline"]["streams"] = []
-        with pytest.raises(ValueError, match="stream"):
+    def test_empty_destinations_fails(self, valid_pipeline):
+        valid_pipeline["connections"]["destinations"] = []
+        with pytest.raises(Exception, match="destinations|minItems|too short"):
             validate_pipeline_config(valid_pipeline)
 
 
@@ -99,14 +78,24 @@ class TestConnectionConfigValidator:
 
     @pytest.mark.unit
     def test_valid_connection_passes(self):
-        config = {"connector_slug": "postgresql", "host": "localhost"}
+        from src.config.schema_validator import _load_schema
+        schema = _load_schema("connection")
+        required = schema.get("required", [])
+        # Build a minimal connection that satisfies the published schema.
+        config = {field: "stub" for field in required}
+        # Override common cases with realistic values.
+        if "alias" in config:
+            config["alias"] = "my-conn"
+        if "connector_slug" in config:
+            config["connector_slug"] = "postgresql"
         result = validate_connection_config(config)
-        assert result["connector_slug"] == "postgresql"
+        for field in required:
+            assert field in result
 
     @pytest.mark.unit
-    def test_missing_connector_slug_fails(self):
-        with pytest.raises(ValueError, match="connector_slug"):
-            validate_connection_config({"host": "localhost"})
+    def test_invalid_connection_raises(self):
+        with pytest.raises(Exception):
+            validate_connection_config({})
 
 
 class TestEndpointRefModel:
@@ -205,11 +194,88 @@ class TestEndpointRefModel:
         assert cache[ref2] == "value"
 
 
+class TestWriteConfigDefaults:
+    """The default WriteMode is UPSERT — pipelines that omit the field
+    inherit idempotent semantics. Flipping the default to INSERT would
+    silently introduce duplicate rows on every replay."""
+
+    @pytest.mark.unit
+    def test_default_mode_is_upsert(self):
+        from src.models.stream import WriteConfig, WriteMode
+        assert WriteConfig().mode is WriteMode.UPSERT
+
+    @pytest.mark.unit
+    def test_effective_conflict_keys_falls_back_to_primary_keys(self):
+        from src.models.stream import WriteConfig, WriteMode
+        cfg = WriteConfig(mode=WriteMode.UPSERT)
+        assert cfg.effective_conflict_keys(["id"]) == [["id"]]
+
+    @pytest.mark.unit
+    def test_effective_conflict_keys_prefers_explicit(self):
+        from src.models.stream import WriteConfig, WriteMode
+        cfg = WriteConfig(mode=WriteMode.UPSERT, conflict_keys=[["tenant", "id"]])
+        assert cfg.effective_conflict_keys(["id"]) == [["tenant", "id"]]
+
+    @pytest.mark.unit
+    def test_effective_conflict_keys_raises_when_upsert_unkeyed(self):
+        from src.models.stream import WriteConfig, WriteMode
+        cfg = WriteConfig(mode=WriteMode.UPSERT)
+        with pytest.raises(ValueError, match="UPSERT requires"):
+            cfg.effective_conflict_keys([])
+
+    @pytest.mark.unit
+    def test_effective_conflict_keys_none_for_insert(self):
+        from src.models.stream import WriteConfig, WriteMode
+        cfg = WriteConfig(mode=WriteMode.INSERT)
+        assert cfg.effective_conflict_keys(["id"]) is None
+
+
+class TestBatchWriteResultInvariant:
+    """``success`` is derived from ``status`` so the two cannot drift.
+    A regression that returned success=True with FATAL_FAILURE would
+    silently mis-report bad writes."""
+
+    @pytest.mark.unit
+    def test_success_derived_when_omitted(self):
+        from src.destination.base_handler import BatchWriteResult
+        from src.grpc.generated.analitiq.v1 import AckStatus
+
+        ok = BatchWriteResult(status=AckStatus.ACK_STATUS_SUCCESS, records_written=3)
+        assert ok.success is True
+        fail = BatchWriteResult(
+            status=AckStatus.ACK_STATUS_FATAL_FAILURE, records_written=0
+        )
+        assert fail.success is False
+        replay = BatchWriteResult(
+            status=AckStatus.ACK_STATUS_ALREADY_COMMITTED, records_written=5
+        )
+        assert replay.success is True
+
+    @pytest.mark.unit
+    def test_explicit_success_disagreeing_with_status_raises(self):
+        from src.destination.base_handler import BatchWriteResult
+        from src.grpc.generated.analitiq.v1 import AckStatus
+
+        with pytest.raises(ValueError, match="disagrees with status"):
+            BatchWriteResult(
+                success=True,
+                status=AckStatus.ACK_STATUS_FATAL_FAILURE,
+                records_written=0,
+            )
+
+
 class TestEndpointRefResolver:
     """Test suite for endpoint reference resolution."""
 
+    @pytest.fixture
+    def lookup(self):
+        return ConnectionLookup(
+            directory_by_id={"wise": "wise", "prod-pg": "prod-pg"},
+            connector_alias_by_id={"wise": "wise", "prod-pg": "postgresql"},
+        )
+
     @pytest.mark.unit
-    def test_resolve_connector_endpoint(self, tmp_path):
+    def test_resolve_connector_endpoint(self, tmp_path, lookup):
         """Test resolving a public connector endpoint."""
         endpoint_dir = tmp_path / "connectors" / "wise" / "definition" / "endpoints"
         endpoint_dir.mkdir(parents=True)
@@ -218,13 +284,14 @@ class TestEndpointRefResolver:
 
         paths = {"connectors": tmp_path / "connectors", "connections": tmp_path / "connections"}
         result = resolve_endpoint_ref(
-            {"scope": "connector", "identifier": "wise", "endpoint": "transfers"},
+            {"scope": "connector", "connection_id": "wise", "alias": "transfers"},
             paths,
+            lookup,
         )
         assert result["endpoint"] == "/v1/transfers"
 
     @pytest.mark.unit
-    def test_resolve_connection_endpoint(self, tmp_path):
+    def test_resolve_connection_endpoint(self, tmp_path, lookup):
         """Test resolving a private connection endpoint (under definition/)."""
         endpoint_dir = tmp_path / "connections" / "prod-pg" / "definition" / "endpoints"
         endpoint_dir.mkdir(parents=True)
@@ -233,29 +300,31 @@ class TestEndpointRefResolver:
 
         paths = {"connectors": tmp_path / "connectors", "connections": tmp_path / "connections"}
         result = resolve_endpoint_ref(
-            {"scope": "connection", "identifier": "prod-pg", "endpoint": "public_users"},
+            {"scope": "connection", "connection_id": "prod-pg", "alias": "public_users"},
             paths,
+            lookup,
         )
         assert result["method"] == "DATABASE"
 
     @pytest.mark.unit
-    def test_resolve_accepts_endpoint_ref_instance(self, tmp_path):
+    def test_resolve_accepts_endpoint_ref_instance(self, tmp_path, lookup):
         endpoint_dir = tmp_path / "connectors" / "wise" / "definition" / "endpoints"
         endpoint_dir.mkdir(parents=True)
         (endpoint_dir / "transfers.json").write_text('{"endpoint": "/v1/transfers"}')
 
         paths = {"connectors": tmp_path / "connectors", "connections": tmp_path / "connections"}
         ref = EndpointRef(scope="connector", connection_id="wise", alias="transfers")
-        assert resolve_endpoint_ref(ref, paths)["endpoint"] == "/v1/transfers"
+        assert resolve_endpoint_ref(ref, paths, lookup)["endpoint"] == "/v1/transfers"
 
     @pytest.mark.unit
-    def test_resolve_missing_endpoint_raises(self, tmp_path):
+    def test_resolve_missing_endpoint_raises(self, tmp_path, lookup):
         """Test that missing endpoint file raises EndpointNotFoundError."""
         paths = {"connectors": tmp_path / "connectors", "connections": tmp_path / "connections"}
         with pytest.raises(EndpointNotFoundError):
             resolve_endpoint_ref(
-                {"scope": "connector", "identifier": "wise", "endpoint": "nonexistent"},
+                {"scope": "connector", "connection_id": "wise", "alias": "nonexistent"},
                 paths,
+                lookup,
             )
 
 

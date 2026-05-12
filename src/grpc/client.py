@@ -105,6 +105,11 @@ class DestinationGRPCClient:
         # sentinel so the failure reason in the BatchResult is the real
         # underlying error instead of "Timeout waiting for ACK".
         self._task_failure: Optional[BaseException] = None
+        # True when the reader observed the server closing the stream
+        # without an error AND before all expected ACKs were delivered.
+        # Distinguishes graceful peer-close from an in-task exception so
+        # the surfaced diagnostic is actionable.
+        self._peer_closed_stream: bool = False
 
         # Connection state
         self._connected = False
@@ -290,10 +295,15 @@ class DestinationGRPCClient:
 
             if response is _STREAM_TASK_FAILED:
                 cause = self._task_failure
-                logger.error(
-                    "Stream reader/writer exited before schema ACK: %s",
-                    cause,
-                )
+                if cause is not None:
+                    logger.error(
+                        "Stream reader/writer exited before schema ACK: %s",
+                        cause,
+                    )
+                else:
+                    logger.error(
+                        "Destination closed stream before sending schema ACK"
+                    )
                 return False
 
             if isinstance(response, SchemaAck):
@@ -350,10 +360,16 @@ class DestinationGRPCClient:
 
             if response is _STREAM_TASK_FAILED:
                 cause = self._task_failure
-                summary = (
-                    f"Stream reader/writer task exited before ACK: "
-                    f"{type(cause).__name__ if cause else 'stream closed'}: {cause}"
-                )
+                if cause is not None:
+                    summary = (
+                        f"Stream reader/writer task exited before ACK: "
+                        f"{type(cause).__name__}: {cause}"
+                    )
+                else:
+                    summary = (
+                        "Destination closed stream before sending ACK "
+                        f"for batch {batch_seq}"
+                    )
                 logger.error("Batch %d: %s", batch_seq, summary)
                 return BatchResult(
                     success=False,
@@ -457,6 +473,7 @@ class DestinationGRPCClient:
         else:
             # Stream closed by the server with no further responses;
             # signal waiters so they don't block until timeout.
+            self._peer_closed_stream = True
             if self._response_queue is not None:
                 self._response_queue.put_nowait(_STREAM_TASK_FAILED)
 

@@ -92,10 +92,14 @@ class EndpointRef:
 
         {
           "scope":         "connector" | "connection",
-          "connection_id": "<versioned connection id selected in the pipeline>",
+          "connection_id": "<connection alias selected in the pipeline>",
           "alias":         "<stable endpoint alias from endpoint discovery>",
           # plus optional "x-*" extension metadata
         }
+
+    ``connection_id`` carries the stream-contract field name; the value
+    is the on-disk connection alias (directory name under
+    ``connections/``). Identity is alias-based throughout the engine.
 
     Resolution rules:
 
@@ -103,8 +107,7 @@ class EndpointRef:
       read its ``connector_alias``, then load
       ``connectors/<connector_alias>/definition/endpoints/<alias>.json``.
     - ``scope="connection"``: load
-      ``connections/<directory>/definition/endpoints/<alias>.json`` where
-      ``<directory>`` is the on-disk path mapped from ``connection_id``.
+      ``connections/<connection_id>/definition/endpoints/<alias>.json``.
 
     Frozen so instances are hashable and usable as dict keys.
     """
@@ -295,10 +298,37 @@ class SourceConfig:
 
 @dataclass
 class WriteConfig:
-    """Destination write behavior."""
+    """Destination write behavior.
+
+    ``conflict_keys`` is only consulted when ``mode == UPSERT``; for
+    INSERT it is ignored. When unset under UPSERT, the destination
+    handler falls back to the stream's primary keys (see
+    :meth:`effective_conflict_keys`).
+    """
 
     mode: WriteMode = WriteMode.UPSERT
     conflict_keys: Optional[List[List[str]]] = None
+
+    def effective_conflict_keys(
+        self, primary_keys: List[str]
+    ) -> Optional[List[List[str]]]:
+        """Return the conflict keys the destination should use.
+
+        For UPSERT mode, returns ``conflict_keys`` when set, otherwise
+        wraps the stream's primary keys as a single composite. Raises
+        ``ValueError`` for UPSERT when neither is available — there is
+        no safe default for a destination-side conflict resolution.
+        """
+        if self.mode is not WriteMode.UPSERT:
+            return None
+        if self.conflict_keys:
+            return self.conflict_keys
+        if primary_keys:
+            return [list(primary_keys)]
+        raise ValueError(
+            "WriteConfig.mode=UPSERT requires either conflict_keys or "
+            "non-empty primary_keys on the stream"
+        )
 
 
 @dataclass

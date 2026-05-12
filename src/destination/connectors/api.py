@@ -4,6 +4,7 @@ This handler sends records to REST API endpoints with support for
 rate limiting, retries, and different batch modes.
 """
 
+import asyncio
 import json
 import logging
 from dataclasses import dataclass
@@ -339,13 +340,21 @@ class ApiDestinationHandler(BaseDestinationHandler):
                     committed_cursor=cursor,
                 )
 
-        except Exception as e:
-            logger.error(f"Error writing to API: {e}")
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            logger.error("Transport error writing to API: %s", e, exc_info=True)
             return BatchWriteResult(
                 success=False,
                 status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
                 records_written=0,
-                failure_summary=str(e),
+                failure_summary=f"{type(e).__name__}: {e}",
+            )
+        except Exception as e:
+            logger.error("Fatal error writing to API: %s", e, exc_info=True)
+            return BatchWriteResult(
+                success=False,
+                status=AckStatus.ACK_STATUS_FATAL_FAILURE,
+                records_written=0,
+                failure_summary=f"{type(e).__name__}: {e}",
             )
 
     async def _write_single_mode(
@@ -362,8 +371,15 @@ class ApiDestinationHandler(BaseDestinationHandler):
             try:
                 await self._send_request(state, record)
                 written += 1
-            except Exception as e:
-                logger.warning(f"Failed to write record {record_ids[i]}: {e}")
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                # Transport-level errors are per-record data issues; log
+                # the cause and move on so the batch reports partial
+                # success. Programming errors (KeyError, TypeError, …)
+                # propagate to write_batch where they become FATAL.
+                logger.warning(
+                    "Failed to write record %s: %s: %s",
+                    record_ids[i], type(e).__name__, e,
+                )
                 failed_ids.append(record_ids[i])
 
         if failed_ids:
@@ -458,8 +474,11 @@ class ApiDestinationHandler(BaseDestinationHandler):
             # Try a simple GET to the base URL
             async with self._session.get(self._base_url) as response:
                 return response.status < 500
-        except Exception as e:
-            logger.warning(f"API health check failed: {e}")
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            logger.warning(
+                "API health check failed: %s: %s",
+                type(e).__name__, e, exc_info=True,
+            )
             return False
 
     def _mask_sensitive_headers(self, headers: Dict[str, str]) -> Dict[str, str]:

@@ -18,16 +18,37 @@ from ..grpc.generated.analitiq.v1 import (
 )
 
 
+_SUCCESS_STATUSES = frozenset({
+    AckStatus.ACK_STATUS_SUCCESS,
+    AckStatus.ACK_STATUS_ALREADY_COMMITTED,
+})
+
+
 @dataclass
 class BatchWriteResult:
-    """Result of writing a batch to the destination."""
+    """Result of writing a batch to the destination.
 
-    success: bool
+    ``success`` is derived from ``status`` so the two cannot drift.
+    Callers may still pass ``success`` for clarity at construction; if
+    they do, it must agree with ``status``.
+    """
+
     status: AckStatus
     records_written: int
     committed_cursor: Optional[Cursor] = None
     failed_record_ids: List[str] = field(default_factory=list)
     failure_summary: str = ""
+    success: Optional[bool] = None
+
+    def __post_init__(self) -> None:
+        derived = self.status in _SUCCESS_STATUSES
+        if self.success is None:
+            self.success = derived
+        elif self.success is not derived:
+            raise ValueError(
+                f"BatchWriteResult.success={self.success} disagrees with "
+                f"status={self.status}; expected success={derived}"
+            )
 
 
 class BaseDestinationHandler(ABC):

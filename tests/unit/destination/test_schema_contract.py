@@ -24,6 +24,7 @@ TEST_TYPE_MAP_RULES = [
     {"match": "exact", "native": "DATETIME", "canonical": "Timestamp(us)"},
     {"match": "exact", "native": "TIMESTAMP", "canonical": "Timestamp(us)"},
     {"match": "exact", "native": "TIMESTAMPTZ", "canonical": "Timestamp(us, UTC)"},
+    {"match": "exact", "native": "DATE", "canonical": "Date32"},
     {"match": "regex", "native": r"^VARCHAR\(\s*\d+\s*\)$", "canonical": "Utf8"},
     {
         "match": "regex",
@@ -134,6 +135,46 @@ class TestSchemaContractCastArrowBatch:
 
         assert cast.schema.names == ["id"]
         assert contract.to_dicts(cast) == [{"id": 1}]
+
+    def test_cast_arrow_batch_missing_required_column_raises(self, type_mapper):
+        """A non-nullable column absent from the incoming batch must fail
+        loudly. Silently null-filling would corrupt destinations that
+        enforce NOT NULL constraints at the database level."""
+        schema = {
+            "columns": [
+                {"name": "id", "native_type": "BIGINT", "nullable": False},
+                {"name": "amount", "native_type": "BIGINT", "nullable": False},
+            ]
+        }
+        contract = SchemaContract(schema, type_mapper=type_mapper)
+
+        source = pa.RecordBatch.from_pylist([{"id": 1}])  # 'amount' missing
+        with pytest.raises(ValueError, match="'amount'.*required"):
+            contract.cast_arrow_batch(source)
+
+    def test_cast_arrow_batch_unparseable_timestamp_raises(self, type_mapper):
+        """When every configured timestamp format fails, the cast must
+        raise instead of silently nulling the column."""
+        schema = {
+            "columns": [
+                {"name": "ts", "native_type": "TIMESTAMP", "nullable": True},
+            ]
+        }
+        contract = SchemaContract(schema, type_mapper=type_mapper)
+
+        source = pa.RecordBatch.from_pylist([{"ts": "not-a-timestamp"}])
+        with pytest.raises(ValueError, match="cannot cast"):
+            contract.cast_arrow_batch(source)
+
+    def test_cast_arrow_batch_unparseable_date_raises(self, type_mapper):
+        schema = {
+            "columns": [{"name": "d", "native_type": "DATE", "nullable": True}]
+        }
+        contract = SchemaContract(schema, type_mapper=type_mapper)
+
+        source = pa.RecordBatch.from_pylist([{"d": "13/30/2025"}])
+        with pytest.raises(ValueError, match="cannot cast"):
+            contract.cast_arrow_batch(source)
 
 
 class TestSchemaContractFromPylist:

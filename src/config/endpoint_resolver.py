@@ -11,10 +11,10 @@ Reference shape (see ``src/models/stream.py:EndpointRef``):
     ``{"scope": "connection", "connection_id": "<connection-id>", "alias": "<name>"}``
         -> connections/<directory>/definition/endpoints/<name>.json
 
-``connection_id`` is the versioned connection id from the stream
-contract; :class:`PipelineConfigPrep` scans ``connections/`` once at
-config-load time and supplies the id → directory / connector_alias maps
-via :class:`ConnectionLookup`.
+``connection_id`` carries the stream-contract field name; the value
+is the on-disk connection alias. :class:`PipelineConfigPrep` scans
+``connections/`` once at config-load time and supplies the
+alias → directory / connector_alias maps via :class:`ConnectionLookup`.
 """
 
 from __future__ import annotations

@@ -323,3 +323,128 @@ class TestClientSchemaBuilder:
         client = DestinationGRPCClient()
         with pytest.raises(ValueError, match="Unknown write_mode"):
             client._build_schema_message("s", {"write_mode": "upsert_typo"})
+
+
+class TestStreamTaskFailurePropagation:
+    """Cover the _STREAM_TASK_FAILED sentinel paths in send_batch.
+
+    The reader/writer asyncio tasks push the sentinel onto the response
+    queue when they exit (exception or clean EOF). Without this signal,
+    send_batch would block on response_queue.get until self.timeout —
+    300s by default. These tests pin the fast-fail behavior and the
+    distinct diagnostics for "task failed" vs "peer closed cleanly".
+    """
+
+    @pytest.mark.asyncio
+    async def test_writer_exception_surfaces_as_fatal(self):
+        import asyncio
+        import pyarrow as pa
+
+        from src.grpc.client import _STREAM_TASK_FAILED
+        from src.grpc.generated.analitiq.v1 import Cursor
+
+        client = DestinationGRPCClient()
+        client._stream_active = True
+        client._request_queue = asyncio.Queue()
+        client._response_queue = asyncio.Queue()
+        client._task_failure = RuntimeError("writer blew up")
+        client._response_queue.put_nowait(_STREAM_TASK_FAILED)
+
+        result = await client.send_batch(
+            run_id="r",
+            stream_id="s",
+            batch_seq=7,
+            record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
+            record_ids=["1"],
+            cursor=Cursor(token=b""),
+        )
+
+        assert result.success is False
+        assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+        assert "RuntimeError" in result.failure_summary
+        assert "writer blew up" in result.failure_summary
+
+    @pytest.mark.asyncio
+    async def test_clean_peer_close_surfaces_distinct_diagnostic(self):
+        """Reader hitting clean EOF (no exception) must produce an
+        actionable message — not 'NoneType: None' — so operators can
+        distinguish premature peer close from in-task errors."""
+        import asyncio
+        import pyarrow as pa
+
+        from src.grpc.client import _STREAM_TASK_FAILED
+        from src.grpc.generated.analitiq.v1 import Cursor
+
+        client = DestinationGRPCClient()
+        client._stream_active = True
+        client._request_queue = asyncio.Queue()
+        client._response_queue = asyncio.Queue()
+        client._task_failure = None
+        client._peer_closed_stream = True
+        client._response_queue.put_nowait(_STREAM_TASK_FAILED)
+
+        result = await client.send_batch(
+            run_id="r",
+            stream_id="s",
+            batch_seq=42,
+            record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
+            record_ids=["1"],
+            cursor=Cursor(token=b""),
+        )
+
+        assert result.success is False
+        assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+        assert "Destination closed stream" in result.failure_summary
+        assert "42" in result.failure_summary
+        assert "NoneType" not in result.failure_summary
+
+    @pytest.mark.asyncio
+    async def test_read_responses_signals_sentinel_on_exception(self):
+        """The reader task must push _STREAM_TASK_FAILED before exiting on
+        exception so consumers don't block until the gRPC timeout."""
+        import asyncio
+
+        from src.grpc.client import _STREAM_TASK_FAILED
+
+        client = DestinationGRPCClient()
+        client._response_queue = asyncio.Queue()
+
+        async def _exploding_stream():
+            raise ConnectionError("peer rst")
+            yield  # pragma: no cover — make this an async generator
+
+        client._stream = _exploding_stream()
+
+        with pytest.raises(ConnectionError):
+            await client._read_responses()
+
+        # Sentinel must be queued and _task_failure must carry the cause.
+        assert client._response_queue.qsize() == 1
+        assert client._response_queue.get_nowait() is _STREAM_TASK_FAILED
+        assert isinstance(client._task_failure, ConnectionError)
+        assert client._peer_closed_stream is False
+
+    @pytest.mark.asyncio
+    async def test_read_responses_signals_sentinel_on_clean_eof(self):
+        """When the server closes the stream gracefully, the reader still
+        pushes the sentinel — but with _peer_closed_stream=True and
+        _task_failure=None, so send_batch produces a distinct diagnostic."""
+        import asyncio
+
+        from src.grpc.client import _STREAM_TASK_FAILED
+
+        client = DestinationGRPCClient()
+        client._response_queue = asyncio.Queue()
+
+        async def _empty_stream():
+            return
+            yield  # pragma: no cover
+
+        client._stream = _empty_stream()
+
+        await client._read_responses()
+
+        assert client._response_queue.qsize() == 1
+        assert client._response_queue.get_nowait() is _STREAM_TASK_FAILED
+        assert client._task_failure is None
+        assert client._peer_closed_stream is True

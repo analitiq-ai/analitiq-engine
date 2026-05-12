@@ -289,7 +289,7 @@ class StreamingEngine:
         except Exception as e:
             status = "failed"
             error_message = str(e)
-            logger.error(f"Stream {stream_name} processing failed: {str(e)}")
+            logger.exception("Stream %s processing failed: %s", stream_name, e)
             # Cancel any running tasks for this stream
             for task in tasks:
                 if not task.done():
@@ -306,7 +306,10 @@ class StreamingEngine:
                     await grpc_client.disconnect()
                 logger.debug(f"Stream {stream_name} connectors disconnected successfully")
             except Exception as e:
-                logger.warning(f"Failed to disconnect connectors for stream {stream_name}: {str(e)}")
+                logger.warning(
+                    "Failed to disconnect connectors for stream %s: %s",
+                    stream_name, e, exc_info=True,
+                )
 
             try:
                 pipeline_name = pipeline_config.get("name")
@@ -330,7 +333,10 @@ class StreamingEngine:
                     })
                     logger.info(f"Emitted stream metrics for {stream_name}")
             except Exception as metrics_error:
-                logger.error(f"Failed to emit stream metrics for {stream_name}: {metrics_error}")
+                logger.error(
+                    "Failed to emit stream metrics for %s: %s",
+                    stream_name, metrics_error, exc_info=True,
+                )
 
     async def _extract_stage(
         self, source_connector: BaseConnector, queue: Queue, config: Dict[str, Any]
@@ -364,7 +370,9 @@ class StreamingEngine:
             logger.info(f"Stream {stream_name}: Extract stage completed with {batch_count} batches")
 
         except Exception as e:
-            logger.error(f"Stream {stream_name}: Extract stage failed: {str(e)}")
+            logger.exception(
+                "Stream %s: Extract stage failed: %s", stream_name, e,
+            )
             await queue.put(None)  # Signal end even on error
             raise
 
@@ -420,7 +428,9 @@ class StreamingEngine:
             logger.info(f"Stream {stream_name}: Transform stage completed with {batch_count} batches")
 
         except Exception as e:
-            logger.error(f"Stream {stream_name}: Transform stage failed: {str(e)}")
+            logger.exception(
+                "Stream %s: Transform stage failed: %s", stream_name, e,
+            )
             await output_queue.put(None)  # Signal end even on error
             self.metrics.increment_batches_failed()
             stream_metrics["batches_failed"] += 1
@@ -697,7 +707,9 @@ class StreamingEngine:
             )
 
         except Exception as e:
-            logger.error(f"Stream {stream_name}: gRPC load stage failed: {str(e)}")
+            logger.exception(
+                "Stream %s: gRPC load stage failed: %s", stream_name, e,
+            )
             await output_queue.put(None)
             raise
 
@@ -720,7 +732,9 @@ class StreamingEngine:
             logger.info(f"Stream {stream_name}: Checkpoint stage completed with {batch_count} batches")
 
         except Exception as e:
-            logger.error(f"Stream {stream_name}: Checkpoint stage failed: {str(e)}")
+            logger.exception(
+                "Stream %s: Checkpoint stage failed: %s", stream_name, e,
+            )
             raise
 
 
@@ -830,7 +844,7 @@ class StreamingEngine:
         """Generate stream name for state management.
 
         Derived from the source ``endpoint_ref`` (canonical
-        ``scope:identifier/endpoint`` form) so the metric path is stable
+        ``scope:connection_id/alias`` form) so the metric path is stable
         across runs.
         """
         source = config.get("source")
@@ -839,7 +853,7 @@ class StreamingEngine:
             if isinstance(ref, dict):
                 return (
                     f"endpoint.{ref.get('scope', '')}:"
-                    f"{ref.get('identifier', '')}/{ref.get('endpoint', '')}"
+                    f"{ref.get('connection_id', '')}/{ref.get('alias', '')}"
                 )
         return config.get("pipeline_id", "unknown-stream")
 

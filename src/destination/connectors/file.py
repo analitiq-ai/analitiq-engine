@@ -3,6 +3,7 @@
 This handler writes records to files using configurable formatters and storage backends.
 """
 
+import errno
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -259,13 +260,36 @@ class FileDestinationHandler(BaseDestinationHandler):
                 committed_cursor=cursor,
             )
 
-        except Exception as e:
-            logger.error(f"Error writing batch: {e}")
+        except OSError as e:
+            # ENOSPC / EACCES / EROFS / EDQUOT are not transient — retrying
+            # without operator intervention is hopeless. Classify as FATAL
+            # so the engine routes to DLQ instead of looping.
+            fatal_errnos = {errno.ENOSPC, errno.EACCES, errno.EROFS, errno.EDQUOT}
+            if e.errno in fatal_errnos:
+                logger.error(
+                    "Fatal filesystem error writing batch (%s): %s",
+                    errno.errorcode.get(e.errno, e.errno), e, exc_info=True,
+                )
+                return BatchWriteResult(
+                    success=False,
+                    status=AckStatus.ACK_STATUS_FATAL_FAILURE,
+                    records_written=0,
+                    failure_summary=f"OSError[{errno.errorcode.get(e.errno, e.errno)}]: {e}",
+                )
+            logger.error("Retryable I/O error writing batch: %s", e, exc_info=True)
             return BatchWriteResult(
                 success=False,
                 status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
                 records_written=0,
-                failure_summary=str(e),
+                failure_summary=f"{type(e).__name__}: {e}",
+            )
+        except Exception as e:
+            logger.error("Fatal error writing batch: %s", e, exc_info=True)
+            return BatchWriteResult(
+                success=False,
+                status=AckStatus.ACK_STATUS_FATAL_FAILURE,
+                records_written=0,
+                failure_summary=f"{type(e).__name__}: {e}",
             )
 
     async def health_check(self) -> bool:

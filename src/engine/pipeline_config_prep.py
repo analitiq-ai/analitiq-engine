@@ -203,7 +203,7 @@ class PipelineConfigPrep:
         return document
 
     # ------------------------------------------------------------------
-    # On-disk indexes (UUID -> directory / file)
+    # On-disk indexes (alias -> directory / file)
     # ------------------------------------------------------------------
 
     def _build_connection_index(self) -> None:

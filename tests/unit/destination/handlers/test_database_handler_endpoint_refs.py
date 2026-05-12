@@ -174,6 +174,24 @@ class TestWriteBatchFatalOnTypeMapError:
         assert "type-map" in result.failure_summary
 
 
+class TestWriteModeDispatch:
+    """Mirror of ``test_build_schema_message_rejects_unknown_mode`` on
+    the destination side: ``_get_write_mode`` must reject unmapped proto
+    values rather than silently defaulting (e.g. when a future
+    WRITE_MODE_MERGE is added)."""
+
+    def test_known_modes(self):
+        handler = DatabaseDestinationHandler()
+        assert handler._get_write_mode(1) == "insert"
+        assert handler._get_write_mode(2) == "upsert"
+        assert handler._get_write_mode(3) == "truncate_insert"
+
+    def test_unknown_mode_raises(self):
+        handler = DatabaseDestinationHandler()
+        with pytest.raises(ValueError, match="Unsupported proto write_mode"):
+            handler._get_write_mode(99)
+
+
 class TestDDLLockSerialization:
     """``_ddl_lock`` must serialize concurrent _ensure_tables_exist calls
     so two streams sharing the handler do not race the database catalog

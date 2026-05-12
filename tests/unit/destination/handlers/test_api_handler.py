@@ -231,24 +231,23 @@ class TestApiHandlerWriteBatchFailures:
         assert "not connected" in result.failure_summary.lower()
 
     @pytest.mark.asyncio
-    async def test_write_batch_exception_returns_retryable_failure(
+    async def test_write_batch_transport_error_is_retryable(
         self,
         api_handler: ApiDestinationHandler,
         mock_cursor: MagicMock,
         sample_records: List[Dict[str, Any]],
         sample_record_ids: List[str],
     ):
-        """Test that unexpected exceptions return RETRYABLE_FAILURE."""
-        # Setup
+        """Transport-level errors are transient — classify as RETRYABLE."""
+        import aiohttp
+
         api_handler._connected = True
         api_handler._session = MagicMock()
 
-        # Mock: raise exception during write
         api_handler._write_single_mode = AsyncMock(
-            side_effect=Exception("Network error")
+            side_effect=aiohttp.ClientConnectionError("connection reset"),
         )
 
-        # Execute
         result = await api_handler.write_batch(
             run_id="test-run",
             stream_id="test-stream",
@@ -258,10 +257,40 @@ class TestApiHandlerWriteBatchFailures:
             cursor=mock_cursor,
         )
 
-        # Assert: exception should be retryable
         assert result.success is False
         assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
-        assert "Network error" in result.failure_summary
+        assert "connection reset" in result.failure_summary
+
+    @pytest.mark.asyncio
+    async def test_write_batch_unexpected_exception_is_fatal(
+        self,
+        api_handler: ApiDestinationHandler,
+        mock_cursor: MagicMock,
+        sample_records: List[Dict[str, Any]],
+        sample_record_ids: List[str],
+    ):
+        """Non-transport exceptions (programming bugs, type errors) are
+        deterministic — retrying achieves nothing. Classify as FATAL so
+        the engine routes to DLQ instead of looping."""
+        api_handler._connected = True
+        api_handler._session = MagicMock()
+
+        api_handler._write_single_mode = AsyncMock(
+            side_effect=KeyError("missing_field"),
+        )
+
+        result = await api_handler.write_batch(
+            run_id="test-run",
+            stream_id="test-stream",
+            batch_seq=1,
+            record_batch=_to_record_batch(sample_records),
+            record_ids=sample_record_ids,
+            cursor=mock_cursor,
+        )
+
+        assert result.success is False
+        assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+        assert "KeyError" in result.failure_summary
 
 
 @pytest.mark.unit
@@ -269,64 +298,76 @@ class TestApiHandlerWriteSingleMode:
     """Test suite for ApiDestinationHandler._write_single_mode()."""
 
     @pytest.mark.asyncio
-    async def test_write_single_mode_counts_failures(
+    async def test_write_single_mode_counts_transport_failures(
         self,
         api_handler: ApiDestinationHandler,
     ):
-        """Test that _write_single_mode correctly counts successful writes."""
-        # Setup
+        """Transport failures are per-record data issues; loop continues
+        and the batch reports partial success."""
+        import aiohttp
+
         api_handler._connected = True
         api_handler._session = MagicMock()
 
-        records = [
-            {"id": 1},
-            {"id": 2},
-            {"id": 3},
-        ]
+        records = [{"id": 1}, {"id": 2}, {"id": 3}]
         record_ids = ["rec-1", "rec-2", "rec-3"]
 
-        # Mock _send_request: first and third succeed, second fails
         call_count = 0
         async def mock_send_request(state, data):
             nonlocal call_count
             call_count += 1
             if call_count == 2:
-                raise Exception("API error 404: Not found")
+                raise aiohttp.ClientConnectionError("transient")
             return {"status": "ok"}
 
         api_handler._send_request = mock_send_request
         state = api_handler._streams["test-stream"]
 
-        # Execute
         written = await api_handler._write_single_mode(state, records, record_ids)
-
-        # Assert: 2 out of 3 succeeded
         assert written == 2
 
     @pytest.mark.asyncio
-    async def test_write_single_mode_all_fail(
+    async def test_write_single_mode_all_transport_failures(
         self,
         api_handler: ApiDestinationHandler,
     ):
-        """Test that _write_single_mode returns 0 when all fail."""
-        # Setup
+        """All-transport-failures yields 0 successes; deterministic
+        exceptions are NOT caught here — they propagate to write_batch."""
+        import aiohttp
+
         api_handler._connected = True
         api_handler._session = MagicMock()
 
         records = [{"id": 1}, {"id": 2}]
         record_ids = ["rec-1", "rec-2"]
 
-        # Mock: all requests fail
         api_handler._send_request = AsyncMock(
-            side_effect=Exception("API error 500")
+            side_effect=aiohttp.ClientConnectionError("Connection refused"),
         )
         state = api_handler._streams["test-stream"]
 
-        # Execute
         written = await api_handler._write_single_mode(state, records, record_ids)
-
-        # Assert: 0 succeeded
         assert written == 0
+
+    @pytest.mark.asyncio
+    async def test_write_single_mode_propagates_programming_errors(
+        self,
+        api_handler: ApiDestinationHandler,
+    ):
+        """A KeyError or similar bug must NOT be swallowed as a
+        per-record failure — it propagates so write_batch can mark the
+        whole batch FATAL."""
+        api_handler._connected = True
+        api_handler._session = MagicMock()
+
+        records = [{"id": 1}, {"id": 2}]
+        record_ids = ["rec-1", "rec-2"]
+
+        api_handler._send_request = AsyncMock(side_effect=KeyError("bad_field"))
+        state = api_handler._streams["test-stream"]
+
+        with pytest.raises(KeyError):
+            await api_handler._write_single_mode(state, records, record_ids)
 
     @pytest.mark.asyncio
     async def test_write_single_mode_all_succeed(
@@ -357,13 +398,14 @@ class TestApiHandlerBatchModes:
     """Test different batch modes handle failures correctly."""
 
     @pytest.mark.asyncio
-    async def test_bulk_mode_failure_affects_all_records(
+    async def test_bulk_mode_transport_failure_is_retryable(
         self,
         api_handler: ApiDestinationHandler,
         mock_cursor: MagicMock,
     ):
-        """Test that bulk mode failure is handled as complete failure."""
-        # Setup
+        """Bulk mode transport-level failure → RETRYABLE."""
+        import aiohttp
+
         api_handler._connected = True
         api_handler._session = MagicMock()
         api_handler._streams["test-stream"].batch_mode = ApiDestinationHandler.BATCH_MODE_BULK
@@ -371,12 +413,10 @@ class TestApiHandlerBatchModes:
         records = [{"id": i} for i in range(5)]
         record_ids = [f"rec-{i}" for i in range(5)]
 
-        # Mock: bulk request fails
         api_handler._write_bulk_mode = AsyncMock(
-            side_effect=Exception("Bulk insert failed")
+            side_effect=aiohttp.ClientConnectionError("Bulk insert failed"),
         )
 
-        # Execute
         result = await api_handler.write_batch(
             run_id="test-run",
             stream_id="test-stream",
@@ -386,7 +426,6 @@ class TestApiHandlerBatchModes:
             cursor=mock_cursor,
         )
 
-        # Assert: exception leads to retryable failure
         assert result.success is False
         assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
 

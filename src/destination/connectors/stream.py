@@ -4,6 +4,7 @@ This handler writes records to stdout, useful for testing and debugging.
 It does not implement idempotency since stdout is not persistent.
 """
 
+import errno
 import logging
 import sys
 from typing import Any, Dict, List
@@ -175,13 +176,33 @@ class StreamDestinationHandler(BaseDestinationHandler):
                 committed_cursor=cursor,
             )
 
-        except Exception as e:
-            logger.error(f"Error writing to stdout: {e}")
+        except OSError as e:
+            # Closed/broken stdout (EPIPE), permissions, disk-full on a
+            # redirected stream — none are recoverable by retry.
+            fatal_errnos = {errno.EPIPE, errno.ENOSPC, errno.EACCES, errno.EBADF}
+            status = (
+                AckStatus.ACK_STATUS_FATAL_FAILURE
+                if e.errno in fatal_errnos
+                else AckStatus.ACK_STATUS_RETRYABLE_FAILURE
+            )
+            logger.error(
+                "%s I/O error writing to stdout: %s",
+                "Fatal" if status == AckStatus.ACK_STATUS_FATAL_FAILURE else "Retryable",
+                e, exc_info=True,
+            )
             return BatchWriteResult(
                 success=False,
-                status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
+                status=status,
                 records_written=0,
-                failure_summary=str(e),
+                failure_summary=f"OSError[{errno.errorcode.get(e.errno, e.errno)}]: {e}",
+            )
+        except Exception as e:
+            logger.error("Fatal error writing to stdout: %s", e, exc_info=True)
+            return BatchWriteResult(
+                success=False,
+                status=AckStatus.ACK_STATUS_FATAL_FAILURE,
+                records_written=0,
+                failure_summary=f"{type(e).__name__}: {e}",
             )
 
     async def health_check(self) -> bool:
@@ -197,5 +218,9 @@ class StreamDestinationHandler(BaseDestinationHandler):
         try:
             # Check if stdout is writable
             return sys.stdout.writable()
-        except Exception:
+        except (ValueError, OSError) as e:
+            logger.warning(
+                "stdout health check failed: %s: %s",
+                type(e).__name__, e, exc_info=True,
+            )
             return False
