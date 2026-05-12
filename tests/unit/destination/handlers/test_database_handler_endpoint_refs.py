@@ -192,6 +192,81 @@ class TestWriteModeDispatch:
             handler._get_write_mode(99)
 
 
+class TestPrepareForSqlAlchemyDecodesJson:
+    """Json columns travel as JSON-encoded strings; ``_prepare_for_sqlalchemy``
+    must reverse the encoding so SQLAlchemy's JSON column receives a dict,
+    not a quoted string. Regression catcher for: 'drops the decode call',
+    'order swap (decode before cast)', 'forgets non-Postgres dialects'."""
+
+    def test_json_column_decodes_to_dict(self):
+        import pyarrow as pa
+        from src.destination.connectors.database import (
+            DatabaseDestinationHandler,
+            _StreamState,
+        )
+        from src.destination.schema_contract import SchemaContract
+
+        handler = DatabaseDestinationHandler()
+        contract = SchemaContract(
+            {
+                "columns": [
+                    {
+                        "name": "id",
+                        "arrow_type": "Utf8",
+                        "native_type": "TEXT",
+                        "nullable": False,
+                    },
+                    {
+                        "name": "metadata",
+                        "arrow_type": "Json",
+                        "native_type": "JSONB",
+                        "nullable": True,
+                    },
+                ]
+            }
+        )
+        state = _StreamState(schema_contract=contract)
+
+        batch = pa.RecordBatch.from_pylist(
+            [{"id": "r1", "metadata": '{"k": "v", "n": 1}'}],
+            schema=contract.arrow_schema,
+        )
+        records = handler._prepare_for_sqlalchemy(state, batch)
+        assert records == [{"id": "r1", "metadata": {"k": "v", "n": 1}}]
+
+    def test_malformed_json_surfaces_column_context(self):
+        """Without context the developer sees ``json.JSONDecodeError`` and
+        has to grep records to find the offender. The handler relies on
+        ``decode_json_columns`` raising ``ValueError`` with the column
+        name."""
+        import pyarrow as pa
+        from src.destination.connectors.database import (
+            DatabaseDestinationHandler,
+            _StreamState,
+        )
+        from src.destination.schema_contract import SchemaContract
+
+        handler = DatabaseDestinationHandler()
+        contract = SchemaContract(
+            {
+                "columns": [
+                    {
+                        "name": "metadata",
+                        "arrow_type": "Json",
+                        "native_type": "JSONB",
+                        "nullable": True,
+                    }
+                ]
+            }
+        )
+        state = _StreamState(schema_contract=contract)
+        batch = pa.RecordBatch.from_pylist(
+            [{"metadata": "not-json{"}], schema=contract.arrow_schema,
+        )
+        with pytest.raises(ValueError, match="Json column 'metadata'"):
+            handler._prepare_for_sqlalchemy(state, batch)
+
+
 class TestDDLLockSerialization:
     """``_ddl_lock`` must serialize concurrent _ensure_tables_exist calls
     so two streams sharing the handler do not race the database catalog

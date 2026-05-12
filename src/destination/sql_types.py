@@ -1,15 +1,4 @@
-"""Arrow → SQLAlchemy type translation for destination DDL.
-
-The destination handler receives native SQL type strings (e.g. ``BIGINT``,
-``VARCHAR(255)``) from the endpoint schema, maps them through the
-connector's ``type-map.json`` to an Arrow type, and then picks a
-SQLAlchemy type from the Arrow type. This module owns the second leg —
-translating ``pa.DataType`` into a SQLAlchemy column type for ``CREATE TABLE``.
-
-The mapping is intentionally small and explicit: the Arrow vocabulary
-already abstracts over dialect quirks, so we only need one SQLAlchemy pick
-per Arrow family.
-"""
+"""Arrow → SQLAlchemy type translation for destination DDL."""
 
 from __future__ import annotations
 
@@ -38,13 +27,9 @@ from src.engine.type_map import TypeMapper, parse_arrow_type
 def arrow_to_sqlalchemy(dtype: pa.DataType) -> Any:
     """Return a SQLAlchemy column type for the given Arrow ``DataType``.
 
-    Raises ``ValueError`` for Arrow families the engine cannot currently
-    materialize — callers should either extend this mapping or reject the
-    schema at load time.
-
     Nested types (``pa.struct``, ``pa.list_``) map to a SQLAlchemy ``JSON``
     column with a PostgreSQL ``JSONB`` variant so SA serializes Python
-    dicts/lists straight into the column without per-record encoding.
+    dicts/lists into the column without per-record encoding.
     """
     if pa.types.is_boolean(dtype):
         return Boolean()

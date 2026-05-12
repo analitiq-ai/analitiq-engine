@@ -578,3 +578,110 @@ class TestApiHandlerConfigureSchemaModeDispatch:
         DB-only mode); leaving it out is what makes the unsupported-mode
         branch reachable."""
         assert set(_API_WRITE_MODE_KEYS.values()) == {"insert", "upsert"}
+
+
+@pytest.mark.unit
+class TestApiHandlerJsonFields:
+    """Json-typed body fields travel as JSON-encoded ``pa.large_string``
+    over the wire; the handler must reverse the encoding so aiohttp posts
+    a nested object, not a quoted string."""
+
+    def _doc_with_json_field(self):
+        """An api-endpoint document declaring one Json-typed body field."""
+        return {
+            "operations": {
+                "write": {
+                    "insert": {
+                        "request": {"method": "POST", "path": "/v1/things"},
+                        "input": {
+                            "schema": {
+                                "properties": {
+                                    "id": {"arrow_type": "Utf8"},
+                                    "metadata": {"arrow_type": "Json"},
+                                }
+                            }
+                        },
+                    }
+                }
+            }
+        }
+
+    @pytest.mark.asyncio
+    async def test_configure_schema_collects_json_fields(self):
+        handler = ApiDestinationHandler()
+        handler._connected = True
+        handler._session = MagicMock()
+        handler.set_stream_endpoints({"s1": self._doc_with_json_field()})
+        ok = await handler.configure_schema(
+            SchemaMessage(stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT)
+        )
+        assert ok is True
+        assert handler._streams["s1"].json_fields == {"metadata"}
+
+    @pytest.mark.asyncio
+    async def test_write_batch_decodes_json_field_before_post(self):
+        """The body delivered to ``_send_request`` must carry a dict for the
+        Json column — not a string. Regression catcher for: 'drops the
+        decode loop', 'mis-spells json_fields', 'configure_schema forgets
+        to populate'."""
+        handler = ApiDestinationHandler()
+        handler._connected = True
+        handler._session = MagicMock()
+        handler.set_stream_endpoints({"s1": self._doc_with_json_field()})
+        await handler.configure_schema(
+            SchemaMessage(stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT)
+        )
+
+        # Wire batch — metadata is the JSON-encoded string produced by the
+        # source/transform stage.
+        batch = pa.RecordBatch.from_pylist(
+            [{"id": "r1", "metadata": '{"k": "v", "n": 42}'}]
+        )
+
+        sent_payloads = []
+
+        async def _capture(state, data):
+            sent_payloads.append(data)
+            return {}
+
+        handler._send_request = _capture  # type: ignore[assignment]
+        result = await handler.write_batch(
+            run_id="run",
+            stream_id="s1",
+            batch_seq=0,
+            record_batch=batch,
+            record_ids=["r1"],
+            cursor=MagicMock(),
+        )
+
+        assert result.status == AckStatus.ACK_STATUS_SUCCESS
+        assert sent_payloads == [{"id": "r1", "metadata": {"k": "v", "n": 42}}]
+
+    @pytest.mark.asyncio
+    async def test_write_batch_malformed_json_returns_fatal(self):
+        """A non-JSON string in a Json column is a data-shape failure,
+        not a transport failure — must classify FATAL and surface the
+        offending column."""
+        handler = ApiDestinationHandler()
+        handler._connected = True
+        handler._session = MagicMock()
+        handler.set_stream_endpoints({"s1": self._doc_with_json_field()})
+        await handler.configure_schema(
+            SchemaMessage(stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT)
+        )
+
+        batch = pa.RecordBatch.from_pylist(
+            [{"id": "r1", "metadata": "this is not json"}]
+        )
+        handler._send_request = AsyncMock(return_value={})
+
+        result = await handler.write_batch(
+            run_id="run",
+            stream_id="s1",
+            batch_seq=0,
+            record_batch=batch,
+            record_ids=["r1"],
+            cursor=MagicMock(),
+        )
+        assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+        assert "metadata" in (result.failure_summary or "")

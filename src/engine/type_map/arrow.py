@@ -1,15 +1,8 @@
-"""Parse Arrow type strings into PyArrow ``DataType`` objects.
+"""Arrow type string ↔ PyArrow ``DataType``.
 
-Arrow type strings are the output of :class:`TypeMapper`. They follow the
-Apache Arrow naming convention.
-
-This parser handles scalar types only (``Int64``, ``Decimal128(p, s)``,
-``Timestamp(us, UTC)``, …). Nested types (struct, list) cannot be fully
-described by a single string because they need a sub-schema; the
-endpoint document declares those via JSON-Schema ``properties`` / ``items``
-and :class:`~src.destination.schema_contract.SchemaContract` builds them
-recursively. Adding further scalar families is a matter of one extra
-branch in :func:`parse_arrow_type`.
+:func:`parse_arrow_type` handles scalar types only — nested ``Object`` /
+``List`` markers need the field's sub-schema (``properties`` / ``items``)
+which only :func:`resolve_arrow_type` has access to.
 """
 
 from __future__ import annotations
@@ -137,20 +130,11 @@ def parse_arrow_type(canonical: str) -> pa.DataType:
 
 
 def resolve_arrow_type(spec: Mapping[str, Any], where: str = "field") -> pa.DataType:
-    """Resolve a field spec into a ``pa.DataType``.
+    """Walk a JSON-Schema-shaped field spec into a ``pa.DataType``.
 
-    ``spec`` is a JSON-Schema-shaped dict with at minimum an
-    ``arrow_type`` key. For nested fields the marker drives the
-    recursion:
-
-    - ``arrow_type == "Object"`` reads ``spec["properties"]`` (a dict of
-      ``name -> sub-spec``) and builds a ``pa.struct(...)``.
-    - ``arrow_type == "List"`` reads ``spec["items"]`` (a single
-      sub-spec) and builds a ``pa.list_(...)``.
-    - Anything else is forwarded to :func:`parse_arrow_type`.
-
-    ``where`` is a caller-supplied hint used in error messages so authors
-    can find the offending field quickly.
+    ``where`` is a caller-supplied breadcrumb (e.g. ``"field 'checkAccount'"``)
+    threaded into error messages so authors can locate the offending
+    declaration without reading the recursion stack.
     """
     arrow_type = spec.get("arrow_type")
     if not arrow_type:

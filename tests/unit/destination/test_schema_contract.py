@@ -424,16 +424,28 @@ class TestSchemaContractNestedObject:
         batch = contract.from_pylist([{"tags": ["a", "b", "c"]}])
         assert batch.column("tags")[0].as_py() == '["a", "b", "c"]'
 
-    def test_json_marker_passes_through_existing_string(self):
-        # An upstream that already serialized the blob should not be
-        # double-encoded — decode_json_columns reverses each layer exactly
-        # once, and from_pylist only json.dumps dict/list inputs.
+    def test_json_marker_rejects_non_dict_non_list_value(self):
+        # A Json column accepts only dict, list, or None — anything else
+        # is an author mistake. The encoder must surface it with the
+        # row index, not let a stray string round-trip and crash the
+        # decoder downstream.
         schema = {
             "properties": {"metadata": {"type": "object", "arrow_type": "Json"}}
         }
         contract = SchemaContract(schema)
-        batch = contract.from_pylist([{"metadata": '{"already": "json"}'}])
-        assert batch.column("metadata")[0].as_py() == '{"already": "json"}'
+        with pytest.raises(ValueError, match="row 0 carries str"):
+            contract.from_pylist([{"metadata": "not-a-dict"}])
+
+    def test_json_marker_rejects_int_value(self):
+        schema = {
+            "properties": {"metadata": {"type": "object", "arrow_type": "Json"}}
+        }
+        contract = SchemaContract(schema)
+        with pytest.raises(ValueError, match="row 1 carries int"):
+            contract.from_pylist([
+                {"metadata": {"ok": True}},
+                {"metadata": 42},
+            ])
 
     def test_decode_json_columns_inverts_serialization(self):
         schema = {
@@ -444,6 +456,19 @@ class TestSchemaContractNestedObject:
         records = batch.to_pylist()
         decoded = contract.decode_json_columns(records)
         assert decoded == [{"metadata": {"k": "v"}}]
+
+    def test_decode_json_columns_surfaces_column_context_on_malformed(self):
+        schema = {
+            "properties": {"metadata": {"type": "object", "arrow_type": "Json"}}
+        }
+        contract = SchemaContract(schema)
+        # The decoder must mention the column name and row index — a bare
+        # JSONDecodeError from deep in the stack would force the caller
+        # to grep through stack frames to find the offending field.
+        with pytest.raises(
+            ValueError, match=r"Json column 'metadata' at row 0"
+        ):
+            contract.decode_json_columns([{"metadata": "not-valid-json{"}])
 
     def test_decode_json_columns_is_idempotent_on_dicts(self):
         # If a caller decodes twice (or the value already came as a dict),

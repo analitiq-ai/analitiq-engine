@@ -538,6 +538,27 @@ class DataTransformer:
             if result is not None:
                 transformed_batch.append(result)
 
+        json_cols = _json_target_names(assignments)
+        if json_cols:
+            for row, record in enumerate(transformed_batch):
+                for col in json_cols:
+                    value = record.get(col)
+                    if not isinstance(value, (dict, list)):
+                        continue
+                    try:
+                        record[col] = json.dumps(value)
+                    except TypeError as exc:
+                        # Non-JSON-serializable values (datetime, Decimal,
+                        # UUID, …) belong in the all_errors stream so they
+                        # follow the same DLQ / retry policy as every other
+                        # per-record transform failure.
+                        all_errors.append({
+                            "field": col,
+                            "row": row,
+                            "error": f"Json target value is not JSON-serializable: {exc}",
+                            "action": "dlq",
+                        })
+
         if all_errors:
             summary = "; ".join(
                 f"{err.get('field', '?')}: {err.get('error', err)}"
@@ -548,14 +569,6 @@ class DataTransformer:
                 f"Assignment transformations produced {len(all_errors)} error(s): "
                 f"{summary}{suffix}"
             )
-
-        json_cols = _json_target_names(assignments)
-        if json_cols:
-            for record in transformed_batch:
-                for col in json_cols:
-                    value = record.get(col)
-                    if isinstance(value, (dict, list)):
-                        record[col] = json.dumps(value)
 
         return transformed_batch
 
@@ -708,12 +721,7 @@ class DataTransformer:
 
 
 def _json_target_names(assignments: List[Dict[str, Any]]) -> set:
-    """Return target column names whose ``target.arrow_type`` is ``"Json"``.
-
-    Used by the transform stage to serialize dict/list values into JSON
-    strings just before Arrow batch construction — ``pa.large_string``
-    (what ``Json`` resolves to) does not accept dicts directly.
-    """
+    """Target column names whose ``target.arrow_type`` is ``"Json"``."""
     names: set = set()
     for a in assignments:
         target = a.get("target") or {}

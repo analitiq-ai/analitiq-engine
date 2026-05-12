@@ -37,14 +37,33 @@ _API_WRITE_MODE_KEYS: Dict[int, str] = {
 }
 
 
-def _collect_json_fields(mode_block: Mapping[str, Any]) -> Set[str]:
-    """Find body fields declared with ``arrow_type: "Json"`` in the
-    endpoint's write input schema.
+def _decode_json_fields(
+    records: List[Dict[str, Any]], json_fields: Set[str]
+) -> None:
+    """Reverse the source-side ``json.dumps`` on Json columns in place.
 
-    Looks under ``input.schema.properties.<name>.arrow_type``. Returns an
-    empty set when the schema is absent or declares no Json fields —
-    callers treat that as "nothing to decode".
+    Malformed input raises ``ValueError`` with the offending column and
+    row so the caller can classify it as a data-shape failure rather
+    than letting a bare ``JSONDecodeError`` escape.
     """
+    if not json_fields:
+        return
+    for row, record in enumerate(records):
+        for col in json_fields:
+            value = record.get(col)
+            if not isinstance(value, str):
+                continue
+            try:
+                record[col] = json.loads(value)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"Json field {col!r} at row {row}: value is not "
+                    f"valid JSON ({exc})"
+                ) from exc
+
+
+def _collect_json_fields(mode_block: Mapping[str, Any]) -> Set[str]:
+    """Body field names declared with ``arrow_type: "Json"``."""
     schema = (mode_block.get("input") or {}).get("schema") or {}
     properties = schema.get("properties") or {}
     return {
@@ -315,12 +334,6 @@ class ApiDestinationHandler(BaseDestinationHandler):
             )
 
         records = record_batch.to_pylist()
-        if state.json_fields:
-            for record in records:
-                for col in state.json_fields:
-                    value = record.get(col)
-                    if isinstance(value, str):
-                        record[col] = json.loads(value)
 
         if not records:
             return BatchWriteResult(
@@ -330,6 +343,7 @@ class ApiDestinationHandler(BaseDestinationHandler):
             )
 
         try:
+            _decode_json_fields(records, state.json_fields)
             if state.batch_mode == self.BATCH_MODE_SINGLE:
                 written = await self._write_single_mode(state, records, record_ids)
             elif state.batch_mode == self.BATCH_MODE_BULK:

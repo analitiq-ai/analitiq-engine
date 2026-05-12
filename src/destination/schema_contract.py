@@ -14,10 +14,8 @@ from src.engine.type_map.exceptions import InvalidTypeMapError
 logger = logging.getLogger(__name__)
 
 
-# Sentinel for the opaque-blob marker — fields declared with this arrow_type
-# carry dict/list values that are JSON-serialized on the source side and
-# JSON-parsed on the destination side. The Arrow column itself is a
-# ``pa.large_string`` so PyArrow has no opinion on the inner structure.
+# Opaque-blob marker. The Arrow wire shape is ``pa.large_string``;
+# encode/decode happens at the source and handler boundaries.
 _JSON_ARROW_TYPE: str = "Json"
 
 
@@ -74,7 +72,6 @@ class SchemaContract:
 
     @property
     def json_columns(self) -> set:
-        """Names of columns declared with ``arrow_type: "Json"``."""
         return {n for n, defn in self._field_defs.items() if _is_json_field(defn)}
 
     def decode_json_columns(
@@ -82,20 +79,28 @@ class SchemaContract:
     ) -> List[Dict[str, Any]]:
         """Parse JSON-encoded string values back into Python dict/list.
 
-        Called at destination write boundaries (HTTP body, SQL JSON column)
-        so the on-wire string representation is reversed before SA or
-        aiohttp serialize the value again. ``None`` and already-parsed
-        dict/list values are passed through unchanged so callers can apply
-        this idempotently.
+        Decode is idempotent: ``None`` and already-parsed dict/list values
+        pass through untouched so the caller can apply this more than
+        once. Malformed strings raise ``ValueError`` carrying the column
+        name and row index — the destination handler classifies that as
+        a data-shape failure rather than letting a bare
+        ``JSONDecodeError`` escape from deep in the stack.
         """
         json_cols = self.json_columns
         if not json_cols or not records:
             return records
-        for record in records:
+        for row, record in enumerate(records):
             for col in json_cols:
                 value = record.get(col)
-                if isinstance(value, str):
+                if not isinstance(value, str):
+                    continue
+                try:
                     record[col] = json.loads(value)
+                except json.JSONDecodeError as exc:
+                    raise ValueError(
+                        f"Json column {col!r} at row {row}: value is not "
+                        f"valid JSON ({exc})"
+                    ) from exc
         return records
 
     def from_pylist(self, records: List[Dict[str, Any]]) -> pa.RecordBatch:
@@ -177,16 +182,24 @@ class SchemaContract:
             return pa.nulls(len(values), type=field.type)
 
         if _is_json_field(field_def):
-            # Opaque JSON blob: serialize dict/list to a JSON string so it
-            # fits a pa.large_string column. Already-stringified values pass
-            # through untouched (idempotent — the source may have emitted
-            # JSON text directly).
-            serialized = [
-                None
-                if v is None
-                else (json.dumps(v) if isinstance(v, (dict, list)) else v)
-                for v in values
-            ]
+            # Opaque JSON blob: a Json column may carry only None, a dict,
+            # or a list. Anything else (int, datetime, raw string) is an
+            # author mistake — fail loud with the offending row index so
+            # the source author can locate the bad value, rather than
+            # letting a string round-trip through the decoder where
+            # ``json.loads`` would raise far from the source.
+            serialized: List[Any] = []
+            for row, v in enumerate(values):
+                if v is None:
+                    serialized.append(None)
+                elif isinstance(v, (dict, list)):
+                    serialized.append(json.dumps(v))
+                else:
+                    raise ValueError(
+                        f"column {field.name!r} declared arrow_type='Json' "
+                        f"but row {row} carries {type(v).__name__}; only "
+                        f"dict, list, or None are accepted"
+                    )
             return pa.array(serialized, type=field.type)
 
         if source_format and (
