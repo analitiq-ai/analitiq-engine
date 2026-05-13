@@ -171,11 +171,11 @@ class PipelineConfigPrep:
         """Match manifest entry by alias (``PIPELINE_ID`` is the alias)."""
         target = self.pipeline_id_input
         for entry in manifest["pipelines"]:
-            if entry.get("alias") == target:
+            if entry.get("pipeline_id") == target:
                 return entry
-        choices = sorted(e.get("alias") or "?" for e in manifest["pipelines"])
+        choices = sorted(e.get("pipeline_id") or "?" for e in manifest["pipelines"])
         raise ValueError(
-            f"Pipeline alias {target!r} not found in manifest. Available: {choices}"
+            f"Pipeline id {target!r} not found in manifest. Available: {choices}"
         )
 
     def _load_pipeline_document(self) -> Dict[str, Any]:
@@ -206,8 +206,8 @@ class PipelineConfigPrep:
     # On-disk indexes (alias -> directory / file)
     # ------------------------------------------------------------------
 
-    def _build_connection_index(self) -> None:
-        """Scan ``connections/`` and index every connection by its directory alias."""
+    def _build_connection_index(self, required_ids: Optional[set] = None) -> None:
+        """Scan ``connections/`` and index connections used by the active pipeline."""
         self._connection_records.clear()
         connections_dir = self._paths["connections"]
         if not connections_dir.is_dir():
@@ -218,6 +218,8 @@ class PipelineConfigPrep:
         for child in sorted(connections_dir.iterdir()):
             if not child.is_dir():
                 continue
+            if required_ids is not None and child.name not in required_ids:
+                continue
             connection_file = child / "connection.json"
             if not connection_file.is_file():
                 continue
@@ -225,17 +227,17 @@ class PipelineConfigPrep:
             raw_config = load_connection_file(connection_file)
             validate_artifact("connection", raw_config, source=str(connection_file))
 
-            connector_alias = raw_config.get("connector_alias")
+            connector_alias = raw_config.get("connector_id")
             if not connector_alias:
                 raise ValueError(
                     f"Connection {connection_file} missing required field "
-                    f"'connector_alias'"
+                    f"'connector_id'"
                 )
-            alias = raw_config.get("alias") or child.name
+            alias = raw_config.get("connection_id") or child.name
             if alias != child.name:
                 raise ValueError(
-                    f"Connection alias mismatch in {connection_file}: "
-                    f"directory={child.name!r} but document alias={alias!r}"
+                    f"Connection id mismatch in {connection_file}: "
+                    f"directory={child.name!r} but document connection_id={alias!r}"
                 )
             if alias in self._connection_records:
                 raise ValueError(
@@ -269,10 +271,10 @@ class PipelineConfigPrep:
                 except json.JSONDecodeError as err:
                     raise ValueError(f"Invalid JSON in {stream_file}: {err}") from err
             validate_artifact("stream", document, source=str(stream_file))
-            alias = document.get("alias")
+            alias = document.get("stream_id")
             if not alias:
                 raise ValueError(
-                    f"Stream document {stream_file} missing 'alias'"
+                    f"Stream document {stream_file} missing 'stream_id'"
                 )
             if alias in self._stream_records:
                 raise ValueError(
@@ -455,14 +457,15 @@ class PipelineConfigPrep:
         * ``connectors``: list of connector documents loaded.
         """
         pipeline_doc = self._load_pipeline_document()
-        self._build_connection_index()
-        self._build_stream_index()
 
         connections = pipeline_doc["connections"]
         source_alias = connections["source"]
         dest_aliases = list(connections.get("destinations") or [])
         if not dest_aliases:
             raise ValueError("Pipeline must declare at least one destination")
+
+        self._build_connection_index({source_alias, *dest_aliases})
+        self._build_stream_index()
 
         self._resolve_connection_by_alias(source_alias)
         for dest_alias in dest_aliases:
@@ -481,10 +484,9 @@ class PipelineConfigPrep:
                 )
             stream_configs.append(self._build_stream_config(record))
 
-        pipeline_alias = pipeline_doc.get("alias")
+        pipeline_alias = pipeline_doc.get("pipeline_id")
         pipeline_config = {
             "pipeline_id": pipeline_alias,
-            "alias": pipeline_alias,
             "name": pipeline_doc.get("display_name") or pipeline_alias,
             "display_name": pipeline_doc.get("display_name"),
             "description": pipeline_doc.get("description"),
@@ -567,7 +569,6 @@ class PipelineConfigPrep:
 
         return {
             "stream_id": alias,
-            "alias": alias,
             "display_name": document.get("display_name"),
             "description": document.get("description"),
             "pipeline_id": document.get("pipeline_id"),

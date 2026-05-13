@@ -403,8 +403,26 @@ class StreamingEngine:
                     transformed_pylist = await self.data_transformer.apply_transformations(
                         pylist, config
                     )
-                    transformed_batch = pa.RecordBatch.from_pylist(
-                        transformed_pylist, schema=output_schema,
+                    # Build with inferred types, then cast each column to
+                    # the declared target type. pyarrow.cast bridges the
+                    # contract-declared types (e.g. Utf8 source value to
+                    # Int32 target) using its native parsing — no per-
+                    # value Python coercion needed.
+                    inferred = pa.RecordBatch.from_pylist(transformed_pylist)
+                    inferred_cols = {
+                        name: inferred.column(i)
+                        for i, name in enumerate(inferred.schema.names)
+                    }
+                    arrays = []
+                    for field in output_schema:
+                        col = inferred_cols.get(field.name)
+                        if col is None:
+                            col = pa.nulls(len(transformed_pylist), type=field.type)
+                        elif col.type != field.type:
+                            col = col.cast(field.type)
+                        arrays.append(col)
+                    transformed_batch = pa.RecordBatch.from_arrays(
+                        arrays, schema=output_schema,
                     )
 
                 await output_queue.put(transformed_batch)
@@ -639,7 +657,12 @@ class StreamingEngine:
                             stream_metrics["batches_failed"] += 1
                             if error_strategy == "dlq":
                                 await stream_dlq.send_batch(
-                                    record_dicts, result.failure_summary, self.pipeline_id
+                                    batch=batch,
+                                    error=result.failure_summary,
+                                    pipeline_id=self.pipeline_id,
+                                    stream_id=stream_id,
+                                    run_id=run_id,
+                                    batch_seq=batch_seq,
                                 )
                             break
 
@@ -666,7 +689,12 @@ class StreamingEngine:
                         # Send entire batch to DLQ with record_ids for correlation
                         if error_strategy == "dlq":
                             await stream_dlq.send_batch(
-                                record_dicts, result.failure_summary, self.pipeline_id
+                                batch=batch,
+                                error=result.failure_summary,
+                                pipeline_id=self.pipeline_id,
+                                stream_id=stream_id,
+                                run_id=run_id,
+                                batch_seq=batch_seq,
                             )
 
                         # Raise exception to mark stream as failed
@@ -686,7 +714,12 @@ class StreamingEngine:
                         stream_metrics["batches_failed"] += 1
                         if error_strategy == "dlq":
                             await stream_dlq.send_batch(
-                                record_dicts, f"Unknown ACK status: {result.status}", self.pipeline_id
+                                batch=batch,
+                                error=f"Unknown ACK status: {result.status}",
+                                pipeline_id=self.pipeline_id,
+                                stream_id=stream_id,
+                                run_id=run_id,
+                                batch_seq=batch_seq,
                             )
                         break
 

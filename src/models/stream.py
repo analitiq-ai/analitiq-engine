@@ -126,7 +126,7 @@ class EndpointRef:
         if not self.connection_id:
             raise ValueError("EndpointRef.connection_id cannot be empty")
         if not self.alias:
-            raise ValueError("EndpointRef.alias cannot be empty")
+            raise ValueError("EndpointRef.endpoint_id cannot be empty")
 
     def __str__(self) -> str:
         return f"{self.scope}:{self.connection_id}/{self.alias}"
@@ -144,10 +144,10 @@ class EndpointRef:
         if not isinstance(data, dict):
             raise TypeError(
                 "endpoint_ref must be an object with keys "
-                "{'scope','connection_id','alias'} (plus optional 'x-*' "
+                "{'scope','connection_id','endpoint_id'} (plus optional 'x-*' "
                 f"extensions), got {type(data).__name__}"
             )
-        required = {"scope", "connection_id", "alias"}
+        required = {"scope", "connection_id", "endpoint_id"}
         unknown = {
             k for k in set(data) - required if not k.startswith("x-")
         }
@@ -164,14 +164,14 @@ class EndpointRef:
         return cls(
             scope=data["scope"],
             connection_id=data["connection_id"],
-            alias=data["alias"],
+            alias=data["endpoint_id"],
         )
 
     def to_dict(self) -> Dict[str, str]:
         return {
             "scope": self.scope,
             "connection_id": self.connection_id,
-            "alias": self.alias,
+            "endpoint_id": self.alias,
         }
 
 

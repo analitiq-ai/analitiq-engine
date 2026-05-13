@@ -1,20 +1,32 @@
-"""Dead Letter Queue implementation for handling failed records.
+"""Dead Letter Queue for failed Arrow batches.
 
-Records that fail processing are written to local JSONL files for later
-inspection or replay. Cloud persistence (S3, etc.) is handled at the
-deployment layer via mounted volumes or sidecar processes.
+Stores failed batches as Arrow IPC files plus a JSON metadata sidecar.
+The DLQ is intentionally payload-format-naive: it persists the Arrow
+buffers byte-for-byte without inspecting types. Decimal precision,
+timestamp time zones, JSON columns, and any other Arrow-native types
+round-trip losslessly because no serialisation runs over the payload.
 
-Lightweight DLQ summaries are emitted to stdout via ANALITIQ_DLQ:: marker
-for observability (CloudWatch, log shippers). Payloads never go to stdout.
+Layout per failed batch:
+    dlq_<ts>_<run>_<stream>_<seq>.arrow   Arrow IPC stream of the batch
+    dlq_<ts>_<run>_<stream>_<seq>.json    Metadata only (primitives)
+
+Cloud persistence is the deployment layer's job (mounted volume or
+sidecar log shipper). Lightweight summaries hit stdout via
+``ANALITIQ_DLQ`` for observability; payloads never go to stdout.
 """
+
+from __future__ import annotations
 
 import asyncio
 import json
 import logging
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
-from uuid import uuid4
+from typing import Any, Dict, List, Optional, Union
+
+import pyarrow as pa
+import pyarrow.ipc as pa_ipc
 
 from src.state.log_emitter import emit_log
 
@@ -42,307 +54,269 @@ def emit_dlq_log(
     emit_log("dlq", data)
 
 
-class DateTimeEncoder(json.JSONEncoder):
-    """JSON encoder that handles datetime objects."""
+def _sanitize(value: str) -> str:
+    """Strip filename-unfriendly characters from a path component."""
+    return "".join(
+        ch if (ch.isalnum() or ch in ("-", "_")) else "_" for ch in value
+    )
 
-    def default(self, obj):
-        if isinstance(obj, datetime):
-            return obj.isoformat()
-        return super().default(obj)
+
+def _error_payload(error: Union[BaseException, str]) -> Dict[str, Any]:
+    """Render an exception or message into a JSON-safe metadata dict."""
+    if isinstance(error, BaseException):
+        try:
+            tb = traceback.format_exception(type(error), error, error.__traceback__)
+        except Exception:
+            tb = None
+        return {
+            "type": type(error).__name__,
+            "message": str(error),
+            "traceback": tb,
+        }
+    return {"type": "str", "message": str(error), "traceback": None}
 
 
 class LocalDLQStorage:
-    """Local filesystem DLQ storage backend."""
+    """Local filesystem DLQ storage.
 
-    def __init__(
-        self,
-        dlq_path: str,
-        max_file_size: int = 10 * 1024 * 1024,
-        max_files: int = 100,
-    ):
-        """Initialize local DLQ storage."""
+    One file pair per failed batch:
+
+    * ``<stem>.arrow`` -- Arrow IPC stream (payload).
+    * ``<stem>.json``  -- metadata sidecar (primitives only).
+
+    The sidecar is written last so a half-written pair is detectable:
+    readers skip any ``.arrow`` lacking a sibling ``.json``.
+    """
+
+    SUFFIX_PAYLOAD = ".arrow"
+    SUFFIX_META = ".json"
+
+    def __init__(self, dlq_path: str, max_files: int = 100):
         self.dlq_path = Path(dlq_path)
-        self.max_file_size = max_file_size
         self.max_files = max_files
-
-        # Create DLQ directory
         self.dlq_path.mkdir(parents=True, exist_ok=True)
+        self._lock = asyncio.Lock()
 
-        # Current file tracking
-        self.current_file: Optional[Path] = None
-        self.current_file_size = 0
-        self.lock = asyncio.Lock()
-
-    def _need_new_file(self) -> bool:
-        """Check if we need to create a new DLQ file."""
+    def _stem(self, run_id: str, stream_id: str, batch_seq: int) -> str:
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%f")
         return (
-            self.current_file is None
-            or self.current_file_size >= self.max_file_size
-            or not self.current_file.exists()
+            f"dlq_{ts}_{_sanitize(run_id)}_"
+            f"{_sanitize(stream_id)}_{batch_seq:09d}"
         )
 
-    async def _create_new_file(self) -> None:
-        """Create a new DLQ file."""
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
-        self.current_file = self.dlq_path / f"dlq_{timestamp}.jsonl"
-        self.current_file_size = 0
-        self.current_file.touch()
-        logger.debug(f"Created new DLQ file: {self.current_file}")
+    async def write_batch(
+        self,
+        batch: pa.RecordBatch,
+        metadata: Dict[str, Any],
+        run_id: str,
+        stream_id: str,
+        batch_seq: int,
+    ) -> None:
+        async with self._lock:
+            stem = self._stem(run_id, stream_id, batch_seq)
+            payload_path = self.dlq_path / f"{stem}{self.SUFFIX_PAYLOAD}"
+            meta_path = self.dlq_path / f"{stem}{self.SUFFIX_META}"
 
-    async def write_record(self, record: Dict[str, Any], stream_id: Optional[str] = None) -> None:
-        """Write a DLQ record to local file."""
-        async with self.lock:
-            try:
-                if self._need_new_file():
-                    await self._create_new_file()
+            await asyncio.to_thread(_write_arrow_ipc, payload_path, batch)
+            await asyncio.to_thread(_write_json, meta_path, metadata)
 
-                record_json = json.dumps(record, cls=DateTimeEncoder) + "\n"
-                record_bytes = record_json.encode("utf-8")
-
-                with open(self.current_file, "a", encoding="utf-8") as f:
-                    f.write(record_json)
-
-                self.current_file_size += len(record_bytes)
-
-            except Exception as e:
-                logger.error(f"Failed to write to DLQ: {e}")
-                # Fallback to unique file
-                fallback_file = (
-                    self.dlq_path
-                    / f"dlq_fallback_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}.json"
-                )
-                with open(fallback_file, "w", encoding="utf-8") as f:
-                    json.dump(record, f, indent=2, cls=DateTimeEncoder)
-
-    async def get_records(
-        self, pipeline_id: Optional[str] = None, stream_id: Optional[str] = None
+    async def list_entries(
+        self, pipeline_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Get DLQ records from local files."""
-        records = []
-
-        try:
-            dlq_files = list(self.dlq_path.glob("dlq_*.jsonl"))
-
-            for dlq_file in dlq_files:
-                with open(dlq_file, "r", encoding="utf-8") as f:
-                    for line in f:
-                        if line.strip():
-                            try:
-                                record = json.loads(line.strip())
-                                if pipeline_id is None or record.get("pipeline_id") == pipeline_id:
-                                    records.append(record)
-                            except json.JSONDecodeError:
-                                logger.warning(f"Invalid JSON in DLQ file {dlq_file}")
-
-        except Exception as e:
-            logger.error(f"Failed to read DLQ records: {e}")
-
-        return records
+        entries: List[Dict[str, Any]] = []
+        for meta_path in sorted(self.dlq_path.glob(f"dlq_*{self.SUFFIX_META}")):
+            try:
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+            except (OSError, json.JSONDecodeError):
+                logger.warning("Skipping unreadable DLQ sidecar %s", meta_path)
+                continue
+            if pipeline_id and meta.get("pipeline_id") != pipeline_id:
+                continue
+            meta["payload_path"] = str(
+                meta_path.with_suffix(self.SUFFIX_PAYLOAD)
+            )
+            entries.append(meta)
+        return entries
 
     async def get_stats(self) -> Dict[str, Any]:
-        """Get DLQ statistics."""
-        stats = {
+        stats: Dict[str, Any] = {
+            "total_batches": 0,
             "total_records": 0,
-            "records_by_pipeline": {},
-            "records_by_error_type": {},
-            "oldest_record": None,
-            "newest_record": None,
+            "batches_by_pipeline": {},
+            "batches_by_stream": {},
+            "batches_by_error_type": {},
             "total_files": 0,
             "total_size_bytes": 0,
+            "oldest_batch": None,
+            "newest_batch": None,
         }
+        for meta_path in self.dlq_path.glob(f"dlq_*{self.SUFFIX_META}"):
+            stats["total_files"] += 1
+            try:
+                stats["total_size_bytes"] += meta_path.stat().st_size
+            except OSError:
+                pass
+            payload_path = meta_path.with_suffix(self.SUFFIX_PAYLOAD)
+            try:
+                stats["total_size_bytes"] += payload_path.stat().st_size
+            except OSError:
+                pass
+            try:
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+            except (OSError, json.JSONDecodeError):
+                continue
+            stats["total_batches"] += 1
+            stats["total_records"] += int(meta.get("record_count", 0))
 
-        try:
-            dlq_files = list(self.dlq_path.glob("dlq_*.jsonl"))
-            stats["total_files"] = len(dlq_files)
+            pid = meta.get("pipeline_id", "unknown")
+            stats["batches_by_pipeline"][pid] = (
+                stats["batches_by_pipeline"].get(pid, 0) + 1
+            )
+            sid = meta.get("stream_id", "unknown")
+            stats["batches_by_stream"][sid] = (
+                stats["batches_by_stream"].get(sid, 0) + 1
+            )
+            etype = (meta.get("error") or {}).get("type", "unknown")
+            stats["batches_by_error_type"][etype] = (
+                stats["batches_by_error_type"].get(etype, 0) + 1
+            )
 
-            for dlq_file in dlq_files:
-                stats["total_size_bytes"] += dlq_file.stat().st_size
-
-                with open(dlq_file, "r", encoding="utf-8") as f:
-                    for line in f:
-                        if line.strip():
-                            try:
-                                record = json.loads(line.strip())
-                                stats["total_records"] += 1
-
-                                pipeline_id = record.get("pipeline_id", "unknown")
-                                stats["records_by_pipeline"][pipeline_id] = (
-                                    stats["records_by_pipeline"].get(pipeline_id, 0) + 1
-                                )
-
-                                error_type = record.get("error", {}).get("type", "unknown")
-                                stats["records_by_error_type"][error_type] = (
-                                    stats["records_by_error_type"].get(error_type, 0) + 1
-                                )
-
-                                timestamp = record.get("timestamp")
-                                if timestamp:
-                                    if stats["oldest_record"] is None or timestamp < stats["oldest_record"]:
-                                        stats["oldest_record"] = timestamp
-                                    if stats["newest_record"] is None or timestamp > stats["newest_record"]:
-                                        stats["newest_record"] = timestamp
-
-                            except json.JSONDecodeError:
-                                continue
-
-        except Exception as e:
-            logger.error(f"Failed to get DLQ stats: {e}")
-
+            ts = meta.get("timestamp")
+            if ts:
+                if stats["oldest_batch"] is None or ts < stats["oldest_batch"]:
+                    stats["oldest_batch"] = ts
+                if stats["newest_batch"] is None or ts > stats["newest_batch"]:
+                    stats["newest_batch"] = ts
         return stats
 
-    async def clear(self, pipeline_id: Optional[str] = None) -> None:
-        """Clear DLQ records."""
-        if pipeline_id is None:
-            dlq_files = list(self.dlq_path.glob("dlq_*.jsonl"))
-            for dlq_file in dlq_files:
-                dlq_file.unlink()
-            self.current_file = None
-            self.current_file_size = 0
-            logger.info("Cleared all DLQ records")
-        else:
-            logger.info(f"Selective DLQ clearing for pipeline {pipeline_id} not implemented")
+    async def clear(self) -> None:
+        for path in self.dlq_path.glob("dlq_*"):
+            try:
+                path.unlink()
+            except OSError:
+                pass
 
-    async def cleanup_old_records(self, retention_days: int) -> None:
-        """Clean up old DLQ files."""
+    async def cleanup_old(self, retention_days: int) -> None:
+        pairs = sorted(
+            self.dlq_path.glob(f"dlq_*{self.SUFFIX_META}"),
+            key=lambda p: p.stat().st_ctime,
+            reverse=True,
+        )
+        for meta in pairs[self.max_files:]:
+            _delete_pair(meta)
+
+        cutoff = datetime.now(timezone.utc).timestamp() - retention_days * 86400
+        for meta in pairs[: self.max_files]:
+            try:
+                ctime = meta.stat().st_ctime
+            except OSError:
+                continue
+            if ctime < cutoff:
+                _delete_pair(meta)
+
+
+def _delete_pair(meta_path: Path) -> None:
+    payload_path = meta_path.with_suffix(LocalDLQStorage.SUFFIX_PAYLOAD)
+    for p in (meta_path, payload_path):
         try:
-            dlq_files = list(self.dlq_path.glob("dlq_*.jsonl"))
-            dlq_files.sort(key=lambda x: x.stat().st_ctime, reverse=True)
+            p.unlink()
+        except OSError:
+            pass
 
-            # Remove files beyond max_files limit
-            if len(dlq_files) > self.max_files:
-                for file_to_remove in dlq_files[self.max_files:]:
-                    file_to_remove.unlink()
-                    logger.info(f"Removed old DLQ file: {file_to_remove}")
 
-            # Remove files older than retention period
-            cutoff_time = datetime.now(timezone.utc).timestamp() - (retention_days * 24 * 60 * 60)
-            for dlq_file in dlq_files:
-                if dlq_file.stat().st_ctime < cutoff_time:
-                    dlq_file.unlink()
-                    logger.info(f"Removed expired DLQ file: {dlq_file}")
+def _write_arrow_ipc(path: Path, batch: pa.RecordBatch) -> None:
+    with pa.OSFile(str(path), "wb") as sink:
+        with pa_ipc.new_stream(sink, batch.schema) as writer:
+            writer.write_batch(batch)
 
-        except Exception as e:
-            logger.error(f"Failed to cleanup old DLQ files: {e}")
 
-    async def flush(self) -> None:
-        """No-op for local storage - writes are immediate."""
-        pass
+def _write_json(path: Path, data: Dict[str, Any]) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
 
 
 class DeadLetterQueue:
-    """
-    Dead Letter Queue for handling records that fail processing.
+    """Persist failed Arrow batches as IPC files plus JSON sidecars.
 
-    Failed records are written to local JSONL files. For cloud deployments,
-    mount the DLQ directory to persistent storage or use a sidecar to ship
-    files to object storage. Lightweight summaries are emitted to stdout
-    via ANALITIQ_DLQ:: for observability.
+    The DLQ does no transformation. Callers hand a ``pa.RecordBatch``
+    plus failure context; the Arrow buffers are written byte-for-byte
+    and the metadata sidecar carries only primitive types.
     """
 
     def __init__(
         self,
         dlq_path: str = "./deadletter/",
-        max_file_size: int = 10 * 1024 * 1024,
         max_files: int = 100,
         retention_days: int = 30,
     ):
-        self.retention_days = retention_days
         self.dlq_path = Path(dlq_path)
-        self.max_file_size = max_file_size
         self.max_files = max_files
-        self.lock = asyncio.Lock()
-        self._record_count = 0
+        self.retention_days = retention_days
+        self._batch_count = 0
         self.storage = LocalDLQStorage(
             dlq_path=dlq_path,
-            max_file_size=max_file_size,
             max_files=max_files,
         )
 
-    async def send_to_dlq(
-        self,
-        record: Dict[str, Any],
-        error: Exception,
-        pipeline_id: str,
-        stream_id: Optional[str] = None,
-        additional_context: Optional[Dict[str, Any]] = None,
-    ):
-        """Send a failed record to the Dead Letter Queue."""
-        dlq_record = {
-            "id": str(uuid4()),
-            "pipeline_id": pipeline_id,
-            "original_record": record,
-            "error": {
-                "type": type(error).__name__,
-                "message": str(error),
-                "traceback": self._get_traceback(error),
-            },
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "retry_count": 0,
-            "additional_context": additional_context or {},
-        }
-
-        await self.storage.write_record(dlq_record, stream_id)
-        self._record_count += 1
-
     async def send_batch(
         self,
-        batch: List[Dict[str, Any]],
-        error_message: str,
-        pipeline_id: str = "unknown",
-        stream_id: Optional[str] = None,
+        batch: pa.RecordBatch,
+        error: Union[BaseException, str],
+        pipeline_id: str,
+        stream_id: str,
+        run_id: str,
+        batch_seq: int,
         additional_context: Optional[Dict[str, Any]] = None,
-    ):
-        """Send a batch of failed records to the Dead Letter Queue."""
-        for record in batch:
-            error = Exception(error_message)
-            await self.send_to_dlq(
-                record=record,
-                error=error,
-                pipeline_id=pipeline_id,
-                stream_id=stream_id,
-                additional_context=additional_context,
-            )
+    ) -> None:
+        """Store the failed batch and its failure context."""
+        record_count = batch.num_rows
+        metadata: Dict[str, Any] = {
+            "pipeline_id": pipeline_id,
+            "stream_id": stream_id,
+            "run_id": run_id,
+            "batch_seq": batch_seq,
+            "record_count": record_count,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "error": _error_payload(error),
+        }
+        if additional_context:
+            metadata["additional_context"] = additional_context
 
-        logger.warning(f"Sent batch of {len(batch)} records to DLQ for pipeline {pipeline_id}")
+        await self.storage.write_batch(
+            batch=batch,
+            metadata=metadata,
+            run_id=run_id,
+            stream_id=stream_id,
+            batch_seq=batch_seq,
+        )
+        self._batch_count += 1
+
+        logger.warning(
+            "Sent batch %s/%s/%s (%d records) to DLQ for pipeline %s",
+            run_id, stream_id, batch_seq, record_count, pipeline_id,
+        )
         emit_dlq_log(
             pipeline_id=pipeline_id,
             stream_id=stream_id,
-            added=len(batch),
-            total=self._record_count,
+            added=record_count,
+            total=self._batch_count,
         )
 
-    def _get_traceback(self, error: Exception) -> Optional[str]:
-        """Get traceback string from exception."""
-        import traceback
-
-        try:
-            return traceback.format_exception(type(error), error, error.__traceback__)
-        except Exception:
-            return None
-
-    async def get_failed_records(
-        self, pipeline_id: Optional[str] = None, stream_id: Optional[str] = None
+    async def list_entries(
+        self, pipeline_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Get failed records from DLQ."""
-        return await self.storage.get_records(pipeline_id, stream_id)
-
-    async def retry_failed_record(self, dlq_record_id: str) -> bool:
-        """Mark a failed record for retry."""
-        logger.info(f"Retry requested for DLQ record: {dlq_record_id}")
-        return True
+        return await self.storage.list_entries(pipeline_id)
 
     async def get_dlq_stats(self) -> Dict[str, Any]:
-        """Get DLQ statistics."""
         return await self.storage.get_stats()
 
-    async def clear_dlq(self, pipeline_id: Optional[str] = None):
-        """Clear DLQ records."""
-        await self.storage.clear(pipeline_id)
+    async def clear_dlq(self) -> None:
+        await self.storage.clear()
 
-    async def cleanup(self):
-        """Clean up old DLQ files based on retention policy."""
-        await self.storage.cleanup_old_records(self.retention_days)
+    async def cleanup(self) -> None:
+        await self.storage.cleanup_old(self.retention_days)
 
-    async def flush(self):
-        """Flush any buffered records to storage."""
-        await self.storage.flush()
+    async def flush(self) -> None:
+        return None

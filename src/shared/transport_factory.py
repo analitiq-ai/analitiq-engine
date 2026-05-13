@@ -241,11 +241,22 @@ def _materialize_tls_for_driver(
     base_driver = driver.split("+", 1)[0].lower()
 
     if base_driver in ("postgresql", "postgres"):
-        # asyncpg understands the canonical string vocabulary directly
-        # and SSLContext for verified modes.
+        # Hand asyncpg an explicit SSLContext (or False for disable)
+        # rather than the libpq-style string. asyncpg's string "prefer"
+        # silently falls back to plain on any SSL setup hiccup, which
+        # masks real auth errors when the server requires hostssl: the
+        # plain connection hits pg_hba and surfaces "no encryption"
+        # instead of "password authentication failed". An SSLContext
+        # makes asyncpg use SSL unconditionally for the attempt and
+        # raise the real underlying error.
+        if mode == "disable":
+            return False
         if mode in _VERIFIED_TLS_MODES:
             return _build_verified_ssl_context(mode, ca_pem or "")
-        return mode
+        ctx = _ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = _ssl.CERT_NONE
+        return ctx
 
     if base_driver in ("mysql", "mariadb"):
         # aiomysql wants an SSLContext or no ssl arg at all.
@@ -292,18 +303,18 @@ def _select_transport(
     transports = connector.get("transports") or {}
     if not transports:
         raise ValueError(
-            f"Connector {connector.get('alias')!r} has no `transports` block; "
+            f"Connector {connector.get('connector_id')!r} has no `transports` block; "
             f"cannot materialize transport"
         )
     ref = transport_ref or connector.get("default_transport")
     if not ref:
         raise ValueError(
-            f"Connector {connector.get('alias')!r}: transport_ref not given "
+            f"Connector {connector.get('connector_id')!r}: transport_ref not given "
             f"and default_transport not declared"
         )
     if ref not in transports:
         raise KeyError(
-            f"Connector {connector.get('alias')!r}: transport {ref!r} not in "
+            f"Connector {connector.get('connector_id')!r}: transport {ref!r} not in "
             f"declared transports {sorted(transports)}"
         )
     defaults = connector.get("transport_defaults") or {}
@@ -501,7 +512,7 @@ async def build_transport(
     if not transport_type:
         raise ValueError(
             f"Resolved transport spec missing `transport_type`; connector "
-            f"{connector.get('alias')!r}, transport {transport_ref!r}"
+            f"{connector.get('connector_id')!r}, transport {transport_ref!r}"
         )
     builder = _TRANSPORT_BUILDERS.get(transport_type)
     if builder is None:

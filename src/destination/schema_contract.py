@@ -2,6 +2,7 @@
 
 import json
 import logging
+from datetime import date, datetime, time
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
@@ -248,6 +249,31 @@ class SchemaContract:
             if tz and not getattr(parsed.type, "tz", None):
                 parsed = pc.assume_timezone(parsed, tz)
             return pc.cast(parsed, field.type, safe=False)
+
+        # JSON-Schema ``format`` lets the source declare ISO-8601 string
+        # inputs without a per-field strptime pattern. Standard formats
+        # are RFC 3339 / ISO 8601 — ``datetime.fromisoformat`` (3.11+)
+        # parses the full grammar including ``+HH:MM`` offsets.
+        json_format = field_def.get("format")
+        if json_format in ("date-time", "date", "time") and all(
+            v is None or isinstance(v, str) for v in values
+        ):
+            if json_format == "date-time" and pa.types.is_timestamp(field.type):
+                parsed_vals = [
+                    None if v is None else datetime.fromisoformat(v) for v in values
+                ]
+                arr = pa.array(parsed_vals, type=field.type)
+                return arr
+            if json_format == "date" and pa.types.is_date(field.type):
+                parsed_vals = [
+                    None if v is None else date.fromisoformat(v) for v in values
+                ]
+                return pa.array(parsed_vals, type=field.type)
+            if json_format == "time" and pa.types.is_time(field.type):
+                parsed_vals = [
+                    None if v is None else time.fromisoformat(v) for v in values
+                ]
+                return pa.array(parsed_vals, type=field.type)
 
         if pa.types.is_decimal(field.type):
             converted = [

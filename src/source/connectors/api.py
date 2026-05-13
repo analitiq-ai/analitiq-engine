@@ -116,7 +116,7 @@ class APIConnector(BaseConnector):
         method = (request.get("method") or "GET").upper()
         if not isinstance(path, str) or not path:
             raise ReadError(
-                f"endpoint {endpoint_doc.get('alias')!r}: operations.read.request.path is required"
+                f"endpoint {endpoint_doc.get('endpoint_id')!r}: operations.read.request.path is required"
             )
         # Preserve both the base URL's path (e.g. ``/api/v1``) and the
         # endpoint's path. ``urljoin`` treats a leading ``/`` on the second
@@ -206,7 +206,7 @@ class APIConnector(BaseConnector):
         Accepted records.ref forms: ``response.body`` and
         ``response.body.<field>[.<field>...]``.
         """
-        endpoint_alias = endpoint_doc.get("alias")
+        endpoint_alias = endpoint_doc.get("endpoint_id")
         response_block = read_spec.get("response") or {}
         response_schema = response_block.get("schema") or {}
         records_ref = (response_block.get("records") or {}).get(
