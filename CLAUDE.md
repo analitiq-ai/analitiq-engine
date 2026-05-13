@@ -23,6 +23,88 @@ The engine and destination run from the same Docker image, toggled by `RUN_MODE`
 3. **Load** — write to destination with fault tolerance
 4. **Checkpoint** — save progress so interrupted runs resume automatically
 
+### For databases that support ADBC (Postgres/BigQuery/Snowflake/DuckDB)
+
+Arrow Database Connectivity (https://arrow.apache.org/adbc/) drivers exist for exactly these. The flow is:
+
+record_batch
+→ cast_arrow_batch
+→ adbc_conn.adbc_ingest(table, record_batch, mode="append")
+
+The driver hands the Arrow buffers directly to libpq's binary COPY protocol or BigQuery's storage API.
+
+**First-class native drivers**
+```text
+  ┌────────────┬────────────────────────────┬──────────────────────────────────────────────────────────────────────────────────────┐
+  │   Driver   │          Package           │                                        Notes                                         │
+  ├────────────┼────────────────────────────┼──────────────────────────────────────────────────────────────────────────────────────┤
+  │ PostgreSQL │ adbc-driver-postgresql     │ Uses libpq COPY BINARY for bulk ingest. Production-ready.                            │                                                                                                                                                                                                                                                        
+  ├────────────┼────────────────────────────┼──────────────────────────────────────────────────────────────────────────────────────┤
+  │ Snowflake  │ adbc-driver-snowflake      │ Native Arrow ingestion via internal Go-Snowflake driver.                             │
+  ├────────────┼────────────────────────────┼──────────────────────────────────────────────────────────────────────────────────────┤
+  │ BigQuery   │ adbc-driver-bigquery       │ Storage Write API (Arrow-native).                                                    │
+  ├────────────┼────────────────────────────┼──────────────────────────────────────────────────────────────────────────────────────┤
+  │ DuckDB     │ shipped with duckdb itself │ Zero-copy in-process.                                                                │
+  ├────────────┼────────────────────────────┼──────────────────────────────────────────────────────────────────────────────────────┤
+  │ SQLite     │ adbc-driver-sqlite         │ Production-ready. Less interesting for "millions of records" but useful for testing. │
+  └────────────┴────────────────────────────┴──────────────────────────────────────────────────────────────────────────────────────┘
+```
+These five are the ones where cur.adbc_ingest(...) actually skips a row-by-row insert path.
+
+**Flight SQL driver (works for any DB exposing Flight SQL)**
+```text
+  ┌────────────────────┬───────────────────────┬───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+  │       Driver       │        Package        │                                                                                    Covers                                                                                     │
+  ├────────────────────┼───────────────────────┼───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ Flight SQL generic │ adbc-driver-flightsql │ Any server that implements the Arrow Flight SQL protocol — currently Dremio, Doris, InfluxDB 3.x, DataBricks (in some configs), and an increasing number of newer warehouses. │
+  └────────────────────┴───────────────────────┴───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+```
+Caveat: this only helps if the target server actually exposes a Flight SQL endpoint. Most ordinary MySQL/Postgres deployments do not.
+
+**Bridge drivers (broad coverage, NO columnar benefit)**
+
+```text
+  ┌─────────────┬──────────────────┬────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+  │   Driver    │     Package      │                                                                                                                              What it does                                                                                                                              │
+  ├─────────────┼──────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ JDBC bridge │ adbc-driver-jdbc │ Wraps any JDBC driver. Gives you "ADBC API surface" over Oracle / MSSQL / MariaDB / MySQL / Redshift / etc. — but underneath it still binds row-by-row through JDBC. Don't pick this for performance. Use it only if you want one ADBC interface across mixed targets. │
+  └─────────────┴──────────────────┴────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+
+### For databases without ADBC: native bulk-load protocols
+
+For PG without ADBC, `COPY FROM stdin BINARY` via `psycopg`. For MySQL, LOAD DATA LOCAL INFILE. Each is ~10x faster than parameterized INSERT, even with batching.
+SQLAlchemy as a generic write path should be the fallback, not the default.
+```text
+  ┌────────────────────┬─────────────────────────────────────────────────────────────────────────┬────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+  │         DB         │                              Driver to use                              │                                                                           Bulk path                                                                            │
+  ├────────────────────┼─────────────────────────────────────────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ MySQL / MariaDB    │ PyMySQL or mysqlclient via SQLAlchemy                                   │ LOAD DATA LOCAL INFILE via raw cursor — stream Arrow → CSV/TSV → MySQL reads it directly. ~10x faster than INSERT.                                             │
+  ├────────────────────┼─────────────────────────────────────────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ Oracle             │ python-oracledb via SQLAlchemy                                          │ cursor.executemany(sql, rows) with arraysize tuned. Oracle's batched executemany is the standard fast path; SQL*Loader exists but isn't practical from Python. │
+  ├────────────────────┼─────────────────────────────────────────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ MSSQL / SQL Server │ pyodbc via SQLAlchemy                                                   │ Set fast_executemany=True on the cursor — uses TDS batched parameter stream. Big speedup, single-line config change.                                           │
+  ├────────────────────┼─────────────────────────────────────────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ ClickHouse         │ clickhouse-connect (skip SQLAlchemy)                                    │ client.insert_arrow(table_name, arrow_table) — first-class Arrow ingest, just not branded ADBC.                                                                │
+  ├────────────────────┼─────────────────────────────────────────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ Redshift           │ redshift_connector via SQLAlchemy, OR Postgres ADBC driver (unofficial) │ See note below — the real fast path conflicts with your engine policy.                                                                                         │
+  └────────────────────┴─────────────────────────────────────────────────────────────────────────┴────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### For API destinations: skip Arrow after the cast
+
+Once the schema is validated, materialize once and stay row-oriented. Use orjson (C-based, handles datetime/Decimal/UUID natively via `default=`) instead of
+stdlib json. This avoids wasting cycles converting decimal → string → dict → json string when it can go decimal → orjson in one step with a custom serializer.
+
+record_batch
+→ cast_arrow_batch          # schema validation only
+→ to_pylist                 # materialize ONCE
+→ orjson.dumps(default=...) # handles Decimal/datetime/UUID without pre-conversion
+→ aiohttp
+
+The whole point of orjson's default= hook is to avoid an explicit "Arrow-level cast to JSON shape" pass.
+
 ## Configuration Layout
 
 Configuration is assembled from modular files. The plugin generates all of this automatically.

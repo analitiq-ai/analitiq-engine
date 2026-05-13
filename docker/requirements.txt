@@ -60,6 +60,14 @@ sqlalchemy[asyncio]>=2.0.0
 # numpy>=1.24.0
 pyarrow>=12.0.0
 
+# ADBC (Arrow Database Connectivity) fast path for the database
+# destination. Always installed in the Docker image; ``ADBC_FAST_PATH=1``
+# at runtime is what gates use. pip consumers see ADBC as the optional
+# ``adbc`` extra in pyproject.toml — the runtime image bundles it so a
+# flag flip needs no rebuild.
+adbc-driver-manager>=1.1.0
+adbc-driver-postgresql>=1.1.0
+
 # For NoSQL databases
 # motor>=3.0.0
 # aioredis>=2.0.0
