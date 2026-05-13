@@ -60,6 +60,13 @@ sqlalchemy[asyncio]>=2.0.0
 # numpy>=1.24.0
 pyarrow>=12.0.0
 
+# ADBC (Arrow Database Connectivity) fast path for the database
+# destination. Enabled at runtime via the ``ADBC_FAST_PATH=1`` env var
+# and only when the stream is append-only. SQLAlchemy stays as the
+# fallback for upserts and any driver not covered by ADBC.
+adbc-driver-manager>=1.1.0
+adbc-driver-postgresql>=1.1.0
+
 # For NoSQL databases
 # motor>=3.0.0
 # aioredis>=2.0.0

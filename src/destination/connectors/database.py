@@ -8,10 +8,13 @@ efficient columnar type conversion for batch operations.
 """
 
 import asyncio
+import importlib
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Mapping, Optional
+from urllib.parse import quote
 
 import pyarrow as pa
 from sqlalchemy import (
@@ -48,6 +51,29 @@ from ...shared.connection_runtime import ConnectionRuntime
 
 
 logger = logging.getLogger(__name__)
+
+
+# SQLAlchemy dialect (matches ``self._driver``, set on connect from
+# ``runtime.driver``) -> dotted ADBC dbapi module path. Import is lazy
+# so a missing package simply disables the fast path for that dialect.
+# MySQL/MariaDB have no first-party ADBC driver today; the dispatch hook
+# is in place so a future ``adbc-driver-mysql`` (or a Flight SQL proxy
+# fronting MySQL via ``adbc-driver-flightsql``) can be wired in without
+# touching the handler.
+_ADBC_MODULES: Dict[str, str] = {
+    "postgresql": "adbc_driver_postgresql.dbapi",
+    "postgres": "adbc_driver_postgresql.dbapi",
+}
+
+
+# Opt-in feature flag. Set ``ADBC_FAST_PATH=1`` to enable. Anything else
+# (unset, ``0``, ``false``) keeps the SQLAlchemy path active.
+_ADBC_ENV_VAR = "ADBC_FAST_PATH"
+
+
+def _adbc_flag_enabled() -> bool:
+    value = os.environ.get(_ADBC_ENV_VAR, "").strip().lower()
+    return value in ("1", "true", "yes", "on")
 
 
 @dataclass
@@ -144,6 +170,15 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         # at startup.
         self._stream_endpoints: Dict[str, Dict[str, Any]] = {}
 
+        # Lazily-imported ADBC dbapi module (one per handler instance).
+        # ``None`` means we have not yet tried to import; ``False`` means
+        # the import failed once and we should not retry.
+        self._adbc_module: Any = None
+        # ADBC connection cached for the lifetime of this handler. ADBC
+        # connections are separate from the SQLAlchemy AsyncEngine pool;
+        # opened lazily on the first append batch, closed in disconnect().
+        self._adbc_conn: Any = None
+
     def set_endpoint_refs(self, endpoint_refs: Mapping[str, Any]) -> None:
         """Register stream_id → endpoint_ref for each stream writing to this
         destination. Called once by ``src.main`` before the gRPC server starts;
@@ -236,6 +271,13 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
 
     async def disconnect(self) -> None:
         """Close database connection."""
+        if self._adbc_conn is not None:
+            adbc_conn = self._adbc_conn
+            self._adbc_conn = None
+            try:
+                await asyncio.to_thread(adbc_conn.close)
+            except Exception as exc:
+                logger.warning("Error closing ADBC connection: %s", exc)
         if self._runtime:
             await self._runtime.close()
         self._connected = False
@@ -519,22 +561,32 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
             )
 
         try:
-            prepared = self._prepare_for_sqlalchemy(state, record_batch)
-
-            async with self._engine.begin() as conn:
-                if state.write_mode == "truncate_insert":
-                    await self._truncate_and_insert(conn, state, prepared)
-                elif state.write_mode == "upsert" and (
-                    state.conflict_keys or state.primary_keys
-                ):
-                    await self._upsert_records(conn, state, prepared)
-                else:
-                    await self._insert_records(conn, state, prepared)
-
-                # Record batch commit
-                await self._record_batch_commit_in_txn(
-                    conn, state, run_id, stream_id, batch_seq, cursor.token, record_count
+            if self._can_use_adbc(state):
+                # Append-only fast path. ADBC ingest and the
+                # ``_batch_commits`` write are intentionally split into
+                # two transactions — see ``_write_via_adbc`` for the
+                # idempotency trade-off this accepts.
+                await self._write_via_adbc(state, record_batch)
+                await self._record_batch_commit(
+                    state, run_id, stream_id, batch_seq, cursor.token, record_count
                 )
+            else:
+                prepared = self._prepare_for_sqlalchemy(state, record_batch)
+
+                async with self._engine.begin() as conn:
+                    if state.write_mode == "truncate_insert":
+                        await self._truncate_and_insert(conn, state, prepared)
+                    elif state.write_mode == "upsert" and (
+                        state.conflict_keys or state.primary_keys
+                    ):
+                        await self._upsert_records(conn, state, prepared)
+                    else:
+                        await self._insert_records(conn, state, prepared)
+
+                    # Record batch commit
+                    await self._record_batch_commit_in_txn(
+                        conn, state, run_id, stream_id, batch_seq, cursor.token, record_count
+                    )
 
             logger.info(f"Wrote batch {batch_seq}: {record_count} records")
             return BatchWriteResult(
@@ -702,6 +754,165 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
             return
         await conn.execute(state.table.delete())
         await self._insert_records(conn, state, records)
+
+    # ------------------------------------------------------------------
+    # ADBC fast path (append-only, opt-in)
+    # ------------------------------------------------------------------
+
+    def _load_adbc_module(self) -> Any:
+        """Lazily import the ADBC dbapi module for the active dialect.
+
+        Returns the module, or ``False`` when no driver is registered for
+        the dialect or the import fails. The result is cached so a missing
+        package is logged once, not every batch.
+        """
+        if self._adbc_module is not None:
+            return self._adbc_module
+
+        module_path = _ADBC_MODULES.get(self._driver)
+        if not module_path:
+            self._adbc_module = False
+            return False
+
+        try:
+            self._adbc_module = importlib.import_module(module_path)
+        except ImportError as exc:
+            logger.info(
+                "ADBC fast path disabled for driver=%s: %s not importable (%s). "
+                "Install the matching `adbc-driver-*` package to enable.",
+                self._driver,
+                module_path,
+                exc,
+            )
+            self._adbc_module = False
+        return self._adbc_module
+
+    def _build_adbc_uri(self) -> Optional[str]:
+        """Render the engine's URL as a libpq-style URI for ADBC.
+
+        SQLAlchemy renders ``postgresql+asyncpg://...``; ADBC expects
+        ``postgresql://...`` so we strip the ``+driver`` suffix and
+        URL-quote the credential parts so special characters in
+        passwords don't break the URI.
+        """
+        if self._engine is None:
+            return None
+        url = self._engine.url
+        backend = (url.get_backend_name() or "").lower()
+        if backend not in {"postgresql", "postgres"}:
+            return None
+        if not url.host or not url.database:
+            return None
+
+        userinfo = ""
+        if url.username:
+            userinfo = quote(url.username, safe="")
+            if url.password:
+                userinfo += ":" + quote(url.password, safe="")
+            userinfo += "@"
+        port = f":{url.port}" if url.port else ""
+        return f"postgresql://{userinfo}{url.host}{port}/{url.database}"
+
+    def _can_use_adbc(self, state: _StreamState) -> bool:
+        """Decide whether the current batch should take the ADBC fast path.
+
+        Gated on:
+
+        * Opt-in feature flag (``ADBC_FAST_PATH`` env var).
+        * Append-only stream (``write_mode == "insert"``). Upsert and
+          truncate-insert keep the SQLAlchemy path; ``adbc_ingest`` is
+          INSERT/APPEND only.
+        * A registered ADBC driver for ``self._driver``.
+        * The driver package is importable.
+        * A connection URI can be built from the engine's URL.
+
+        Any single ``False`` short-circuits to the SQLAlchemy path —
+        the caller does not need to know which condition failed.
+        """
+        if not _adbc_flag_enabled():
+            return False
+        if state.write_mode != "insert":
+            return False
+        if self._driver not in _ADBC_MODULES:
+            return False
+        if not self._load_adbc_module():
+            return False
+        if self._build_adbc_uri() is None:
+            return False
+        return True
+
+    def _open_adbc_connection(self) -> Any:
+        """Return the cached ADBC connection, opening it on first use."""
+        if self._adbc_conn is not None:
+            return self._adbc_conn
+        module = self._load_adbc_module()
+        if not module:
+            raise RuntimeError(
+                f"ADBC module for driver={self._driver!r} not available"
+            )
+        uri = self._build_adbc_uri()
+        if uri is None:
+            raise RuntimeError(
+                f"Could not build ADBC URI for driver={self._driver!r}"
+            )
+        self._adbc_conn = module.connect(uri)
+        return self._adbc_conn
+
+    def _adbc_ingest_sync(
+        self,
+        cast_batch: pa.RecordBatch,
+        schema_name: str,
+        table_name: str,
+    ) -> None:
+        """Synchronous ADBC ingest. Runs on a worker thread.
+
+        Uses ``adbc_ingest(..., mode="append")``. The target table must
+        already exist — ``configure_schema`` has emitted DDL via
+        SQLAlchemy by the time the first batch arrives.
+        """
+        conn = self._open_adbc_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.adbc_ingest(
+                table_name,
+                cast_batch,
+                mode="append",
+                db_schema_name=schema_name or None,
+            )
+            conn.commit()
+        finally:
+            cursor.close()
+
+    async def _write_via_adbc(
+        self,
+        state: _StreamState,
+        record_batch: pa.RecordBatch,
+    ) -> None:
+        """Append-only fast path. INSERT via ``adbc_ingest``.
+
+        Reuses :meth:`SchemaContract.cast_arrow_batch` so the Arrow
+        types match the destination table exactly. The cast batch is
+        handed straight to ADBC — no ``to_pylist()`` round trip, no
+        SQLAlchemy bind-parameter loop.
+
+        Idempotency caveat: the ingest commits on its own ADBC
+        connection, then ``_batch_commits`` is recorded in a separate
+        SQLAlchemy transaction. If the process dies between those two
+        commits, a retry will re-insert the batch. This is acceptable
+        for append-only streams; callers needing exactly-once should
+        stay on the SQLAlchemy path (``write_mode != "insert"``).
+        """
+        if state.schema_contract is None:
+            raise RuntimeError(
+                "ADBC fast path requires a configured SchemaContract"
+            )
+        cast_batch = state.schema_contract.cast_arrow_batch(record_batch)
+        await asyncio.to_thread(
+            self._adbc_ingest_sync,
+            cast_batch,
+            state.schema_name,
+            state.table_name,
+        )
 
     def _prepare_for_sqlalchemy(
         self, state: _StreamState, record_batch: pa.RecordBatch
