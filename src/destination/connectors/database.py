@@ -31,6 +31,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.mysql import insert as mysql_insert
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncConnection
 
 from ..base_handler import BaseDestinationHandler, BatchWriteResult
@@ -699,6 +700,22 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
             # failed. The retry will re-ingest. Stay RETRYABLE so the
             # engine reconciles, but surface the divergence text in
             # failure_summary so DLQ / monitoring can route on it.
+            return BatchWriteResult(
+                status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
+                records_written=0,
+                failure_summary=str(e),
+            )
+        except IntegrityError as e:
+            if state.write_mode == "insert":
+                logger.error(
+                    "Insert-mode integrity violation (won't retry): %s", e
+                )
+                return BatchWriteResult(
+                    status=AckStatus.ACK_STATUS_FATAL_FAILURE,
+                    records_written=0,
+                    failure_summary=f"integrity: {e}",
+                )
+            logger.error(f"Error writing batch: {e}", exc_info=True)
             return BatchWriteResult(
                 status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
                 records_written=0,

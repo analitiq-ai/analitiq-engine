@@ -78,6 +78,11 @@ class DestinationGRPCServer:
             options=[
                 ("grpc.max_send_message_length", self.max_message_size),
                 ("grpc.max_receive_message_length", self.max_message_size),
+                ("grpc.keepalive_time_ms", 10000),
+                ("grpc.keepalive_timeout_ms", 5000),
+                ("grpc.keepalive_permit_without_calls", 1),
+                ("grpc.http2.min_ping_interval_without_data_ms", 5000),
+                ("grpc.http2.max_ping_strikes", 0),
             ]
         )
 
