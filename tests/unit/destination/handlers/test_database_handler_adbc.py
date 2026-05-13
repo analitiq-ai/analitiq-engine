@@ -18,7 +18,6 @@ import pytest
 from src.destination.connectors import database as database_module
 from src.destination.connectors.database import (
     _ADBC_IMPORT_FAILED,
-    AdbcCommitRecordError,
     AdbcConfigurationError,
     DatabaseDestinationHandler,
     _StreamState,

@@ -12,7 +12,6 @@ import os
 import socket
 import uuid
 from typing import Any, Dict
-from unittest.mock import MagicMock
 
 import pyarrow as pa
 import pytest
@@ -159,7 +158,9 @@ async def prepared_handler(pg_engine, table_name, monkeypatch):
     async with pg_engine.begin() as conn:
         await conn.execute(text(f"DROP TABLE IF EXISTS public.{table_name}"))
         await conn.execute(text(f"DROP TABLE IF EXISTS public.{table_name}_commits"))
-    # Close ADBC connection if opened.
+    # Close ADBC connection if opened. Test teardown — close failures
+    # are intentionally swallowed so a flaky close doesn't mask the
+    # real test result.
     if handler._adbc_conn is not None:
         try:
             handler._adbc_conn.close()
