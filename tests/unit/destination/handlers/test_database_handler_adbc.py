@@ -18,6 +18,7 @@ import pytest
 from src.destination.connectors import database as database_module
 from src.destination.connectors.database import (
     _ADBC_IMPORT_FAILED,
+    AdbcCommitRecordError,
     AdbcConfigurationError,
     DatabaseDestinationHandler,
     _StreamState,
@@ -95,25 +96,25 @@ def _disable_adbc_env(monkeypatch: pytest.MonkeyPatch) -> None:
 class TestCanUseAdbc:
     def test_default_flag_off_returns_false(self, handler):
         state = _state_with_contract(write_mode="insert")
-        assert handler._can_use_adbc(state) is False
+        assert handler._can_use_adbc('s1', state) is False
 
     def test_upsert_returns_false(self, handler, monkeypatch, adbc_module_stub):
         monkeypatch.setenv("ADBC_FAST_PATH", "1")
         handler._adbc_module = adbc_module_stub
         state = _state_with_contract(write_mode="upsert")
-        assert handler._can_use_adbc(state) is False
+        assert handler._can_use_adbc('s1', state) is False
 
     def test_truncate_insert_returns_false(self, handler, monkeypatch, adbc_module_stub):
         monkeypatch.setenv("ADBC_FAST_PATH", "1")
         handler._adbc_module = adbc_module_stub
         state = _state_with_contract(write_mode="truncate_insert")
-        assert handler._can_use_adbc(state) is False
+        assert handler._can_use_adbc('s1', state) is False
 
     def test_unsupported_driver_returns_false(self, handler, monkeypatch):
         monkeypatch.setenv("ADBC_FAST_PATH", "1")
         handler._driver = "mysql"
         state = _state_with_contract(write_mode="insert")
-        assert handler._can_use_adbc(state) is False
+        assert handler._can_use_adbc('s1', state) is False
         # _load_adbc_module cached the import-failed sentinel for the
         # unsupported dialect rather than attempting an import.
         assert handler._adbc_module is _ADBC_IMPORT_FAILED
@@ -126,7 +127,7 @@ class TestCanUseAdbc:
             side_effect=ImportError("boom"),
         ):
             state = _state_with_contract(write_mode="insert")
-            assert handler._can_use_adbc(state) is False
+            assert handler._can_use_adbc('s1', state) is False
             assert handler._adbc_module is _ADBC_IMPORT_FAILED
 
     def test_import_failure_logs_warning_when_flag_on(
@@ -139,7 +140,9 @@ class TestCanUseAdbc:
             side_effect=ImportError("boom"),
         ):
             with caplog.at_level(logging.WARNING, logger=database_module.logger.name):
-                handler._can_use_adbc(_state_with_contract(write_mode="insert"))
+                handler._can_use_adbc(
+                    "s1", _state_with_contract(write_mode="insert")
+                )
         msgs = [r for r in caplog.records if "not importable" in r.message]
         assert msgs, "expected a WARNING when the opted-in driver is missing"
         assert msgs[0].levelno == logging.WARNING
@@ -165,7 +168,7 @@ class TestCanUseAdbc:
         monkeypatch.setenv("ADBC_FAST_PATH", "1")
         handler._adbc_module = adbc_module_stub
         state = _state_with_contract(write_mode="insert")
-        assert handler._can_use_adbc(state) is True
+        assert handler._can_use_adbc('s1', state) is True
 
     def test_postgres_alias_dialect_matches(
         self, handler, monkeypatch, adbc_module_stub
@@ -174,14 +177,14 @@ class TestCanUseAdbc:
         handler._driver = "postgres"  # `postgres+psycopg2` strips to `postgres`
         handler._adbc_module = adbc_module_stub
         state = _state_with_contract(write_mode="insert")
-        assert handler._can_use_adbc(state) is True
+        assert handler._can_use_adbc('s1', state) is True
 
     def test_unbuildable_uri_returns_false(self, handler, monkeypatch, adbc_module_stub):
         monkeypatch.setenv("ADBC_FAST_PATH", "1")
         handler._adbc_module = adbc_module_stub
         handler._engine = _build_engine_url_mock(host=None)
         state = _state_with_contract(write_mode="insert")
-        assert handler._can_use_adbc(state) is False
+        assert handler._can_use_adbc('s1', state) is False
 
 
 class TestDemotionLogging:
@@ -193,7 +196,7 @@ class TestDemotionLogging:
         state = _state_with_contract(write_mode="insert", table_name="events")
         with caplog.at_level(logging.INFO, logger=database_module.logger.name):
             for _ in range(5):
-                assert handler._can_use_adbc(state) is False
+                assert handler._can_use_adbc('s1', state) is False
         demotion_msgs = [
             r for r in caplog.records
             if "fast path disabled" in r.message and "no ADBC driver" in r.message
@@ -204,8 +207,30 @@ class TestDemotionLogging:
         # Flag intentionally not set.
         state = _state_with_contract(write_mode="upsert")
         with caplog.at_level(logging.INFO, logger=database_module.logger.name):
-            handler._can_use_adbc(state)
+            handler._can_use_adbc('s1', state)
         assert not any("fast path disabled" in r.message for r in caplog.records)
+
+    def test_two_streams_each_get_their_own_first_demotion_log(
+        self, handler, monkeypatch, caplog
+    ):
+        """Demotion cache keys on stream_id, so two streams writing to
+        the same physical table each see their own first-demotion line
+        rather than the second one being silently swallowed."""
+        monkeypatch.setenv("ADBC_FAST_PATH", "1")
+        handler._driver = "mysql"  # not in _ADBC_MODULES
+        state = _state_with_contract(write_mode="insert", table_name="events")
+        with caplog.at_level(logging.INFO, logger=database_module.logger.name):
+            handler._can_use_adbc("stream-a", state)
+            handler._can_use_adbc("stream-b", state)
+        demotion_msgs = [
+            r for r in caplog.records if "fast path disabled" in r.message
+        ]
+        assert len(demotion_msgs) == 2
+        streams = sorted(
+            "stream-a" if "stream-a" in r.message else "stream-b"
+            for r in demotion_msgs
+        )
+        assert streams == ["stream-a", "stream-b"]
 
 
 class TestBuildAdbcUri:
@@ -402,10 +427,14 @@ class TestWriteBatchDispatch:
 
         # Outer except converts to retryable failure (engine retries it).
         assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
+        # The failure_summary keeps the "ingest already committed"
+        # signal so an operator looking at acks (or the DLQ) sees the
+        # duplicate-on-retry hazard, not a generic commit error.
+        assert "adbc ingest committed" in (result.failure_summary or "")
         # Ingest happened.
         cursor = adbc_module_stub.connect.return_value.cursor.return_value
         cursor.adbc_ingest.assert_called_once()
-        # Explicit warning about the duplication window.
+        # Explicit ERROR log about the duplication window.
         divergence = [
             r for r in caplog.records
             if "retry will duplicate" in r.message
@@ -477,3 +506,23 @@ class TestDisconnectClosesAdbc:
         # Engine is still released so we don't leak it on top of the
         # ADBC handle.
         handler._runtime.close.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_runtime_close_failure_still_flips_connected_state(
+        self, handler, caplog
+    ):
+        """If ``runtime.close()`` raises, the handler must still
+        transition to ``_connected = False`` so callers can re-acquire
+        without observing a half-disconnected state."""
+        handler._runtime = AsyncMock()
+        handler._runtime.close = AsyncMock(side_effect=RuntimeError("engine.dispose failed"))
+
+        with caplog.at_level(logging.ERROR, logger=database_module.logger.name):
+            await handler.disconnect()
+
+        errors = [
+            r for r in caplog.records
+            if "Failed to close SQLAlchemy runtime" in r.message
+        ]
+        assert errors and errors[0].levelno == logging.ERROR
+        assert handler._connected is False

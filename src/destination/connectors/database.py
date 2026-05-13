@@ -81,6 +81,24 @@ class AdbcConfigurationError(RuntimeError):
     """
 
 
+class AdbcCommitRecordError(RuntimeError):
+    """ADBC ingest succeeded, but ``_batch_commits`` recording failed.
+
+    The data is already in the destination table. A retry will pass
+    the pre-flight idempotency check and ingest the batch again,
+    duplicating rows. The exception carries the inner error so the
+    engine's failure summary surfaces the divergence rather than a
+    generic commit error.
+    """
+
+    def __init__(self, inner: BaseException) -> None:
+        super().__init__(
+            f"adbc ingest committed; commit-record failed "
+            f"(retry will duplicate): {inner}"
+        )
+        self.__cause__ = inner
+
+
 def _adbc_flag_enabled() -> bool:
     value = os.environ.get(_ADBC_ENV_VAR, "").strip().lower()
     return value in ("1", "true", "yes", "on")
@@ -191,10 +209,10 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         # so the next batch reconnects instead of reusing a poisoned
         # handle.
         self._adbc_conn: Any = None
-        # Set of ``(stream_id, reason)`` pairs that have already been
-        # logged when the fast path was demoted to SQLAlchemy. Keeps
-        # the demotion log to one line per stream per reason instead of
-        # one per batch.
+        # Set of ``(stream_id, reason)`` pairs already logged when the
+        # fast path was demoted to SQLAlchemy. Keyed on stream_id so
+        # two streams writing to the same physical table each get their
+        # own first-demotion log line.
         self._adbc_demotion_logged: Set[Tuple[str, str]] = set()
 
     def set_endpoint_refs(self, endpoint_refs: Mapping[str, Any]) -> None:
@@ -290,10 +308,12 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
     async def disconnect(self) -> None:
         """Close database connection.
 
-        The SQLAlchemy runtime is released even if the ADBC close
-        fails, so we don't leak the engine on top of the ADBC handle.
-        ADBC close failures are surfaced at ERROR with ``exc_info`` —
-        they indicate a server-side resource may still be live.
+        Both the ADBC connection and the SQLAlchemy runtime are
+        released even if the other side fails, so neither leaks on top
+        of the other. Close failures are logged at ERROR with
+        ``exc_info``; the handler still transitions to ``_connected =
+        False`` so callers can re-acquire without seeing a half-open
+        state.
         """
         adbc_conn = self._adbc_conn
         if adbc_conn is not None:
@@ -308,7 +328,13 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
             finally:
                 self._adbc_conn = None
         if self._runtime:
-            await self._runtime.close()
+            try:
+                await self._runtime.close()
+            except Exception:
+                logger.error(
+                    "Failed to close SQLAlchemy runtime during disconnect",
+                    exc_info=True,
+                )
         self._connected = False
         logger.info("DatabaseDestinationHandler disconnected")
 
@@ -590,27 +616,27 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
             )
 
         try:
-            if self._can_use_adbc(state):
+            if self._can_use_adbc(stream_id, state):
                 await self._write_via_adbc(state, record_batch)
                 try:
                     await self._record_batch_commit(
                         state, run_id, stream_id, batch_seq,
                         cursor.token, record_count,
                     )
-                except Exception:
+                except Exception as commit_exc:
                     # The ingest already committed on the ADBC
-                    # connection; we just failed to mark it in
-                    # ``_batch_commits``. A retry will pass the
-                    # pre-flight check and re-ingest, duplicating
-                    # the batch. Log loudly so operators can
-                    # correlate post-mortem.
+                    # connection; the SA ``_batch_commits`` write
+                    # failed. A retry will pass the pre-flight check
+                    # and re-ingest, duplicating rows. Surface the
+                    # divergence both in the log and in the failure
+                    # summary returned to the engine.
                     logger.error(
                         "ADBC ingest committed but commit-record failed "
                         "for %s/%s/%s — retry will duplicate %d row(s)",
                         run_id, stream_id, batch_seq, record_count,
                         exc_info=True,
                     )
-                    raise
+                    raise AdbcCommitRecordError(commit_exc) from commit_exc
             else:
                 prepared = self._prepare_for_sqlalchemy(state, record_batch)
 
@@ -879,26 +905,29 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
 
         return f"postgresql://{userinfo}{url.host}{port}/{url.database}{query_string}"
 
-    def _note_adbc_demotion(self, state: _StreamState, reason: str) -> None:
+    def _note_adbc_demotion(
+        self, stream_id: str, state: _StreamState, reason: str
+    ) -> None:
         """Log once per ``(stream_id, reason)`` why the fast path was
-        skipped. Only fires when the user actually asked for ADBC; if
-        the flag is off, demotion is the expected default and silent.
+        skipped. Silent when the flag is off — demotion is the default
+        and only worth surfacing when the user actually opted in.
         """
         if not _adbc_flag_enabled():
             return
-        key = (state.table_name or "", reason)
+        key = (stream_id, reason)
         if key in self._adbc_demotion_logged:
             return
         self._adbc_demotion_logged.add(key)
         logger.info(
-            "ADBC fast path disabled for table=%s.%s (driver=%s): %s",
+            "ADBC fast path disabled for stream=%s table=%s.%s (driver=%s): %s",
+            stream_id,
             state.schema_name,
             state.table_name,
             self._driver,
             reason,
         )
 
-    def _can_use_adbc(self, state: _StreamState) -> bool:
+    def _can_use_adbc(self, stream_id: str, state: _StreamState) -> bool:
         """Decide whether the current batch takes the ADBC fast path.
 
         Gated on:
@@ -914,17 +943,20 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
             return False
         if state.write_mode != "insert":
             self._note_adbc_demotion(
-                state, f"write_mode={state.write_mode!r} requires SQLAlchemy"
+                stream_id, state,
+                f"write_mode={state.write_mode!r} requires SQLAlchemy",
             )
             return False
         if self._load_adbc_module() is _ADBC_IMPORT_FAILED:
             self._note_adbc_demotion(
-                state, f"no ADBC driver registered for dialect={self._driver!r}"
+                stream_id, state,
+                f"no ADBC driver registered for dialect={self._driver!r}",
             )
             return False
         if self._build_adbc_uri() is None:
             self._note_adbc_demotion(
-                state, "could not build ADBC URI from engine.url"
+                stream_id, state,
+                "could not build ADBC URI from engine.url",
             )
             return False
         return True
@@ -989,10 +1021,14 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
                 try:
                     poisoned.close()
                 except Exception:
-                    # Best-effort. The conn is being discarded; the
-                    # original exception is what the caller cares
-                    # about.
-                    pass
+                    # Best-effort. The conn is being discarded and the
+                    # original ingest exception is what the caller
+                    # needs to see; the close failure is logged at
+                    # DEBUG so a libpq leak still leaves evidence.
+                    logger.debug(
+                        "Discarded poisoned ADBC connection; close failed",
+                        exc_info=True,
+                    )
             raise
 
     async def _write_via_adbc(
