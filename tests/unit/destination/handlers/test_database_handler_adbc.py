@@ -213,9 +213,6 @@ class TestDemotionLogging:
     def test_two_streams_each_get_their_own_first_demotion_log(
         self, handler, monkeypatch, caplog
     ):
-        """Demotion cache keys on stream_id, so two streams writing to
-        the same physical table each see their own first-demotion line
-        rather than the second one being silently swallowed."""
         monkeypatch.setenv("ADBC_FAST_PATH", "1")
         handler._driver = "mysql"  # not in _ADBC_MODULES
         state = _state_with_contract(write_mode="insert", table_name="events")
@@ -231,6 +228,36 @@ class TestDemotionLogging:
             for r in demotion_msgs
         )
         assert streams == ["stream-a", "stream-b"]
+
+    def test_same_stream_two_reasons_each_get_logged(
+        self, handler, monkeypatch, adbc_module_stub, caplog
+    ):
+        """A single stream demoted for two different reasons gets two
+        log lines — the cache key includes ``reason``, not just
+        ``stream_id``."""
+        monkeypatch.setenv("ADBC_FAST_PATH", "1")
+        handler._adbc_module = adbc_module_stub
+        state = _state_with_contract(write_mode="upsert", table_name="events")
+        with caplog.at_level(logging.INFO, logger=database_module.logger.name):
+            # Reason 1: write_mode != insert
+            handler._can_use_adbc("stream-a", state)
+            # Reason 2: missing schema contract (after flipping mode)
+            state.write_mode = "insert"
+            state.schema_contract = None
+            handler._can_use_adbc("stream-a", state)
+        demotion_msgs = [
+            r for r in caplog.records if "fast path disabled" in r.message
+        ]
+        assert len(demotion_msgs) == 2
+
+    def test_missing_schema_contract_demotes(
+        self, handler, monkeypatch, adbc_module_stub
+    ):
+        monkeypatch.setenv("ADBC_FAST_PATH", "1")
+        handler._adbc_module = adbc_module_stub
+        state = _state_with_contract(write_mode="insert")
+        state.schema_contract = None
+        assert handler._can_use_adbc("s1", state) is False
 
 
 class TestBuildAdbcUri:
@@ -257,6 +284,19 @@ class TestBuildAdbcUri:
         # Order-insensitive: both keys present, URL-encoded.
         assert "sslmode=require" in uri
         assert "application_name=engine" in uri
+
+    def test_forwards_tuple_valued_query_params(self, handler):
+        """SQLAlchemy URL.query maps a key to ``tuple[str, ...]`` for
+        multi-valued params (immutabledict shape). The builder uses
+        ``urlencode(..., doseq=True)`` so both values reach the URI
+        instead of only the first."""
+        handler._engine = _build_engine_url_mock(
+            query={"option": ("a", "b")}
+        )
+        uri = handler._build_adbc_uri()
+        assert uri is not None
+        assert "option=a" in uri
+        assert "option=b" in uri
 
 
 class TestWriteViaAdbc:
@@ -443,17 +483,56 @@ class TestWriteBatchDispatch:
         assert divergence[0].levelno == logging.ERROR
 
     @pytest.mark.asyncio
+    async def test_ingest_failure_does_not_wrap_in_commit_record_error(
+        self, handler, monkeypatch, adbc_module_stub
+    ):
+        """``AdbcCommitRecordError`` must signal *only* the "ingest
+        already committed" case. An ingest failure before any commit
+        must surface as the raw exception so the failure_summary
+        doesn't claim a duplicate-on-retry hazard that did not occur.
+        """
+        monkeypatch.setenv("ADBC_FAST_PATH", "1")
+        handler._adbc_module = adbc_module_stub
+        cursor = adbc_module_stub.connect.return_value.cursor.return_value
+        cursor.adbc_ingest.side_effect = RuntimeError("ingest blew up")
+        state = _state_with_contract(write_mode="insert")
+        handler._streams["s1"] = state
+        handler._check_batch_committed = AsyncMock(return_value=None)
+        handler._record_batch_commit = AsyncMock()
+
+        batch = pa.RecordBatch.from_pydict({"id": [1]})
+        result = await handler.write_batch(
+            run_id="r1", stream_id="s1", batch_seq=0,
+            record_batch=batch, record_ids=["1"],
+            cursor=Cursor(token=b"tok"),
+        )
+
+        # Catch-all maps ingest failure to RETRYABLE.
+        assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
+        # failure_summary must not lie about an "ingest committed" event.
+        assert "adbc ingest committed" not in (result.failure_summary or "")
+        # commit-record was never invoked.
+        handler._record_batch_commit.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_adbc_config_error_returns_fatal(
         self, handler, monkeypatch, adbc_module_stub
     ):
+        """When a deterministic ADBC config error escapes the
+        dispatch (e.g. _open_adbc_connection raises mid-batch because
+        the driver was uninstalled at runtime), write_batch must
+        classify it as FATAL, not RETRYABLE."""
         monkeypatch.setenv("ADBC_FAST_PATH", "1")
-        # All gating passes (driver imported, URI fine, write_mode insert)
-        # but the schema contract is missing — a deterministic config error.
         handler._adbc_module = adbc_module_stub
         state = _state_with_contract(write_mode="insert")
-        state.schema_contract = None
         handler._streams["s1"] = state
         handler._check_batch_committed = AsyncMock(return_value=None)
+
+        # Force _write_via_adbc to raise the deterministic error
+        # without going through the gated _open_adbc_connection path.
+        async def _raise(*_a, **_kw):
+            raise database_module.AdbcConfigurationError("driver missing")
+        handler._write_via_adbc = _raise  # type: ignore[assignment]
 
         batch = pa.RecordBatch.from_pydict({"id": [1]})
         result = await handler.write_batch(

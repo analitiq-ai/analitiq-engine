@@ -61,9 +61,10 @@ sqlalchemy[asyncio]>=2.0.0
 pyarrow>=12.0.0
 
 # ADBC (Arrow Database Connectivity) fast path for the database
-# destination. Enabled at runtime via the ``ADBC_FAST_PATH=1`` env var
-# and only when the stream is append-only. SQLAlchemy stays as the
-# fallback for upserts and any driver not covered by ADBC.
+# destination. Always installed in the Docker image; ``ADBC_FAST_PATH=1``
+# at runtime is what gates use. pip consumers see ADBC as the optional
+# ``adbc`` extra in pyproject.toml — the runtime image bundles it so a
+# flag flip needs no rebuild.
 adbc-driver-manager>=1.1.0
 adbc-driver-postgresql>=1.1.0
 

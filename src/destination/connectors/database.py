@@ -309,16 +309,24 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         """Close database connection.
 
         Both the ADBC connection and the SQLAlchemy runtime are
-        released even if the other side fails, so neither leaks on top
-        of the other. Close failures are logged at ERROR with
-        ``exc_info``; the handler still transitions to ``_connected =
-        False`` so callers can re-acquire without seeing a half-open
-        state.
+        released even if the other side fails or the coroutine is
+        cancelled mid-close. The ADBC release uses ``BaseException``
+        so ``asyncio.CancelledError`` during shutdown still gives the
+        SQLAlchemy runtime a chance to dispose its engine pool.
+        ``CancelledError`` is re-raised after both releases so the
+        caller's cancellation is honored.
         """
+        cancelled: Optional[BaseException] = None
         adbc_conn = self._adbc_conn
         if adbc_conn is not None:
             try:
                 await asyncio.to_thread(adbc_conn.close)
+            except asyncio.CancelledError as exc:
+                logger.error(
+                    "ADBC close cancelled during disconnect; "
+                    "server-side resources may remain allocated"
+                )
+                cancelled = exc
             except Exception:
                 logger.error(
                     "Failed to close ADBC connection during disconnect; "
@@ -330,6 +338,9 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         if self._runtime:
             try:
                 await self._runtime.close()
+            except asyncio.CancelledError as exc:
+                logger.error("SQLAlchemy runtime close cancelled during disconnect")
+                cancelled = exc
             except Exception:
                 logger.error(
                     "Failed to close SQLAlchemy runtime during disconnect",
@@ -337,6 +348,8 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
                 )
         self._connected = False
         logger.info("DatabaseDestinationHandler disconnected")
+        if cancelled is not None:
+            raise cancelled
 
     async def configure_schema(self, schema_msg: SchemaMessage) -> bool:
         """Configure the destination from the preloaded contract endpoint.
@@ -681,6 +694,16 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
                 records_written=0,
                 failure_summary=f"adbc: {e}",
             )
+        except AdbcCommitRecordError as e:
+            # Ingest already committed; the SA _batch_commits write
+            # failed. The retry will re-ingest. Stay RETRYABLE so the
+            # engine reconciles, but surface the divergence text in
+            # failure_summary so DLQ / monitoring can route on it.
+            return BatchWriteResult(
+                status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
+                records_written=0,
+                failure_summary=str(e),
+            )
         except Exception as e:
             logger.error(f"Error writing batch: {e}", exc_info=True)
             return BatchWriteResult(
@@ -930,14 +953,16 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
     def _can_use_adbc(self, stream_id: str, state: _StreamState) -> bool:
         """Decide whether the current batch takes the ADBC fast path.
 
-        Gated on:
+        Returns ``True`` iff all of the following hold:
 
-        * Opt-in feature flag (``ADBC_FAST_PATH`` env var).
-        * Append-only stream (``write_mode == "insert"``).
+        * Opt-in feature flag (``ADBC_FAST_PATH`` env var) is set.
+        * Stream is append-only (``write_mode == "insert"``);
           ``adbc_ingest`` is INSERT/APPEND only.
         * The dialect is in ``_ADBC_MODULES`` and the matching driver
           package is importable.
         * A connection URI can be built from the engine's URL.
+        * The stream has a configured schema contract (needed for the
+          vectorized cast before ingest).
         """
         if not _adbc_flag_enabled():
             return False
@@ -959,16 +984,19 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
                 "could not build ADBC URI from engine.url",
             )
             return False
+        if state.schema_contract is None:
+            self._note_adbc_demotion(
+                stream_id, state, "stream has no configured schema contract"
+            )
+            return False
         return True
 
     def _open_adbc_connection(self) -> Any:
         """Return the cached ADBC connection, opening it on first use.
 
         Raises :class:`AdbcConfigurationError` when the driver module
-        or URI cannot be produced. The handler-side cache means the
-        connection persists across batches; ``_adbc_ingest_sync``
-        nulls it on any ingest error so a poisoned handle is not
-        reused.
+        or URI cannot be produced. The cached handle is dropped on any
+        ingest error so a poisoned connection is not reused.
         """
         if self._adbc_conn is not None:
             return self._adbc_conn
@@ -995,11 +1023,10 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
 
         Caller must ensure the target table exists.
 
-        On any exception (ingest itself, or cursor.close after a
-        successful ingest), invalidate ``self._adbc_conn`` so the next
-        batch reconnects. ADBC connection state after a backend error
-        is undefined — reusing it tends to produce a flapping retry
-        loop against an already-broken session.
+        Only ingest / cursor failures invalidate ``self._adbc_conn`` —
+        misconfiguration raised by ``_open_adbc_connection`` does not
+        touch a connection (none was opened) and the
+        ``AdbcConfigurationError`` propagates straight through.
         """
         conn = self._open_adbc_connection()
         try:
@@ -1041,15 +1068,15 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         Reuses :meth:`SchemaContract.cast_arrow_batch` so the Arrow
         types match the destination table exactly. The cast batch is
         handed straight to ADBC — no ``to_pylist()`` round trip, no
-        SQLAlchemy bind-parameter loop.
+        per-row SQLAlchemy parameter loop.
 
-        Idempotency caveat: ``adbc_ingest`` commits on its own ADBC
-        connection, then ``_batch_commits`` is recorded in a separate
-        SQLAlchemy transaction. If the process dies between those two
-        commits, a retry re-inserts the batch. This is acceptable for
-        append-only streams; callers needing exactly-once must stay on
-        the SQLAlchemy path (``write_mode != "insert"``).
+        Append-only: ingest commits before ``_batch_commits`` is
+        recorded; see :class:`AdbcCommitRecordError` for the
+        retry-duplication window.
         """
+        # Defensive — _can_use_adbc gates on schema_contract being set,
+        # so this only triggers if a caller invokes _write_via_adbc
+        # outside of the dispatch in write_batch.
         if state.schema_contract is None:
             raise AdbcConfigurationError(
                 "ADBC fast path requires a configured SchemaContract"
