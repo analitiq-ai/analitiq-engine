@@ -71,6 +71,18 @@ class TestSSLDictToContext:
         with pytest.raises(ValueError, match="not recognized"):
             _ssl_dict_to_context({"verify_mode": "CERT_TYPO"})
 
+    def test_cert_optional_with_no_hostname_check(self):
+        ctx = _ssl_dict_to_context(
+            {"verify_mode": "CERT_OPTIONAL", "check_hostname": False}
+        )
+        assert ctx.verify_mode == ssl.CERT_OPTIONAL
+        assert ctx.check_hostname is False
+
+    def test_missing_verify_mode_rejected_with_clear_message(self):
+        # An absent key should say "required", not "None not recognized".
+        with pytest.raises(ValueError, match="required"):
+            _ssl_dict_to_context({"check_hostname": False})
+
     def test_check_hostname_must_be_bool(self):
         with pytest.raises(TypeError, match="check_hostname must be a boolean"):
             _ssl_dict_to_context({"check_hostname": "yes"})
@@ -424,6 +436,41 @@ class TestBuildSqlAlchemyTransport:
             )
 
     @pytest.mark.asyncio
+    async def test_non_ssl_connect_args_passed_through(self):
+        # connect_args entries other than "ssl" must reach create_async_engine
+        # unchanged. A regression that wrapped the whole block in an ssl-only
+        # guard would silently drop driver-specific args like connect_timeout.
+        fake_engine = MagicMock()
+        connect_cm = MagicMock()
+        connect_cm.__aenter__ = AsyncMock(
+            return_value=MagicMock(execute=AsyncMock())
+        )
+        connect_cm.__aexit__ = AsyncMock(return_value=False)
+        fake_engine.connect = MagicMock(return_value=connect_cm)
+        fake_engine.dispose = AsyncMock()
+
+        captured: dict = {}
+
+        def fake_create_engine(dsn, *, connect_args, **kw):
+            captured["connect_args"] = connect_args
+            return fake_engine
+
+        with patch(
+            "src.shared.transport_factory.create_async_engine",
+            side_effect=fake_create_engine,
+        ):
+            await build_sqlalchemy_transport(
+                {
+                    "kind": "sqlalchemy",
+                    "driver": "postgresql+asyncpg",
+                    "dsn": "postgresql+asyncpg://u:p@h:5432/d",
+                    "connect_args": {"ssl": "require", "connect_timeout": 5},
+                }
+            )
+        assert captured["connect_args"]["ssl"] == "require"
+        assert captured["connect_args"]["connect_timeout"] == 5
+
+    @pytest.mark.asyncio
     async def test_returns_sqlalchemy_transport_with_base_dialect(self):
         # Mock the engine creation + probe so this is a unit test, not
         # an integration test. The probe path is engine.connect() used
@@ -560,6 +607,39 @@ class TestBuildHttpTransport:
 
 
 class TestBuildTransportDispatch:
+    @pytest.mark.asyncio
+    async def test_sqlalchemy_kind_dispatches_to_sqlalchemy_builder(self):
+        # Verifies the full build_transport → build_sqlalchemy_transport path,
+        # including spec resolution before the builder is called.
+        connector = {
+            "slug": "demo",
+            "default_transport": "db",
+            "transports": {
+                "db": {
+                    "kind": "sqlalchemy",
+                    "driver": "postgresql+asyncpg",
+                    "dsn": "postgresql+asyncpg://u:p@h:5432/d",
+                }
+            },
+        }
+        ctx = ResolutionContext(connector=connector)
+        fake_engine = MagicMock()
+        connect_cm = MagicMock()
+        connect_cm.__aenter__ = AsyncMock(
+            return_value=MagicMock(execute=AsyncMock())
+        )
+        connect_cm.__aexit__ = AsyncMock(return_value=False)
+        fake_engine.connect = MagicMock(return_value=connect_cm)
+        fake_engine.dispose = AsyncMock()
+
+        with patch(
+            "src.shared.transport_factory.create_async_engine",
+            return_value=fake_engine,
+        ):
+            transport = await build_transport(connector, context=ctx)
+        assert isinstance(transport, SqlAlchemyTransport)
+        assert transport.dialect == "postgresql"
+
     @pytest.mark.asyncio
     async def test_http_kind_dispatches_to_http_builder(self):
         connector = {

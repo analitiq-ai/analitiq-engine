@@ -31,4 +31,13 @@ def emit_state_log(
             stream_id,
         )
         return
-    print(f"ANALITIQ_STATE::{line}", file=sys.stdout, flush=True)
+    try:
+        print(f"ANALITIQ_STATE::{line}", file=sys.stdout, flush=True)
+    except OSError as exc:
+        logger.error(
+            "emit_state_log: failed to write state checkpoint to stdout (%s); "
+            "checkpoint lost for stream_id=%r — cross-run cursor recovery "
+            "may replay from an earlier position",
+            exc,
+            stream_id,
+        )

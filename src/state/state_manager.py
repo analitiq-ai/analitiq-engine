@@ -19,8 +19,9 @@ class StateManager:
     Manages pipeline run state and emits checkpoints to structured logs.
 
     Checkpoints are emitted as ANALITIQ_STATE:: log lines for
-    cross-run observability. Batch commit tracking uses local
-    filesystem for in-run idempotency.
+    cross-run observability. Batch commit tracking is in-memory for the
+    current run; cross-run idempotency relies on the ``_batch_commits``
+    table in the destination database.
     """
 
     def __init__(

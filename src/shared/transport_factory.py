@@ -1,10 +1,9 @@
 """Materialize transports from connector definitions.
 
 The connector contract owns provider-specific transport recipes. This
-module reads ``connector.transports.<ref>``, resolves expressions via a
-typed :class:`~src.engine.resolver.ResolutionContext`, applies the
-declared per-binding encodings to render the DSN, and produces a
-concrete transport object.
+module reads ``connector.transports.<ref>``, resolves the merged spec
+via a typed :class:`~src.engine.resolver.ResolutionContext`, normalises
+driver-specific SSL arguments, and produces a concrete transport object.
 
 Currently registered transport families:
 
@@ -49,7 +48,16 @@ _VERIFY_MODES = {
 
 
 def _ssl_dict_to_context(d: Mapping[str, Any]) -> _ssl.SSLContext:
-    """Build an :class:`ssl.SSLContext` from a plain ``{verify_mode, check_hostname}`` dict.
+    """Build an :class:`ssl.SSLContext` from a plain dict.
+
+    Accepted keys:
+
+    * ``verify_mode`` (required) — one of ``"CERT_NONE"``, ``"CERT_OPTIONAL"``,
+      ``"CERT_REQUIRED"``.
+    * ``check_hostname`` (optional, default ``False``) — boolean.
+    * ``ca_certificate`` (optional) — PEM string loaded as the CA bundle.
+      Use this when connecting to servers whose certificate is signed by a
+      private CA; omit it to use the OS trust store.
 
     Connector specs declare TLS configuration as a plain object so they
     are not tied to Python's ssl module API.  This function converts the
@@ -62,6 +70,11 @@ def _ssl_dict_to_context(d: Mapping[str, Any]) -> _ssl.SSLContext:
             f"check_hostname must be a boolean, got {type(check_hostname).__name__!r}"
         )
     raw_mode = d.get("verify_mode")
+    if raw_mode is None:
+        raise ValueError(
+            "`verify_mode` is required in an ssl dict spec; "
+            f"allowed: {sorted(_VERIFY_MODES)}"
+        )
     if raw_mode not in _VERIFY_MODES:
         raise ValueError(
             f"verify_mode {raw_mode!r} not recognized; "
@@ -79,6 +92,13 @@ def _ssl_dict_to_context(d: Mapping[str, Any]) -> _ssl.SSLContext:
     ctx.check_hostname = False
     ctx.verify_mode = verify_mode
     ctx.check_hostname = check_hostname
+    ca_certificate = d.get("ca_certificate")
+    if ca_certificate is not None:
+        if not isinstance(ca_certificate, str):
+            raise TypeError(
+                f"ca_certificate must be a PEM string, got {type(ca_certificate).__name__!r}"
+            )
+        ctx.load_verify_locations(cadata=ca_certificate)
     return ctx
 
 
@@ -87,7 +107,9 @@ def _materialize_ssl_arg(arg: Any) -> Any:
 
     Drivers accept different shapes for the ``ssl`` connect arg:
 
-    * ``True`` / ``False`` — enable/disable TLS, no certificate check.
+    * ``True`` / ``False`` — passed through as-is; semantics are driver-defined
+      (asyncpg treats ``True`` as TLS without certificate verification;
+      other drivers may differ).
     * A string like ``"prefer"`` or ``"require"`` — asyncpg canonical mode.
     * An :class:`ssl.SSLContext` — pre-built context, passed through.
     * A ``{verify_mode, check_hostname}`` dict — converted to an
@@ -150,8 +172,8 @@ def _materialize_derived(
             try:
                 resolved_this_pass[name] = resolver.resolve(expr)
                 del pending[name]
-            except (KeyError, TypeError, ValueError):
-                pass
+            except KeyError:
+                pass  # dependency not yet resolved — retry next pass
         if not resolved_this_pass:
             raise KeyError(
                 f"Derived value(s) {sorted(pending)} cannot be resolved; "
@@ -447,9 +469,9 @@ def resolve_transport_spec(
 ) -> Dict[str, Any]:
     """Resolve a transport spec into a primitives-only dict.
 
-    Used by introspection callers that need the pre-build dict (e.g.
-    tests asserting DSN rendering). Production code should call
-    :func:`build_transport` instead.
+    Used by introspection callers that need the fully-resolved primitives
+    dict (e.g. tests asserting resolved field values or connector contract
+    coverage). Production code should call :func:`build_transport` instead.
     """
     _ref, merged = _select_transport(connector, transport_ref)
     resolved_ctx = _resolved_context_with_derived(connector, context)

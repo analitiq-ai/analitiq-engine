@@ -26,4 +26,12 @@ def emit_log(category: str, data: Dict[str, Any]) -> None:
             list(data.keys()),
         )
         return
-    print(f"{marker}{line}", file=sys.stdout, flush=True)
+    try:
+        print(f"{marker}{line}", file=sys.stdout, flush=True)
+    except OSError as exc:
+        logger.error(
+            "emit_log: failed to write %r payload to stdout (%s); "
+            "log line lost — check container log driver",
+            category,
+            exc,
+        )
