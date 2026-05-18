@@ -338,6 +338,92 @@ class TestBuildSqlAlchemyTransport:
             )
 
     @pytest.mark.asyncio
+    async def test_connect_args_ssl_string_passed_through(self):
+        # asyncpg accepts canonical TLS mode strings like "require" directly.
+        # The connector spec declares the format its driver expects; the
+        # engine normalises it with _materialize_ssl_arg.
+        fake_engine = MagicMock()
+        connect_cm = MagicMock()
+        connect_cm.__aenter__ = AsyncMock(
+            return_value=MagicMock(execute=AsyncMock())
+        )
+        connect_cm.__aexit__ = AsyncMock(return_value=False)
+        fake_engine.connect = MagicMock(return_value=connect_cm)
+        fake_engine.dispose = AsyncMock()
+
+        captured: dict = {}
+
+        def fake_create_engine(dsn, *, connect_args, **kw):
+            captured["connect_args"] = connect_args
+            return fake_engine
+
+        with patch(
+            "src.shared.transport_factory.create_async_engine",
+            side_effect=fake_create_engine,
+        ):
+            await build_sqlalchemy_transport(
+                {
+                    "kind": "sqlalchemy",
+                    "driver": "postgresql+asyncpg",
+                    "dsn": "postgresql+asyncpg://u:p@h:5432/d",
+                    "connect_args": {"ssl": "require"},
+                }
+            )
+        assert captured["connect_args"]["ssl"] == "require"
+
+    @pytest.mark.asyncio
+    async def test_connect_args_ssl_dict_materialised_to_ssl_context(self):
+        # Driver-agnostic dict spec is converted to an ssl.SSLContext so the
+        # connector author doesn't need to import the ssl module.
+        import ssl
+
+        fake_engine = MagicMock()
+        connect_cm = MagicMock()
+        connect_cm.__aenter__ = AsyncMock(
+            return_value=MagicMock(execute=AsyncMock())
+        )
+        connect_cm.__aexit__ = AsyncMock(return_value=False)
+        fake_engine.connect = MagicMock(return_value=connect_cm)
+        fake_engine.dispose = AsyncMock()
+
+        captured: dict = {}
+
+        def fake_create_engine(dsn, *, connect_args, **kw):
+            captured["connect_args"] = connect_args
+            return fake_engine
+
+        with patch(
+            "src.shared.transport_factory.create_async_engine",
+            side_effect=fake_create_engine,
+        ):
+            await build_sqlalchemy_transport(
+                {
+                    "kind": "sqlalchemy",
+                    "driver": "postgresql+asyncpg",
+                    "dsn": "postgresql+asyncpg://u:p@h:5432/d",
+                    "connect_args": {
+                        "ssl": {"verify_mode": "CERT_REQUIRED", "check_hostname": False}
+                    },
+                }
+            )
+        assert isinstance(captured["connect_args"]["ssl"], ssl.SSLContext)
+        assert captured["connect_args"]["ssl"].verify_mode == ssl.CERT_REQUIRED
+
+    @pytest.mark.asyncio
+    async def test_connect_args_unsupported_ssl_type_rejected(self):
+        # An integer or other unsupported type is caught early at the
+        # validation layer — not silently passed to the driver.
+        with pytest.raises(TypeError, match="Unsupported ssl arg type"):
+            await build_sqlalchemy_transport(
+                {
+                    "kind": "sqlalchemy",
+                    "driver": "postgresql+asyncpg",
+                    "dsn": "postgresql+asyncpg://u:p@h:5432/d",
+                    "connect_args": {"ssl": 42},
+                }
+            )
+
+    @pytest.mark.asyncio
     async def test_returns_sqlalchemy_transport_with_base_dialect(self):
         # Mock the engine creation + probe so this is a unit test, not
         # an integration test. The probe path is engine.connect() used

@@ -59,7 +59,7 @@ def _derive_dialect(connector_definition: Optional[Mapping[str, Any]]) -> Option
     if not default_ref or default_ref not in transports:
         return None
     transport = transports[default_ref]
-    if transport.get("transport_type") != "sqlalchemy":
+    if transport.get("kind") != "sqlalchemy":
         return None
     driver = transport.get("driver")
     if not isinstance(driver, str) or not driver:
