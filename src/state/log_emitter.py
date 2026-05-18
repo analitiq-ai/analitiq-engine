@@ -10,17 +10,30 @@ Example output:
 """
 
 import json
+import logging
 import sys
 from typing import Any, Dict
+
+logger = logging.getLogger(__name__)
 
 
 def emit_log(category: str, data: Dict[str, Any]) -> None:
     """Write a structured JSON line to stdout with an observability marker.
 
     Args:
-        category: Log category (e.g. ``"dlq"``, ``"metrics"``). Used to
-            construct the ``ANALITIQ_{CATEGORY.upper()}::`` prefix.
-        data: Payload to serialise as JSON. Must be JSON-serialisable.
+        category: Log category, case-insensitive (e.g. ``"dlq"``, ``"metrics"``).
+            Uppercased when constructing the ``ANALITIQ_{CATEGORY.upper()}::`` prefix.
+        data: Payload to serialise as JSON. Values must be JSON-serialisable.
     """
     marker = f"ANALITIQ_{category.upper()}::"
-    print(f"{marker}{json.dumps(data)}", file=sys.stdout, flush=True)
+    try:
+        line = json.dumps(data)
+    except (TypeError, ValueError) as exc:
+        logger.error(
+            "emit_log: failed to serialise %r payload (%s); keys=%s",
+            category,
+            exc,
+            list(data.keys()),
+        )
+        return
+    print(f"{marker}{line}", file=sys.stdout, flush=True)

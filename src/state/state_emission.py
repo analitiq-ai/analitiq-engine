@@ -4,8 +4,11 @@ Emits ANALITIQ_STATE:: log lines that log shippers can extract to track
 pipeline progress across runs without a database dependency.
 """
 
-import sys
 import json
+import logging
+import sys
+
+logger = logging.getLogger(__name__)
 
 
 def emit_state_log(
@@ -31,4 +34,13 @@ def emit_state_log(
         "cursor_hex": cursor_hex,
         "cursor_value": cursor_value,
     }
-    print(f"ANALITIQ_STATE::{json.dumps(data)}", file=sys.stdout, flush=True)
+    try:
+        line = json.dumps(data)
+    except (TypeError, ValueError) as exc:
+        logger.error(
+            "emit_state_log: failed to serialise state payload (%s); stream_id=%s",
+            exc,
+            stream_id,
+        )
+        return
+    print(f"ANALITIQ_STATE::{line}", file=sys.stdout, flush=True)

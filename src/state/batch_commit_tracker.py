@@ -16,9 +16,7 @@ from typing import Dict, Tuple
 class BatchCommitTracker:
     """In-memory record of batches committed during the current run."""
 
-    def __init__(self, pipeline_dir: str, run_id: str) -> None:
-        self._pipeline_dir = pipeline_dir
-        self._run_id = run_id
+    def __init__(self) -> None:
         self._committed: Dict[Tuple[str, int], int] = {}
 
     def check_committed(self, stream_id: str, batch_seq: int) -> bool:
@@ -30,7 +28,7 @@ class BatchCommitTracker:
         stream_id: str,
         batch_seq: int,
         records_written: int,
-        cursor_bytes: bytes,
+        cursor_bytes: bytes,  # accepted for API compatibility; not stored (in-memory only)
     ) -> None:
         """Record that a batch was successfully committed."""
         self._committed[(stream_id, batch_seq)] = records_written

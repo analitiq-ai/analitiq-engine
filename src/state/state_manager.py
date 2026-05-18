@@ -46,10 +46,7 @@ class StateManager:
 
     def init_commit_tracker(self, run_id: str) -> None:
         """Initialize batch commit tracker for the current run."""
-        self._commit_tracker = BatchCommitTracker(
-            pipeline_dir=str(self.pipeline_dir),
-            run_id=run_id,
-        )
+        self._commit_tracker = BatchCommitTracker()
 
     @property
     def commit_tracker(self) -> Optional[BatchCommitTracker]:

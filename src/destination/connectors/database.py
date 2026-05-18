@@ -62,10 +62,6 @@ _ADBC_MODULES: Dict[str, str] = {
 }
 
 
-# Per-dialect upsert statement builders. Keys are the driver strings
-# returned by ``runtime.driver``. Adding a new SQL dialect requires only
-# a new entry here — ``_upsert_records`` and ``supports_upsert`` stay
-# unchanged.
 def _pg_upsert_stmt(
     table: "Table",
     records: List[Dict[str, Any]],
@@ -100,6 +96,10 @@ _UpsertBuilder = Callable[
     ["Table", List[Dict[str, Any]], List[str], Set[str]], Any
 ]
 
+# Per-dialect upsert statement builders. Keys are the driver strings
+# returned by ``runtime.driver``. Adding a new SQL dialect requires only
+# a new entry here — ``_upsert_records`` and ``supports_upsert`` stay
+# unchanged.
 _UPSERT_BUILDERS: Dict[str, _UpsertBuilder] = {
     "postgresql": _pg_upsert_stmt,
     "postgres": _pg_upsert_stmt,
@@ -313,6 +313,7 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
 
     @property
     def supports_upsert(self) -> bool:
+        """True when the active driver has a registered builder in ``_UPSERT_BUILDERS``."""
         return self._driver in _UPSERT_BUILDERS
 
     @property
@@ -852,7 +853,7 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         state: _StreamState,
         records: List[Dict[str, Any]],
     ) -> None:
-        """Upsert pre-cast records (INSERT ... ON CONFLICT)."""
+        """Upsert pre-cast records using the dialect-specific builder (ON CONFLICT / ON DUPLICATE KEY UPDATE)."""
         conflict_keys = state.conflict_keys or state.primary_keys
         if state.table is None or not conflict_keys:
             await self._insert_records(conn, state, records)
@@ -862,6 +863,14 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
 
         builder = _UPSERT_BUILDERS.get(self._driver)
         if builder is None:
+            logger.warning(
+                "No upsert builder registered for driver=%r (table=%s.%s); "
+                "falling back to plain INSERT — duplicates may accumulate on conflict. "
+                "Check that write_mode and driver are compatible.",
+                self._driver,
+                state.schema_name,
+                state.table_name,
+            )
             await self._insert_records(conn, state, records)
             return
         record_columns = set(records[0].keys())
