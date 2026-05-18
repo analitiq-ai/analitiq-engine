@@ -106,13 +106,18 @@ class LocalDLQStorage:
 
             except Exception as e:
                 logger.error(f"Failed to write to DLQ: {e}")
-                # Fallback to unique file
                 fallback_file = (
                     self.dlq_path
                     / f"dlq_fallback_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}.json"
                 )
-                with open(fallback_file, "w", encoding="utf-8") as f:
-                    json.dump(record, f, indent=2, cls=DateTimeEncoder)
+                try:
+                    with open(fallback_file, "w", encoding="utf-8") as f:
+                        json.dump(record, f, indent=2, cls=DateTimeEncoder)
+                except Exception as fallback_error:
+                    logger.critical(
+                        f"DLQ fallback write failed — record lost permanently: {fallback_error}",
+                        exc_info=True,
+                    )
 
     async def get_records(
         self, pipeline_id: Optional[str] = None, stream_id: Optional[str] = None
