@@ -13,7 +13,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Mapping, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Set, Tuple
 from urllib.parse import quote, urlencode
 
 import pyarrow as pa
@@ -59,6 +59,52 @@ logger = logging.getLogger(__name__)
 _ADBC_MODULES: Dict[str, str] = {
     "postgresql": "adbc_driver_postgresql.dbapi",
     "postgres": "adbc_driver_postgresql.dbapi",
+}
+
+
+def _pg_upsert_stmt(
+    table: "Table",
+    records: List[Dict[str, Any]],
+    conflict_keys: List[str],
+    record_columns: Set[str],
+) -> Any:
+    stmt = pg_insert(table).values(records)
+    update_cols = {
+        c.name: c
+        for c in stmt.excluded
+        if c.name not in conflict_keys and c.name in record_columns
+    }
+    return stmt.on_conflict_do_update(index_elements=conflict_keys, set_=update_cols)
+
+
+def _mysql_upsert_stmt(
+    table: "Table",
+    records: List[Dict[str, Any]],
+    conflict_keys: List[str],
+    record_columns: Set[str],
+) -> Any:
+    stmt = mysql_insert(table).values(records)
+    update_cols = {
+        c.name: c
+        for c in stmt.inserted
+        if c.name not in conflict_keys and c.name in record_columns
+    }
+    return stmt.on_duplicate_key_update(**update_cols)
+
+
+_UpsertBuilder = Callable[
+    ["Table", List[Dict[str, Any]], List[str], Set[str]], Any
+]
+
+# Per-dialect upsert statement builders. Keys are the driver strings
+# returned by ``runtime.driver``. Adding a new SQL dialect requires only
+# a new entry here — ``_upsert_records`` and ``supports_upsert`` stay
+# unchanged.
+_UPSERT_BUILDERS: Dict[str, _UpsertBuilder] = {
+    "postgresql": _pg_upsert_stmt,
+    "postgres": _pg_upsert_stmt,
+    "mysql": _mysql_upsert_stmt,
+    "mariadb": _mysql_upsert_stmt,
 }
 
 
@@ -267,8 +313,8 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
 
     @property
     def supports_upsert(self) -> bool:
-        """PostgreSQL and MySQL support upsert."""
-        return self._driver in ("postgresql", "postgres", "mysql", "mariadb")
+        """True when the active driver has a registered builder in ``_UPSERT_BUILDERS``."""
+        return self._driver in _UPSERT_BUILDERS
 
     @property
     def supports_bulk_load(self) -> bool:
@@ -807,7 +853,7 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         state: _StreamState,
         records: List[Dict[str, Any]],
     ) -> None:
-        """Upsert pre-cast records (INSERT ... ON CONFLICT)."""
+        """Upsert pre-cast records using the dialect-specific builder (ON CONFLICT / ON DUPLICATE KEY UPDATE)."""
         conflict_keys = state.conflict_keys or state.primary_keys
         if state.table is None or not conflict_keys:
             await self._insert_records(conn, state, records)
@@ -815,32 +861,21 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         if not records:
             return
 
-        if self._driver in ("postgresql", "postgres"):
-            stmt = pg_insert(state.table).values(records)
-            record_columns = set(records[0].keys())
-            update_cols = {
-                c.name: c for c in stmt.excluded
-                if c.name not in conflict_keys and c.name in record_columns
-            }
-            stmt = stmt.on_conflict_do_update(
-                index_elements=conflict_keys,
-                set_=update_cols,
+        builder = _UPSERT_BUILDERS.get(self._driver)
+        if builder is None:
+            logger.warning(
+                "No upsert builder registered for driver=%r (table=%s.%s); "
+                "falling back to plain INSERT — duplicates may accumulate on conflict. "
+                "Check that write_mode and driver are compatible.",
+                self._driver,
+                state.schema_name,
+                state.table_name,
             )
-            await conn.execute(stmt)
-
-        elif self._driver in ("mysql", "mariadb"):
-            stmt = mysql_insert(state.table).values(records)
-            record_columns = set(records[0].keys())
-            update_cols = {
-                c.name: c for c in stmt.inserted
-                if c.name not in conflict_keys and c.name in record_columns
-            }
-            stmt = stmt.on_duplicate_key_update(**update_cols)
-            await conn.execute(stmt)
-
-        else:
-            # Fallback to plain insert for other databases
             await self._insert_records(conn, state, records)
+            return
+        record_columns = set(records[0].keys())
+        stmt = builder(state.table, records, conflict_keys, record_columns)
+        await conn.execute(stmt)
 
     async def _truncate_and_insert(
         self,

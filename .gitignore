@@ -178,8 +178,8 @@ cython_debug/
 /pipelines/
 
 # Runtime state files - These contain pipeline execution state and should not be committed
-state/
-runtime_test_state/
+/state/
+/runtime_test_state/
 
 # Log files - Generated during pipeline execution
 logs/
