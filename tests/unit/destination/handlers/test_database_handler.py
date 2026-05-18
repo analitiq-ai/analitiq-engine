@@ -8,9 +8,15 @@ mocked :class:`SqlAlchemyTransport`.
 import ssl
 
 import pytest
+from sqlalchemy import Column, Integer, MetaData, String, Table
 from unittest.mock import AsyncMock, patch
 
-from src.destination.connectors.database import DatabaseDestinationHandler
+from src.destination.connectors.database import (
+    DatabaseDestinationHandler,
+    _UPSERT_BUILDERS,
+    _pg_upsert_stmt,
+    _mysql_upsert_stmt,
+)
 from src.shared.connection_runtime import ConnectionRuntime
 from src.shared.transport_factory import SqlAlchemyTransport
 
@@ -209,3 +215,57 @@ class TestDatabaseHandlerURLEncoding:
         with _patch_transport():
             await handler.connect(runtime)
         assert handler._connected is True
+
+
+_UPSERT_TABLE = Table(
+    "events",
+    MetaData(),
+    Column("id", Integer),
+    Column("name", String),
+    Column("value", Integer),
+)
+
+
+class TestUpsertRegistry:
+    def test_registry_covers_expected_drivers(self):
+        assert set(_UPSERT_BUILDERS) == {"postgresql", "postgres", "mysql", "mariadb"}
+
+    def test_postgres_aliases_share_builder(self):
+        assert _UPSERT_BUILDERS["postgresql"] is _UPSERT_BUILDERS["postgres"]
+
+    def test_mysql_aliases_share_builder(self):
+        assert _UPSERT_BUILDERS["mysql"] is _UPSERT_BUILDERS["mariadb"]
+
+    def test_supports_upsert_true_for_registered_drivers(self, handler):
+        for driver in ("postgresql", "postgres", "mysql", "mariadb"):
+            handler._driver = driver
+            assert handler.supports_upsert is True
+
+    def test_supports_upsert_false_for_unknown_driver(self, handler):
+        handler._driver = "sqlite"
+        assert handler.supports_upsert is False
+
+    def test_pg_upsert_stmt_returns_compilable_construct(self):
+        records = [{"id": 1, "name": "a", "value": 10}]
+        record_columns = set(records[0].keys())
+        stmt = _pg_upsert_stmt(_UPSERT_TABLE, records, ["id"], record_columns)
+        sql = str(stmt.compile(dialect=__import__("sqlalchemy.dialects.postgresql", fromlist=["dialect"]).dialect()))
+        assert "ON CONFLICT" in sql
+        assert "DO UPDATE" in sql
+
+    def test_mysql_upsert_stmt_returns_compilable_construct(self):
+        records = [{"id": 1, "name": "a", "value": 10}]
+        record_columns = set(records[0].keys())
+        stmt = _mysql_upsert_stmt(_UPSERT_TABLE, records, ["id"], record_columns)
+        sql = str(stmt.compile(dialect=__import__("sqlalchemy.dialects.mysql", fromlist=["dialect"]).dialect()))
+        assert "ON DUPLICATE KEY UPDATE" in sql
+
+    def test_pg_upsert_excludes_conflict_keys_from_update(self):
+        from sqlalchemy.dialects import postgresql as pg_dialect
+        records = [{"id": 1, "name": "a", "value": 10}]
+        record_columns = set(records[0].keys())
+        stmt = _pg_upsert_stmt(_UPSERT_TABLE, records, ["id"], record_columns)
+        sql = str(stmt.compile(dialect=pg_dialect.dialect()))
+        assert "id" not in sql.split("DO UPDATE SET")[1]
+        assert "name" in sql.split("DO UPDATE SET")[1]
+        assert "value" in sql.split("DO UPDATE SET")[1]
