@@ -21,7 +21,7 @@ class BatchCommitTracker:
         run_id: Optional[str] = None,
     ) -> None:
         # pipeline_dir and run_id are accepted for call-site compatibility
-        # but not persisted — this implementation is in-memory only.
+        # but not persisted — this implementation is in-memory only (see issue #49).
         self._committed: Dict[Tuple[str, int], int] = {}
         self._cursor_warning_emitted = False
 

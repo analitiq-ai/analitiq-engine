@@ -465,7 +465,12 @@ class TestDeadLetterQueueEdgeCases:
 
                 mock_logger.error.assert_called_once()
                 mock_logger.critical.assert_called_once()
-                assert "record lost permanently" in mock_logger.critical.call_args[0][0]
+                critical_msg, critical_kwargs = (
+                    mock_logger.critical.call_args[0][0],
+                    mock_logger.critical.call_args[1],
+                )
+                assert "record lost permanently" in critical_msg
+                assert critical_kwargs.get("exc_info") is True
 
     @pytest.mark.asyncio
     async def test_traceback_extraction(self):
