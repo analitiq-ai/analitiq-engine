@@ -168,10 +168,10 @@ class DestinationSchemaContract:
                     f"field; unnamed columns indicate a malformed endpoint payload"
                 )
 
-            col_type = col.get("type")
+            col_type = col.get("native_type") or col.get("type")
             if not col_type:
                 raise ValueError(
-                    f"column {col_name!r} has no 'type' field in destination schema"
+                    f"column {col_name!r} has no 'native_type' field in destination schema"
                 )
             nullable = col.get("nullable", True)
 

@@ -363,10 +363,10 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
                         f"'name' field; unnamed columns indicate a malformed "
                         f"endpoint payload"
                     )
-                native_type = col_def.get("type")
+                native_type = col_def.get("native_type") or col_def.get("type")
                 if not native_type:
                     raise ValueError(
-                        f"column {col_name!r} has no 'type' field in destination schema"
+                        f"column {col_name!r} has no 'native_type' field in destination schema"
                     )
                 sa_type = native_to_sqlalchemy(native_type, type_mapper)
                 is_pk = col_name in primary_keys

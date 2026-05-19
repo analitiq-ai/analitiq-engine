@@ -191,14 +191,14 @@ def _compare_values(a: Any, b: Any) -> int:
     Returns:
         -1 if a < b, 0 if a == b, 1 if a > b
     """
-    # Handle datetime strings
+    # Handle datetime strings — Python 3.11+ `datetime.fromisoformat`
+    # parses the `Z` UTC suffix natively, so no third-party dep is needed.
     if isinstance(a, str) and isinstance(b, str):
-        # Try to parse as ISO datetime for proper comparison
         try:
-            from dateutil import parser as date_parser
+            from datetime import datetime as _dt
 
-            a_dt = date_parser.isoparse(a)
-            b_dt = date_parser.isoparse(b)
+            a_dt = _dt.fromisoformat(a.replace("Z", "+00:00"))
+            b_dt = _dt.fromisoformat(b.replace("Z", "+00:00"))
             if a_dt < b_dt:
                 return -1
             elif a_dt > b_dt:

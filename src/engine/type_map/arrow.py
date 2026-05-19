@@ -113,15 +113,33 @@ def _require_unit(
     return args[0]
 
 
+_TIMESTAMP_UNIT_ALIASES = {
+    "s": "s",
+    "ms": "ms",
+    "us": "us",
+    "ns": "ns",
+    "second": "s",
+    "seconds": "s",
+    "millisecond": "ms",
+    "milliseconds": "ms",
+    "microsecond": "us",
+    "microseconds": "us",
+    "nanosecond": "ns",
+    "nanoseconds": "ns",
+}
+
+
 def _parse_timestamp(args: tuple[str, ...]) -> pa.DataType:
     if not args:
         raise InvalidTypeMapError(
             "Timestamp requires at least a unit (e.g. Timestamp(us))"
         )
-    unit = args[0]
-    if unit not in ("s", "ms", "us", "ns"):
+    raw_unit = args[0]
+    unit = _TIMESTAMP_UNIT_ALIASES.get(raw_unit.lower())
+    if unit is None:
         raise InvalidTypeMapError(
-            f"Timestamp unit must be one of s/ms/us/ns, got {unit!r}"
+            f"Timestamp unit must be one of s/ms/us/ns (or the long form "
+            f"SECOND/MILLISECOND/MICROSECOND/NANOSECOND), got {raw_unit!r}"
         )
     tz = args[1] if len(args) > 1 and args[1] else None
     return pa.timestamp(unit, tz=tz)

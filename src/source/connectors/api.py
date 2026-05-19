@@ -15,8 +15,6 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, AsyncIterator, Dict, List, Optional
 from urllib.parse import urljoin, urlencode
 
-from dateutil.parser import isoparse
-
 from .base import BaseConnector, ConnectionError, ReadError
 from ...engine.resolved import (
     ApiReadEndpoint,
@@ -488,11 +486,17 @@ def _extract_path(data: Any, ref: Optional[str]) -> Any:
 
 
 def _shift_cursor_value(cursor: Any, safety_window_seconds: int) -> str:
-    """Subtract safety window from cursor (best-effort: datetime or numeric ID)."""
+    """Subtract safety window from cursor (best-effort: datetime or numeric ID).
+
+    Uses stdlib :func:`datetime.fromisoformat` (Python 3.11+ handles the
+    trailing ``Z`` suffix natively) so the engine doesn't need a
+    third-party date parser at runtime.
+    """
     if safety_window_seconds <= 0:
         return str(cursor)
+    raw = str(cursor)
     try:
-        dt = isoparse(str(cursor))
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
         shifted = dt - timedelta(seconds=safety_window_seconds)
@@ -501,7 +505,7 @@ def _shift_cursor_value(cursor: Any, safety_window_seconds: int) -> str:
         try:
             return str(max(0, int(cursor) - safety_window_seconds))
         except (ValueError, TypeError):
-            return str(cursor)
+            return raw
 
 
 def _nested_value(record: Dict[str, Any], path: str) -> Any:

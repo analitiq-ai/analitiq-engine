@@ -497,7 +497,7 @@ class DestinationGRPCClient:
             stream_id=stream_id,
             version=1,
             json_schema=json.dumps(endpoint_schema_json),
-            primary_key=list(endpoint.primary_keys),
+            primary_key=list(getattr(endpoint, "primary_keys", ()) or ()),
             write_mode=write_mode,
             destination_config=DestinationConfig(
                 connector_type=connector_kind,

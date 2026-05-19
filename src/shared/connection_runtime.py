@@ -31,16 +31,14 @@ from typing import Any, Dict, Mapping, Optional
 import aiohttp
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from src.engine.resolved import ResolvedConnector
 from src.engine.resolver import ResolutionContext
 from src.engine.type_map import TypeMapper
 from src.secrets.protocol import SecretsResolver
 from src.secrets.exceptions import SecretNotFoundError, SecretResolutionError
 from src.shared.rate_limiter import RateLimiter
-from src.shared.transport_factory import (
-    HttpTransport,
-    SqlAlchemyTransport,
-    build_transport,
-)
+from src.shared.transport_factory import HttpTransport, SqlAlchemyTransport
+from src.shared.typed_transport import materialize_typed_transport
 
 
 logger = logging.getLogger(__name__)
@@ -49,19 +47,15 @@ logger = logging.getLogger(__name__)
 VALID_CONNECTOR_TYPES = frozenset({"database", "api", "file", "s3", "stdout"})
 
 
-def _derive_dialect(connector_definition: Optional[Mapping[str, Any]]) -> Optional[str]:
-    """Return the base SQL dialect (e.g. ``postgresql``) from a connector
-    definition, or ``None`` if not a sqlalchemy connector."""
-    if not connector_definition:
+def _derive_dialect(resolved_connector: Optional[ResolvedConnector]) -> Optional[str]:
+    """Return the base SQL dialect (``postgresql``, ``mysql``, …) for a
+    sqlalchemy-backed connector, or ``None`` otherwise."""
+    if resolved_connector is None:
         return None
-    transports = connector_definition.get("transports") or {}
-    default_ref = connector_definition.get("default_transport")
-    if not default_ref or default_ref not in transports:
+    transport = resolved_connector.transports.get(resolved_connector.default_transport)
+    if transport is None or getattr(transport, "type", None) != "sqlalchemy":
         return None
-    transport = transports[default_ref]
-    if transport.get("kind") != "sqlalchemy":
-        return None
-    driver = transport.get("driver")
+    driver = getattr(transport, "driver", None)
     if not isinstance(driver, str) or not driver:
         return None
     return driver.split("+", 1)[0]
@@ -84,6 +78,7 @@ class ConnectionRuntime:
         connection_id: str,
         connector_type: str,
         resolver: SecretsResolver,
+        resolved_connector: Optional[ResolvedConnector] = None,
         connector_definition: Optional[Mapping[str, Any]] = None,
         driver: Optional[str] = None,
         connector_type_mapper: Optional[TypeMapper] = None,
@@ -98,6 +93,7 @@ class ConnectionRuntime:
         self._raw_config: Dict[str, Any] = dict(raw_config)
         self._connection_id = connection_id
         self._connector_type = connector_type
+        self._resolved_connector = resolved_connector
         self._connector_definition: Optional[Dict[str, Any]] = (
             dict(connector_definition) if connector_definition else None
         )
@@ -141,7 +137,7 @@ class ConnectionRuntime:
             return self._transport_dialect
         if self._driver_override is not None:
             return self._driver_override
-        return _derive_dialect(self._connector_definition)
+        return _derive_dialect(self._resolved_connector)
 
     @property
     def driver_string(self) -> Optional[str]:
@@ -192,19 +188,22 @@ class ConnectionRuntime:
     # ------------------------------------------------------------------
 
     async def materialize(self, *, require_port: bool = True) -> None:
-        """Resolve secrets, build the resolution context, materialize the transport.
+        """Resolve secrets and materialize the transport.
 
-        Any connector that declares a ``transports`` block goes through the
-        spec-driven transport factory regardless of its ``connector_type``.
-        Connectors without a ``transports`` block fall through to a
-        legacy passthrough that exposes ``resolved_config`` for handlers
-        that still consume a flat dict (file/s3/stdout adapters that have
-        not yet migrated to the new model).
+        Drives the typed :class:`ResolvedConnector.transports` spec
+        directly — no generic expression resolver runs over the connector
+        JSON, which avoids the historical collision between the schema
+        field ``dsn.template`` and the resolver's ``template`` expression
+        marker.
+
+        Connectors without a resolved transports block (``file``,
+        ``s3``, ``stdout``) fall through to a legacy passthrough that
+        exposes ``resolved_config`` for handlers that still consume a
+        flat dict.
 
         ``require_port`` is accepted for API compatibility with the
-        previous runtime; database transport DSN templates encode whether
-        a port is required, so the argument is no-op for spec-driven
-        connectors.
+        previous runtime; database DSN templates encode whether a port
+        is required, so the argument is no-op for spec-driven connectors.
         """
         if self._materialized:
             return
@@ -212,18 +211,11 @@ class ConnectionRuntime:
         secrets = await self._load_secrets()
         self._validate_secret_refs(secrets)
 
-        has_transports = bool(
-            self._connector_definition
-            and self._connector_definition.get("transports")
-        )
-
-        if has_transports:
+        spec = self._select_transport_spec()
+        if spec is not None:
             context = self._build_resolution_context(secrets)
             try:
-                transport = await build_transport(
-                    self._connector_definition,
-                    context=context,
-                )
+                transport = await materialize_typed_transport(spec, context=context)
             except Exception:
                 self._scrub_secrets()
                 raise
@@ -249,6 +241,14 @@ class ConnectionRuntime:
             self._resolved_config = self._merge_secrets_into_config(secrets)
 
         self._materialized = True
+
+    def _select_transport_spec(self):
+        """Return the typed transport spec to materialize, or ``None`` for
+        legacy connectors without a typed connector."""
+        if self._resolved_connector is None:
+            return None
+        ref = self._resolved_connector.default_transport
+        return self._resolved_connector.transports.get(ref)
 
     # ------------------------------------------------------------------
     # Transport accessors

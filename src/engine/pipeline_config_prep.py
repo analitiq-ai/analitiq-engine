@@ -102,15 +102,29 @@ class PipelineConfigPrep:
     # ------------------------------------------------------------------
 
     def _build_runtimes(self, resolved: ResolvedPipeline) -> Dict[str, ConnectionRuntime]:
+        """Build a runtime per connection referenced by the pipeline.
+
+        Pulls the typed :class:`ResolvedConnector` out of the resolved
+        pipeline so the runtime can materialize the transport directly
+        without re-resolving the raw connector JSON.
+        """
         runtimes: Dict[str, ConnectionRuntime] = {}
 
         connection_ids = {resolved.source_connection_id, *resolved.destination_connection_ids}
 
+        # Build a connection_id -> ResolvedConnection map from the streams.
+        resolved_connections: Dict[str, Any] = {}
+        for stream in resolved.streams:
+            resolved_connections[stream.source.connection.connection_id] = stream.source.connection
+            for dest in stream.destinations:
+                resolved_connections[dest.connection.connection_id] = dest.connection
+
         for cid in connection_ids:
-            runtimes[cid] = self._build_runtime(cid)
+            resolved_connection = resolved_connections.get(cid)
+            runtimes[cid] = self._build_runtime(cid, resolved_connection)
         return runtimes
 
-    def _build_runtime(self, connection_id: str) -> ConnectionRuntime:
+    def _build_runtime(self, connection_id: str, resolved_connection) -> ConnectionRuntime:
         conn_path = self.root / "connections" / connection_id / "connection.json"
         connector_path = self._connector_path_for_connection(conn_path)
 
@@ -131,11 +145,14 @@ class PipelineConfigPrep:
             self.root / "connections", connection_id
         )
 
+        resolved_connector = resolved_connection.connector if resolved_connection else None
+
         runtime = ConnectionRuntime(
             raw_config=raw_connection,
             connection_id=connection_id,
             connector_type=connector_type,
             resolver=resolver,
+            resolved_connector=resolved_connector,
             connector_definition=raw_connector,
             connector_type_mapper=connector_type_mapper,
             connection_type_mapper=connection_type_mapper,

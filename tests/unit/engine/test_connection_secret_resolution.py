@@ -1,15 +1,22 @@
 """Tests for ConnectionRuntime materialization and lifecycle.
 
-The runtime now drives transport creation through
-:mod:`src.shared.transport_factory` based on the connector definition's
-``transports`` block. These tests exercise that contract using mock
-transports rather than the legacy ``${PLACEHOLDER}`` expansion path.
+The runtime drives transport creation through
+:func:`src.shared.typed_transport.materialize_typed_transport`, which
+consumes the typed :class:`~src.engine.resolved.ResolvedConnector`
+produced by the resolved-runtime layer. These tests exercise that
+contract using mock transports rather than the legacy
+``${PLACEHOLDER}`` expansion path.
 """
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from src.engine.resolved import (
+    HttpTransport as ResolvedHttpTransport,
+    ResolvedConnector,
+    SqlAlchemyTransport as ResolvedSqlAlchemyTransport,
+)
 from src.secrets.exceptions import SecretNotFoundError
 from src.shared.connection_runtime import ConnectionRuntime
 from src.shared.transport_factory import HttpTransport, SqlAlchemyTransport
@@ -27,8 +34,44 @@ def _resolver(value: dict | None = None) -> AsyncMock:
     return mock
 
 
+def _db_resolved_connector(slug: str = "pg") -> ResolvedConnector:
+    """Typed resolved connector with a sqlalchemy default transport."""
+    return ResolvedConnector(
+        connector_id=slug,
+        kind="database",
+        display_name="PG",
+        default_transport="database",
+        transports={
+            "database": ResolvedSqlAlchemyTransport(
+                driver="postgresql+asyncpg",
+                dsn_template="postgresql+asyncpg://u:p@h:5432/d",
+                dsn_bindings={},
+                tls=None,
+            )
+        },
+    )
+
+
+def _api_resolved_connector() -> ResolvedConnector:
+    return ResolvedConnector(
+        connector_id="wise-test",
+        kind="api",
+        display_name="Wise",
+        default_transport="api",
+        transports={
+            "api": ResolvedHttpTransport(
+                base_url="https://api.example.com",
+                headers={},
+                timeout_seconds=None,
+            )
+        },
+    )
+
+
+# Legacy raw-dict variants — only used by tests that still exercise the
+# pre-typed-runtime helpers (e.g. driver derivation when no typed
+# connector is available).
 def _db_connector(slug: str = "pg") -> dict:
-    """Minimal connector spec with a sqlalchemy transports block."""
     return {
         "slug": slug,
         "connector_type": "database",
@@ -76,14 +119,14 @@ class TestConnectionRuntimeMetadata:
         assert runtime.connection_id == "conn-1"
 
     def test_driver_derived_from_connector_definition(self):
-        """When ``driver`` is not passed, it falls out of the connector's
-        default sqlalchemy transport."""
+        """When ``driver`` is not passed, it falls out of the typed
+        connector's default sqlalchemy transport."""
         runtime = ConnectionRuntime(
             raw_config={"parameters": {}},
             connection_id="conn-1",
             connector_type="database",
             resolver=AsyncMock(),
-            connector_definition=_db_connector(),
+            resolved_connector=_db_resolved_connector(),
         )
         assert runtime.driver == "postgresql"
 
@@ -127,10 +170,10 @@ class TestConnectionRuntimeMaterialize:
             connection_id="conn-db",
             connector_type="database",
             resolver=_resolver({"password": "secret"}),
-            connector_definition=_db_connector(),
+            resolved_connector=_db_resolved_connector(),
         )
         with patch(
-            "src.shared.connection_runtime.build_transport",
+            "src.shared.connection_runtime.materialize_typed_transport",
             new=AsyncMock(return_value=transport),
         ) as mock_build:
             await runtime.materialize()
@@ -153,10 +196,10 @@ class TestConnectionRuntimeMaterialize:
             connection_id="conn-api",
             connector_type="api",
             resolver=_resolver({"api_key": "t"}),
-            connector_definition=_api_connector(),
+            resolved_connector=_api_resolved_connector(),
         )
         with patch(
-            "src.shared.connection_runtime.build_transport",
+            "src.shared.connection_runtime.materialize_typed_transport",
             new=AsyncMock(return_value=transport),
         ):
             await runtime.materialize()
@@ -202,7 +245,7 @@ class TestConnectionRuntimeMaterialize:
             connection_id="conn-missing",
             connector_type="database",
             resolver=_resolver({}),  # no `password` key
-            connector_definition=_db_connector(),
+            resolved_connector=_db_resolved_connector(),
         )
         with pytest.raises(SecretNotFoundError):
             await runtime.materialize()
@@ -225,10 +268,10 @@ class TestConnectionRuntimeClose:
             connection_id="conn-db",
             connector_type="database",
             resolver=_resolver(),
-            connector_definition=_db_connector(),
+            resolved_connector=_db_resolved_connector(),
         )
         with patch(
-            "src.shared.connection_runtime.build_transport",
+            "src.shared.connection_runtime.materialize_typed_transport",
             new=AsyncMock(return_value=transport),
         ):
             await runtime.materialize()
@@ -249,10 +292,10 @@ class TestConnectionRuntimeClose:
             connection_id="conn-api",
             connector_type="api",
             resolver=_resolver(),
-            connector_definition=_api_connector(),
+            resolved_connector=_api_resolved_connector(),
         )
         with patch(
-            "src.shared.connection_runtime.build_transport",
+            "src.shared.connection_runtime.materialize_typed_transport",
             new=AsyncMock(return_value=transport),
         ):
             await runtime.materialize()
@@ -271,10 +314,10 @@ class TestConnectionRuntimeClose:
             connection_id="conn-db",
             connector_type="database",
             resolver=_resolver(),
-            connector_definition=_db_connector(),
+            resolved_connector=_db_resolved_connector(),
         )
         with patch(
-            "src.shared.connection_runtime.build_transport",
+            "src.shared.connection_runtime.materialize_typed_transport",
             new=AsyncMock(return_value=transport),
         ):
             await runtime.materialize()
@@ -387,10 +430,10 @@ class TestScrubResolvedConfig:
             connection_id="conn-db",
             connector_type="database",
             resolver=_resolver(),
-            connector_definition=_db_connector(),
+            resolved_connector=_db_resolved_connector(),
         )
         with patch(
-            "src.shared.connection_runtime.build_transport",
+            "src.shared.connection_runtime.materialize_typed_transport",
             new=AsyncMock(return_value=transport),
         ):
             await runtime.materialize()
