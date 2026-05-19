@@ -20,10 +20,8 @@ class TestEnginePackageInit:
     def test_engine_direct_imports(self):
         """Test direct imports from engine package."""
         from src.engine.engine import StreamingEngine
-        from src.engine.pipeline import Pipeline
 
         assert StreamingEngine is not None
-        assert Pipeline is not None
 
 
 class TestSourceConnectorsPackageInit:

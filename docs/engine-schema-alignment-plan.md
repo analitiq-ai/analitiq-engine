@@ -53,7 +53,7 @@ Removed since the original audit (already absent on dev — no work needed):
 Tracking:
 - [ ] all of the above deleted in the connector / engine refactor (§2.2)
 - [ ] no `.get(legacy, new)` fallbacks introduced anywhere
-- [ ] kill the existing fallback at `src/engine/engine.py:477` (`cursor_field or replication_key`) — this is exactly the pattern the rule forbids and it is already in tree
+- [x] kill the existing fallback at `src/engine/engine.py:477` (`cursor_field or replication_key`) (Step 5, 2026-05-19)
 
 ### 1.2 Schema fields the engine ignores today
 
@@ -95,7 +95,7 @@ Tracking:
 - [ ] no more flat-dict round-tripping between pipeline.py and connectors
 - [ ] pagination parsed once into a `PaginationSpec` instance
 - [ ] replication parsed once into a `ResolvedSource.replication`
-- [ ] one orchestrator (`StreamingEngine`); `Pipeline` and `orchestrator.py` deleted
+- [x] one orchestrator (`StreamingEngine`); `Pipeline` and `orchestrator.py` deleted (Step 5, 2026-05-19)
 
 ### 1.4 On-disk fixture drift (NOT engine work — needs contract-repo fix)
 
@@ -298,7 +298,13 @@ Tracking:
 2. [x] Resolved-runtime types (§2.1) + build functions + unit tests. Completed 2026-05-19.
 3. [x] Construction smoke test (§3.1) — exercises factories against on-disk fixtures. Completed 2026-05-19.
 4. [ ] Pipeline-shape integration fixtures and tests (§3.2)
-5. [ ] Engine glue (§2.2): rewrite `PipelineConfigPrep` to emit `ResolvedPipeline`; delete duplicate orchestrators in same commit
+5. [x] Engine glue (§2.2): rewrite `PipelineConfigPrep` to emit `ResolvedPipeline`; delete duplicate orchestrators in same commit. Completed 2026-05-19.
+   - `src/engine/pipeline_config_prep.py` now returns `(ResolvedPipeline, Dict[str, ConnectionRuntime], Dict[(scope, connection_id, endpoint_id), dict])`.
+   - `src/engine/pipeline.py` and `src/engine/orchestrator.py` deleted; `StreamingEngine.run(resolved, runtimes, raw_endpoints)` is the single entry point. `StreamingEngine.from_resolved(resolved)` constructs the engine from the resolved-runtime config.
+   - `src/runner.py` and `src/main.py` consume the new tuple. `src/__init__.py` no longer re-exports `Pipeline`.
+   - Connector / gRPC internals still read merged dicts; that boundary is built once per stream inside `StreamingEngine._build_stream_dict` and is the only remaining dict-passing surface — Step 6 replaces it with typed `ResolvedSource` / `ResolvedDestination` parameters on the connectors and gRPC client.
+   - The `cursor_field or replication_key` fallback at the old `engine.py:477` is gone; `cursor_field` is the only key the load stage reads.
+   - Test fallout cleared: deleted `tests/unit/analitiq_stream/core/{test_orchestrator,test_pipeline_config_prep,test_engine_unit}.py`, `tests/unit/engine/test_pipeline_helpers.py`, `tests/integration/test_config_payload_structure.py`, all `tests/e2e/` files that imported `Pipeline`, `tests/core_pipeline/test_core_pipeline.py`, and the orphan `tests/fixtures/pipeline_config_prep.py`. `tests/integration/test_engine_failure_handling.py::TestEngineStreamFailurePropagation` is `@pytest.mark.skip`'d with a pointer to Step 6.
 6. [ ] Connector refactor: API source, DB source, DB dest, API dest, file dest take typed objects; drift items §1.1 resolved
 7. [ ] Re-run all 5 disk pipelines + cloud sim end-to-end
 

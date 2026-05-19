@@ -136,13 +136,10 @@ async def run_destination_mode() -> None:
     grpc_port = int(os.getenv("GRPC_PORT", "50051"))
     destination_index = int(os.getenv("DESTINATION_INDEX", "0"))
 
-    # Load configuration using PipelineConfigPrep (same as engine)
     logger.info("Loading pipeline configuration via PipelineConfigPrep")
-    config_prep = PipelineConfigPrep()
-    pipeline_config, stream_configs, resolved_connections, resolved_endpoints, _connectors = config_prep.create_config()
+    resolved, runtimes, _raw_endpoints = PipelineConfigPrep().create_config()
 
-    # Get destination connection from pipeline config
-    destinations = pipeline_config["connections"]["destinations"]
+    destinations = list(resolved.destination_connection_ids)
     if not destinations:
         logger.error("Pipeline has no destinations configured")
         sys.exit(1)
@@ -154,31 +151,29 @@ async def run_destination_mode() -> None:
         )
         sys.exit(1)
 
-    # Get the connection alias for the selected destination
     dest_alias = destinations[destination_index]
-
     logger.info(f"Using destination index {destination_index}: alias={dest_alias}")
 
-    # Get ConnectionRuntime for selected destination
-    if dest_alias not in resolved_connections:
-        logger.error(f"Connection '{dest_alias}' not found in resolved connections")
+    runtime = runtimes.get(dest_alias)
+    if runtime is None:
+        logger.error(f"Connection '{dest_alias}' has no resolved runtime")
         sys.exit(1)
-
-    runtime = resolved_connections[dest_alias]
 
     logger.info(f"Connector type: {runtime.connector_type}")
     logger.info(f"gRPC port: {grpc_port}")
 
     # Build stream_id -> destination endpoint_ref index for streams that
-    # target this connection. The handler uses it to pick the right
-    # type-mapper per incoming SchemaMessage (connector-scoped vs
-    # connection-scoped endpoints). Values are dict-shape EndpointRef
-    # payloads ({"scope", "identifier", "endpoint"}).
+    # target this connection. Values are dict-shape EndpointRef payloads
+    # ({"scope", "identifier", "endpoint"}) the handler still consumes.
     endpoint_refs: Dict[str, Dict[str, Any]] = {}
-    for stream in stream_configs:
-        for dest in stream.get("destinations", []):
-            if dest.get("connection_ref") == dest_alias:
-                endpoint_refs[stream["stream_id"]] = dest["endpoint_ref"]
+    for stream in resolved.streams:
+        for dest in stream.destinations:
+            if dest.connection.connection_id == dest_alias:
+                endpoint_refs[stream.stream_id] = {
+                    "scope": dest.endpoint_ref.scope,
+                    "identifier": dest.endpoint_ref.connection_id,
+                    "endpoint": dest.endpoint_ref.endpoint_id,
+                }
                 break
     logger.info(
         "Registered endpoint_refs for %d stream(s) targeting %s",

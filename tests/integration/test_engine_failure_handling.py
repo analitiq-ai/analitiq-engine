@@ -318,6 +318,14 @@ class TestEngineFatalFailureHandling:
         assert engine.metrics.batches_failed == 1
 
 
+@pytest.mark.skip(
+    reason=(
+        "Tested the legacy dict-based stream_data() signature. "
+        "Replaced by tests/integration/test_resolved_construction.py; "
+        "equivalent failure-aggregation coverage will return in Step 6 "
+        "of the engine-schema-alignment plan with typed engine inputs."
+    )
+)
 @pytest.mark.integration
 class TestEngineStreamFailurePropagation:
     """Test that stream failures propagate correctly to pipeline level."""

@@ -12,14 +12,12 @@ from .source.connectors.api import APIConnector
 from .source.connectors.base import BaseConnector
 from .source.connectors.database import DatabaseConnector
 from .engine.engine import StreamingEngine
-from .engine.pipeline import Pipeline
 from .state.circuit_breaker import CircuitBreaker
 from .state.dead_letter_queue import DeadLetterQueue
 from .state.retry_handler import RetryHandler
 
 __all__ = [
     "StreamingEngine",
-    "Pipeline",
     "RetryHandler",
     "CircuitBreaker",
     "DeadLetterQueue",

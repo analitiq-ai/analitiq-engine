@@ -25,7 +25,6 @@ class TestMainPackageInit:
 
         expected_exports = [
             "StreamingEngine",
-            "Pipeline",
             "RetryHandler",
             "CircuitBreaker",
             "DeadLetterQueue",
@@ -46,14 +45,12 @@ class TestMainPackageInit:
             CircuitBreaker,
             DatabaseConnector,
             DeadLetterQueue,
-            Pipeline,
             RetryHandler,
             StreamingEngine,
         )
 
         for cls in (
             StreamingEngine,
-            Pipeline,
             RetryHandler,
             CircuitBreaker,
             DeadLetterQueue,
@@ -111,17 +108,16 @@ class TestImportErrors:
     def test_circular_import_prevention(self):
         """Test that imports don't create circular dependencies."""
         # Import in different orders to test for circular imports
-        # Use new module paths (src.engine, src.source.connectors)
-        import src.engine.pipeline
         import src.engine.engine
+        import src.engine.pipeline_config_prep
         import src.source.connectors.api
         import src.source.connectors.database
         import src
 
         # All imports should succeed
         assert all([
-            src.engine.pipeline,
             src.engine.engine,
+            src.engine.pipeline_config_prep,
             src.source.connectors.api,
             src.source.connectors.database,
             src
