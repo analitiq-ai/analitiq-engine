@@ -173,7 +173,7 @@ async def run_destination_mode() -> None:
     # target this connection. The handler uses it to pick the right
     # type-mapper per incoming SchemaMessage (connector-scoped vs
     # connection-scoped endpoints). Values are dict-shape EndpointRef
-    # payloads ({"scope", "identifier", "endpoint"}).
+    # payloads ({"scope", "connection_id", "endpoint_id"}).
     endpoint_refs: Dict[str, Dict[str, Any]] = {}
     for stream in stream_configs:
         for dest in stream.get("destinations", []):

@@ -461,7 +461,7 @@ class PipelineConfigPrep:
 
         Args:
             endpoint_ref: ``EndpointRef`` instance or equivalent dict
-                ``{"scope", "identifier", "endpoint"}``.
+                ``{"scope", "connection_id", "endpoint_id"}``.
 
         Returns:
             Resolved endpoint configuration dict

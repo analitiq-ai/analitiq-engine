@@ -212,17 +212,20 @@ class MappingConfig:
 class EndpointRef:
     """Structured reference to an endpoint definition.
 
+    Matches the published stream contract
+    (``https://schemas.analitiq.ai/stream/latest.json`` ``$defs/EndpointRef``).
+
     Resolution to a filesystem path:
 
-    - ``scope="connector"`` -> ``connectors/{identifier}/definition/endpoints/{endpoint}.json``
-    - ``scope="connection"`` -> ``connections/{identifier}/definition/endpoints/{endpoint}.json``
+    - ``scope="connector"`` -> ``connectors/{connection_id}/definition/endpoints/{endpoint_id}.json``
+    - ``scope="connection"`` -> ``connections/{connection_id}/definition/endpoints/{endpoint_id}.json``
 
     Frozen so instances are hashable and usable as dict keys (the engine
     caches resolved endpoints by ref).
     """
     scope: str
-    identifier: str
-    endpoint: str
+    connection_id: str
+    endpoint_id: str
 
     _VALID_SCOPES = ("connector", "connection")
 
@@ -231,13 +234,13 @@ class EndpointRef:
             raise ValueError(
                 f"EndpointRef.scope must be one of {self._VALID_SCOPES}, got {self.scope!r}"
             )
-        if not self.identifier:
-            raise ValueError("EndpointRef.identifier cannot be empty")
-        if not self.endpoint:
-            raise ValueError("EndpointRef.endpoint cannot be empty")
+        if not self.connection_id:
+            raise ValueError("EndpointRef.connection_id cannot be empty")
+        if not self.endpoint_id:
+            raise ValueError("EndpointRef.endpoint_id cannot be empty")
 
     def __str__(self) -> str:
-        return f"{self.scope}:{self.identifier}/{self.endpoint}"
+        return f"{self.scope}:{self.connection_id}/{self.endpoint_id}"
 
     @classmethod
     def from_dict(cls, data: Any) -> "EndpointRef":
@@ -246,10 +249,10 @@ class EndpointRef:
             return data
         if not isinstance(data, dict):
             raise TypeError(
-                f"endpoint_ref must be a dict with keys {{'scope','identifier','endpoint'}}, "
+                f"endpoint_ref must be a dict with keys {{'scope','connection_id','endpoint_id'}}, "
                 f"got {type(data).__name__}"
             )
-        allowed = {"scope", "identifier", "endpoint"}
+        allowed = {"scope", "connection_id", "endpoint_id"}
         unknown = set(data.keys()) - allowed
         if unknown:
             raise ValueError(
@@ -263,16 +266,16 @@ class EndpointRef:
             )
         return cls(
             scope=data["scope"],
-            identifier=data["identifier"],
-            endpoint=data["endpoint"],
+            connection_id=data["connection_id"],
+            endpoint_id=data["endpoint_id"],
         )
 
     def to_dict(self) -> Dict[str, str]:
         """Serialize to plain dict (for JSON output)."""
         return {
             "scope": self.scope,
-            "identifier": self.identifier,
-            "endpoint": self.endpoint,
+            "connection_id": self.connection_id,
+            "endpoint_id": self.endpoint_id,
         }
 
 

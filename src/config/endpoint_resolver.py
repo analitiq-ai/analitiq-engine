@@ -4,11 +4,12 @@ Endpoint reference resolver.
 Resolves a structured ``EndpointRef`` (or its plain-dict form) to the endpoint
 configuration JSON on disk.
 
-Reference shape (see ``src/models/stream.py:EndpointRef``):
-    {"scope": "connector",  "identifier": "<slug>",  "endpoint": "<name>"}
-        -> connectors/<slug>/definition/endpoints/<name>.json
-    {"scope": "connection", "identifier": "<alias>", "endpoint": "<name>"}
-        -> connections/<alias>/definition/endpoints/<name>.json
+Reference shape (see ``src/models/stream.py:EndpointRef`` and the published
+stream schema ``$defs/EndpointRef``):
+    {"scope": "connector",  "connection_id": "<id>", "endpoint_id": "<name>"}
+        -> connectors/<id>/definition/endpoints/<name>.json
+    {"scope": "connection", "connection_id": "<id>", "endpoint_id": "<name>"}
+        -> connections/<id>/definition/endpoints/<name>.json
 """
 
 import json
@@ -46,8 +47,8 @@ def resolve_endpoint_path(ref: EndpointRefInput, paths: dict[str, Path]) -> Path
 
     root_key = "connectors" if parsed.scope == "connector" else "connections"
     file_path = (
-        paths[root_key] / parsed.identifier / "definition" / "endpoints"
-        / f"{parsed.endpoint}.json"
+        paths[root_key] / parsed.connection_id / "definition" / "endpoints"
+        / f"{parsed.endpoint_id}.json"
     )
 
     if not file_path.is_file():
