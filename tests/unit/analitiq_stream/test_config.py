@@ -35,61 +35,57 @@ class TestConfig:
 
 
 class TestPipelineConfigValidator:
-    """Test suite for pipeline config validation."""
+    """Test suite for pipeline config validation (flat shape per
+    https://schemas.analitiq.ai/pipeline/latest.json)."""
 
     @pytest.fixture
     def valid_pipeline(self):
         return {
-            "pipeline": {
-                "pipeline_id": "test-pipeline",
-                "connections": {
-                    "source": "my-api",
-                    "destinations": ["prod-postgres"],
-                },
-                "streams": ["stream-1"],
-                "engine": {"vcpu": 1, "memory": 8192},
-                "runtime": {
-                    "buffer_size": 5000,
-                    "batching": {"batch_size": 100, "max_concurrent_batches": 3},
-                    "logging": {"log_level": "INFO", "metrics_enabled": True},
-                    "error_handling": {"strategy": "dlq", "max_retries": 3, "retry_delay": 5},
+            "$schema": "https://schemas.analitiq.ai/pipeline/latest.json",
+            "pipeline_id": "test-pipeline",
+            "display_name": "Test",
+            "connections": {
+                "source": "my-api",
+                "destinations": ["prod-postgres"],
+            },
+            "streams": ["stream-1"],
+            "engine": {"vcpu": 1, "memory": 8192},
+            "runtime": {
+                "buffer_size": 5000,
+                "batching": {"batch_size": 100, "max_concurrent_batches": 3},
+                "logging": {"log_level": "INFO", "metrics_enabled": True},
+                "error_handling": {
+                    "strategy": "dlq", "max_retries": 3, "retry_delay_seconds": 5,
                 },
             },
-            "streams": [{"stream_id": "stream-1"}],
         }
 
     @pytest.mark.unit
     def test_valid_pipeline_passes(self, valid_pipeline):
         result = validate_pipeline_config(valid_pipeline)
-        assert "pipeline" in result
+        assert result["pipeline_id"] == "test-pipeline"
 
     @pytest.mark.unit
-    def test_missing_pipeline_key_fails(self, valid_pipeline):
-        del valid_pipeline["pipeline"]
-        with pytest.raises(ValueError, match="pipeline"):
-            validate_pipeline_config(valid_pipeline)
-
-    @pytest.mark.unit
-    def test_missing_streams_key_fails(self, valid_pipeline):
-        del valid_pipeline["streams"]
-        with pytest.raises(ValueError, match="streams"):
+    def test_missing_connections_key_fails(self, valid_pipeline):
+        del valid_pipeline["connections"]
+        with pytest.raises(ValueError, match="connections"):
             validate_pipeline_config(valid_pipeline)
 
     @pytest.mark.unit
     def test_missing_source_fails(self, valid_pipeline):
-        valid_pipeline["pipeline"]["connections"]["source"] = ""
+        valid_pipeline["connections"]["source"] = ""
         with pytest.raises(ValueError, match="source"):
             validate_pipeline_config(valid_pipeline)
 
     @pytest.mark.unit
     def test_missing_destinations_fails(self, valid_pipeline):
-        valid_pipeline["pipeline"]["connections"]["destinations"] = []
+        valid_pipeline["connections"]["destinations"] = []
         with pytest.raises(ValueError, match="destinations"):
             validate_pipeline_config(valid_pipeline)
 
     @pytest.mark.unit
     def test_no_stream_ids_fails(self, valid_pipeline):
-        valid_pipeline["pipeline"]["streams"] = []
+        valid_pipeline["streams"] = []
         with pytest.raises(ValueError, match="stream"):
             validate_pipeline_config(valid_pipeline)
 
@@ -99,14 +95,14 @@ class TestConnectionConfigValidator:
 
     @pytest.mark.unit
     def test_valid_connection_passes(self):
-        config = {"connector_slug": "postgresql", "host": "localhost"}
+        config = {"connector_id": "postgres", "parameters": {"host": "localhost"}}
         result = validate_connection_config(config)
-        assert result["connector_slug"] == "postgresql"
+        assert result["connector_id"] == "postgres"
 
     @pytest.mark.unit
-    def test_missing_connector_slug_fails(self):
-        with pytest.raises(ValueError, match="connector_slug"):
-            validate_connection_config({"host": "localhost"})
+    def test_missing_connector_id_fails(self):
+        with pytest.raises(ValueError, match="connector_id"):
+            validate_connection_config({"parameters": {"host": "localhost"}})
 
 
 class TestEndpointRefModel:
@@ -115,31 +111,31 @@ class TestEndpointRefModel:
     @pytest.mark.unit
     def test_from_dict_connector(self):
         ref = EndpointRef.from_dict({
-            "scope": "connector", "identifier": "pipedrive", "endpoint": "deals",
+            "scope": "connector", "connection_id": "pipedrive", "endpoint_id": "deals",
         })
         assert ref.scope == "connector"
-        assert ref.identifier == "pipedrive"
-        assert ref.endpoint == "deals"
+        assert ref.connection_id == "pipedrive"
+        assert ref.endpoint_id == "deals"
 
     @pytest.mark.unit
     def test_from_dict_connection(self):
         ref = EndpointRef.from_dict({
-            "scope": "connection", "identifier": "prod-postgres", "endpoint": "public_users",
+            "scope": "connection", "connection_id": "prod-postgres", "endpoint_id": "public_users",
         })
         assert ref.scope == "connection"
-        assert ref.identifier == "prod-postgres"
-        assert ref.endpoint == "public_users"
+        assert ref.connection_id == "prod-postgres"
+        assert ref.endpoint_id == "public_users"
 
     @pytest.mark.unit
     def test_from_dict_passes_through_existing_instance(self):
-        original = EndpointRef(scope="connector", identifier="x", endpoint="y")
+        original = EndpointRef(scope="connector", connection_id="x", endpoint_id="y")
         assert EndpointRef.from_dict(original) is original
 
     @pytest.mark.unit
     def test_invalid_scope_raises(self):
         with pytest.raises(ValueError, match="scope"):
             EndpointRef.from_dict({
-                "scope": "unknown", "identifier": "x", "endpoint": "y",
+                "scope": "unknown", "connection_id": "x", "endpoint_id": "y",
             })
 
     @pytest.mark.unit
@@ -151,21 +147,21 @@ class TestEndpointRefModel:
     def test_unknown_keys_raises(self):
         with pytest.raises(ValueError, match="unknown keys"):
             EndpointRef.from_dict({
-                "scope": "connector", "identifier": "x", "endpoint": "y", "extra": "z",
+                "scope": "connector", "connection_id": "x", "endpoint_id": "y", "extra": "z",
             })
 
     @pytest.mark.unit
     def test_empty_identifier_raises(self):
-        with pytest.raises(ValueError, match="identifier cannot be empty"):
+        with pytest.raises(ValueError, match="connection_id cannot be empty"):
             EndpointRef.from_dict({
-                "scope": "connector", "identifier": "", "endpoint": "y",
+                "scope": "connector", "connection_id": "", "endpoint_id": "y",
             })
 
     @pytest.mark.unit
     def test_empty_endpoint_raises(self):
-        with pytest.raises(ValueError, match="endpoint cannot be empty"):
+        with pytest.raises(ValueError, match="endpoint_id cannot be empty"):
             EndpointRef.from_dict({
-                "scope": "connector", "identifier": "x", "endpoint": "",
+                "scope": "connector", "connection_id": "x", "endpoint_id": "",
             })
 
     @pytest.mark.unit
@@ -175,18 +171,18 @@ class TestEndpointRefModel:
 
     @pytest.mark.unit
     def test_to_dict_roundtrip(self):
-        d = {"scope": "connector", "identifier": "x", "endpoint": "y"}
+        d = {"scope": "connector", "connection_id": "x", "endpoint_id": "y"}
         assert EndpointRef.from_dict(d).to_dict() == d
 
     @pytest.mark.unit
     def test_str_canonical_form(self):
-        ref = EndpointRef(scope="connection", identifier="alias", endpoint="name")
+        ref = EndpointRef(scope="connection", connection_id="alias", endpoint_id="name")
         assert str(ref) == "connection:alias/name"
 
     @pytest.mark.unit
     def test_hashable_for_dict_keys(self):
-        ref1 = EndpointRef(scope="connector", identifier="x", endpoint="y")
-        ref2 = EndpointRef(scope="connector", identifier="x", endpoint="y")
+        ref1 = EndpointRef(scope="connector", connection_id="x", endpoint_id="y")
+        ref2 = EndpointRef(scope="connector", connection_id="x", endpoint_id="y")
         assert hash(ref1) == hash(ref2)
         cache = {ref1: "value"}
         assert cache[ref2] == "value"
@@ -205,7 +201,7 @@ class TestEndpointRefResolver:
 
         paths = {"connectors": tmp_path / "connectors", "connections": tmp_path / "connections"}
         result = resolve_endpoint_ref(
-            {"scope": "connector", "identifier": "wise", "endpoint": "transfers"},
+            {"scope": "connector", "connection_id": "wise", "endpoint_id": "transfers"},
             paths,
         )
         assert result["endpoint"] == "/v1/transfers"
@@ -220,7 +216,7 @@ class TestEndpointRefResolver:
 
         paths = {"connectors": tmp_path / "connectors", "connections": tmp_path / "connections"}
         result = resolve_endpoint_ref(
-            {"scope": "connection", "identifier": "prod-pg", "endpoint": "public_users"},
+            {"scope": "connection", "connection_id": "prod-pg", "endpoint_id": "public_users"},
             paths,
         )
         assert result["method"] == "DATABASE"
@@ -232,7 +228,7 @@ class TestEndpointRefResolver:
         (endpoint_dir / "transfers.json").write_text('{"endpoint": "/v1/transfers"}')
 
         paths = {"connectors": tmp_path / "connectors", "connections": tmp_path / "connections"}
-        ref = EndpointRef(scope="connector", identifier="wise", endpoint="transfers")
+        ref = EndpointRef(scope="connector", connection_id="wise", endpoint_id="transfers")
         assert resolve_endpoint_ref(ref, paths)["endpoint"] == "/v1/transfers"
 
     @pytest.mark.unit
@@ -241,7 +237,7 @@ class TestEndpointRefResolver:
         paths = {"connectors": tmp_path / "connectors", "connections": tmp_path / "connections"}
         with pytest.raises(EndpointNotFoundError):
             resolve_endpoint_ref(
-                {"scope": "connector", "identifier": "wise", "endpoint": "nonexistent"},
+                {"scope": "connector", "connection_id": "wise", "endpoint_id": "nonexistent"},
                 paths,
             )
 
@@ -254,11 +250,11 @@ class TestConnectionLoader:
         conn_dir = tmp_path / "my-api"
         conn_dir.mkdir()
         (conn_dir / "connection.json").write_text(
-            '{"connector_slug": "wise", "host": "https://api.wise.com"}'
+            '{"connector_id": "wise", "parameters": {"host": "https://api.wise.com"}}'
         )
 
         result = load_connection("my-api", tmp_path)
-        assert result["connector_slug"] == "wise"
+        assert result["connector_id"] == "wise"
 
     @pytest.mark.unit
     def test_load_missing_connection_raises(self, tmp_path):
@@ -270,11 +266,11 @@ class TestConnectionLoader:
         connector_dir = tmp_path / "wise" / "definition"
         connector_dir.mkdir(parents=True)
         (connector_dir / "connector.json").write_text(
-            '{"connector_type": "api", "slug": "wise"}'
+            '{"kind": "api", "connector_id": "wise"}'
         )
 
         result = load_connector_for_connection("wise", tmp_path)
-        assert result["connector_type"] == "api"
+        assert result["kind"] == "api"
 
     @pytest.mark.unit
     def test_load_missing_connector_raises(self, tmp_path):

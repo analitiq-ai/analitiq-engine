@@ -836,7 +836,7 @@ class StreamingEngine:
         """Generate stream name for state management.
 
         Derived from the source ``endpoint_ref`` (canonical
-        ``scope:identifier/endpoint`` form) so the metric path is stable
+        ``scope:connection_id/endpoint_id`` form) so the metric path is stable
         across runs.
         """
         source = config.get("source")
@@ -845,7 +845,7 @@ class StreamingEngine:
             if isinstance(ref, dict):
                 return (
                     f"endpoint.{ref.get('scope', '')}:"
-                    f"{ref.get('identifier', '')}/{ref.get('endpoint', '')}"
+                    f"{ref.get('connection_id', '')}/{ref.get('endpoint_id', '')}"
                 )
         return config.get("pipeline_id", "unknown-stream")
 

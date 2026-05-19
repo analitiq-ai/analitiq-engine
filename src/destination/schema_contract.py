@@ -168,15 +168,19 @@ class DestinationSchemaContract:
                     f"field; unnamed columns indicate a malformed endpoint payload"
                 )
 
-            col_type = col.get("type")
-            if not col_type:
+            native_type = col.get("native_type")
+            if not native_type:
                 raise ValueError(
-                    f"column {col_name!r} has no 'type' field in destination schema"
+                    f"column {col_name!r} has no 'native_type' field in destination schema"
                 )
             nullable = col.get("nullable", True)
 
-            canonical = self._type_mapper.to_canonical(col_type)
-            arrow_type = canonical_to_arrow(canonical)
+            arrow_type_str = col.get("arrow_type")
+            if arrow_type_str:
+                arrow_type = canonical_to_arrow(arrow_type_str)
+            else:
+                canonical = self._type_mapper.to_canonical(native_type)
+                arrow_type = canonical_to_arrow(canonical)
             fields.append(pa.field(col_name, arrow_type, nullable=nullable))
 
         return pa.schema(fields)
@@ -254,20 +258,26 @@ class DestinationSchemaContract:
         """
         source_type = col.type
 
-        # Handle timestamp conversion from strings
+        # Handle timestamp conversion from strings. Try a small set of
+        # common provider formats, then localize naive timestamps to the
+        # target column's timezone (typically UTC) before casting.
         if pa.types.is_timestamp(target_type) and pa.types.is_string(source_type):
-            # Parse ISO8601 timestamps
-            try:
-                return pc.strptime(col, format="%Y-%m-%dT%H:%M:%S", unit="us")
-            except Exception:
-                # Try with timezone
+            for fmt in (
+                "%Y-%m-%dT%H:%M:%S%z",
+                "%Y-%m-%d %H:%M:%S%z",
+                "%Y-%m-%dT%H:%M:%S",
+                "%Y-%m-%d %H:%M:%S",
+            ):
                 try:
-                    return pc.strptime(
-                        col, format="%Y-%m-%dT%H:%M:%S%z", unit="us"
-                    )
+                    parsed = pc.strptime(col, format=fmt, unit=target_type.unit)
+                    if (
+                        target_type.tz
+                        and (parsed.type.tz is None)
+                    ):
+                        parsed = pc.assume_timezone(parsed, "UTC")
+                    return pc.cast(parsed, target_type)
                 except Exception:
-                    # Fall back to cast
-                    pass
+                    continue
 
         # Handle date conversion from strings
         if pa.types.is_date(target_type) and pa.types.is_string(source_type):

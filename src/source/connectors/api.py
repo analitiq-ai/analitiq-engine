@@ -89,6 +89,15 @@ class APIConnector(BaseConnector):
             method = config.get("method", "GET")
             full_url = urljoin(self.base_url, endpoint)
 
+            # Respect the endpoint's declared per-request limit max from the
+            # pagination block (Wise caps at 100). The pipeline-level
+            # batch_size is a hint; the provider's contract wins when lower.
+            pagination_cfg = config.get("pagination") or {}
+            limit_block = pagination_cfg.get("limit") or {}
+            limit_max = limit_block.get("max")
+            if isinstance(limit_max, int) and batch_size > limit_max:
+                batch_size = limit_max
+
             # Load state from state manager
             # Use the complete config passed to read_batches, which contains merged source configuration
             state = self._load_state_from_state_manager(
@@ -531,10 +540,22 @@ class APIConnector(BaseConnector):
         return [data]
 
     def _apply_filters_to_params(self, params: Dict[str, Any], config: Dict[str, Any]):
-        """Apply filters from config to request parameters."""
-        filters = config.get("filters", {})
+        """Apply pre-resolved defaults + cursor/state-driven filters to request params.
 
-        for filter_name, filter_config in filters.items():
+        ``config['query']`` carries the read operation's already-resolved
+        defaults (assembled by the pipeline against the connection's typed
+        context). ``config['filters']`` is the engine's runtime filter
+        layer (incremental-replication cursor, etc.).
+        """
+        for query_name, query_value in (config.get("query") or {}).items():
+            if query_value is None:
+                continue
+            if isinstance(query_value, list):
+                params[query_name] = ",".join(str(v) for v in query_value)
+            else:
+                params[query_name] = query_value
+
+        for filter_name, filter_config in (config.get("filters") or {}).items():
             filter_value = self._extract_value_from_schema_filter(filter_config)
             if filter_value is None:
                 continue

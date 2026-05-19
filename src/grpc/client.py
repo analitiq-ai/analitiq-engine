@@ -438,8 +438,7 @@ class DestinationGRPCClient:
         config: Dict[str, Any],
     ) -> SchemaMessage:
         """Build SchemaMessage from configuration dict."""
-        # Determine connector type (prefer connector_type, then driver, then type for legacy)
-        connector_type = config.get("connector_type") or config.get("driver") or config.get("type") or "database"
+        connector_type = config["connector_type"]
 
         # Extract database config if present
         db_config = None

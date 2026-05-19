@@ -87,11 +87,19 @@ def canonical_to_arrow(canonical: str) -> pa.DataType:
         case "Date64":
             return pa.date64()
         case "Time32":
-            return pa.time32(_require_unit(args, head, ("s", "ms")))
+            return pa.time32(_require_unit(args, head, ("SECOND", "MILLISECOND")))
         case "Time64":
-            return pa.time64(_require_unit(args, head, ("us", "ns")))
+            return pa.time64(_require_unit(args, head, ("MICROSECOND", "NANOSECOND")))
         case "Timestamp":
             return _parse_timestamp(args)
+        case "Duration":
+            return pa.duration(
+                _require_unit(
+                    args,
+                    head,
+                    ("SECOND", "MILLISECOND", "MICROSECOND", "NANOSECOND"),
+                )
+            )
         case "Decimal128":
             return _parse_decimal(args, pa.decimal128, head)
         case "Decimal256":
@@ -103,26 +111,37 @@ def canonical_to_arrow(canonical: str) -> pa.DataType:
     )
 
 
+_PYARROW_UNIT = {
+    "SECOND": "s",
+    "MILLISECOND": "ms",
+    "MICROSECOND": "us",
+    "NANOSECOND": "ns",
+}
+
+
 def _require_unit(
     args: tuple[str, ...], head: str, allowed: tuple[str, ...]
 ) -> str:
+    """Validate that ``args`` is a single unit drawn from the published
+    Arrow vocabulary and return the corresponding pyarrow short form."""
     if len(args) != 1 or args[0] not in allowed:
         raise InvalidTypeMapError(
             f"{head}{args} requires exactly one unit from {allowed}"
         )
-    return args[0]
+    return _PYARROW_UNIT[args[0]]
 
 
 def _parse_timestamp(args: tuple[str, ...]) -> pa.DataType:
     if not args:
         raise InvalidTypeMapError(
-            "Timestamp requires at least a unit (e.g. Timestamp(us))"
+            "Timestamp requires at least a unit (e.g. Timestamp(MICROSECOND))"
         )
-    unit = args[0]
-    if unit not in ("s", "ms", "us", "ns"):
+    allowed = ("SECOND", "MILLISECOND", "MICROSECOND", "NANOSECOND")
+    if args[0] not in allowed:
         raise InvalidTypeMapError(
-            f"Timestamp unit must be one of s/ms/us/ns, got {unit!r}"
+            f"Timestamp unit must be one of {allowed}, got {args[0]!r}"
         )
+    unit = _PYARROW_UNIT[args[0]]
     tz = args[1] if len(args) > 1 and args[1] else None
     return pa.timestamp(unit, tz=tz)
 

@@ -1,14 +1,17 @@
 """
 Endpoint reference resolver.
 
-Resolves a structured ``EndpointRef`` (or its plain-dict form) to the endpoint
-configuration JSON on disk.
+Resolves a structured ``EndpointRef`` (matching the published stream contract
+``$defs/EndpointRef``: ``{scope, connection_id, endpoint_id}``) to the
+endpoint configuration JSON on disk.
 
-Reference shape (see ``src/models/stream.py:EndpointRef``):
-    {"scope": "connector",  "identifier": "<slug>",  "endpoint": "<name>"}
-        -> connectors/<slug>/definition/endpoints/<name>.json
-    {"scope": "connection", "identifier": "<alias>", "endpoint": "<name>"}
-        -> connections/<alias>/definition/endpoints/<name>.json
+Path resolution:
+- ``scope="connection"``: ``connections/{connection_id}/definition/endpoints/{endpoint_id}.json``
+- ``scope="connector"``: look up the owning connection's ``connector_id``
+  (i.e. ``connections/{connection_id}/connection.json``) then load
+  ``connectors/{connector_id}/definition/endpoints/{endpoint_id}.json``.
+  The fallback path ``connectors/{connection_id}/...`` is used when the
+  connection isn't on disk (e.g. cloud bundles that pre-resolved the slug).
 """
 
 import json
@@ -29,6 +32,28 @@ def _coerce(ref: EndpointRefInput) -> EndpointRef:
     return EndpointRef.from_dict(ref)
 
 
+def _connector_dir_name(
+    connection_id: str, connections_dir: Path
+) -> str:
+    """For a connector-scoped ref, derive the on-disk connectors/ dir name.
+
+    If ``connections/<connection_id>/connection.json`` exists, read its
+    ``connector_id`` and use that. Otherwise fall back to ``connection_id``
+    itself (cloud bundles already pre-resolve to the connector slug).
+    """
+    conn_file = connections_dir / connection_id / "connection.json"
+    if conn_file.is_file():
+        try:
+            with open(conn_file) as f:
+                cfg = json.load(f)
+            connector_id = cfg.get("connector_id")
+            if connector_id:
+                return connector_id
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid JSON in connection file {conn_file}: {e}")
+    return connection_id
+
+
 def resolve_endpoint_path(ref: EndpointRefInput, paths: dict[str, Path]) -> Path:
     """Resolve an endpoint reference to its file path on disk.
 
@@ -44,11 +69,19 @@ def resolve_endpoint_path(ref: EndpointRefInput, paths: dict[str, Path]) -> Path
     """
     parsed = _coerce(ref)
 
-    root_key = "connectors" if parsed.scope == "connector" else "connections"
-    file_path = (
-        paths[root_key] / parsed.identifier / "definition" / "endpoints"
-        / f"{parsed.endpoint}.json"
-    )
+    if parsed.scope == "connector":
+        connector_id = _connector_dir_name(
+            parsed.connection_id, paths["connections"]
+        )
+        file_path = (
+            paths["connectors"] / connector_id / "definition" / "endpoints"
+            / f"{parsed.endpoint_id}.json"
+        )
+    else:
+        file_path = (
+            paths["connections"] / parsed.connection_id / "definition" / "endpoints"
+            / f"{parsed.endpoint_id}.json"
+        )
 
     if not file_path.is_file():
         raise EndpointNotFoundError(
@@ -59,15 +92,7 @@ def resolve_endpoint_path(ref: EndpointRefInput, paths: dict[str, Path]) -> Path
 
 
 def resolve_endpoint_ref(ref: EndpointRefInput, paths: dict[str, Path]) -> dict[str, Any]:
-    """Resolve an endpoint reference and return the endpoint configuration.
-
-    Args:
-        ref: ``EndpointRef`` instance or equivalent dict
-        paths: Dict with 'connectors' and 'connections' Path objects
-
-    Returns:
-        Parsed endpoint configuration dict
-    """
+    """Resolve an endpoint reference and return the endpoint configuration."""
     parsed = _coerce(ref)
     file_path = resolve_endpoint_path(parsed, paths)
 

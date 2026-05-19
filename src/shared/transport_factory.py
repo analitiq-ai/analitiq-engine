@@ -162,7 +162,19 @@ def resolve_transport_spec(
     defaults = connector.get("transport_defaults") or {}
     merged = _deep_merge(defaults, transports[ref])
     resolver = Resolver(enriched, functions=DEFAULT_FUNCTIONS)
-    return resolver.resolve(merged)
+    # Resolve top-level keys independently. A block whose inner refs point
+    # at missing optional values (e.g. a ``tls`` block when the connection
+    # has no CA cert) is dropped from the resolved spec — the transport
+    # builders only read the keys they own and ignore the rest.
+    resolved: Dict[str, Any] = {}
+    for key, value in merged.items():
+        try:
+            resolved[key] = resolver.resolve(value)
+        except KeyError as exc:
+            logger.debug(
+                "transport_spec: dropping %r (missing reference %s)", key, exc
+            )
+    return resolved
 
 
 # ---------------------------------------------------------------------------
@@ -466,16 +478,16 @@ async def build_transport(
     spec = resolve_transport_spec(
         connector, transport_ref=transport_ref, context=context
     )
-    kind = spec.get("kind")
-    if not kind:
+    transport_type = spec.get("transport_type")
+    if not transport_type:
         raise ValueError(
-            f"Resolved transport spec missing `kind`; connector "
-            f"{connector.get('slug')!r}, transport {transport_ref!r}"
+            f"Resolved transport spec missing `transport_type`; connector "
+            f"{connector.get('connector_id')!r}, transport {transport_ref!r}"
         )
-    builder = _TRANSPORT_BUILDERS.get(kind)
+    builder = _TRANSPORT_BUILDERS.get(transport_type)
     if builder is None:
         raise NotImplementedError(
-            f"Unsupported transport kind: {kind!r}; "
+            f"Unsupported transport_type: {transport_type!r}; "
             f"registered: {registered_transport_kinds()}"
         )
     return await builder(spec)

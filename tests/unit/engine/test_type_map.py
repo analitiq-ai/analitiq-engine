@@ -244,8 +244,8 @@ class TestCanonicalToArrow:
     def test_timestamp_with_tz(self):
         import pyarrow as pa
 
-        assert canonical_to_arrow("Timestamp(us, UTC)") == pa.timestamp("us", tz="UTC")
-        assert canonical_to_arrow("Timestamp(ms)") == pa.timestamp("ms")
+        assert canonical_to_arrow("Timestamp(MICROSECOND, UTC)") == pa.timestamp("us", tz="UTC")
+        assert canonical_to_arrow("Timestamp(MILLISECOND)") == pa.timestamp("ms")
 
     def test_decimal(self):
         import pyarrow as pa
@@ -255,20 +255,20 @@ class TestCanonicalToArrow:
     def test_time32(self):
         import pyarrow as pa
 
-        assert canonical_to_arrow("Time32(s)") == pa.time32("s")
-        assert canonical_to_arrow("Time32(ms)") == pa.time32("ms")
+        assert canonical_to_arrow("Time32(SECOND)") == pa.time32("s")
+        assert canonical_to_arrow("Time32(MILLISECOND)") == pa.time32("ms")
 
     def test_time64(self):
         import pyarrow as pa
 
-        assert canonical_to_arrow("Time64(us)") == pa.time64("us")
-        assert canonical_to_arrow("Time64(ns)") == pa.time64("ns")
+        assert canonical_to_arrow("Time64(MICROSECOND)") == pa.time64("us")
+        assert canonical_to_arrow("Time64(NANOSECOND)") == pa.time64("ns")
 
     def test_time_rejects_wrong_unit(self):
         with pytest.raises(InvalidTypeMapError, match="requires exactly one unit"):
-            canonical_to_arrow("Time32(us)")  # us is Time64-only
+            canonical_to_arrow("Time32(MICROSECOND)")  # MICROSECOND is Time64-only
         with pytest.raises(InvalidTypeMapError, match="requires exactly one unit"):
-            canonical_to_arrow("Time64(s)")  # s is Time32-only
+            canonical_to_arrow("Time64(SECOND)")  # SECOND is Time32-only
 
     def test_fixed_size_binary(self):
         import pyarrow as pa

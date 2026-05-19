@@ -53,12 +53,12 @@ def load_connection(alias: str, connections_dir: Path) -> dict[str, Any]:
 
 
 def load_connector_for_connection(
-    connector_slug: str, connectors_dir: Path
+    connector_id: str, connectors_dir: Path
 ) -> dict[str, Any]:
     """Load a connector definition by slug.
 
     Args:
-        connector_slug: Connector slug (directory name under connectors/)
+        connector_id: Connector slug (directory name under connectors/)
         connectors_dir: Path to the connectors/ directory
 
     Returns:
@@ -69,15 +69,15 @@ def load_connector_for_connection(
     """
     # Connector directories may be named either {slug} or connector-{slug}
     connector_file = (
-        connectors_dir / connector_slug / "definition" / "connector.json"
+        connectors_dir / connector_id / "definition" / "connector.json"
     )
     if not connector_file.is_file():
         connector_file = (
-            connectors_dir / f"connector-{connector_slug}" / "definition" / "connector.json"
+            connectors_dir / f"connector-{connector_id}" / "definition" / "connector.json"
         )
     if not connector_file.is_file():
         raise ConnectorNotFoundError(
-            connector_slug,
+            connector_id,
             detail=f"Connector definition not found: {connector_file}",
         )
 
@@ -86,8 +86,8 @@ def load_connector_for_connection(
             config = json.load(f)
     except json.JSONDecodeError as e:
         raise ConnectorNotFoundError(
-            connector_slug, detail=f"Invalid JSON in {connector_file}: {e}"
+            connector_id, detail=f"Invalid JSON in {connector_file}: {e}"
         )
 
-    logger.info(f"Loaded connector '{connector_slug}' from {connector_file}")
+    logger.info(f"Loaded connector '{connector_id}' from {connector_file}")
     return config

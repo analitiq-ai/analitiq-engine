@@ -48,7 +48,7 @@ class BaseDestinationHandler(ABC):
         """Register the ``stream_id → endpoint_ref`` index for this handler.
 
         ``endpoint_refs`` values are dict-shape ``EndpointRef`` payloads
-        (``{"scope", "identifier", "endpoint"}``). Called once by the
+        (``{"scope", "connection_id", "endpoint_id"}``). Called once by the
         destination entrypoint before the gRPC server starts. The default
         implementation is a no-op; handlers that need per-stream endpoint
         context (e.g. picking a type-mapper by scope) override it.

@@ -76,7 +76,7 @@ class Pipeline:
             buffer_size=runtime["buffer_size"],
             dlq_path=self.dlq_dir,
             max_retries=error_handling["max_retries"],
-            retry_delay=error_handling["retry_delay"],
+            retry_delay=error_handling["retry_delay_seconds"],
         )
 
     def _ensure_directories(self):
@@ -149,6 +149,20 @@ class Pipeline:
             # (the engine consumes the base URL via runtime.base_url).
             source_params = source_conn.get("parameters", {}) or {}
             source_host = _connection_host(source_conn, source_runtime, source_connector_type)
+            # API endpoints carry their request shape under
+            # ``operations.read.{request, params, pagination, response,
+            # replication}`` per the published api-endpoint contract.
+            # Flatten the read-operation block into the source config keys
+            # the engine's API connector consumes, resolving each declared
+            # param's ``default`` against the source connection's typed
+            # context (selections / parameters / discovered).
+            read_op = (source_endpoint.get("operations") or {}).get("read") or {}
+            read_request = read_op.get("request") or {}
+            resolved_default_query = _resolve_default_query(
+                read_op.get("params") or {},
+                read_request.get("query") or {},
+                source_conn,
+            )
             source_config = {
                 "host": source_host,
                 "parameters": source_params,
@@ -156,6 +170,13 @@ class Pipeline:
                 "driver": source_runtime.driver if source_runtime else None,
                 "_runtime": source_runtime,
                 **source_endpoint,
+                "endpoint": read_request.get("path", ""),
+                "method": read_request.get("method", "GET"),
+                "query": resolved_default_query,
+                "request_headers": read_request.get("headers") or {},
+                "params": read_op.get("params") or {},
+                "pagination": read_op.get("pagination"),
+                "response_extraction": read_op.get("response"),
                 "endpoint_ref": source["endpoint_ref"],
                 "connection_ref": source["connection_ref"],
                 "replication_method": replication.get("method", "incremental"),
@@ -200,6 +221,7 @@ class Pipeline:
 
             dest_params = dest_conn.get("parameters", {}) or {}
             dest_host = _connection_host(dest_conn, dest_runtime, dest_connector_type)
+            dest_db_object = dest_endpoint.get("database_object") or {}
             dest_config = {
                 "host": dest_host,
                 "parameters": dest_params,
@@ -207,9 +229,14 @@ class Pipeline:
                 "driver": dest_runtime.driver if dest_runtime else None,
                 "_runtime": dest_runtime,
                 **dest_endpoint,
+                "schema": dest_db_object.get("schema") or "public",
+                "table": dest_db_object.get("name", ""),
                 "endpoint_ref": dest["endpoint_ref"],
                 "connection_ref": dest["connection_ref"],
                 "refresh_mode": write.get("mode", "upsert"),
+                "write_mode": write.get("mode", "upsert"),
+                "primary_key": dest_endpoint.get("primary_keys") or [],
+                "endpoint_schema": dest_endpoint,
                 "batch_support": batching.get("supported", False),
                 "batch_size": batching.get("size", 1),
             }
@@ -303,6 +330,49 @@ class Pipeline:
     def get_metrics(self) -> Dict[str, Any]:
         """Get pipeline execution metrics."""
         return self.engine.get_metrics()
+
+
+def _resolve_default_query(
+    op_params: Dict[str, Any],
+    request_query: Dict[str, Any],
+    connection_config: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Flatten a read-operation's declared defaults into a query dict.
+
+    For each entry in ``request.query`` shaped ``{from_param: "<name>"}``,
+    look up the matching ``params[name].default`` and resolve it against
+    the source connection's typed context. Non-defaulted required params
+    that the engine isn't yet wiring (filter/cursor inputs) are skipped
+    — the API connector still picks them up from its own state machine.
+    """
+    from src.engine.resolver import ResolutionContext, Resolver
+
+    ctx = ResolutionContext(
+        connection={
+            "parameters": dict(connection_config.get("parameters") or {}),
+            "selections": dict(connection_config.get("selections") or {}),
+            "discovered": dict(connection_config.get("discovered") or {}),
+        },
+    )
+    resolver = Resolver(ctx)
+    resolved: Dict[str, Any] = {}
+    for query_name, binding in request_query.items():
+        if not isinstance(binding, dict):
+            continue
+        param_name = binding.get("from_param")
+        if not param_name:
+            continue
+        param_spec = op_params.get(param_name) or {}
+        default = param_spec.get("default")
+        if default is None:
+            continue
+        try:
+            value = resolver.resolve(default)
+        except Exception:
+            continue
+        if value is not None:
+            resolved[query_name] = value
+    return resolved
 
 
 def _connection_host(
