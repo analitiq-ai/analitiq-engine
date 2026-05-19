@@ -289,9 +289,9 @@ class DestinationServicer(DestinationServiceServicer):
         context: grpc.aio.ServicerContext,
     ) -> GetCapabilitiesResponse:
         """Return destination capabilities."""
-        supported_modes = [WriteMode.WRITE_MODE_UPSERT]
+        supported_modes = [WriteMode.WRITE_MODE_INSERT]
         if self.handler.supports_upsert:
-            supported_modes.append(WriteMode.WRITE_MODE_INSERT)
+            supported_modes.append(WriteMode.WRITE_MODE_UPSERT)
         supported_modes.append(WriteMode.WRITE_MODE_TRUNCATE_INSERT)
 
         return GetCapabilitiesResponse(
