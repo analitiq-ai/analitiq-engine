@@ -16,8 +16,19 @@ from typing import Any, Dict
 def emit_log(category: str, data: Dict[str, Any]) -> None:
     """Write a single structured log line to stdout.
 
-    The line format is ``ANALITIQ_{CATEGORY}::<json>`` where category is
+    The line format is ``ANALITIQ_{CATEGORY}::{json}`` where category is
     upper-cased (e.g. ``"dlq"`` → ``ANALITIQ_DLQ::``).
+
+    Failures are best-effort: a broken stdout pipe (common in containers
+    where the log aggregator restarts) must never abort a running pipeline.
+    On any I/O or serialization error the failure is reported to stderr and
+    the caller continues normally.
     """
     marker = f"ANALITIQ_{category.upper()}::"
-    print(f"{marker}{json.dumps(data, default=str)}", file=sys.stdout, flush=True)
+    try:
+        print(f"{marker}{json.dumps(data, default=str)}", file=sys.stdout, flush=True)
+    except Exception as exc:
+        try:
+            print(f"[emit_log] failed to emit {marker!r}: {exc!r}", file=sys.stderr, flush=True)
+        except Exception:
+            pass

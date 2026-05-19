@@ -55,6 +55,7 @@ class TestGetCapabilities:
         assert WriteMode.WRITE_MODE_INSERT in resp.supported_write_modes
         assert WriteMode.WRITE_MODE_UPSERT not in resp.supported_write_modes
         assert WriteMode.WRITE_MODE_TRUNCATE_INSERT in resp.supported_write_modes
+        assert WriteMode.WRITE_MODE_UNSPECIFIED not in resp.supported_write_modes
 
     @pytest.mark.asyncio
     async def test_upsert_only_when_supported(self):
@@ -72,6 +73,7 @@ class TestGetCapabilities:
         assert WriteMode.WRITE_MODE_INSERT in resp.supported_write_modes
         assert WriteMode.WRITE_MODE_UPSERT in resp.supported_write_modes
         assert WriteMode.WRITE_MODE_TRUNCATE_INSERT in resp.supported_write_modes
+        assert WriteMode.WRITE_MODE_UNSPECIFIED not in resp.supported_write_modes
 
 
 class TestSchemaAckTypeMapError:

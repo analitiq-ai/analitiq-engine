@@ -9,7 +9,7 @@ intentional: a new run starts fresh.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -55,7 +55,7 @@ class BatchCommitTracker:
             records_written=records_written,
             cursor_bytes=cursor_bytes,
         )
-        logger.debug(
+        logger.info(
             "batch committed: stream=%s seq=%d records=%d",
             stream_id,
             batch_seq,
