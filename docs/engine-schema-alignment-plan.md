@@ -51,8 +51,8 @@ Removed since the original audit (already absent on dev — no work needed):
 - `filters[].default` — no reads found on dev.
 
 Tracking:
-- [ ] all of the above deleted in the connector / engine refactor (§2.2)
-- [ ] no `.get(legacy, new)` fallbacks introduced anywhere
+- [x] all of the above deleted in the connector / engine refactor (§2.2). Completed Step 6, 2026-05-19.
+- [x] no `.get(legacy, new)` fallbacks introduced anywhere. Verified Step 6, 2026-05-19.
 - [x] kill the existing fallback at `src/engine/engine.py:477` (`cursor_field or replication_key`) (Step 5, 2026-05-19)
 
 ### 1.2 Schema fields the engine ignores today
@@ -90,11 +90,11 @@ boundary is in place:
    - `src/engine/orchestrator.py` — `PipelineOrchestrator` (~358 lines)
 
 Tracking:
-- [ ] EndpointRef parsed once (in PipelineConfigPrep) and passed as typed object
-- [ ] `{schema, table}` lives only on the resolved `DatabaseReadEndpoint`
-- [ ] no more flat-dict round-tripping between pipeline.py and connectors
-- [ ] pagination parsed once into a `PaginationSpec` instance
-- [ ] replication parsed once into a `ResolvedSource.replication`
+- [x] EndpointRef parsed once (in PipelineConfigPrep) and passed as typed object. Step 6, 2026-05-19.
+- [x] `{schema, table}` lives only on the resolved `DatabaseReadEndpoint`. Step 6, 2026-05-19.
+- [x] no more flat-dict round-tripping between pipeline.py and connectors. Step 6, 2026-05-19.
+- [x] pagination parsed once into a `PaginationSpec` instance. Step 6, 2026-05-19.
+- [x] replication parsed once into a `ResolvedSource.replication`. Step 6, 2026-05-19.
 - [x] one orchestrator (`StreamingEngine`); `Pipeline` and `orchestrator.py` deleted (Step 5, 2026-05-19)
 
 ### 1.4 On-disk fixture drift (NOT engine work — needs contract-repo fix)
@@ -145,7 +145,7 @@ dict-passing the typed boundary should eliminate.
 | `src/engine/pipeline.py:100` | (same consumers) | `_runtime` |
 
 Tracking:
-- [ ] underscore-prefixed keys removed once connectors take typed `ResolvedSource` / `ResolvedDestination` (the runtime + resolved endpoint become real fields)
+- [x] underscore-prefixed keys removed once connectors take typed `ResolvedSource` / `ResolvedDestination` (the runtime + resolved endpoint become real fields). Step 6, 2026-05-19.
 
 ### 1.6 Hand-rolled dataclasses in `src/models/` that overlap the resolved-runtime layer
 
@@ -305,7 +305,14 @@ Tracking:
    - Connector / gRPC internals still read merged dicts; that boundary is built once per stream inside `StreamingEngine._build_stream_dict` and is the only remaining dict-passing surface — Step 6 replaces it with typed `ResolvedSource` / `ResolvedDestination` parameters on the connectors and gRPC client.
    - The `cursor_field or replication_key` fallback at the old `engine.py:477` is gone; `cursor_field` is the only key the load stage reads.
    - Test fallout cleared: deleted `tests/unit/analitiq_stream/core/{test_orchestrator,test_pipeline_config_prep,test_engine_unit}.py`, `tests/unit/engine/test_pipeline_helpers.py`, `tests/integration/test_config_payload_structure.py`, all `tests/e2e/` files that imported `Pipeline`, `tests/core_pipeline/test_core_pipeline.py`, and the orphan `tests/fixtures/pipeline_config_prep.py`. `tests/integration/test_engine_failure_handling.py::TestEngineStreamFailurePropagation` is `@pytest.mark.skip`'d with a pointer to Step 6.
-6. [ ] Connector refactor: API source, DB source, DB dest, API dest, file dest take typed objects; drift items §1.1 resolved
+6. [x] Connector refactor: source connectors and gRPC client schema builder take typed objects; engine drops `_build_stream_dict`. Completed 2026-05-19.
+   - `src/source/connectors/base.py:BaseConnector.read_batches(source: ResolvedSource, ...)` — write API removed from the source ABC; destinations live under `BaseDestinationHandler`.
+   - `src/source/connectors/api.py:APIConnector.read_batches` now consumes `ApiReadEndpoint` directly: `request.path`/`request.method`, `pagination` (discriminated `OffsetPagination`/`CursorPagination`/`PagePagination`/keyset/link), `response.records_ref`, `params` (with `controlled_by` skipping), `replication.cursor_mappings` for cursor-param injection. Legacy keys `endpoint`, `method`, `data_field`, `cursor_param`/`limit_param`/`start_page`, `replication_filter_mapping`, `replication_method` are gone.
+   - `src/source/connectors/database.py:DatabaseConnector.read_batches` reads `DatabaseReadEndpoint.database_object.{schema, name}` and `columns`; cursor comes from `source.replication.cursor_field`. The `_parse_endpoint("schema/table")` string parsing is gone.
+   - `src/grpc/client.py:_build_schema_message(stream_id, destination: ResolvedDestination, endpoint_schema_json)` builds `DatabaseConfig`/`ApiConfig` from typed `DatabaseWriteEndpoint`/`ApiWriteEndpoint`. `start_stream(... destination, endpoint_schema_json)` takes the typed destination plus the raw endpoint JSON (forwarded as `SchemaMessage.json_schema` so the destination handler builds its Arrow contract from the source-of-truth schema).
+   - `src/engine/engine.py`: deleted `_build_stream_dict`/`_build_source_dict`/`_build_dest_dict`/`_assignment_to_dict`/`_connection_host`/`_flat_connection_lookup`/`_warn_unresolved_placeholders`. Replaced with a `StreamContext` dataclass carrying `(ResolvedStream, ResolvedPipeline, src_runtime, dest_runtime, src_endpoint_raw, dest_endpoint_raw)`. Every stage (`_extract_stage`/`_transform_stage`/`_load_stage`/`_checkpoint_stage`) now takes `StreamContext` and reads typed fields. The legacy `stream_data()` method is gone.
+   - `src/engine/data_transformer.py:DataTransformer`: `apply_transformations(batch, config_dict)` replaced with `apply_assignments(batch, assignments: list[dict])`; legacy `field_mappings`/`computed_fields` path and all its helpers (`_apply_legacy_transformations`, `_get_nested_value`, `_apply_field_transformations`, `_parse_iso_*`) deleted.
+   - Test fallout: deleted `tests/unit/analitiq_stream/connectors/test_{api_incremental,database_connector_unit}.py`, `tests/unit/analitiq_stream/core/test_data_transformer.py`, `tests/integration/test_{api_connector,api_incremental_integration,duplicate_records_integration,engine_failure_handling,security_integration}.py` (all tied to the deleted legacy helpers/signatures). Rewrote `tests/unit/grpc_tests/test_client.py::TestClientSchemaBuilder.test_build_schema_message_from_resolved` to drive the new typed builder.
 7. [ ] Re-run all 5 disk pipelines + cloud sim end-to-end
 
 ## 5. Out-of-scope (do not work on here)

@@ -1,8 +1,9 @@
 """Data transformation utilities for the streaming engine.
 
-Supports both:
-- New assignment-based mapping (MAPPING_AND_TRANSFORMATIONS.md spec)
-- Legacy field_mappings + computed_fields format (for backwards compatibility)
+Implements the schema-defined assignment-based mapping (each assignment
+has ``target.path``, ``target.arrow_type``, ``value``, optional
+``validate``). There is no legacy ``field_mappings`` / ``computed_fields``
+fallback.
 """
 
 import asyncio
@@ -521,41 +522,20 @@ class DataTransformer:
         self.expression_evaluator = SecureExpressionEvaluator()
         self.assignment_transformer = AssignmentTransformer()
 
-    async def apply_transformations(
+    async def apply_assignments(
         self,
         batch: List[Dict[str, Any]],
-        config: Dict[str, Any]
+        assignments: List[Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
+        """Apply schema-shaped assignment rules to a batch.
+
+        Each assignment matches ``stream.mapping.assignments[i]`` from the
+        published stream schema: ``{target: {path, arrow_type, nullable},
+        value: {...}, validate: {...} | None}``.
         """
-        Apply field mappings and transformations to batch.
-
-        Args:
-            batch: List of records to transform
-            config: Stream configuration with mapping rules
-
-        Returns:
-            Transformed batch
-
-        Raises:
-            TransformationError: If transformation fails
-        """
-        mapping = config.get("mapping", {})
-
-        # Check for new assignment-based format
-        assignments = mapping.get("assignments", [])
-        if assignments:
-            return await self._apply_assignment_transformations(batch, assignments)
-
-        # Fall back to legacy format
-        field_mappings = mapping.get("field_mappings", {})
-        computed_fields = mapping.get("computed_fields", {})
-
-        if not field_mappings and not computed_fields:
-            return batch  # No transformations to apply
-
-        return await self._apply_legacy_transformations(
-            batch, field_mappings, computed_fields
-        )
+        if not assignments:
+            return batch
+        return await self._apply_assignment_transformations(batch, assignments)
 
     async def _apply_assignment_transformations(
         self,
@@ -583,146 +563,3 @@ class DataTransformer:
 
         return transformed_batch
 
-    async def _apply_legacy_transformations(
-        self,
-        batch: List[Dict[str, Any]],
-        field_mappings: Dict[str, Any],
-        computed_fields: Dict[str, Any]
-    ) -> List[Dict[str, Any]]:
-        """Apply legacy field_mappings and computed_fields."""
-        transformed_batch = []
-
-        try:
-            for record in batch:
-                transformed_record = {}
-
-                # Apply field mappings
-                for source_field, mapping_config in field_mappings.items():
-                    if isinstance(mapping_config, dict):
-                        target_field = mapping_config.get("target", source_field)
-                        transformations = mapping_config.get("transformations", [])
-                    else:
-                        target_field = mapping_config
-                        transformations = []
-
-                    source_value = self._get_nested_value(record, source_field)
-                    transformed_value = await self._apply_field_transformations(
-                        source_value, transformations
-                    )
-                    transformed_record[target_field] = transformed_value
-
-                # Apply computed fields
-                for field_name, field_config in computed_fields.items():
-                    if isinstance(field_config, dict):
-                        expression = field_config.get("expression", "")
-                    else:
-                        expression = field_config
-
-                    computed_value = await self.expression_evaluator.evaluate(
-                        expression, record, transformed_record
-                    )
-                    transformed_record[field_name] = computed_value
-
-                transformed_batch.append(transformed_record)
-
-        except Exception as e:
-            logger.error(f"Transformation failed: {e}")
-            raise TransformationError(f"Data transformation failed: {e}") from e
-
-        return transformed_batch
-
-    def _get_nested_value(self, record: Dict[str, Any], field_path: str) -> Any:
-        """Get value from nested field path like 'details.merchant.name'."""
-        if "." not in field_path:
-            return record.get(field_path)
-
-        current = record
-        for field in field_path.split("."):
-            if isinstance(current, dict) and field in current:
-                current = current[field]
-            else:
-                return None
-        return current
-
-    async def _apply_field_transformations(
-        self,
-        value: Any,
-        transformations: List[str]
-    ) -> Any:
-        """Apply transformations to a field value."""
-        if not transformations or value is None:
-            return value
-
-        for transformation in transformations:
-            await asyncio.sleep(0)  # Yield for async safety
-
-            match transformation:
-                case "abs" if isinstance(value, (int, float)):
-                    value = abs(value)
-                case "strip" | "trim" if isinstance(value, str):
-                    value = value.strip()
-                case "lowercase" | "lower" if isinstance(value, str):
-                    value = value.lower()
-                case "uppercase" | "upper" if isinstance(value, str):
-                    value = value.upper()
-                case "iso_to_date" if isinstance(value, str):
-                    value = await self._parse_iso_date(value)
-                case "iso_to_timestamp" if isinstance(value, str):
-                    value = await self._parse_iso_timestamp(value)
-                case "iso_string_to_datetime":
-                    value = await self._parse_iso_to_datetime_object(value)
-                case "to_int" if isinstance(value, (str, float)):
-                    try:
-                        value = int(float(value))
-                    except (ValueError, TypeError):
-                        logger.warning(f"Failed to convert {value} to int")
-                case "to_float" if isinstance(value, (str, int)):
-                    try:
-                        value = float(value)
-                    except (ValueError, TypeError):
-                        logger.warning(f"Failed to convert {value} to float")
-                case "to_str":
-                    value = str(value) if value is not None else ""
-                case _:
-                    logger.warning(f"Unknown transformation: {transformation}")
-
-        return value
-
-    async def _parse_iso_date(self, value: str) -> str:
-        """Parse ISO datetime string to date format."""
-        try:
-            if value.endswith('Z'):
-                value = value.replace('Z', '+00:00')
-            dt = datetime.fromisoformat(value)
-            return dt.strftime('%Y-%m-%d')
-        except ValueError as e:
-            logger.warning(f"Failed to parse ISO date '{value}': {e}")
-            return value
-
-    async def _parse_iso_timestamp(self, value: str) -> datetime:
-        """Parse ISO datetime string to datetime object."""
-        try:
-            if value.endswith('Z'):
-                value = value.replace('Z', '+00:00')
-            return datetime.fromisoformat(value)
-        except ValueError as e:
-            logger.warning(f"Failed to parse ISO timestamp '{value}': {e}")
-            return datetime.now()
-
-    async def _parse_iso_to_datetime_object(self, value: Any) -> datetime:
-        """Convert ISO timestamp string or datetime to datetime object."""
-        try:
-            if value is None:
-                raise ValueError("Cannot convert None to datetime")
-
-            if isinstance(value, datetime):
-                return value
-
-            iso_string = str(value)
-            if iso_string.endswith('Z'):
-                iso_string = iso_string.replace('Z', '+00:00')
-
-            return datetime.fromisoformat(iso_string)
-        except (ValueError, TypeError) as e:
-            logger.warning(f"Failed to parse value '{value}' to datetime: {e}")
-            return datetime.now()

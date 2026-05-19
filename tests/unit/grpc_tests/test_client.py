@@ -318,34 +318,61 @@ class TestClientPayloadEncoding:
 class TestClientSchemaBuilder:
     """Tests for schema message building."""
 
-    def test_build_schema_message(self):
-        """Test building a schema message from config."""
+    def test_build_schema_message_from_resolved(self):
+        """Build a schema message from a typed `ResolvedDestination`."""
+        from src.engine.resolved import (
+            Column,
+            DatabaseObject,
+            DatabaseWriteEndpoint,
+            EndpointRef,
+            ExecutionConfig,
+            HttpTransport,
+            ResolvedConnection,
+            ResolvedConnector,
+            ResolvedDestination,
+            WriteSpec,
+        )
+
+        connector = ResolvedConnector(
+            connector_id="postgresql",
+            kind="database",
+            display_name="PostgreSQL",
+            default_transport="primary",
+            transports={"primary": HttpTransport(base_url="x", headers={}, timeout_seconds=None)},
+        )
+        connection = ResolvedConnection(
+            connection_id="conn-1",
+            connector=connector,
+            parameters={},
+            selections={},
+            secret_refs={},
+        )
+        endpoint = DatabaseWriteEndpoint(
+            endpoint_id="users",
+            database_object=DatabaseObject(schema="public", name="users", object_type="table"),
+            columns=(
+                Column(name="id", arrow_type="Int64", native_type="bigint", nullable=False, default=None, ordinal_position=1),
+                Column(name="name", arrow_type="Utf8", native_type="text", nullable=True, default=None, ordinal_position=2),
+            ),
+            primary_keys=("id",),
+        )
+        destination = ResolvedDestination(
+            connection=connection,
+            endpoint=endpoint,
+            endpoint_ref=EndpointRef(scope="connection", connection_id="conn-1", endpoint_id="users"),
+            write=WriteSpec(mode="upsert", conflict_keys=(("id",),)),
+            execution=ExecutionConfig(batch_size=100, max_concurrent_batches=2),
+        )
+
         client = DestinationGRPCClient()
-
-        config = {
-            "type": "database",
-            "driver": "postgresql",
-            "endpoint": "public/users",
-            "primary_key": ["id"],
-            "write_mode": "upsert",
-            "endpoint_schema": {
-                "type": "object",
-                "properties": {
-                    "id": {"type": "integer"},
-                    "name": {"type": "string"},
-                },
-            },
-            "conflict_resolution": {
-                "on_conflict": "id",
-                "action": "update",
-                "update_columns": ["name"],
-            },
-        }
-
-        schema_msg = client._build_schema_message("stream-1", config)
+        schema_msg = client._build_schema_message(
+            "stream-1",
+            destination,
+            {"endpoint_id": "users", "columns": []},
+        )
 
         assert schema_msg.stream_id == "stream-1"
-        assert len(schema_msg.primary_key) == 1
-        assert schema_msg.primary_key[0] == "id"
-        assert schema_msg.destination_config.connector_type == "postgresql"
+        assert list(schema_msg.primary_key) == ["id"]
+        assert schema_msg.destination_config.connector_type == "database"
         assert schema_msg.destination_config.database.table_name == "users"
+        assert schema_msg.destination_config.database.schema_name == "public"

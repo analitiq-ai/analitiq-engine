@@ -1,66 +1,37 @@
-"""Database source connector using shared SQLAlchemy engine factory."""
+"""Database source connector.
+
+Reads from a SQLAlchemy-supported database driven by the typed
+:class:`ResolvedSource`. The dialect-specific engine is built by
+:class:`ConnectionRuntime` from the connector's transport spec; this
+connector only consumes the resolved values.
+"""
+
+from __future__ import annotations
 
 import logging
 from typing import Any, AsyncIterator, Dict, List, Optional
 
-from .base import BaseConnector, ConnectionError, ReadError, WriteError
+from .base import BaseConnector, ConnectionError, ReadError
+from ...engine.resolved import DatabaseReadEndpoint, ResolvedSource
 from ...shared.connection_runtime import ConnectionRuntime
-from ...shared.database_utils import (
-    acquire_connection,
-    convert_record_from_db,
-)
+from ...shared.database_utils import acquire_connection, convert_record_from_db
 from ...shared.query_builder import build_select_query
+from ...state.state_manager import StateManager
 
 logger = logging.getLogger(__name__)
 
 
 class DatabaseConnector(BaseConnector):
-    """
-    Database source connector using shared SQLAlchemy engine.
-
-    Features:
-    - Shared engine factory with SSL-prefer fallback
-    - Incremental reading with cursor support
-    - Read-only: write operations are handled by the destination handler
-    """
+    """Database source connector."""
 
     def __init__(self, name: str = "DatabaseConnector"):
         super().__init__(name)
         self._runtime: ConnectionRuntime | None = None
         self._engine = None
         self._driver: str = ""
-        self.table_info_cache = {}
         self._initialized = False
 
-    def _parse_endpoint(self, endpoint: str, default_schema: str = "public") -> tuple[str, str]:
-        """
-        Parse endpoint string to extract schema and table name.
-
-        Supports format: "schema/table" or just "table"
-
-        Args:
-            endpoint: Endpoint string (e.g., "public/wise_transfers" or "wise_transfers")
-            default_schema: Schema to use if not specified in endpoint
-
-        Returns:
-            Tuple of (schema_name, table_name)
-        """
-        if endpoint and "/" in endpoint:
-            parts = endpoint.split("/", 1)
-            schema_name = parts[0] or default_schema
-            table_name = parts[1]
-        else:
-            schema_name = default_schema
-            table_name = endpoint
-        return schema_name, table_name
-
-    async def connect(self, runtime: ConnectionRuntime):
-        """
-        Establish connection to the database using ConnectionRuntime.
-
-        Args:
-            runtime: ConnectionRuntime with enriched config
-        """
+    async def connect(self, runtime: ConnectionRuntime) -> None:
         try:
             self._runtime = runtime
             runtime.acquire()
@@ -74,8 +45,7 @@ class DatabaseConnector(BaseConnector):
             logger.error("Failed to connect to database: %s", e)
             raise ConnectionError(f"Database connection failed: {e}") from e
 
-    async def disconnect(self):
-        """Close database connection."""
+    async def disconnect(self) -> None:
         if self._runtime:
             await self._runtime.close()
         self._engine = None
@@ -85,97 +55,80 @@ class DatabaseConnector(BaseConnector):
 
     async def read_batches(
         self,
-        config: Dict[str, Any],
+        source: ResolvedSource,
         *,
-        state_manager: "StateManager",
-        stream_name: str,
+        state_manager: StateManager,
+        stream_id: str,
         partition: Optional[Dict[str, Any]] = None,
-        batch_size: int = 1000
+        batch_size: int = 1000,
     ) -> AsyncIterator[List[Dict[str, Any]]]:
-        """
-        Read data in batches from database table with state management for incremental replication.
-
-        Args:
-            config: Read configuration
-            state_manager: State manager for incremental replication
-            stream_name: Name of the stream for state tracking
-            partition: Optional partition identifier for sharded streams
-            batch_size: Number of records per batch
-
-        Yields:
-            Batches of records as dictionaries
-        """
         if not self._initialized:
             raise RuntimeError("Database connection not initialized. Call connect() first.")
 
-        try:
-            partition = partition or {}
-
-            # Parse endpoint to extract schema and table name
-            schema_name, table_name = self._parse_endpoint(
-                config["endpoint"], config.get("schema", "public")
+        endpoint = source.endpoint
+        if not isinstance(endpoint, DatabaseReadEndpoint):
+            raise ReadError(
+                f"DatabaseConnector requires a DatabaseReadEndpoint, got {type(endpoint).__name__}"
             )
 
-            # Get current cursor from state manager for incremental reads
-            cursor_state = await state_manager.get_cursor(stream_name, partition)
+        partition = partition or {}
+        schema_name = endpoint.database_object.schema
+        table_name = endpoint.database_object.name
+
+        try:
+            cursor_state = await state_manager.get_cursor(stream_id, partition)
             cursor_value = cursor_state.get("cursor") if cursor_state else None
+            cursor_field = source.replication.cursor_field
 
-            logger.debug("Database read starting with cursor: %s", cursor_value)
+            query_config: Dict[str, Any] = {
+                "columns": [c.name for c in endpoint.columns] or ["*"],
+                "filters": [
+                    {"field": f.field, "op": f.op, "value": f.value}
+                    for f in source.filters
+                ],
+                "cursor_field": cursor_field,
+                "cursor_mode": "inclusive",
+                "order_by": cursor_field,
+                "order_direction": "asc",
+            }
 
-            # Build query using shared query builder
             query, params = build_select_query(
                 dialect=self._driver,
                 schema_name=schema_name,
                 table_name=table_name,
-                config=config,
+                config=query_config,
                 cursor_value=cursor_value,
             )
 
-            # Execute query with batching
             async with acquire_connection(self._engine) as conn:
                 offset = 0
                 last_cursor_value = cursor_value
 
                 while True:
-                    # Add pagination to query
                     batch_query = f"{query} LIMIT {batch_size} OFFSET {offset}"
-
-                    # Execute through driver connection
                     if params:
                         result = await conn.exec_driver_sql(batch_query, tuple(params))
                     else:
                         result = await conn.exec_driver_sql(batch_query)
 
-                    # Convert rows to dicts with type conversion
-                    rows = [
-                        convert_record_from_db(dict(row._mapping))
-                        for row in result
-                    ]
-
+                    rows = [convert_record_from_db(dict(row._mapping)) for row in result]
                     if not rows:
                         break
 
-                    # Update cursor from the last record if replication_key exists
-                    replication_key = config.get("replication_key")
-                    if replication_key and rows:
-                        last_cursor_value = rows[-1].get(replication_key)
+                    if cursor_field and rows:
+                        last_cursor_value = rows[-1].get(cursor_field)
 
                     self.metrics["records_read"] += len(rows)
                     self.metrics["batches_read"] += 1
 
                     yield rows
 
-                    # Save cursor state after each batch
                     if last_cursor_value is not None:
                         await state_manager.save_cursor(
-                            stream_name,
-                            partition,
-                            {"cursor": last_cursor_value}
+                            stream_id, partition, {"cursor": last_cursor_value}
                         )
 
                     offset += batch_size
-
-                    # If we got less than batch_size, we're done
                     if len(rows) < batch_size:
                         break
 
@@ -184,12 +137,7 @@ class DatabaseConnector(BaseConnector):
         except Exception as e:
             self.metrics["errors"] += 1
             logger.error("Database read failed: %s", e)
-            raise ReadError(f"Database read failed: {e}")
-
-    async def write_batch(self, batch: List[Dict[str, Any]], config: Dict[str, Any]):
-        """Source connector is read-only; writes are handled by the destination."""
-        raise NotImplementedError("Source connector is read-only")
+            raise ReadError(f"Database read failed: {e}") from e
 
     def supports_incremental_read(self) -> bool:
-        """Database supports incremental reading."""
         return True

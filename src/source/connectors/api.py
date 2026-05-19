@@ -1,42 +1,51 @@
-"""Modern API connector with state management."""
+"""API source connector.
+
+Drives HTTP reads from a typed :class:`ResolvedSource` (with an
+:class:`ApiReadEndpoint`). Pagination and replication are taken from the
+endpoint definition; runtime context (session, base URL, rate limiter)
+comes from the :class:`ConnectionRuntime` passed to ``connect()``.
+"""
+
+from __future__ import annotations
 
 import asyncio
 import logging
 from dataclasses import asdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, AsyncIterator, Dict, List, Optional
 from urllib.parse import urljoin, urlencode
 
+from dateutil.parser import isoparse
+
 from .base import BaseConnector, ConnectionError, ReadError
+from ...engine.resolved import (
+    ApiReadEndpoint,
+    CursorPagination,
+    KeysetPagination,
+    LinkPagination,
+    OffsetPagination,
+    PagePagination,
+    ResolvedSource,
+)
+from ...models.state import CursorField, StreamCursor, StreamStats
 from ...shared.connection_runtime import ConnectionRuntime
-from ...state.state_manager import StateManager
-from ...models.state import StreamCursor, CursorField, StreamStats
 from ...shared.rate_limiter import RateLimiter
+from ...state.state_manager import StateManager
 
 logger = logging.getLogger(__name__)
 
 
 class APIConnector(BaseConnector):
-    """
-    Modern API connector with state management.
-
-    Features:
-    - State management for scalability
-    - Pydantic validation for type safety
-    - Incremental replication with cursor tracking
-    - Rate limiting and fault tolerance
-    """
+    """HTTP API source connector."""
 
     def __init__(self, name: str = "APIConnector"):
         super().__init__(name)
         self._runtime: ConnectionRuntime | None = None
         self.session = None
-        self.base_url = None
-        self.headers = {}
-        self.rate_limiter = None
+        self.base_url: str | None = None
+        self.rate_limiter: RateLimiter | None = None
 
-    async def connect(self, runtime: ConnectionRuntime):
-        """Establish connection to the API using ConnectionRuntime."""
+    async def connect(self, runtime: ConnectionRuntime) -> None:
         try:
             self._runtime = runtime
             runtime.acquire()
@@ -45,14 +54,12 @@ class APIConnector(BaseConnector):
             self.base_url = runtime.base_url
             self.rate_limiter = runtime.rate_limiter
             self.is_connected = True
-            logger.debug(f"Connected to API: {self.base_url}")
-
+            logger.debug("Connected to API: %s", self.base_url)
         except Exception as e:
-            logger.error(f"Failed to connect to API: {str(e)}")
-            raise ConnectionError(f"API connection failed: {str(e)}") from e
+            logger.error("Failed to connect to API: %s", e)
+            raise ConnectionError(f"API connection failed: {e}") from e
 
-    async def disconnect(self):
-        """Close API connection."""
+    async def disconnect(self) -> None:
         if self._runtime:
             await self._runtime.close()
             await asyncio.sleep(0.25)
@@ -61,742 +68,447 @@ class APIConnector(BaseConnector):
 
     async def read_batches(
         self,
-        config: Dict[str, Any],
+        source: ResolvedSource,
         *,
         state_manager: StateManager,
-        stream_name: str,
+        stream_id: str,
         partition: Optional[Dict[str, Any]] = None,
-        batch_size: int = 1000
+        batch_size: int = 1000,
     ) -> AsyncIterator[List[Dict[str, Any]]]:
-        """
-        Read data in batches with state management.
-
-        Args:
-            config: Read configuration
-            state_manager: State manager
-            stream_name: Name of the stream for state tracking
-            partition: Partition key for processing
-            batch_size: Number of records per batch
-
-        Yields:
-            Batches of records as dictionaries
-        """
         if partition is None:
             partition = {}
-            
-        try:
-            endpoint = config.get("endpoint", "")
-            method = config.get("method", "GET")
-            full_url = urljoin(self.base_url, endpoint)
 
-            # Load state from state manager
-            # Use the complete config passed to read_batches, which contains merged source configuration
-            state = self._load_state_from_state_manager(
-                state_manager, stream_name, partition, config
+        endpoint = source.endpoint
+        if not isinstance(endpoint, ApiReadEndpoint):
+            raise ReadError(
+                f"APIConnector requires an ApiReadEndpoint, got {type(endpoint).__name__}"
             )
-            
-            # Apply incremental replication logic if enabled
-            if state["replication_method"] == "incremental":
-                await self._setup_incremental_replication(config, state, config)
 
-            # Track records for checkpointing
-            batch_count = 0
-            total_records = 0
-            
-            # Handle pagination
-            pagination_config = config.get("pagination") or {}
-            pagination_type = pagination_config.get("type")
+        path = endpoint.request.path
+        method = endpoint.request.method or "GET"
+        full_url = urljoin(self.base_url or "", path)
 
-            pagination_methods = {
-                "cursor": self._read_cursor_paginated,
-                "offset": self._read_offset_paginated,
-                "page": self._read_page_paginated,
-            }
+        base_query = self._initial_query_params(source, endpoint)
+        cursor_field = source.replication.cursor_field
+        replication_method = source.replication.method
+        safety_window = source.replication.safety_window_seconds
 
-            method_func = pagination_methods.get(pagination_type)
-            if method_func:
-                async for batch in method_func(full_url, method, config, batch_size):
-                    # Update state after each batch
-                    if batch:
-                        # Filter out duplicate records based on tie-breaker comparison
-                        deduplicated_batch = self._deduplicate_records(batch, state, config)
-                        if not deduplicated_batch:
-                            logger.debug(f"Stream {stream_name}: All {len(batch)} records in batch were duplicates, skipping")
-                            continue
-                            
-                        if len(deduplicated_batch) != len(batch):
-                            logger.debug(f"Stream {stream_name}: Deduplicated batch: {len(batch)} -> {len(deduplicated_batch)} records")
-                            
-                        # Update batch to use deduplicated version
-                        batch = deduplicated_batch
-                        
-                        # Only yield non-empty deduplicated batches
-                        yield batch
-                        
-                        batch_count += 1
-                        total_records += len(batch)
-                        
-                        # Extract cursor from last record using cursor field
-                        last_record = batch[-1]
-                        cursor_field = state.get("cursor_field")
-                        
-                        if cursor_field and cursor_field in last_record:
-                            cursor_value = last_record[cursor_field]
-                            
-                            # Build validated cursor state
-                            primary_cursor = CursorField(
-                                field=cursor_field,
-                                value=cursor_value,
-                                inclusive=True  # Always use inclusive mode
-                            )
-                            
-                            cursor = StreamCursor(primary=primary_cursor)
-                            
-                            # Add tie-breaker fields from configuration
-                            tie_breaker_fields = config.get("tie_breaker_fields", [])
-                            if tie_breaker_fields:
-                                tiebreakers = []
-                                for field_name in tie_breaker_fields:
-                                    field_value = self._get_nested_field_value(last_record, field_name)
-                                    if field_value is not None:
-                                        tiebreakers.append(CursorField(
-                                            field=field_name,
-                                            value=field_value,
-                                            inclusive=True
-                                        ))
-                                
-                                if tiebreakers:
-                                    cursor.tiebreakers = tiebreakers
-                                
-                            # Save checkpoint with validation
-                            stats = StreamStats(
-                                records_synced=total_records,
-                                batches_written=batch_count,
-                                last_checkpoint_at=datetime.now(timezone.utc),
-                                errors_since_checkpoint=0
-                            )
-                                
-                            state_manager.save_stream_checkpoint(
-                                stream_name=stream_name,
-                                partition=partition,
-                                cursor=asdict(cursor),
-                                hwm=cursor_value,
-                                stats=asdict(stats)
-                            )
-            else:
-                # Single request without pagination
-                batch = await self._read_single_request(full_url, method, config)
+        # Inject incremental cursor as request param when state has one.
+        cursor_state = (
+            await state_manager.get_cursor(stream_id, partition)
+            if replication_method == "incremental"
+            else None
+        )
+        if cursor_state and cursor_field:
+            self._apply_incremental_filter(
+                endpoint=endpoint,
+                query_params=base_query,
+                cursor_value=cursor_state.get("cursor"),
+                safety_window=safety_window,
+            )
+
+        pagination = endpoint.pagination
+
+        batch_count = 0
+        total_records = 0
+
+        try:
+            if pagination is None:
+                batch = await self._read_single(full_url, method, base_query, endpoint)
                 if batch:
-                    # Filter out duplicate records based on tie-breaker comparison
-                    deduplicated_batch = self._deduplicate_records(batch, state, config)
-                    if not deduplicated_batch:
-                        logger.debug(f"Stream {stream_name}: All {len(batch)} records were duplicates, skipping")
-                    else:
-                        if len(deduplicated_batch) != len(batch):
-                            logger.debug(f"Stream {stream_name}: Deduplicated batch: {len(batch)} -> {len(deduplicated_batch)} records")
-                            
-                        # Use deduplicated batch
-                        batch = deduplicated_batch
-                        yield batch
-                    
-                        # Update state for single batch
-                        total_records = len(batch)
-                        last_record = batch[-1]
-                        cursor_field = state.get("cursor_field")
-                    
-                    if cursor_field and cursor_field in last_record:
-                        cursor_value = last_record[cursor_field]
-                        
-                        primary_cursor = CursorField(
-                            field=cursor_field,
-                            value=cursor_value,
-                            inclusive=True  # Always use inclusive mode
+                    yield batch
+                    batch_count = 1
+                    total_records = len(batch)
+                    if cursor_field:
+                        await self._save_cursor(
+                            state_manager,
+                            stream_id,
+                            partition,
+                            batch,
+                            cursor_field,
+                            source,
+                            total_records,
+                            batch_count,
                         )
-                        
-                        cursor = StreamCursor(primary=primary_cursor)
-                        
-                        # Add tie-breaker fields from configuration
-                        tie_breaker_fields = config.get("tie_breaker_fields", [])
-                        if tie_breaker_fields:
-                            tiebreakers = []
-                            for field_name in tie_breaker_fields:
-                                field_value = self._get_nested_field_value(last_record, field_name)
-                                if field_value is not None:
-                                    tiebreakers.append(CursorField(
-                                        field=field_name,
-                                        value=field_value,
-                                        inclusive=True
-                                    ))
-                            
-                            if tiebreakers:
-                                cursor.tiebreakers = tiebreakers
-                            
-                        stats = StreamStats(
-                            records_synced=total_records,
-                            batches_written=1,
-                            last_checkpoint_at=datetime.now(timezone.utc),
-                            errors_since_checkpoint=0
+            elif isinstance(pagination, OffsetPagination):
+                async for batch in self._read_offset(
+                    full_url, method, base_query, endpoint, pagination, batch_size
+                ):
+                    yield batch
+                    batch_count += 1
+                    total_records += len(batch)
+                    if cursor_field:
+                        await self._save_cursor(
+                            state_manager, stream_id, partition, batch, cursor_field,
+                            source, total_records, batch_count,
                         )
-                            
-                        state_manager.save_stream_checkpoint(
-                            stream_name=stream_name,
-                            partition=partition,
-                            cursor=asdict(cursor),
-                            hwm=cursor_value,
-                            stats=asdict(stats)
+            elif isinstance(pagination, CursorPagination):
+                async for batch in self._read_cursor(
+                    full_url, method, base_query, endpoint, pagination, batch_size
+                ):
+                    yield batch
+                    batch_count += 1
+                    total_records += len(batch)
+                    if cursor_field:
+                        await self._save_cursor(
+                            state_manager, stream_id, partition, batch, cursor_field,
+                            source, total_records, batch_count,
                         )
-
+            elif isinstance(pagination, PagePagination):
+                async for batch in self._read_page(
+                    full_url, method, base_query, endpoint, pagination, batch_size
+                ):
+                    yield batch
+                    batch_count += 1
+                    total_records += len(batch)
+                    if cursor_field:
+                        await self._save_cursor(
+                            state_manager, stream_id, partition, batch, cursor_field,
+                            source, total_records, batch_count,
+                        )
+            elif isinstance(pagination, (KeysetPagination, LinkPagination)):
+                raise ReadError(
+                    f"Pagination type {pagination.type!r} is not yet implemented in APIConnector"
+                )
+            else:
+                raise ReadError(f"Unknown pagination type: {type(pagination).__name__}")
         except Exception as e:
             self.metrics["errors"] += 1
-            raise ReadError(f"API {method} connection to {full_url} failed: {str(e)}")
+            raise ReadError(f"API {method} to {full_url} failed: {e}") from e
 
-    def _load_state_from_state_manager(
-        self,
-        state_manager: StateManager,
-        stream_name: str,
-        partition: Dict[str, Any],
-        config: Dict[str, Any],
+    # ------------------------------------------------------------------
+    # Query parameter assembly
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _initial_query_params(
+        source: ResolvedSource, endpoint: ApiReadEndpoint
     ) -> Dict[str, Any]:
-        """Load state from state manager."""
-        cursor_field = config.get("cursor_field")
-        state: Dict[str, Any] = {
-            "bookmarks": [],
-            "run": state_manager.get_run_info(),
-            "replication_method": config.get("replication_method", "incremental"),
-            "cursor_field": cursor_field,
-        }
-        if config.get("safety_window_seconds") is not None:
-            state["safety_window_seconds"] = config["safety_window_seconds"]
-        return state
+        """Build the static query params (everything except pagination + cursor).
 
-    async def _setup_incremental_replication(self, config: Dict[str, Any], state: Dict[str, Any], src_config: Dict[str, Any]):
-        """Set up incremental replication by validating cursor field and building filters."""
-        cursor_field = state["cursor_field"]
-        
-        # Get the API filter parameter name from source configuration
-        filter_param = self._get_filter_param_for_cursor_field(cursor_field, config)
-        if not filter_param:
-            logger.warning(f"No filter mapping found for cursor field '{cursor_field}', falling back to full replication")
+        Resolves declared `params` defaults that aren't `controlled_by` the
+        engine, then layers `source.filters` on top.
+        """
+        params: Dict[str, Any] = {}
+
+        for name, spec in endpoint.params.items():
+            if spec.location != "query":
+                continue
+            if spec.controlled_by:
+                # `pagination` / `replication`-controlled params are populated
+                # by the pagination loop / incremental injector.
+                continue
+            value = _resolve_default(spec.default, source)
+            if value is not None:
+                params[name] = value
+
+        # Layer ResolvedSource filters (already typed with field/op/value).
+        for f in source.filters:
+            if f.value is None:
+                continue
+            value = f.value
+            if isinstance(value, list):
+                params[f.field] = ",".join(str(v) for v in value)
+            else:
+                params[f.field] = value
+
+        return params
+
+    def _apply_incremental_filter(
+        self,
+        *,
+        endpoint: ApiReadEndpoint,
+        query_params: Dict[str, Any],
+        cursor_value: Any,
+        safety_window: Optional[int],
+    ) -> None:
+        """Inject the cursor value into the right query param using endpoint
+        cursor_mappings."""
+        if cursor_value is None:
             return
+        cursor_field = endpoint.replication.cursor_mappings
+        for mapping in cursor_field:
+            param_name = mapping.param
+            window = safety_window or 0
+            query_params[param_name] = _shift_cursor_value(cursor_value, window)
+            logger.debug(
+                "Injected incremental cursor: %s = %s", param_name, query_params[param_name]
+            )
+            break
 
-        # Get bookmark for the current partition
-        bookmarks = state["bookmarks"]
-        if not bookmarks:
-            logger.info("No bookmarks found, performing full replication for first run")
-            return
-            
-        bookmark = bookmarks[0]
-        cursor = bookmark.get("cursor")
-        
-        if not cursor:
-            logger.info("No cursor found in bookmark, performing full replication")
-            return
-            
-        # Compute effective start time with safety window
-        safety_window = state.get("safety_window_seconds")
-        if safety_window is None:
-            logger.warning("safety_window_seconds not configured, skipping incremental filter setup")
-            return
-        effective_start = self._compute_effective_start_time(cursor, safety_window)
-        
-        # Build incremental filter using the mapped API parameter (always inclusive mode)
-        incremental_filter = self._build_replication_filter(filter_param, effective_start)
+    # ------------------------------------------------------------------
+    # Pagination implementations
+    # ------------------------------------------------------------------
 
-        # Apply incremental filter
-        if "filters" not in config:
-            config["filters"] = {}
-
-        for filter_name, filter_value in incremental_filter.items():
-            config["filters"][filter_name] = {
-                "type": "string",
-                "value": filter_value,
-                "required": True,
-                "description": f"Incremental replication filter using cursor: {filter_value}"
-            }
-
-        logger.info(f"Set up incremental replication: {cursor_field} -> {filter_param} from {effective_start}")
-
-    async def _read_offset_paginated(
-        self, url: str, method: str, config: Dict[str, Any], batch_size: int
+    async def _read_offset(
+        self,
+        url: str,
+        method: str,
+        base_query: Dict[str, Any],
+        endpoint: ApiReadEndpoint,
+        pagination: OffsetPagination,
+        batch_size: int,
     ) -> AsyncIterator[List[Dict[str, Any]]]:
-        """Read data using offset-based pagination."""
-        pagination_config = config.get("pagination", {})
-        offset_param = pagination_config.get("params", {}).get("offset_param", "offset")
-        limit_param = pagination_config.get("params", {}).get("limit_param", "limit")
-
-        offset = 0
-
+        offset = pagination.offset_initial
+        page_size = pagination.limit_max or batch_size
         while True:
-            params = {offset_param: offset, limit_param: batch_size}
-            
-            # Apply filters from config
-            self._apply_filters_to_params(params, config)
+            params = {**base_query, pagination.offset_param: offset, pagination.limit_param: page_size}
+            records = await self._fetch(url, method, params, endpoint)
+            if not records:
+                break
+            yield records
+            if len(records) < page_size:
+                break
+            offset += page_size
 
-            # Apply rate limiting
-            if self.rate_limiter:
-                await self.rate_limiter.acquire()
-
-            # Log the full request URL
-            full_request_url = f"{url}?{urlencode(params)}" if params else url
-            logger.debug(f"Making API request: {method} {full_request_url}")
-
-            async with self.session.request(method, url, params=params) as response:
-                if response.status != 200:
-                    body = await response.text()
-                    logger.error(f"API {response.status} response body: {body[:500]}")
-                    raise ReadError(f"API request failed with status {response.status}")
-
-                data = await response.json()
-                records = self._extract_records_from_response(data, config)
-
-                if not records:
-                    break
-
-                self.metrics["records_read"] += len(records)
-                self.metrics["batches_read"] += 1
-
-                yield records
-
-                # If we got less than batch_size, we're done
-                if len(records) < batch_size:
-                    break
-
-                offset += batch_size
-
-    async def _read_cursor_paginated(
-        self, url: str, method: str, config: Dict[str, Any], batch_size: int
+    async def _read_cursor(
+        self,
+        url: str,
+        method: str,
+        base_query: Dict[str, Any],
+        endpoint: ApiReadEndpoint,
+        pagination: CursorPagination,
+        batch_size: int,
     ) -> AsyncIterator[List[Dict[str, Any]]]:
-        """Read data using cursor-based pagination."""
-        pagination_config = config.get("pagination", {})
-        cursor_param = pagination_config.get("params", {}).get("cursor_param", "cursor")
-        limit_param = pagination_config.get("params", {}).get("limit_param", "limit")
-        
-        cursor = None
-        
+        cursor: Any = pagination.initial_cursor
         while True:
-            params = {limit_param: batch_size}
-            if cursor:
-                params[cursor_param] = cursor
-            
-            # Apply filters from config
-            self._apply_filters_to_params(params, config)
+            params = {**base_query}
+            if cursor is not None:
+                params[pagination.cursor_param] = cursor
+            data, records = await self._fetch_with_envelope(url, method, params, endpoint)
+            if not records:
+                break
+            yield records
+            cursor = _extract_path(data, pagination.cursor_response_ref)
+            if not cursor:
+                break
 
-            # Apply rate limiting
-            if self.rate_limiter:
-                await self.rate_limiter.acquire()
-
-            # Log the full request URL
-            full_request_url = f"{url}?{urlencode(params)}" if params else url
-            logger.debug(f"Making API request: {method} {full_request_url}")
-
-            async with self.session.request(method, url, params=params) as response:
-                if response.status != 200:
-                    body = await response.text()
-                    logger.error(f"API {response.status} response body: {body[:500]}")
-                    raise ReadError(f"API request failed with status {response.status}")
-
-                data = await response.json()
-                records = self._extract_records_from_response(data, config)
-
-                if not records:
-                    break
-
-                self.metrics["records_read"] += len(records)
-                self.metrics["batches_read"] += 1
-
-                yield records
-
-                # Extract next cursor from response
-                cursor = self._extract_next_cursor_from_response(data, pagination_config)
-                if not cursor:
-                    break
-
-    async def _read_page_paginated(
-        self, url: str, method: str, config: Dict[str, Any], batch_size: int
+    async def _read_page(
+        self,
+        url: str,
+        method: str,
+        base_query: Dict[str, Any],
+        endpoint: ApiReadEndpoint,
+        pagination: PagePagination,
+        batch_size: int,
     ) -> AsyncIterator[List[Dict[str, Any]]]:
-        """Read data using page number-based pagination."""
-        pagination_config = config.get("pagination", {})
-        page_param = pagination_config.get("params", {}).get("page_param", "page")
-        limit_param = pagination_config.get("params", {}).get("limit_param", "limit")
-
-        page = pagination_config.get("start_page", 1)
-
+        page = pagination.page_initial
+        page_size = batch_size
         while True:
-            params = {page_param: page, limit_param: batch_size}
-            
-            # Apply filters from config
-            self._apply_filters_to_params(params, config)
+            params = {**base_query, pagination.page_param: page}
+            if pagination.size_param:
+                params[pagination.size_param] = page_size
+            records = await self._fetch(url, method, params, endpoint)
+            if not records:
+                break
+            yield records
+            if len(records) < page_size:
+                break
+            page += 1
 
-            # Apply rate limiting
-            if self.rate_limiter:
-                await self.rate_limiter.acquire()
-
-            # Log the full request URL
-            full_request_url = f"{url}?{urlencode(params)}" if params else url
-            logger.debug(f"Making API request: {method} {full_request_url}")
-
-            async with self.session.request(method, url, params=params) as response:
-                if response.status != 200:
-                    body = await response.text()
-                    logger.error(f"API {response.status} response body: {body[:500]}")
-                    raise ReadError(f"API request failed with status {response.status}")
-
-                data = await response.json()
-                records = self._extract_records_from_response(data, config)
-
-                if not records:
-                    break
-
-                self.metrics["records_read"] += len(records)
-                self.metrics["batches_read"] += 1
-
-                yield records
-
-                # If we got less than batch_size, we're done
-                if len(records) < batch_size:
-                    break
-
-                page += 1
-
-    def _extract_next_cursor_from_response(
-        self, data: Dict[str, Any], pagination_config: Dict[str, Any]
-    ) -> Optional[str]:
-        """Extract next cursor from API response."""
-        cursor_field = pagination_config.get("cursor_field", "next_cursor")
-        
-        if isinstance(data, dict):
-            # Look for cursor in common locations
-            for field in [cursor_field, "next_cursor", "cursor", "next", "continuation_token"]:
-                if field in data:
-                    cursor_value = data[field]
-                    if cursor_value:
-                        return str(cursor_value)
-            
-            # Look for cursor in pagination metadata
-            if "pagination" in data and isinstance(data["pagination"], dict):
-                pagination = data["pagination"]
-                for field in [cursor_field, "next_cursor", "cursor", "next"]:
-                    if field in pagination:
-                        cursor_value = pagination[field]
-                        if cursor_value:
-                            return str(cursor_value)
-        
-        return None
-
-    async def _read_single_request(
-        self, url: str, method: str, config: Dict[str, Any]
+    async def _read_single(
+        self,
+        url: str,
+        method: str,
+        base_query: Dict[str, Any],
+        endpoint: ApiReadEndpoint,
     ) -> Optional[List[Dict[str, Any]]]:
-        """Read data from single API request."""
-        params = {}
-        self._apply_filters_to_params(params, config)
-        
-        # Apply rate limiting
+        return await self._fetch(url, method, base_query, endpoint)
+
+    # ------------------------------------------------------------------
+    # HTTP & extraction
+    # ------------------------------------------------------------------
+
+    async def _fetch(
+        self,
+        url: str,
+        method: str,
+        params: Dict[str, Any],
+        endpoint: ApiReadEndpoint,
+    ) -> List[Dict[str, Any]]:
+        _, records = await self._fetch_with_envelope(url, method, params, endpoint)
+        return records
+
+    async def _fetch_with_envelope(
+        self,
+        url: str,
+        method: str,
+        params: Dict[str, Any],
+        endpoint: ApiReadEndpoint,
+    ) -> tuple[Any, List[Dict[str, Any]]]:
         if self.rate_limiter:
             await self.rate_limiter.acquire()
-
-        full_request_url = f"{url}?{urlencode(params)}" if params else url
-        logger.debug(f"Making API request: {method} {full_request_url}")
+        full = f"{url}?{urlencode(params)}" if params else url
+        logger.debug("Making API request: %s %s", method, full)
 
         async with self.session.request(method, url, params=params) as response:
             if response.status != 200:
                 body = await response.text()
-                logger.error(f"API {response.status} response body: {body[:500]}")
+                logger.error("API %s response body: %s", response.status, body[:500])
                 raise ReadError(f"API request failed with status {response.status}")
-
             data = await response.json()
-            records = self._extract_records_from_response(data, config)
 
-            if records:
-                self.metrics["records_read"] += len(records)
-                self.metrics["batches_read"] += 1
+        records = _extract_records(data, endpoint.response.records_ref)
+        if records:
+            self.metrics["records_read"] += len(records)
+            self.metrics["batches_read"] += 1
+        return data, records
 
-            return records
+    # ------------------------------------------------------------------
+    # State persistence
+    # ------------------------------------------------------------------
 
-    def _extract_records_from_response(
-        self, data: Dict[str, Any], config: Dict[str, Any]
-    ) -> List[Dict[str, Any]]:
-        """Extract records from API response."""
-        if isinstance(data, list):
-            return data
+    async def _save_cursor(
+        self,
+        state_manager: StateManager,
+        stream_id: str,
+        partition: Dict[str, Any],
+        batch: List[Dict[str, Any]],
+        cursor_field: str,
+        source: ResolvedSource,
+        total_records: int,
+        batch_count: int,
+    ) -> None:
+        last_record = batch[-1]
+        cursor_value = last_record.get(cursor_field)
+        if cursor_value is None:
+            return
 
-        data_field = config.get("data_field", "data")
+        primary = CursorField(field=cursor_field, value=cursor_value, inclusive=True)
+        cursor = StreamCursor(primary=primary)
 
-        if data_field in data:
-            records = data[data_field]
-            if isinstance(records, list):
-                return records
-            else:
-                return [records]
+        tie_breakers = source.replication.tie_breaker_fields or ()
+        if tie_breakers:
+            tbs = []
+            for fields in tie_breakers:
+                # tie_breaker_fields is a tuple of tuples; flatten dotted path lookups
+                path = fields if isinstance(fields, tuple) else (fields,)
+                value = _nested_value(last_record, ".".join(path))
+                if value is not None:
+                    tbs.append(CursorField(field=".".join(path), value=value, inclusive=True))
+            if tbs:
+                cursor.tiebreakers = tbs
 
-        return [data]
-
-    def _apply_filters_to_params(self, params: Dict[str, Any], config: Dict[str, Any]):
-        """Apply filters from config to request parameters."""
-        filters = config.get("filters", {})
-
-        for filter_name, filter_config in filters.items():
-            filter_value = self._extract_value_from_schema_filter(filter_config)
-            if filter_value is None:
-                continue
-
-            if isinstance(filter_value, list):
-                params[filter_name] = ",".join(str(v) for v in filter_value)
-            else:
-                params[filter_name] = filter_value
-
-    def _extract_value_from_schema_filter(self, filter_config: Dict[str, Any]) -> Any:
-        """Extract actual filter value from schema-based filter configuration."""
-        raw = None
-        if "value" in filter_config:
-            raw = filter_config["value"]
-        elif "default" in filter_config:
-            raw = filter_config["default"]
-        else:
-            if filter_config.get("required", False):
-                logger.warning(f"Required filter missing explicit value: {filter_config}")
-            return None
-
-        declared_type = filter_config.get("type")
-        if declared_type == "integer" and isinstance(raw, str):
-            try:
-                return int(raw)
-            except ValueError:
-                pass
-        return raw
-
-
-    def _get_filter_param_for_cursor_field(self, cursor_field: str, source_config: Dict[str, Any]) -> Optional[str]:
-        """Get the API filter parameter name for a cursor field from the source configuration."""
-        try:
-            # Check for replication filter mapping in the source config
-            replication_mapping = source_config.get("replication_filter_mapping", {})
-            if cursor_field in replication_mapping:
-                filter_param = replication_mapping[cursor_field]
-                logger.debug(f"Found filter mapping: {cursor_field} -> {filter_param}")
-                
-                # Validate the filter parameter exists in schema filters
-                filters = source_config.get("filters", {})
-                if filter_param in filters:
-                    return filter_param
-                else:
-                    logger.warning(f"Mapped filter parameter '{filter_param}' not found in source config filters")
-                    return None
-            
-            # Fallback: check if cursor_field directly exists as a filter
-            filters = source_config.get("filters", {})
-            if cursor_field in filters:
-                logger.debug(f"Using direct filter mapping: {cursor_field}")
-                return cursor_field
-            
-            logger.warning(f"No filter parameter found for cursor field '{cursor_field}'")
-            return None
-            
-        except Exception as e:
-            logger.error(f"Failed to get filter parameter for cursor field '{cursor_field}': {str(e)}")
-            return None
-
-
-    def _compute_effective_start_time(self, cursor: str, safety_window_seconds: int) -> str:
-        """Compute the effective start time by subtracting safety window from cursor."""
-        try:
-            from datetime import timedelta
-            from dateutil.parser import isoparse
-            
-            # Parse datetime using dateutil for robust format handling
-            cursor_dt = isoparse(cursor)
-            
-            # Ensure timezone-aware datetime
-            if cursor_dt.tzinfo is None:
-                cursor_dt = cursor_dt.replace(tzinfo=timezone.utc)
-            
-            effective_dt = cursor_dt - timedelta(seconds=safety_window_seconds)
-            # Return in ISO format with Z suffix as expected by Wise API  
-            return effective_dt.isoformat().replace('+00:00', 'Z')
-            
-        except (ValueError, ImportError) as e:
-            logger.debug(f"Failed to parse datetime cursor '{cursor}': {str(e)}")
-            
-            # Try numeric cursor (ID-based)
-            try:
-                cursor_id = int(cursor)
-                effective_id = max(0, cursor_id - safety_window_seconds)
-                return str(effective_id)
-            except ValueError:
-                logger.warning(f"Failed to parse cursor '{cursor}' as datetime or numeric, using as-is")
-                return cursor
-
-    def _build_replication_filter(self, filter_param: str, effective_start: str) -> Dict[str, Any]:
-        """Build the filter parameters for incremental replication (always inclusive mode)."""
-        filter_params = {}
-        filter_params[filter_param] = effective_start
-
-        logger.debug(f"Built incremental filter: {filter_param} = {effective_start}")
-        return filter_params
-
-    def _get_nested_field_value(self, record: Dict[str, Any], field_path: str) -> Any:
-        """Get value from nested field using dot notation (e.g., 'details.reference')."""
-        try:
-            value = record
-            for field_name in field_path.split('.'):
-                if isinstance(value, dict) and field_name in value:
-                    value = value[field_name]
-                else:
-                    return None
-            return value
-        except (KeyError, TypeError, AttributeError):
-            return None
-
-    def _deduplicate_records(self, batch: List[Dict[str, Any]], state: Dict[str, Any], config: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Filter out duplicate records based on cursor and tie-breaker comparison."""
-        if not batch:
-            return batch
-            
-        # Get stored cursor state
-        bookmarks = state.get("bookmarks", [])
-        if not bookmarks:
-            return batch  # No previous state, all records are new
-            
-        bookmark = bookmarks[0]
-        stored_cursor = bookmark.get("cursor")
-        if not stored_cursor:
-            return batch  # No cursor stored, all records are new
-            
-        cursor_field = state.get("cursor_field")
-        tie_breaker_fields = config.get("tie_breaker_fields", [])
-        
-        if not cursor_field or not tie_breaker_fields:
-            return batch  # No deduplication possible without cursor and tie-breaker fields
-            
-        deduplicated_records = []
-        
-        for record in batch:
-            if self._is_record_new(record, bookmark, cursor_field, tie_breaker_fields):
-                deduplicated_records.append(record)
-            else:
-                logger.debug(f"Skipping duplicate record: {cursor_field}={record.get(cursor_field)}, tie_breakers={[self._get_nested_field_value(record, f) for f in tie_breaker_fields]}")
-
-        return deduplicated_records
-
-    def _is_record_new(self, record: Dict[str, Any], bookmark: Dict[str, Any], cursor_field: str, tie_breaker_fields: List[str]) -> bool:
-        """Check if a record is new compared to stored cursor and tie-breaker values."""
-        try:
-            from dateutil.parser import isoparse
-            
-            record_cursor_value = record.get(cursor_field)
-            if record_cursor_value is None:
-                return True  # No cursor value, treat as new
-                
-            stored_cursor = bookmark.get("cursor")
-            if stored_cursor is None:
-                return True  # No stored cursor, treat as new
-                
-            # Parse cursor values for comparison
-            try:
-                stored_cursor_dt = isoparse(stored_cursor)
-                record_cursor_dt = isoparse(str(record_cursor_value))
-                
-                # Ensure both are timezone-aware
-                if stored_cursor_dt.tzinfo is None:
-                    stored_cursor_dt = stored_cursor_dt.replace(tzinfo=timezone.utc)
-                if record_cursor_dt.tzinfo is None:
-                    record_cursor_dt = record_cursor_dt.replace(tzinfo=timezone.utc)
-                    
-            except (ValueError, ImportError):
-                # Fallback to string comparison
-                stored_cursor_dt = str(stored_cursor)
-                record_cursor_dt = str(record_cursor_value)
-            
-            # Compare cursor values
-            if record_cursor_dt > stored_cursor_dt:
-                return True  # Record is newer than stored cursor
-            elif record_cursor_dt < stored_cursor_dt:
-                return False  # Record is older than stored cursor
-            else:
-                # Same cursor value, check tie-breakers (always inclusive mode)
-                return self._compare_tie_breakers(record, tie_breaker_fields, bookmark)
-
-        except Exception as e:
-            logger.warning(f"Error comparing record cursor: {str(e)}, treating as new")
-            return True
-
-    def _compare_tie_breakers(self, record: Dict[str, Any], tie_breaker_fields: List[str], bookmark: Dict[str, Any]) -> bool:
-        """Compare tie-breaker field values to determine if record is new (always inclusive mode)."""
-        if not tie_breaker_fields:
-            return False  # No tie-breakers in inclusive mode means treat as duplicate
-            
-        aux_data = bookmark.get("aux", {})
-        
-        # Handle multiple tie-breakers
-        if "tiebreakers" in aux_data:
-            stored_tiebreakers = aux_data["tiebreakers"]
-            
-            # Compare each tie-breaker field in order
-            for i, field_name in enumerate(tie_breaker_fields):
-                if i >= len(stored_tiebreakers):
-                    return True  # New field, treat as new
-                    
-                record_value = self._get_nested_field_value(record, field_name)
-                stored_tiebreaker = stored_tiebreakers[i]
-                stored_value = stored_tiebreaker.get("value")
-                
-                if record_value is None:
-                    return True  # Missing record value, treat as new
-                    
-                # Compare values (convert to same type for comparison)
-                try:
-                    if isinstance(stored_value, str) and str(record_value).isdigit() and stored_value.isdigit():
-                        # Both are numeric strings, compare as numbers
-                        record_num = int(record_value)
-                        stored_num = int(stored_value)
-                        if record_num > stored_num:
-                            return True
-                        elif record_num < stored_num:
-                            return False
-                        # Equal, continue to next field
-                    else:
-                        # String comparison
-                        if str(record_value) > str(stored_value):
-                            return True
-                        elif str(record_value) < str(stored_value):
-                            return False
-                        # Equal, continue to next field
-                except (ValueError, TypeError):
-                    # Fallback to string comparison
-                    if str(record_value) > str(stored_value):
-                        return True
-                    elif str(record_value) < str(stored_value):
-                        return False
-            
-            # All tie-breaker fields are equal - treat as duplicate in inclusive mode
-            return False
-
-        # No tie-breaker information found - treat as duplicate in inclusive mode
-        return False
-
-    async def write_batch(self, batch: List[Dict[str, Any]], config: Dict[str, Any]):
-        """Source connector is read-only; writes are handled by the destination."""
-        raise NotImplementedError("Source connector is read-only")
+        stats = StreamStats(
+            records_synced=total_records,
+            batches_written=batch_count,
+            last_checkpoint_at=datetime.now(timezone.utc),
+            errors_since_checkpoint=0,
+        )
+        state_manager.save_stream_checkpoint(
+            stream_name=stream_id,
+            partition=partition,
+            cursor=asdict(cursor),
+            hwm=cursor_value,
+            stats=asdict(stats),
+        )
 
     def supports_incremental_read(self) -> bool:
-        """API supports incremental reading through timestamps."""
         return True
 
-    def supports_upsert(self) -> bool:
-        """API supports upsert through idempotency."""
-        return True
 
-    def _mask_sensitive_headers(self, headers: Dict[str, str]) -> Dict[str, str]:
-        """Mask sensitive header values for logging."""
-        sensitive_keys = {'authorization', 'x-api-key', 'api-key', 'token', 'bearer'}
-        masked = {}
-        for key, value in headers.items():
-            if key.lower() in sensitive_keys:
-                # Show first 10 chars and mask the rest
-                if len(value) > 14:
-                    masked[key] = value[:14] + '***MASKED***'
-                else:
-                    masked[key] = '***MASKED***'
-            else:
-                masked[key] = value
-        return masked
+# ----------------------------------------------------------------------
+# Module-level helpers
+# ----------------------------------------------------------------------
 
+
+def _resolve_default(default: Any, source: ResolvedSource) -> Any:
+    """Resolve a ParamSpec.default value.
+
+    The schema lets defaults be either literal values or
+    ``{"ref": "connection.selections.X"}`` style references. We support
+    selections/parameters lookups against the ``ResolvedSource.connection``.
+    """
+    if default is None:
+        return None
+    if isinstance(default, dict) and "ref" in default:
+        ref = default["ref"]
+        # connection.selections.foo / connection.parameters.foo
+        parts = ref.split(".")
+        if len(parts) >= 3 and parts[0] == "connection":
+            scope, key = parts[1], parts[2]
+            scopes = {
+                "selections": source.connection.selections,
+                "parameters": source.connection.parameters,
+            }
+            return scopes.get(scope, {}).get(key)
+        # runtime.batch_size etc. — caller assigns via pagination loop, leave None
+        return None
+    return default
+
+
+def _extract_records(data: Any, ref: str) -> List[Dict[str, Any]]:
+    """Pull the record array out of an envelope using a dotted ``records_ref``.
+
+    `response.body` (the default) means "the body is the records array".
+    """
+    if not ref or ref in ("response.body", "$"):
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            return [data]
+        return []
+
+    # Strip the leading "response." marker, navigate the body.
+    path = ref.split(".")
+    if path and path[0] == "response":
+        path = path[1:]
+    if path and path[0] == "body":
+        path = path[1:]
+
+    value: Any = data
+    for key in path:
+        if isinstance(value, dict) and key in value:
+            value = value[key]
+        else:
+            return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, dict):
+        return [value]
+    return []
+
+
+def _extract_path(data: Any, ref: Optional[str]) -> Any:
+    """Walk dotted ``$.foo.bar`` style ref to extract a single value."""
+    if not ref:
+        return None
+    path = ref.split(".")
+    if path and path[0] in ("response", "$"):
+        path = path[1:]
+    if path and path[0] == "body":
+        path = path[1:]
+    value: Any = data
+    for key in path:
+        if isinstance(value, dict) and key in value:
+            value = value[key]
+        else:
+            return None
+    return value
+
+
+def _shift_cursor_value(cursor: Any, safety_window_seconds: int) -> str:
+    """Subtract safety window from cursor (best-effort: datetime or numeric ID)."""
+    if safety_window_seconds <= 0:
+        return str(cursor)
+    try:
+        dt = isoparse(str(cursor))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        shifted = dt - timedelta(seconds=safety_window_seconds)
+        return shifted.isoformat().replace("+00:00", "Z")
+    except (ValueError, TypeError):
+        try:
+            return str(max(0, int(cursor) - safety_window_seconds))
+        except (ValueError, TypeError):
+            return str(cursor)
+
+
+def _nested_value(record: Dict[str, Any], path: str) -> Any:
+    current: Any = record
+    for key in path.split("."):
+        if isinstance(current, dict) and key in current:
+            current = current[key]
+        else:
+            return None
+    return current
