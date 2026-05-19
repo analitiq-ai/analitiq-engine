@@ -218,6 +218,7 @@ TODO.md
 # spec referenced from module docstrings and the PR template.
 docs/*
 !docs/connector-connection-parameterization.md
+!docs/engine-schema-alignment-plan.md
 scripts/
 docker-cloud/
 
