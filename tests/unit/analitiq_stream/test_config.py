@@ -35,61 +35,57 @@ class TestConfig:
 
 
 class TestPipelineConfigValidator:
-    """Test suite for pipeline config validation."""
+    """Test suite for pipeline config validation (flat shape per
+    https://schemas.analitiq.ai/pipeline/latest.json)."""
 
     @pytest.fixture
     def valid_pipeline(self):
         return {
-            "pipeline": {
-                "pipeline_id": "test-pipeline",
-                "connections": {
-                    "source": "my-api",
-                    "destinations": ["prod-postgres"],
-                },
-                "streams": ["stream-1"],
-                "engine": {"vcpu": 1, "memory": 8192},
-                "runtime": {
-                    "buffer_size": 5000,
-                    "batching": {"batch_size": 100, "max_concurrent_batches": 3},
-                    "logging": {"log_level": "INFO", "metrics_enabled": True},
-                    "error_handling": {"strategy": "dlq", "max_retries": 3, "retry_delay": 5},
+            "$schema": "https://schemas.analitiq.ai/pipeline/latest.json",
+            "pipeline_id": "test-pipeline",
+            "display_name": "Test",
+            "connections": {
+                "source": "my-api",
+                "destinations": ["prod-postgres"],
+            },
+            "streams": ["stream-1"],
+            "engine": {"vcpu": 1, "memory": 8192},
+            "runtime": {
+                "buffer_size": 5000,
+                "batching": {"batch_size": 100, "max_concurrent_batches": 3},
+                "logging": {"log_level": "INFO", "metrics_enabled": True},
+                "error_handling": {
+                    "strategy": "dlq", "max_retries": 3, "retry_delay_seconds": 5,
                 },
             },
-            "streams": [{"stream_id": "stream-1"}],
         }
 
     @pytest.mark.unit
     def test_valid_pipeline_passes(self, valid_pipeline):
         result = validate_pipeline_config(valid_pipeline)
-        assert "pipeline" in result
+        assert result["pipeline_id"] == "test-pipeline"
 
     @pytest.mark.unit
-    def test_missing_pipeline_key_fails(self, valid_pipeline):
-        del valid_pipeline["pipeline"]
-        with pytest.raises(ValueError, match="pipeline"):
-            validate_pipeline_config(valid_pipeline)
-
-    @pytest.mark.unit
-    def test_missing_streams_key_fails(self, valid_pipeline):
-        del valid_pipeline["streams"]
-        with pytest.raises(ValueError, match="streams"):
+    def test_missing_connections_key_fails(self, valid_pipeline):
+        del valid_pipeline["connections"]
+        with pytest.raises(ValueError, match="connections"):
             validate_pipeline_config(valid_pipeline)
 
     @pytest.mark.unit
     def test_missing_source_fails(self, valid_pipeline):
-        valid_pipeline["pipeline"]["connections"]["source"] = ""
+        valid_pipeline["connections"]["source"] = ""
         with pytest.raises(ValueError, match="source"):
             validate_pipeline_config(valid_pipeline)
 
     @pytest.mark.unit
     def test_missing_destinations_fails(self, valid_pipeline):
-        valid_pipeline["pipeline"]["connections"]["destinations"] = []
+        valid_pipeline["connections"]["destinations"] = []
         with pytest.raises(ValueError, match="destinations"):
             validate_pipeline_config(valid_pipeline)
 
     @pytest.mark.unit
     def test_no_stream_ids_fails(self, valid_pipeline):
-        valid_pipeline["pipeline"]["streams"] = []
+        valid_pipeline["streams"] = []
         with pytest.raises(ValueError, match="stream"):
             validate_pipeline_config(valid_pipeline)
 
@@ -99,14 +95,14 @@ class TestConnectionConfigValidator:
 
     @pytest.mark.unit
     def test_valid_connection_passes(self):
-        config = {"connector_slug": "postgresql", "host": "localhost"}
+        config = {"connector_id": "postgres", "parameters": {"host": "localhost"}}
         result = validate_connection_config(config)
-        assert result["connector_slug"] == "postgresql"
+        assert result["connector_id"] == "postgres"
 
     @pytest.mark.unit
-    def test_missing_connector_slug_fails(self):
-        with pytest.raises(ValueError, match="connector_slug"):
-            validate_connection_config({"host": "localhost"})
+    def test_missing_connector_id_fails(self):
+        with pytest.raises(ValueError, match="connector_id"):
+            validate_connection_config({"parameters": {"host": "localhost"}})
 
 
 class TestEndpointRefModel:
@@ -254,11 +250,11 @@ class TestConnectionLoader:
         conn_dir = tmp_path / "my-api"
         conn_dir.mkdir()
         (conn_dir / "connection.json").write_text(
-            '{"connector_slug": "wise", "host": "https://api.wise.com"}'
+            '{"connector_id": "wise", "parameters": {"host": "https://api.wise.com"}}'
         )
 
         result = load_connection("my-api", tmp_path)
-        assert result["connector_slug"] == "wise"
+        assert result["connector_id"] == "wise"
 
     @pytest.mark.unit
     def test_load_missing_connection_raises(self, tmp_path):
@@ -270,11 +266,11 @@ class TestConnectionLoader:
         connector_dir = tmp_path / "wise" / "definition"
         connector_dir.mkdir(parents=True)
         (connector_dir / "connector.json").write_text(
-            '{"connector_type": "api", "slug": "wise"}'
+            '{"kind": "api", "connector_id": "wise"}'
         )
 
         result = load_connector_for_connection("wise", tmp_path)
-        assert result["connector_type"] == "api"
+        assert result["kind"] == "api"
 
     @pytest.mark.unit
     def test_load_missing_connector_raises(self, tmp_path):

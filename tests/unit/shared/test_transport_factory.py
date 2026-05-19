@@ -189,19 +189,19 @@ class TestResolveTransportSpec:
             "slug": "demo",
             "default_transport": "api",
             "transports": {
-                "api": {"kind": "http", "base_url": "https://api.example.com"}
+                "api": {"transport_type": "http", "base_url": "https://api.example.com"}
             },
         }
         ctx = ResolutionContext(connector=connector)
         spec = resolve_transport_spec(connector, context=ctx)
-        assert spec == {"kind": "http", "base_url": "https://api.example.com"}
+        assert spec == {"transport_type": "http", "base_url": "https://api.example.com"}
 
     def test_transport_defaults_merged_into_named_transport(self):
         connector = {
             "slug": "demo",
             "default_transport": "api",
             "transport_defaults": {
-                "kind": "http",
+                "transport_type": "http",
                 "headers": {"Accept": "application/json"},
             },
             "transports": {
@@ -213,7 +213,7 @@ class TestResolveTransportSpec:
         }
         ctx = ResolutionContext(connector=connector)
         spec = resolve_transport_spec(connector, context=ctx)
-        assert spec["kind"] == "http"
+        assert spec["transport_type"] == "http"
         assert spec["headers"] == {
             "Accept": "application/json",
             "Authorization": "Bearer x",
@@ -228,7 +228,7 @@ class TestResolveTransportSpec:
             },
             "transports": {
                 "api": {
-                    "kind": "http",
+                    "transport_type": "http",
                     "base_url": "https://api.example.com",
                     "headers": {"Authorization": "Basic specific"},
                 }
@@ -242,7 +242,7 @@ class TestResolveTransportSpec:
         connector = {
             "slug": "demo",
             "default_transport": "api",
-            "transports": {"api": {"kind": "http", "base_url": "https://x"}},
+            "transports": {"api": {"transport_type": "http", "base_url": "https://x"}},
         }
         ctx = ResolutionContext(connector=connector)
         with pytest.raises(KeyError, match="not in declared transports"):
@@ -256,7 +256,7 @@ class TestResolveTransportSpec:
     def test_no_default_transport_rejected(self):
         connector = {
             "slug": "demo",
-            "transports": {"api": {"kind": "http", "base_url": "https://x"}},
+            "transports": {"api": {"transport_type": "http", "base_url": "https://x"}},
         }
         ctx = ResolutionContext(connector=connector)
         with pytest.raises(ValueError, match="`default_transport` not declared"):
@@ -274,7 +274,7 @@ class TestResolveTransportSpec:
             },
             "transports": {
                 "api": {
-                    "kind": "sqlalchemy",
+                    "transport_type": "sqlalchemy",
                     "driver": "postgresql+asyncpg",
                     "dsn": {
                         "template": (
@@ -303,14 +303,14 @@ class TestBuildSqlAlchemyTransport:
     async def test_missing_driver_rejected(self):
         with pytest.raises(ValueError, match="requires `driver`"):
             await build_sqlalchemy_transport(
-                {"kind": "sqlalchemy", "dsn": "postgresql+asyncpg://u:p@h/d"}
+                {"transport_type": "sqlalchemy", "dsn": "postgresql+asyncpg://u:p@h/d"}
             )
 
     @pytest.mark.asyncio
     async def test_missing_dsn_rejected(self):
         with pytest.raises(ValueError, match="`dsn` must resolve"):
             await build_sqlalchemy_transport(
-                {"kind": "sqlalchemy", "driver": "postgresql+asyncpg"}
+                {"transport_type": "sqlalchemy", "driver": "postgresql+asyncpg"}
             )
 
     @pytest.mark.asyncio
@@ -318,7 +318,7 @@ class TestBuildSqlAlchemyTransport:
         with pytest.raises(TypeError, match="`connect_args` must be an object"):
             await build_sqlalchemy_transport(
                 {
-                    "kind": "sqlalchemy",
+                    "transport_type": "sqlalchemy",
                     "driver": "postgresql+asyncpg",
                     "dsn": "postgresql+asyncpg://u:p@h/d",
                     "connect_args": "nope",
@@ -330,7 +330,7 @@ class TestBuildSqlAlchemyTransport:
         with pytest.raises(TypeError, match="`options` must be an object"):
             await build_sqlalchemy_transport(
                 {
-                    "kind": "sqlalchemy",
+                    "transport_type": "sqlalchemy",
                     "driver": "postgresql+asyncpg",
                     "dsn": "postgresql+asyncpg://u:p@h/d",
                     "options": "nope",
@@ -357,7 +357,7 @@ class TestBuildSqlAlchemyTransport:
         ):
             transport = await build_sqlalchemy_transport(
                 {
-                    "kind": "sqlalchemy",
+                    "transport_type": "sqlalchemy",
                     "driver": "postgresql+asyncpg",
                     "dsn": "postgresql+asyncpg://u:p@h:5432/d",
                 }
@@ -376,20 +376,20 @@ class TestBuildHttpTransport:
     @pytest.mark.asyncio
     async def test_missing_base_url_rejected(self):
         with pytest.raises(ValueError, match="`base_url` must resolve"):
-            await build_http_transport({"kind": "http"})
+            await build_http_transport({"transport_type": "http"})
 
     @pytest.mark.asyncio
     async def test_headers_must_be_object(self):
         with pytest.raises(TypeError, match="`headers` must be an object"):
             await build_http_transport(
-                {"kind": "http", "base_url": "https://x", "headers": "nope"}
+                {"transport_type": "http", "base_url": "https://x", "headers": "nope"}
             )
 
     @pytest.mark.asyncio
     async def test_rate_limit_must_be_object(self):
         with pytest.raises(TypeError, match="`rate_limit` must be an object"):
             await build_http_transport(
-                {"kind": "http", "base_url": "https://x", "rate_limit": "nope"}
+                {"transport_type": "http", "base_url": "https://x", "rate_limit": "nope"}
             )
 
     @pytest.mark.asyncio
@@ -399,7 +399,7 @@ class TestBuildHttpTransport:
         with pytest.raises(ValueError, match="requires both"):
             await build_http_transport(
                 {
-                    "kind": "http",
+                    "transport_type": "http",
                     "base_url": "https://x",
                     "rate_limit": {"max_requests": 10},
                 }
@@ -407,7 +407,7 @@ class TestBuildHttpTransport:
         with pytest.raises(ValueError, match="requires both"):
             await build_http_transport(
                 {
-                    "kind": "http",
+                    "transport_type": "http",
                     "base_url": "https://x",
                     "rate_limit": {"time_window_seconds": 60},
                 }
@@ -420,7 +420,7 @@ class TestBuildHttpTransport:
         with pytest.raises(ValueError, match="requires both"):
             await build_http_transport(
                 {
-                    "kind": "http",
+                    "transport_type": "http",
                     "base_url": "https://x",
                     "rate_limit": {
                         "max_requests": 10,
@@ -433,7 +433,7 @@ class TestBuildHttpTransport:
     async def test_headers_resolved_and_session_built(self):
         transport = await build_http_transport(
             {
-                "kind": "http",
+                "transport_type": "http",
                 "base_url": "https://api.example.com/",
                 "headers": {
                     "Authorization": "Bearer abc",
@@ -456,7 +456,7 @@ class TestBuildHttpTransport:
     async def test_none_header_values_dropped(self):
         transport = await build_http_transport(
             {
-                "kind": "http",
+                "transport_type": "http",
                 "base_url": "https://x",
                 "headers": {"X-Optional": None, "X-Always": "yes"},
             }
@@ -480,7 +480,7 @@ class TestBuildTransportDispatch:
             "slug": "demo",
             "default_transport": "api",
             "transports": {
-                "api": {"kind": "http", "base_url": "https://api.example.com"}
+                "api": {"transport_type": "http", "base_url": "https://api.example.com"}
             },
         }
         ctx = ResolutionContext(connector=connector)
@@ -495,10 +495,10 @@ class TestBuildTransportDispatch:
         connector = {
             "slug": "demo",
             "default_transport": "api",
-            "transports": {"api": {"kind": "kafka", "base_url": "x"}},
+            "transports": {"api": {"transport_type": "kafka", "base_url": "x"}},
         }
         ctx = ResolutionContext(connector=connector)
-        with pytest.raises(NotImplementedError, match="Unsupported transport kind"):
+        with pytest.raises(NotImplementedError, match="Unsupported transport_type"):
             await build_transport(connector, context=ctx)
 
     @pytest.mark.asyncio
@@ -508,7 +508,7 @@ class TestBuildTransportDispatch:
         connector = {
             "slug": "demo",
             "default_transport": "api",
-            "transports": {"api": {"kind": "kafka", "base_url": "x"}},
+            "transports": {"api": {"transport_type": "kafka", "base_url": "x"}},
         }
         ctx = ResolutionContext(connector=connector)
         with pytest.raises(NotImplementedError) as excinfo:
@@ -524,7 +524,7 @@ class TestBuildTransportDispatch:
             "transports": {"api": {"base_url": "x"}},
         }
         ctx = ResolutionContext(connector=connector)
-        with pytest.raises(ValueError, match="missing `kind`"):
+        with pytest.raises(ValueError, match="missing `transport_type`"):
             await build_transport(connector, context=ctx)
 
 
@@ -596,7 +596,7 @@ class TestTransportKindRegistry:
                 "slug": "demo",
                 "default_transport": "api",
                 "transports": {
-                    "api": {"kind": "test_kind", "marker": "value"}
+                    "api": {"transport_type": "test_kind", "marker": "value"}
                 },
             }
             ctx = ResolutionContext(connector=connector)
@@ -604,7 +604,7 @@ class TestTransportKindRegistry:
             assert result is sentinel
             builder.assert_awaited_once()
             (called_spec,) = builder.await_args.args
-            assert called_spec["kind"] == "test_kind"
+            assert called_spec["transport_type"] == "test_kind"
             assert called_spec["marker"] == "value"
         finally:
             unregister_transport_kind("test_kind")
@@ -613,8 +613,8 @@ class TestTransportKindRegistry:
         connector = {
             "slug": "demo",
             "default_transport": "api",
-            "transports": {"api": {"kind": "test_kind"}},
+            "transports": {"api": {"transport_type": "test_kind"}},
         }
         ctx = ResolutionContext(connector=connector)
-        with pytest.raises(NotImplementedError, match="Unsupported transport kind"):
+        with pytest.raises(NotImplementedError, match="Unsupported transport_type"):
             await build_transport(connector, context=ctx)

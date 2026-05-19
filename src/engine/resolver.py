@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Mapping, Optional
+from urllib.parse import quote
 
 
 @dataclass
@@ -161,6 +162,12 @@ class Resolver:
         return value
 
     def _resolve_mapping(self, node: Mapping[str, Any]) -> Any:
+        # ``kind``-tagged composition nodes are resolved by their own
+        # handlers; they own how their siblings are interpreted.
+        kind = node.get("kind") if isinstance(node.get("kind"), str) else None
+        if kind == "url_template":
+            return self._resolve_url_template(node)
+
         # Detect expression markers. Mixing markers (e.g. `ref` + `template`,
         # or `function` + `ref`) is rejected outright so connector authors
         # see the typo instead of one marker silently winning.
@@ -238,6 +245,60 @@ class Resolver:
             out.append(str(value))
             i = k + 1
         return "".join(out)
+
+    _URL_ENCODINGS = {"url_userinfo", "url_path_segment", "host", "raw"}
+
+    def _resolve_url_template(self, node: Mapping[str, Any]) -> str:
+        """Resolve a ``{kind: "url_template", template, bindings}`` node.
+
+        ``template`` is a Python-style ``{name}`` format string.
+        ``bindings`` is a mapping of ``name -> {value: <expr>, encoding}``.
+        Each binding's value is resolved against the active context and
+        encoded per ``encoding`` before substitution.
+        """
+        template = node.get("template")
+        if not isinstance(template, str) or not template:
+            raise ValueError(f"url_template node missing/invalid `template`: {node!r}")
+        bindings = node.get("bindings")
+        if not isinstance(bindings, Mapping):
+            raise ValueError(f"url_template node missing/invalid `bindings`: {node!r}")
+
+        resolved: Dict[str, str] = {}
+        for name, spec in bindings.items():
+            if not isinstance(spec, Mapping):
+                raise ValueError(
+                    f"url_template binding {name!r} must be a mapping with "
+                    f"`value` and `encoding`, got {type(spec).__name__}"
+                )
+            encoding = spec.get("encoding", "raw")
+            if encoding not in self._URL_ENCODINGS:
+                raise ValueError(
+                    f"url_template binding {name!r} has unknown encoding "
+                    f"{encoding!r}; allowed: {sorted(self._URL_ENCODINGS)}"
+                )
+            value = self.resolve(spec.get("value"))
+            if value is None:
+                raise KeyError(
+                    f"url_template binding {name!r} resolved to None"
+                )
+            if not isinstance(value, (str, int, float, bool)):
+                raise TypeError(
+                    f"url_template binding {name!r} must resolve to a scalar, "
+                    f"got {type(value).__name__}"
+                )
+            text = str(value)
+            if encoding == "url_userinfo":
+                resolved[name] = quote(text, safe="")
+            elif encoding == "url_path_segment":
+                resolved[name] = quote(text, safe="")
+            else:
+                resolved[name] = text
+        try:
+            return template.format(**resolved)
+        except KeyError as e:
+            raise KeyError(
+                f"url_template {template!r}: missing binding for {e.args[0]!r}"
+            )
 
     def _resolve_function(self, node: Mapping[str, Any]) -> Any:
         name = node.get("function")

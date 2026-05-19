@@ -72,11 +72,17 @@ class AssignmentTransformer:
                 value_spec = assignment.get("value", {})
                 validate = assignment.get("validate")
 
-                target_path = target.get("path", [])
-                target_type = target.get("type", "string")
+                # Stream contract: target.path is a string (e.g. "id" or
+                # "checkAccount.id"). Engine internals expect a list, so
+                # split on '.' when authored as a string. Lists pass through.
+                raw_path = target.get("path", [])
+                if isinstance(raw_path, str):
+                    target_path = raw_path.split(".") if raw_path else []
+                else:
+                    target_path = list(raw_path)
+                target_type = target.get("arrow_type") or target.get("type") or "string"
                 nullable = target.get("nullable", True)
 
-                # Evaluate the value
                 value = await self._evaluate_value(record, result, value_spec)
 
                 # Validate if rules specified
@@ -129,17 +135,18 @@ class AssignmentTransformer:
         partial_result: Dict[str, Any],
         value_spec: Dict[str, Any]
     ) -> Any:
-        """Evaluate a value specification (const or expr)."""
-        kind = value_spec.get("kind", "expr")
+        """Evaluate a value specification per the stream contract.
 
-        if kind == "const":
-            const = value_spec.get("const", {})
-            return const.get("value")
-
-        elif kind == "expr":
-            expr = value_spec.get("expr", {})
-            return await self._evaluate_expression(record, partial_result, expr)
-
+        ``AssignmentValue`` is one of:
+        - ``{"expression": {"op": "get", "path": "<source field>"}}``
+        - ``{"constant": {"arrow_type": "...", "value": <json>}}``
+        """
+        constant = value_spec.get("constant")
+        if constant is not None:
+            return constant.get("value")
+        expression = value_spec.get("expression")
+        if expression is not None:
+            return await self._evaluate_expression(record, partial_result, expression)
         return None
 
     async def _evaluate_expression(
@@ -153,7 +160,14 @@ class AssignmentTransformer:
 
         match op:
             case "get":
-                path = expr.get("path", [])
+                # Stream contract: ``path`` is a string source field
+                # reference (e.g. "id" or "checkAccount.id"). Split on '.'
+                # for nested access. Lists pass through for engine internals.
+                raw_path = expr.get("path", [])
+                if isinstance(raw_path, str):
+                    path = raw_path.split(".") if raw_path else []
+                else:
+                    path = list(raw_path)
                 return self._get_nested_value(record, path)
 
             case "const":

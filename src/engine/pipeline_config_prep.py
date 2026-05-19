@@ -263,27 +263,19 @@ class PipelineConfigPrep:
         return self._pipeline_file
 
     def _load_local_pipeline(self) -> Dict[str, Any]:
-        """Load pipeline section from the pipeline file."""
-        pipeline_file = self._load_pipeline_file()
-        pipeline = pipeline_file.get("pipeline")
-        if not pipeline:
-            raise ValueError(
-                f"Pipeline file missing 'pipeline' key for pipeline_id: "
-                f"{self.pipeline_id}"
-            )
-        return pipeline
+        """Load the pipeline document (flat, per the published contract)."""
+        return self._load_pipeline_file()
 
     def _load_local_streams(self) -> List[Dict[str, Any]]:
         """Load stream configurations from individual stream files.
 
-        Stream IDs come from the pipeline.streams array. Each stream is
-        loaded from {pipeline_dir}/streams/{stream_id}.json.
+        Stream IDs come from the pipeline's ``streams`` array. Each stream is
+        loaded from ``{pipeline_dir}/streams/{stream_id}.json``.
 
         Returns:
             List of stream configuration dicts
         """
-        pipeline_file = self._load_pipeline_file()
-        pipeline = pipeline_file.get("pipeline", {})
+        pipeline = self._load_pipeline_file()
         stream_ids = pipeline.get("streams", [])
 
         if not stream_ids:
@@ -333,36 +325,36 @@ class PipelineConfigPrep:
         validate_connection_config(config)
         return config
 
-    def _load_connector(self, connector_slug: str) -> Dict[str, Any]:
-        """Load a connector definition by slug, with caching.
+    def _load_connector(self, connector_id: str) -> Dict[str, Any]:
+        """Load a connector definition by its ``connector_id`` slug, with caching.
 
         Also eagerly loads the connector's ``type-map.json`` (required for
         the schema contract). SSL behavior is encoded in the connector's
         ``transports.<ref>.connect_args.ssl`` lookup and resolved lazily by
         the transport factory; no separate ssl-mode-map is read here.
         """
-        if connector_slug in self._loaded_connectors:
-            return self._loaded_connectors[connector_slug]
+        if connector_id in self._loaded_connectors:
+            return self._loaded_connectors[connector_id]
 
         connector = load_connector_for_connection(
-            connector_slug, self._paths["connectors"]
+            connector_id, self._paths["connectors"]
         )
-        self._loaded_connectors[connector_slug] = connector
-        self._type_mappers[connector_slug] = load_type_map(
-            self._paths["connectors"], connector_slug
+        self._loaded_connectors[connector_id] = connector
+        self._type_mappers[connector_id] = load_type_map(
+            self._paths["connectors"], connector_id
         )
         return connector
 
-    def get_type_mapper(self, connector_slug: str) -> TypeMapper:
+    def get_type_mapper(self, connector_id: str) -> TypeMapper:
         """Return the cached ``TypeMapper`` for a connector.
 
         Raises ``KeyError`` if the connector has not been loaded yet — the
         caller should always trigger loading via ``_resolve_connection`` or
         ``_load_connector`` first.
         """
-        if connector_slug not in self._type_mappers:
-            self._load_connector(connector_slug)
-        return self._type_mappers[connector_slug]
+        if connector_id not in self._type_mappers:
+            self._load_connector(connector_id)
+        return self._type_mappers[connector_id]
 
     def _load_connection_type_mapper(self, alias: str) -> Optional[TypeMapper]:
         """Load (and cache) the connection's own type-map for private endpoints."""
@@ -382,34 +374,30 @@ class PipelineConfigPrep:
         """Get the connector definition for a connection config.
 
         Args:
-            config: Connection configuration dict (must have connector_slug)
+            config: Connection configuration dict (must have connector_id)
             alias: Connection alias (for error messages)
 
         Returns:
             Connector definition dict
         """
-        slug = config.get("connector_slug")
+        slug = config.get("connector_id")
         if not slug:
             raise ValueError(
-                f"Connection '{alias}' is missing 'connector_slug' field."
+                f"Connection '{alias}' is missing 'connector_id' field."
             )
         return self._load_connector(slug)
 
     def get_connector_type(self, config: Dict[str, Any], alias: str) -> str:
-        """Get the connector_type for a connection.
+        """Get the connector type ('api'|'database'|'file'|'stdout'|'s3').
 
-        Args:
-            config: Connection configuration dict
-            alias: Connection alias (for error messages)
-
-        Returns:
-            The connector_type string
+        The published connector contract calls this ``kind``; the engine
+        keeps the internal name ``connector_type``.
         """
         connector = self.get_connector_for_connection(config, alias)
-        connector_type = connector.get("connector_type")
+        connector_type = connector.get("kind")
         if not connector_type:
             raise ValueError(
-                f"Connector for '{alias}' is missing 'connector_type' field."
+                f"Connector for '{alias}' is missing 'kind' field."
             )
         return connector_type
 
@@ -427,7 +415,7 @@ class PipelineConfigPrep:
 
         config = self._load_connection(alias)
         connector = self.get_connector_for_connection(config, alias)
-        connection_type = connector.get("connector_type")
+        connection_type = connector.get("kind")
 
         if connection_type not in VALID_CONNECTOR_TYPES:
             raise ValueError(
@@ -436,7 +424,7 @@ class PipelineConfigPrep:
             )
 
         resolver = self._create_secrets_resolver(alias)
-        connector_slug = config.get("connector_slug")
+        connector_id = config.get("connector_id")
 
         runtime = ConnectionRuntime(
             raw_config=config,
@@ -444,7 +432,7 @@ class PipelineConfigPrep:
             connector_type=connection_type,
             resolver=resolver,
             connector_definition=connector,
-            connector_type_mapper=self._type_mappers.get(connector_slug),
+            connector_type_mapper=self._type_mappers.get(connector_id),
             connection_type_mapper=self._load_connection_type_mapper(alias),
         )
 
@@ -518,24 +506,16 @@ class PipelineConfigPrep:
         # Load streams
         raw_streams = self._load_local_streams()
 
-        # Handle version
-        version = raw_pipeline.get("version", 1)
-        if isinstance(version, str):
-            version = int(float(version))
-
         pipeline_config = {
-            "version": version,
             "pipeline_id": self.pipeline_id,
-            "name": raw_pipeline.get("name", ""),
+            "display_name": raw_pipeline.get("display_name"),
             "description": raw_pipeline.get("description"),
             "status": raw_pipeline.get("status", "draft"),
-            "tags": raw_pipeline.get("tags", []),
+            "tags": raw_pipeline.get("tags") or [],
             "connections": connections_config,
             "schedule": raw_pipeline.get("schedule"),
-            "engine": raw_pipeline["engine"],
-            "runtime": raw_pipeline["runtime"],
-            "created_at": raw_pipeline.get("created_at"),
-            "updated_at": raw_pipeline.get("updated_at"),
+            "engine": raw_pipeline.get("engine") or {},
+            "runtime": raw_pipeline.get("runtime") or {},
         }
 
         # Build stream configs — only include streams listed in pipeline.streams
@@ -558,8 +538,10 @@ class PipelineConfigPrep:
             )
             stream_configs.append(stream_config)
 
-        pipeline_name = pipeline_config["name"]
-        logger.info(f"Loaded pipeline '{pipeline_name}' with {len(stream_configs)} streams")
+        logger.info(
+            f"Loaded pipeline '{pipeline_config['display_name'] or self.pipeline_id}' "
+            f"with {len(stream_configs)} streams"
+        )
         return pipeline_config, stream_configs
 
     def _build_stream_config(
@@ -567,34 +549,49 @@ class PipelineConfigPrep:
         raw_stream: Dict[str, Any],
         connections_config: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """Build a stream config dict with resolved connections and endpoints."""
+        """Build a stream config dict with resolved connections and endpoints.
+
+        Per the published stream contract, stream source/destination nodes
+        carry only ``endpoint_ref`` (no separate ``connection_ref``). For
+        ``scope=connection`` the endpoint_ref's ``connection_id`` IS the
+        owning connection. For ``scope=connector`` the owning connection is
+        derived from ``pipeline.connections.source`` (source side) or
+        positionally from ``pipeline.connections.destinations`` (dest side).
+        """
         stream_id = raw_stream["stream_id"]
 
-        # Resolve source connection by alias
-        source_ref = raw_stream["source"]["connection_ref"]
-        source_connection = self._resolved_connections.get(source_ref)
-        if not source_connection:
-            raise ValueError(
-                f"Connection '{source_ref}' not resolved for stream {stream_id}"
-            )
-
-        # Resolve source endpoint
         source_endpoint_ref = raw_stream["source"].get("endpoint_ref")
         if not source_endpoint_ref:
             raise ValueError(
                 f"Stream {stream_id} source is missing 'endpoint_ref'"
             )
+        source_ref = self._connection_ref_for(
+            source_endpoint_ref, connections_config["source"]
+        )
+        source_connection = self._resolved_connections.get(source_ref)
+        if not source_connection:
+            raise ValueError(
+                f"Connection '{source_ref}' not resolved for stream {stream_id}"
+            )
         source_endpoint = self._resolve_endpoint(source_endpoint_ref)
 
-        # Build enriched source data
         source_data = raw_stream["source"].copy()
+        source_data["connection_ref"] = source_ref
         source_data["_runtime"] = source_connection
         source_data["_endpoint"] = source_endpoint
 
-        # Resolve destinations
         destinations_data = []
-        for dest in raw_stream["destinations"]:
-            dest_ref = dest["connection_ref"]
+        dest_aliases = list(connections_config["destinations"])
+        for idx, dest in enumerate(raw_stream["destinations"]):
+            dest_endpoint_ref = dest.get("endpoint_ref")
+            if not dest_endpoint_ref:
+                raise ValueError(
+                    f"Stream {stream_id} destination [{idx}] is missing 'endpoint_ref'"
+                )
+            positional_ref = (
+                dest_aliases[idx] if idx < len(dest_aliases) else dest_aliases[0]
+            )
+            dest_ref = self._connection_ref_for(dest_endpoint_ref, positional_ref)
             dest_connection = self._resolved_connections.get(dest_ref)
             if not dest_connection:
                 raise ValueError(
@@ -602,27 +599,18 @@ class PipelineConfigPrep:
                 )
 
             dest_endpoint_ref = dest.get("endpoint_ref")
-            if not dest_endpoint_ref:
-                raise ValueError(
-                    f"Stream {stream_id} destination '{dest_ref}' is missing 'endpoint_ref'"
-                )
             dest_endpoint = self._resolve_endpoint(dest_endpoint_ref)
 
             dest_data = dest.copy()
+            dest_data["connection_ref"] = dest_ref
             dest_data["_runtime"] = dest_connection
             dest_data["_endpoint"] = dest_endpoint
             destinations_data.append(dest_data)
-
-        # Handle version
-        version = raw_stream.get("version", 1)
-        if isinstance(version, str):
-            version = int(float(version))
 
         # Mapping is passed through verbatim — type resolution is owned by
         # the connectors' type-map.json files applied at ingest and
         # materialization time, not by a stream-level translation layer.
         return {
-            "version": version,
             "stream_id": stream_id,
             "pipeline_id": raw_stream.get("pipeline_id", self.pipeline_id),
             "status": raw_stream.get("status", "draft"),
@@ -633,10 +621,21 @@ class PipelineConfigPrep:
             ],
             "mapping": raw_stream.get("mapping", {}) or {},
             "tags": raw_stream.get("tags"),
-            "runtime": raw_stream.get("runtime"),
-            "created_at": raw_stream.get("created_at"),
-            "updated_at": raw_stream.get("updated_at"),
         }
+
+    @staticmethod
+    def _connection_ref_for(endpoint_ref: Any, pipeline_side: str) -> str:
+        """Derive the connection alias for an endpoint_ref.
+
+        For ``scope=connection`` the ref's ``connection_id`` is the owning
+        connection. For ``scope=connector`` the connection isn't carried by
+        the stream node — the pipeline-side connection (source / positional
+        destination) is the owner.
+        """
+        ref = EndpointRef.from_dict(endpoint_ref)
+        if ref.scope == "connection":
+            return ref.connection_id
+        return pipeline_side
 
     def _normalize_source_config(self, source_data: Dict[str, Any]) -> Dict[str, Any]:
         """Normalize source configuration to match SourceConfig model."""

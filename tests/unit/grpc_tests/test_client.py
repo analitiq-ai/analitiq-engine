@@ -323,8 +323,10 @@ class TestClientSchemaBuilder:
         client = DestinationGRPCClient()
 
         config = {
-            "type": "database",
+            "connector_type": "database",
             "driver": "postgresql",
+            "schema": "public",
+            "table": "users",
             "endpoint": "public/users",
             "primary_key": ["id"],
             "write_mode": "upsert",
@@ -347,5 +349,5 @@ class TestClientSchemaBuilder:
         assert schema_msg.stream_id == "stream-1"
         assert len(schema_msg.primary_key) == 1
         assert schema_msg.primary_key[0] == "id"
-        assert schema_msg.destination_config.connector_type == "postgresql"
+        assert schema_msg.destination_config.connector_type == "database"
         assert schema_msg.destination_config.database.table_name == "users"

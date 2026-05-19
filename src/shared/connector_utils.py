@@ -54,10 +54,10 @@ def get_connector_type_from_list(
             f"Connector not found{context} with connector_id '{connector_id}'."
         )
 
-    connector_type = connector.get("connector_type")
+    connector_type = connector.get("kind")
     if not connector_type:
         raise ValueError(
-            f"Connector '{connector_id}' is missing 'connector_type' field."
+            f"Connector '{connector_id}' is missing 'kind' field."
         )
 
     return connector_type

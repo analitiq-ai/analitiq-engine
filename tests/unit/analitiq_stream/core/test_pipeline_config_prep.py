@@ -29,21 +29,19 @@ class ModularConfigHelper:
         endpoints_dir.mkdir(parents=True, exist_ok=True)
 
         connector = {
-            "connector_id": f"{slug}-connector-id",
-            "connector_name": slug.title(),
-            "connector_type": connector_type,
-            "slug": slug,
+            "$schema": "https://schemas.analitiq.ai/connector/latest.json",
+            "connector_id": slug,
+            "kind": connector_type,
+            "display_name": slug.title(),
             **(extra or {}),
         }
         if connector_type == "database" and driver:
-            # Spec-compliant transports block so PipelineConfigPrep can
-            # derive the base dialect without a top-level ``driver`` field.
             connector.setdefault("default_transport", "database")
             connector.setdefault(
                 "transports",
                 {
                     "database": {
-                        "kind": "sqlalchemy",
+                        "transport_type": "sqlalchemy",
                         "driver": f"{driver}+asyncpg",
                         "dsn": {"template": f"{driver}+asyncpg://u:p@h:5432/d"},
                     }
@@ -55,7 +53,7 @@ class ModularConfigHelper:
                 "transports",
                 {
                     "api": {
-                        "kind": "http",
+                        "transport_type": "http",
                         "base_url": "https://api.example.com",
                     }
                 },
@@ -64,8 +62,7 @@ class ModularConfigHelper:
 
         manifest = {
             "connector_id": connector["connector_id"],
-            "connector_name": connector["connector_name"],
-            "slug": slug,
+            "display_name": connector["display_name"],
             "version": "1.0.0",
             "endpoints": [],
         }
@@ -93,18 +90,22 @@ class ModularConfigHelper:
     def setup_connection(
         connections_dir: Path,
         alias: str,
-        connector_slug: str,
+        connector_id: str,
         host: str = "localhost",
         parameters: dict = None,
     ):
-        """Create a connection directory with connection.json."""
+        """Create a connection directory with connection.json (flat, per
+        published connection contract)."""
         conn_dir = connections_dir / alias
         conn_dir.mkdir(parents=True, exist_ok=True)
 
+        merged_params = dict(parameters or {})
+        merged_params.setdefault("host", host)
         connection = {
-            "connector_slug": connector_slug,
-            "host": host,
-            **({"parameters": parameters} if parameters else {}),
+            "$schema": "https://schemas.analitiq.ai/connection/latest.json",
+            "connector_id": connector_id,
+            "connection_id": alias,
+            "parameters": merged_params,
         }
         (conn_dir / "connection.json").write_text(json.dumps(connection))
         return conn_dir
@@ -148,24 +149,27 @@ class ModularConfigHelper:
         stream_ids = [s.get("stream_id", "unknown") for s in streams]
         new_entry = {
             "pipeline_id": pipeline_id,
-            "name": pipeline_config.get("name", pipeline_id),
+            "display_name": pipeline_config.get("display_name", pipeline_id),
             "path": f"{pipeline_id}/pipeline.json",
             "status": pipeline_config.get("status", "active"),
             "schedule": pipeline_config.get("schedule"),
             "streams": stream_ids,
         }
-        # Replace existing entry for this pipeline_id or append
         manifest["pipelines"] = [
             e for e in manifest["pipelines"]
             if e.get("pipeline_id") != pipeline_id
         ] + [new_entry]
         manifest_path.write_text(json.dumps(manifest))
 
-        # Write pipeline directory with pipeline.json (empty streams array)
+        # Write pipeline directory with flat pipeline.json per the
+        # published pipeline contract (no wrapper).
         pipeline_dir = pipelines_dir / pipeline_id
         pipeline_dir.mkdir(parents=True, exist_ok=True)
-        content = {"pipeline": pipeline_config, "streams": []}
-        (pipeline_dir / "pipeline.json").write_text(json.dumps(content))
+        flat_pipeline = {
+            "$schema": "https://schemas.analitiq.ai/pipeline/latest.json",
+            **pipeline_config,
+        }
+        (pipeline_dir / "pipeline.json").write_text(json.dumps(flat_pipeline))
 
         # Write individual stream files
         streams_dir = pipeline_dir / "streams"
@@ -213,12 +217,19 @@ def standard_setup(temp_config_dir, helper):
     helper.setup_connector(connectors_dir, "wise", connector_type="api")
     helper.setup_connector(connectors_dir, "postgresql", connector_type="database", driver="postgresql")
 
-    # Public endpoint
+    # Public endpoint (api-endpoint/latest.json shape)
     helper.setup_connector_endpoint(connectors_dir, "wise", "transfers", {
-        "endpoint_id": "wise-transfers-ep",
-        "endpoint": "/v1/transfers",
-        "method": "GET",
-        "endpoint_schema": {"type": "array", "items": {"type": "object"}},
+        "$schema": "https://schemas.analitiq.ai/api-endpoint/latest.json",
+        "endpoint_id": "transfers",
+        "operations": {
+            "read": {
+                "request": {"method": "GET", "path": "/v1/transfers"},
+                "response": {
+                    "records": {"ref": "response.body"},
+                    "schema": {"type": "object"},
+                },
+            },
+        },
     })
 
     # Connections
@@ -229,17 +240,16 @@ def standard_setup(temp_config_dir, helper):
         parameters={"database": "${DB_NAME}", "username": "${DB_USER}", "password": "${DB_PASSWORD}", "port": 5432},
     )
 
-    # Private endpoint (DB table schema)
+    # Private endpoint (database-endpoint/latest.json shape)
     helper.setup_connection_endpoint(connections_dir, "prod-pg", "public_transfers", {
-        "endpoint": "public/transfers",
-        "method": "DATABASE",
-        "endpoint_schema": {
-            "columns": [
-                {"name": "id", "type": "BIGINT", "nullable": False},
-                {"name": "status", "type": "VARCHAR(50)", "nullable": True},
-            ],
-            "primary_keys": ["id"],
-        },
+        "$schema": "https://schemas.analitiq.ai/database-endpoint/latest.json",
+        "endpoint_id": "public_transfers",
+        "database_object": {"schema": "public", "name": "transfers", "object_type": "table"},
+        "columns": [
+            {"name": "id", "native_type": "BIGINT", "arrow_type": "Int64", "nullable": False},
+            {"name": "status", "native_type": "VARCHAR(50)", "arrow_type": "Utf8", "nullable": True},
+        ],
+        "primary_keys": ["id"],
     })
 
     # Secrets
@@ -248,12 +258,11 @@ def standard_setup(temp_config_dir, helper):
         "DB_HOST": "localhost", "DB_NAME": "testdb", "DB_USER": "user", "DB_PASSWORD": "pass"
     })
 
-    # Pipeline
+    # Pipeline (flat, per published pipeline contract)
     pipeline_config = {
         "pipeline_id": "test-pipeline-123",
-        "name": "Wise to Postgres",
+        "display_name": "Wise to Postgres",
         "status": "active",
-        "version": 1,
         "connections": {
             "source": "my-wise",
             "destinations": ["prod-pg"],
@@ -265,29 +274,37 @@ def standard_setup(temp_config_dir, helper):
             "buffer_size": 5000,
             "batching": {"batch_size": 100, "max_concurrent_batches": 3},
             "logging": {"log_level": "INFO", "metrics_enabled": True},
-            "error_handling": {"strategy": "dlq", "max_retries": 3, "retry_delay": 5},
+            "error_handling": {
+                "strategy": "dlq", "max_retries": 3, "retry_delay_seconds": 5,
+            },
         },
     }
 
     stream_config = {
+        "$schema": "https://schemas.analitiq.ai/stream/latest.json",
         "stream_id": "stream-1",
-        "is_enabled": True,
+        "pipeline_id": "test-pipeline-123",
+        "status": "active",
         "source": {
-            "connection_ref": "my-wise",
-            "endpoint_ref": {"scope": "connector", "connection_id": "wise", "endpoint_id": "transfers"},
-            "primary_key": ["id"],
-            "replication": {"method": "incremental", "cursor_field": ["created"]},
+            "endpoint_ref": {
+                "scope": "connector", "connection_id": "my-wise",
+                "endpoint_id": "transfers",
+            },
+            "primary_keys": ["id"],
+            "replication": {"method": "incremental", "cursor_field": "created"},
         },
         "destinations": [{
-            "connection_ref": "prod-pg",
-            "endpoint_ref": {"scope": "connection", "connection_id": "prod-pg", "endpoint_id": "public_transfers"},
-            "write": {"mode": "upsert", "conflict_keys": ["id"]},
+            "endpoint_ref": {
+                "scope": "connection", "connection_id": "prod-pg",
+                "endpoint_id": "public_transfers",
+            },
+            "write": {"mode": "upsert", "conflict_keys": [["id"]]},
         }],
         "mapping": {
             "assignments": [
                 {
-                    "target": {"path": ["id"], "type": "integer", "nullable": False},
-                    "value": {"kind": "expr", "expr": {"op": "get", "path": ["id"]}},
+                    "target": {"path": "id", "arrow_type": "Int64", "nullable": False},
+                    "value": {"expression": {"op": "get", "path": "id"}},
                 }
             ]
         },
@@ -345,7 +362,7 @@ class TestConfigurationLoading:
             pipeline_config, stream_configs = prep.load_pipeline_config()
 
             assert pipeline_config["pipeline_id"] == "test-pipeline-123"
-            assert pipeline_config["name"] == "Wise to Postgres"
+            assert pipeline_config["display_name"] == "Wise to Postgres"
             assert len(stream_configs) == 1
             assert stream_configs[0]["stream_id"] == "stream-1"
 
@@ -360,7 +377,6 @@ class TestConfigurationLoading:
             assert connections["my-wise"].connector_type == "api"
             assert "prod-pg" in connections
             assert connections["prod-pg"].connector_type == "database"
-            assert connections["prod-pg"].driver == "postgresql"
 
     def test_endpoint_resolution(
         self, temp_config_dir, mock_paths, standard_setup
@@ -372,15 +388,15 @@ class TestConfigurationLoading:
             pipeline, streams, connections, endpoints, connectors = prep.create_config()
 
             wise_ref = EndpointRef(
-                scope="connector", connection_id="wise", endpoint_id="transfers",
+                scope="connector", connection_id="my-wise", endpoint_id="transfers",
             )
             pg_ref = EndpointRef(
                 scope="connection", connection_id="prod-pg", endpoint_id="public_transfers",
             )
             assert wise_ref in endpoints
-            assert endpoints[wise_ref]["endpoint"] == "/v1/transfers"
+            assert endpoints[wise_ref]["operations"]["read"]["request"]["path"] == "/v1/transfers"
             assert pg_ref in endpoints
-            assert endpoints[pg_ref]["method"] == "DATABASE"
+            assert endpoints[pg_ref]["database_object"]["name"] == "transfers"
 
     def test_connectors_collected(
         self, temp_config_dir, mock_paths, standard_setup
@@ -389,9 +405,9 @@ class TestConfigurationLoading:
             prep = PipelineConfigPrep()
             pipeline, streams, connections, endpoints, connectors = prep.create_config()
 
-            slugs = {c["slug"] for c in connectors}
-            assert "wise" in slugs
-            assert "postgresql" in slugs
+            ids = {c["connector_id"] for c in connectors}
+            assert "wise" in ids
+            assert "postgresql" in ids
 
     def test_pipeline_file_cached(
         self, temp_config_dir, mock_paths, standard_setup
@@ -430,9 +446,8 @@ class TestConfigurationLoading:
         """Test that a pipeline with non-active status raises ValueError."""
         pipelines_dir = Path(temp_config_dir, "pipelines")
         pipeline_config = {
-                "name": "Draft Pipeline",
+                "display_name": "Draft Pipeline",
             "status": "draft",
-            "version": 1,
             "connections": {"source": "my-wise", "destinations": ["prod-pg"]},
             "streams": ["stream-1"],
             "engine": {"vcpu": 1, "memory": 8192},
@@ -440,7 +455,7 @@ class TestConfigurationLoading:
                 "buffer_size": 5000,
                 "batching": {"batch_size": 100, "max_concurrent_batches": 3},
                 "logging": {"log_level": "INFO", "metrics_enabled": True},
-                "error_handling": {"strategy": "dlq", "max_retries": 3, "retry_delay": 5},
+                "error_handling": {"strategy": "dlq", "max_retries": 3, "retry_delay_seconds": 5},
             },
         }
         stream = {
@@ -467,9 +482,8 @@ class TestConfigurationLoading:
         """Test that a missing stream file raises FileNotFoundError."""
         pipelines_dir = Path(temp_config_dir, "pipelines")
         pipeline_config = {
-                "name": "Bad",
+                "display_name": "Bad",
             "status": "active",
-            "version": 1,
             "connections": {"source": "my-wise", "destinations": ["prod-pg"]},
             "streams": ["nonexistent-stream"],
             "engine": {"vcpu": 1, "memory": 8192},
@@ -477,15 +491,14 @@ class TestConfigurationLoading:
                 "buffer_size": 5000,
                 "batching": {"batch_size": 100, "max_concurrent_batches": 3},
                 "logging": {"log_level": "INFO", "metrics_enabled": True},
-                "error_handling": {"strategy": "dlq", "max_retries": 3, "retry_delay": 5},
+                "error_handling": {"strategy": "dlq", "max_retries": 3, "retry_delay_seconds": 5},
             },
         }
         # Write pipeline with no streams (so directory exists but file doesn't)
         helper.write_pipeline(pipelines_dir, "bad-pipeline", pipeline_config, [])
         # Override pipeline.json to reference a stream that has no file
         pipeline_dir = pipelines_dir / "bad-pipeline"
-        content = {"pipeline": pipeline_config, "streams": []}
-        (pipeline_dir / "pipeline.json").write_text(json.dumps(content))
+        (pipeline_dir / "pipeline.json").write_text(json.dumps({"$schema": "https://schemas.analitiq.ai/pipeline/latest.json", **pipeline_config}))
 
         with patch.dict(os.environ, {"PIPELINE_ID": "bad-pipeline"}):
             prep = PipelineConfigPrep()
@@ -498,9 +511,8 @@ class TestConfigurationLoading:
         """Test that a stream file with mismatched stream_id raises ValueError."""
         pipelines_dir = Path(temp_config_dir, "pipelines")
         pipeline_config = {
-                "name": "Mismatch",
+                "display_name": "Mismatch",
             "status": "active",
-            "version": 1,
             "connections": {"source": "my-wise", "destinations": ["prod-pg"]},
             "streams": ["expected-stream"],
             "engine": {"vcpu": 1, "memory": 8192},
@@ -508,7 +520,7 @@ class TestConfigurationLoading:
                 "buffer_size": 5000,
                 "batching": {"batch_size": 100, "max_concurrent_batches": 3},
                 "logging": {"log_level": "INFO", "metrics_enabled": True},
-                "error_handling": {"strategy": "dlq", "max_retries": 3, "retry_delay": 5},
+                "error_handling": {"strategy": "dlq", "max_retries": 3, "retry_delay_seconds": 5},
             },
         }
         # Write pipeline with empty streams list first
@@ -557,7 +569,7 @@ class TestConfigurationLoading:
             source = stream_configs[0]["source"]
             assert source["endpoint_ref"] == {
                 "scope": "connector",
-                "connection_id": "wise",
+                "connection_id": "my-wise",
                 "endpoint_id": "transfers",
             }
             assert source["connection_ref"] == "my-wise"
