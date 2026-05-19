@@ -424,7 +424,7 @@ class StreamingEngine:
         ]
 
         dest_endpoint = ctx.destination.endpoint
-        primary_key_fields = list(dest_endpoint.primary_keys)
+        primary_key_fields = list(getattr(dest_endpoint, "primary_keys", ()) or ())
 
         logger.info("Stream %s: gRPC load stage start", stream_name)
 

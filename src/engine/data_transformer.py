@@ -130,17 +130,21 @@ class AssignmentTransformer:
         partial_result: Dict[str, Any],
         value_spec: Dict[str, Any]
     ) -> Any:
-        """Evaluate a value specification (const or expr)."""
-        kind = value_spec.get("kind", "expr")
+        """Evaluate a value specification.
 
-        if kind == "const":
-            const = value_spec.get("const", {})
-            return const.get("value")
-
-        elif kind == "expr":
-            expr = value_spec.get("expr", {})
-            return await self._evaluate_expression(record, partial_result, expr)
-
+        Accepts the schema-canonical shape used in stream JSON:
+            {"expression": {op, path, args, ...}}
+            {"constant": {"value": <literal>}}
+        """
+        if "expression" in value_spec:
+            return await self._evaluate_expression(
+                record, partial_result, value_spec["expression"]
+            )
+        if "constant" in value_spec:
+            const = value_spec["constant"]
+            if isinstance(const, dict):
+                return const.get("value", const)
+            return const
         return None
 
     async def _evaluate_expression(
@@ -155,6 +159,8 @@ class AssignmentTransformer:
         match op:
             case "get":
                 path = expr.get("path", [])
+                if isinstance(path, str):
+                    path = path.split(".")
                 return self._get_nested_value(record, path)
 
             case "const":

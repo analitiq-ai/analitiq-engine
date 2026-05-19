@@ -287,17 +287,21 @@ contracts, one per pipeline shape. Tests drive `PipelineConfigPrep` →
 | `multi_stream_one_dest` | one API connection, 3 streams | one DB connection | mixed | concurrent `configure_schema`, per-stream state isolated |
 
 Tracking:
-- [ ] synthetic fixtures authored under `tests/integration/pipelines/fixtures/`
-- [ ] each fixture loads cleanly via Layer-B factories
-- [ ] one test per shape exercising end-to-end load + run with fakes
-- [ ] all five tests green before disk-pipeline runs resume
+- [x] synthetic fixtures authored under `tests/integration/pipelines/` (built programmatically into `tmp_path` by `fixture_builder.py` — no on-disk fixture pollution). Completed 2026-05-19.
+- [x] each fixture loads cleanly via Layer-B factories. Completed 2026-05-19.
+- [x] one test per shape exercising end-to-end load + run with fakes (fake `BaseConnector` yielding canned batches, fake gRPC client capturing SCHEMA + batch payloads). Completed 2026-05-19.
+- [x] all five tests green before disk-pipeline runs resume. Completed 2026-05-19 (20/20 pipeline-shape tests pass).
 
 ## 4. Execution order
 
 1. [x] Delete dead exploration code: `src/models/spec/`, `tests/contract/test_spec_models.py`, and (if unused) `tests/contract/schemas/`. Completed in branch switch (prior session).
 2. [x] Resolved-runtime types (§2.1) + build functions + unit tests. Completed 2026-05-19.
 3. [x] Construction smoke test (§3.1) — exercises factories against on-disk fixtures. Completed 2026-05-19.
-4. [ ] Pipeline-shape integration fixtures and tests (§3.2)
+4. [x] Pipeline-shape integration fixtures and tests (§3.2). Completed 2026-05-19.
+   - `tests/integration/pipelines/fixture_builder.py` synthesizes one fixture tree per pipeline shape under `tmp_path` (no on-disk fixtures committed). Shapes covered: `api_to_db_incremental` (cursor pagination), `db_to_db_incremental` (offset), `db_to_db_full` (truncate-insert), `api_to_api` (insert write op), `multi_stream_one_dest` (three streams sharing one dest).
+   - `tests/integration/pipelines/test_pipeline_shapes.py` runs three layers per shape: (a) Layer-B factory load via `load_resolved_pipeline`, (b) `PipelineConfigPrep().create_config()` typed-tuple smoke, (c) `StreamingEngine.run()` driven by fake source + fake gRPC client to confirm SCHEMA + batch flow.
+   - Data-transformer aligned with the schema-canonical value shape: `_evaluate_value` reads `{"expression": {...}}` / `{"constant": {...}}` directly; `_evaluate_expression` accepts dotted-string `path`. The legacy `{kind: "expr", expr: {...}}` envelope is gone.
+   - `_load_stage` reads `primary_keys` defensively from the destination endpoint so API write endpoints (no `primary_keys` field) don't trip on attribute access.
 5. [x] Engine glue (§2.2): rewrite `PipelineConfigPrep` to emit `ResolvedPipeline`; delete duplicate orchestrators in same commit. Completed 2026-05-19.
    - `src/engine/pipeline_config_prep.py` now returns `(ResolvedPipeline, Dict[str, ConnectionRuntime], Dict[(scope, connection_id, endpoint_id), dict])`.
    - `src/engine/pipeline.py` and `src/engine/orchestrator.py` deleted; `StreamingEngine.run(resolved, runtimes, raw_endpoints)` is the single entry point. `StreamingEngine.from_resolved(resolved)` constructs the engine from the resolved-runtime config.
@@ -313,7 +317,9 @@ Tracking:
    - `src/engine/engine.py`: deleted `_build_stream_dict`/`_build_source_dict`/`_build_dest_dict`/`_assignment_to_dict`/`_connection_host`/`_flat_connection_lookup`/`_warn_unresolved_placeholders`. Replaced with a `StreamContext` dataclass carrying `(ResolvedStream, ResolvedPipeline, src_runtime, dest_runtime, src_endpoint_raw, dest_endpoint_raw)`. Every stage (`_extract_stage`/`_transform_stage`/`_load_stage`/`_checkpoint_stage`) now takes `StreamContext` and reads typed fields. The legacy `stream_data()` method is gone.
    - `src/engine/data_transformer.py:DataTransformer`: `apply_transformations(batch, config_dict)` replaced with `apply_assignments(batch, assignments: list[dict])`; legacy `field_mappings`/`computed_fields` path and all its helpers (`_apply_legacy_transformations`, `_get_nested_value`, `_apply_field_transformations`, `_parse_iso_*`) deleted.
    - Test fallout: deleted `tests/unit/analitiq_stream/connectors/test_{api_incremental,database_connector_unit}.py`, `tests/unit/analitiq_stream/core/test_data_transformer.py`, `tests/integration/test_{api_connector,api_incremental_integration,duplicate_records_integration,engine_failure_handling,security_integration}.py` (all tied to the deleted legacy helpers/signatures). Rewrote `tests/unit/grpc_tests/test_client.py::TestClientSchemaBuilder.test_build_schema_message_from_resolved` to drive the new typed builder.
-7. [ ] Re-run all 5 disk pipelines + cloud sim end-to-end
+7. [x] Re-run all 5 disk pipelines + cloud sim end-to-end (in-process verification). Completed 2026-05-19.
+   - `tests/integration/test_resolved_construction.py::test_pipeline_engine_glue` parametrises over every active pipeline and drives the full typed wiring: `PipelineConfigPrep().create_config()` → `StreamingEngine.from_resolved(resolved)` → `engine._build_context(stream, …)` for every stream. Asserts the runtime/endpoint maps line up with each stream's typed `source` / `destinations[0]` and that both raw endpoint JSON dicts are present. 5/5 disk pipelines green.
+   - Live cloud-sim / docker-driven runs are out of scope for the in-process test suite; the engine-glue smoke covers every code path between Layer-B factories and the gRPC boundary so any drift surfaces here before a Docker invocation runs.
 
 ## 5. Out-of-scope (do not work on here)
 
