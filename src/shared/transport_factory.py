@@ -292,18 +292,18 @@ def _select_transport(
     transports = connector.get("transports") or {}
     if not transports:
         raise ValueError(
-            f"Connector {connector.get('alias')!r} has no `transports` block; "
+            f"Connector {connector.get('connector_id')!r} has no `transports` block; "
             f"cannot materialize transport"
         )
     ref = transport_ref or connector.get("default_transport")
     if not ref:
         raise ValueError(
-            f"Connector {connector.get('alias')!r}: transport_ref not given "
+            f"Connector {connector.get('connector_id')!r}: transport_ref not given "
             f"and default_transport not declared"
         )
     if ref not in transports:
         raise KeyError(
-            f"Connector {connector.get('alias')!r}: transport {ref!r} not in "
+            f"Connector {connector.get('connector_id')!r}: transport {ref!r} not in "
             f"declared transports {sorted(transports)}"
         )
     defaults = connector.get("transport_defaults") or {}
@@ -501,7 +501,7 @@ async def build_transport(
     if not transport_type:
         raise ValueError(
             f"Resolved transport spec missing `transport_type`; connector "
-            f"{connector.get('alias')!r}, transport {transport_ref!r}"
+            f"{connector.get('connector_id')!r}, transport {transport_ref!r}"
         )
     builder = _TRANSPORT_BUILDERS.get(transport_type)
     if builder is None:
