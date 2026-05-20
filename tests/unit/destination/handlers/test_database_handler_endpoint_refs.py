@@ -46,14 +46,14 @@ def _runtime(
 class TestEndpointRefDispatch:
     def test_pre_connect_raises(self):
         handler = DatabaseDestinationHandler()
-        handler.set_endpoint_refs({"s1": {"scope": "connector", "identifier": "pg", "endpoint": "transfers"}})
+        handler.set_endpoint_refs({"s1": {"scope": "connector", "connection_id": "pg", "alias": "transfers"}})
         with pytest.raises(RuntimeError, match="called before connect"):
             handler._type_mapper_for_stream("s1")
 
     def test_unknown_stream_id_raises(self):
         handler = DatabaseDestinationHandler()
         handler._runtime = _runtime(connector_mapper=_mapper("pg"))
-        handler.set_endpoint_refs({"s1": {"scope": "connector", "identifier": "pg", "endpoint": "transfers"}})
+        handler.set_endpoint_refs({"s1": {"scope": "connector", "connection_id": "pg", "alias": "transfers"}})
         with pytest.raises(RuntimeError, match="no endpoint_ref registered"):
             handler._type_mapper_for_stream("unregistered-stream")
 
@@ -64,7 +64,7 @@ class TestEndpointRefDispatch:
             connector_mapper=connector_map,
             connection_mapper=_mapper("connection:dest-conn"),
         )
-        handler.set_endpoint_refs({"s1": {"scope": "connector", "identifier": "pg", "endpoint": "transfers"}})
+        handler.set_endpoint_refs({"s1": {"scope": "connector", "connection_id": "pg", "alias": "transfers"}})
         assert handler._type_mapper_for_stream("s1") is connector_map
 
     def test_connection_scoped_uses_connection_mapper(self):
@@ -74,19 +74,19 @@ class TestEndpointRefDispatch:
             connector_mapper=_mapper("pg"),
             connection_mapper=connection_map,
         )
-        handler.set_endpoint_refs({"s1": {"scope": "connection", "identifier": "dest-conn", "endpoint": "orders"}})
+        handler.set_endpoint_refs({"s1": {"scope": "connection", "connection_id": "dest-conn", "alias": "orders"}})
         assert handler._type_mapper_for_stream("s1") is connection_map
 
     def test_set_endpoint_refs_copies_mapping(self):
         """External mutations must not leak into the handler's state."""
         handler = DatabaseDestinationHandler()
-        source = {"s1": {"scope": "connector", "identifier": "pg", "endpoint": "transfers"}}
+        source = {"s1": {"scope": "connector", "connection_id": "pg", "alias": "transfers"}}
         handler.set_endpoint_refs(source)
-        source["s1"] = {"scope": "connector", "identifier": "evil", "endpoint": "injected"}
+        source["s1"] = {"scope": "connector", "connection_id": "evil", "alias": "injected"}
         handler._runtime = _runtime(connector_mapper=_mapper("pg"))
         # Original registration wins — set_endpoint_refs took a defensive copy.
         assert handler._endpoint_refs["s1"] == {
-            "scope": "connector", "identifier": "pg", "endpoint": "transfers",
+            "scope": "connector", "connection_id": "pg", "alias": "transfers",
         }
 
 
@@ -96,50 +96,21 @@ class TestCreateTableFromSchemaStrictness:
     Arrow-side check in ``schema_contract``."""
 
     def test_unnamed_column_raises(self):
+        from sqlalchemy import MetaData
+
         handler = DatabaseDestinationHandler()
         handler._runtime = _runtime(connector_mapper=_mapper("pg"))
-        handler._schema_name = "public"
 
         schema = {
             "columns": [
-                {"type": "BIGINT"},  # missing 'name'
-                {"name": "valid", "type": "BIGINT"},
+                {"native_type": "BIGINT"},  # missing 'name'
+                {"name": "valid", "native_type": "BIGINT"},
             ]
         }
         with pytest.raises(ValueError, match="has no 'name' field"):
             handler._create_table_from_schema(
-                "t", schema, [], _mapper("pg")
+                "t", schema, [], "public", MetaData(), _mapper("pg")
             )
-
-
-class TestJsonSchemaDdlMapping:
-    """``_json_type_to_sqlalchemy`` must agree with the Arrow path on
-    JSON-Schema formats — otherwise DDL and casting disagree silently."""
-
-    def test_date_format_is_date_not_datetime(self):
-        from sqlalchemy import Date, DateTime
-
-        handler = DatabaseDestinationHandler()
-        sa_type = handler._json_type_to_sqlalchemy({"type": "string", "format": "date"})
-        # Date, not DateTime — pa.date32() on the Arrow side has no time
-        # component, so a DateTime column would round-trip wrong.
-        assert isinstance(sa_type, Date)
-        assert not isinstance(sa_type, DateTime)
-
-    def test_date_time_format_is_tz_aware_datetime(self):
-        from sqlalchemy import DateTime
-
-        handler = DatabaseDestinationHandler()
-        sa_type = handler._json_type_to_sqlalchemy(
-            {"type": "string", "format": "date-time"}
-        )
-        assert isinstance(sa_type, DateTime)
-        assert sa_type.timezone is True
-
-    def test_unknown_type_raises(self):
-        handler = DatabaseDestinationHandler()
-        with pytest.raises(ValueError, match="unsupported type/format"):
-            handler._json_type_to_sqlalchemy({"type": "polygon"})
 
 
 class TestWriteBatchFatalOnTypeMapError:
@@ -150,7 +121,10 @@ class TestWriteBatchFatalOnTypeMapError:
         from contextlib import asynccontextmanager
         from unittest.mock import AsyncMock, MagicMock
 
-        from src.destination.connectors.database import DatabaseDestinationHandler
+        from src.destination.connectors.database import (
+            DatabaseDestinationHandler,
+            _StreamState,
+        )
         from src.engine.type_map import UnmappedTypeError
         from src.grpc.generated.analitiq.v1 import AckStatus, Cursor
 
@@ -160,10 +134,12 @@ class TestWriteBatchFatalOnTypeMapError:
         # prepare_records call raises before any SQL runs.
         handler._engine = MagicMock()
         handler._connected = True
-        handler._table = MagicMock()
-        handler._batch_commits_table = MagicMock()
-        handler._write_mode = "insert"
-        handler._primary_keys = []
+        handler._streams["s1"] = _StreamState(
+            table=MagicMock(),
+            batch_commits_table=MagicMock(),
+            write_mode="insert",
+            primary_keys=[],
+        )
 
         @asynccontextmanager
         async def _fake_begin():
@@ -178,16 +154,17 @@ class TestWriteBatchFatalOnTypeMapError:
 
         # The schema contract's prepare_records is called inside _insert_records;
         # route the UnmappedTypeError through that entry.
-        async def _raising_insert(_conn, _records):
+        async def _raising_insert(_conn, _state, _records):
             raise UnmappedTypeError("pg", "forward", "MONEY")
 
         handler._insert_records = _raising_insert  # type: ignore[method-assign]
 
+        import pyarrow as pa
         result = await handler.write_batch(
             run_id="run-1",
             stream_id="s1",
             batch_seq=1,
-            records=[{"id": 1}],
+            record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
             record_ids=["1"],
             cursor=Cursor(token=b""),
         )
@@ -195,3 +172,167 @@ class TestWriteBatchFatalOnTypeMapError:
         assert result.success is False
         assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
         assert "type-map" in result.failure_summary
+
+
+class TestWriteModeDispatch:
+    """Mirror of ``test_build_schema_message_rejects_unknown_mode`` on
+    the destination side: ``_get_write_mode`` must reject unmapped proto
+    values rather than silently defaulting (e.g. when a future
+    WRITE_MODE_MERGE is added)."""
+
+    def test_known_modes(self):
+        handler = DatabaseDestinationHandler()
+        assert handler._get_write_mode(1) == "insert"
+        assert handler._get_write_mode(2) == "upsert"
+        assert handler._get_write_mode(3) == "truncate_insert"
+
+    def test_unknown_mode_raises(self):
+        handler = DatabaseDestinationHandler()
+        with pytest.raises(ValueError, match="Unsupported proto write_mode"):
+            handler._get_write_mode(99)
+
+
+class TestPrepareForSqlAlchemyDecodesJson:
+    """Json columns travel as JSON-encoded strings; ``_prepare_for_sqlalchemy``
+    must reverse the encoding so SQLAlchemy's JSON column receives a dict,
+    not a quoted string. Regression catcher for: 'drops the decode call',
+    'order swap (decode before cast)', 'forgets non-Postgres dialects'."""
+
+    def test_json_column_decodes_to_dict(self):
+        import pyarrow as pa
+        from src.destination.connectors.database import (
+            DatabaseDestinationHandler,
+            _StreamState,
+        )
+        from src.destination.schema_contract import SchemaContract
+
+        handler = DatabaseDestinationHandler()
+        contract = SchemaContract(
+            {
+                "columns": [
+                    {
+                        "name": "id",
+                        "arrow_type": "Utf8",
+                        "native_type": "TEXT",
+                        "nullable": False,
+                    },
+                    {
+                        "name": "metadata",
+                        "arrow_type": "Json",
+                        "native_type": "JSONB",
+                        "nullable": True,
+                    },
+                ]
+            }
+        )
+        state = _StreamState(schema_contract=contract)
+
+        batch = pa.RecordBatch.from_pylist(
+            [{"id": "r1", "metadata": '{"k": "v", "n": 1}'}],
+            schema=contract.arrow_schema,
+        )
+        records = handler._prepare_for_sqlalchemy(state, batch)
+        assert records == [{"id": "r1", "metadata": {"k": "v", "n": 1}}]
+
+    def test_malformed_json_surfaces_column_context(self):
+        """Without context the developer sees ``json.JSONDecodeError`` and
+        has to grep records to find the offender. The handler relies on
+        ``decode_json_columns`` raising ``ValueError`` with the column
+        name."""
+        import pyarrow as pa
+        from src.destination.connectors.database import (
+            DatabaseDestinationHandler,
+            _StreamState,
+        )
+        from src.destination.schema_contract import SchemaContract
+
+        handler = DatabaseDestinationHandler()
+        contract = SchemaContract(
+            {
+                "columns": [
+                    {
+                        "name": "metadata",
+                        "arrow_type": "Json",
+                        "native_type": "JSONB",
+                        "nullable": True,
+                    }
+                ]
+            }
+        )
+        state = _StreamState(schema_contract=contract)
+        batch = pa.RecordBatch.from_pylist(
+            [{"metadata": "not-json{"}], schema=contract.arrow_schema,
+        )
+        with pytest.raises(ValueError, match="Json column 'metadata'"):
+            handler._prepare_for_sqlalchemy(state, batch)
+
+
+class TestDDLLockSerialization:
+    """``_ddl_lock`` must serialize concurrent _ensure_tables_exist calls
+    so two streams sharing the handler do not race the database catalog
+    (the failure that motivated commit 5bf2e00)."""
+
+    @pytest.mark.asyncio
+    async def test_ddl_lock_serializes_concurrent_table_creation(self):
+        import asyncio
+
+        from src.destination.connectors.database import (
+            DatabaseDestinationHandler,
+            _StreamState,
+        )
+
+        handler = DatabaseDestinationHandler()
+        # Pretend the engine is connected; we'll intercept create_all
+        # before any real SQL is dispatched.
+        handler._engine = AsyncMock()
+
+        in_flight = 0
+        max_concurrent = 0
+        order: list[str] = []
+
+        async def _fake_run_sync(_callable, *_args, **_kwargs):
+            nonlocal in_flight, max_concurrent
+            in_flight += 1
+            max_concurrent = max(max_concurrent, in_flight)
+            # Yield control to give a parallel coroutine a chance to enter
+            # this critical section if the lock isn't holding.
+            await asyncio.sleep(0.01)
+            in_flight -= 1
+
+        # The handler's _ensure_tables_exist uses engine.begin() as an async
+        # context manager; bypass with a coroutine returning a prepared ctx.
+        from contextlib import asynccontextmanager
+
+        @asynccontextmanager
+        async def _begin_ctx():
+            conn = AsyncMock()
+            conn.run_sync = _fake_run_sync
+            yield conn
+
+        handler._engine.begin = _begin_ctx
+
+        type_mapper = _mapper("pg")
+
+        async def _drive(stream_id: str):
+            state = _StreamState(
+                schema_name="public",
+                table_name=f"t_{stream_id}",
+                endpoint_document={
+                    "columns": [{"name": "id", "native_type": "BIGINT", "nullable": False}],
+                    "primary_keys": ["id"],
+                    "database_object": {"name": f"t_{stream_id}", "schema": "public"},
+                },
+                primary_keys=["id"],
+            )
+            order.append(f"enter:{stream_id}")
+            await handler._ensure_tables_exist(state, type_mapper)
+            order.append(f"exit:{stream_id}")
+
+        await asyncio.gather(_drive("a"), _drive("b"), _drive("c"))
+
+        # If the lock works, run_sync is never executed concurrently —
+        # max_concurrent across all three coroutines must be 1.
+        assert max_concurrent == 1, (
+            f"DDL lock did not serialize create_all calls "
+            f"(max_concurrent={max_concurrent}, order={order})"
+        )

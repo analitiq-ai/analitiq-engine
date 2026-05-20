@@ -11,8 +11,6 @@ import pytest
 from unittest.mock import AsyncMock, patch
 
 from src.destination.connectors.database import DatabaseDestinationHandler
-from src.engine.resolved import ResolvedConnector
-from src.engine.resolved import SqlAlchemyTransport as ResolvedSqlAlchemyTransport
 from src.shared.connection_runtime import ConnectionRuntime
 from src.shared.transport_factory import SqlAlchemyTransport
 
@@ -51,24 +49,7 @@ def _connector_def(driver: str = "postgresql+asyncpg") -> dict:
     }
 
 
-def _resolved_connector(driver: str = "postgresql+asyncpg") -> ResolvedConnector:
-    return ResolvedConnector(
-        connector_id="postgres",
-        kind="database",
-        display_name="PG",
-        default_transport="database",
-        transports={
-            "database": ResolvedSqlAlchemyTransport(
-                driver=driver,
-                dsn_template=f"{driver}://u:p@h:5432/d",
-                dsn_bindings={},
-                tls=None,
-            )
-        },
-    )
-
-
-def _make_runtime(config, *, connector_def=None, resolved=None):
+def _make_runtime(config, *, connector_def=None):
     resolver = AsyncMock()
     resolver.resolve = AsyncMock(return_value={"password": "test_password"})
     return ConnectionRuntime(
@@ -76,7 +57,6 @@ def _make_runtime(config, *, connector_def=None, resolved=None):
         connection_id="test-conn",
         connector_type="database",
         resolver=resolver,
-        resolved_connector=resolved or _resolved_connector(),
         connector_definition=connector_def or _connector_def(),
     )
 
@@ -85,7 +65,7 @@ def _patch_transport(*, engine=None, side_effect=None):
     """Patch build_transport with a mocked SqlAlchemyTransport result."""
     if side_effect is not None:
         return patch(
-            "src.shared.connection_runtime.materialize_typed_transport",
+            "src.shared.connection_runtime.build_transport",
             new=AsyncMock(side_effect=side_effect),
         )
     transport = SqlAlchemyTransport(
@@ -94,7 +74,7 @@ def _patch_transport(*, engine=None, side_effect=None):
         dialect="postgresql",
     )
     return patch(
-        "src.shared.connection_runtime.materialize_typed_transport",
+        "src.shared.connection_runtime.build_transport",
         new=AsyncMock(return_value=transport),
     )
 
@@ -196,7 +176,7 @@ class TestDatabaseHandlerConnect:
             engine=AsyncMock(), driver="sqlite+aiosqlite", dialect="sqlite"
         )
         with patch(
-            "src.shared.connection_runtime.materialize_typed_transport",
+            "src.shared.connection_runtime.build_transport",
             new=AsyncMock(return_value=transport),
         ):
             await handler.connect(runtime)

@@ -1,18 +1,17 @@
 """Shared database helpers used by source and destination components.
 
-The hard-coded engine factory, dialect map, and SSL canonicalization that
-used to live here have been replaced by the connector-driven transport
-factory at :mod:`src.shared.transport_factory`. What remains is purely
-SQL helpers (identifier validation, fully-qualified names, DEFAULT
-clauses), connection acquisition, and read-side type conversion — none
-of them know anything provider-specific.
+The hard-coded engine factory, dialect map, and SSL canonicalization
+that used to live here have been replaced by the connector-driven
+transport factory at :mod:`src.shared.transport_factory`. What remains
+is pure SQL helpers (identifier validation, fully-qualified names,
+DEFAULT clauses) and connection acquisition — none of them know
+anything provider-specific.
 """
 
 from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
-from datetime import datetime
 from typing import Any, AsyncIterator, Dict
 
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -50,24 +49,6 @@ async def acquire_connection(engine: AsyncEngine) -> AsyncIterator:
         raise RuntimeError("Engine not initialized")
     async with engine.connect() as conn:
         yield conn
-
-
-def convert_db_to_python(value: Any) -> Any:
-    """Convert a single database value to a JSON-friendly Python value.
-
-    The only conversion applied is :class:`datetime` → ISO-8601 string;
-    everything else is returned unchanged.
-    """
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        return value.isoformat()
-    return value
-
-
-def convert_record_from_db(record: Dict[str, Any]) -> Dict[str, Any]:
-    """Apply :func:`convert_db_to_python` to every value in a record dict."""
-    return {key: convert_db_to_python(value) for key, value in record.items()}
 
 
 def get_default_clause(field_def: Dict[str, Any]) -> str:

@@ -274,105 +274,177 @@ class TestConnectRetryLogLevels:
 class TestClientPayloadEncoding:
     """Tests for client payload encoding."""
 
-    def test_encode_jsonl_payload(self):
-        """Test JSONL payload encoding."""
-        from src.grpc.generated.analitiq.v1 import PayloadFormat
+    def test_encode_arrow_ipc_roundtrip(self):
+        """Arrow IPC encode → decode preserves typed columnar data.
 
-        client = DestinationGRPCClient()
-        records = [
+        Arrow IPC is the only supported wire format; the encoded bytes
+        carry both the schema and the record batch so the destination
+        decodes them together.
+        """
+        import io
+        import pyarrow as pa
+
+        batch = pa.RecordBatch.from_pylist(
+            [{"id": 1, "name": "first"}, {"id": 2, "name": "second"}]
+        )
+        payload = DestinationGRPCClient._encode_arrow_ipc(batch)
+
+        with pa.ipc.open_stream(io.BytesIO(payload)) as reader:
+            decoded = reader.read_all()
+
+        assert decoded.num_rows == 2
+        assert decoded.to_pylist() == [
             {"id": 1, "name": "first"},
             {"id": 2, "name": "second"},
         ]
-
-        payload = client._encode_payload(records, PayloadFormat.PAYLOAD_FORMAT_JSONL)
-
-        # Decode and verify
-        lines = payload.decode("utf-8").split("\n")
-        assert len(lines) == 2
-
-        import json
-        assert json.loads(lines[0]) == {"id": 1, "name": "first"}
-        assert json.loads(lines[1]) == {"id": 2, "name": "second"}
-
-    def test_encode_msgpack_payload(self):
-        """Test MessagePack payload encoding."""
-        pytest.importorskip("msgpack")
-
-        from src.grpc.generated.analitiq.v1 import PayloadFormat
-        import msgpack
-
-        client = DestinationGRPCClient()
-        records = [
-            {"id": 1, "name": "first"},
-            {"id": 2, "name": "second"},
-        ]
-
-        payload = client._encode_payload(records, PayloadFormat.PAYLOAD_FORMAT_MSGPACK)
-
-        # Decode and verify
-        decoded = msgpack.unpackb(payload, raw=False)
-        assert len(decoded) == 2
-        assert decoded[0] == {"id": 1, "name": "first"}
+        assert decoded.schema == batch.schema
 
 
 class TestClientSchemaBuilder:
     """Tests for schema message building."""
 
-    def test_build_schema_message_from_resolved(self):
-        """Build a schema message from a typed `ResolvedDestination`."""
-        from src.engine.resolved import (
-            Column,
-            DatabaseObject,
-            DatabaseWriteEndpoint,
-            EndpointRef,
-            ExecutionConfig,
-            HttpTransport,
-            ResolvedConnection,
-            ResolvedConnector,
-            ResolvedDestination,
-            WriteSpec,
-        )
-
-        connector = ResolvedConnector(
-            connector_id="postgresql",
-            kind="database",
-            display_name="PostgreSQL",
-            default_transport="primary",
-            transports={"primary": HttpTransport(base_url="x", headers={}, timeout_seconds=None)},
-        )
-        connection = ResolvedConnection(
-            connection_id="conn-1",
-            connector=connector,
-            parameters={},
-            selections={},
-            secret_refs={},
-        )
-        endpoint = DatabaseWriteEndpoint(
-            endpoint_id="users",
-            database_object=DatabaseObject(schema="public", name="users", object_type="table"),
-            columns=(
-                Column(name="id", arrow_type="Int64", native_type="bigint", nullable=False, default=None, ordinal_position=1),
-                Column(name="name", arrow_type="Utf8", native_type="text", nullable=True, default=None, ordinal_position=2),
-            ),
-            primary_keys=("id",),
-        )
-        destination = ResolvedDestination(
-            connection=connection,
-            endpoint=endpoint,
-            endpoint_ref=EndpointRef(scope="connection", connection_id="conn-1", endpoint_id="users"),
-            write=WriteSpec(mode="upsert", conflict_keys=(("id",),)),
-            execution=ExecutionConfig(batch_size=100, max_concurrent_batches=2),
-        )
+    def test_build_schema_message_carries_identification_and_mode(self):
+        """The slim SchemaMessage carries only stream_id, version, and
+        write_mode — every other field comes from the preloaded contract
+        endpoint document on the destination side."""
+        from src.grpc.generated.analitiq.v1 import WriteMode
 
         client = DestinationGRPCClient()
         schema_msg = client._build_schema_message(
-            "stream-1",
-            destination,
-            {"endpoint_id": "users", "columns": []},
+            "stream-1", {"write_mode": "upsert", "schema_version": 7}
+        )
+        assert schema_msg.stream_id == "stream-1"
+        assert schema_msg.version == 7
+        assert schema_msg.write_mode == WriteMode.WRITE_MODE_UPSERT
+
+    def test_build_schema_message_rejects_unknown_mode(self):
+        """Unknown write_mode strings must surface instead of silently
+        defaulting to UPSERT (which would mask config typos)."""
+        client = DestinationGRPCClient()
+        with pytest.raises(ValueError, match="Unknown write_mode"):
+            client._build_schema_message("s", {"write_mode": "upsert_typo"})
+
+
+class TestStreamTaskFailurePropagation:
+    """Cover the _STREAM_TASK_FAILED sentinel paths in send_batch.
+
+    The reader/writer asyncio tasks push the sentinel onto the response
+    queue when they exit (exception or clean EOF). Without this signal,
+    send_batch would block on response_queue.get until self.timeout —
+    300s by default. These tests pin the fast-fail behavior and the
+    distinct diagnostics for "task failed" vs "peer closed cleanly".
+    """
+
+    @pytest.mark.asyncio
+    async def test_writer_exception_surfaces_as_fatal(self):
+        import asyncio
+        import pyarrow as pa
+
+        from src.grpc.client import _STREAM_TASK_FAILED
+        from src.grpc.generated.analitiq.v1 import Cursor
+
+        client = DestinationGRPCClient()
+        client._stream_active = True
+        client._request_queue = asyncio.Queue()
+        client._response_queue = asyncio.Queue()
+        client._task_failure = RuntimeError("writer blew up")
+        client._response_queue.put_nowait(_STREAM_TASK_FAILED)
+
+        result = await client.send_batch(
+            run_id="r",
+            stream_id="s",
+            batch_seq=7,
+            record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
+            record_ids=["1"],
+            cursor=Cursor(token=b""),
         )
 
-        assert schema_msg.stream_id == "stream-1"
-        assert list(schema_msg.primary_key) == ["id"]
-        assert schema_msg.destination_config.connector_type == "database"
-        assert schema_msg.destination_config.database.table_name == "users"
-        assert schema_msg.destination_config.database.schema_name == "public"
+        assert result.success is False
+        assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+        assert "RuntimeError" in result.failure_summary
+        assert "writer blew up" in result.failure_summary
+
+    @pytest.mark.asyncio
+    async def test_clean_peer_close_surfaces_distinct_diagnostic(self):
+        """Reader hitting clean EOF (no exception) must produce an
+        actionable message — not 'NoneType: None' — so operators can
+        distinguish premature peer close from in-task errors."""
+        import asyncio
+        import pyarrow as pa
+
+        from src.grpc.client import _STREAM_TASK_FAILED
+        from src.grpc.generated.analitiq.v1 import Cursor
+
+        client = DestinationGRPCClient()
+        client._stream_active = True
+        client._request_queue = asyncio.Queue()
+        client._response_queue = asyncio.Queue()
+        client._task_failure = None
+        client._peer_closed_stream = True
+        client._response_queue.put_nowait(_STREAM_TASK_FAILED)
+
+        result = await client.send_batch(
+            run_id="r",
+            stream_id="s",
+            batch_seq=42,
+            record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
+            record_ids=["1"],
+            cursor=Cursor(token=b""),
+        )
+
+        assert result.success is False
+        assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+        assert "Destination closed stream" in result.failure_summary
+        assert "42" in result.failure_summary
+        assert "NoneType" not in result.failure_summary
+
+    @pytest.mark.asyncio
+    async def test_read_responses_signals_sentinel_on_exception(self):
+        """The reader task must push _STREAM_TASK_FAILED before exiting on
+        exception so consumers don't block until the gRPC timeout."""
+        import asyncio
+
+        from src.grpc.client import _STREAM_TASK_FAILED
+
+        client = DestinationGRPCClient()
+        client._response_queue = asyncio.Queue()
+
+        async def _exploding_stream():
+            raise ConnectionError("peer rst")
+            yield  # pragma: no cover — make this an async generator
+
+        client._stream = _exploding_stream()
+
+        with pytest.raises(ConnectionError):
+            await client._read_responses()
+
+        # Sentinel must be queued and _task_failure must carry the cause.
+        assert client._response_queue.qsize() == 1
+        assert client._response_queue.get_nowait() is _STREAM_TASK_FAILED
+        assert isinstance(client._task_failure, ConnectionError)
+        assert client._peer_closed_stream is False
+
+    @pytest.mark.asyncio
+    async def test_read_responses_signals_sentinel_on_clean_eof(self):
+        """When the server closes the stream gracefully, the reader still
+        pushes the sentinel — but with _peer_closed_stream=True and
+        _task_failure=None, so send_batch produces a distinct diagnostic."""
+        import asyncio
+
+        from src.grpc.client import _STREAM_TASK_FAILED
+
+        client = DestinationGRPCClient()
+        client._response_queue = asyncio.Queue()
+
+        async def _empty_stream():
+            return
+            yield  # pragma: no cover
+
+        client._stream = _empty_stream()
+
+        await client._read_responses()
+
+        assert client._response_queue.qsize() == 1
+        assert client._response_queue.get_nowait() is _STREAM_TASK_FAILED
+        assert client._task_failure is None
+        assert client._peer_closed_stream is True

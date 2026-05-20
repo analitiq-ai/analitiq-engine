@@ -126,12 +126,13 @@ class TestFileHandlerSecretRetention:
         ):
             await handler.connect(runtime)
 
+            import pyarrow as pa
             from src.grpc.generated.analitiq.v1 import Cursor
             result = await handler.write_batch(
                 run_id="run-1",
                 stream_id="stream-1",
                 batch_seq=0,
-                records=[{"id": 1}],
+                record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
                 record_ids=["r1"],
                 cursor=Cursor(token=b"cursor-0"),
             )

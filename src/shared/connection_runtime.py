@@ -18,8 +18,8 @@ Lifecycle:
   transport, and scrubs secret values from memory.
 * Reference counting (:meth:`acquire`, :meth:`close`) lets multiple
   source/destination connectors share one underlying engine/session.
-* ``file``/``s3``/``stdout`` connectors keep the legacy resolved-config
-  passthrough until those connector families adopt ``transports`` blocks.
+* ``file``/``s3``/``stdout`` connectors expose a resolved-config dict via
+  :attr:`resolved_config`; they have no shared transport to manage.
 """
 
 from __future__ import annotations
@@ -31,14 +31,16 @@ from typing import Any, Dict, Mapping, Optional
 import aiohttp
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from src.engine.resolved import ResolvedConnector
 from src.engine.resolver import ResolutionContext
 from src.engine.type_map import TypeMapper
 from src.secrets.protocol import SecretsResolver
 from src.secrets.exceptions import SecretNotFoundError, SecretResolutionError
 from src.shared.rate_limiter import RateLimiter
-from src.shared.transport_factory import HttpTransport, SqlAlchemyTransport
-from src.shared.typed_transport import materialize_typed_transport
+from src.shared.transport_factory import (
+    HttpTransport,
+    SqlAlchemyTransport,
+    build_transport,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -47,15 +49,19 @@ logger = logging.getLogger(__name__)
 VALID_CONNECTOR_TYPES = frozenset({"database", "api", "file", "s3", "stdout"})
 
 
-def _derive_dialect(resolved_connector: Optional[ResolvedConnector]) -> Optional[str]:
-    """Return the base SQL dialect (``postgresql``, ``mysql``, …) for a
-    sqlalchemy-backed connector, or ``None`` otherwise."""
-    if resolved_connector is None:
+def _derive_dialect(connector_definition: Optional[Mapping[str, Any]]) -> Optional[str]:
+    """Return the base SQL dialect (e.g. ``postgresql``) from a connector
+    definition, or ``None`` if not a sqlalchemy connector."""
+    if not connector_definition:
         return None
-    transport = resolved_connector.transports.get(resolved_connector.default_transport)
-    if transport is None or getattr(transport, "type", None) != "sqlalchemy":
+    transports = connector_definition.get("transports") or {}
+    default_ref = connector_definition.get("default_transport")
+    if not default_ref or default_ref not in transports:
         return None
-    driver = getattr(transport, "driver", None)
+    transport = transports[default_ref]
+    if transport.get("transport_type") != "sqlalchemy":
+        return None
+    driver = transport.get("driver")
     if not isinstance(driver, str) or not driver:
         return None
     return driver.split("+", 1)[0]
@@ -78,7 +84,6 @@ class ConnectionRuntime:
         connection_id: str,
         connector_type: str,
         resolver: SecretsResolver,
-        resolved_connector: Optional[ResolvedConnector] = None,
         connector_definition: Optional[Mapping[str, Any]] = None,
         driver: Optional[str] = None,
         connector_type_mapper: Optional[TypeMapper] = None,
@@ -93,7 +98,6 @@ class ConnectionRuntime:
         self._raw_config: Dict[str, Any] = dict(raw_config)
         self._connection_id = connection_id
         self._connector_type = connector_type
-        self._resolved_connector = resolved_connector
         self._connector_definition: Optional[Dict[str, Any]] = (
             dict(connector_definition) if connector_definition else None
         )
@@ -115,7 +119,6 @@ class ConnectionRuntime:
         # Reference counting for shared ownership across streams
         self._ref_count = 0
 
-        # Cooperative scrub for legacy file/s3/stdout consumers.
         self._scrub_requests = 0
 
     # ------------------------------------------------------------------
@@ -137,7 +140,7 @@ class ConnectionRuntime:
             return self._transport_dialect
         if self._driver_override is not None:
             return self._driver_override
-        return _derive_dialect(self._resolved_connector)
+        return _derive_dialect(self._connector_definition)
 
     @property
     def driver_string(self) -> Optional[str]:
@@ -188,22 +191,12 @@ class ConnectionRuntime:
     # ------------------------------------------------------------------
 
     async def materialize(self, *, require_port: bool = True) -> None:
-        """Resolve secrets and materialize the transport.
+        """Resolve secrets, build the resolution context, materialize the transport.
 
-        Drives the typed :class:`ResolvedConnector.transports` spec
-        directly — no generic expression resolver runs over the connector
-        JSON, which avoids the historical collision between the schema
-        field ``dsn.template`` and the resolver's ``template`` expression
-        marker.
-
-        Connectors without a resolved transports block (``file``,
-        ``s3``, ``stdout``) fall through to a legacy passthrough that
-        exposes ``resolved_config`` for handlers that still consume a
-        flat dict.
-
-        ``require_port`` is accepted for API compatibility with the
-        previous runtime; database DSN templates encode whether a port
-        is required, so the argument is no-op for spec-driven connectors.
+        Connectors that declare a ``transports`` block go through the
+        spec-driven transport factory. Connectors without a ``transports``
+        block (file/s3/stdout) expose ``resolved_config`` directly — they
+        have no shared transport to manage.
         """
         if self._materialized:
             return
@@ -211,11 +204,18 @@ class ConnectionRuntime:
         secrets = await self._load_secrets()
         self._validate_secret_refs(secrets)
 
-        spec = self._select_transport_spec()
-        if spec is not None:
+        has_transports = bool(
+            self._connector_definition
+            and self._connector_definition.get("transports")
+        )
+
+        if has_transports:
             context = self._build_resolution_context(secrets)
             try:
-                transport = await materialize_typed_transport(spec, context=context)
+                transport = await build_transport(
+                    self._connector_definition,
+                    context=context,
+                )
             except Exception:
                 self._scrub_secrets()
                 raise
@@ -235,20 +235,11 @@ class ConnectionRuntime:
 
             self._scrub_secrets()
         else:
-            # Legacy passthrough for connectors that have not yet declared
-            # a ``transports`` block (typically file/s3/stdout). The
-            # handler consumes ``resolved_config`` directly.
+            # file/s3/stdout connectors: expose ``resolved_config``
+            # directly. They have no transports block by design.
             self._resolved_config = self._merge_secrets_into_config(secrets)
 
         self._materialized = True
-
-    def _select_transport_spec(self):
-        """Return the typed transport spec to materialize, or ``None`` for
-        legacy connectors without a typed connector."""
-        if self._resolved_connector is None:
-            return None
-        ref = self._resolved_connector.default_transport
-        return self._resolved_connector.transports.get(ref)
 
     # ------------------------------------------------------------------
     # Transport accessors
@@ -428,9 +419,9 @@ class ConnectionRuntime:
             "discovered": dict(self._raw_config.get("discovered") or {}),
             "secret_refs": dict(self._raw_config.get("secret_refs") or {}),
             "auth_state": dict(self._raw_config.get("auth_state") or {}),
-            # Preserve any top-level address fields connectors may want to
-            # reference (kept only as a back-compat surface; new connectors
-            # encode address in transports).
+            # Top-level fields that connector value expressions may
+            # reference directly (e.g. ``connection.name`` for logging
+            # decorators). Address fields live in transports.
             "name": self._raw_config.get("name"),
             "status": self._raw_config.get("status"),
         }
@@ -445,8 +436,9 @@ class ConnectionRuntime:
     def _merge_secrets_into_config(
         self, secrets: Mapping[str, Any]
     ) -> Dict[str, Any]:
-        """For legacy file/s3/stdout connectors that still consume a
-        flat resolved-config dict, expose secrets under the same keys."""
+        """Merge secrets into a flat resolved-config dict for file/s3/stdout
+        consumers, which expose ``resolved_config`` directly instead of
+        a transport object."""
         resolved = copy.deepcopy(self._raw_config)
         resolved.setdefault("parameters", {})
         # Surface secrets at the top level for handlers that look them up

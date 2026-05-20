@@ -1,20 +1,13 @@
 """Deterministic matchers for type-map and ssl-mode-map.
 
-``TypeMapper`` walks a rule list top-to-bottom and returns the canonical
-type of the first matching rule. It never defaults, never invokes an LLM,
-and never performs implicit coercion — a miss is a hard error so upstream
-pipelines fail loudly on unmapped types.
+``TypeMapper`` returns the Arrow-type string of the first matching rule
+and raises on a miss — no defaults, no coercion. Rule files are
+single-direction (native → Arrow) by design: inverting one side's rules
+at runtime would be lossy and ambiguous.
 
-Rule files are deliberately single-direction (native → canonical). Source
-connectors author their own file (many source-natives → one canonical);
-destination connectors author a separate file in the opposite direction
-(one canonical → one opinionated destination-native) using the same
-matcher. Inverting one side's rules at runtime would be lossy and ambiguous,
-so this module does not attempt it.
-
-``SSLModeMapper`` is a flat dictionary lookup from native driver SSL modes
-(``prefer``, ``VERIFY_IDENTITY``, …) to the canonical engine vocabulary
-(``none`` / ``encrypt`` / ``verify`` / ``prefer``).
+``SSLModeMapper`` maps native driver SSL modes (``prefer``,
+``VERIFY_IDENTITY``, …) to the engine's canonical vocabulary (``none`` /
+``encrypt`` / ``verify`` / ``prefer``).
 """
 
 from __future__ import annotations
@@ -79,10 +72,11 @@ class TypeMapper:
     def rules(self) -> tuple[TypeMapRule, ...]:
         return self._rules
 
-    def to_canonical(self, native: str) -> str:
-        """Map a native type string to its canonical form.
+    def to_arrow_type(self, native: str) -> str:
+        """Map a native type string to its Arrow-type-string form.
 
-        Raises :class:`UnmappedTypeError` when no rule matches — never defaults.
+        Pair with :func:`~src.engine.type_map.arrow.parse_arrow_type` to
+        get a ``pa.DataType``. Raises :class:`UnmappedTypeError` on miss.
         """
         normalized = normalize_native_type(native)
         for rule, compiled, exact in zip(

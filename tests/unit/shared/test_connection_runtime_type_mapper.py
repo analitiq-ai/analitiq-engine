@@ -33,7 +33,7 @@ class TestTypeMapperFor:
         cmapper = TypeMapper("pg", parse_rules(RULES, source="<t>"))
         rt = _runtime(connector_mapper=cmapper)
         assert rt.type_mapper_for(
-            {"scope": "connector", "identifier": "pg", "endpoint": "transfers"},
+            {"scope": "connector", "connection_id": "pg", "alias": "transfers"},
         ) is cmapper
 
     def test_connection_scope_returns_connection_mapper(self):
@@ -41,7 +41,7 @@ class TestTypeMapperFor:
         nmapper = TypeMapper("connection:test-conn", parse_rules(RULES, source="<t>"))
         rt = _runtime(connector_mapper=cmapper, connection_mapper=nmapper)
         assert rt.type_mapper_for(
-            {"scope": "connection", "identifier": "test-conn", "endpoint": "orders"},
+            {"scope": "connection", "connection_id": "test-conn", "alias": "orders"},
         ) is nmapper
 
     def test_connection_scope_without_mapper_raises(self):
@@ -49,19 +49,19 @@ class TestTypeMapperFor:
         rt = _runtime(connector_mapper=cmapper, connection_mapper=None)
         with pytest.raises(RuntimeError, match="has no type-map"):
             rt.type_mapper_for(
-                {"scope": "connection", "identifier": "test-conn", "endpoint": "orders"},
+                {"scope": "connection", "connection_id": "test-conn", "alias": "orders"},
             )
 
     def test_string_ref_rejected(self):
         rt = _runtime(connector_mapper=TypeMapper("pg", parse_rules(RULES, source="<t>")))
-        with pytest.raises(TypeError, match="endpoint_ref must be a dict"):
+        with pytest.raises(TypeError, match="endpoint_ref must be"):
             rt.type_mapper_for("transfers")
 
     def test_unknown_scope_rejected(self):
         rt = _runtime(connector_mapper=TypeMapper("pg", parse_rules(RULES, source="<t>")))
         with pytest.raises(ValueError, match="scope"):
             rt.type_mapper_for(
-                {"scope": "pipeline", "identifier": "foo", "endpoint": "bar"},
+                {"scope": "pipeline", "connection_id": "foo", "alias": "bar"},
             )
 
     def test_connector_mapper_required(self):

@@ -1,18 +1,22 @@
 """Data transformation utilities for the streaming engine.
 
-Implements the schema-defined assignment-based mapping (each assignment
-has ``target.path``, ``target.arrow_type``, ``value``, optional
-``validate``). There is no legacy ``field_mappings`` / ``computed_fields``
-fallback.
+Supports assignment-based mapping (per MAPPING_AND_TRANSFORMATIONS.md)
+and a flat ``field_mappings`` + ``computed_fields`` format used by
+fixture-driven tests.
 """
 
 import asyncio
+import json
 import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
+import pyarrow as pa
+
 from .exceptions import TransformationError
 from .expression_evaluator import SecureExpressionEvaluator
+from .type_map.arrow import resolve_arrow_type
+from .type_map.exceptions import InvalidTypeMapError
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +78,6 @@ class AssignmentTransformer:
                 validate = assignment.get("validate")
 
                 target_path = target.get("path", [])
-                target_type = target.get("type", "string")
                 nullable = target.get("nullable", True)
 
                 # Evaluate the value
@@ -108,10 +111,6 @@ class AssignmentTransformer:
                     })
                     continue
 
-                # Type coercion
-                value = self._coerce_type(value, target_type)
-
-                # Set value in result (supports nested paths)
                 self._set_nested_value(result, target_path, value)
 
             except Exception as e:
@@ -130,21 +129,17 @@ class AssignmentTransformer:
         partial_result: Dict[str, Any],
         value_spec: Dict[str, Any]
     ) -> Any:
-        """Evaluate a value specification.
+        """Evaluate a value specification (const or expr)."""
+        kind = value_spec.get("kind", "expr")
 
-        Accepts the schema-canonical shape used in stream JSON:
-            {"expression": {op, path, args, ...}}
-            {"constant": {"value": <literal>}}
-        """
-        if "expression" in value_spec:
-            return await self._evaluate_expression(
-                record, partial_result, value_spec["expression"]
-            )
-        if "constant" in value_spec:
-            const = value_spec["constant"]
-            if isinstance(const, dict):
-                return const.get("value", const)
-            return const
+        if kind == "const":
+            const = value_spec.get("const", {})
+            return const.get("value")
+
+        elif kind == "expr":
+            expr = value_spec.get("expr", {})
+            return await self._evaluate_expression(record, partial_result, expr)
+
         return None
 
     async def _evaluate_expression(
@@ -159,8 +154,6 @@ class AssignmentTransformer:
         match op:
             case "get":
                 path = expr.get("path", [])
-                if isinstance(path, str):
-                    path = path.split(".")
                 return self._get_nested_value(record, path)
 
             case "const":
@@ -470,102 +463,340 @@ class AssignmentTransformer:
 
         return None
 
-    def _coerce_type(self, value: Any, target_type: str) -> Any:
-        """
-        Coerce value to JSON-compatible type for transmission.
-
-        NOTE: Datetime/date/time coercion is intentionally NOT done here.
-        Type coercion to destination-specific types (e.g., Python datetime
-        objects for PostgreSQL) is handled by the destination-side type
-        coercer based on the JSON schema. This avoids losing type information
-        during JSON serialization over gRPC.
-
-        This method only handles basic JSON-native type coercion:
-        - string, integer, number, boolean
-        """
-        if value is None:
-            return None
-
-        match target_type:
-            case "string":
-                return str(value) if value is not None else None
-            case "integer":
-                try:
-                    return int(float(value))
-                except (ValueError, TypeError):
-                    return value
-            case "decimal" | "number":
-                try:
-                    return float(value)
-                except (ValueError, TypeError):
-                    return value
-            case "boolean":
-                if isinstance(value, bool):
-                    return value
-                if isinstance(value, str):
-                    return value.lower() in ("true", "1", "yes")
-                return bool(value)
-            case "date" | "datetime" | "time":
-                # Pass through as-is - destination handles type coercion
-                # based on JSON schema and database requirements
-                return value
-            case "object" | "array":
-                return value
-            case _:
-                return value
-
-
 class DataTransformer:
-    """
-    Handles field mappings, transformations, and computed fields.
-
-    Supports both:
-    - New assignment-based mapping (assignments array)
-    - Legacy field_mappings + computed_fields format
-    """
+    """Apply contract mapping assignments (and the ``field_mappings`` /
+    ``computed_fields`` fixture shape) to a batch of records."""
 
     def __init__(self):
         self.expression_evaluator = SecureExpressionEvaluator()
         self.assignment_transformer = AssignmentTransformer()
 
-    async def apply_assignments(
+    async def apply_transformations(
         self,
         batch: List[Dict[str, Any]],
-        assignments: List[Dict[str, Any]],
+        config: Dict[str, Any]
     ) -> List[Dict[str, Any]]:
-        """Apply schema-shaped assignment rules to a batch.
-
-        Each assignment matches ``stream.mapping.assignments[i]`` from the
-        published stream schema: ``{target: {path, arrow_type, nullable},
-        value: {...}, validate: {...} | None}``.
         """
-        if not assignments:
-            return batch
-        return await self._apply_assignment_transformations(batch, assignments)
+        Apply field mappings and transformations to batch.
+
+        Args:
+            batch: List of records to transform
+            config: Stream configuration with mapping rules
+
+        Returns:
+            Transformed batch
+
+        Raises:
+            TransformationError: If transformation fails
+        """
+        mapping = config.get("mapping", {})
+
+        # Check for new assignment-based format
+        assignments = mapping.get("assignments", [])
+        if assignments:
+            return await self._apply_assignment_transformations(batch, assignments)
+
+        # Fall back to legacy format
+        field_mappings = mapping.get("field_mappings", {})
+        computed_fields = mapping.get("computed_fields", {})
+
+        if not field_mappings and not computed_fields:
+            return batch  # No transformations to apply
+
+        return await self._apply_legacy_transformations(
+            batch, field_mappings, computed_fields
+        )
 
     async def _apply_assignment_transformations(
         self,
         batch: List[Dict[str, Any]],
         assignments: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
-        """Apply assignment-based transformations."""
-        transformed_batch = []
-        all_errors = []
+        """Apply assignment-based transformations.
 
-        for record in batch:
+        Any per-record transform error fails the whole batch. Silently
+        dropping records would deliver a shorter batch than the source
+        emitted with no count reconciliation, no DLQ routing, and no
+        FATAL signal — the engine's error_strategy is the right place
+        to decide retry vs DLQ, not this transformer.
+
+        Fields whose target ``arrow_type`` is ``"Json"`` are JSON-encoded
+        here so the engine's Arrow batch (``pa.large_string`` column) can
+        accept them. Destination handlers reverse this at the write
+        boundary.
+        """
+        kept: List[tuple[int, Dict[str, Any]]] = []
+        all_errors: List[Dict[str, Any]] = []
+
+        for source_row, record in enumerate(batch):
             await asyncio.sleep(0)  # Yield for async safety
             result, errors = await self.assignment_transformer.transform_record(
                 record, assignments
             )
-            if result is not None:
-                transformed_batch.append(result)
             if errors:
+                for err in errors:
+                    err.setdefault("row", source_row)
                 all_errors.extend(errors)
+            if result is not None:
+                kept.append((source_row, result))
+
+        # Skip the Json-encoding pass when prior errors exist — those
+        # records will be discarded by the raise below, and mutating
+        # their Json columns in-place beforehand would leak a partially
+        # transformed view to anyone introspecting them.
+        if not all_errors:
+            json_cols = _json_target_names(assignments)
+            if json_cols:
+                for source_row, record in kept:
+                    for col in json_cols:
+                        value = record.get(col)
+                        if value is None or isinstance(value, str):
+                            # Strings pass through to pa.large_string
+                            # unchanged — the destination decoder will
+                            # json.loads them. Useful when the assignment
+                            # is ``get`` from a Json source column.
+                            continue
+                        if not isinstance(value, (dict, list)):
+                            all_errors.append({
+                                "field": col,
+                                "row": source_row,
+                                "error": (
+                                    f"Json target requires dict/list/str/None, "
+                                    f"got {type(value).__name__}"
+                                ),
+                                "action": "dlq",
+                            })
+                            continue
+                        try:
+                            record[col] = json.dumps(value)
+                        except TypeError as exc:
+                            # Non-JSON-serializable values (datetime,
+                            # Decimal, UUID, …) join the per-record error
+                            # stream so they follow the same DLQ / retry
+                            # policy as every other transform failure.
+                            all_errors.append({
+                                "field": col,
+                                "row": source_row,
+                                "error": f"Json target value is not JSON-serializable: {exc}",
+                                "action": "dlq",
+                            })
 
         if all_errors:
-            logger.warning(f"Transformation completed with {len(all_errors)} errors")
-            for error in all_errors[:5]:  # Log first 5 errors
-                logger.warning(f"  Field '{error['field']}': {error['error']}")
+            summary = "; ".join(
+                f"{err.get('field', '?')} (row {err.get('row', '?')}): "
+                f"{err.get('error', err)}"
+                for err in all_errors[:5]
+            )
+            suffix = f" (+{len(all_errors) - 5} more)" if len(all_errors) > 5 else ""
+            raise TransformationError(
+                f"Assignment transformations produced {len(all_errors)} error(s): "
+                f"{summary}{suffix}"
+            )
+
+        return [record for _, record in kept]
+
+    async def _apply_legacy_transformations(
+        self,
+        batch: List[Dict[str, Any]],
+        field_mappings: Dict[str, Any],
+        computed_fields: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        """Apply legacy field_mappings and computed_fields."""
+        transformed_batch = []
+
+        try:
+            for record in batch:
+                transformed_record = {}
+
+                # Apply field mappings
+                for source_field, mapping_config in field_mappings.items():
+                    if isinstance(mapping_config, dict):
+                        target_field = mapping_config.get("target", source_field)
+                        transformations = mapping_config.get("transformations", [])
+                    else:
+                        target_field = mapping_config
+                        transformations = []
+
+                    source_value = self._get_nested_value(record, source_field)
+                    transformed_value = await self._apply_field_transformations(
+                        source_value, transformations
+                    )
+                    transformed_record[target_field] = transformed_value
+
+                # Apply computed fields
+                for field_name, field_config in computed_fields.items():
+                    if isinstance(field_config, dict):
+                        expression = field_config.get("expression", "")
+                    else:
+                        expression = field_config
+
+                    computed_value = await self.expression_evaluator.evaluate(
+                        expression, record, transformed_record
+                    )
+                    transformed_record[field_name] = computed_value
+
+                transformed_batch.append(transformed_record)
+
+        except Exception as e:
+            logger.error(f"Transformation failed: {e}")
+            raise TransformationError(f"Data transformation failed: {e}") from e
 
         return transformed_batch
 
+    def _get_nested_value(self, record: Dict[str, Any], field_path: str) -> Any:
+        """Get value from nested field path like 'details.merchant.name'."""
+        if "." not in field_path:
+            return record.get(field_path)
+
+        current = record
+        for field in field_path.split("."):
+            if isinstance(current, dict) and field in current:
+                current = current[field]
+            else:
+                return None
+        return current
+
+    async def _apply_field_transformations(
+        self,
+        value: Any,
+        transformations: List[str]
+    ) -> Any:
+        """Apply transformations to a field value."""
+        if not transformations or value is None:
+            return value
+
+        for transformation in transformations:
+            await asyncio.sleep(0)  # Yield for async safety
+
+            match transformation:
+                case "abs" if isinstance(value, (int, float)):
+                    value = abs(value)
+                case "strip" | "trim" if isinstance(value, str):
+                    value = value.strip()
+                case "lowercase" | "lower" if isinstance(value, str):
+                    value = value.lower()
+                case "uppercase" | "upper" if isinstance(value, str):
+                    value = value.upper()
+                case "iso_to_date" if isinstance(value, str):
+                    value = await self._parse_iso_date(value)
+                case "iso_to_timestamp" if isinstance(value, str):
+                    value = await self._parse_iso_timestamp(value)
+                case "iso_string_to_datetime":
+                    value = await self._parse_iso_to_datetime_object(value)
+                case "to_int" if isinstance(value, (str, float)):
+                    try:
+                        value = int(float(value))
+                    except (ValueError, TypeError) as e:
+                        raise TransformationError(
+                            f"to_int: cannot convert {value!r} ({type(value).__name__}) to int: {e}"
+                        ) from e
+                case "to_float" if isinstance(value, (str, int)):
+                    try:
+                        value = float(value)
+                    except (ValueError, TypeError) as e:
+                        raise TransformationError(
+                            f"to_float: cannot convert {value!r} ({type(value).__name__}) to float: {e}"
+                        ) from e
+                case "to_str":
+                    value = str(value) if value is not None else ""
+                case _:
+                    logger.warning(f"Unknown transformation: {transformation}")
+
+        return value
+
+    async def _parse_iso_date(self, value: str) -> str:
+        """Parse ISO datetime string to date format. On parse failure
+        the original string is returned unchanged — this transformation
+        is used for output-side reformatting, not cursor math, so
+        passing the bad value through to the destination's schema is a
+        more localized failure than raising mid-batch."""
+        try:
+            if value.endswith('Z'):
+                value = value.replace('Z', '+00:00')
+            dt = datetime.fromisoformat(value)
+            return dt.strftime('%Y-%m-%d')
+        except ValueError as e:
+            logger.warning("Failed to parse ISO date '%s': %s", value, e)
+            return value
+
+    async def _parse_iso_timestamp(self, value: str) -> datetime:
+        """Parse ISO datetime string to datetime object. Raises on
+        unparseable input — a ``datetime.now()`` fallback would silently
+        re-window cursors and corrupt incremental sync."""
+        if value.endswith('Z'):
+            value = value.replace('Z', '+00:00')
+        return datetime.fromisoformat(value)
+
+    async def _parse_iso_to_datetime_object(self, value: Any) -> datetime:
+        """Convert ISO timestamp string or datetime to datetime object.
+        Raises on unparseable input — see ``_parse_iso_timestamp``."""
+        if value is None:
+            raise ValueError("Cannot convert None to datetime")
+
+        if isinstance(value, datetime):
+            return value
+
+        iso_string = str(value)
+        if iso_string.endswith('Z'):
+            iso_string = iso_string.replace('Z', '+00:00')
+
+        return datetime.fromisoformat(iso_string)
+
+
+def _json_target_names(assignments: List[Dict[str, Any]]) -> set:
+    """Target column names whose ``target.arrow_type`` is ``"Json"``."""
+    names: set = set()
+    for a in assignments:
+        target = a.get("target") or {}
+        if target.get("arrow_type") == "Json":
+            names.add(_normalize_path(target.get("path")))
+    return names
+
+
+def _normalize_path(path: Any) -> str:
+    if isinstance(path, str):
+        return path
+    if isinstance(path, list):
+        if len(path) != 1 or not isinstance(path[0], str):
+            raise TransformationError(
+                f"assignment path must be a single column name; got {path!r}"
+            )
+        return path[0]
+    raise TransformationError(
+        f"assignment path must be str or [str]; got {type(path).__name__}"
+    )
+
+
+def build_output_schema(
+    assignments: List[Dict[str, Any]],
+) -> pa.Schema:
+    """Build the post-transform Arrow schema from a stream's assignments.
+
+    Object/List targets declare ``arrow_type: "Object"`` with a
+    ``target.properties`` map, or ``arrow_type: "List"`` with
+    ``target.items`` — :func:`resolve_arrow_type` handles the recursion.
+    """
+    fields: List[pa.Field] = []
+    for index, assignment in enumerate(assignments):
+        target = assignment.get("target") or {}
+        target_name = _normalize_path(target.get("path"))
+        nullable = bool(target.get("nullable", True))
+
+        if not target.get("arrow_type"):
+            raise TransformationError(
+                f"assignment[{index}] target={target_name!r}: missing "
+                f"target.arrow_type; every assignment must declare an "
+                f"Arrow type"
+            )
+        try:
+            arrow_type = resolve_arrow_type(
+                target, where=f"assignment[{index}] target={target_name!r}"
+            )
+        except InvalidTypeMapError as e:
+            raise TransformationError(
+                f"assignment[{index}] target={target_name!r}: cannot "
+                f"parse target.arrow_type={target.get('arrow_type')!r}: {e}"
+            ) from e
+
+        fields.append(pa.field(target_name, arrow_type, nullable=nullable))
+    return pa.schema(fields)

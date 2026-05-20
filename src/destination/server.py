@@ -8,12 +8,13 @@ This server implements the DestinationService gRPC interface, handling:
 """
 
 import asyncio
-import json
+import io
 import logging
 import os
 from typing import Any, AsyncIterator, Dict, Optional
 
 import grpc
+import pyarrow as pa
 from grpc import aio as grpc_aio
 
 from ..grpc.generated.analitiq.v1 import (
@@ -121,8 +122,6 @@ class DestinationServicer(DestinationServiceServicer):
     ):
         self.handler = handler
         self._server = server
-        self._schema_configured = False
-        self._current_stream_id: Optional[str] = None
 
     async def StreamRecords(
         self,
@@ -139,8 +138,12 @@ class DestinationServicer(DestinationServiceServicer):
         4. Server responds with BatchAck for each batch
         """
         logger.info("StreamRecords: New stream started")
-        self._schema_configured = False
-        self._current_stream_id = None
+        # Per-RPC state must be function-local: the servicer instance is
+        # shared across every concurrent ``StreamRecords`` call, so storing
+        # ``schema_configured`` / ``current_stream_id`` on ``self`` would
+        # let one stream's bookkeeping clobber another's.
+        schema_configured = False
+        current_stream_id: Optional[str] = None
 
         try:
             async for request in request_iterator:
@@ -149,17 +152,19 @@ class DestinationServicer(DestinationServiceServicer):
                 if msg_type == "schema":
                     # Handle schema message
                     schema_msg = request.schema
-                    self._current_stream_id = schema_msg.stream_id
+                    current_stream_id = schema_msg.stream_id
 
                     logger.info(
                         f"Received schema for stream {schema_msg.stream_id}, "
                         f"version {schema_msg.version}"
                     )
 
-                    # Configure handler with schema. Deterministic type-map
-                    # errors bubble out of the handler and we relay them in
-                    # the SchemaAck so the engine sees the exact unmapped
-                    # native type instead of an opaque stream abort.
+                    # Configure handler with schema. Deterministic errors
+                    # (type-map, KeyError/ValueError/TypeError on a malformed
+                    # endpoint document) surface in the SchemaAck with the
+                    # exception type and message, so the engine can route
+                    # them to DLQ instead of treating them as a transient
+                    # "schema configuration failed".
                     try:
                         accepted = await self.handler.configure_schema(schema_msg)
                         ack_message = "" if accepted else "Schema configuration failed"
@@ -171,7 +176,14 @@ class DestinationServicer(DestinationServiceServicer):
                         )
                         accepted = False
                         ack_message = f"type-map: {e}"
-                    self._schema_configured = accepted
+                    except (KeyError, TypeError, ValueError) as e:
+                        logger.exception(
+                            "deterministic error configuring stream %s",
+                            schema_msg.stream_id,
+                        )
+                        accepted = False
+                        ack_message = f"{type(e).__name__}: {e}"
+                    schema_configured = accepted
 
                     yield StreamResponse(
                         schema_ack=SchemaAck(
@@ -185,7 +197,7 @@ class DestinationServicer(DestinationServiceServicer):
                     # Handle record batch
                     batch_msg = request.batch
 
-                    if not self._schema_configured:
+                    if not schema_configured:
                         logger.error("Received batch before schema was configured")
                         yield StreamResponse(
                             ack=BatchAck(
@@ -204,17 +216,12 @@ class DestinationServicer(DestinationServiceServicer):
                         f"{batch_msg.stream_id} with {batch_msg.record_count} records"
                     )
 
-                    # Decode payload
-                    records = self._decode_payload(
-                        batch_msg.payload, batch_msg.format
-                    )
-
-                    # Write batch via handler
+                    record_batch = self._decode_arrow_ipc(batch_msg)
                     result = await self.handler.write_batch(
                         run_id=batch_msg.run_id,
                         stream_id=batch_msg.stream_id,
                         batch_seq=batch_msg.batch_seq,
-                        records=records,
+                        record_batch=record_batch,
                         record_ids=list(batch_msg.record_ids),
                         cursor=batch_msg.cursor,
                     )
@@ -237,13 +244,14 @@ class DestinationServicer(DestinationServiceServicer):
                     logger.warning(f"Unknown message type: {msg_type}")
 
         except Exception as e:
-            logger.error(f"StreamRecords error: {e}")
+            logger.exception("StreamRecords error: %s", e)
             raise
 
         finally:
-            logger.info("StreamRecords: Stream ended")
-            self._schema_configured = False
-            self._current_stream_id = None
+            logger.info(
+                "StreamRecords: Stream ended%s",
+                f" (stream_id={current_stream_id!r})" if current_stream_id else "",
+            )
 
     async def HealthCheck(
         self,
@@ -268,10 +276,10 @@ class DestinationServicer(DestinationServiceServicer):
                 )
 
         except Exception as e:
-            logger.error(f"Health check failed: {e}")
+            logger.exception("Health check failed: %s", e)
             return HealthCheckResponse(
                 status=HealthCheckResponse.ServingStatus.NOT_SERVING,
-                message=str(e),
+                message=f"{type(e).__name__}: {e}",
                 db_connection=ConnectionStatus.CONNECTION_STATUS_DISCONNECTED,
             )
 
@@ -295,10 +303,7 @@ class DestinationServicer(DestinationServiceServicer):
             supports_bulk_load=self.handler.supports_bulk_load,
             max_batch_size=self.handler.max_batch_size,
             max_batch_bytes=self.handler.max_batch_bytes,
-            supported_formats=[
-                PayloadFormat.PAYLOAD_FORMAT_JSONL,
-                PayloadFormat.PAYLOAD_FORMAT_MSGPACK,
-            ],
+            supported_formats=[PayloadFormat.PAYLOAD_FORMAT_ARROW_IPC],
             protocol_version="1.0.0",
         )
 
@@ -312,20 +317,24 @@ class DestinationServicer(DestinationServiceServicer):
         self._server.signal_shutdown()
         return ShutdownAck(acknowledged=True, message="Shutting down")
 
-    def _decode_payload(
-        self, payload: bytes, format: PayloadFormat
-    ) -> list[Dict[str, Any]]:
-        """Decode payload bytes to list of records."""
-        if format == PayloadFormat.PAYLOAD_FORMAT_JSONL:
-            lines = payload.decode("utf-8").strip().split("\n")
-            return [json.loads(line) for line in lines if line]
+    @staticmethod
+    def _decode_arrow_ipc(batch_msg: Any) -> pa.RecordBatch:
+        """Decode an Arrow IPC payload into a single ``pa.RecordBatch``.
 
-        elif format == PayloadFormat.PAYLOAD_FORMAT_MSGPACK:
-            import msgpack
-            return msgpack.unpackb(payload, raw=False)
-
-        else:
-            raise ValueError(f"Unsupported payload format: {format}")
+        ``combine_chunks`` collapses any multi-batch writers down to one
+        record batch; an empty payload produces an empty batch with the
+        schema preserved.
+        """
+        if batch_msg.format != PayloadFormat.PAYLOAD_FORMAT_ARROW_IPC:
+            raise ValueError(
+                f"Unsupported payload format: {batch_msg.format}; "
+                f"only PAYLOAD_FORMAT_ARROW_IPC is supported"
+            )
+        with pa.ipc.open_stream(io.BytesIO(batch_msg.payload)) as reader:
+            table = reader.read_all()
+        if table.num_rows == 0:
+            return pa.RecordBatch.from_pylist([], schema=table.schema)
+        return table.combine_chunks().to_batches()[0]
 
 
 async def run_destination_server(
