@@ -206,8 +206,14 @@ class PipelineConfigPrep:
     # On-disk indexes (id -> directory / file)
     # ------------------------------------------------------------------
 
-    def _build_connection_index(self) -> None:
-        """Scan ``connections/`` and index every connection by its ``connection_id`` (= directory name)."""
+    def _build_connection_index(self, referenced_ids: List[str]) -> None:
+        """Index only the connections referenced by the active pipeline.
+
+        Earlier versions scanned every directory under ``connections/`` and
+        validated each, so a single malformed connection from an unrelated
+        pipeline broke startup. We now index just the ids the pipeline names
+        in its ``connections.{source,destinations}``.
+        """
         self._connection_records.clear()
         connections_dir = self._paths["connections"]
         if not connections_dir.is_dir():
@@ -215,12 +221,19 @@ class PipelineConfigPrep:
                 f"Connections directory not found: {connections_dir}"
             )
 
-        for child in sorted(connections_dir.iterdir()):
-            if not child.is_dir():
+        for connection_id in referenced_ids:
+            if connection_id in self._connection_records:
                 continue
+            child = connections_dir / connection_id
+            if not child.is_dir():
+                raise FileNotFoundError(
+                    f"Connection directory not found: {child}"
+                )
             connection_file = child / "connection.json"
             if not connection_file.is_file():
-                continue
+                raise FileNotFoundError(
+                    f"Connection file not found: {connection_file}"
+                )
 
             raw_config = load_connection_file(connection_file)
             validate_artifact("connection", raw_config, source=str(connection_file))
@@ -231,18 +244,14 @@ class PipelineConfigPrep:
                     f"Connection {connection_file} missing required field "
                     f"'connector_id'"
                 )
-            connection_id = raw_config.get("connection_id") or child.name
-            if connection_id != child.name:
+            doc_connection_id = raw_config.get("connection_id") or child.name
+            if doc_connection_id != child.name:
                 raise ValueError(
                     f"Connection id mismatch in {connection_file}: "
-                    f"directory={child.name!r} but document connection_id={connection_id!r}"
+                    f"directory={child.name!r} but document connection_id={doc_connection_id!r}"
                 )
-            if connection_id in self._connection_records:
-                raise ValueError(
-                    f"Duplicate connection_id {connection_id!r} under {connections_dir}"
-                )
-            self._connection_records[connection_id] = _ConnectionRecord(
-                connection_id=connection_id,
+            self._connection_records[child.name] = _ConnectionRecord(
+                connection_id=child.name,
                 connector_id=connector_id,
                 raw_config=raw_config,
             )
@@ -455,14 +464,15 @@ class PipelineConfigPrep:
         * ``connectors``: list of connector documents loaded.
         """
         pipeline_doc = self._load_pipeline_document()
-        self._build_connection_index()
-        self._build_stream_index()
 
         connections = pipeline_doc["connections"]
         source_id = connections["source"]
         dest_ids = list(connections.get("destinations") or [])
         if not dest_ids:
             raise ValueError("Pipeline must declare at least one destination")
+
+        self._build_connection_index([source_id, *dest_ids])
+        self._build_stream_index()
 
         self._resolve_connection_by_id(source_id)
         for dest_id in dest_ids:
