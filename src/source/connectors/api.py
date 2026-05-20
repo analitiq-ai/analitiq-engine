@@ -13,7 +13,7 @@ import logging
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from typing import Any, AsyncIterator, Dict, List, Optional
-from urllib.parse import urljoin, urlencode
+from urllib.parse import urlencode
 
 from .base import BaseConnector, ConnectionError, ReadError
 from ...engine.resolved import (
@@ -84,7 +84,7 @@ class APIConnector(BaseConnector):
 
         path = endpoint.request.path
         method = endpoint.request.method or "GET"
-        full_url = urljoin(self.base_url or "", path)
+        full_url = _join_url(self.base_url or "", path)
 
         base_query = self._initial_query_params(source, endpoint)
         cursor_field = source.replication.cursor_field
@@ -408,6 +408,22 @@ class APIConnector(BaseConnector):
 # ----------------------------------------------------------------------
 # Module-level helpers
 # ----------------------------------------------------------------------
+
+
+def _join_url(base_url: str, path: str) -> str:
+    """Concatenate ``base_url`` + ``path`` without dropping the base path.
+
+    ``urllib.parse.urljoin("https://host/api/v1", "/Contact")`` returns
+    ``"https://host/Contact"`` because the absolute leading-slash path
+    replaces the existing path component. Endpoint specs declare paths
+    with a leading slash and connectors declare ``base_url`` with the
+    API prefix (``/api/v1``), so we hand-roll the join: strip the
+    trailing slash off ``base_url`` and the leading slash off ``path``,
+    then concatenate with a single ``/``.
+    """
+    if not base_url:
+        return path
+    return f"{base_url.rstrip('/')}/{path.lstrip('/')}"
 
 
 def _resolve_default(default: Any, source: ResolvedSource) -> Any:
