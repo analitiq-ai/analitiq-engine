@@ -147,7 +147,7 @@ class TestStreamingEngine:
                 "endpoint_ref": {
                     "scope": "connector",
                     "connection_id": "wise",
-                    "alias": "transfers",
+                    "endpoint_id": "transfers",
                 },
             },
         }

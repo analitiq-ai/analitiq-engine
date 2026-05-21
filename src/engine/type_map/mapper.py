@@ -1,23 +1,17 @@
-"""Deterministic matchers for type-map and ssl-mode-map.
+"""Deterministic matcher for type-map.
 
 ``TypeMapper`` returns the Arrow-type string of the first matching rule
 and raises on a miss — no defaults, no coercion. Rule files are
 single-direction (native → Arrow) by design: inverting one side's rules
 at runtime would be lossy and ambiguous.
-
-``SSLModeMapper`` maps native driver SSL modes (``prefer``,
-``VERIFY_IDENTITY``, …) to the engine's canonical vocabulary (``none`` /
-``encrypt`` / ``verify`` / ``prefer``).
 """
 
 from __future__ import annotations
 
-from typing import Final, Mapping, Pattern
+from typing import Mapping, Pattern
 
 from .exceptions import (
-    InvalidSSLModeMapError,
     InvalidTypeMapError,
-    UnmappedSSLModeError,
     UnmappedTypeError,
 )
 from .rules import (
@@ -27,11 +21,6 @@ from .rules import (
 )
 
 import re
-
-
-CANONICAL_SSL_MODES: Final[frozenset[str]] = frozenset(
-    {"none", "encrypt", "verify", "prefer"}
-)
 
 
 class TypeMapper:
@@ -111,70 +100,3 @@ def _substitute_tokens(template: str, values: Mapping[str, str]) -> str:
         return values[name]
 
     return _SUBSTITUTION_TOKEN.sub(_replace, template)
-
-
-class SSLModeMapper:
-    """Translate a driver-native SSL mode to the engine's canonical vocabulary.
-
-    Mappings are exact-match on the normalized native key (same normalization
-    rules as :class:`TypeMapper` — trim, collapse whitespace, uppercase).
-    Values must be drawn from :data:`CANONICAL_SSL_MODES`.
-
-    Inputs that are *already* a canonical value (case-insensitive) are
-    passed through unchanged so pipelines that bypass the form and store
-    canonical values directly still work — see :meth:`to_canonical`.
-    """
-
-    def __init__(self, connector_slug: str, mapping: Mapping[str, str]) -> None:
-        self._slug = connector_slug
-        normalized: dict[str, str] = {}
-        for native, canonical in mapping.items():
-            if not isinstance(native, str) or not isinstance(canonical, str):
-                raise InvalidSSLModeMapError(
-                    f"connector {connector_slug!r}: ssl-mode entries must be "
-                    f"string-to-string, got {native!r}: {canonical!r}"
-                )
-            canonical_lower = canonical.strip().lower()
-            if canonical_lower not in CANONICAL_SSL_MODES:
-                raise InvalidSSLModeMapError(
-                    f"connector {connector_slug!r}: ssl-mode maps {native!r} "
-                    f"to {canonical!r}, which is not in the canonical set "
-                    f"{sorted(CANONICAL_SSL_MODES)}"
-                )
-            key = normalize_native_type(native)
-            if key in normalized and normalized[key] != canonical_lower:
-                raise InvalidSSLModeMapError(
-                    f"connector {connector_slug!r}: native ssl-mode {native!r} "
-                    f"maps to both {normalized[key]!r} and {canonical_lower!r}"
-                )
-            normalized[key] = canonical_lower
-        if not normalized:
-            raise InvalidSSLModeMapError(
-                f"connector {connector_slug!r}: ssl-mode-map is empty"
-            )
-        self._mapping: Mapping[str, str] = normalized
-
-    @property
-    def connector_slug(self) -> str:
-        return self._slug
-
-    @property
-    def entries(self) -> Mapping[str, str]:
-        return dict(self._mapping)
-
-    def to_canonical(self, native: str) -> str:
-        """Return the canonical ssl-mode for *native*.
-
-        Raises :class:`UnmappedSSLModeError` when the native value is not
-        known. If the input is already a canonical value (``none`` /
-        ``encrypt`` / ``verify`` / ``prefer``) we let it through as-is so
-        pipelines that bypass the form and write canonical values directly
-        still work.
-        """
-        trimmed = native.strip()
-        if trimmed.lower() in CANONICAL_SSL_MODES:
-            return trimmed.lower()
-        key = normalize_native_type(native)
-        if key in self._mapping:
-            return self._mapping[key]
-        raise UnmappedSSLModeError(self._slug, native)

@@ -1,50 +1,25 @@
-"""Structured stdout state log emitter.
+"""State change emission helper.
 
-Emits ``ANALITIQ_STATE::{json}`` lines to stdout so checkpoint state can be
-captured by log aggregators for cross-run observability.
-
-``cursor_hex`` must be hex-encoded by the caller before passing here
-(e.g. ``json.dumps(cursor).encode().hex()``).  This module passes it
-through unchanged and performs no encoding of its own.
+Thin wrapper around :func:`src.state.log_emitter.emit_log` so the state
+manager has a single function to call for every persisted-state change.
+The signature accepts arbitrary keyword fields (``run_id``,
+``pipeline_id``, ``stream_id``, ``cursor_value``, …) so call sites can
+emit structured payloads without coordinating on a single dict shape.
 """
 
 from __future__ import annotations
 
-import logging
+from typing import Any
 
-from .log_emitter import emit_log
-
-logger = logging.getLogger(__name__)
+from src.state.log_emitter import emit_log
 
 
-def emit_state_log(
-    run_id: str,
-    pipeline_id: str,
-    stream_id: str,
-    cursor_hex: str,
-    cursor_value: str,
-) -> None:
-    """Emit a checkpoint record to stdout.
+def emit_state_log(**fields: Any) -> None:
+    """Emit a state-change observability record.
 
-    ``cursor_hex`` is the hex-encoded JSON cursor dict (produced by the
-    caller).  ``cursor_value`` is the human-readable high-water mark (e.g.
-    an ISO timestamp).  Both are emitted for observability; only
-    ``cursor_hex`` is machine-parseable.
+    All keyword arguments become fields of the emitted record. ``None``
+    values are dropped so the on-the-wire payload only contains
+    populated fields.
     """
-    if not run_id:
-        logger.warning(
-            "emit_state_log called with empty run_id for stream %s pipeline %s; "
-            "checkpoint will be unqueriable by run",
-            stream_id,
-            pipeline_id,
-        )
-    emit_log(
-        "state",
-        {
-            "run_id": run_id,
-            "pipeline_id": pipeline_id,
-            "stream_id": stream_id,
-            "cursor_hex": cursor_hex,
-            "cursor_value": cursor_value,
-        },
-    )
+    payload = {k: v for k, v in fields.items() if v is not None}
+    emit_log("state", payload)

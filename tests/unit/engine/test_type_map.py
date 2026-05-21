@@ -19,16 +19,11 @@ from pathlib import Path
 import pytest
 
 from src.engine.type_map import (
-    CANONICAL_SSL_MODES,
-    InvalidSSLModeMapError,
     InvalidTypeMapError,
-    SSLModeMapper,
     TypeMapper,
-    UnmappedSSLModeError,
     UnmappedTypeError,
     parse_arrow_type,
     load_connection_type_map,
-    load_ssl_mode_map,
     load_type_map,
     normalize_native_type,
 )
@@ -415,54 +410,6 @@ class TestResolveArrowType:
 
 
 # ---------------------------------------------------------------------------
-# SSLModeMapper
-# ---------------------------------------------------------------------------
-
-
-class TestSSLModeMapper:
-    def test_canonical_set_is_frozen(self):
-        assert isinstance(CANONICAL_SSL_MODES, frozenset)
-        assert CANONICAL_SSL_MODES == {"none", "encrypt", "verify", "prefer"}
-
-    def test_native_lookup(self):
-        m = SSLModeMapper(
-            "pg",
-            {
-                "disable": "none",
-                "prefer": "prefer",
-                "require": "encrypt",
-                "verify-ca": "verify",
-                "verify-full": "verify",
-            },
-        )
-        assert m.to_canonical("disable") == "none"
-        assert m.to_canonical("REQUIRE") == "encrypt"
-        assert m.to_canonical("verify-full") == "verify"
-
-    def test_canonical_passthrough(self):
-        m = SSLModeMapper("pg", {"require": "encrypt"})
-        assert m.to_canonical("encrypt") == "encrypt"
-        assert m.to_canonical("VERIFY") == "verify"
-
-    def test_unknown_native_raises(self):
-        m = SSLModeMapper("pg", {"require": "encrypt"})
-        with pytest.raises(UnmappedSSLModeError):
-            m.to_canonical("allow-tls")
-
-    def test_invalid_canonical_value_rejected(self):
-        with pytest.raises(InvalidSSLModeMapError, match="not in the canonical"):
-            SSLModeMapper("pg", {"strict": "strict"})
-
-    def test_conflicting_native_rejected(self):
-        with pytest.raises(InvalidSSLModeMapError, match="maps to both"):
-            SSLModeMapper("pg", {"Require": "encrypt", "REQUIRE": "verify"})
-
-    def test_empty_mapping_rejected(self):
-        with pytest.raises(InvalidSSLModeMapError, match="empty"):
-            SSLModeMapper("pg", {})
-
-
-# ---------------------------------------------------------------------------
 # Loader — filesystem
 # ---------------------------------------------------------------------------
 
@@ -472,7 +419,6 @@ def _write_connector(
     slug: str,
     *,
     type_map: list | None = None,
-    ssl_mode_map: dict | None = None,
 ) -> None:
     definition = root / slug / "definition"
     definition.mkdir(parents=True, exist_ok=True)
@@ -481,8 +427,6 @@ def _write_connector(
     )
     if type_map is not None:
         (definition / "type-map.json").write_text(json.dumps(type_map))
-    if ssl_mode_map is not None:
-        (definition / "ssl-mode-map.json").write_text(json.dumps(ssl_mode_map))
 
 
 class TestLoaders:
@@ -512,31 +456,6 @@ class TestLoaders:
         mapper = load_type_map(tmp_path, "demo")
         assert mapper.connector_slug == "demo"
         assert mapper.to_arrow_type("text") == "Utf8"
-
-    def test_ssl_mode_map_absent_is_ok(self, tmp_path: Path):
-        _write_connector(
-            tmp_path,
-            "no-ssl",
-            type_map=[{"match": "exact", "native": "TEXT", "canonical": "Utf8"}],
-        )
-        assert load_ssl_mode_map(tmp_path, "no-ssl") is None
-
-    def test_ssl_mode_map_happy_path(self, tmp_path: Path):
-        _write_connector(
-            tmp_path,
-            "ssl-db",
-            type_map=[{"match": "exact", "native": "TEXT", "canonical": "Utf8"}],
-            ssl_mode_map={
-                "$schema": "https://analitiq.dev/schemas/ssl-mode-map.json",
-                "require": "encrypt",
-                "disable": "none",
-            },
-        )
-        mapper = load_ssl_mode_map(tmp_path, "ssl-db")
-        assert mapper is not None
-        assert mapper.to_canonical("require") == "encrypt"
-        # JSON-Schema metadata keys are dropped at load time
-        assert "$schema" not in mapper.entries
 
     def test_alternate_connector_dir_layout(self, tmp_path: Path):
         """``connector-{slug}`` layout also resolves."""

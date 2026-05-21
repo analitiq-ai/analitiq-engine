@@ -1,10 +1,10 @@
 """Connection and connector file loading utilities.
 
-Loads connection configs from ``connections/{alias}/connection.json`` and
-connector definitions from ``connectors/{connector_alias}/definition/connector.json``.
+Loads connection configs from ``connections/{connection_id}/connection.json`` and
+connector definitions from ``connectors/{connector_id}/definition/connector.json``.
 
-Connection JSON references its connector by ``connector_alias``. The
-canonical connection identity is the directory name (= alias) under
+Connection JSON references its connector by ``connector_id``. The canonical
+connection identity is the directory name (= ``connection_id``) under
 ``connections/``.
 """
 
@@ -31,11 +31,11 @@ def load_connection_file(path: Path) -> Dict[str, Any]:
         raise ValueError(f"Invalid JSON in {path}: {err}") from err
 
 
-def load_connection(alias: str, connections_dir: Path) -> Dict[str, Any]:
-    """Load a connection configuration by directory alias.
+def load_connection(connection_id: str, connections_dir: Path) -> Dict[str, Any]:
+    """Load a connection configuration by ``connection_id`` (= directory name).
 
     Args:
-        alias: Connection directory name under ``connections/``.
+        connection_id: Connection directory name under ``connections/``.
         connections_dir: Path to the ``connections/`` root.
 
     Returns:
@@ -44,38 +44,38 @@ def load_connection(alias: str, connections_dir: Path) -> Dict[str, Any]:
     Raises:
         ConnectionConfigError: If the directory or file is missing or malformed.
     """
-    conn_dir = connections_dir / alias
+    conn_dir = connections_dir / connection_id
     if not conn_dir.is_dir():
         raise ConnectionConfigError(
-            alias, detail=f"Connection directory not found: {conn_dir}"
+            connection_id, detail=f"Connection directory not found: {conn_dir}"
         )
 
     conn_file = conn_dir / "connection.json"
     if not conn_file.is_file():
         raise ConnectionConfigError(
-            alias, detail=f"connection.json not found in {conn_dir}"
+            connection_id, detail=f"connection.json not found in {conn_dir}"
         )
 
     try:
         config = load_connection_file(conn_file)
     except (ValueError, json.JSONDecodeError) as err:
-        raise ConnectionConfigError(alias, detail=str(err)) from err
+        raise ConnectionConfigError(connection_id, detail=str(err)) from err
 
-    logger.info("Loaded connection %r from %s", alias, conn_file)
+    logger.info("Loaded connection %r from %s", connection_id, conn_file)
     return config
 
 
 def load_connector_definition(
-    connector_alias: str, connectors_dir: Path
+    connector_id: str, connectors_dir: Path
 ) -> Dict[str, Any]:
-    """Load a connector definition by ``connector_alias``.
+    """Load a connector definition by ``connector_id``.
 
-    Connector directories may be named either ``{alias}`` or
-    ``connector-{alias}``; the lookup tries both.
+    Connector directories may be named either ``{connector_id}`` or
+    ``connector-{connector_id}``; the lookup tries both.
     """
     candidates = [
-        connectors_dir / connector_alias / "definition" / "connector.json",
-        connectors_dir / f"connector-{connector_alias}" / "definition" / "connector.json",
+        connectors_dir / connector_id / "definition" / "connector.json",
+        connectors_dir / f"connector-{connector_id}" / "definition" / "connector.json",
     ]
     for candidate in candidates:
         if candidate.is_file():
@@ -84,14 +84,14 @@ def load_connector_definition(
                     config = json.load(fh)
             except json.JSONDecodeError as err:
                 raise ConnectorNotFoundError(
-                    connector_alias,
+                    connector_id,
                     detail=f"Invalid JSON in {candidate}: {err}",
                 ) from err
-            logger.info("Loaded connector %r from %s", connector_alias, candidate)
+            logger.info("Loaded connector %r from %s", connector_id, candidate)
             return config
 
     raise ConnectorNotFoundError(
-        connector_alias,
+        connector_id,
         detail=(
             f"Connector definition not found at {candidates[0]} "
             f"or {candidates[1]}"
