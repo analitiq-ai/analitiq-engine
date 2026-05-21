@@ -28,19 +28,3 @@ class UnmappedTypeError(TypeMapError):
             f"No {direction} type-map rule for {value!r} in connector "
             f"{connector_slug!r}"
         )
-
-
-class InvalidSSLModeMapError(TypeMapError):
-    """Raised when an ssl-mode-map file is structurally invalid."""
-
-
-class UnmappedSSLModeError(TypeMapError):
-    """Raised when a native SSL mode has no mapping to a canonical value."""
-
-    def __init__(self, connector_slug: str, value: str) -> None:
-        self.connector_slug = connector_slug
-        self.value = value
-        super().__init__(
-            f"No ssl-mode-map entry for {value!r} in connector "
-            f"{connector_slug!r}"
-        )

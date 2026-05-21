@@ -1,4 +1,4 @@
-"""Filesystem loaders for ``type-map.json`` and ``ssl-mode-map.json``.
+"""Filesystem loaders for ``type-map.json``.
 
 Two parallel locations are supported:
 
@@ -7,9 +7,6 @@ Two parallel locations are supported:
 - ``connections/{connection_id}/definition/type-map.json`` — optional. Covers
   the connection's private endpoints (e.g. user-specific DB tables). Absent
   when a connection only uses public endpoints from its connector.
-
-``ssl-mode-map.json`` only lives at the connector level — SSL vocabularies
-are driver-specific, not connection-specific.
 """
 
 from __future__ import annotations
@@ -19,18 +16,14 @@ import logging
 from pathlib import Path
 from typing import Optional
 
-from .exceptions import (
-    InvalidSSLModeMapError,
-    InvalidTypeMapError,
-)
-from .mapper import SSLModeMapper, TypeMapper
+from .exceptions import InvalidTypeMapError
+from .mapper import TypeMapper
 from .rules import parse_rules
 
 logger = logging.getLogger(__name__)
 
 
 TYPE_MAP_FILENAME = "type-map.json"
-SSL_MODE_MAP_FILENAME = "ssl-mode-map.json"
 
 
 def _definition_dir(connectors_dir: Path, slug: str) -> Path:
@@ -100,30 +93,3 @@ def load_connection_type_map(
         "Loaded connection type-map for '%s' (%d rules)", connection_id, len(rules)
     )
     return TypeMapper(f"connection:{connection_id}", rules)
-
-
-def load_ssl_mode_map(connectors_dir: Path, slug: str) -> Optional[SSLModeMapper]:
-    """Load ``ssl-mode-map.json`` if present. Returns ``None`` when absent."""
-    path = _definition_dir(connectors_dir, slug) / SSL_MODE_MAP_FILENAME
-    if not path.is_file():
-        return None
-    try:
-        payload = json.loads(path.read_text())
-    except json.JSONDecodeError as err:
-        raise InvalidSSLModeMapError(
-            f"connector {slug!r}: {path} is not valid JSON: {err}"
-        ) from err
-    if not isinstance(payload, dict):
-        raise InvalidSSLModeMapError(
-            f"connector {slug!r}: {path} must contain a JSON object"
-        )
-    # Drop JSON Schema metadata keys — ``$schema`` / ``$id`` are allowed in
-    # the file but are not mapping entries.
-    entries = {k: v for k, v in payload.items() if not k.startswith("$")}
-    mapper = SSLModeMapper(slug, entries)
-    logger.info(
-        "Loaded ssl-mode-map for connector '%s' (%d entries)",
-        slug,
-        len(mapper.entries),
-    )
-    return mapper

@@ -150,28 +150,24 @@ def _apply_encoding(encoding: str, value: Any, *, binding: str) -> str:
 
 # ---------------------------------------------------------------------------
 # TLS materialization (database transports)
+#
+# Each driver speaks its own native SSL vocabulary. The engine resolves
+# the ``tls.mode`` and ``tls.ca_certificate`` refs to whatever strings
+# the connection stored and hands them to a driver-specific helper that
+# knows how to apply those strings to that driver's API. No shared
+# canonical set, no implicit translation.
 # ---------------------------------------------------------------------------
-
-
-# Modes that skip server certificate verification entirely. Asyncpg accepts
-# these as plain strings.
-_PLAIN_TLS_MODES = {"disable", "allow", "prefer", "require"}
-# Modes that require certificate verification — we hand asyncpg a
-# pre-built SSLContext so the CA bundle declared on the connection is
-# honoured.
-_VERIFIED_TLS_MODES = {"verify-ca", "verify-full"}
 
 
 def _resolve_tls_mode(
     tls_spec: Optional[Mapping[str, Any]], resolver: Resolver
 ) -> tuple[Optional[str], Optional[str]]:
-    """Resolve ``tls.mode`` and (when needed) ``tls.ca_certificate``.
+    """Resolve ``tls.mode`` and ``tls.ca_certificate`` to their stored values.
 
-    Returns ``(mode, ca_pem)`` where:
-    * ``mode`` is one of the canonical strings or ``None`` when no TLS
-      block was declared.
-    * ``ca_pem`` is the PEM bundle string for verified modes (only
-      required for ``verify-ca`` / ``verify-full``).
+    Returns ``(mode, ca_pem)``. Neither value is validated against any
+    canonical vocabulary — the driver-specific materializer interprets the
+    native string. ``ca_pem`` is ``None`` unless the connection provided
+    a CA bundle.
     """
     if tls_spec is None:
         return None, None
@@ -188,36 +184,94 @@ def _resolve_tls_mode(
         raise TypeError(
             f"tls.mode must resolve to a string, got {type(mode).__name__}"
         )
-    if mode not in _PLAIN_TLS_MODES and mode not in _VERIFIED_TLS_MODES:
-        raise ValueError(
-            f"tls.mode {mode!r} is not in the canonical set "
-            f"{sorted(_PLAIN_TLS_MODES | _VERIFIED_TLS_MODES)}"
-        )
 
     ca_value: Optional[str] = None
-    if mode in _VERIFIED_TLS_MODES:
-        raw_ca = tls_spec.get("ca_certificate")
-        if raw_ca is not None:
-            try:
-                resolved = resolver.resolve(raw_ca)
-            except KeyError:
-                resolved = None
-            if isinstance(resolved, str) and resolved:
-                ca_value = resolved
-        if ca_value is None:
-            raise ValueError(
-                f"tls.mode={mode!r} requires tls.ca_certificate to resolve "
-                f"to a PEM certificate bundle"
-            )
+    raw_ca = tls_spec.get("ca_certificate")
+    if raw_ca is not None:
+        try:
+            resolved = resolver.resolve(raw_ca)
+        except KeyError:
+            resolved = None
+        if isinstance(resolved, str) and resolved:
+            ca_value = resolved
 
     return mode, ca_value
 
 
-def _build_verified_ssl_context(mode: str, ca_pem: str) -> _ssl.SSLContext:
+def _ca_ssl_context(ca_pem: str, *, check_hostname: bool) -> _ssl.SSLContext:
     ctx = _ssl.create_default_context(cadata=ca_pem)
-    ctx.check_hostname = mode == "verify-full"
+    ctx.check_hostname = check_hostname
     ctx.verify_mode = _ssl.CERT_REQUIRED
     return ctx
+
+
+def _materialize_tls_postgres(mode: str, ca_pem: Optional[str]) -> Any:
+    """Apply libpq-native SSL modes to asyncpg.
+
+    asyncpg accepts ``disable``/``allow``/``prefer``/``require`` as
+    strings; ``verify-ca``/``verify-full`` need an explicit SSLContext
+    built from the connection's CA bundle.
+    """
+    if mode in ("disable", "allow", "prefer", "require"):
+        return mode
+    if mode == "verify-ca":
+        if not ca_pem:
+            raise ValueError(
+                "tls.mode='verify-ca' requires tls.ca_certificate to resolve "
+                "to a PEM certificate bundle"
+            )
+        return _ca_ssl_context(ca_pem, check_hostname=False)
+    if mode == "verify-full":
+        if not ca_pem:
+            raise ValueError(
+                "tls.mode='verify-full' requires tls.ca_certificate to resolve "
+                "to a PEM certificate bundle"
+            )
+        return _ca_ssl_context(ca_pem, check_hostname=True)
+    raise ValueError(
+        f"postgresql tls.mode {mode!r} not recognized; expected one of: "
+        "disable, allow, prefer, require, verify-ca, verify-full"
+    )
+
+
+def _materialize_tls_mysql(mode: str, ca_pem: Optional[str]) -> Any:
+    """Apply MySQL-native SSL modes to aiomysql.
+
+    aiomysql accepts ``False`` (no TLS), an SSLContext, or no argument at
+    all — it does not accept native string modes. MySQL's vocabulary is
+    ``DISABLED`` / ``PREFERRED`` / ``REQUIRED`` / ``VERIFY_CA`` /
+    ``VERIFY_IDENTITY``; comparison is case-insensitive on the stored
+    value.
+    """
+    canonical = mode.upper()
+    if canonical == "DISABLED":
+        return False
+    if canonical in ("PREFERRED", "REQUIRED"):
+        # Negotiate TLS without verifying the server certificate (the
+        # connection didn't ship a CA bundle). ``check_hostname`` must be
+        # False whenever ``verify_mode`` is ``CERT_NONE`` or CPython raises.
+        ctx = _ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = _ssl.CERT_NONE
+        return ctx
+    if canonical == "VERIFY_CA":
+        if not ca_pem:
+            raise ValueError(
+                "tls.mode='VERIFY_CA' requires tls.ca_certificate to resolve "
+                "to a PEM certificate bundle"
+            )
+        return _ca_ssl_context(ca_pem, check_hostname=False)
+    if canonical == "VERIFY_IDENTITY":
+        if not ca_pem:
+            raise ValueError(
+                "tls.mode='VERIFY_IDENTITY' requires tls.ca_certificate to resolve "
+                "to a PEM certificate bundle"
+            )
+        return _ca_ssl_context(ca_pem, check_hostname=True)
+    raise ValueError(
+        f"mysql tls.mode {mode!r} not recognized; expected one of: "
+        "DISABLED, PREFERRED, REQUIRED, VERIFY_CA, VERIFY_IDENTITY"
+    )
 
 
 def _materialize_tls_for_driver(
@@ -227,12 +281,11 @@ def _materialize_tls_for_driver(
 ) -> Any:
     """Dispatch TLS materialization based on the SQLAlchemy driver string.
 
-    asyncpg accepts plain ``"disable"``/``"allow"``/``"prefer"``/``"require"``
-    strings or an :class:`ssl.SSLContext`. aiomysql (and PyMySQL) only
-    accept ``True`` / ``False`` / an ``SSLContext`` — string modes raise
-    ``'str' object has no attribute 'wrap_bio'``. The connector contract
-    keeps a single canonical vocabulary; this helper translates it to
-    each driver's expected shape.
+    Each branch speaks its driver's native SSL vocabulary. Connectors
+    whose driver isn't listed here fall through to a portable default:
+    if a CA bundle was provided, build a verifying SSLContext; otherwise
+    pass the resolved mode through and let the downstream materializer
+    decide.
     """
     mode, ca_pem = _resolve_tls_mode(tls_spec, resolver)
     if mode is None:
@@ -241,32 +294,13 @@ def _materialize_tls_for_driver(
     base_driver = driver.split("+", 1)[0].lower()
 
     if base_driver in ("postgresql", "postgres"):
-        # asyncpg understands the canonical string vocabulary directly
-        # and SSLContext for verified modes.
-        if mode in _VERIFIED_TLS_MODES:
-            return _build_verified_ssl_context(mode, ca_pem or "")
-        return mode
+        return _materialize_tls_postgres(mode, ca_pem)
 
     if base_driver in ("mysql", "mariadb"):
-        # aiomysql wants an SSLContext or no ssl arg at all.
-        if mode == "disable":
-            return None
-        if mode in _VERIFIED_TLS_MODES:
-            return _build_verified_ssl_context(mode, ca_pem or "")
-        # For ``allow`` / ``prefer`` / ``require`` we negotiate TLS but
-        # do not verify the server certificate — the user has not
-        # provided a CA bundle. ``check_hostname`` must be False for
-        # ``CERT_NONE`` or CPython raises.
-        ctx = _ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = _ssl.CERT_NONE
-        return ctx
+        return _materialize_tls_mysql(mode, ca_pem)
 
-    # Unknown driver: pass the resolved mode through and let the
-    # downstream materializer decide. SSLContext for verified modes is
-    # the safest portable default.
-    if mode in _VERIFIED_TLS_MODES:
-        return _build_verified_ssl_context(mode, ca_pem or "")
+    if ca_pem:
+        return _ca_ssl_context(ca_pem, check_hostname=False)
     return mode
 
 

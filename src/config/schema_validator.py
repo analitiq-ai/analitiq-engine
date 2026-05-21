@@ -35,7 +35,7 @@ from jsonschema.exceptions import ValidationError
 logger = logging.getLogger(__name__)
 
 
-_DEFAULT_SCHEMA_BASE_URL = "https://schemas.analitiq.ai"
+_DEFAULT_SCHEMAS_DOMAIN = "schemas.analitiq.ai"
 _FETCH_TIMEOUT_SECONDS = 15
 
 ARTIFACT_KINDS = (
@@ -101,12 +101,21 @@ def validate(kind: str, document: Dict[str, Any], *, source: str = "<inline>") -
     Raises :class:`ContractValidationError` on failure. The ``source``
     parameter is woven into the error message so callers can include the
     file path or other context.
+
+    Errors anchored at the top-level ``$schema`` field are dropped before
+    raising. The ``$schema`` value is an informational pointer to the
+    contract URL; whether the engine fetched ``schemas.analitiq.ai`` or
+    ``schemas.analitiq.work`` for validation is independent of which host
+    the document advertises, and the body of the contract is what
+    actually governs correctness.
     """
     schema = _load_schema(kind)
-    errors = sorted(
-        Draft202012Validator(schema).iter_errors(document),
-        key=lambda e: list(e.path),
-    )
+    errors = [
+        err
+        for err in Draft202012Validator(schema).iter_errors(document)
+        if tuple(err.absolute_path) != ("$schema",)
+    ]
+    errors.sort(key=lambda e: list(e.path))
     if errors:
         raise ContractValidationError(kind, source, errors)
     logger.debug("Schema %r validated %s", kind, source)
