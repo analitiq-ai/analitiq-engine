@@ -36,7 +36,7 @@ def emit_dlq_log(
     """
     data: Dict[str, Any] = {
         "type": "dlq",
-        "run_id": get_run_id(),
+        "run_id": get_run_id() or 0,
         "pipeline_id": pipeline_id,
         "added": added,
         "total": total,

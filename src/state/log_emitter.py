@@ -39,13 +39,11 @@ def emit_log(category: str, data: Mapping[str, Any]) -> None:
     if marker is None:
         logger.debug("emit_log: unknown category %r — using as marker", category)
         marker = category.upper()
-    org_id = os.environ.get("ORG_ID")
+    org_id = os.environ.get("ORG_ID") or 0
     enriched: dict[str, Any] = {"org_id": org_id, **dict(data)}
     try:
         payload = json.dumps(enriched, default=str)
     except (TypeError, ValueError) as err:
         logger.error("emit_log: payload not JSON-serialisable: %s", err)
-        payload = json.dumps(
-            {"org_id": org_id, "error": str(err), "category": category}
-        )
+        payload = json.dumps({"org_id": org_id, "error": str(err), "category": category})
     logger.info("%s::%s", marker, payload)
