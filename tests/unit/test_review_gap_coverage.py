@@ -42,7 +42,7 @@ class TestWriteConflictKeysWiring:
             ),
         )
         handler._endpoint_refs = {
-            "s1": {"scope": "connector", "connection_id": "pg", "alias": "x"},
+            "s1": {"scope": "connector", "connection_id": "pg", "endpoint_id": "x"},
         }
         handler._stream_endpoints = {
             "s1": {
@@ -88,7 +88,7 @@ class TestWriteConflictKeysWiring:
             ),
         )
         handler._endpoint_refs = {
-            "s1": {"scope": "connector", "connection_id": "pg", "alias": "x"},
+            "s1": {"scope": "connector", "connection_id": "pg", "endpoint_id": "x"},
         }
         handler._stream_endpoints = {
             "s1": {

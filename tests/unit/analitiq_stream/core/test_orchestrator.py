@@ -57,8 +57,8 @@ class TestStreamProcessingConfig:
     
     def test_build_stream_processing_config_success(self, orchestrator):
         """Test successful stream processing config building."""
-        src_ref = {"scope": "connector", "connection_id": "src", "alias": "transfers"}
-        dst_ref = {"scope": "connection", "connection_id": "dst", "alias": "transfers"}
+        src_ref = {"scope": "connector", "connection_id": "src", "endpoint_id": "transfers"}
+        dst_ref = {"scope": "connection", "connection_id": "dst", "endpoint_id": "transfers"}
         stream_config = {
             "name": "Test Stream",
             "source": {
@@ -99,10 +99,10 @@ class TestStreamProcessingConfig:
         invalid_stream_config = {
             "name": "Test Stream",
             "source": {"endpoint_ref": {
-                "scope": "connector", "connection_id": "src", "alias": "transfers",
+                "scope": "connector", "connection_id": "src", "endpoint_id": "transfers",
             }},
             "destination": {"endpoint_ref": {
-                "scope": "connection", "connection_id": "dst", "alias": "transfers",
+                "scope": "connection", "connection_id": "dst", "endpoint_id": "transfers",
             }},
             "replication_method": "invalid_method"  # Invalid
         }
@@ -170,10 +170,10 @@ class TestStreamTaskCreation:
             "stream1": {
                 "name": "Stream 1",
                 "source": {"endpoint_ref": {
-                    "scope": "connector", "connection_id": "src", "alias": "transfers",
+                    "scope": "connector", "connection_id": "src", "endpoint_id": "transfers",
                 }},
                 "destination": {"endpoint_ref": {
-                    "scope": "connection", "connection_id": "dst", "alias": "transfers",
+                    "scope": "connection", "connection_id": "dst", "endpoint_id": "transfers",
                 }},
                 "replication_method": "incremental",
                 "cursor_mode": "inclusive",
