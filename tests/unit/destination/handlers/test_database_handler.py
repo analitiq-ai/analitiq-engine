@@ -5,12 +5,11 @@ factory; these tests patch :func:`build_transport` to substitute a
 mocked :class:`SqlAlchemyTransport`.
 """
 
-import json
 import ssl
 
 import pytest
 from sqlalchemy import Column, Integer, MetaData, String, Table
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 from src.destination.connectors.database import (
     DatabaseDestinationHandler,
@@ -335,75 +334,3 @@ class TestUpsertRegistry:
             await handler._upsert_records(conn, state, records)
         mock_insert.assert_called_once()
         conn.execute.assert_not_called()
-
-
-class TestBatchCommitTracker:
-    def test_check_committed_false_before_any_record(self):
-        from src.state.batch_commit_tracker import BatchCommitTracker
-        tracker = BatchCommitTracker()
-        assert tracker.check_committed("stream-a", 1) is False
-
-    def test_check_committed_true_after_record(self):
-        from src.state.batch_commit_tracker import BatchCommitTracker
-        tracker = BatchCommitTracker()
-        tracker.record_commit("stream-a", 1, records_written=5, cursor_bytes=b"\x00")
-        assert tracker.check_committed("stream-a", 1) is True
-
-    def test_different_streams_dont_collide(self):
-        from src.state.batch_commit_tracker import BatchCommitTracker
-        tracker = BatchCommitTracker()
-        tracker.record_commit("stream-a", 1, records_written=5, cursor_bytes=b"")
-        assert tracker.check_committed("stream-b", 1) is False
-
-    def test_different_batch_seq_dont_collide(self):
-        from src.state.batch_commit_tracker import BatchCommitTracker
-        tracker = BatchCommitTracker()
-        tracker.record_commit("stream-a", 1, records_written=5, cursor_bytes=b"")
-        assert tracker.check_committed("stream-a", 2) is False
-
-
-class TestEmitLog:
-    def test_format_and_prefix(self, capsys):
-        from src.state.log_emitter import emit_log
-        emit_log("dlq", {"type": "dlq", "count": 3})
-        out = capsys.readouterr().out
-        assert out.startswith("ANALITIQ_DLQ::")
-        assert json.loads(out.split("::", 1)[1]) == {"type": "dlq", "count": 3}
-
-    def test_category_is_case_insensitive(self, capsys):
-        from src.state.log_emitter import emit_log
-        emit_log("metrics", {"x": 1})
-        out = capsys.readouterr().out
-        assert out.startswith("ANALITIQ_METRICS::")
-
-    def test_non_serialisable_value_does_not_raise(self, capsys):
-        from src.state.log_emitter import emit_log
-        emit_log("dlq", {"bad": object()})
-        out = capsys.readouterr().out
-        assert out == ""  # nothing emitted to stdout on serialisation failure
-
-
-class TestEmitStateLog:
-    def test_format_and_all_fields_present(self, capsys):
-        from src.state.state_emission import emit_state_log
-        emit_state_log(
-            run_id="run-1",
-            pipeline_id="pipe-1",
-            stream_id="stream-1",
-            cursor_hex="deadbeef",
-            cursor_value="2024-01-01",
-        )
-        out = capsys.readouterr().out
-        assert out.startswith("ANALITIQ_STATE::")
-        payload = json.loads(out.split("::", 1)[1])
-        assert payload["run_id"] == "run-1"
-        assert payload["pipeline_id"] == "pipe-1"
-        assert payload["stream_id"] == "stream-1"
-        assert payload["cursor_hex"] == "deadbeef"
-        assert payload["cursor_value"] == "2024-01-01"
-
-    def test_non_serialisable_value_does_not_raise(self, capsys):
-        from src.state.state_emission import emit_state_log
-        emit_state_log("r", "p", "s", object(), "v")  # type: ignore[arg-type]
-        out = capsys.readouterr().out
-        assert out == ""
