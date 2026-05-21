@@ -19,7 +19,7 @@ Environment Variables:
     RUN_MODE: "source" (default) or "destination"
 
     Common (both modes):
-        PIPELINE_ID: Pipeline alias to execute (matches `pipeline_id` in
+        PIPELINE_ID: Pipeline id to execute (matches `pipeline_id` in
             `pipelines/manifest.json`).
 
     Engine Mode:
@@ -160,17 +160,17 @@ async def run_destination_mode() -> None:
         )
         sys.exit(1)
 
-    # Get the connection alias for the selected destination
-    dest_alias = destinations[destination_index]
+    # Get the connection id for the selected destination
+    dest_connection_id = destinations[destination_index]
 
-    logger.info(f"Using destination index {destination_index}: alias={dest_alias}")
+    logger.info(f"Using destination index {destination_index}: connection_id={dest_connection_id}")
 
     # Get ConnectionRuntime for selected destination
-    if dest_alias not in resolved_connections:
-        logger.error(f"Connection '{dest_alias}' not found in resolved connections")
+    if dest_connection_id not in resolved_connections:
+        logger.error(f"Connection '{dest_connection_id}' not found in resolved connections")
         sys.exit(1)
 
-    runtime = resolved_connections[dest_alias]
+    runtime = resolved_connections[dest_connection_id]
 
     logger.info(f"Connector type: {runtime.connector_type}")
     logger.info(f"gRPC port: {grpc_port}")
@@ -187,7 +187,7 @@ async def run_destination_mode() -> None:
     stream_endpoints: Dict[str, Dict[str, Any]] = {}
     for stream in stream_configs:
         for dest in stream.get("destinations", []):
-            if dest.get("connection_ref") != dest_alias:
+            if dest.get("connection_ref") != dest_connection_id:
                 continue
             stream_id = stream["stream_id"]
             endpoint_refs[stream_id] = dest["endpoint_ref"]
@@ -228,7 +228,7 @@ async def run_destination_mode() -> None:
     logger.info(
         "Registered %d stream(s) targeting %s",
         len(endpoint_refs),
-        dest_alias,
+        dest_connection_id,
     )
 
     # Create handler and start server. ``set_endpoint_refs`` and

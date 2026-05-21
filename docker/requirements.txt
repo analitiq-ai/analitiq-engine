@@ -7,6 +7,13 @@ aiofiles>=23.0.0
 # Database connectors
 asyncpg>=0.28.0
 aiomysql>=0.2.0
+# PyMySQL 1.2 changed Connection.ping()'s default from reconnect=True to
+# reconnect=False. SQLAlchemy 2.x's pool_pre_ping path uses that default
+# to decide whether to send `False` to ping(), but the aiomysql adapter
+# (AsyncAdapt_aiomysql_connection.ping) still requires the positional
+# `reconnect` argument — so do_ping() calls ping() with no args and
+# crashes with TypeError. Pin to <1.2 until aiomysql ships a fix.
+PyMySQL>=1.0,<1.2
 
 # API connectors
 aiohttp>=3.8.0
