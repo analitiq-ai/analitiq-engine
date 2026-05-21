@@ -3,8 +3,8 @@
 Engine-side runtime view of streams, mirroring the published stream
 schema at ``https://schemas.analitiq.ai/stream/latest.json``.
 
-Identity is alias-based: connections, streams, and pipelines are all
-keyed by their alias (= directory name on disk).
+Identity is id-based: connections, streams, and pipelines are all
+keyed by their ``*_id`` field (= directory name on disk).
 """
 
 from __future__ import annotations
@@ -92,29 +92,25 @@ class EndpointRef:
 
         {
           "scope":         "connector" | "connection",
-          "connection_id": "<connection alias selected in the pipeline>",
-          "alias":         "<stable endpoint alias from endpoint discovery>",
+          "connection_id": "<connection id selected in the pipeline>",
+          "endpoint_id":   "<stable endpoint id from endpoint discovery>",
           # plus optional "x-*" extension metadata
         }
-
-    ``connection_id`` carries the stream-contract field name; the value
-    is the on-disk connection alias (directory name under
-    ``connections/``). Identity is alias-based throughout the engine.
 
     Resolution rules:
 
     - ``scope="connector"``: look up the connection by ``connection_id``,
-      read its ``connector_alias``, then load
-      ``connectors/<connector_alias>/definition/endpoints/<alias>.json``.
+      read its ``connector_id``, then load
+      ``connectors/<connector_id>/definition/endpoints/<endpoint_id>.json``.
     - ``scope="connection"``: load
-      ``connections/<connection_id>/definition/endpoints/<alias>.json``.
+      ``connections/<connection_id>/definition/endpoints/<endpoint_id>.json``.
 
     Frozen so instances are hashable and usable as dict keys.
     """
 
     scope: str
     connection_id: str
-    alias: str
+    endpoint_id: str
 
     _VALID_SCOPES = ("connector", "connection")
 
@@ -125,11 +121,11 @@ class EndpointRef:
             )
         if not self.connection_id:
             raise ValueError("EndpointRef.connection_id cannot be empty")
-        if not self.alias:
-            raise ValueError("EndpointRef.alias cannot be empty")
+        if not self.endpoint_id:
+            raise ValueError("EndpointRef.endpoint_id cannot be empty")
 
     def __str__(self) -> str:
-        return f"{self.scope}:{self.connection_id}/{self.alias}"
+        return f"{self.scope}:{self.connection_id}/{self.endpoint_id}"
 
     @classmethod
     def from_dict(cls, data: Any) -> "EndpointRef":
@@ -144,10 +140,10 @@ class EndpointRef:
         if not isinstance(data, dict):
             raise TypeError(
                 "endpoint_ref must be an object with keys "
-                "{'scope','connection_id','alias'} (plus optional 'x-*' "
+                "{'scope','connection_id','endpoint_id'} (plus optional 'x-*' "
                 f"extensions), got {type(data).__name__}"
             )
-        required = {"scope", "connection_id", "alias"}
+        required = {"scope", "connection_id", "endpoint_id"}
         unknown = {
             k for k in set(data) - required if not k.startswith("x-")
         }
@@ -164,14 +160,14 @@ class EndpointRef:
         return cls(
             scope=data["scope"],
             connection_id=data["connection_id"],
-            alias=data["alias"],
+            endpoint_id=data["endpoint_id"],
         )
 
     def to_dict(self) -> Dict[str, str]:
         return {
             "scope": self.scope,
             "connection_id": self.connection_id,
-            "alias": self.alias,
+            "endpoint_id": self.endpoint_id,
         }
 
 
@@ -352,10 +348,10 @@ class DestinationConfig:
 class StreamConfig:
     """Complete Stream configuration model.
 
-    Mirrors the persisted stream document. Identity is the alias.
+    Mirrors the persisted stream document. Identity is ``stream_id``.
     """
 
-    alias: str = ""
+    stream_id: str = ""
     pipeline_id: str = ""
     display_name: Optional[str] = None
     description: Optional[str] = None
@@ -368,6 +364,6 @@ class StreamConfig:
     def get_primary_destination(self) -> DestinationConfig:
         if not self.destinations:
             raise ValueError(
-                f"Stream {self.alias!r} has no destinations configured"
+                f"Stream {self.stream_id!r} has no destinations configured"
             )
         return self.destinations[0]

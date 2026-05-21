@@ -2,6 +2,7 @@
 
 import json
 import logging
+from datetime import date, datetime, time
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
@@ -255,7 +256,59 @@ class SchemaContract:
             ]
             return pa.array(converted, type=field.type)
 
+        if (
+            pa.types.is_timestamp(field.type)
+            or pa.types.is_date(field.type)
+            or pa.types.is_time(field.type)
+        ) and any(isinstance(v, str) for v in values if v is not None):
+            return SchemaContract._build_temporal_from_strings(field, values)
+
         return pa.array(values, type=field.type)
+
+    @staticmethod
+    def _build_temporal_from_strings(
+        field: pa.Field, values: List[Any]
+    ) -> pa.Array:
+        """Parse ISO-8601 strings into a timestamp / date / time column.
+
+        Triggered for JSON-Schema ``format: date-time | date | time`` fields
+        whose endpoint declares an Arrow temporal ``arrow_type`` but does not
+        pin a ``source_format``. PyArrow refuses to coerce strings into a
+        timestamp/date/time array directly, so we parse with the stdlib
+        first and hand typed Python objects to ``pa.array``.
+        """
+        is_ts = pa.types.is_timestamp(field.type)
+        is_date = pa.types.is_date(field.type)
+        tz = getattr(field.type, "tz", None) if is_ts else None
+
+        parsed: List[Any] = []
+        for row, v in enumerate(values):
+            if v is None:
+                parsed.append(None)
+                continue
+            if not isinstance(v, str):
+                parsed.append(v)
+                continue
+            try:
+                if is_ts:
+                    dt = datetime.fromisoformat(v.replace("Z", "+00:00"))
+                    if tz and dt.tzinfo is None:
+                        raise ValueError(
+                            f"value {v!r} is naive but column declares tz={tz!r}"
+                        )
+                    if not tz and dt.tzinfo is not None:
+                        dt = dt.replace(tzinfo=None)
+                    parsed.append(dt)
+                elif is_date:
+                    parsed.append(date.fromisoformat(v[:10]))
+                else:
+                    parsed.append(time.fromisoformat(v))
+            except ValueError as exc:
+                raise ValueError(
+                    f"column {field.name!r} at row {row}: cannot parse "
+                    f"{v!r} as {field.type}: {exc}"
+                ) from exc
+        return pa.array(parsed, type=field.type)
 
     @staticmethod
     def _schema_from_columns(

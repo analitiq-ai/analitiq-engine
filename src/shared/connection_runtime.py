@@ -170,20 +170,23 @@ class ConnectionRuntime:
         return self._connection_type_mapper
 
     def type_mapper_for(self, endpoint_ref: Any) -> TypeMapper:
-        """Pick the type mapper whose scope matches ``endpoint_ref``."""
+        """Pick the type mapper whose scope matches ``endpoint_ref``.
+
+        For ``scope="connection"`` the connection's own ``type-map.json``
+        wins when present; otherwise the connector's mapper is used. The
+        connector's native vocabulary is authoritative for the driver
+        (e.g. MySQL ``BIGINT`` is the same in every MySQL installation),
+        so a connection only needs its own map to override or extend it.
+        """
         from src.models.stream import EndpointRef
 
         ref = EndpointRef.from_dict(endpoint_ref)
         if ref.scope == "connector":
             return self.connector_type_mapper
         if ref.scope == "connection":
-            if self._connection_type_mapper is None:
-                raise RuntimeError(
-                    f"endpoint {ref} is connection-scoped but connection "
-                    f"{self._connection_id!r} has no type-map (expected at "
-                    f"connections/{self._connection_id}/definition/type-map.json)"
-                )
-            return self._connection_type_mapper
+            if self._connection_type_mapper is not None:
+                return self._connection_type_mapper
+            return self.connector_type_mapper
         raise ValueError(f"type_mapper_for: unknown endpoint scope in {ref}")
 
     # ------------------------------------------------------------------
