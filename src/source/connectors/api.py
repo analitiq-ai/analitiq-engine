@@ -116,7 +116,7 @@ class APIConnector(BaseConnector):
         method = (request.get("method") or "GET").upper()
         if not isinstance(path, str) or not path:
             raise ReadError(
-                f"endpoint {endpoint_doc.get('alias')!r}: operations.read.request.path is required"
+                f"endpoint {endpoint_doc.get('endpoint_id')!r}: operations.read.request.path is required"
             )
         # Preserve both the base URL's path (e.g. ``/api/v1``) and the
         # endpoint's path. ``urljoin`` treats a leading ``/`` on the second
@@ -206,7 +206,7 @@ class APIConnector(BaseConnector):
         Accepted records.ref forms: ``response.body`` and
         ``response.body.<field>[.<field>...]``.
         """
-        endpoint_alias = endpoint_doc.get("alias")
+        endpoint_id = endpoint_doc.get("endpoint_id")
         response_block = read_spec.get("response") or {}
         response_schema = response_block.get("schema") or {}
         records_ref = (response_block.get("records") or {}).get(
@@ -222,14 +222,14 @@ class APIConnector(BaseConnector):
                 if not isinstance(properties, dict) or field not in properties:
                     available = sorted(properties.keys()) if isinstance(properties, dict) else []
                     raise ReadError(
-                        f"endpoint {endpoint_alias!r}: records.ref "
+                        f"endpoint {endpoint_id!r}: records.ref "
                         f"{records_ref!r} references field {field!r} that is "
                         f"not declared under properties; available: {available}"
                     )
                 node = properties[field]
         else:
             raise ReadError(
-                f"endpoint {endpoint_alias!r}: unsupported "
+                f"endpoint {endpoint_id!r}: unsupported "
                 f"records.ref {records_ref!r}; expected 'response.body' "
                 f"or 'response.body.<field>[.<field>...]'"
             )
@@ -237,7 +237,7 @@ class APIConnector(BaseConnector):
         items = node.get("items") if node.get("type") == "array" else node
         if not isinstance(items, dict) or not items.get("properties"):
             raise ReadError(
-                f"endpoint {endpoint_alias!r}: cannot resolve "
+                f"endpoint {endpoint_id!r}: cannot resolve "
                 f"record schema at {records_ref!r} (no 'properties' under "
                 f"the addressed items)"
             )

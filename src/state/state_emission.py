@@ -1,46 +1,25 @@
-"""State checkpoint emission for cross-run observability.
+"""State change emission helper.
 
-Emits ANALITIQ_STATE:: log lines that log shippers can extract to track
-pipeline progress across runs without a database dependency.
+Thin wrapper around :func:`src.state.log_emitter.emit_log` so the state
+manager has a single function to call for every persisted-state change.
+The signature accepts arbitrary keyword fields (``run_id``,
+``pipeline_id``, ``stream_id``, ``cursor_value``, …) so call sites can
+emit structured payloads without coordinating on a single dict shape.
 """
 
-import json
-import logging
-import sys
+from __future__ import annotations
 
-logger = logging.getLogger(__name__)
+from typing import Any
+
+from src.state.log_emitter import emit_log
 
 
-def emit_state_log(
-    run_id: str,
-    pipeline_id: str,
-    stream_id: str,
-    cursor_hex: str,
-    cursor_value: str,
-) -> None:
-    """Emit a checkpoint log line to stdout.
+def emit_state_log(**fields: Any) -> None:
+    """Emit a state-change observability record.
 
-    Args:
-        run_id: Current pipeline run identifier.
-        pipeline_id: Pipeline being executed.
-        stream_id: Stream that advanced its cursor.
-        cursor_hex: Hex-encoded cursor bytes for replay.
-        cursor_value: Human-readable high-water mark value.
+    All keyword arguments become fields of the emitted record. ``None``
+    values are dropped so the on-the-wire payload only contains
+    populated fields.
     """
-    data = {
-        "run_id": run_id,
-        "pipeline_id": pipeline_id,
-        "stream_id": stream_id,
-        "cursor_hex": cursor_hex,
-        "cursor_value": cursor_value,
-    }
-    try:
-        line = json.dumps(data)
-    except (TypeError, ValueError) as exc:
-        logger.error(
-            "emit_state_log: failed to serialise state payload (%s); stream_id=%s",
-            exc,
-            stream_id,
-        )
-        return
-    print(f"ANALITIQ_STATE::{line}", file=sys.stdout, flush=True)
+    payload = {k: v for k, v in fields.items() if v is not None}
+    emit_log("state", payload)

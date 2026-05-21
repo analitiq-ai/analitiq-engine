@@ -1,39 +1,49 @@
-"""Structured log emitter for observability markers.
+"""Structured log emitter used by DLQ, metrics, and state subsystems.
 
-Emits JSON lines to stdout with ANALITIQ_{CATEGORY}:: prefixes so that
-log shippers (CloudWatch Logs Insights, Datadog, etc.) can filter and
-parse them without touching the payload.
-
-Example output:
-    ANALITIQ_DLQ::{"type": "dlq", "pipeline_id": "my-pipe", "added": 3}
-    ANALITIQ_METRICS::{"type": "batch", "run_id": "abc", "records_written": 100}
+The other state-package modules emit observability records by wrapping a
+small payload with a marker and a category so log-collecting infra can
+reliably pick them out of stdout. This module is the single seam.
 """
+
+from __future__ import annotations
 
 import json
 import logging
-import sys
-from typing import Any, Dict
+import os
+from typing import Any, Mapping
 
 logger = logging.getLogger(__name__)
 
 
-def emit_log(category: str, data: Dict[str, Any]) -> None:
-    """Write a structured JSON line to stdout with an observability marker.
+# Markers prefix every emitted log line so downstream collectors can
+# identify Analitiq-emitted records without parsing free-form messages.
+MARKERS: dict[str, str] = {
+    "dlq": "ANALITIQ_DLQ",
+    "metrics": "ANALITIQ_METRICS",
+    "state": "ANALITIQ_STATE",
+}
 
-    Args:
-        category: Log category, case-insensitive (e.g. ``"dlq"``, ``"metrics"``).
-            Uppercased when constructing the ``ANALITIQ_{CATEGORY.upper()}::`` prefix.
-        data: Payload to serialise as JSON. Values must be JSON-serialisable.
+
+def emit_log(category: str, data: Mapping[str, Any]) -> None:
+    """Emit one observability record at INFO level.
+
+    The record is JSON-serialised so collectors can ingest it directly.
+    Unknown categories are still emitted (the marker falls back to the
+    category name) but a debug warning is logged so the typo is visible.
+
+    ``org_id`` is injected from the ``ORG_ID`` environment variable into
+    every payload. The downstream pipeline-output-processor keys S3 paths
+    and DDB writes by ``org_id`` and drops records where it is missing.
     """
-    marker = f"ANALITIQ_{category.upper()}::"
+    marker = MARKERS.get(category)
+    if marker is None:
+        logger.debug("emit_log: unknown category %r — using as marker", category)
+        marker = category.upper()
+    org_id = os.environ.get("ORG_ID") or 0
+    enriched: dict[str, Any] = {"org_id": org_id, **dict(data)}
     try:
-        line = json.dumps(data)
-    except (TypeError, ValueError) as exc:
-        logger.error(
-            "emit_log: failed to serialise %r payload (%s); keys=%s",
-            category,
-            exc,
-            list(data.keys()),
-        )
-        return
-    print(f"{marker}{line}", file=sys.stdout, flush=True)
+        payload = json.dumps(enriched, default=str)
+    except (TypeError, ValueError) as err:
+        logger.error("emit_log: payload not JSON-serialisable: %s", err)
+        payload = json.dumps({"org_id": org_id, "error": str(err), "category": category})
+    logger.info("%s::%s", marker, payload)

@@ -833,7 +833,7 @@ class StreamingEngine:
     def _get_stream_name(self, config: Dict[str, Any]) -> str:
         """Generate stream name for state management.
 
-        Returns ``endpoint.<scope>:<connection_id>/<alias>`` (the
+        Returns ``endpoint.<scope>:<connection_id>/<endpoint_id>`` (the
         ``endpoint.`` prefix namespaces the key in shared state stores)
         so the metric path is stable across runs.
         """
@@ -843,7 +843,7 @@ class StreamingEngine:
             if isinstance(ref, dict):
                 return (
                     f"endpoint.{ref.get('scope', '')}:"
-                    f"{ref.get('connection_id', '')}/{ref.get('alias', '')}"
+                    f"{ref.get('connection_id', '')}/{ref.get('endpoint_id', '')}"
                 )
         return config.get("pipeline_id", "unknown-stream")
 
