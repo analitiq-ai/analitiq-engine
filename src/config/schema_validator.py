@@ -35,7 +35,7 @@ from jsonschema.exceptions import ValidationError
 logger = logging.getLogger(__name__)
 
 
-_DEFAULT_SCHEMAS_DOMAIN = "schemas.analitiq.ai"
+_DEFAULT_SCHEMA_BASE_URL = "https://schemas.analitiq.ai"
 _FETCH_TIMEOUT_SECONDS = 15
 
 ARTIFACT_KINDS = (
