@@ -18,6 +18,7 @@ add new families.
 from __future__ import annotations
 
 import copy
+import json
 import logging
 import ssl as _ssl
 import urllib.parse
@@ -234,6 +235,22 @@ def _materialize_tls_postgres(mode: str, ca_pem: Optional[str]) -> Any:
     )
 
 
+# libpq-style SSL mode names (``disable``/``allow``/``prefer``/``require``/
+# ``verify-ca``/``verify-full``) accepted as aliases for the MySQL-native
+# vocabulary. Connections authored against the PG connector contract
+# routinely get cloned into MySQL connections with the libpq names
+# left in place; rejecting them with a hard error is more friction than
+# value when the semantic intent is unambiguous.
+_LIBPQ_TO_MYSQL_TLS_MODE: Dict[str, str] = {
+    "DISABLE": "DISABLED",
+    "ALLOW": "PREFERRED",
+    "PREFER": "PREFERRED",
+    "REQUIRE": "REQUIRED",
+    "VERIFY-CA": "VERIFY_CA",
+    "VERIFY-FULL": "VERIFY_IDENTITY",
+}
+
+
 def _materialize_tls_mysql(mode: str, ca_pem: Optional[str]) -> Any:
     """Apply MySQL-native SSL modes to aiomysql.
 
@@ -241,9 +258,12 @@ def _materialize_tls_mysql(mode: str, ca_pem: Optional[str]) -> Any:
     all — it does not accept native string modes. MySQL's vocabulary is
     ``DISABLED`` / ``PREFERRED`` / ``REQUIRED`` / ``VERIFY_CA`` /
     ``VERIFY_IDENTITY``; comparison is case-insensitive on the stored
-    value.
+    value. libpq-style aliases (``prefer``/``require``/``verify-ca``/
+    ``verify-full``) are accepted for connections cloned across
+    connectors.
     """
     canonical = mode.upper()
+    canonical = _LIBPQ_TO_MYSQL_TLS_MODE.get(canonical, canonical)
     if canonical == "DISABLED":
         return False
     if canonical in ("PREFERRED", "REQUIRED"):
@@ -359,6 +379,58 @@ class SqlAlchemyTransport:
     dialect: str
 
 
+async def _init_pg_json_codecs(conn: Any) -> None:
+    """Register dict <-> JSON / JSONB codecs on an asyncpg connection.
+
+    PG's wire protocol for JSON / JSONB is text. asyncpg ships no
+    default dict encoder, so binding a Python dict against a JSONB
+    column raises ``DataError: expected str, got dict``. Registering
+    ``json.dumps`` / ``json.loads`` here makes dict and list values
+    pass through transparently for any caller that hands SA a Python
+    object as the parameter (e.g. the destination handler's
+    ``table.insert()`` call against a dynamically-built table).
+    """
+    await conn.set_type_codec(
+        "jsonb",
+        encoder=json.dumps,
+        decoder=json.loads,
+        schema="pg_catalog",
+    )
+    await conn.set_type_codec(
+        "json",
+        encoder=json.dumps,
+        decoder=json.loads,
+        schema="pg_catalog",
+    )
+    logger.info("asyncpg JSON/JSONB codecs registered on connection")
+
+
+async def _asyncpg_connect_with_json_codecs(*args: Any, **kwargs: Any) -> Any:
+    """``asyncpg.connect`` wrapper that wires JSON/JSONB codecs on connect.
+
+    Used as ``async_creator_fn`` in SQLAlchemy's asyncpg connect_args.
+    asyncpg's ``connect()`` doesn't accept an ``init=`` callback
+    directly (only ``create_pool`` does), so we attach the codecs
+    post-connect on the same coroutine path. Imports asyncpg lazily so
+    the engine doesn't hard-require it at module-import time (only
+    when a PG connector materializes).
+    """
+    import asyncpg  # type: ignore[import-untyped]
+
+    conn = await asyncpg.connect(*args, **kwargs)
+    try:
+        await _init_pg_json_codecs(conn)
+    except Exception:
+        # Codec setup is a precondition for binding dict/list values
+        # against JSONB columns. If it fails, drop the half-initialised
+        # connection rather than handing it back to the pool — the next
+        # checkout would re-trigger the original ``expected str, got
+        # dict`` error.
+        await conn.close()
+        raise
+    return conn
+
+
 async def build_sqlalchemy_transport(
     spec: Mapping[str, Any], *, resolver: Resolver
 ) -> SqlAlchemyTransport:
@@ -380,6 +452,26 @@ async def build_sqlalchemy_transport(
     tls_value = _materialize_tls_for_driver(driver, spec.get("tls"), resolver)
     if tls_value is not None:
         connect_args["ssl"] = tls_value
+
+    # PG asyncpg: register JSON / JSONB codecs per connection so dict /
+    # list values bound against a JSONB column are serialized to text
+    # by asyncpg before they hit the wire. Without this, asyncpg's
+    # default binding sees ``dict`` and rejects with ``(expected str,
+    # got dict)`` because PG's wire protocol for JSONB is text and
+    # asyncpg has no built-in dict encoder. SQLAlchemy's JSONB
+    # ``bind_processor`` only fires when SA recognizes the column type
+    # at INSERT-execute time; for tables built dynamically from Arrow
+    # schemas (where the column may resolve to ``JSON()`` rather than
+    # ``JSONB()`` depending on dialect introspection timing), the
+    # connection-level codec is the deterministic fix.
+    #
+    # SA's asyncpg adapter pops ``async_creator_fn`` and calls it in
+    # place of ``asyncpg.connect``. That's the hook for passing
+    # ``init=`` through — passing ``init`` directly via connect_args
+    # is rejected by SA's adapter as an unknown kwarg.
+    base_driver = driver.split("+", 1)[0].lower()
+    if base_driver in ("postgresql", "postgres"):
+        connect_args.setdefault("async_creator_fn", _asyncpg_connect_with_json_codecs)
 
     options = spec.get("options") or {}
     if not isinstance(options, Mapping):

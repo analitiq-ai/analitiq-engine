@@ -549,7 +549,12 @@ class TestToDbRecords:
         assert isinstance(records[0]["created"], datetime)
         assert isinstance(records[0]["amount"], Decimal)
 
-    def test_to_db_records_decodes_json_marker_strings(self):
+    def test_to_db_records_serialises_json_marker_dicts_to_strings(self):
+        """JSON columns reach SA as strings so the dict / list values
+        don't trip asyncpg's strict ``expected str, got dict`` binding
+        against JSONB. Round-trippable via ``json.loads``."""
+        import json as _json
+
         schema = {
             "columns": [
                 {"name": "id", "arrow_type": "Int64", "nullable": False},
@@ -561,4 +566,32 @@ class TestToDbRecords:
             [{"id": 1, "metadata": {"k": "v"}}]
         )
         records = contract.to_db_records(batch)
-        assert records[0]["metadata"] == {"k": "v"}
+        assert isinstance(records[0]["metadata"], str)
+        assert _json.loads(records[0]["metadata"]) == {"k": "v"}
+
+    def test_to_db_records_passes_through_null_json(self):
+        schema = {
+            "columns": [
+                {"name": "id", "arrow_type": "Int64", "nullable": False},
+                {"name": "metadata", "arrow_type": "Json", "nullable": True},
+            ]
+        }
+        contract = SchemaContract(schema)
+        batch = contract.from_pylist([{"id": 1, "metadata": None}])
+        records = contract.to_db_records(batch)
+        assert records[0]["metadata"] is None
+
+    def test_to_db_records_serialises_list_json_values(self):
+        import json as _json
+
+        schema = {
+            "columns": [
+                {"name": "id", "arrow_type": "Int64", "nullable": False},
+                {"name": "tags", "arrow_type": "Json", "nullable": True},
+            ]
+        }
+        contract = SchemaContract(schema)
+        batch = contract.from_pylist([{"id": 1, "tags": ["a", "b"]}])
+        records = contract.to_db_records(batch)
+        assert isinstance(records[0]["tags"], str)
+        assert _json.loads(records[0]["tags"]) == ["a", "b"]
