@@ -8,13 +8,10 @@ efficient columnar type conversion for batch operations.
 """
 
 import asyncio
-import importlib
 import logging
-import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Mapping, Optional, Set, Tuple
-from urllib.parse import quote, urlencode
 
 import pyarrow as pa
 from sqlalchemy import (
@@ -47,38 +44,19 @@ from ...grpc.generated.analitiq.v1 import (
     Cursor,
     SchemaMessage,
 )
+from ...shared.adbc_registry import (
+    _ADBC_ENV_VAR,
+    _ADBC_IMPORT_FAILED,
+    _ADBC_MODULES,
+    AdbcConfigurationError,
+    adbc_flag_enabled as _adbc_flag_enabled,
+    build_adbc_uri,
+    load_adbc_module,
+)
 from ...shared.connection_runtime import ConnectionRuntime
 
 
 logger = logging.getLogger(__name__)
-
-
-# SQLAlchemy dialect (matches ``self._driver``, set on connect from
-# ``runtime.driver``) -> dotted ADBC dbapi module path. Import is lazy
-# so a missing package disables the fast path for that dialect.
-_ADBC_MODULES: Dict[str, str] = {
-    "postgresql": "adbc_driver_postgresql.dbapi",
-    "postgres": "adbc_driver_postgresql.dbapi",
-}
-
-
-# Opt-in feature flag. ``ADBC_FAST_PATH=1`` enables the fast path.
-_ADBC_ENV_VAR = "ADBC_FAST_PATH"
-
-# Sentinel for ``_adbc_module``: distinct from ``None`` (never tried)
-# and from a real module object so an ``is`` check is unambiguous even
-# if a third-party module overrides ``__bool__``.
-_ADBC_IMPORT_FAILED: Any = object()
-
-
-class AdbcConfigurationError(RuntimeError):
-    """Deterministic ADBC-side misconfiguration.
-
-    Raised when retrying the same batch cannot succeed: missing driver
-    package, unsupported dialect, unbuildable URI, missing schema
-    contract. Surfaced as ``ACK_STATUS_FATAL_FAILURE`` so the engine
-    stops re-attempting.
-    """
 
 
 class AdbcCommitRecordError(RuntimeError):
@@ -97,11 +75,6 @@ class AdbcCommitRecordError(RuntimeError):
             f"(retry will duplicate): {inner}"
         )
         self.__cause__ = inner
-
-
-def _adbc_flag_enabled() -> bool:
-    value = os.environ.get(_ADBC_ENV_VAR, "").strip().lower()
-    return value in ("1", "true", "yes", "on")
 
 
 @dataclass
@@ -861,72 +834,23 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
     def _load_adbc_module(self) -> Any:
         """Lazily import the ADBC dbapi module for the active dialect.
 
-        Returns the module, or ``_ADBC_IMPORT_FAILED`` when no driver
-        is registered for the dialect or the import fails. The result
-        is cached so we do not retry an import that already failed
-        once in this process.
+        Caches the result per handler instance so a failed import is
+        not retried on every batch.
         """
         if self._adbc_module is not None:
             return self._adbc_module
-
-        module_path = _ADBC_MODULES.get(self._driver)
-        if not module_path:
-            self._adbc_module = _ADBC_IMPORT_FAILED
-            return self._adbc_module
-
-        try:
-            self._adbc_module = importlib.import_module(module_path)
-        except ImportError as exc:
-            # The flag was explicitly opted into, so a missing driver
-            # deserves WARNING — the user asked for the fast path and
-            # is silently getting the slow one otherwise.
-            log_fn = logger.warning if _adbc_flag_enabled() else logger.debug
-            log_fn(
-                "ADBC fast path disabled for driver=%s: %s not importable (%s). "
-                "Install the matching `adbc-driver-*` package to enable.",
-                self._driver,
-                module_path,
-                exc,
-            )
-            self._adbc_module = _ADBC_IMPORT_FAILED
+        self._adbc_module = load_adbc_module(self._driver)
         return self._adbc_module
 
     def _build_adbc_uri(self) -> Optional[str]:
-        """Render the SQLAlchemy URL as a libpq URI for ADBC.
+        """Render the per-dialect ADBC connect argument from the engine.
 
-        Reassembled from ``url`` parts so the leading driver name is
-        the bare backend (``postgresql``), credentials are
-        percent-encoded, and any non-empty ``url.query`` (e.g.
-        ``sslmode=require``, ``application_name=...``) is forwarded so
-        TLS / connection settings configured for SQLAlchemy are not
-        silently dropped for ADBC.
+        Returns ``None`` when no URI builder is registered for the
+        active dialect or the engine URL is missing required parts.
         """
         if self._engine is None:
             return None
-        url = self._engine.url
-        backend = (url.get_backend_name() or "").lower()
-        if backend not in {"postgresql", "postgres"}:
-            return None
-        if not url.host or not url.database:
-            return None
-
-        userinfo = ""
-        if url.username:
-            userinfo = quote(url.username, safe="")
-            if url.password:
-                userinfo += ":" + quote(url.password, safe="")
-            userinfo += "@"
-        port = f":{url.port}" if url.port else ""
-
-        query = getattr(url, "query", None) or {}
-        query_string = ""
-        if query:
-            # SQLAlchemy ``url.query`` is a dict (or immutabledict)
-            # mapping str -> str | tuple[str, ...]. ``urlencode`` with
-            # ``doseq=True`` handles both.
-            query_string = "?" + urlencode(list(query.items()), doseq=True)
-
-        return f"postgresql://{userinfo}{url.host}{port}/{url.database}{query_string}"
+        return build_adbc_uri(self._driver, self._engine)
 
     def _note_adbc_demotion(
         self, stream_id: str, state: _StreamState, reason: str

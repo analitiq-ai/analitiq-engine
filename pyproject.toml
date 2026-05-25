@@ -90,11 +90,29 @@ passlib = {version = "^1.7.4", optional = true}
 apscheduler = {version = "^3.10.0", optional = true}
 
 # ADBC (Arrow Database Connectivity) — opt-in fast path for the
-# database destination. When the driver is importable and
+# database source and destination. When the driver is importable and
 # ``ADBC_FAST_PATH=1`` is set, append-only writes go through
-# ``adbc_ingest`` instead of SQLAlchemy ``executemany``.
+# ``adbc_ingest`` and reads stream Arrow batches via ``fetch_arrow_table``
+# instead of SQLAlchemy ``executemany`` / row mapping.
 adbc-driver-manager = {version = "^1.1.0", optional = true}
 adbc-driver-postgresql = {version = "^1.1.0", optional = true}
+adbc-driver-sqlite = {version = "^1.1.0", optional = true}
+adbc-driver-snowflake = {version = "^1.1.0", optional = true}
+adbc-driver-bigquery = {version = "^1.1.0", optional = true}
+
+# Per-dialect SQLAlchemy + native packages. All optional — installed
+# only when the user pulls in the matching extra. Keeps the base image
+# small and avoids forcing cloud-vendor SDKs on installations that
+# don't use them.
+aiosqlite = {version = "^0.19.0", optional = true}
+duckdb-engine = {version = "^0.13.0", optional = true}
+snowflake-sqlalchemy = {version = "^1.5.0", optional = true}
+sqlalchemy-bigquery = {version = "^1.11.0", optional = true}
+sqlalchemy-redshift = {version = "^0.8.14", optional = true}
+redshift-connector = {version = "^2.0.0", optional = true}
+aioodbc = {version = "^0.5.0", optional = true}
+clickhouse-connect = {version = "^0.7.0", optional = true}
+clickhouse-sqlalchemy = {version = "^0.3.0", optional = true}
 strands-agents = "^1.3.0"
 strands-agents-tools = "^0.2.3"
 bedrock-agentcore = "^0.1.2"
@@ -128,9 +146,36 @@ kafka = ["kafka-python", "aiokafka"]
 cloud = ["boto3", "azure-storage-blob", "google-cloud-storage"]
 analytics = ["pandas", "numpy"]
 nosql = ["motor", "aioredis"]
+mongodb = ["motor"]
 security = ["cryptography", "passlib"]
 scheduling = ["apscheduler"]
-adbc = ["adbc-driver-manager", "adbc-driver-postgresql"]
+adbc = [
+    "adbc-driver-manager",
+    "adbc-driver-postgresql",
+    "adbc-driver-sqlite",
+    "adbc-driver-snowflake",
+    "adbc-driver-bigquery",
+]
+# Per-database extras. Each pulls in the SQLAlchemy dialect plus the
+# matching ADBC driver where one exists. Install with
+# ``poetry install -E <name>`` (or combine, e.g. ``-E "snowflake bigquery"``).
+sqlite = ["aiosqlite", "adbc-driver-sqlite"]
+duckdb = ["duckdb-engine", "adbc-driver-manager"]
+snowflake = ["snowflake-sqlalchemy", "adbc-driver-snowflake", "adbc-driver-manager"]
+bigquery = ["sqlalchemy-bigquery", "adbc-driver-bigquery", "adbc-driver-manager"]
+redshift = ["sqlalchemy-redshift", "redshift-connector", "adbc-driver-postgresql", "adbc-driver-manager"]
+mssql = ["aioodbc"]
+clickhouse = ["clickhouse-connect", "clickhouse-sqlalchemy"]
+databases = [
+    "aiosqlite", "adbc-driver-sqlite",
+    "duckdb-engine",
+    "snowflake-sqlalchemy", "adbc-driver-snowflake",
+    "sqlalchemy-bigquery", "adbc-driver-bigquery",
+    "sqlalchemy-redshift", "redshift-connector",
+    "aioodbc",
+    "clickhouse-connect", "clickhouse-sqlalchemy",
+    "adbc-driver-manager", "adbc-driver-postgresql",
+]
 all = [
     "kafka-python", "aiokafka",
     "boto3", "azure-storage-blob", "google-cloud-storage",
@@ -138,7 +183,13 @@ all = [
     "motor", "aioredis",
     "cryptography", "passlib",
     "apscheduler",
-    "adbc-driver-manager", "adbc-driver-postgresql"
+    "adbc-driver-manager", "adbc-driver-postgresql",
+    "adbc-driver-sqlite", "adbc-driver-snowflake", "adbc-driver-bigquery",
+    "aiosqlite", "duckdb-engine",
+    "snowflake-sqlalchemy", "sqlalchemy-bigquery",
+    "sqlalchemy-redshift", "redshift-connector",
+    "aioodbc",
+    "clickhouse-connect", "clickhouse-sqlalchemy",
 ]
 
 [tool.poetry.scripts]

@@ -421,6 +421,31 @@ class HttpTransport:
     rate_limiter: Optional[RateLimiter] = None
 
 
+# ---------------------------------------------------------------------------
+# Native-Arrow transport (ClickHouse, Flight SQL, etc.)
+#
+# Carries a connected native-Arrow client alongside the dialect string.
+# Builders are registered out-of-band so the base install stays
+# dependency-light; see :mod:`src.shared.native_arrow_clients` for the
+# dispatch table.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class NativeArrowTransport:
+    """Materialized native-Arrow client transport.
+
+    ``client`` is the dialect-specific client object (e.g. a
+    ``clickhouse_connect`` async client). Consumers narrow the type
+    based on ``dialect`` rather than via a uniform interface, because
+    each native-Arrow library has its own ``query_arrow_stream`` /
+    ``insert_arrow`` method signature.
+    """
+
+    client: Any
+    dialect: str
+
+
 async def build_http_transport(
     spec: Mapping[str, Any], *, resolver: Resolver
 ) -> HttpTransport:

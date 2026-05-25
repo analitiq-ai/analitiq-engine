@@ -23,6 +23,7 @@ from src.destination.connectors.database import (
     _StreamState,
 )
 from src.grpc.generated.analitiq.v1 import AckStatus, Cursor
+from src.shared import adbc_registry
 
 
 def _state_with_contract(
@@ -121,7 +122,7 @@ class TestCanUseAdbc:
     def test_import_failure_caches_sentinel(self, handler, monkeypatch):
         monkeypatch.setenv("ADBC_FAST_PATH", "1")
         with patch.object(
-            database_module.importlib,
+            adbc_registry.importlib,
             "import_module",
             side_effect=ImportError("boom"),
         ):
@@ -134,7 +135,7 @@ class TestCanUseAdbc:
     ):
         monkeypatch.setenv("ADBC_FAST_PATH", "1")
         with patch.object(
-            database_module.importlib,
+            adbc_registry.importlib,
             "import_module",
             side_effect=ImportError("boom"),
         ):
@@ -152,7 +153,7 @@ class TestCanUseAdbc:
         # No env var set. We still call _load_adbc_module directly to
         # check the level: opt-out demotion is mundane.
         with patch.object(
-            database_module.importlib,
+            adbc_registry.importlib,
             "import_module",
             side_effect=ImportError("boom"),
         ):

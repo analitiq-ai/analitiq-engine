@@ -4,14 +4,15 @@ Supports multiple database dialects (PostgreSQL, MySQL, etc.) and provides
 SQL injection protection through proper identifier quoting and value parameterization.
 """
 
+import importlib
 import logging
-import re
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from sqlalchemy import Column, MetaData, Table, and_, asc, desc, select, text
-from sqlalchemy.dialects import mysql, postgresql
+from sqlalchemy.dialects import mssql, mysql, sqlite
+from sqlalchemy.dialects.postgresql.asyncpg import dialect as _asyncpg_dialect
 from sqlalchemy.engine import Dialect as SADialect
 from sqlalchemy.sql import Select
 
@@ -73,23 +74,72 @@ class QueryConfig:
             self.filters = []
 
 
+# Third-party SQLAlchemy dialects loaded on demand. Each entry names the
+# importable module that calling ``import_module`` triggers the dialect
+# registration side effect for, so we can resolve ``dialect()`` after.
+_LAZY_DIALECT_PACKAGES: Dict[str, str] = {
+    "snowflake": "snowflake.sqlalchemy",
+    "bigquery": "sqlalchemy_bigquery",
+    "redshift": "sqlalchemy_redshift.dialect",
+    "duckdb": "duckdb_engine",
+    "clickhouse": "clickhouse_sqlalchemy",
+}
+
+
+# Built-in SQLAlchemy dialect factories. ``postgresql``/``postgres`` and
+# ``mysql``/``mariadb`` are aliases — same SA dialect underneath.
+#
+# PostgreSQL uses the ``asyncpg``-specific dialect so compiled SQL ships
+# with ``$N`` placeholders (asyncpg's native paramstyle). The default
+# ``postgresql.dialect()`` would emit ``%(name)s`` and require a manual
+# conversion pass that drifts out of sync whenever SQLAlchemy adds new
+# bound parameters (limit / offset being the obvious case).
+_BUILTIN_DIALECT_FACTORIES: Dict[str, Callable[[], SADialect]] = {
+    "postgresql": _asyncpg_dialect,
+    "postgres": _asyncpg_dialect,
+    "mysql": mysql.dialect,
+    "mariadb": mysql.dialect,
+    "mssql": mssql.dialect,
+    "sqlite": sqlite.dialect,
+}
+
+
 def _get_sqlalchemy_dialect(dialect: str) -> SADialect:
-    """Get SQLAlchemy dialect instance from dialect string.
+    """Resolve a dialect string to a SQLAlchemy dialect instance.
 
-    Args:
-        dialect: Database dialect string from config (e.g., 'postgresql', 'postgres', 'mysql')
+    Built-in dialects (postgresql, mysql, mssql, sqlite) resolve directly.
+    Third-party dialects (snowflake, bigquery, redshift, duckdb,
+    clickhouse) are loaded by importing the package that registers them
+    with SQLAlchemy's dialect registry; this lets the engine compile SQL
+    for those dialects without forcing the package into the base install.
 
-    Returns:
-        SQLAlchemy dialect instance
+    Raises ``ValueError`` for unknown dialects and ``ImportError`` (with
+    actionable text) when a third-party dialect package is missing.
     """
     dialect_lower = dialect.lower()
+    factory = _BUILTIN_DIALECT_FACTORIES.get(dialect_lower)
+    if factory is not None:
+        return factory()
 
-    if dialect_lower in ("postgresql", "postgres"):
-        return postgresql.dialect()
-    elif dialect_lower in ("mysql", "mariadb"):
-        return mysql.dialect()
-    else:
+    package = _LAZY_DIALECT_PACKAGES.get(dialect_lower)
+    if package is None:
         raise ValueError(f"Unsupported dialect: {dialect}")
+
+    try:
+        importlib.import_module(package)
+    except ImportError as exc:
+        raise ImportError(
+            f"SQLAlchemy dialect for {dialect!r} requires the "
+            f"{package!r} package. Install the matching extra "
+            f"(e.g. `poetry install -E {dialect_lower}`)."
+        ) from exc
+
+    # The package's import side effect registers the dialect; resolve
+    # it via SQLAlchemy's URL machinery so we don't hard-code each
+    # third-party dialect's module path.
+    from sqlalchemy.dialects import registry
+    cls = registry.load(dialect_lower)
+    return cls()
 
 
 def _is_postgresql_dialect(dialect: str) -> bool:
@@ -313,58 +363,18 @@ class QueryBuilder:
 
         query_str = str(compiled)
 
-        # For PostgreSQL, convert :param_N to $N format for asyncpg
-        if _is_postgresql_dialect(self.dialect):
-            query_str, params = self._convert_to_positional_params(
-                query_str, compiled.params, params
-            )
+        # ``compiled.params`` preserves insertion order (the order each
+        # placeholder appears in the SQL) and is the single source of
+        # truth for bound values -- including the limit / offset values
+        # SQLAlchemy adds when ``.limit().offset()`` is on the select.
+        # The caller-tracked ``params`` list only covers filter + cursor
+        # values and would silently miss paging binds otherwise.
+        params = list(compiled.params.values())
 
         logger.debug(f"Compiled query: {query_str}")
         logger.debug(f"Parameters: {params}")
 
         return query_str, params
-
-    def _convert_to_positional_params(
-        self,
-        query_str: str,
-        compiled_params: Dict[str, Any],
-        explicit_params: List[Any]
-    ) -> Tuple[str, List[Any]]:
-        """Convert named parameters to positional ($1, $2) for asyncpg.
-
-        Args:
-            query_str: Query with named parameters
-            compiled_params: Parameters from SQLAlchemy compilation
-            explicit_params: Explicitly provided parameter values
-
-        Returns:
-            Tuple of (query_string with $N placeholders, ordered params list)
-        """
-        # If we have explicit params, they're already in order
-        if explicit_params:
-            param_index = 0
-
-            def replace_param(match):
-                nonlocal param_index
-                param_index += 1
-                return f"${param_index}"
-
-            # Match :param_name patterns
-            query_str = re.sub(r':[\w_]+', replace_param, query_str)
-            return query_str, explicit_params
-
-        # Otherwise extract from compiled params
-        ordered_params = []
-        param_mapping = {}
-
-        for i, (name, value) in enumerate(compiled_params.items(), 1):
-            param_mapping[f":{name}"] = f"${i}"
-            ordered_params.append(value)
-
-        for old, new in param_mapping.items():
-            query_str = query_str.replace(old, new)
-
-        return query_str, ordered_params
 
 
 def build_select_query(

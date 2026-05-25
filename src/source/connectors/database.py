@@ -24,9 +24,11 @@ from typing import Any, AsyncIterator, Dict, List, Optional
 import pyarrow as pa
 
 from .base import BaseConnector, ConnectionError, ReadError
+from ..drivers.adbc_reader import open_session as open_adbc_session, source_adbc_eligible
 from ...destination.schema_contract import SchemaContract
 from ...engine.type_map import InvalidTypeMapError, UnmappedTypeError
 from ...secrets.exceptions import PlaceholderExpansionError
+from ...shared.adbc_registry import AdbcConfigurationError
 from ...shared.connection_runtime import ConnectionRuntime
 from ...shared.database_utils import acquire_connection
 from ...shared.query_builder import Filter, QueryBuilder, QueryConfig
@@ -126,25 +128,52 @@ class DatabaseConnector(BaseConnector):
         cursor_value = stored_cursor if replication_method == "incremental" else None
 
         builder = QueryBuilder(self._driver)
-        base_query, base_params = builder.build_select_query(
-            QueryConfig(
-                schema_name=schema_name,
-                table_name=table_name,
-                columns=column_names,
-                filters=filters,
-                cursor_field=cursor_field if replication_method == "incremental" else None,
-                cursor_value=cursor_value,
-                cursor_mode="inclusive",
+
+        def page_query(offset: int) -> tuple[str, List[Any]]:
+            """Build the per-page SELECT. Limit / offset are pushed into
+            ``QueryConfig`` so SQLAlchemy compiles dialect-correct paging
+            (PostgreSQL/MySQL ``LIMIT ... OFFSET ...`` vs MSSQL ``OFFSET
+            ... ROWS FETCH NEXT ... ROWS ONLY``).
+            """
+            sql, params = builder.build_select_query(
+                QueryConfig(
+                    schema_name=schema_name,
+                    table_name=table_name,
+                    columns=column_names,
+                    filters=filters,
+                    cursor_field=(
+                        cursor_field if replication_method == "incremental" else None
+                    ),
+                    cursor_value=cursor_value,
+                    cursor_mode="inclusive",
+                    limit=batch_size,
+                    offset=offset,
+                )
             )
-        )
+            return sql, params
 
         last_cursor_value = cursor_value
         offset = 0
+
+        if source_adbc_eligible(self._driver, self._engine):
+            async for batch in self._read_via_adbc(
+                page_query=page_query,
+                schema_contract=schema_contract,
+                cursor_field=cursor_field,
+                batch_size=batch_size,
+                state_manager=state_manager,
+                stream_name=stream_name,
+                partition=partition,
+            ):
+                yield batch
+            logger.debug("Database read (ADBC) completed")
+            return
+
         async with acquire_connection(self._engine) as conn:
             while True:
-                paged_query = f"{base_query} LIMIT {batch_size} OFFSET {offset}"
-                if base_params:
-                    result = await conn.exec_driver_sql(paged_query, tuple(base_params))
+                paged_query, paged_params = page_query(offset)
+                if paged_params:
+                    result = await conn.exec_driver_sql(paged_query, tuple(paged_params))
                 else:
                     result = await conn.exec_driver_sql(paged_query)
 
@@ -172,6 +201,57 @@ class DatabaseConnector(BaseConnector):
                     break
 
         logger.debug("Database read completed with cursor: %s", last_cursor_value)
+
+    async def _read_via_adbc(
+        self,
+        *,
+        page_query,
+        schema_contract: SchemaContract,
+        cursor_field: Optional[str],
+        batch_size: int,
+        state_manager: StateManager,
+        stream_name: str,
+        partition: Dict[str, Any],
+    ) -> AsyncIterator[pa.RecordBatch]:
+        """Stream Arrow batches via ADBC, holding one connection across pages.
+
+        Each page goes ``cursor.execute → fetch_arrow_table → cast``,
+        skipping the rows-to-dicts-to-Arrow conversion the SQLAlchemy
+        path takes. Cursor state is saved after each yielded batch using
+        the last row's ``cursor_field`` value, mirroring the SQLAlchemy
+        path's checkpoint shape.
+        """
+        offset = 0
+        last_cursor_value: Any = None
+        async with open_adbc_session(self._driver, self._engine) as session:
+            while True:
+                sql, params = page_query(offset)
+                batches = await session.fetch_page(sql, params)
+                if not batches:
+                    break
+
+                page_rows = 0
+                for batch in batches:
+                    cast_batch = schema_contract.cast_arrow_batch(batch)
+                    page_rows += cast_batch.num_rows
+                    if cursor_field and cast_batch.num_rows > 0:
+                        column = cast_batch.column(cursor_field) if cursor_field in cast_batch.schema.names else None
+                        if column is not None:
+                            last_cursor_value = column[-1].as_py()
+                    self.metrics["records_read"] += cast_batch.num_rows
+                    self.metrics["batches_read"] += 1
+                    yield cast_batch
+
+                if last_cursor_value is not None:
+                    await state_manager.save_cursor(
+                        stream_name,
+                        partition,
+                        {"cursor": last_cursor_value},
+                    )
+
+                if page_rows < batch_size:
+                    break
+                offset += page_rows
 
     # ------------------------------------------------------------------
     # Helpers
