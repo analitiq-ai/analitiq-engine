@@ -113,6 +113,15 @@ def _build_pg_uri(url: Any) -> Optional[str]:
     non-empty ``url.query`` (e.g. ``sslmode=require``) is forwarded to
     the ADBC driver. Returns ``None`` when the URL backend isn't in the
     PG-wire family or when host/database are missing.
+
+    TLS gap: when the SA engine has TLS configured via ``connect_args``
+    (the canonical path -- ``tls.mode`` materializes to an SSLContext
+    object), those settings live on the engine object, not in
+    ``url.query``, so the ADBC URI ends up without ``sslmode`` /
+    ``sslrootcert``. Users opting into ``ADBC_FAST_PATH`` with TLS
+    requirements should explicitly include ``?sslmode=verify-full``
+    (or equivalent libpq query params) in the connector's ``dsn``
+    template until a per-dialect TLS bridge lands.
     """
     backend = _url_backend(url)
     if backend and backend not in {"postgresql", "postgres", "redshift"}:
