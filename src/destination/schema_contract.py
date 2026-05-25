@@ -80,66 +80,28 @@ class SchemaContract:
     ) -> List[Dict[str, Any]]:
         """Materialise a batch for a SQL destination.
 
-        Arrow-space schema alignment, then ``to_pylist``, then Json
-        column normalisation. JSON columns are guaranteed to be either
-        ``None`` or a serialised JSON string on the way out -- not a
-        Python dict / list.
-
-        Why pre-serialise instead of relying on SQLAlchemy's JSON /
-        JSONB ``bind_processor``? SA + asyncpg's batched-INSERT path
-        (executemany ``values_plus_batch``) does not always invoke the
-        column-level bind_processor for every row, so a Python dict
-        can reach asyncpg unserialised and trip ``DataError: expected
-        str, got dict`` against the JSONB binary protocol. Producing
-        strings here is dialect-agnostic and side-steps the bind-time
-        ambiguity entirely. PG accepts the string as JSONB text input;
-        other dialects pass it through their TEXT/JSON column types.
-
-        ``datetime`` / ``Decimal`` / ``date`` still pass through as
-        Python objects -- SA's adapters handle those uniformly across
-        dialects and the issue above is specific to dict/list bindings
-        against the JSON column family.
+        JSON columns stay as wire-format strings (their Arrow shape is
+        ``pa.large_string``) — they bind directly into TEXT / JSONB
+        columns without per-row coercion. ``datetime`` / ``Decimal`` /
+        ``date`` pass through as Python objects; SA's column adapters
+        handle them uniformly across dialects.
         """
         record_batch = self.cast_arrow_batch(record_batch)
-        records = record_batch.to_pylist()
-        records = self.decode_json_columns(records)
-        return self.encode_json_columns(records)
-
-    def encode_json_columns(
-        self, records: List[Dict[str, Any]]
-    ) -> List[Dict[str, Any]]:
-        """Serialise dict / list values in JSON columns to JSON strings.
-
-        Inverse of :meth:`decode_json_columns`. Idempotent: ``None``
-        and already-encoded string values pass through untouched.
-        Mutates the input records in place (consistent with
-        ``decode_json_columns``) and returns them for chaining.
-        """
-        json_cols = self.json_columns
-        if not json_cols or not records:
-            return records
-        for record in records:
-            for col in json_cols:
-                value = record.get(col)
-                if value is None or isinstance(value, str):
-                    continue
-                # dict / list / tuple — anything else would have been
-                # rejected at ``cast_arrow_batch`` time when the JSON
-                # column was built from the Arrow batch.
-                record[col] = json.dumps(value)
-        return records
+        return record_batch.to_pylist()
 
     def decode_json_columns(
         self, records: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
-        """Parse JSON-encoded string values back into Python dict/list.
+        """Parse JSON-encoded string values into Python dict/list.
 
-        Decode is idempotent: ``None`` and already-parsed dict/list values
-        pass through untouched so the caller can apply this more than
-        once. Malformed strings raise ``ValueError`` carrying the column
-        name and row index — the destination handler classifies that as
-        a data-shape failure rather than letting a bare
-        ``JSONDecodeError`` escape from deep in the stack.
+        Available for callers that need decoded objects (e.g. an API
+        destination handing values to ``orjson``). The SQL destination
+        path keeps strings — JSON columns bind directly to TEXT/JSONB
+        without coercion.
+
+        Idempotent on ``None`` and already-parsed dict/list values.
+        Malformed strings raise ``ValueError`` carrying the column
+        name and row index.
         """
         json_cols = self.json_columns
         if not json_cols or not records:

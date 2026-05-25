@@ -247,6 +247,11 @@ class QueryBuilder:
                 query = query.order_by(desc(order_col))
             else:
                 query = query.order_by(asc(order_col))
+        elif config.offset is not None and self.dialect.lower() == "mssql":
+            # T-SQL refuses OFFSET / FETCH NEXT without ORDER BY.
+            # ``ORDER BY (SELECT NULL)`` is Microsoft's documented escape
+            # hatch for paginated reads that don't need a stable order.
+            query = query.order_by(text("(SELECT NULL)"))
 
         # Apply limit/offset
         if config.limit is not None:

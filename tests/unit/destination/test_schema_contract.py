@@ -549,10 +549,14 @@ class TestToDbRecords:
         assert isinstance(records[0]["created"], datetime)
         assert isinstance(records[0]["amount"], Decimal)
 
-    def test_to_db_records_serialises_json_marker_dicts_to_strings(self):
-        """JSON columns reach SA as strings so the dict / list values
-        don't trip asyncpg's strict ``expected str, got dict`` binding
-        against JSONB. Round-trippable via ``json.loads``."""
+    def test_to_db_records_keeps_json_columns_as_strings(self):
+        """JSON columns bind directly as their wire-format string.
+
+        ``_build_column`` serialised the dict to a string when the batch
+        was constructed; ``to_db_records`` does not parse it back, so
+        SA receives the string and TEXT/JSONB columns accept it
+        without any per-row coercion.
+        """
         import json as _json
 
         schema = {
@@ -581,7 +585,7 @@ class TestToDbRecords:
         records = contract.to_db_records(batch)
         assert records[0]["metadata"] is None
 
-    def test_to_db_records_serialises_list_json_values(self):
+    def test_to_db_records_keeps_list_json_columns_as_strings(self):
         import json as _json
 
         schema = {

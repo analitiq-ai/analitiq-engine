@@ -43,6 +43,29 @@ from src.shared.adbc_registry import (
 logger = logging.getLogger(__name__)
 
 
+_demotion_logged: set = set()
+
+
+def _note_demotion(dialect: str, reason: str) -> None:
+    """Log once per ``(dialect, reason)`` why the source-side fast path
+    was skipped. Silent when the flag is off — demotion is the default
+    then, only worth surfacing when the user actually opted in. Matches
+    the destination handler's ``_note_adbc_demotion`` shape so operators
+    see symmetric signals on both sides of the pipeline.
+    """
+    if not adbc_flag_enabled():
+        return
+    key = (dialect, reason)
+    if key in _demotion_logged:
+        return
+    _demotion_logged.add(key)
+    logger.info(
+        "ADBC source fast path disabled (dialect=%s): %s",
+        dialect or "<empty>",
+        reason,
+    )
+
+
 def source_adbc_eligible(dialect: str, engine: Optional[AsyncEngine]) -> bool:
     """Return ``True`` when the source-side ADBC fast path is available.
 
@@ -53,12 +76,16 @@ def source_adbc_eligible(dialect: str, engine: Optional[AsyncEngine]) -> bool:
     if not adbc_flag_enabled():
         return False
     if not dialect or engine is None:
+        _note_demotion(dialect, "engine not materialized or dialect unknown")
         return False
     if not adbc_uri_supported(dialect):
+        _note_demotion(dialect, "no URI builder registered for dialect")
         return False
     if load_adbc_module(dialect) is _ADBC_IMPORT_FAILED:
+        _note_demotion(dialect, "ADBC driver package not importable")
         return False
     if build_adbc_uri(dialect, engine) is None:
+        _note_demotion(dialect, "engine URL could not be rendered as an ADBC URI")
         return False
     return True
 

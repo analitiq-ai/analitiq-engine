@@ -109,6 +109,44 @@ class TestPaging:
         assert "LIMIT 50" not in upper
         assert "LIMIT :" not in upper
 
+    def test_mssql_paging_without_cursor_injects_order_by(self):
+        """Full-refresh on MSSQL has no cursor / order_by, but T-SQL
+        refuses OFFSET without ORDER BY. The builder must inject
+        ``ORDER BY (SELECT NULL)`` (the documented no-op order) so the
+        compile succeeds.
+        """
+        builder = QueryBuilder("mssql")
+        sql, _ = builder.build_select_query(
+            QueryConfig(
+                schema_name="dbo",
+                table_name="events",
+                columns=["id"],
+                limit=50,
+                offset=100,
+            )
+        )
+        upper = sql.upper()
+        # Either OFFSET/FETCH or ROW_NUMBER, plus the synthetic ORDER BY.
+        assert "ORDER BY" in upper
+        assert "(SELECT NULL)" in upper or "SELECT NULL" in upper
+
+    def test_postgres_paging_without_cursor_omits_order_by(self):
+        """The synthetic ``ORDER BY (SELECT NULL)`` is MSSQL-only.
+        Non-MSSQL dialects accept OFFSET without ORDER BY and shouldn't
+        get the no-op order silently appended.
+        """
+        builder = QueryBuilder("postgresql")
+        sql, _ = builder.build_select_query(
+            QueryConfig(
+                schema_name="public",
+                table_name="events",
+                columns=["id"],
+                limit=50,
+                offset=100,
+            )
+        )
+        assert "ORDER BY" not in sql.upper()
+
     def test_mysql_uses_limit_paging(self):
         """MySQL SA dialect emits ``LIMIT offset, count`` (equivalent to
         ``LIMIT count OFFSET offset`` — the comma form is what mysql/

@@ -45,9 +45,7 @@ from ...grpc.generated.analitiq.v1 import (
     SchemaMessage,
 )
 from ...shared.adbc_registry import (
-    _ADBC_ENV_VAR,
     _ADBC_IMPORT_FAILED,
-    _ADBC_MODULES,
     AdbcConfigurationError,
     adbc_flag_enabled as _adbc_flag_enabled,
     build_adbc_uri,
@@ -1018,11 +1016,10 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
     ) -> List[Dict[str, Any]]:
         """Materialise a batch for SQLAlchemy via the schema contract.
 
-        SQLAlchemy is the wire-format-aware receiver: ``datetime`` /
-        ``Decimal`` / ``dict`` go straight into their column types.
-        ``to_db_records`` aligns the batch to the destination schema,
-        materialises once, and reverses the Json wire-string encoding so
-        a JSONB column receives a real dict, not a quoted string.
+        ``to_db_records`` aligns the batch to the destination schema
+        and materialises once. JSON columns stay as wire-format
+        strings, so they bind directly to TEXT or JSONB columns
+        without per-row coercion.
         """
         if state.schema_contract is None:
             return record_batch.to_pylist()

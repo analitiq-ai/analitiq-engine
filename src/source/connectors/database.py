@@ -28,7 +28,6 @@ from ..drivers.adbc_reader import open_session as open_adbc_session, source_adbc
 from ...destination.schema_contract import SchemaContract
 from ...engine.type_map import InvalidTypeMapError, UnmappedTypeError
 from ...secrets.exceptions import PlaceholderExpansionError
-from ...shared.adbc_registry import AdbcConfigurationError
 from ...shared.connection_runtime import ConnectionRuntime
 from ...shared.database_utils import acquire_connection
 from ...shared.query_builder import Filter, QueryBuilder, QueryConfig
@@ -121,6 +120,23 @@ class DatabaseConnector(BaseConnector):
         if isinstance(cursor_field, list):
             cursor_field = cursor_field[0] if cursor_field else None
         replication_method = replication.get("method", "full_refresh")
+
+        if (
+            replication_method == "incremental"
+            and cursor_field
+            and cursor_field not in column_names
+        ):
+            # An incremental stream whose projection drops the cursor
+            # column will silently revert to "full-scan + upsert" every
+            # run: no cursor value is observable, so no state advances.
+            # Loud and once.
+            logger.warning(
+                "stream %r: cursor_field %r not in selected columns %r; "
+                "cursor will not advance",
+                stream_name,
+                cursor_field,
+                column_names,
+            )
 
         partition = partition or {}
         cursor_state = await state_manager.get_cursor(stream_name, partition)
@@ -223,6 +239,7 @@ class DatabaseConnector(BaseConnector):
         """
         offset = 0
         last_cursor_value: Any = None
+        cursor_missing_warned = False
         async with open_adbc_session(self._driver, self._engine) as session:
             while True:
                 sql, params = page_query(offset)
@@ -235,9 +252,22 @@ class DatabaseConnector(BaseConnector):
                     cast_batch = schema_contract.cast_arrow_batch(batch)
                     page_rows += cast_batch.num_rows
                     if cursor_field and cast_batch.num_rows > 0:
-                        column = cast_batch.column(cursor_field) if cursor_field in cast_batch.schema.names else None
-                        if column is not None:
-                            last_cursor_value = column[-1].as_py()
+                        if cursor_field in cast_batch.schema.names:
+                            last_cursor_value = cast_batch.column(cursor_field)[-1].as_py()
+                        elif not cursor_missing_warned:
+                            # Silent here means the next run re-reads from
+                            # the old cursor — incremental degrades to
+                            # repeated full-scan-with-upsert. Warn loudly
+                            # once per stream so the operator can fix the
+                            # projection (likely missing from
+                            # ``selected_columns``).
+                            logger.warning(
+                                "stream %r: cursor_field %r not present in "
+                                "result batch; cursor will not advance",
+                                stream_name,
+                                cursor_field,
+                            )
+                            cursor_missing_warned = True
                     self.metrics["records_read"] += cast_batch.num_rows
                     self.metrics["batches_read"] += 1
                     yield cast_batch
