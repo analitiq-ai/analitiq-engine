@@ -77,7 +77,7 @@ class TestConnection:
     """Test connection management."""
     
     @pytest.mark.asyncio
-    async def test_connect_success(self, connector, valid_connection_config):
+    async def test_connect_adopts_materialized_runtime(self, connector, valid_connection_config):
         """Connector.connect adopts an already-materialized runtime's session.
 
         The runtime owns transport materialization; the connector just

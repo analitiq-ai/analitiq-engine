@@ -1,13 +1,11 @@
 """Integration tests for config payload structure validation.
 
-Tests all connector combinations with fixture data.
-No filesystem dependencies - configs constructed directly from fixture data.
+Tests connector combinations with fixture data. No filesystem
+dependencies — configs are constructed directly from fixture data.
 
 These tests verify that:
 1. Connections are resolved with correct keys (plain UUIDs, not prefixed)
 2. Resolved config structure matches what connectors expect
-3. Pipeline._build_config_dict() produces valid enriched configs
-4. End-to-end flow from constructed configs -> Pipeline -> Engine config
 """
 
 import pytest
