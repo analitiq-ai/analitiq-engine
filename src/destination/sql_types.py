@@ -84,10 +84,10 @@ def native_to_sqlalchemy(native_type: str, type_mapper: TypeMapper) -> Any:
 def arrow_to_snowflake_native(dtype: pa.DataType) -> str:
     """Return a Snowflake DDL type string for the given Arrow ``DataType``.
 
-    Used by the ADBC-only destination path (Snowflake has no async SQLAlchemy
-    driver, so we cannot compile DDL via the SQLAlchemy Snowflake dialect).
-    Nested types map to ``VARIANT`` — Snowflake's semi-structured column
-    type that accepts arbitrary JSON.
+    Used by the ADBC-only destination path; the engine standardizes on
+    ADBC for Snowflake DDL/ingest rather than pulling in the sync-only
+    ``snowflake-sqlalchemy`` package. Nested types map to ``VARIANT`` —
+    Snowflake's semi-structured column type that accepts arbitrary JSON.
     """
     if pa.types.is_boolean(dtype):
         return "BOOLEAN"

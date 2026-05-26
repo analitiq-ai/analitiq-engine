@@ -74,7 +74,15 @@ class DatabaseConnector(BaseConnector):
         self._driver = runtime.driver or ""
         if runtime.is_adbc:
             self._adbc_only = True
-            self._adbc_conn = await asyncio.to_thread(runtime.open_adbc_connection)
+            try:
+                self._adbc_conn = await asyncio.to_thread(
+                    runtime.open_adbc_connection
+                )
+            except Exception as e:
+                logger.error(
+                    "ADBC eager-open failed during connect: %s", e, exc_info=True
+                )
+                raise ConnectionError(f"ADBC connection failed: {e}") from e
             logger.info("Connected to database via ADBC (%s)", self._driver)
         else:
             self._engine = runtime.engine
@@ -83,18 +91,49 @@ class DatabaseConnector(BaseConnector):
         self._initialized = True
 
     async def disconnect(self):
+        """Release the cached ADBC connection (if any) then the runtime.
+
+        Both releases run independently. ``CancelledError`` during the
+        ADBC close is logged and re-raised after the runtime release
+        still happens, mirroring the destination handler. Plain
+        exceptions surface at ERROR — a leaked Snowflake / libpq
+        session is a billable resource, not a noise-level event.
+        """
+        cancelled: Optional[BaseException] = None
         if self._adbc_conn is not None:
             try:
                 await asyncio.to_thread(self._adbc_conn.close)
+            except asyncio.CancelledError as exc:
+                logger.error(
+                    "ADBC close cancelled during disconnect; "
+                    "server-side resources may remain allocated"
+                )
+                cancelled = exc
             except Exception:
-                logger.debug("ADBC connection close failed", exc_info=True)
-            self._adbc_conn = None
+                logger.error(
+                    "Failed to close ADBC connection during disconnect; "
+                    "server-side resources may remain allocated",
+                    exc_info=True,
+                )
+            finally:
+                self._adbc_conn = None
         if self._runtime:
-            await self._runtime.close()
+            try:
+                await self._runtime.close()
+            except asyncio.CancelledError as exc:
+                logger.error("SQLAlchemy runtime close cancelled during disconnect")
+                cancelled = exc
+            except Exception:
+                logger.error(
+                    "Failed to close SQLAlchemy runtime during disconnect",
+                    exc_info=True,
+                )
         self._engine = None
         self.is_connected = False
         self._initialized = False
         logger.info("Database connection closed")
+        if cancelled is not None:
+            raise cancelled
 
     async def read_batches(
         self,
@@ -155,10 +194,11 @@ class DatabaseConnector(BaseConnector):
             if filters:
                 # The ADBC reader's minimal query builder does not yet
                 # translate the typed Filter objects. Surface the
-                # limitation rather than silently ignoring them.
+                # limitation rather than silently ignoring them; the
+                # extension point is the where-fragment branch in
+                # _build_select_sql.
                 raise ReadError(
-                    "ADBC source path does not yet support stream-level filters; "
-                    "extend AdbcReadPlan.extra_where to enable"
+                    "ADBC source path does not yet support stream-level filters"
                 )
             plan = AdbcReadPlan(
                 schema_name=schema_name,
@@ -170,10 +210,25 @@ class DatabaseConnector(BaseConnector):
             )
             reader = AdbcReader(self._adbc_conn)
             last_cursor_value = cursor_value
+            # The cursor field may not appear in the selected column set
+            # (some pipelines project a subset). Resolve once so the
+            # per-batch path can skip cursor extraction cleanly instead
+            # of raising KeyError mid-stream — matching the SA path's
+            # ``rows[-1].get(cursor_field, last_cursor_value)`` fallback.
+            cursor_in_projection = bool(
+                active_cursor_field
+                and (not column_names or active_cursor_field in column_names)
+            )
+            if active_cursor_field and not cursor_in_projection:
+                logger.warning(
+                    "ADBC source: cursor_field=%r is not in selected_columns "
+                    "for stream=%r; cursor will not advance",
+                    active_cursor_field, stream_name,
+                )
             async for batch in reader.read_batches(plan, batch_size=batch_size):
                 if batch.num_rows == 0:
                     continue
-                if active_cursor_field:
+                if cursor_in_projection and active_cursor_field in batch.schema.names:
                     column = batch.column(active_cursor_field)
                     if column.length() > 0:
                         last_cursor_value = column[-1].as_py()

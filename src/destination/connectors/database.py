@@ -76,27 +76,65 @@ class AdbcConfigurationError(RuntimeError):
 
     Raised when retrying the same batch cannot succeed: missing driver
     package, unsupported dialect, unbuildable URI, missing schema
-    contract. Surfaced as ``ACK_STATUS_FATAL_FAILURE`` so the engine
-    stops re-attempting.
+    contract, malformed SQL, or insufficient privileges. Surfaced as
+    ``ACK_STATUS_FATAL_FAILURE`` so the engine stops re-attempting.
     """
+
+
+# PEP-249 exception class names that indicate the failure cannot heal
+# between retries against an identical request: bad SQL, missing
+# objects, permission denials, type mismatches, unsupported operations.
+# Driver modules re-export these names per PEP-249; we match on the
+# class name so the check works without importing the optional driver.
+_FATAL_ADBC_ERROR_NAMES = frozenset({
+    "ProgrammingError",
+    "NotSupportedError",
+    "IntegrityError",
+    "DataError",
+})
+
+
+def _is_fatal_adbc_error(exc: BaseException) -> bool:
+    """``True`` when *exc* is a class of failure retries cannot heal."""
+    for cls in type(exc).__mro__:
+        if cls.__name__ in _FATAL_ADBC_ERROR_NAMES:
+            return True
+    return False
 
 
 class AdbcCommitRecordError(RuntimeError):
     """ADBC ingest succeeded, but ``_batch_commits`` recording failed.
 
-    The data is already in the destination table. A retry will pass
-    the pre-flight idempotency check and ingest the batch again,
-    duplicating rows. The exception carries the inner error so the
-    engine's failure summary surfaces the divergence rather than a
-    generic commit error.
+    The data is already in the destination table. Retry behavior
+    depends on ``write_mode``:
+
+    * ``insert`` — retry re-ingests, duplicating rows.
+    * ``truncate_insert`` — retry truncates then re-ingests, so the
+      net effect is idempotent (no duplication).
+    * ``upsert`` — retry re-MERGEs on the conflict keys; idempotent
+      provided the conflict-key set is actually unique.
+
+    The exception carries the inner error so the engine's failure
+    summary surfaces the divergence rather than a generic commit
+    error.
     """
 
-    def __init__(self, inner: BaseException) -> None:
+    _RETRY_SEMANTICS = {
+        "insert": "retry will duplicate rows",
+        "truncate_insert": "retry is idempotent (truncate + re-ingest)",
+        "upsert": "retry is idempotent under conflict keys (re-MERGE)",
+    }
+
+    def __init__(self, inner: BaseException, write_mode: str = "insert") -> None:
+        retry_note = self._RETRY_SEMANTICS.get(
+            write_mode, f"retry semantics for write_mode={write_mode!r} unknown"
+        )
         super().__init__(
             f"adbc ingest committed; commit-record failed "
-            f"(retry will duplicate): {inner}"
+            f"({retry_note}): {inner}"
         )
         self.__cause__ = inner
+        self.write_mode = write_mode
 
 
 def _adbc_flag_enabled() -> bool:
@@ -312,8 +350,18 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         if runtime.is_adbc:
             self._adbc_only = True
             # Open the ADBC connection eagerly so a bad credential
-            # fails at connect() time, not on the first batch.
-            self._adbc_conn = await asyncio.to_thread(runtime.open_adbc_connection)
+            # fails at connect() time, not on the first batch. Wrap
+            # the driver-specific exception in ConnectionError to
+            # match the materialize() failure shape.
+            try:
+                self._adbc_conn = await asyncio.to_thread(
+                    runtime.open_adbc_connection
+                )
+            except Exception as e:
+                logger.error(
+                    "ADBC eager-open failed during connect: %s", e, exc_info=True
+                )
+                raise ConnectionError(f"ADBC connection failed: {e}") from e
             logger.info(
                 "DatabaseDestinationHandler connected via ADBC to %s",
                 self._driver,
@@ -416,8 +464,24 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
                 conflict_keys = list(endpoint_doc["_write_conflict_keys"] or [])
             else:
                 conflict_keys = list(primary_keys)
+            raw_schema = database_object.get("schema")
+            if self._adbc_only:
+                # Snowflake's default schema is account-/role-dependent;
+                # falling back to "public" silently writes into a
+                # Postgres-shaped namespace that may not exist. Require
+                # the endpoint document to declare the schema explicitly.
+                if not raw_schema:
+                    logger.error(
+                        "ADBC destination requires database_object.schema "
+                        "for stream %r (no implicit default)",
+                        stream_id,
+                    )
+                    return False
+                schema_name = raw_schema
+            else:
+                schema_name = raw_schema or "public"
             state = _StreamState(
-                schema_name=database_object.get("schema") or "public",
+                schema_name=schema_name,
                 table_name=table_name,
                 endpoint_document=dict(endpoint_doc),
                 write_mode=self._get_write_mode(schema_msg.write_mode),
@@ -675,8 +739,8 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
                 except Exception as commit_exc:
                     # The ingest already committed on the ADBC
                     # connection; the SA ``_batch_commits`` write
-                    # failed. A retry will pass the pre-flight check
-                    # and re-ingest, duplicating rows. Surface the
+                    # failed. For the insert-only fast path a retry
+                    # re-ingests, duplicating rows. Surface the
                     # divergence both in the log and in the failure
                     # summary returned to the engine.
                     logger.error(
@@ -685,7 +749,9 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
                         run_id, stream_id, batch_seq, record_count,
                         exc_info=True,
                     )
-                    raise AdbcCommitRecordError(commit_exc) from commit_exc
+                    raise AdbcCommitRecordError(
+                        commit_exc, write_mode="insert"
+                    ) from commit_exc
             else:
                 prepared = self._prepare_for_sqlalchemy(state, record_batch)
 
@@ -1005,8 +1071,10 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         Returns ``True`` iff all of the following hold:
 
         * Opt-in feature flag (``ADBC_FAST_PATH`` env var) is set.
-        * Stream is append-only (``write_mode == "insert"``);
-          ``adbc_ingest`` is INSERT/APPEND only.
+        * Stream is append-only (``write_mode == "insert"``); this fast
+          path only invokes ``adbc_ingest`` with ``mode="append"``.
+          Truncate / upsert modes are handled by the SQLAlchemy backend
+          (or, for ADBC-only runtimes, by ``_write_batch_adbc_only``).
         * The dialect is in ``_ADBC_MODULES`` and the matching driver
           package is importable.
         * A connection URI can be built from the engine's URL.
@@ -1144,11 +1212,10 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
     #
     # When the runtime exposes an ADBC transport instead of a SQLAlchemy
     # engine, every DDL/idempotency/write call goes through the cached
-    # ADBC DBAPI connection. Snowflake is the first dialect to use this
-    # path because it has no async SQLAlchemy driver; the same machinery
-    # extends to any dialect ``transport_factory._ADBC_DRIVER_MODULES``
-    # knows about, provided ``arrow_to_snowflake_native`` is generalized
-    # (currently Snowflake-specific).
+    # ADBC DBAPI connection. Snowflake is the only dialect this path
+    # supports today; adding another requires (1) registering its driver
+    # module in the shared ADBC registry and (2) writing the equivalent
+    # of ``arrow_to_snowflake_native`` for the new dialect's DDL types.
 
     def _adbc_quote_ident(self, name: str) -> str:
         """Quote a SQL identifier for ADBC dialects.
@@ -1176,8 +1243,8 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
 
         Mirrors :meth:`_create_table_from_schema` but emits a DDL string
         instead of a SQLAlchemy ``Table``. Always appends ``_synced_at``
-        as a server-defaulted TIMESTAMP_NTZ when the endpoint document
-        does not declare it.
+        as a server-defaulted TIMESTAMP_TZ when the endpoint document
+        does not declare it (matches the SA path's ``DateTime(timezone=True)``).
         """
         column_defs: List[str] = []
         declared_names: set[str] = set()
@@ -1275,7 +1342,13 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         )
 
     def _execute_adbc_ddl_sync(self, statements: List[str]) -> None:
-        """Run a list of DDL statements on the cached ADBC connection."""
+        """Run a list of DDL statements on the cached ADBC connection.
+
+        SQL-level failures (syntax, permission, missing object) are
+        reclassified as :class:`AdbcConfigurationError` so the engine
+        treats them as fatal; transient I/O failures still propagate
+        as the original exception and stay retryable.
+        """
         conn = self._adbc_conn
         if conn is None:
             raise AdbcConfigurationError("ADBC connection not open")
@@ -1286,9 +1359,14 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
                     cursor.execute(stmt)
                 conn.commit()
             finally:
-                cursor.close()
-        except Exception:
+                try:
+                    cursor.close()
+                except Exception:
+                    logger.debug("ADBC DDL cursor close failed", exc_info=True)
+        except Exception as exc:
             self._poison_adbc_connection()
+            if _is_fatal_adbc_error(exc):
+                raise AdbcConfigurationError(str(exc)) from exc
             raise
 
     def _poison_adbc_connection(self) -> None:
@@ -1362,9 +1440,14 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
                 cursor.execute(sql, params)
                 return cursor.fetchone()
             finally:
-                cursor.close()
-        except Exception:
+                try:
+                    cursor.close()
+                except Exception:
+                    logger.debug("ADBC fetch cursor close failed", exc_info=True)
+        except Exception as exc:
             self._poison_adbc_connection()
+            if _is_fatal_adbc_error(exc):
+                raise AdbcConfigurationError(str(exc)) from exc
             raise
 
     async def _record_batch_commit_via_adbc(
@@ -1402,9 +1485,14 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
                 cursor.execute(sql, params)
                 conn.commit()
             finally:
-                cursor.close()
-        except Exception:
+                try:
+                    cursor.close()
+                except Exception:
+                    logger.debug("ADBC DML cursor close failed", exc_info=True)
+        except Exception as exc:
             self._poison_adbc_connection()
+            if _is_fatal_adbc_error(exc):
+                raise AdbcConfigurationError(str(exc)) from exc
             raise
 
     async def _write_batch_adbc_only(
@@ -1420,15 +1508,17 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         """Full write path for ADBC-only mode.
 
         Insert: append via ``adbc_ingest``. Truncate-insert: TRUNCATE
-        TABLE then append. Upsert: ingest into a session-scoped temp
-        table, then ``MERGE INTO`` the target.
+        TABLE then append (two separate commits). Upsert: ingest into
+        a session-scoped temp table, then ``MERGE INTO`` the target
+        (three separate commits).
 
         Unlike the SA path's atomicity (write + commit-record in one
         transaction), the ADBC path commits the ingest separately from
-        the ``_batch_commits`` INSERT. A crash between the two will
-        cause the next retry to duplicate rows — same window as the
-        existing ADBC fast path on Postgres. See
-        :class:`AdbcCommitRecordError`.
+        the ``_batch_commits`` INSERT. The retry semantics depend on
+        write_mode (see :class:`AdbcCommitRecordError`):
+        ``insert`` retries duplicate rows; ``truncate_insert`` is
+        idempotent (table empties then re-fills); ``upsert`` is
+        idempotent under the conflict-key set.
         """
         if state.schema_contract is None:
             raise AdbcConfigurationError(
@@ -1459,13 +1549,19 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
                 state, run_id, stream_id, batch_seq, cursor_bytes, record_count,
             )
         except Exception as commit_exc:
+            retry_hint = AdbcCommitRecordError._RETRY_SEMANTICS.get(
+                state.write_mode, "retry semantics unknown"
+            )
             logger.error(
                 "ADBC-only ingest committed but commit-record failed "
-                "for %s/%s/%s — retry will duplicate %d row(s)",
-                run_id, stream_id, batch_seq, record_count,
+                "for %s/%s/%s (write_mode=%s; %s; %d row(s))",
+                run_id, stream_id, batch_seq, state.write_mode,
+                retry_hint, record_count,
                 exc_info=True,
             )
-            raise AdbcCommitRecordError(commit_exc) from commit_exc
+            raise AdbcCommitRecordError(
+                commit_exc, write_mode=state.write_mode
+            ) from commit_exc
 
     def _truncate_then_ingest_sync(
         self,
@@ -1480,10 +1576,17 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
             try:
                 cursor.execute(f"TRUNCATE TABLE {qualified}")
             finally:
-                cursor.close()
+                try:
+                    cursor.close()
+                except Exception:
+                    logger.debug(
+                        "ADBC truncate cursor close failed", exc_info=True
+                    )
             conn.commit()
-        except Exception:
+        except Exception as exc:
             self._poison_adbc_connection()
+            if _is_fatal_adbc_error(exc):
+                raise AdbcConfigurationError(str(exc)) from exc
             raise
         # ``_adbc_ingest_sync`` handles its own connection poisoning
         # and commit.
@@ -1499,15 +1602,20 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
     ) -> None:
         """Upsert via ingest-to-temp + MERGE INTO target.
 
-        Snowflake session-scoped temporary tables are dropped
-        automatically at session close, so no explicit cleanup is
-        required. The temp table is created fresh per batch using
-        ``CREATE OR REPLACE`` to defend against name collisions on
-        retries.
+        The temp table is created in the same schema as the target so
+        the MERGE statement resolves both sides cleanly. Snowflake
+        session-scoped temporary tables drop at session close (and the
+        per-handler ADBC connection IS the session), so no explicit
+        cleanup is required. ``CREATE OR REPLACE`` defends against name
+        collisions on retries. The temp name is derived only from the
+        target table name, so two streams writing to same-named tables
+        in different schemas within the same session would collide —
+        each handler instance opens its own ADBC connection (session),
+        so cross-handler isolation holds today.
         """
         temp_name = f"_analitiq_stage_{table_name}"
         qualified_target = self._adbc_quote_qualified(schema_name, table_name)
-        qualified_temp = self._adbc_quote_ident(temp_name)
+        qualified_temp = self._adbc_quote_qualified(schema_name, temp_name)
         conn = self._reopen_adbc_if_needed_sync()
         try:
             cursor = conn.cursor()
@@ -1521,6 +1629,7 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
                     temp_name,
                     cast_batch,
                     mode="append",
+                    db_schema_name=schema_name or None,
                 )
                 conn.commit()
                 on_clause = " AND ".join(
@@ -1537,7 +1646,8 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
                     f"s.{self._adbc_quote_ident(c)}" for c in all_columns
                 )
                 merge_sql = (
-                    f"MERGE INTO {qualified_target} t USING {qualified_temp} s "
+                    f"MERGE INTO {qualified_target} t "
+                    f"USING {qualified_temp} s "
                     f"ON {on_clause} "
                 )
                 if update_cols:
@@ -1549,9 +1659,16 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
                 cursor.execute(merge_sql)
                 conn.commit()
             finally:
-                cursor.close()
-        except Exception:
+                try:
+                    cursor.close()
+                except Exception:
+                    logger.debug(
+                        "ADBC merge cursor close failed", exc_info=True
+                    )
+        except Exception as exc:
             self._poison_adbc_connection()
+            if _is_fatal_adbc_error(exc):
+                raise AdbcConfigurationError(str(exc)) from exc
             raise
 
     def _prepare_for_sqlalchemy(

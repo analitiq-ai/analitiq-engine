@@ -18,8 +18,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
-from typing import Any, AsyncIterator, Iterable, List, Optional, Tuple
+from dataclasses import dataclass, field
+from typing import Any, AsyncIterator, List, Literal, Optional, Protocol, Tuple
 
 import pyarrow as pa
 
@@ -27,25 +27,54 @@ import pyarrow as pa
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class AdbcReadPlan:
-    """Inputs needed to issue a single SELECT against an ADBC source."""
+class _AdbcCursor(Protocol):
+    """Subset of DBAPI 2.0 the reader needs from an ADBC cursor."""
 
-    schema_name: str
+    def execute(self, sql: str, params: Tuple[Any, ...] = ...) -> None: ...
+
+    def fetch_record_batch(self) -> Any: ...
+
+    def close(self) -> None: ...
+
+
+class _AdbcConnection(Protocol):
+    """Subset of DBAPI 2.0 the reader needs from an ADBC connection."""
+
+    def cursor(self) -> _AdbcCursor: ...
+
+    def close(self) -> None: ...
+
+
+@dataclass(frozen=True)
+class AdbcReadPlan:
+    """Inputs needed to issue a single SELECT against an ADBC source.
+
+    ``cursor_field`` and ``cursor_value`` co-vary: the cursor predicate is
+    emitted only when both are set. ``cursor_mode`` is constrained to the
+    two inclusive/exclusive choices so a typo cannot silently fall back to
+    ``>``.
+    """
+
+    schema_name: Optional[str]
     table_name: str
-    columns: List[str]
+    columns: List[str] = field(default_factory=list)
     cursor_field: Optional[str] = None
     cursor_value: Any = None
-    cursor_mode: str = "inclusive"
-    extra_where: Optional[str] = None
-    extra_params: Tuple[Any, ...] = ()
+    cursor_mode: Literal["inclusive", "exclusive"] = "inclusive"
+
+    def __post_init__(self) -> None:
+        if self.cursor_mode not in ("inclusive", "exclusive"):
+            raise ValueError(
+                f"AdbcReadPlan.cursor_mode must be 'inclusive' or "
+                f"'exclusive'; got {self.cursor_mode!r}"
+            )
 
 
 def _quote_ident(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
 
 
-def _quote_qualified(schema: str, name: str) -> str:
+def _quote_qualified(schema: Optional[str], name: str) -> str:
     if schema:
         return f"{_quote_ident(schema)}.{_quote_ident(name)}"
     return _quote_ident(name)
@@ -56,9 +85,9 @@ def _build_select_sql(
 ) -> Tuple[str, Tuple[Any, ...]]:
     """Return ``(sql, params)`` for a single paged SELECT.
 
-    Column quoting and the cursor predicate are the only places where
-    we generate identifiers; user-supplied values always flow through
-    positional ``?`` placeholders.
+    Identifier interpolation is limited to the table reference, the
+    column list, and the cursor predicate's field name; user-supplied
+    scalar values always flow through positional ``?`` placeholders.
     """
     if plan.columns:
         col_list = ", ".join(_quote_ident(c) for c in plan.columns)
@@ -67,9 +96,6 @@ def _build_select_sql(
     qualified = _quote_qualified(plan.schema_name, plan.table_name)
     where_parts: List[str] = []
     params: List[Any] = []
-    if plan.extra_where:
-        where_parts.append(plan.extra_where)
-        params.extend(plan.extra_params)
     if plan.cursor_field and plan.cursor_value is not None:
         op = ">=" if plan.cursor_mode == "inclusive" else ">"
         where_parts.append(f"{_quote_ident(plan.cursor_field)} {op} ?")
@@ -93,11 +119,11 @@ class AdbcReader:
     The reader does not own the connection — the caller (source
     connector) keeps the single cached handle for its lifetime and
     passes it in here. On any cursor error, the reader closes the
-    cursor but leaves the connection alone; the caller is responsible
-    for poisoning + re-opening on connection-level failures.
+    cursor and the exception propagates; no connection-level recovery
+    happens at this layer.
     """
 
-    def __init__(self, connection: Any) -> None:
+    def __init__(self, connection: _AdbcConnection) -> None:
         if connection is None:
             raise ValueError("AdbcReader requires an open ADBC connection")
         self._connection = connection
@@ -107,10 +133,12 @@ class AdbcReader:
     ) -> AsyncIterator[pa.RecordBatch]:
         """Yield Arrow record batches for *plan*, paginated by ``batch_size``.
 
-        Each page issues a fresh ``cursor.execute`` so the offset
-        advances on the server. ``cursor.fetch_record_batch()`` returns
-        a ``RecordBatchReader`` for the current page; iteration over
-        that reader runs on a worker thread.
+        Each page issues a fresh ``cursor.execute`` with the next
+        ``OFFSET`` value, so pagination is repeated independent SELECTs
+        rather than a server-side scroll cursor.
+        ``cursor.fetch_record_batch()`` returns an Arrow record-batch
+        reader for the current page; iteration over that reader runs on
+        a worker thread.
         """
         offset = 0
         while True:
@@ -138,7 +166,7 @@ class AdbcReader:
         We materialize inside the worker thread (rather than handing
         the live ``RecordBatchReader`` back to the event loop) because
         ADBC readers are bound to the cursor's lifetime — yielding
-        across an `await` would risk fetching after the cursor closes.
+        across an ``await`` would risk fetching after the cursor closes.
         """
         cursor = self._connection.cursor()
         try:
@@ -147,15 +175,13 @@ class AdbcReader:
             else:
                 cursor.execute(sql)
             reader = cursor.fetch_record_batch()
-            return list(_iter_record_batches(reader))
+            # ``RecordBatchReader`` is iterable per the documented Arrow
+            # API; iterating yields batches until exhaustion. Avoids
+            # relying on ``read_next_batch`` raising ``StopIteration``
+            # which is a less-stable sentinel.
+            return list(reader)
         finally:
-            cursor.close()
-
-
-def _iter_record_batches(reader: Any) -> Iterable[pa.RecordBatch]:
-    """Iterate Arrow batches from an ADBC ``RecordBatchReader``."""
-    while True:
-        try:
-            yield reader.read_next_batch()
-        except StopIteration:
-            return
+            try:
+                cursor.close()
+            except Exception:
+                logger.debug("ADBC cursor close failed", exc_info=True)

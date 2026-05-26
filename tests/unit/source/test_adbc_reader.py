@@ -103,6 +103,21 @@ class TestBuildSelectSql:
         assert sql.startswith("SELECT * FROM ")
 
 
+class TestAdbcReadPlan:
+    def test_rejects_invalid_cursor_mode(self):
+        with pytest.raises(ValueError, match="must be 'inclusive' or 'exclusive'"):
+            AdbcReadPlan(
+                schema_name="public",
+                table_name="t",
+                cursor_mode="Inclusive",  # case mismatch
+            )
+
+    def test_is_frozen(self):
+        plan = AdbcReadPlan(schema_name="public", table_name="t")
+        with pytest.raises(Exception):
+            plan.table_name = "other"  # type: ignore[misc]
+
+
 class TestAdbcReader:
     def test_rejects_none_connection(self):
         with pytest.raises(ValueError, match="open ADBC connection"):
@@ -113,23 +128,11 @@ class TestAdbcReader:
         schema = pa.schema([pa.field("id", pa.int64())])
         full_page = pa.record_batch([pa.array(list(range(10)))], schema=schema)
         short_page = pa.record_batch([pa.array([100, 101])], schema=schema)
-        empty_reader = MagicMock()
-        empty_reader.read_next_batch.side_effect = StopIteration
 
-        def make_reader(batches):
-            iter_batches = iter(batches)
-            reader = MagicMock()
-
-            def read_next():
-                try:
-                    return next(iter_batches)
-                except StopIteration:
-                    raise StopIteration()
-
-            reader.read_next_batch.side_effect = read_next
-            return reader
-
-        page_readers = [make_reader([full_page]), make_reader([short_page])]
+        # ``RecordBatchReader`` is iterable per the Arrow C++ binding;
+        # any iterable that yields RecordBatch instances is enough for
+        # ``_fetch_page_sync`` since it materializes via ``list(reader)``.
+        page_readers = [iter([full_page]), iter([short_page])]
 
         cursor = MagicMock()
         cursor.fetch_record_batch.side_effect = page_readers

@@ -9,6 +9,8 @@ concrete transport object.
 Currently registered transport families:
 
 * ``sqlalchemy`` — SQLAlchemy ``AsyncEngine`` for database connectors.
+* ``adbc``       — Apache Arrow Database Connectivity (DBAPI 2.0) for
+  dialects without an async SQLAlchemy driver (Snowflake today).
 * ``http``       — ``aiohttp.ClientSession`` for API connectors.
 
 Plugin packages call :func:`register_transport_kind` at import time to
@@ -318,7 +320,7 @@ def _select_transport(
 # ---------------------------------------------------------------------------
 
 
-@dataclass
+@dataclass(frozen=True)
 class SqlAlchemyTransport:
     """Materialized SQLAlchemy transport."""
 
@@ -379,10 +381,12 @@ async def build_sqlalchemy_transport(
 # ---------------------------------------------------------------------------
 
 
-# Dialect -> dotted ADBC dbapi module path. Lifted here from the
-# destination handler so source and destination share one registry.
-# Additions are append-only — adding a dialect here makes the connector
-# definition's ``transport_type: "adbc"`` block usable for that dialect.
+# Dialect -> dotted ADBC dbapi module path consulted by the spec-driven
+# ADBC transport. The destination handler keeps its own narrower table
+# (``_ADBC_MODULES``) for the older opportunistic PG fast path; the two
+# are intentionally independent because they serve different purposes
+# (full ADBC-only transport vs SA-side ingest acceleration). Additions
+# here are append-only.
 _ADBC_DRIVER_MODULES: Dict[str, str] = {
     "postgresql": "adbc_driver_postgresql.dbapi",
     "postgres": "adbc_driver_postgresql.dbapi",
@@ -390,7 +394,7 @@ _ADBC_DRIVER_MODULES: Dict[str, str] = {
 }
 
 
-@dataclass
+@dataclass(frozen=True)
 class AdbcTransport:
     """Materialized ADBC transport.
 
@@ -398,7 +402,7 @@ class AdbcTransport:
     DBAPI 2.0 protocol synchronously and is not a connection pool.
     Callers obtain a fresh DBAPI connection via :meth:`connect`;
     lifecycle (close on disconnect, poison-on-error) is owned by the
-    caller.
+    caller — the runtime keeps no live ADBC handles.
     """
 
     connect: Callable[[], Any]
@@ -412,8 +416,10 @@ def _resolve_db_kwargs(
     """Resolve the optional ``db_kwargs`` block.
 
     Each value goes through the resolver so secrets and connection
-    parameters flow in the same way as DSN bindings. Stringification
-    is left to the caller — ADBC accepts non-string scalar values.
+    parameters flow in the same way as DSN bindings. The resolved dict
+    is passed verbatim to ``driver_module.connect(uri, db_kwargs=...)``;
+    per-driver requirements for value types (usually ``str``) are the
+    caller's responsibility.
     """
     if raw is None:
         return {}
@@ -431,6 +437,16 @@ def _resolve_db_kwargs(
 async def build_adbc_transport(
     spec: Mapping[str, Any], *, resolver: Resolver
 ) -> AdbcTransport:
+    """Materialize an ADBC transport from a connector ``transports[ref]`` block.
+
+    Validates the declared ``dialect`` against ``_ADBC_DRIVER_MODULES``,
+    imports the matching ``adbc_driver_*`` package, renders the
+    ``dsn.url_template`` block, resolves any ``db_kwargs``, then opens
+    one probe connection synchronously to ping ``SELECT 1`` so a bad
+    credential or missing driver fails at materialize time, not on the
+    first batch. The probe handle is closed before returning; the
+    transport returned to the caller is a connection factory.
+    """
     dialect = spec.get("dialect")
     if not isinstance(dialect, str) or not dialect:
         raise ValueError(
@@ -477,7 +493,13 @@ async def build_adbc_transport(
         try:
             await asyncio.to_thread(probe_conn.close)
         except Exception:
-            logger.debug("ADBC probe connection close failed", exc_info=True)
+            # A leaked Snowflake / libpq session is a billable resource —
+            # surface at WARNING so operators see it without -vvv.
+            logger.warning(
+                "ADBC probe connection close failed; server-side session "
+                "may remain allocated",
+                exc_info=True,
+            )
 
     return AdbcTransport(
         connect=_open_connection,
@@ -492,7 +514,13 @@ def _ping_adbc(conn: Any) -> None:
         cursor.execute("SELECT 1")
         cursor.fetchone()
     finally:
-        cursor.close()
+        # Wrap the cursor close so a failure here does not mask the
+        # original execute/fetchone exception (Python's default
+        # finally-replaces-exception behaviour).
+        try:
+            cursor.close()
+        except Exception:
+            logger.debug("ADBC ping cursor close failed", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -500,7 +528,7 @@ def _ping_adbc(conn: Any) -> None:
 # ---------------------------------------------------------------------------
 
 
-@dataclass
+@dataclass(frozen=True)
 class HttpTransport:
     """Materialized HTTP transport ready for ``aiohttp`` requests."""
 
