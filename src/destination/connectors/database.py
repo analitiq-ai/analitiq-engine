@@ -102,6 +102,19 @@ def _is_fatal_adbc_error(exc: BaseException) -> bool:
     return False
 
 
+def _reclassify_as_fatal(exc: BaseException) -> "AdbcConfigurationError":
+    """Wrap *exc* in :class:`AdbcConfigurationError` preserving its class name.
+
+    The wrapped message includes ``"<OriginalClassName>: ..."`` so the
+    top-level engine log (which only renders ``str(exception)``) still
+    tells operators whether they're looking at a ProgrammingError vs an
+    IntegrityError vs a NotSupportedError. ``__cause__`` is set via
+    ``raise ... from`` at the call site so the chained traceback
+    remains intact.
+    """
+    return AdbcConfigurationError(f"{type(exc).__name__}: {exc}")
+
+
 class AdbcCommitRecordError(RuntimeError):
     """ADBC ingest succeeded, but ``_batch_commits`` recording failed.
 
@@ -756,8 +769,20 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
                         cursor.token, record_count,
                     )
                 except AdbcConfigurationError:
-                    # Same flow as the ADBC-only path: a PEP-249 fatal
-                    # commit-record failure must stay fatal.
+                    # Defensive: today this branch is unreachable
+                    # because ``_record_batch_commit`` on the fast path
+                    # writes via SQLAlchemy (which doesn't raise
+                    # AdbcConfigurationError). Keep the explicit re-raise
+                    # in case a future change routes commit-record
+                    # through ADBC here too — the divergence log below
+                    # is what operators need to reconcile.
+                    logger.error(
+                        "ADBC ingest committed but commit-record fatally "
+                        "failed for %s/%s/%s — destination has %d row(s), "
+                        "_batch_commits does not; manual reconciliation "
+                        "required",
+                        run_id, stream_id, batch_seq, record_count,
+                    )
                     raise
                 except Exception as commit_exc:
                     # The ingest already committed on the ADBC
@@ -1212,7 +1237,7 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
             # reclassified so the engine stops retrying forever on a
             # permission denial or syntax error.
             if _is_fatal_adbc_error(exc):
-                raise AdbcConfigurationError(str(exc)) from exc
+                raise _reclassify_as_fatal(exc) from exc
             raise
 
     async def _write_via_adbc(
@@ -1415,7 +1440,7 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         except Exception as exc:
             self._poison_adbc_connection()
             if _is_fatal_adbc_error(exc):
-                raise AdbcConfigurationError(str(exc)) from exc
+                raise _reclassify_as_fatal(exc) from exc
             raise
 
     def _poison_adbc_connection(self) -> None:
@@ -1496,7 +1521,7 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         except Exception as exc:
             self._poison_adbc_connection()
             if _is_fatal_adbc_error(exc):
-                raise AdbcConfigurationError(str(exc)) from exc
+                raise _reclassify_as_fatal(exc) from exc
             raise
 
     async def _record_batch_commit_via_adbc(
@@ -1520,11 +1545,30 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
             f"{self._adbc_quote_ident('records_written')}) "
             f"VALUES (?, ?, ?, ?, ?)"
         )
-        await asyncio.to_thread(
-            self._execute_adbc_dml_sync,
-            sql,
-            (run_id, stream_id, batch_seq, cursor_bytes, records_written),
-        )
+        try:
+            await asyncio.to_thread(
+                self._execute_adbc_dml_sync,
+                sql,
+                (run_id, stream_id, batch_seq, cursor_bytes, records_written),
+            )
+        except AdbcConfigurationError as exc:
+            # A PK collision on (run_id, stream_id, batch_seq) means a
+            # concurrent retry already recorded this batch. Treat it as
+            # success — the row exists, so idempotency is intact and the
+            # next retry's pre-flight check will short-circuit. Other
+            # fatal classes (ProgrammingError / NotSupportedError /
+            # DataError on commit-record) still propagate.
+            cause = exc.__cause__
+            if cause is not None and any(
+                cls.__name__ == "IntegrityError" for cls in type(cause).__mro__
+            ):
+                logger.info(
+                    "ADBC _batch_commits PK already present for %s/%s/%s "
+                    "(concurrent retry); treating as committed",
+                    run_id, stream_id, batch_seq,
+                )
+                return
+            raise
 
     def _execute_adbc_dml_sync(self, sql: str, params: Tuple[Any, ...]) -> None:
         conn = self._reopen_adbc_if_needed_sync()
@@ -1541,7 +1585,7 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         except Exception as exc:
             self._poison_adbc_connection()
             if _is_fatal_adbc_error(exc):
-                raise AdbcConfigurationError(str(exc)) from exc
+                raise _reclassify_as_fatal(exc) from exc
             raise
 
     async def _write_batch_adbc_only(
@@ -1602,7 +1646,16 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
             # fatal failure (missing _batch_commits table, permission
             # denial, …). Let it surface as fatal — retrying cannot
             # heal a configuration error even though the ingest itself
-            # already committed.
+            # already committed. Surface the divergence explicitly so
+            # operators have the reconciliation hint without digging
+            # through the chained traceback.
+            logger.error(
+                "ADBC-only ingest committed but commit-record fatally "
+                "failed for %s/%s/%s (write_mode=%s) — destination has "
+                "%d row(s), _batch_commits does not; manual reconciliation "
+                "required",
+                run_id, stream_id, batch_seq, state.write_mode, record_count,
+            )
             raise
         except Exception as commit_exc:
             retry_hint = AdbcCommitRecordError._RETRY_SEMANTICS.get(
@@ -1642,7 +1695,7 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         except Exception as exc:
             self._poison_adbc_connection()
             if _is_fatal_adbc_error(exc):
-                raise AdbcConfigurationError(str(exc)) from exc
+                raise _reclassify_as_fatal(exc) from exc
             raise
         # ``_adbc_ingest_sync`` handles its own connection poisoning
         # and commit.
@@ -1723,7 +1776,7 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         except Exception as exc:
             self._poison_adbc_connection()
             if _is_fatal_adbc_error(exc):
-                raise AdbcConfigurationError(str(exc)) from exc
+                raise _reclassify_as_fatal(exc) from exc
             raise
 
     def _prepare_for_sqlalchemy(

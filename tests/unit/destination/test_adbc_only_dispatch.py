@@ -15,6 +15,7 @@ from src.destination.connectors.database import (
     AdbcCommitRecordError,
     AdbcConfigurationError,
     _is_fatal_adbc_error,
+    _reclassify_as_fatal,
 )
 
 
@@ -108,3 +109,33 @@ class TestAdbcConfigurationErrorContract:
         # ``except RuntimeError`` continue to catch it.
         with pytest.raises(RuntimeError):
             raise AdbcConfigurationError("bad config")
+
+
+class TestReclassifyAsFatal:
+    def test_preserves_original_class_name_in_message(self):
+        # The top-level engine log only renders ``str(exception)``;
+        # without the class name, operators can't tell a missing
+        # column (ProgrammingError) from a permission denial
+        # (NotSupportedError on some drivers).
+        class ProgrammingError(Exception):
+            pass
+
+        wrapped = _reclassify_as_fatal(ProgrammingError("missing column foo"))
+        assert isinstance(wrapped, AdbcConfigurationError)
+        assert "ProgrammingError" in str(wrapped)
+        assert "missing column foo" in str(wrapped)
+
+    def test_distinguishes_integrity_from_programming(self):
+        class IntegrityError(Exception):
+            pass
+
+        class ProgrammingError(Exception):
+            pass
+
+        a = _reclassify_as_fatal(IntegrityError("dup"))
+        b = _reclassify_as_fatal(ProgrammingError("dup"))
+        # Same inner message but different prefixes — the difference
+        # is precisely the information operators need.
+        assert str(a) != str(b)
+        assert "IntegrityError" in str(a)
+        assert "ProgrammingError" in str(b)
