@@ -100,11 +100,11 @@ def source_adbc_eligible(
         tls_ca_bundle_present=tls_ca_bundle_present,
     )
     if uri is None:
-        if tls_ca_bundle_present and tls_mode and tls_mode.lower() in {"verify-ca", "verify-full"}:
+        if tls_mode and tls_mode.lower() in {"verify-ca", "verify-full"}:
             _note_demotion(
                 dialect,
-                f"tls.mode={tls_mode!r} with CA bundle requires SQLAlchemy "
-                "(ADBC URI cannot carry an inline PEM)",
+                f"tls.mode={tls_mode!r} requires SQLAlchemy "
+                "(ADBC URI cannot carry an inline CA bundle)",
             )
         else:
             _note_demotion(dialect, "engine URL could not be rendered as an ADBC URI")

@@ -123,7 +123,11 @@ class TestEligibility:
         monkeypatch.setenv("ADBC_FAST_PATH", "1")
         assert source_adbc_eligible("postgresql", None) is False
 
-    def test_verify_full_with_ca_demotes(self, monkeypatch):
+    @pytest.mark.parametrize("ca_present", [True, False])
+    def test_verify_full_always_demotes(self, monkeypatch, ca_present):
+        """Verify-* modes need a CA file path -- demote whether or
+        not the runtime tracked the CA bundle. Future callers that
+        forget to set the flag still get the safe behaviour."""
         monkeypatch.setenv("ADBC_FAST_PATH", "1")
         with patch.object(adbc_reader, "load_adbc_module", return_value=MagicMock()):
             assert (
@@ -131,7 +135,7 @@ class TestEligibility:
                     "postgresql",
                     _engine(),
                     tls_mode="verify-full",
-                    tls_ca_bundle_present=True,
+                    tls_ca_bundle_present=ca_present,
                 )
                 is False
             )

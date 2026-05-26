@@ -173,6 +173,9 @@ _URI_BUILDERS: Dict[str, Callable[..., Optional[str]]] = {
 }
 
 
+_VERIFY_TLS_MODES: frozenset = frozenset({"verify-ca", "verify-full"})
+
+
 def build_adbc_uri(
     dialect: str,
     engine: Any,
@@ -185,20 +188,28 @@ def build_adbc_uri(
     ``tls_mode`` is the resolved SA-side TLS mode (the connector's
     native vocabulary, e.g. ``"require"`` or ``"verify-full"``). When
     safe to embed in the URI (libpq's non-CA modes), it becomes
-    ``?sslmode=...``. CA-required modes (verify-ca / verify-full)
-    return ``None`` when ``tls_ca_bundle_present`` is True --
-    asyncpg's SSLContext can't ride along in a URI string, and
-    silently downgrading to a non-verifying connection would be a
-    security regression.
+    ``?sslmode=...``. Verify modes always demote to the SA path --
+    they need a CA file path (``sslrootcert=``) that the URI can't
+    inline. The ``tls_ca_bundle_present`` flag is accepted for
+    callsites that already track CA-bundle state; demotion fires for
+    any verify-* mode regardless of the flag, so a future caller
+    that forgets to set it can't silently downgrade to plaintext.
 
     Returns ``None`` when no URI builder is registered for the
-    dialect or the engine URL is missing required parts. ``None`` is
-    a deliberate signal that the fast path is unavailable -- callers
-    must demote to the SQLAlchemy path.
+    dialect, the engine URL is missing required parts, or the TLS
+    mode forces SA. ``None`` is a deliberate signal that the fast
+    path is unavailable -- callers must demote to the SQLAlchemy
+    path.
     """
     if not dialect or engine is None:
         return None
-    if tls_ca_bundle_present and tls_mode and tls_mode.lower() in {"verify-ca", "verify-full"}:
+    if tls_mode and tls_mode.lower() in _VERIFY_TLS_MODES:
+        # Demote unconditionally for verify-* modes. ``_build_pg_uri``
+        # would otherwise silently strip the mode (it's not in the
+        # safe-embed set) and the ADBC connection would negotiate at
+        # libpq's default posture -- a security regression masquerading
+        # as a no-op.
+        del tls_ca_bundle_present
         return None
     builder = _URI_BUILDERS.get(dialect.lower())
     if builder is None:

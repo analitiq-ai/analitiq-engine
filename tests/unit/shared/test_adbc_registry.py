@@ -225,31 +225,18 @@ class TestBuildAdbcUriWithTls:
         uri = build_adbc_uri("postgresql", _engine(_url()), tls_mode="REQUIRE")
         assert "sslmode=require" in uri
 
-    def test_verify_modes_without_ca_bundle_pass_through(self):
-        # Without a CA bundle the verify modes also aren't safe to
-        # embed (libpq would refuse), but build_adbc_uri only demotes
-        # when tls_ca_bundle_present is True. Without the flag it
-        # silently drops the mode from the URI -- caller should set
-        # tls_ca_bundle_present=True for verify modes in practice.
-        uri = build_adbc_uri("postgresql", _engine(_url()), tls_mode="verify-ca")
-        assert uri is not None
-        assert "sslmode" not in uri
-
-    def test_verify_full_with_ca_bundle_demotes(self):
+    @pytest.mark.parametrize("ca_present", [True, False])
+    @pytest.mark.parametrize("mode", ["verify-ca", "verify-full", "VERIFY-CA"])
+    def test_verify_modes_always_demote(self, mode, ca_present):
+        """Verify-* modes need a CA file path that the URI cannot
+        inline. Demotion fires regardless of ``tls_ca_bundle_present``
+        so a future caller that forgets the flag can't silently
+        downgrade to plaintext."""
         uri = build_adbc_uri(
             "postgresql",
             _engine(_url()),
-            tls_mode="verify-full",
-            tls_ca_bundle_present=True,
-        )
-        assert uri is None
-
-    def test_verify_ca_with_ca_bundle_demotes(self):
-        uri = build_adbc_uri(
-            "postgresql",
-            _engine(_url()),
-            tls_mode="verify-ca",
-            tls_ca_bundle_present=True,
+            tls_mode=mode,
+            tls_ca_bundle_present=ca_present,
         )
         assert uri is None
 
