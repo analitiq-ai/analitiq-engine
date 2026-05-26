@@ -151,11 +151,12 @@ class DatabaseConnector(BaseConnector):
 
         builder = QueryBuilder(self._driver)
 
-        def page_query(offset: int) -> tuple[str, List[Any]]:
+        def page_query(offset: int):
             """Build the per-page SELECT. Limit / offset are pushed into
             ``QueryConfig`` so SQLAlchemy compiles dialect-correct paging
             (PostgreSQL/MySQL ``LIMIT ... OFFSET ...`` vs MSSQL ``OFFSET
-            ... ROWS FETCH NEXT ... ROWS ONLY``).
+            ... ROWS FETCH NEXT ... ROWS ONLY``). ``params`` is a list
+            for positional dialects and a dict for named ones.
             """
             sql, params = builder.build_select_query(
                 QueryConfig(
@@ -205,7 +206,15 @@ class DatabaseConnector(BaseConnector):
         async with acquire_connection(self._engine) as conn:
             while True:
                 paged_query, paged_params = page_query(offset)
-                if paged_params:
+                if isinstance(paged_params, dict):
+                    # Named-paramstyle dialects (Snowflake pyformat,
+                    # BigQuery named): the driver binds by name and
+                    # expects a dict, not a positional tuple.
+                    if paged_params:
+                        result = await conn.exec_driver_sql(paged_query, paged_params)
+                    else:
+                        result = await conn.exec_driver_sql(paged_query)
+                elif paged_params:
                     result = await conn.exec_driver_sql(paged_query, tuple(paged_params))
                 else:
                     result = await conn.exec_driver_sql(paged_query)

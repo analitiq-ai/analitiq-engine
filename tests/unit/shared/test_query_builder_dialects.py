@@ -227,6 +227,46 @@ class TestMssqlParamstyle:
         assert sql.count("?") == len(params)
 
 
+class TestNamedParamstyleReturnsDict:
+    """Dialects whose SA compiler uses named/pyformat paramstyle
+    (Snowflake, BigQuery, etc.) have ``compiled.positiontup is None``.
+    Iterating None would TypeError, so the builder must return a
+    dict the caller can pass straight to the driver."""
+
+    def test_named_paramstyle_returns_dict(self, monkeypatch):
+        from sqlalchemy.dialects import sqlite
+
+        builder = QueryBuilder("sqlite")
+        # Force named paramstyle to simulate Snowflake / BigQuery
+        # behaviour (which we don't have installed locally).
+        builder._sa_dialect = sqlite.dialect(paramstyle="named")
+        sql, params = builder.build_select_query(
+            QueryConfig(
+                schema_name=None,
+                table_name="events",
+                columns=["id"],
+                filters=[Filter(field="id", op="gt", value=10)],
+            )
+        )
+        assert isinstance(params, dict)
+        # The bind name SA picked for the filter shows up in the SQL
+        # AND in the params dict; their pairing is the contract.
+        assert any(v == 10 for v in params.values())
+        assert ":" in sql  # named placeholder
+
+    def test_positional_paramstyle_returns_list(self):
+        builder = QueryBuilder("postgresql")
+        _, params = builder.build_select_query(
+            QueryConfig(
+                schema_name="public",
+                table_name="events",
+                columns=["id"],
+                filters=[Filter(field="id", op="gt", value=10)],
+            )
+        )
+        assert isinstance(params, list)
+
+
 class TestPositionalParamConversion:
     def test_filter_and_paging_params_preserve_order(self):
         builder = QueryBuilder("postgresql")

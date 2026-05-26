@@ -122,21 +122,32 @@ class _AdbcSession:
     async def fetch_page(
         self,
         sql: str,
-        params: Optional[Sequence[Any]] = None,
+        params: Optional[Any] = None,
     ) -> List[pa.RecordBatch]:
         """Execute ``sql`` and return its result as Arrow record batches.
 
-        Empty results return ``[]`` so the caller's loop terminates
+        ``params`` may be a positional sequence (for qmark / numeric
+        dialects) or a name->value mapping (for named / pyformat
+        dialects); the underlying ADBC cursor accepts both. Empty
+        results return ``[]`` so the caller's loop terminates
         without special-casing ``None``.
         """
         return await asyncio.to_thread(self._fetch_sync, sql, params)
 
     def _fetch_sync(
-        self, sql: str, params: Optional[Sequence[Any]]
+        self, sql: str, params: Optional[Any]
     ) -> List[pa.RecordBatch]:
         cursor = self._conn.cursor()
         try:
-            if params:
+            if isinstance(params, dict):
+                # ADBC's DBAPI cursor.execute accepts a parameters
+                # mapping for named-paramstyle dialects. Today the
+                # registered ADBC URI builders only cover positional
+                # dialects (PG / Redshift / SQLite / DuckDB), so
+                # ``dict`` here implies a future named dialect got
+                # added. Pass it through unchanged.
+                cursor.execute(sql, params)
+            elif params:
                 cursor.execute(sql, list(params))
             else:
                 cursor.execute(sql)

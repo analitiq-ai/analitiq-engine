@@ -153,8 +153,31 @@ class TestBuildAdbcUri:
         assert build_adbc_uri("snowflake", _engine(_url(backend="snowflake"))) is None
         assert build_adbc_uri("bigquery", _engine(_url(backend="bigquery"))) is None
 
-    def test_returns_none_when_host_missing(self):
-        assert build_adbc_uri("postgresql", _engine(_url(host=None))) is None
+    def test_unix_socket_url_renders_without_host_segment(self):
+        """libpq accepts ``postgresql:///db?host=/var/run/postgresql``
+        for Unix-domain sockets. SA represents these with
+        ``url.host=None`` and the socket path in ``url.query``."""
+        url = _url(host=None, query={"host": "/var/run/postgresql"})
+        uri = build_adbc_uri("postgresql", _engine(url))
+        assert uri is not None
+        # No host segment between ``@`` and ``/``.
+        assert "@/warehouse" in uri
+        assert "host=%2Fvar%2Frun%2Fpostgresql" in uri or "host=/var/run/postgresql" in uri
+
+    def test_ipv6_host_is_bracketed(self):
+        """RFC 3986 requires IPv6 literals to be enclosed in ``[]``
+        in URI authority. Without brackets ``2001:db8::1:5432`` is
+        ambiguous (libpq can't tell where host ends and port starts)."""
+        url = _url(host="2001:db8::1", port=5432)
+        uri = build_adbc_uri("postgresql", _engine(url))
+        assert uri is not None
+        assert "[2001:db8::1]:5432" in uri
+
+    def test_ipv6_host_without_port(self):
+        url = _url(host="::1", port=None)
+        uri = build_adbc_uri("postgresql", _engine(url))
+        assert uri is not None
+        assert "[::1]/" in uri
 
     def test_returns_none_when_database_missing(self):
         assert build_adbc_uri("postgresql", _engine(_url(database=None))) is None

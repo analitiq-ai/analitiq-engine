@@ -120,17 +120,28 @@ def _build_pg_uri(url: Any, tls_mode: Optional[str] = None) -> Optional[str]:
     """Render a libpq URI from a SQLAlchemy URL.
 
     Reassembled from parts so credentials are percent-encoded and any
-    non-empty ``url.query`` (e.g. ``sslmode=require``) is forwarded to
-    the ADBC driver. When ``tls_mode`` is supplied and not already in
-    ``url.query``, it is added as ``sslmode=`` so the ADBC connection
-    matches the SQLAlchemy engine's TLS configuration. Returns
-    ``None`` when the URL backend isn't in the PG-wire family or when
-    host/database are missing.
+    non-empty ``url.query`` (e.g. ``sslmode=require``,
+    ``host=/var/run/postgresql``) is forwarded to the ADBC driver.
+    When ``tls_mode`` is supplied and not already in ``url.query``,
+    it is added as ``sslmode=`` so the ADBC connection matches the
+    SQLAlchemy engine's TLS configuration.
+
+    Accepts three host shapes:
+
+    * Normal TCP -- ``postgresql://user@host:5432/db``
+    * IPv6 literal -- bracketed per RFC 3986
+      (``postgresql://user@[2001:db8::1]:5432/db``)
+    * Unix socket -- no host segment; libpq picks the socket path
+      from the ``host=`` query param
+      (``postgresql:///db?host=/var/run/postgresql``)
+
+    Returns ``None`` when the URL backend isn't in the PG-wire
+    family or when ``database`` is missing.
     """
     backend = _url_backend(url)
     if backend and backend not in {"postgresql", "postgres", "redshift"}:
         return None
-    if not url.host or not url.database:
+    if not url.database:
         return None
     userinfo = ""
     if url.username:
@@ -138,14 +149,20 @@ def _build_pg_uri(url: Any, tls_mode: Optional[str] = None) -> Optional[str]:
         if url.password:
             userinfo += ":" + quote(url.password, safe="")
         userinfo += "@"
-    port = f":{url.port}" if url.port else ""
+    host_segment = ""
+    if url.host:
+        # RFC 3986: IPv6 literals (any host containing ':') must be
+        # bracketed in URI authority.
+        host_segment = f"[{url.host}]" if ":" in url.host else url.host
+        if url.port:
+            host_segment += f":{url.port}"
     query = dict(getattr(url, "query", None) or {})
     if tls_mode and tls_mode.lower() in _PG_URI_SAFE_TLS_MODES and "sslmode" not in query:
         query["sslmode"] = tls_mode.lower()
     query_string = ""
     if query:
         query_string = "?" + urlencode(list(query.items()), doseq=True)
-    return f"postgresql://{userinfo}{url.host}{port}/{url.database}{query_string}"
+    return f"postgresql://{userinfo}{host_segment}/{url.database}{query_string}"
 
 
 def _build_file_uri(url: Any, tls_mode: Optional[str] = None) -> Optional[str]:

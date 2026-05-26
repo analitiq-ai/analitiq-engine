@@ -8,13 +8,21 @@ import importlib
 import logging
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from sqlalchemy import Column, MetaData, Table, and_, asc, desc, select, text
 from sqlalchemy.dialects import mssql, mysql, sqlite
 from sqlalchemy.dialects.postgresql.asyncpg import dialect as _asyncpg_dialect
 from sqlalchemy.engine import Dialect as SADialect
 from sqlalchemy.sql import Select
+
+
+# Parameters returned by build_select_query: positional list for
+# paramstyles that bind by index (qmark, format, numeric, numeric_dollar)
+# and a name->value dict for named paramstyles (named, pyformat).
+# Snowflake / BigQuery dialects compile to named/pyformat by default;
+# their drivers consume dicts.
+ParamsLike = Union[List[Any], Dict[str, Any]]
 
 logger = logging.getLogger(__name__)
 
@@ -188,14 +196,19 @@ class QueryBuilder:
         self.dialect = dialect
         self._sa_dialect = _get_sqlalchemy_dialect(dialect)
 
-    def build_select_query(self, config: QueryConfig) -> Tuple[str, List[Any]]:
+    def build_select_query(self, config: QueryConfig) -> Tuple[str, ParamsLike]:
         """Build a SELECT query from configuration.
 
-        Args:
-            config: Query configuration
+        Returns ``(sql, params)`` where ``params`` is either:
 
-        Returns:
-            Tuple of (query_string, params_list)
+        * a positional ``list`` for dialects whose driver binds by index
+          (PG asyncpg / SQLite qmark / MySQL format / MSSQL qmark), or
+        * a name->value ``dict`` for dialects whose driver binds by
+          name (Snowflake pyformat, BigQuery named, generic ``:foo``
+          dialects).
+
+        Callers must dispatch on the returned type before passing to
+        ``exec_driver_sql``.
         """
         # Create table reference with proper schema
         metadata = MetaData()
@@ -376,13 +389,20 @@ class QueryBuilder:
 
         query_str = str(compiled)
 
-        # ``compiled.positiontup`` is the ordered list of placeholder
-        # names as they appear in the SQL. The same name can repeat
-        # (e.g. MSSQL ROW_NUMBER pagination reuses ``param_1`` in two
-        # places), so a naive ``list(compiled.params.values())`` would
-        # silently drop the repeated binding. Iterating positiontup
-        # produces the right positional value list for any paramstyle.
-        params = [compiled.params[name] for name in compiled.positiontup]
+        # SA sets ``compiled.positiontup`` only for positional
+        # paramstyles (qmark, format, numeric, numeric_dollar). For
+        # named/pyformat it's None -- iterating would TypeError.
+        # Snowflake / BigQuery dialects fall into the named bucket,
+        # so callers must accept the dict form too.
+        params: ParamsLike
+        if compiled.positiontup is not None:
+            # The same name can repeat in positiontup (MSSQL
+            # ROW_NUMBER pagination reuses ``param_1``), so dict-iter
+            # alone would drop the repeat. Iterating positiontup
+            # produces the right positional value list.
+            params = [compiled.params[name] for name in compiled.positiontup]
+        else:
+            params = dict(compiled.params)
 
         logger.debug(f"Compiled query: {query_str}")
         logger.debug(f"Parameters: {params}")

@@ -180,9 +180,12 @@ class TestCanUseAdbc:
         assert handler._can_use_adbc('s1', state) is True
 
     def test_unbuildable_uri_returns_false(self, handler, monkeypatch, adbc_module_stub):
+        """Missing ``database`` is the case where the URI builder
+        cannot produce anything usable. (Missing ``host`` is fine --
+        libpq accepts hostless URLs for Unix-socket deployments.)"""
         monkeypatch.setenv("ADBC_FAST_PATH", "1")
         handler._adbc_module = adbc_module_stub
-        handler._engine = _build_engine_url_mock(host=None)
+        handler._engine = _build_engine_url_mock(database=None)
         state = _state_with_contract(write_mode="insert")
         assert handler._can_use_adbc('s1', state) is False
 
@@ -270,8 +273,19 @@ class TestBuildAdbcUri:
         handler._engine = _build_engine_url_mock(backend="sqlite")
         assert handler._build_adbc_uri() is None
 
-    def test_returns_none_when_host_missing(self, handler):
-        handler._engine = _build_engine_url_mock(host=None)
+    def test_hostless_url_renders_for_unix_socket(self, handler):
+        """libpq accepts ``postgresql:///db?host=/var/run/postgresql``
+        for Unix-domain sockets. The destination handler should
+        forward that shape to ADBC rather than demoting."""
+        handler._engine = _build_engine_url_mock(
+            host=None, query={"host": "/var/run/postgresql"}
+        )
+        uri = handler._build_adbc_uri()
+        assert uri is not None
+        assert "@/warehouse" in uri  # no host segment
+
+    def test_returns_none_when_database_missing(self, handler):
+        handler._engine = _build_engine_url_mock(database=None)
         assert handler._build_adbc_uri() is None
 
     def test_forwards_query_params(self, handler):
