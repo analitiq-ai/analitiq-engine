@@ -249,11 +249,14 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         # attempted and the package is unavailable in this process — we
         # do not retry within the handler's lifetime.
         self._adbc_module: Any = None
-        # ADBC connection cached for the handler's lifetime. ADBC uses
-        # its own libpq transport, separate from the SQLAlchemy
-        # AsyncEngine pool. Opened lazily, nulled on any ingest error
-        # so the next batch reconnects instead of reusing a poisoned
-        # handle.
+        # Cached ADBC connection. In the Postgres fast path it is
+        # opened lazily on the first ingest via ``_open_adbc_connection``
+        # (libpq under the hood). In ADBC-only mode (Snowflake today)
+        # it is opened eagerly in ``connect()`` via the runtime and
+        # poisoned-then-reopened on failure via
+        # ``_reopen_adbc_if_needed_sync``. Either way: nulled on any
+        # ingest error so the next batch reconnects instead of reusing
+        # a poisoned handle.
         self._adbc_conn: Any = None
         # Set of ``(stream_id, reason)`` pairs already logged when the
         # fast path was demoted to SQLAlchemy. Keyed on stream_id so
@@ -379,11 +382,11 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
 
         Both the ADBC connection and the SQLAlchemy runtime are
         released even if the other side fails or the coroutine is
-        cancelled mid-close. The ADBC release uses ``BaseException``
-        so ``asyncio.CancelledError`` during shutdown still gives the
-        SQLAlchemy runtime a chance to dispose its engine pool.
-        ``CancelledError`` is re-raised after both releases so the
-        caller's cancellation is honored.
+        cancelled mid-close. ``asyncio.CancelledError`` is caught
+        separately from ``Exception`` for each release, captured, and
+        re-raised after the runtime close still runs — so the caller's
+        cancellation is honored without leaving the engine pool
+        un-disposed.
         """
         cancelled: Optional[BaseException] = None
         adbc_conn = self._adbc_conn
@@ -465,6 +468,7 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
             else:
                 conflict_keys = list(primary_keys)
             raw_schema = database_object.get("schema")
+            write_mode_str = self._get_write_mode(schema_msg.write_mode)
             if self._adbc_only:
                 # Snowflake's default schema is account-/role-dependent;
                 # falling back to "public" silently writes into a
@@ -478,13 +482,28 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
                     )
                     return False
                 schema_name = raw_schema
+                # ``upsert`` on the ADBC-only path requires a non-empty
+                # conflict-key set to drive the MERGE. Without it the
+                # write_batch dispatcher silently falls through to plain
+                # ingest, which produces duplicate rows on retry while
+                # AdbcCommitRecordError claims the retry is idempotent.
+                # Refuse the stream up front so the misconfiguration is
+                # visible at configure time.
+                if write_mode_str == "upsert" and not conflict_keys:
+                    logger.error(
+                        "ADBC destination stream %r uses write_mode=upsert "
+                        "but has no conflict_keys (no primary_keys, no "
+                        "_write_conflict_keys); cannot MERGE",
+                        stream_id,
+                    )
+                    return False
             else:
                 schema_name = raw_schema or "public"
             state = _StreamState(
                 schema_name=schema_name,
                 table_name=table_name,
                 endpoint_document=dict(endpoint_doc),
-                write_mode=self._get_write_mode(schema_msg.write_mode),
+                write_mode=write_mode_str,
                 primary_keys=primary_keys,
                 conflict_keys=conflict_keys,
             )
@@ -736,6 +755,10 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
                         state, run_id, stream_id, batch_seq,
                         cursor.token, record_count,
                     )
+                except AdbcConfigurationError:
+                    # Same flow as the ADBC-only path: a PEP-249 fatal
+                    # commit-record failure must stay fatal.
+                    raise
                 except Exception as commit_exc:
                     # The ingest already committed on the ADBC
                     # connection; the SA ``_batch_commits`` write
@@ -1109,11 +1132,18 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         return True
 
     def _open_adbc_connection(self) -> Any:
-        """Return the cached ADBC connection, opening it on first use.
+        """Postgres-fast-path opener: return the cached ADBC connection.
 
-        Raises :class:`AdbcConfigurationError` when the driver module
-        or URI cannot be produced. The cached handle is dropped on any
-        ingest error so a poisoned connection is not reused.
+        Builds a libpq URI from ``self._engine.url`` and consults the
+        handler-local ``_ADBC_MODULES`` table for the matching driver
+        package. ADBC-only mode (Snowflake) uses
+        :meth:`_reopen_adbc_if_needed_sync` instead, which goes through
+        the runtime's ``open_adbc_connection`` factory and supports
+        every dialect registered in the transport factory's shared
+        registry. Raises :class:`AdbcConfigurationError` when the
+        driver module or URI cannot be produced. The cached handle is
+        dropped on any ingest error so a poisoned connection is not
+        reused.
         """
         if self._adbc_conn is not None:
             return self._adbc_conn
@@ -1157,8 +1187,13 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
                 )
                 conn.commit()
             finally:
-                cursor.close()
-        except Exception:
+                try:
+                    cursor.close()
+                except Exception:
+                    logger.debug(
+                        "ADBC ingest cursor close failed", exc_info=True
+                    )
+        except Exception as exc:
             poisoned = self._adbc_conn
             self._adbc_conn = None
             if poisoned is not None:
@@ -1173,6 +1208,11 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
                         "Discarded poisoned ADBC connection; close failed",
                         exc_info=True,
                     )
+            # Mirror the ADBC-only helpers: PEP-249 fatal errors get
+            # reclassified so the engine stops retrying forever on a
+            # permission denial or syntax error.
+            if _is_fatal_adbc_error(exc):
+                raise AdbcConfigurationError(str(exc)) from exc
             raise
 
     async def _write_via_adbc(
@@ -1308,13 +1348,22 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
     async def _ensure_tables_via_adbc(
         self, state: _StreamState, type_mapper: TypeMapper
     ) -> None:
+        """Apply schema + target + ``_batch_commits`` DDL via ADBC cursor.
+
+        Requires ``state.endpoint_document`` (raises
+        :class:`AdbcConfigurationError` otherwise). Snowflake is the
+        only dialect supported on this path today; adding another
+        means writing the equivalent of ``arrow_to_snowflake_native``.
+        Emits the three DDL statements in order — schema first (so the
+        table CREATE can resolve), then the target table, then the
+        idempotency table. Fatal-vs-retryable classification happens
+        one level down in :meth:`_execute_adbc_ddl_sync`; the DDL
+        lock serialises concurrent streams writing the same catalog.
+        """
         if state.endpoint_document is None:
             raise AdbcConfigurationError(
                 "ADBC-only mode requires an endpoint document for DDL"
             )
-        # Currently the only ADBC-only dialect with native DDL support is
-        # Snowflake. Other ADBC dialects can land here once their own
-        # ``native_to_*`` renderer is wired up.
         if self._driver != "snowflake":
             raise AdbcConfigurationError(
                 f"ADBC-only mode does not yet support dialect={self._driver!r}; "
@@ -1548,6 +1597,13 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
             await self._record_batch_commit_via_adbc(
                 state, run_id, stream_id, batch_seq, cursor_bytes, record_count,
             )
+        except AdbcConfigurationError:
+            # The commit-record helper already reclassified a PEP-249
+            # fatal failure (missing _batch_commits table, permission
+            # denial, …). Let it surface as fatal — retrying cannot
+            # heal a configuration error even though the ingest itself
+            # already committed.
+            raise
         except Exception as commit_exc:
             retry_hint = AdbcCommitRecordError._RETRY_SEMANTICS.get(
                 state.write_mode, "retry semantics unknown"
@@ -1602,16 +1658,15 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
     ) -> None:
         """Upsert via ingest-to-temp + MERGE INTO target.
 
-        The temp table is created in the same schema as the target so
-        the MERGE statement resolves both sides cleanly. Snowflake
-        session-scoped temporary tables drop at session close (and the
-        per-handler ADBC connection IS the session), so no explicit
-        cleanup is required. ``CREATE OR REPLACE`` defends against name
-        collisions on retries. The temp name is derived only from the
-        target table name, so two streams writing to same-named tables
-        in different schemas within the same session would collide —
-        each handler instance opens its own ADBC connection (session),
-        so cross-handler isolation holds today.
+        The temp table is qualified with the target's schema so the
+        MERGE resolves both sides against the same namespace. Snowflake
+        session-scoped temporary tables drop at session close — and
+        each handler instance owns its own ADBC connection / session,
+        so cross-handler isolation holds today. ``CREATE OR REPLACE``
+        defends against the one remaining collision case: two
+        consecutive writes to the literal same ``(schema, table)`` on
+        retries. Two streams whose targets live in *different* schemas
+        produce distinct fully-qualified temp names and do not collide.
         """
         temp_name = f"_analitiq_stage_{table_name}"
         qualified_target = self._adbc_quote_qualified(schema_name, table_name)

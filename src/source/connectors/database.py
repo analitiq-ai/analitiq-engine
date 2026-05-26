@@ -208,27 +208,28 @@ class DatabaseConnector(BaseConnector):
                 cursor_value=cursor_value,
                 cursor_mode="inclusive",
             )
+            # Refuse to run an incremental stream whose cursor field is
+            # outside the projection — that combination silently makes
+            # every run a full re-read, which burns warehouse compute
+            # and duplicates downstream rows. The user-actionable fix
+            # is "add the cursor field to selected_columns".
+            if (
+                active_cursor_field
+                and column_names
+                and active_cursor_field not in column_names
+            ):
+                raise ReadError(
+                    f"stream {stream_name!r} declares cursor_field="
+                    f"{active_cursor_field!r} but selected_columns does not "
+                    f"include it; add it to selected_columns or drop the "
+                    f"projection so the cursor can advance"
+                )
             reader = AdbcReader(self._adbc_conn)
             last_cursor_value = cursor_value
-            # The cursor field may not appear in the selected column set
-            # (some pipelines project a subset). Resolve once so the
-            # per-batch path can skip cursor extraction cleanly instead
-            # of raising KeyError mid-stream — matching the SA path's
-            # ``rows[-1].get(cursor_field, last_cursor_value)`` fallback.
-            cursor_in_projection = bool(
-                active_cursor_field
-                and (not column_names or active_cursor_field in column_names)
-            )
-            if active_cursor_field and not cursor_in_projection:
-                logger.warning(
-                    "ADBC source: cursor_field=%r is not in selected_columns "
-                    "for stream=%r; cursor will not advance",
-                    active_cursor_field, stream_name,
-                )
             async for batch in reader.read_batches(plan, batch_size=batch_size):
                 if batch.num_rows == 0:
                     continue
-                if cursor_in_projection and active_cursor_field in batch.schema.names:
+                if active_cursor_field and active_cursor_field in batch.schema.names:
                     column = batch.column(active_cursor_field)
                     if column.length() > 0:
                         last_cursor_value = column[-1].as_py()
