@@ -381,12 +381,8 @@ async def build_sqlalchemy_transport(
 # ---------------------------------------------------------------------------
 
 
-# Dialect -> dotted ADBC dbapi module path consulted by the spec-driven
-# ADBC transport. The destination handler keeps its own narrower table
-# (``_ADBC_MODULES``) for the older opportunistic PG fast path; the two
-# are intentionally independent because they serve different purposes
-# (full ADBC-only transport vs SA-side ingest acceleration). Additions
-# here are append-only.
+# Dialect -> dotted ADBC dbapi module path consulted by the
+# ``transport_type: "adbc"`` builder. Additions here are append-only.
 _ADBC_DRIVER_MODULES: Dict[str, str] = {
     "postgresql": "adbc_driver_postgresql.dbapi",
     "postgres": "adbc_driver_postgresql.dbapi",

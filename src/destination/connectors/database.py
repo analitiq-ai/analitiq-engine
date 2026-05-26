@@ -8,13 +8,10 @@ efficient columnar type conversion for batch operations.
 """
 
 import asyncio
-import importlib
 import logging
-import os
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Mapping, Optional, Set, Tuple
-from urllib.parse import quote, urlencode
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import pyarrow as pa
 from sqlalchemy import (
@@ -51,24 +48,6 @@ from ...shared.connection_runtime import ConnectionRuntime
 
 
 logger = logging.getLogger(__name__)
-
-
-# SQLAlchemy dialect (matches ``self._driver``, set on connect from
-# ``runtime.driver``) -> dotted ADBC dbapi module path. Import is lazy
-# so a missing package disables the fast path for that dialect.
-_ADBC_MODULES: Dict[str, str] = {
-    "postgresql": "adbc_driver_postgresql.dbapi",
-    "postgres": "adbc_driver_postgresql.dbapi",
-}
-
-
-# Opt-in feature flag. ``ADBC_FAST_PATH=1`` enables the fast path.
-_ADBC_ENV_VAR = "ADBC_FAST_PATH"
-
-# Sentinel for ``_adbc_module``: distinct from ``None`` (never tried)
-# and from a real module object so an ``is`` check is unambiguous even
-# if a third-party module overrides ``__bool__``.
-_ADBC_IMPORT_FAILED: Any = object()
 
 
 class AdbcConfigurationError(RuntimeError):
@@ -148,11 +127,6 @@ class AdbcCommitRecordError(RuntimeError):
         )
         self.__cause__ = inner
         self.write_mode = write_mode
-
-
-def _adbc_flag_enabled() -> bool:
-    value = os.environ.get(_ADBC_ENV_VAR, "").strip().lower()
-    return value in ("1", "true", "yes", "on")
 
 
 @dataclass
@@ -257,25 +231,13 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         # at startup.
         self._stream_endpoints: Dict[str, Dict[str, Any]] = {}
 
-        # Lazily-imported ADBC dbapi module. ``None`` means the import
-        # has not been attempted; ``_ADBC_IMPORT_FAILED`` means it was
-        # attempted and the package is unavailable in this process — we
-        # do not retry within the handler's lifetime.
-        self._adbc_module: Any = None
-        # Cached ADBC connection. In the Postgres fast path it is
-        # opened lazily on the first ingest via ``_open_adbc_connection``
-        # (libpq under the hood). In ADBC-only mode (Snowflake today)
-        # it is opened eagerly in ``connect()`` via the runtime and
-        # poisoned-then-reopened on failure via
-        # ``_reopen_adbc_if_needed_sync``. Either way: nulled on any
-        # ingest error so the next batch reconnects instead of reusing
-        # a poisoned handle.
+        # Cached ADBC DBAPI connection used when the runtime exposes an
+        # ADBC transport. Opened eagerly in ``connect()`` via
+        # ``runtime.open_adbc_connection`` and poisoned-then-reopened on
+        # failure via ``_reopen_adbc_if_needed_sync``. Nulled on any
+        # error so the next batch reconnects instead of reusing a
+        # poisoned handle.
         self._adbc_conn: Any = None
-        # Set of ``(stream_id, reason)`` pairs already logged when the
-        # fast path was demoted to SQLAlchemy. Keyed on stream_id so
-        # two streams writing to the same physical table each get their
-        # own first-demotion log line.
-        self._adbc_demotion_logged: Set[Tuple[str, str]] = set()
 
     def set_endpoint_refs(self, endpoint_refs: Mapping[str, Any]) -> None:
         """Register stream_id → endpoint_ref for each stream writing to this
@@ -761,45 +723,6 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
                     state, run_id, stream_id, batch_seq,
                     record_batch, cursor.token, record_count,
                 )
-            elif self._can_use_adbc(stream_id, state):
-                await self._write_via_adbc(state, record_batch)
-                try:
-                    await self._record_batch_commit(
-                        state, run_id, stream_id, batch_seq,
-                        cursor.token, record_count,
-                    )
-                except AdbcConfigurationError:
-                    # Defensive: today this branch is unreachable
-                    # because ``_record_batch_commit`` on the fast path
-                    # writes via SQLAlchemy (which doesn't raise
-                    # AdbcConfigurationError). Keep the explicit re-raise
-                    # in case a future change routes commit-record
-                    # through ADBC here too — the divergence log below
-                    # is what operators need to reconcile.
-                    logger.error(
-                        "ADBC ingest committed but commit-record fatally "
-                        "failed for %s/%s/%s — destination has %d row(s), "
-                        "_batch_commits does not; manual reconciliation "
-                        "required",
-                        run_id, stream_id, batch_seq, record_count,
-                    )
-                    raise
-                except Exception as commit_exc:
-                    # The ingest already committed on the ADBC
-                    # connection; the SA ``_batch_commits`` write
-                    # failed. For the insert-only fast path a retry
-                    # re-ingests, duplicating rows. Surface the
-                    # divergence both in the log and in the failure
-                    # summary returned to the engine.
-                    logger.error(
-                        "ADBC ingest committed but commit-record failed "
-                        "for %s/%s/%s — retry will duplicate %d row(s)",
-                        run_id, stream_id, batch_seq, record_count,
-                        exc_info=True,
-                    )
-                    raise AdbcCommitRecordError(
-                        commit_exc, write_mode="insert"
-                    ) from commit_exc
             else:
                 prepared = self._prepare_for_sqlalchemy(state, record_batch)
 
@@ -1016,260 +939,6 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
             return
         await conn.execute(state.table.delete())
         await self._insert_records(conn, state, records)
-
-    # ------------------------------------------------------------------
-    # ADBC fast path (append-only, opt-in)
-    # ------------------------------------------------------------------
-
-    def _load_adbc_module(self) -> Any:
-        """Lazily import the ADBC dbapi module for the active dialect.
-
-        Returns the module, or ``_ADBC_IMPORT_FAILED`` when no driver
-        is registered for the dialect or the import fails. The result
-        is cached so we do not retry an import that already failed
-        once in this process.
-        """
-        if self._adbc_module is not None:
-            return self._adbc_module
-
-        module_path = _ADBC_MODULES.get(self._driver)
-        if not module_path:
-            self._adbc_module = _ADBC_IMPORT_FAILED
-            return self._adbc_module
-
-        try:
-            self._adbc_module = importlib.import_module(module_path)
-        except ImportError as exc:
-            # The flag was explicitly opted into, so a missing driver
-            # deserves WARNING — the user asked for the fast path and
-            # is silently getting the slow one otherwise.
-            log_fn = logger.warning if _adbc_flag_enabled() else logger.debug
-            log_fn(
-                "ADBC fast path disabled for driver=%s: %s not importable (%s). "
-                "Install the matching `adbc-driver-*` package to enable.",
-                self._driver,
-                module_path,
-                exc,
-            )
-            self._adbc_module = _ADBC_IMPORT_FAILED
-        return self._adbc_module
-
-    def _build_adbc_uri(self) -> Optional[str]:
-        """Render the SQLAlchemy URL as a libpq URI for ADBC.
-
-        Reassembled from ``url`` parts so the leading driver name is
-        the bare backend (``postgresql``), credentials are
-        percent-encoded, and any non-empty ``url.query`` (e.g.
-        ``sslmode=require``, ``application_name=...``) is forwarded so
-        TLS / connection settings configured for SQLAlchemy are not
-        silently dropped for ADBC.
-        """
-        if self._engine is None:
-            return None
-        url = self._engine.url
-        backend = (url.get_backend_name() or "").lower()
-        if backend not in {"postgresql", "postgres"}:
-            return None
-        if not url.host or not url.database:
-            return None
-
-        userinfo = ""
-        if url.username:
-            userinfo = quote(url.username, safe="")
-            if url.password:
-                userinfo += ":" + quote(url.password, safe="")
-            userinfo += "@"
-        port = f":{url.port}" if url.port else ""
-
-        query = getattr(url, "query", None) or {}
-        query_string = ""
-        if query:
-            # SQLAlchemy ``url.query`` is a dict (or immutabledict)
-            # mapping str -> str | tuple[str, ...]. ``urlencode`` with
-            # ``doseq=True`` handles both.
-            query_string = "?" + urlencode(list(query.items()), doseq=True)
-
-        return f"postgresql://{userinfo}{url.host}{port}/{url.database}{query_string}"
-
-    def _note_adbc_demotion(
-        self, stream_id: str, state: _StreamState, reason: str
-    ) -> None:
-        """Log once per ``(stream_id, reason)`` why the fast path was
-        skipped. Silent when the flag is off — demotion is the default
-        and only worth surfacing when the user actually opted in.
-        """
-        if not _adbc_flag_enabled():
-            return
-        key = (stream_id, reason)
-        if key in self._adbc_demotion_logged:
-            return
-        self._adbc_demotion_logged.add(key)
-        logger.info(
-            "ADBC fast path disabled for stream=%s table=%s.%s (driver=%s): %s",
-            stream_id,
-            state.schema_name,
-            state.table_name,
-            self._driver,
-            reason,
-        )
-
-    def _can_use_adbc(self, stream_id: str, state: _StreamState) -> bool:
-        """Decide whether the current batch takes the ADBC fast path.
-
-        Returns ``True`` iff all of the following hold:
-
-        * Opt-in feature flag (``ADBC_FAST_PATH`` env var) is set.
-        * Stream is append-only (``write_mode == "insert"``); this fast
-          path only invokes ``adbc_ingest`` with ``mode="append"``.
-          Truncate / upsert modes are handled by the SQLAlchemy backend
-          (or, for ADBC-only runtimes, by ``_write_batch_adbc_only``).
-        * The dialect is in ``_ADBC_MODULES`` and the matching driver
-          package is importable.
-        * A connection URI can be built from the engine's URL.
-        * The stream has a configured schema contract (needed for the
-          vectorized cast before ingest).
-        """
-        if not _adbc_flag_enabled():
-            return False
-        if state.write_mode != "insert":
-            self._note_adbc_demotion(
-                stream_id, state,
-                f"write_mode={state.write_mode!r} requires SQLAlchemy",
-            )
-            return False
-        if self._load_adbc_module() is _ADBC_IMPORT_FAILED:
-            self._note_adbc_demotion(
-                stream_id, state,
-                f"no ADBC driver registered for dialect={self._driver!r}",
-            )
-            return False
-        if self._build_adbc_uri() is None:
-            self._note_adbc_demotion(
-                stream_id, state,
-                "could not build ADBC URI from engine.url",
-            )
-            return False
-        if state.schema_contract is None:
-            self._note_adbc_demotion(
-                stream_id, state, "stream has no configured schema contract"
-            )
-            return False
-        return True
-
-    def _open_adbc_connection(self) -> Any:
-        """Postgres-fast-path opener: return the cached ADBC connection.
-
-        Builds a libpq URI from ``self._engine.url`` and consults the
-        handler-local ``_ADBC_MODULES`` table for the matching driver
-        package. ADBC-only mode (Snowflake) uses
-        :meth:`_reopen_adbc_if_needed_sync` instead, which goes through
-        the runtime's ``open_adbc_connection`` factory and supports
-        every dialect registered in the transport factory's shared
-        registry. Raises :class:`AdbcConfigurationError` when the
-        driver module or URI cannot be produced. The cached handle is
-        dropped on any ingest error so a poisoned connection is not
-        reused.
-        """
-        if self._adbc_conn is not None:
-            return self._adbc_conn
-        module = self._load_adbc_module()
-        if module is _ADBC_IMPORT_FAILED:
-            raise AdbcConfigurationError(
-                f"ADBC module for driver={self._driver!r} not available"
-            )
-        uri = self._build_adbc_uri()
-        if uri is None:
-            raise AdbcConfigurationError(
-                f"Could not build ADBC URI for driver={self._driver!r}"
-            )
-        self._adbc_conn = module.connect(uri)
-        return self._adbc_conn
-
-    def _adbc_ingest_sync(
-        self,
-        cast_batch: pa.RecordBatch,
-        schema_name: str,
-        table_name: str,
-    ) -> None:
-        """Synchronous ADBC ingest. Runs on a worker thread.
-
-        Caller must ensure the target table exists.
-
-        Only ingest / cursor failures invalidate ``self._adbc_conn`` —
-        misconfiguration raised by ``_open_adbc_connection`` does not
-        touch a connection (none was opened) and the
-        ``AdbcConfigurationError`` propagates straight through.
-        """
-        conn = self._open_adbc_connection()
-        try:
-            cursor = conn.cursor()
-            try:
-                cursor.adbc_ingest(
-                    table_name,
-                    cast_batch,
-                    mode="append",
-                    db_schema_name=schema_name or None,
-                )
-                conn.commit()
-            finally:
-                try:
-                    cursor.close()
-                except Exception:
-                    logger.debug(
-                        "ADBC ingest cursor close failed", exc_info=True
-                    )
-        except Exception as exc:
-            poisoned = self._adbc_conn
-            self._adbc_conn = None
-            if poisoned is not None:
-                try:
-                    poisoned.close()
-                except Exception:
-                    # Best-effort. The conn is being discarded and the
-                    # original ingest exception is what the caller
-                    # needs to see; the close failure is logged at
-                    # DEBUG so a libpq leak still leaves evidence.
-                    logger.debug(
-                        "Discarded poisoned ADBC connection; close failed",
-                        exc_info=True,
-                    )
-            # Mirror the ADBC-only helpers: PEP-249 fatal errors get
-            # reclassified so the engine stops retrying forever on a
-            # permission denial or syntax error.
-            if _is_fatal_adbc_error(exc):
-                raise _reclassify_as_fatal(exc) from exc
-            raise
-
-    async def _write_via_adbc(
-        self,
-        state: _StreamState,
-        record_batch: pa.RecordBatch,
-    ) -> None:
-        """Append-only fast path. INSERT via ``adbc_ingest``.
-
-        Reuses :meth:`SchemaContract.cast_arrow_batch` so the Arrow
-        types match the destination table exactly. The cast batch is
-        handed straight to ADBC — no ``to_pylist()`` round trip, no
-        per-row SQLAlchemy parameter loop.
-
-        Append-only: ingest commits before ``_batch_commits`` is
-        recorded; see :class:`AdbcCommitRecordError` for the
-        retry-duplication window.
-        """
-        # Defensive — _can_use_adbc gates on schema_contract being set,
-        # so this only triggers if a caller invokes _write_via_adbc
-        # outside of the dispatch in write_batch.
-        if state.schema_contract is None:
-            raise AdbcConfigurationError(
-                "ADBC fast path requires a configured SchemaContract"
-            )
-        cast_batch = state.schema_contract.cast_arrow_batch(record_batch)
-        await asyncio.to_thread(
-            self._adbc_ingest_sync,
-            cast_batch,
-            state.schema_name,
-            state.table_name,
-        )
 
     # ------------------------------------------------------------------
     # ADBC-only mode (DDL + idempotency + writes via ADBC cursor)
@@ -1633,7 +1302,7 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
             )
         else:
             await asyncio.to_thread(
-                self._adbc_ingest_sync,
+                self._adbc_only_ingest_sync,
                 cast_batch, state.schema_name, state.table_name,
             )
 
@@ -1672,6 +1341,44 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
                 commit_exc, write_mode=state.write_mode
             ) from commit_exc
 
+    def _adbc_only_ingest_sync(
+        self,
+        cast_batch: pa.RecordBatch,
+        schema_name: str,
+        table_name: str,
+    ) -> None:
+        """Synchronous ``adbc_ingest`` against the cached ADBC connection.
+
+        Used by both insert-mode batches and :meth:`_truncate_then_ingest_sync`.
+        Routes through :meth:`_reopen_adbc_if_needed_sync` so a poisoned
+        connection self-heals on the next call. PEP-249 fatal exceptions
+        get reclassified to :class:`AdbcConfigurationError` so the engine
+        stops retrying on permission denials and the like.
+        """
+        conn = self._reopen_adbc_if_needed_sync()
+        try:
+            cursor = conn.cursor()
+            try:
+                cursor.adbc_ingest(
+                    table_name,
+                    cast_batch,
+                    mode="append",
+                    db_schema_name=schema_name or None,
+                )
+                conn.commit()
+            finally:
+                try:
+                    cursor.close()
+                except Exception:
+                    logger.debug(
+                        "ADBC ingest cursor close failed", exc_info=True
+                    )
+        except Exception as exc:
+            self._poison_adbc_connection()
+            if _is_fatal_adbc_error(exc):
+                raise _reclassify_as_fatal(exc) from exc
+            raise
+
     def _truncate_then_ingest_sync(
         self,
         cast_batch: pa.RecordBatch,
@@ -1697,9 +1404,9 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
             if _is_fatal_adbc_error(exc):
                 raise _reclassify_as_fatal(exc) from exc
             raise
-        # ``_adbc_ingest_sync`` handles its own connection poisoning
-        # and commit.
-        self._adbc_ingest_sync(cast_batch, schema_name, table_name)
+        # ``_adbc_only_ingest_sync`` handles its own connection
+        # poisoning and commit.
+        self._adbc_only_ingest_sync(cast_batch, schema_name, table_name)
 
     def _merge_ingest_sync(
         self,
