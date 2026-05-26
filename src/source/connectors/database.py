@@ -18,12 +18,14 @@ inputs.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, AsyncIterator, Dict, List, Optional
 
 import pyarrow as pa
 
 from .base import BaseConnector, ConnectionError, ReadError
+from ..drivers.adbc_reader import AdbcReader, AdbcReadPlan
 from ...destination.schema_contract import SchemaContract
 from ...engine.type_map import InvalidTypeMapError, UnmappedTypeError
 from ...secrets.exceptions import PlaceholderExpansionError
@@ -44,6 +46,12 @@ class DatabaseConnector(BaseConnector):
         self._engine = None
         self._driver: str = ""
         self._initialized = False
+        # ADBC-only mode: the runtime has no SQLAlchemy engine. The
+        # connector caches a single ADBC DBAPI connection for its
+        # lifetime and the read path uses AdbcReader instead of
+        # QueryBuilder + AsyncEngine.
+        self._adbc_only: bool = False
+        self._adbc_conn: Any = None
 
     async def connect(self, runtime: ConnectionRuntime):
         self._runtime = runtime
@@ -63,13 +71,24 @@ class DatabaseConnector(BaseConnector):
         except Exception as e:
             logger.error("Failed to connect to database: %s", e)
             raise ConnectionError(f"Database connection failed: {e}") from e
-        self._engine = runtime.engine
         self._driver = runtime.driver or ""
+        if runtime.is_adbc:
+            self._adbc_only = True
+            self._adbc_conn = await asyncio.to_thread(runtime.open_adbc_connection)
+            logger.info("Connected to database via ADBC (%s)", self._driver)
+        else:
+            self._engine = runtime.engine
+            logger.info("Connected to database via SQLAlchemy (%s)", self._driver)
         self.is_connected = True
         self._initialized = True
-        logger.info("Connected to database via %s", self._driver)
 
     async def disconnect(self):
+        if self._adbc_conn is not None:
+            try:
+                await asyncio.to_thread(self._adbc_conn.close)
+            except Exception:
+                logger.debug("ADBC connection close failed", exc_info=True)
+            self._adbc_conn = None
         if self._runtime:
             await self._runtime.close()
         self._engine = None
@@ -87,7 +106,11 @@ class DatabaseConnector(BaseConnector):
         batch_size: int = 1000,
     ) -> AsyncIterator[pa.RecordBatch]:
         """Read upstream rows as Arrow batches typed via the endpoint contract."""
-        if not self._initialized or self._engine is None:
+        if not self._initialized:
+            raise ReadError(
+                "DatabaseConnector.read_batches() called before connect()"
+            )
+        if not self._adbc_only and self._engine is None:
             raise ReadError(
                 "DatabaseConnector.read_batches() called before connect()"
             )
@@ -124,6 +147,51 @@ class DatabaseConnector(BaseConnector):
         cursor_state = await state_manager.get_cursor(stream_name, partition)
         stored_cursor = cursor_state.get("cursor") if cursor_state else None
         cursor_value = stored_cursor if replication_method == "incremental" else None
+        active_cursor_field = (
+            cursor_field if replication_method == "incremental" else None
+        )
+
+        if self._adbc_only:
+            if filters:
+                # The ADBC reader's minimal query builder does not yet
+                # translate the typed Filter objects. Surface the
+                # limitation rather than silently ignoring them.
+                raise ReadError(
+                    "ADBC source path does not yet support stream-level filters; "
+                    "extend AdbcReadPlan.extra_where to enable"
+                )
+            plan = AdbcReadPlan(
+                schema_name=schema_name,
+                table_name=table_name,
+                columns=column_names,
+                cursor_field=active_cursor_field,
+                cursor_value=cursor_value,
+                cursor_mode="inclusive",
+            )
+            reader = AdbcReader(self._adbc_conn)
+            last_cursor_value = cursor_value
+            async for batch in reader.read_batches(plan, batch_size=batch_size):
+                if batch.num_rows == 0:
+                    continue
+                if active_cursor_field:
+                    column = batch.column(active_cursor_field)
+                    if column.length() > 0:
+                        last_cursor_value = column[-1].as_py()
+                self.metrics["records_read"] += batch.num_rows
+                self.metrics["batches_read"] += 1
+                # Re-cast through the schema contract so the downstream
+                # destination receives the contract-declared Arrow types
+                # exactly. ADBC's native types are mostly aligned but
+                # not always identical to what the contract declares.
+                yield schema_contract.cast_arrow_batch(batch)
+                if last_cursor_value is not None:
+                    await state_manager.save_cursor(
+                        stream_name,
+                        partition,
+                        {"cursor": last_cursor_value},
+                    )
+            logger.debug("Database read completed with cursor: %s", last_cursor_value)
+            return
 
         builder = QueryBuilder(self._driver)
         base_query, base_params = builder.build_select_query(
@@ -132,7 +200,7 @@ class DatabaseConnector(BaseConnector):
                 table_name=table_name,
                 columns=column_names,
                 filters=filters,
-                cursor_field=cursor_field if replication_method == "incremental" else None,
+                cursor_field=active_cursor_field,
                 cursor_value=cursor_value,
                 cursor_mode="inclusive",
             )

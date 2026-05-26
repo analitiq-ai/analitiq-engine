@@ -37,6 +37,7 @@ from src.secrets.protocol import SecretsResolver
 from src.secrets.exceptions import SecretNotFoundError, SecretResolutionError
 from src.shared.rate_limiter import RateLimiter
 from src.shared.transport_factory import (
+    AdbcTransport,
     HttpTransport,
     SqlAlchemyTransport,
     build_transport,
@@ -51,7 +52,7 @@ VALID_CONNECTOR_TYPES = frozenset({"database", "api", "file", "s3", "stdout"})
 
 def _derive_dialect(connector_definition: Optional[Mapping[str, Any]]) -> Optional[str]:
     """Return the base SQL dialect (e.g. ``postgresql``) from a connector
-    definition, or ``None`` if not a sqlalchemy connector."""
+    definition, or ``None`` if not a database connector."""
     if not connector_definition:
         return None
     transports = connector_definition.get("transports") or {}
@@ -59,12 +60,18 @@ def _derive_dialect(connector_definition: Optional[Mapping[str, Any]]) -> Option
     if not default_ref or default_ref not in transports:
         return None
     transport = transports[default_ref]
-    if transport.get("transport_type") != "sqlalchemy":
-        return None
-    driver = transport.get("driver")
-    if not isinstance(driver, str) or not driver:
-        return None
-    return driver.split("+", 1)[0]
+    transport_type = transport.get("transport_type")
+    if transport_type == "sqlalchemy":
+        driver = transport.get("driver")
+        if not isinstance(driver, str) or not driver:
+            return None
+        return driver.split("+", 1)[0]
+    if transport_type == "adbc":
+        dialect = transport.get("dialect")
+        if not isinstance(dialect, str) or not dialect:
+            return None
+        return dialect.lower()
+    return None
 
 
 class ConnectionRuntime:
@@ -115,6 +122,11 @@ class ConnectionRuntime:
         self._resolved_config: Optional[Dict[str, Any]] = None
         self._transport_dialect: Optional[str] = None
         self._transport_driver: Optional[str] = None
+        # ADBC transport state. ``_adbc_transport`` is the materialized
+        # transport (carries the connect factory); the runtime does not
+        # own a live connection — callers open and manage their own
+        # DBAPI handles via :meth:`open_adbc_connection`.
+        self._adbc_transport: Optional[AdbcTransport] = None
 
         # Reference counting for shared ownership across streams
         self._ref_count = 0
@@ -224,6 +236,12 @@ class ConnectionRuntime:
                 self._engine = transport.engine
                 self._transport_driver = transport.driver
                 self._transport_dialect = transport.dialect
+            elif isinstance(transport, AdbcTransport):
+                self._adbc_transport = transport
+                self._transport_dialect = transport.dialect
+                # ADBC has no SQLAlchemy driver string; record the
+                # module path so debugging output is informative.
+                self._transport_driver = transport.driver_module_path
             elif isinstance(transport, HttpTransport):
                 self._session = transport.session
                 self._base_url = transport.base_url
@@ -248,10 +266,35 @@ class ConnectionRuntime:
     @property
     def engine(self) -> AsyncEngine:
         if not self._materialized or self._engine is None:
+            if self._adbc_transport is not None:
+                raise RuntimeError(
+                    f"connection {self._connection_id!r} uses an ADBC "
+                    f"transport; SQLAlchemy `engine` is not available. "
+                    f"Use `open_adbc_connection()` instead."
+                )
             raise RuntimeError(
                 "engine not available: call materialize() first or wrong connector_type"
             )
         return self._engine
+
+    @property
+    def is_adbc(self) -> bool:
+        """``True`` when this runtime is backed by an ADBC transport."""
+        return self._adbc_transport is not None
+
+    def open_adbc_connection(self) -> Any:
+        """Open a fresh ADBC DBAPI connection. Caller owns lifecycle.
+
+        The runtime keeps no live ADBC handles. Each call returns a new
+        connection; the caller is responsible for closing it (typically
+        cached for the consumer's lifetime, then closed on disconnect).
+        """
+        if not self._materialized or self._adbc_transport is None:
+            raise RuntimeError(
+                f"adbc connection not available for {self._connection_id!r}: "
+                f"call materialize() first or wrong transport type"
+            )
+        return self._adbc_transport.connect()
 
     @property
     def session(self) -> aiohttp.ClientSession:
@@ -366,6 +409,7 @@ class ConnectionRuntime:
             self._materialized = False
             self._transport_dialect = None
             self._transport_driver = None
+            self._adbc_transport = None
 
     # ------------------------------------------------------------------
     # Private helpers

@@ -17,7 +17,9 @@ add new families.
 
 from __future__ import annotations
 
+import asyncio
 import copy
+import importlib
 import logging
 import ssl as _ssl
 import urllib.parse
@@ -373,6 +375,127 @@ async def build_sqlalchemy_transport(
 
 
 # ---------------------------------------------------------------------------
+# ADBC transport
+# ---------------------------------------------------------------------------
+
+
+# Dialect -> dotted ADBC dbapi module path. Lifted here from the
+# destination handler so source and destination share one registry.
+# Additions are append-only — adding a dialect here makes the connector
+# definition's ``transport_type: "adbc"`` block usable for that dialect.
+_ADBC_DRIVER_MODULES: Dict[str, str] = {
+    "postgresql": "adbc_driver_postgresql.dbapi",
+    "postgres": "adbc_driver_postgresql.dbapi",
+    "snowflake": "adbc_driver_snowflake.dbapi",
+}
+
+
+@dataclass
+class AdbcTransport:
+    """Materialized ADBC transport.
+
+    Unlike :class:`SqlAlchemyTransport`, the ADBC driver exposes the
+    DBAPI 2.0 protocol synchronously and is not a connection pool.
+    Callers obtain a fresh DBAPI connection via :meth:`connect`;
+    lifecycle (close on disconnect, poison-on-error) is owned by the
+    caller.
+    """
+
+    connect: Callable[[], Any]
+    dialect: str
+    driver_module_path: str
+
+
+def _resolve_db_kwargs(
+    raw: Optional[Mapping[str, Any]], resolver: Resolver
+) -> Dict[str, Any]:
+    """Resolve the optional ``db_kwargs`` block.
+
+    Each value goes through the resolver so secrets and connection
+    parameters flow in the same way as DSN bindings. Stringification
+    is left to the caller — ADBC accepts non-string scalar values.
+    """
+    if raw is None:
+        return {}
+    if not isinstance(raw, Mapping):
+        raise TypeError("adbc transport `db_kwargs` must be an object")
+    out: Dict[str, Any] = {}
+    for name, value in raw.items():
+        resolved = resolver.resolve(value)
+        if resolved is None:
+            continue
+        out[str(name)] = resolved
+    return out
+
+
+async def build_adbc_transport(
+    spec: Mapping[str, Any], *, resolver: Resolver
+) -> AdbcTransport:
+    dialect = spec.get("dialect")
+    if not isinstance(dialect, str) or not dialect:
+        raise ValueError(
+            "adbc transport requires `dialect` (e.g. 'snowflake', 'postgresql')"
+        )
+    dialect = dialect.lower()
+    driver_module_path = _ADBC_DRIVER_MODULES.get(dialect)
+    if driver_module_path is None:
+        raise ValueError(
+            f"adbc transport dialect {dialect!r} is not registered; "
+            f"known dialects: {sorted(_ADBC_DRIVER_MODULES)}"
+        )
+
+    try:
+        driver_module = importlib.import_module(driver_module_path)
+    except ImportError as exc:
+        raise RuntimeError(
+            f"ADBC driver package not installed for dialect={dialect!r}: "
+            f"{driver_module_path} is not importable ({exc}). Install the "
+            f"matching `adbc-driver-*` extra."
+        ) from exc
+
+    raw_dsn = spec.get("dsn")
+    if not isinstance(raw_dsn, Mapping):
+        raise TypeError(
+            "adbc transport `dsn` must be the structured "
+            "{kind: url_template, template, bindings} object"
+        )
+    uri = _render_url_template_dsn(raw_dsn, resolver)
+
+    db_kwargs = _resolve_db_kwargs(spec.get("db_kwargs"), resolver)
+
+    def _open_connection() -> Any:
+        if db_kwargs:
+            return driver_module.connect(uri, db_kwargs=db_kwargs)
+        return driver_module.connect(uri)
+
+    # Ping the driver once at materialize time so a bad DSN or missing
+    # credential fails here, before the engine starts a pipeline run.
+    probe_conn = await asyncio.to_thread(_open_connection)
+    try:
+        await asyncio.to_thread(_ping_adbc, probe_conn)
+    finally:
+        try:
+            await asyncio.to_thread(probe_conn.close)
+        except Exception:
+            logger.debug("ADBC probe connection close failed", exc_info=True)
+
+    return AdbcTransport(
+        connect=_open_connection,
+        dialect=dialect,
+        driver_module_path=driver_module_path,
+    )
+
+
+def _ping_adbc(conn: Any) -> None:
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT 1")
+        cursor.fetchone()
+    finally:
+        cursor.close()
+
+
+# ---------------------------------------------------------------------------
 # HTTP transport
 # ---------------------------------------------------------------------------
 
@@ -481,6 +604,7 @@ def registered_transport_kinds() -> list[str]:
 
 
 register_transport_kind("sqlalchemy", build_sqlalchemy_transport)
+register_transport_kind("adbc", build_adbc_transport)
 register_transport_kind("http", build_http_transport)
 
 
