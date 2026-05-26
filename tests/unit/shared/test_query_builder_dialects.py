@@ -182,6 +182,51 @@ class TestPaging:
         assert "OFFSET" in upper
 
 
+class TestMssqlParamstyle:
+    """MSSQL via aioodbc / pyodbc consumes ``?`` (qmark) placeholders.
+    ``exec_driver_sql`` bypasses SA's bind translation, so the
+    builder must compile with qmark directly."""
+
+    def test_mssql_emits_qmark_placeholders(self):
+        builder = QueryBuilder("mssql")
+        sql, _ = builder.build_select_query(
+            QueryConfig(
+                schema_name="dbo",
+                table_name="events",
+                columns=["id"],
+                filters=[Filter(field="id", op="gt", value=10)],
+                cursor_field="id",
+                cursor_value=0,
+                limit=100,
+                offset=200,
+            )
+        )
+        # No named (``:foo``) placeholders should leak through.
+        assert ":param" not in sql
+        assert "?" in sql
+
+    def test_mssql_positional_repetition_preserved(self):
+        """SA's ROW_NUMBER pagination shape on MSSQL binds the same
+        offset value twice (``mssql_rn > ? AND mssql_rn <= ? + ?``).
+        The previous ``list(compiled.params.values())`` would silently
+        drop the repeat. Using ``positiontup`` keeps the right number
+        of positional values for the driver to bind.
+        """
+        builder = QueryBuilder("mssql")
+        sql, params = builder.build_select_query(
+            QueryConfig(
+                schema_name="dbo",
+                table_name="events",
+                columns=["id"],
+                limit=100,
+                offset=200,
+            )
+        )
+        # The qmark count must match the positional values count
+        # the driver will receive -- a mismatch raises at bind time.
+        assert sql.count("?") == len(params)
+
+
 class TestPositionalParamConversion:
     def test_filter_and_paging_params_preserve_order(self):
         builder = QueryBuilder("postgresql")

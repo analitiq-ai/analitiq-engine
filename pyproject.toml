@@ -99,6 +99,7 @@ adbc-driver-postgresql = {version = "^1.1.0", optional = true}
 adbc-driver-sqlite = {version = "^1.1.0", optional = true}
 adbc-driver-snowflake = {version = "^1.1.0", optional = true}
 adbc-driver-bigquery = {version = "^1.1.0", optional = true}
+adbc-driver-duckdb = {version = "^1.1.0", optional = true}
 
 # Per-dialect SQLAlchemy + native packages. All optional — installed
 # only when the user pulls in the matching extra. Keeps the base image
@@ -155,12 +156,13 @@ adbc = [
     "adbc-driver-sqlite",
     "adbc-driver-snowflake",
     "adbc-driver-bigquery",
+    "adbc-driver-duckdb",
 ]
 # Per-database extras. Each pulls in the SQLAlchemy dialect plus the
 # matching ADBC driver where one exists. Install with
 # ``poetry install -E <name>`` (or combine, e.g. ``-E "snowflake bigquery"``).
 sqlite = ["aiosqlite", "adbc-driver-sqlite"]
-duckdb = ["duckdb-engine", "adbc-driver-manager"]
+duckdb = ["duckdb-engine", "adbc-driver-duckdb", "adbc-driver-manager"]
 snowflake = ["snowflake-sqlalchemy", "adbc-driver-snowflake", "adbc-driver-manager"]
 bigquery = ["sqlalchemy-bigquery", "adbc-driver-bigquery", "adbc-driver-manager"]
 redshift = ["sqlalchemy-redshift", "redshift-connector", "adbc-driver-postgresql", "adbc-driver-manager"]
@@ -168,7 +170,7 @@ mssql = ["aioodbc"]
 clickhouse = ["clickhouse-connect", "clickhouse-sqlalchemy"]
 databases = [
     "aiosqlite", "adbc-driver-sqlite",
-    "duckdb-engine",
+    "duckdb-engine", "adbc-driver-duckdb",
     "snowflake-sqlalchemy", "adbc-driver-snowflake",
     "sqlalchemy-bigquery", "adbc-driver-bigquery",
     "sqlalchemy-redshift", "redshift-connector",
@@ -185,6 +187,7 @@ all = [
     "apscheduler",
     "adbc-driver-manager", "adbc-driver-postgresql",
     "adbc-driver-sqlite", "adbc-driver-snowflake", "adbc-driver-bigquery",
+    "adbc-driver-duckdb",
     "aiosqlite", "duckdb-engine",
     "snowflake-sqlalchemy", "sqlalchemy-bigquery",
     "sqlalchemy-redshift", "redshift-connector",

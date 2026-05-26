@@ -104,7 +104,13 @@ class DatabaseConnector(BaseConnector):
             raise ReadError(
                 "endpoint document missing database_object.name"
             )
-        schema_name = database_object.get("schema") or "public"
+        # No default schema: dialects without a schema concept
+        # (sqlite, duckdb) would emit invalid ``public.<table>``
+        # references if we forced one. When the endpoint omits
+        # ``schema``, QueryBuilder emits an unqualified table name
+        # and the driver uses the connection's current
+        # schema/database -- which is what every dialect expects.
+        schema_name = database_object.get("schema")
 
         if self._runtime is None:
             raise ReadError(

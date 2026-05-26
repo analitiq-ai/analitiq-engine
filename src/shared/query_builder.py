@@ -360,21 +360,29 @@ class QueryBuilder:
         Returns:
             Tuple of (query_string, params_list)
         """
-        # Compile with literal_binds=False to get parameterized query
-        compiled = query.compile(
-            dialect=self._sa_dialect,
-            compile_kwargs={"literal_binds": False}
-        )
+        # MSSQL's default dialect compiles to ``:name`` (named paramstyle),
+        # but aioodbc / pyodbc DBAPI drivers consume ``?`` (qmark) and
+        # ``exec_driver_sql`` bypasses SA's bind translation. Force the
+        # MSSQL compile to qmark so the SQL placeholders match what the
+        # driver expects. Other dialects already compile to a paramstyle
+        # their async driver accepts directly.
+        compile_kwargs: Dict[str, Any] = {"literal_binds": False}
+        sa_dialect = self._sa_dialect
+        if sa_dialect.name == "mssql":
+            from sqlalchemy.dialects import mssql as _mssql
+            sa_dialect = _mssql.dialect(paramstyle="qmark")
+
+        compiled = query.compile(dialect=sa_dialect, compile_kwargs=compile_kwargs)
 
         query_str = str(compiled)
 
-        # ``compiled.params`` preserves insertion order (the order each
-        # placeholder appears in the SQL) and is the single source of
-        # truth for bound values -- including the limit / offset values
-        # SQLAlchemy adds when ``.limit().offset()`` is on the select.
-        # The caller-tracked ``params`` list only covers filter + cursor
-        # values and would silently miss paging binds otherwise.
-        params = list(compiled.params.values())
+        # ``compiled.positiontup`` is the ordered list of placeholder
+        # names as they appear in the SQL. The same name can repeat
+        # (e.g. MSSQL ROW_NUMBER pagination reuses ``param_1`` in two
+        # places), so a naive ``list(compiled.params.values())`` would
+        # silently drop the repeated binding. Iterating positiontup
+        # produces the right positional value list for any paramstyle.
+        params = [compiled.params[name] for name in compiled.positiontup]
 
         logger.debug(f"Compiled query: {query_str}")
         logger.debug(f"Parameters: {params}")
