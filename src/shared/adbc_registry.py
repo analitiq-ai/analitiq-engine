@@ -209,7 +209,6 @@ def build_adbc_uri(
         # safe-embed set) and the ADBC connection would negotiate at
         # libpq's default posture -- a security regression masquerading
         # as a no-op.
-        del tls_ca_bundle_present
         return None
     builder = _URI_BUILDERS.get(dialect.lower())
     if builder is None:
