@@ -202,6 +202,75 @@ class TestBuildAdbcUri:
         assert build_adbc_uri("", _engine(_url())) is None
 
 
+class TestBuildAdbcUriWithTls:
+    """The ADBC URI must carry the SA-side TLS mode so the ADBC
+    connection matches the engine's posture instead of silently
+    going plaintext."""
+
+    @pytest.mark.parametrize("mode", ["disable", "allow", "prefer", "require"])
+    def test_safe_modes_become_sslmode_query_param(self, mode):
+        uri = build_adbc_uri("postgresql", _engine(_url()), tls_mode=mode)
+        assert uri is not None
+        assert f"sslmode={mode}" in uri
+
+    def test_explicit_query_sslmode_is_not_overridden(self):
+        url = _url(query={"sslmode": "require"})
+        uri = build_adbc_uri("postgresql", _engine(url), tls_mode="prefer")
+        # Existing query wins -- we don't silently downgrade what the
+        # connector author put in the DSN template.
+        assert "sslmode=require" in uri
+        assert "sslmode=prefer" not in uri
+
+    def test_mode_case_normalised_to_lowercase(self):
+        uri = build_adbc_uri("postgresql", _engine(_url()), tls_mode="REQUIRE")
+        assert "sslmode=require" in uri
+
+    def test_verify_modes_without_ca_bundle_pass_through(self):
+        # Without a CA bundle the verify modes also aren't safe to
+        # embed (libpq would refuse), but build_adbc_uri only demotes
+        # when tls_ca_bundle_present is True. Without the flag it
+        # silently drops the mode from the URI -- caller should set
+        # tls_ca_bundle_present=True for verify modes in practice.
+        uri = build_adbc_uri("postgresql", _engine(_url()), tls_mode="verify-ca")
+        assert uri is not None
+        assert "sslmode" not in uri
+
+    def test_verify_full_with_ca_bundle_demotes(self):
+        uri = build_adbc_uri(
+            "postgresql",
+            _engine(_url()),
+            tls_mode="verify-full",
+            tls_ca_bundle_present=True,
+        )
+        assert uri is None
+
+    def test_verify_ca_with_ca_bundle_demotes(self):
+        uri = build_adbc_uri(
+            "postgresql",
+            _engine(_url()),
+            tls_mode="verify-ca",
+            tls_ca_bundle_present=True,
+        )
+        assert uri is None
+
+    def test_require_with_ca_bundle_does_not_demote(self):
+        # CA-bundle-present + non-verify mode is fine -- the CA is
+        # used by SA for SSLContext, but the URI just needs sslmode=
+        # to match the negotiation posture.
+        uri = build_adbc_uri(
+            "postgresql",
+            _engine(_url()),
+            tls_mode="require",
+            tls_ca_bundle_present=True,
+        )
+        assert uri is not None
+        assert "sslmode=require" in uri
+
+    def test_no_tls_mode_means_no_sslmode_param(self):
+        uri = build_adbc_uri("postgresql", _engine(_url()))
+        assert "sslmode" not in uri
+
+
 class TestUriSupported:
     @pytest.mark.parametrize(
         "dialect",

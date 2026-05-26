@@ -123,6 +123,35 @@ class TestEligibility:
         monkeypatch.setenv("ADBC_FAST_PATH", "1")
         assert source_adbc_eligible("postgresql", None) is False
 
+    def test_verify_full_with_ca_demotes(self, monkeypatch):
+        monkeypatch.setenv("ADBC_FAST_PATH", "1")
+        with patch.object(adbc_reader, "load_adbc_module", return_value=MagicMock()):
+            assert (
+                source_adbc_eligible(
+                    "postgresql",
+                    _engine(),
+                    tls_mode="verify-full",
+                    tls_ca_bundle_present=True,
+                )
+                is False
+            )
+
+    def test_require_with_ca_stays_eligible(self, monkeypatch):
+        monkeypatch.setenv("ADBC_FAST_PATH", "1")
+        with patch.object(adbc_reader, "load_adbc_module", return_value=MagicMock()):
+            # Non-verify mode + CA bundle is fine: SA holds the
+            # SSLContext for its own use, the URI just needs to
+            # negotiate at the same posture.
+            assert (
+                source_adbc_eligible(
+                    "postgresql",
+                    _engine(),
+                    tls_mode="require",
+                    tls_ca_bundle_present=True,
+                )
+                is True
+            )
+
 
 class TestOpenSession:
     @pytest.mark.asyncio

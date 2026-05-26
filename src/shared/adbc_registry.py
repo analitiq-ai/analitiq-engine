@@ -106,22 +106,26 @@ def _url_backend(url: Any) -> str:
     return (getter() or "").lower()
 
 
-def _build_pg_uri(url: Any) -> Optional[str]:
+# libpq sslmode values that can ride along inside the URI as
+# ``?sslmode=...``. verify-ca / verify-full are deliberately omitted:
+# both require a CA file path (``sslrootcert=``), and the URI cannot
+# inline a raw PEM bundle -- those modes demote to the SQLAlchemy
+# path that holds the materialized SSLContext.
+_PG_URI_SAFE_TLS_MODES: frozenset = frozenset({
+    "disable", "allow", "prefer", "require",
+})
+
+
+def _build_pg_uri(url: Any, tls_mode: Optional[str] = None) -> Optional[str]:
     """Render a libpq URI from a SQLAlchemy URL.
 
     Reassembled from parts so credentials are percent-encoded and any
     non-empty ``url.query`` (e.g. ``sslmode=require``) is forwarded to
-    the ADBC driver. Returns ``None`` when the URL backend isn't in the
-    PG-wire family or when host/database are missing.
-
-    TLS gap: when the SA engine has TLS configured via ``connect_args``
-    (the canonical path -- ``tls.mode`` materializes to an SSLContext
-    object), those settings live on the engine object, not in
-    ``url.query``, so the ADBC URI ends up without ``sslmode`` /
-    ``sslrootcert``. Users opting into ``ADBC_FAST_PATH`` with TLS
-    requirements should explicitly include ``?sslmode=verify-full``
-    (or equivalent libpq query params) in the connector's ``dsn``
-    template until a per-dialect TLS bridge lands.
+    the ADBC driver. When ``tls_mode`` is supplied and not already in
+    ``url.query``, it is added as ``sslmode=`` so the ADBC connection
+    matches the SQLAlchemy engine's TLS configuration. Returns
+    ``None`` when the URL backend isn't in the PG-wire family or when
+    host/database are missing.
     """
     backend = _url_backend(url)
     if backend and backend not in {"postgresql", "postgres", "redshift"}:
@@ -135,27 +139,32 @@ def _build_pg_uri(url: Any) -> Optional[str]:
             userinfo += ":" + quote(url.password, safe="")
         userinfo += "@"
     port = f":{url.port}" if url.port else ""
-    query = getattr(url, "query", None) or {}
+    query = dict(getattr(url, "query", None) or {})
+    if tls_mode and tls_mode.lower() in _PG_URI_SAFE_TLS_MODES and "sslmode" not in query:
+        query["sslmode"] = tls_mode.lower()
     query_string = ""
     if query:
         query_string = "?" + urlencode(list(query.items()), doseq=True)
     return f"postgresql://{userinfo}{url.host}{port}/{url.database}{query_string}"
 
 
-def _build_file_uri(url: Any) -> Optional[str]:
+def _build_file_uri(url: Any, tls_mode: Optional[str] = None) -> Optional[str]:
     """Render the connect argument for in-process file-based ADBC drivers.
 
     SQLite and DuckDB take a path (or ``:memory:``). SQLAlchemy stores
     that path in ``url.database``; an empty database is the in-memory
     convention. Returns ``None`` when the URL backend isn't sqlite/duckdb.
+    TLS is not applicable for file-based drivers; ``tls_mode`` is
+    accepted for signature uniformity and ignored.
     """
+    del tls_mode  # not applicable for file-based drivers
     backend = _url_backend(url)
     if backend and backend not in {"sqlite", "duckdb"}:
         return None
     return url.database or ":memory:"
 
 
-_URI_BUILDERS: Dict[str, Callable[[Any], Optional[str]]] = {
+_URI_BUILDERS: Dict[str, Callable[..., Optional[str]]] = {
     "postgresql": _build_pg_uri,
     "postgres": _build_pg_uri,
     "redshift": _build_pg_uri,
@@ -164,20 +173,37 @@ _URI_BUILDERS: Dict[str, Callable[[Any], Optional[str]]] = {
 }
 
 
-def build_adbc_uri(dialect: str, engine: Any) -> Optional[str]:
+def build_adbc_uri(
+    dialect: str,
+    engine: Any,
+    *,
+    tls_mode: Optional[str] = None,
+    tls_ca_bundle_present: bool = False,
+) -> Optional[str]:
     """Render the per-dialect ADBC ``connect()`` argument from an engine.
 
-    Returns ``None`` when no URI builder is registered for the dialect
-    or the engine URL is missing required parts. ``None`` is a
-    deliberate signal that the fast path is unavailable -- callers must
-    demote to the SQLAlchemy path.
+    ``tls_mode`` is the resolved SA-side TLS mode (the connector's
+    native vocabulary, e.g. ``"require"`` or ``"verify-full"``). When
+    safe to embed in the URI (libpq's non-CA modes), it becomes
+    ``?sslmode=...``. CA-required modes (verify-ca / verify-full)
+    return ``None`` when ``tls_ca_bundle_present`` is True --
+    asyncpg's SSLContext can't ride along in a URI string, and
+    silently downgrading to a non-verifying connection would be a
+    security regression.
+
+    Returns ``None`` when no URI builder is registered for the
+    dialect or the engine URL is missing required parts. ``None`` is
+    a deliberate signal that the fast path is unavailable -- callers
+    must demote to the SQLAlchemy path.
     """
     if not dialect or engine is None:
+        return None
+    if tls_ca_bundle_present and tls_mode and tls_mode.lower() in {"verify-ca", "verify-full"}:
         return None
     builder = _URI_BUILDERS.get(dialect.lower())
     if builder is None:
         return None
-    return builder(engine.url)
+    return builder(engine.url, tls_mode=tls_mode)
 
 
 def adbc_uri_supported(dialect: str) -> bool:

@@ -845,10 +845,23 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
 
         Returns ``None`` when no URI builder is registered for the
         active dialect or the engine URL is missing required parts.
+        TLS mode flows in from the runtime so the ADBC connection
+        matches the SQLAlchemy engine's posture; ``verify-ca`` /
+        ``verify-full`` with a CA bundle demotes to the SA path
+        because the URI can't carry an inline PEM.
         """
         if self._engine is None:
             return None
-        return build_adbc_uri(self._driver, self._engine)
+        tls_mode = self._runtime.tls_mode if self._runtime else None
+        tls_has_ca = (
+            self._runtime.tls_ca_bundle_present if self._runtime else False
+        )
+        return build_adbc_uri(
+            self._driver,
+            self._engine,
+            tls_mode=tls_mode,
+            tls_ca_bundle_present=tls_has_ca,
+        )
 
     def _note_adbc_demotion(
         self, stream_id: str, state: _StreamState, reason: str

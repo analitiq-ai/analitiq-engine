@@ -66,12 +66,21 @@ def _note_demotion(dialect: str, reason: str) -> None:
     )
 
 
-def source_adbc_eligible(dialect: str, engine: Optional[AsyncEngine]) -> bool:
+def source_adbc_eligible(
+    dialect: str,
+    engine: Optional[AsyncEngine],
+    *,
+    tls_mode: Optional[str] = None,
+    tls_ca_bundle_present: bool = False,
+) -> bool:
     """Return ``True`` when the source-side ADBC fast path is available.
 
-    Eligibility requires the env-var flag, a registered URI builder for
-    the dialect, an importable driver package, and an engine URL that
-    actually renders to a usable ADBC connect string.
+    Eligibility requires the env-var flag, a registered URI builder
+    for the dialect, an importable driver package, and an engine URL
+    that actually renders to a usable ADBC connect string -- including
+    a TLS configuration the URI can carry. CA-bundle-backed modes
+    (verify-ca / verify-full) demote here so the SQLAlchemy path can
+    use its materialized SSLContext.
     """
     if not adbc_flag_enabled():
         return False
@@ -84,8 +93,21 @@ def source_adbc_eligible(dialect: str, engine: Optional[AsyncEngine]) -> bool:
     if load_adbc_module(dialect) is _ADBC_IMPORT_FAILED:
         _note_demotion(dialect, "ADBC driver package not importable")
         return False
-    if build_adbc_uri(dialect, engine) is None:
-        _note_demotion(dialect, "engine URL could not be rendered as an ADBC URI")
+    uri = build_adbc_uri(
+        dialect,
+        engine,
+        tls_mode=tls_mode,
+        tls_ca_bundle_present=tls_ca_bundle_present,
+    )
+    if uri is None:
+        if tls_ca_bundle_present and tls_mode and tls_mode.lower() in {"verify-ca", "verify-full"}:
+            _note_demotion(
+                dialect,
+                f"tls.mode={tls_mode!r} with CA bundle requires SQLAlchemy "
+                "(ADBC URI cannot carry an inline PEM)",
+            )
+        else:
+            _note_demotion(dialect, "engine URL could not be rendered as an ADBC URI")
         return False
     return True
 
@@ -128,20 +150,31 @@ class _AdbcSession:
 
 @asynccontextmanager
 async def open_session(
-    dialect: str, engine: AsyncEngine
+    dialect: str,
+    engine: AsyncEngine,
+    *,
+    tls_mode: Optional[str] = None,
+    tls_ca_bundle_present: bool = False,
 ) -> AsyncIterator[_AdbcSession]:
     """Open an ADBC connection for the lifetime of the context manager.
 
     Raises :class:`AdbcConfigurationError` when the driver module or URI
     cannot be produced -- both are deterministic misconfigurations the
-    caller should classify as fatal rather than retry.
+    caller should classify as fatal rather than retry. TLS settings
+    flow through to ``build_adbc_uri`` so the ADBC connection matches
+    the SQLAlchemy engine's posture.
     """
     module = load_adbc_module(dialect)
     if module is _ADBC_IMPORT_FAILED:
         raise AdbcConfigurationError(
             f"ADBC module for dialect={dialect!r} not available"
         )
-    uri = build_adbc_uri(dialect, engine)
+    uri = build_adbc_uri(
+        dialect,
+        engine,
+        tls_mode=tls_mode,
+        tls_ca_bundle_present=tls_ca_bundle_present,
+    )
     if uri is None:
         raise AdbcConfigurationError(
             f"Could not build ADBC URI for dialect={dialect!r}"

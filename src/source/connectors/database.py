@@ -171,7 +171,16 @@ class DatabaseConnector(BaseConnector):
         last_cursor_value = cursor_value
         offset = 0
 
-        if source_adbc_eligible(self._driver, self._engine):
+        tls_mode = self._runtime.tls_mode if self._runtime else None
+        tls_has_ca = (
+            self._runtime.tls_ca_bundle_present if self._runtime else False
+        )
+        if source_adbc_eligible(
+            self._driver,
+            self._engine,
+            tls_mode=tls_mode,
+            tls_ca_bundle_present=tls_has_ca,
+        ):
             async for batch in self._read_via_adbc(
                 page_query=page_query,
                 schema_contract=schema_contract,
@@ -180,6 +189,8 @@ class DatabaseConnector(BaseConnector):
                 state_manager=state_manager,
                 stream_name=stream_name,
                 partition=partition,
+                tls_mode=tls_mode,
+                tls_ca_bundle_present=tls_has_ca,
             ):
                 yield batch
             logger.debug("Database read (ADBC) completed")
@@ -228,6 +239,8 @@ class DatabaseConnector(BaseConnector):
         state_manager: StateManager,
         stream_name: str,
         partition: Dict[str, Any],
+        tls_mode: Optional[str] = None,
+        tls_ca_bundle_present: bool = False,
     ) -> AsyncIterator[pa.RecordBatch]:
         """Stream Arrow batches via ADBC, holding one connection across pages.
 
@@ -240,7 +253,12 @@ class DatabaseConnector(BaseConnector):
         offset = 0
         last_cursor_value: Any = None
         cursor_missing_warned = False
-        async with open_adbc_session(self._driver, self._engine) as session:
+        async with open_adbc_session(
+            self._driver,
+            self._engine,
+            tls_mode=tls_mode,
+            tls_ca_bundle_present=tls_ca_bundle_present,
+        ) as session:
             while True:
                 sql, params = page_query(offset)
                 batches = await session.fetch_page(sql, params)
