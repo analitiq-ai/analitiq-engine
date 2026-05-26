@@ -193,6 +193,11 @@ class TestReadBatchesNoPagination:
 
         assert len(batches) == 1
         assert batches[0].num_rows == 2
+        # Pin the Arrow dtypes from the endpoint schema — a regression that
+        # silently downgraded ``id`` to a string would still pass the
+        # ``to_pylist()`` value check below.
+        assert batches[0].schema.field("id").type == pa.int64()
+        assert batches[0].schema.field("name").type == pa.string()
         assert batches[0].column("id").to_pylist() == [1, 2]
         assert batches[0].column("name").to_pylist() == ["alpha", "beta"]
         assert len(session.calls) == 1
