@@ -80,31 +80,28 @@ class SchemaContract:
     ) -> List[Dict[str, Any]]:
         """Materialise a batch for a SQL destination.
 
-        Arrow-space schema alignment, then ``to_pylist``, then Json wire-
-        strings → dicts. SQLAlchemy is the wire-format-aware receiver
-        beyond this point — it serialises ``datetime`` / ``Decimal`` /
-        ``dict`` natively into their column types.
-
-        JSON-emitting destinations (the API handler) use this same
-        materialisation and let ``orjson`` handle the ``datetime`` /
-        ``Decimal`` conversion at serialisation time rather than
-        pre-casting in Arrow space.
+        JSON columns stay as wire-format strings (their Arrow shape is
+        ``pa.large_string``) — they bind directly into TEXT / JSONB
+        columns without per-row coercion. ``datetime`` / ``Decimal`` /
+        ``date`` pass through as Python objects; SA's column adapters
+        handle them uniformly across dialects.
         """
         record_batch = self.cast_arrow_batch(record_batch)
-        records = record_batch.to_pylist()
-        return self.decode_json_columns(records)
+        return record_batch.to_pylist()
 
     def decode_json_columns(
         self, records: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
-        """Parse JSON-encoded string values back into Python dict/list.
+        """Parse JSON-encoded string values into Python dict/list.
 
-        Decode is idempotent: ``None`` and already-parsed dict/list values
-        pass through untouched so the caller can apply this more than
-        once. Malformed strings raise ``ValueError`` carrying the column
-        name and row index — the destination handler classifies that as
-        a data-shape failure rather than letting a bare
-        ``JSONDecodeError`` escape from deep in the stack.
+        Available for callers that need decoded objects (e.g. an API
+        destination handing values to ``orjson``). The SQL destination
+        path keeps strings — JSON columns bind directly to TEXT/JSONB
+        without coercion.
+
+        Idempotent on ``None`` and already-parsed dict/list values.
+        Malformed strings raise ``ValueError`` carrying the column
+        name and row index.
         """
         json_cols = self.json_columns
         if not json_cols or not records:

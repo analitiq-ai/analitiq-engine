@@ -115,6 +115,8 @@ class ConnectionRuntime:
         self._resolved_config: Optional[Dict[str, Any]] = None
         self._transport_dialect: Optional[str] = None
         self._transport_driver: Optional[str] = None
+        self._tls_mode: Optional[str] = None
+        self._tls_ca_bundle_present: bool = False
 
         # Reference counting for shared ownership across streams
         self._ref_count = 0
@@ -147,6 +149,21 @@ class ConnectionRuntime:
         """Full SQLAlchemy driver string (``postgresql+asyncpg``) once the
         transport has been materialized."""
         return self._transport_driver
+
+    @property
+    def tls_mode(self) -> Optional[str]:
+        """Resolved ``tls.mode`` string (the connector's native vocabulary)
+        once materialized, or ``None`` if the transport has no TLS."""
+        return self._tls_mode
+
+    @property
+    def tls_ca_bundle_present(self) -> bool:
+        """True when materialisation consumed a CA PEM bundle. ADBC URI
+        builders use this to decide whether to demote: ADBC accepts
+        libpq ``sslmode=`` in the URI but cannot inline raw PEM, so
+        ``verify-ca`` / ``verify-full`` with a CA bundle must stay on
+        the SQLAlchemy path that holds the SSLContext."""
+        return self._tls_ca_bundle_present
 
     @property
     def raw_config(self) -> Dict[str, Any]:
@@ -227,6 +244,8 @@ class ConnectionRuntime:
                 self._engine = transport.engine
                 self._transport_driver = transport.driver
                 self._transport_dialect = transport.dialect
+                self._tls_mode = transport.tls_mode
+                self._tls_ca_bundle_present = transport.tls_ca_bundle_present
             elif isinstance(transport, HttpTransport):
                 self._session = transport.session
                 self._base_url = transport.base_url
@@ -369,6 +388,8 @@ class ConnectionRuntime:
             self._materialized = False
             self._transport_dialect = None
             self._transport_driver = None
+            self._tls_mode = None
+            self._tls_ca_bundle_present = False
 
     # ------------------------------------------------------------------
     # Private helpers

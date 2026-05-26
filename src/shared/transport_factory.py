@@ -278,7 +278,7 @@ def _materialize_tls_for_driver(
     driver: str,
     tls_spec: Optional[Mapping[str, Any]],
     resolver: Resolver,
-) -> Any:
+) -> tuple[Any, Optional[str], bool]:
     """Dispatch TLS materialization based on the SQLAlchemy driver string.
 
     Each branch speaks its driver's native SSL vocabulary. Connectors
@@ -286,22 +286,29 @@ def _materialize_tls_for_driver(
     if a CA bundle was provided, build a verifying SSLContext; otherwise
     pass the resolved mode through and let the downstream materializer
     decide.
+
+    Returns ``(connect_args_value, raw_mode, has_ca_bundle)``. The raw
+    mode and CA-presence flag travel with the transport so the ADBC
+    URI builder can include ``sslmode=...`` and decide whether to
+    demote (verify-ca / verify-full need a CA file path the URI can't
+    inline).
     """
     mode, ca_pem = _resolve_tls_mode(tls_spec, resolver)
     if mode is None:
-        return None
+        return None, None, False
 
     base_driver = driver.split("+", 1)[0].lower()
+    has_ca = ca_pem is not None
 
     if base_driver in ("postgresql", "postgres"):
-        return _materialize_tls_postgres(mode, ca_pem)
+        return _materialize_tls_postgres(mode, ca_pem), mode, has_ca
 
     if base_driver in ("mysql", "mariadb"):
-        return _materialize_tls_mysql(mode, ca_pem)
+        return _materialize_tls_mysql(mode, ca_pem), mode, has_ca
 
     if ca_pem:
-        return _ca_ssl_context(ca_pem, check_hostname=False)
-    return mode
+        return _ca_ssl_context(ca_pem, check_hostname=False), mode, has_ca
+    return mode, mode, has_ca
 
 
 # ---------------------------------------------------------------------------
@@ -352,11 +359,22 @@ def _select_transport(
 
 @dataclass
 class SqlAlchemyTransport:
-    """Materialized SQLAlchemy transport."""
+    """Materialized SQLAlchemy transport.
+
+    ``tls_mode`` carries the resolved ``tls.mode`` string (the
+    connector's native vocabulary, e.g. PG ``"require"`` or MySQL
+    ``"VERIFY_IDENTITY"``) so the ADBC URI builder can embed it as a
+    libpq ``sslmode=`` parameter. ``tls_ca_bundle_present`` is True
+    when a CA PEM was materialised into the SQLAlchemy SSLContext --
+    the ADBC URI cannot inline raw PEM, so eligibility checks demote
+    to SA when this is True.
+    """
 
     engine: AsyncEngine
     driver: str
     dialect: str
+    tls_mode: Optional[str] = None
+    tls_ca_bundle_present: bool = False
 
 
 async def build_sqlalchemy_transport(
@@ -377,7 +395,9 @@ async def build_sqlalchemy_transport(
     dsn = _render_url_template_dsn(raw_dsn, resolver)
 
     connect_args: Dict[str, Any] = {}
-    tls_value = _materialize_tls_for_driver(driver, spec.get("tls"), resolver)
+    tls_value, tls_mode, tls_has_ca = _materialize_tls_for_driver(
+        driver, spec.get("tls"), resolver
+    )
     if tls_value is not None:
         connect_args["ssl"] = tls_value
 
@@ -403,7 +423,13 @@ async def build_sqlalchemy_transport(
         raise
 
     base_dialect = driver.split("+", 1)[0]
-    return SqlAlchemyTransport(engine=engine, driver=driver, dialect=base_dialect)
+    return SqlAlchemyTransport(
+        engine=engine,
+        driver=driver,
+        dialect=base_dialect,
+        tls_mode=tls_mode,
+        tls_ca_bundle_present=tls_has_ca,
+    )
 
 
 # ---------------------------------------------------------------------------

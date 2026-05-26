@@ -24,6 +24,7 @@ from typing import Any, AsyncIterator, Dict, List, Optional
 import pyarrow as pa
 
 from .base import BaseConnector, ConnectionError, ReadError
+from ..drivers.adbc_reader import open_session as open_adbc_session, source_adbc_eligible
 from ...destination.schema_contract import SchemaContract
 from ...engine.type_map import InvalidTypeMapError, UnmappedTypeError
 from ...secrets.exceptions import PlaceholderExpansionError
@@ -103,7 +104,13 @@ class DatabaseConnector(BaseConnector):
             raise ReadError(
                 "endpoint document missing database_object.name"
             )
-        schema_name = database_object.get("schema") or "public"
+        # No default schema: dialects without a schema concept
+        # (sqlite, duckdb) would emit invalid ``public.<table>``
+        # references if we forced one. When the endpoint omits
+        # ``schema``, QueryBuilder emits an unqualified table name
+        # and the driver uses the connection's current
+        # schema/database -- which is what every dialect expects.
+        schema_name = database_object.get("schema")
 
         if self._runtime is None:
             raise ReadError(
@@ -120,31 +127,95 @@ class DatabaseConnector(BaseConnector):
             cursor_field = cursor_field[0] if cursor_field else None
         replication_method = replication.get("method", "full_refresh")
 
+        if (
+            replication_method == "incremental"
+            and cursor_field
+            and cursor_field not in column_names
+        ):
+            # An incremental stream whose projection drops the cursor
+            # column will silently revert to "full-scan + upsert" every
+            # run: no cursor value is observable, so no state advances.
+            # Loud and once.
+            logger.warning(
+                "stream %r: cursor_field %r not in selected columns %r; "
+                "cursor will not advance",
+                stream_name,
+                cursor_field,
+                column_names,
+            )
+
         partition = partition or {}
         cursor_state = await state_manager.get_cursor(stream_name, partition)
         stored_cursor = cursor_state.get("cursor") if cursor_state else None
         cursor_value = stored_cursor if replication_method == "incremental" else None
 
         builder = QueryBuilder(self._driver)
-        base_query, base_params = builder.build_select_query(
-            QueryConfig(
-                schema_name=schema_name,
-                table_name=table_name,
-                columns=column_names,
-                filters=filters,
-                cursor_field=cursor_field if replication_method == "incremental" else None,
-                cursor_value=cursor_value,
-                cursor_mode="inclusive",
+
+        def page_query(offset: int):
+            """Build the per-page SELECT. Limit / offset are pushed into
+            ``QueryConfig`` so SQLAlchemy compiles dialect-correct paging
+            (PostgreSQL/MySQL ``LIMIT ... OFFSET ...`` vs MSSQL ``OFFSET
+            ... ROWS FETCH NEXT ... ROWS ONLY``). ``params`` is a list
+            for positional dialects and a dict for named ones.
+            """
+            sql, params = builder.build_select_query(
+                QueryConfig(
+                    schema_name=schema_name,
+                    table_name=table_name,
+                    columns=column_names,
+                    filters=filters,
+                    cursor_field=(
+                        cursor_field if replication_method == "incremental" else None
+                    ),
+                    cursor_value=cursor_value,
+                    cursor_mode="inclusive",
+                    limit=batch_size,
+                    offset=offset,
+                )
             )
-        )
+            return sql, params
 
         last_cursor_value = cursor_value
         offset = 0
+
+        tls_mode = self._runtime.tls_mode if self._runtime else None
+        tls_has_ca = (
+            self._runtime.tls_ca_bundle_present if self._runtime else False
+        )
+        if source_adbc_eligible(
+            self._driver,
+            self._engine,
+            tls_mode=tls_mode,
+            tls_ca_bundle_present=tls_has_ca,
+        ):
+            async for batch in self._read_via_adbc(
+                page_query=page_query,
+                schema_contract=schema_contract,
+                cursor_field=cursor_field,
+                batch_size=batch_size,
+                state_manager=state_manager,
+                stream_name=stream_name,
+                partition=partition,
+                tls_mode=tls_mode,
+                tls_ca_bundle_present=tls_has_ca,
+            ):
+                yield batch
+            logger.debug("Database read (ADBC) completed")
+            return
+
         async with acquire_connection(self._engine) as conn:
             while True:
-                paged_query = f"{base_query} LIMIT {batch_size} OFFSET {offset}"
-                if base_params:
-                    result = await conn.exec_driver_sql(paged_query, tuple(base_params))
+                paged_query, paged_params = page_query(offset)
+                if isinstance(paged_params, dict):
+                    # Named-paramstyle dialects (Snowflake pyformat,
+                    # BigQuery named): the driver binds by name and
+                    # expects a dict, not a positional tuple.
+                    if paged_params:
+                        result = await conn.exec_driver_sql(paged_query, paged_params)
+                    else:
+                        result = await conn.exec_driver_sql(paged_query)
+                elif paged_params:
+                    result = await conn.exec_driver_sql(paged_query, tuple(paged_params))
                 else:
                     result = await conn.exec_driver_sql(paged_query)
 
@@ -172,6 +243,78 @@ class DatabaseConnector(BaseConnector):
                     break
 
         logger.debug("Database read completed with cursor: %s", last_cursor_value)
+
+    async def _read_via_adbc(
+        self,
+        *,
+        page_query,
+        schema_contract: SchemaContract,
+        cursor_field: Optional[str],
+        batch_size: int,
+        state_manager: StateManager,
+        stream_name: str,
+        partition: Dict[str, Any],
+        tls_mode: Optional[str] = None,
+        tls_ca_bundle_present: bool = False,
+    ) -> AsyncIterator[pa.RecordBatch]:
+        """Stream Arrow batches via ADBC, holding one connection across pages.
+
+        Each page goes ``cursor.execute → fetch_arrow_table → cast``,
+        skipping the rows-to-dicts-to-Arrow conversion the SQLAlchemy
+        path takes. Cursor state is saved after each yielded batch using
+        the last row's ``cursor_field`` value, mirroring the SQLAlchemy
+        path's checkpoint shape.
+        """
+        offset = 0
+        last_cursor_value: Any = None
+        cursor_missing_warned = False
+        async with open_adbc_session(
+            self._driver,
+            self._engine,
+            tls_mode=tls_mode,
+            tls_ca_bundle_present=tls_ca_bundle_present,
+        ) as session:
+            while True:
+                sql, params = page_query(offset)
+                batches = await session.fetch_page(sql, params)
+                if not batches:
+                    break
+
+                page_rows = 0
+                for batch in batches:
+                    cast_batch = schema_contract.cast_arrow_batch(batch)
+                    page_rows += cast_batch.num_rows
+                    if cursor_field and cast_batch.num_rows > 0:
+                        if cursor_field in cast_batch.schema.names:
+                            last_cursor_value = cast_batch.column(cursor_field)[-1].as_py()
+                        elif not cursor_missing_warned:
+                            # Silent here means the next run re-reads from
+                            # the old cursor — incremental degrades to
+                            # repeated full-scan-with-upsert. Warn loudly
+                            # once per stream so the operator can fix the
+                            # projection (likely missing from
+                            # ``selected_columns``).
+                            logger.warning(
+                                "stream %r: cursor_field %r not present in "
+                                "result batch; cursor will not advance",
+                                stream_name,
+                                cursor_field,
+                            )
+                            cursor_missing_warned = True
+                    self.metrics["records_read"] += cast_batch.num_rows
+                    self.metrics["batches_read"] += 1
+                    yield cast_batch
+
+                if last_cursor_value is not None:
+                    await state_manager.save_cursor(
+                        stream_name,
+                        partition,
+                        {"cursor": last_cursor_value},
+                    )
+
+                if page_rows < batch_size:
+                    break
+                offset += page_rows
 
     # ------------------------------------------------------------------
     # Helpers
