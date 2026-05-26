@@ -26,7 +26,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator, List, Optional, Sequence
+from typing import Any, AsyncIterator, List, Optional
 
 import pyarrow as pa
 from sqlalchemy.ext.asyncio import AsyncEngine
