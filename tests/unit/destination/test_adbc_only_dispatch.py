@@ -9,6 +9,8 @@ the manual Docker run noted in the PR description.
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock, patch
+
 import pytest
 
 from src.destination.connectors.database import (
@@ -109,6 +111,91 @@ class TestAdbcConfigurationErrorContract:
         # ``except RuntimeError`` continue to catch it.
         with pytest.raises(RuntimeError):
             raise AdbcConfigurationError("bad config")
+
+
+class TestRecordBatchCommitViaAdbcIdempotency:
+    """Lock in the IntegrityError-as-success contract.
+
+    A concurrent retry races to write the same ``(run_id, stream_id,
+    batch_seq)`` PK in ``_batch_commits``. The second writer must
+    treat the resulting IntegrityError as success — both writers
+    intended the same outcome and the row exists. Any other PEP-249
+    fatal class must still propagate so an actually-broken commit-
+    record path (missing table, permission denial) doesn't get
+    masked.
+    """
+
+    @pytest.fixture
+    def handler(self):
+        from src.destination.connectors.database import (
+            DatabaseDestinationHandler,
+        )
+
+        # Bypass __init__: configure_schema / connect pull a lot in
+        # we don't need here. Set only the fields the SUT touches.
+        h = DatabaseDestinationHandler.__new__(DatabaseDestinationHandler)
+        h._adbc_conn = None  # poisoned-by-_execute_adbc_dml_sync semantics
+        h._runtime = None
+        # State carries schema_name for the qualified INSERT target.
+        return h
+
+    @pytest.fixture
+    def state(self):
+        from src.destination.connectors.database import _StreamState
+
+        return _StreamState(schema_name="ANALYTICS")
+
+    @pytest.mark.asyncio
+    async def test_integrity_error_treated_as_success(self, handler, state):
+        # Driver-level IntegrityError; the helper matches by class
+        # name across the MRO so any subclass with that name works.
+        class IntegrityError(Exception):
+            pass
+
+        # `_reopen_adbc_if_needed_sync` opens the cached connection.
+        # Cursor.execute raises the driver's IntegrityError, which
+        # `_execute_adbc_dml_sync` reclassifies via _reclassify_as_fatal
+        # and `_record_batch_commit_via_adbc` must then swallow.
+        cursor = MagicMock()
+        cursor.execute.side_effect = IntegrityError(
+            "duplicate key value violates unique constraint"
+        )
+        conn = MagicMock()
+        conn.cursor.return_value = cursor
+
+        with patch.object(
+            handler, "_reopen_adbc_if_needed_sync", return_value=conn
+        ), patch.object(handler, "_poison_adbc_connection"):
+            # Must NOT raise.
+            await handler._record_batch_commit_via_adbc(
+                state, "run-1", "stream-1", 7, b"cursor-token", 100,
+            )
+        # The DML was actually attempted (proves we didn't short-
+        # circuit somewhere earlier and produce a false success).
+        cursor.execute.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_programming_error_still_propagates(self, handler, state):
+        class ProgrammingError(Exception):
+            pass
+
+        cursor = MagicMock()
+        cursor.execute.side_effect = ProgrammingError(
+            'relation "ANALYTICS._batch_commits" does not exist'
+        )
+        conn = MagicMock()
+        conn.cursor.return_value = cursor
+
+        with patch.object(
+            handler, "_reopen_adbc_if_needed_sync", return_value=conn
+        ), patch.object(handler, "_poison_adbc_connection"):
+            with pytest.raises(AdbcConfigurationError) as info:
+                await handler._record_batch_commit_via_adbc(
+                    state, "run-1", "stream-1", 7, b"cursor-token", 100,
+                )
+        # The class-name prefix lives in the wrapped message — losing
+        # it would silently regress operator triage.
+        assert "ProgrammingError" in str(info.value)
 
 
 class TestReclassifyAsFatal:
