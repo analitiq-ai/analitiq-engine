@@ -5,7 +5,7 @@ import time
 import pytest
 from unittest.mock import patch, AsyncMock
 
-from src.source.connectors.api import RateLimiter
+from src.shared.rate_limiter import RateLimiter
 
 
 class TestRateLimiter:

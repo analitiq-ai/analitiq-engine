@@ -44,13 +44,12 @@ class TestTypeMapperFor:
             {"scope": "connection", "connection_id": "test-conn", "endpoint_id": "orders"},
         ) is nmapper
 
-    def test_connection_scope_without_mapper_raises(self):
+    def test_connection_scope_without_mapper_falls_back_to_connector(self):
         cmapper = TypeMapper("pg", parse_rules(RULES, source="<t>"))
         rt = _runtime(connector_mapper=cmapper, connection_mapper=None)
-        with pytest.raises(RuntimeError, match="has no type-map"):
-            rt.type_mapper_for(
-                {"scope": "connection", "connection_id": "test-conn", "endpoint_id": "orders"},
-            )
+        assert rt.type_mapper_for(
+            {"scope": "connection", "connection_id": "test-conn", "endpoint_id": "orders"},
+        ) is cmapper
 
     def test_string_ref_rejected(self):
         rt = _runtime(connector_mapper=TypeMapper("pg", parse_rules(RULES, source="<t>")))

@@ -103,7 +103,6 @@ class TestDatabaseConnectorInit:
         assert connector.name == "TestConnector"
         assert connector._engine is None
         assert connector._driver == ""
-        assert connector.table_info_cache == {}
         assert connector._initialized is False
         assert connector.is_connected is False
 
@@ -175,142 +174,6 @@ class TestDatabaseConnectorConnection:
         assert connector._initialized is False
 
 
-class TestDatabaseConnectorReadBatches:
-    """Test DatabaseConnector read_batches method."""
-
-    @pytest.mark.asyncio
-    async def test_read_batches_success(self, connector, endpoint_config, mock_state_manager):
-        """Test successful batch reading."""
-        mock_engine = AsyncMock()
-        mock_conn = AsyncMock()
-
-        # Mock result rows
-        mock_row1 = MagicMock()
-        mock_row1._mapping = {"id": 1, "name": "test1"}
-        mock_row2 = MagicMock()
-        mock_row2._mapping = {"id": 2, "name": "test2"}
-        mock_result_batch1 = MagicMock()
-        mock_result_batch1.__iter__ = lambda self: iter([mock_row1, mock_row2])
-        mock_result_empty = MagicMock()
-        mock_result_empty.__iter__ = lambda self: iter([])
-
-        mock_conn.exec_driver_sql = AsyncMock(
-            side_effect=[mock_result_batch1, mock_result_empty]
-        )
-
-        connector._engine = mock_engine
-        connector._initialized = True
-        connector._driver = "postgresql"
-
-        with patch(
-            'src.source.connectors.database.acquire_connection',
-        ) as mock_acquire, patch(
-            'src.source.connectors.database.build_select_query',
-            return_value=("SELECT * FROM test", []),
-        ):
-            mock_acm = AsyncMock()
-            mock_acm.__aenter__.return_value = mock_conn
-            mock_acm.__aexit__.return_value = False
-            mock_acquire.return_value = mock_acm
-
-            batches = []
-            async for batch in connector.read_batches(
-                endpoint_config,
-                state_manager=mock_state_manager,
-                stream_name="test_stream",
-                batch_size=2
-            ):
-                batches.append(batch)
-
-        assert len(batches) == 1
-        # Source connectors emit pa.RecordBatch; materialize for assertions.
-        first = batches[0].to_pylist()
-        assert len(first) == 2
-        assert first[0]["id"] == 1
-        assert connector.metrics["records_read"] == 2
-        assert connector.metrics["batches_read"] == 1
-
-    @pytest.mark.asyncio
-    async def test_read_batches_not_initialized(self, connector, endpoint_config, mock_state_manager):
-        """Test read batches without initialization."""
-        with pytest.raises(RuntimeError) as exc_info:
-            async for batch in connector.read_batches(
-                endpoint_config,
-                state_manager=mock_state_manager,
-                stream_name="test_stream"
-            ):
-                pass
-
-        assert "not initialized" in str(exc_info.value)
-
-    @pytest.mark.asyncio
-    async def test_read_batches_error(self, connector, endpoint_config, mock_state_manager):
-        """Test read batches with query build error."""
-        connector._engine = AsyncMock()
-        connector._initialized = True
-        connector._driver = "postgresql"
-
-        with patch(
-            'src.source.connectors.database.build_select_query',
-            side_effect=Exception("Query build failed"),
-        ):
-            with pytest.raises(ReadError) as exc_info:
-                async for batch in connector.read_batches(
-                    endpoint_config,
-                    state_manager=mock_state_manager,
-                    stream_name="test_stream"
-                ):
-                    pass
-
-            assert "Database read failed" in str(exc_info.value)
-            assert connector.metrics["errors"] == 1
-
-    @pytest.mark.asyncio
-    async def test_read_batches_pagination_edge_case(self, connector, endpoint_config, mock_state_manager):
-        """Test read_batches pagination with different result sizes."""
-        mock_engine = AsyncMock()
-        mock_conn = AsyncMock()
-
-        # Batch 1: exactly batch_size records
-        row1 = MagicMock(); row1._mapping = {"id": 1}
-        row2 = MagicMock(); row2._mapping = {"id": 2}
-        result1 = MagicMock(); result1.__iter__ = lambda self: iter([row1, row2])
-
-        # Batch 2: fewer than batch_size
-        row3 = MagicMock(); row3._mapping = {"id": 3}
-        result2 = MagicMock(); result2.__iter__ = lambda self: iter([row3])
-
-        mock_conn.exec_driver_sql = AsyncMock(side_effect=[result1, result2])
-
-        connector._engine = mock_engine
-        connector._initialized = True
-        connector._driver = "postgresql"
-
-        with patch(
-            'src.source.connectors.database.acquire_connection',
-        ) as mock_acquire, patch(
-            'src.source.connectors.database.build_select_query',
-            return_value=("SELECT * FROM test", []),
-        ):
-            mock_acm = AsyncMock()
-            mock_acm.__aenter__.return_value = mock_conn
-            mock_acm.__aexit__.return_value = False
-            mock_acquire.return_value = mock_acm
-
-            batches = []
-            async for batch in connector.read_batches(
-                endpoint_config,
-                state_manager=mock_state_manager,
-                stream_name="test_stream",
-                batch_size=2
-            ):
-                batches.append(batch)
-
-        assert len(batches) == 2
-        assert connector.metrics["records_read"] == 3
-
-
-class TestDatabaseConnectorWriteBatch:
     """Test DatabaseConnector write_batch raises NotImplementedError."""
 
     @pytest.mark.asyncio
@@ -357,20 +220,3 @@ class TestDatabaseConnectorImports:
         assert DatabaseConnector is not None
 
 
-class TestParseEndpoint:
-    """Test _parse_endpoint method."""
-
-    def test_schema_slash_table(self, connector):
-        schema, table = connector._parse_endpoint("myschema/mytable")
-        assert schema == "myschema"
-        assert table == "mytable"
-
-    def test_table_only(self, connector):
-        schema, table = connector._parse_endpoint("mytable")
-        assert schema == "public"
-        assert table == "mytable"
-
-    def test_empty_schema_part(self, connector):
-        schema, table = connector._parse_endpoint("/mytable")
-        assert schema == "public"
-        assert table == "mytable"

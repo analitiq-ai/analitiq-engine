@@ -17,8 +17,6 @@ import pytest
 from src.destination.server import DestinationServicer
 from src.engine.type_map import InvalidTypeMapError, UnmappedTypeError
 from src.grpc.generated.analitiq.v1 import (
-    DatabaseConfig,
-    DestinationConfig,
     SchemaMessage,
     StreamRequest,
     WriteMode,
@@ -34,13 +32,7 @@ def _schema_request(stream_id: str = "s1") -> StreamRequest:
         schema=SchemaMessage(
             stream_id=stream_id,
             version=1,
-            json_schema='{"columns":[{"name":"id","type":"BIGINT"}]}',
-            primary_key=["id"],
             write_mode=WriteMode.WRITE_MODE_INSERT,
-            destination_config=DestinationConfig(
-                connector_type="database",
-                database=DatabaseConfig(schema_name="public", table_name="t"),
-            ),
         )
     )
 

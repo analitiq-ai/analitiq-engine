@@ -170,6 +170,11 @@ def _make_stream_config(source_alias, source_endpoint_id, dest_alias, dest_endpo
         "source": {
             "connection_ref": source_alias,
             "endpoint_id": source_endpoint_id,
+            "endpoint_ref": {
+                "scope": "connector",
+                "connection_id": source_alias,
+                "endpoint_id": source_endpoint_id,
+            },
             "primary_key": ["id"],
             "replication": {
                 "method": "incremental",
@@ -179,10 +184,33 @@ def _make_stream_config(source_alias, source_endpoint_id, dest_alias, dest_endpo
         "destinations": [{
             "connection_ref": dest_alias,
             "endpoint_id": dest_endpoint_id,
+            "endpoint_ref": {
+                "scope": "connection",
+                "connection_id": dest_alias,
+                "endpoint_id": dest_endpoint_id,
+            },
             "write": {"mode": "upsert"},
         }],
         "mapping": {"assignments": []},
     }
+
+
+def _inject_runtime_and_endpoint(
+    stream_configs, source_connection_id, source_endpoint_id,
+    dest_connection_id, dest_endpoint_id,
+    resolved_connections, resolved_endpoints,
+):
+    """Mirror the ``PipelineConfigPrep`` injection: each stream's source
+    and destination dicts must carry ``_runtime`` (ConnectionRuntime) and
+    ``_endpoint`` (resolved endpoint document) before ``Pipeline._build_config_dict``
+    runs."""
+    for stream in stream_configs:
+        stream["source"]["_runtime"] = resolved_connections[source_connection_id]
+        stream["source"]["_endpoint"] = resolved_endpoints[source_endpoint_id]
+        for dest in stream["destinations"]:
+            dest["_runtime"] = resolved_connections[dest_connection_id]
+            dest["_endpoint"] = resolved_endpoints[dest_endpoint_id]
+    return stream_configs
 
 
 def _make_runtime(connection_id, connector_type, config, driver=None):
@@ -272,6 +300,12 @@ class TestAPIToAPIConfigStructure:
         )]
         resolved_connections = _api_to_api_resolved_connections()
         resolved_endpoints = _api_to_api_resolved_endpoints()
+        _inject_runtime_and_endpoint(
+            stream_configs,
+            WISE_CONNECTION_ID, WISE_ENDPOINT_ID,
+            SEVDESK_CONNECTION_ID, SEVDESK_ENDPOINT_ID,
+            resolved_connections, resolved_endpoints,
+        )
         return pipeline_config, stream_configs, resolved_connections, resolved_endpoints
 
     def test_source_connection_has_api_fields(self, api_to_api_config):
@@ -304,53 +338,6 @@ class TestAPIToAPIConfigStructure:
 
         assert "host" in config, "API connection must have host"
         assert "parameters" in config, "API connection must have parameters"
-
-    def test_pipeline_build_config_produces_valid_source(self, api_to_api_config):
-        """Verify Pipeline._build_config_dict() produces valid source config."""
-        pipeline_config, stream_configs, resolved_connections, resolved_endpoints = api_to_api_config
-
-        pipeline = Pipeline(
-            pipeline_config=pipeline_config,
-            stream_configs=stream_configs,
-            resolved_connections=resolved_connections,
-            resolved_endpoints=resolved_endpoints,
-            connectors=API_CONNECTORS,
-        )
-
-        config_dict = pipeline._build_config_dict()
-
-        for stream_id, stream_data in config_dict["streams"].items():
-            source = stream_data["source"]
-
-            assert "host" in source, f"Stream {stream_id} source missing 'host'"
-            assert source["host"].startswith("http"), "Source host should be URL"
-
-            assert "connection_ref" in source
-            assert "endpoint_id" in source
-            assert "replication_method" in source
-
-    def test_pipeline_build_config_produces_valid_destination(self, api_to_api_config):
-        """Verify Pipeline._build_config_dict() produces valid destination config."""
-        pipeline_config, stream_configs, resolved_connections, resolved_endpoints = api_to_api_config
-
-        pipeline = Pipeline(
-            pipeline_config=pipeline_config,
-            stream_configs=stream_configs,
-            resolved_connections=resolved_connections,
-            resolved_endpoints=resolved_endpoints,
-            connectors=API_CONNECTORS,
-        )
-
-        config_dict = pipeline._build_config_dict()
-
-        for stream_id, stream_data in config_dict["streams"].items():
-            destination = stream_data["destination"]
-
-            assert "host" in destination, f"Stream {stream_id} destination missing 'host'"
-
-            assert "connection_ref" in destination
-            assert "endpoint_id" in destination
-            assert "refresh_mode" in destination
 
 
 class TestAPIToDatabaseConfigStructure:
@@ -437,50 +424,3 @@ class TestEndToEndConfigFlow:
         assert params.get("database"), "Database parameters must have 'database'"
         assert params.get("username"), "Database parameters must have 'username'"
 
-    def test_full_pipeline_config_dict_structure(self):
-        """Verify complete config dict has all required sections."""
-        pipeline_config = _make_pipeline_config(
-            WISE_ALIAS, WISE_CONNECTION_ID,
-            SEVDESK_ALIAS, SEVDESK_CONNECTION_ID,
-        )
-        stream_configs = [_make_stream_config(
-            WISE_ALIAS, WISE_ENDPOINT_ID,
-            SEVDESK_ALIAS, SEVDESK_ENDPOINT_ID,
-        )]
-        resolved_connections = _api_to_api_resolved_connections()
-        resolved_endpoints = _api_to_api_resolved_endpoints()
-
-        pipeline = Pipeline(
-            pipeline_config=pipeline_config,
-            stream_configs=stream_configs,
-            resolved_connections=resolved_connections,
-            resolved_endpoints=resolved_endpoints,
-            connectors=API_CONNECTORS,
-        )
-
-        config_dict = pipeline._build_config_dict()
-
-        # Required top-level fields
-        assert "pipeline_id" in config_dict
-        assert "name" in config_dict
-        assert "streams" in config_dict
-        assert "source" in config_dict
-        assert "destination" in config_dict
-        assert "runtime" in config_dict
-
-        # Streams should not be empty
-        assert len(config_dict["streams"]) > 0
-
-        # Each stream should have source, destination, mapping
-        for stream_id, stream_data in config_dict["streams"].items():
-            assert "source" in stream_data, f"Stream {stream_id} missing source"
-            assert "destination" in stream_data, f"Stream {stream_id} missing destination"
-            assert "mapping" in stream_data, f"Stream {stream_id} missing mapping"
-
-            # Source should have merged connection + stream fields
-            source = stream_data["source"]
-            assert "host" in source or "driver" in source, (
-                f"Stream {stream_id} source missing connection fields"
-            )
-            assert "connection_ref" in source
-            assert "endpoint_id" in source

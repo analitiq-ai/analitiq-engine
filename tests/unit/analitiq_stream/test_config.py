@@ -42,18 +42,20 @@ class TestPipelineConfigValidator:
     def valid_pipeline(self):
         return {
             "$schema": "https://schemas.analitiq.ai/pipeline/latest.json",
-            "pipeline_id": "test-pipeline",
+            "display_name": "Test Pipeline",
+            "status": "active",
             "connections": {
-                "source": "my-api",
-                "destinations": ["prod-postgres"],
+                "source": "00000000-0000-0000-0000-000000000001",
+                "destinations": ["00000000-0000-0000-0000-000000000002"],
             },
-            "streams": ["stream-1"],
+            "streams": ["00000000-0000-0000-0000-000000000003"],
+            "schedule": {"type": "manual", "timezone": "UTC"},
         }
 
     @pytest.mark.unit
     def test_valid_pipeline_passes(self, valid_pipeline):
         result = validate_pipeline_config(valid_pipeline)
-        assert result["pipeline_id"] == "test-pipeline"
+        assert result["display_name"] == "Test Pipeline"
 
     @pytest.mark.unit
     def test_missing_connections_fails(self, valid_pipeline):
