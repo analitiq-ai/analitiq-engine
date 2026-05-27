@@ -210,7 +210,25 @@ class TestPerDriverQuoting:
         h = DatabaseDestinationHandler()
         h._driver = "snowflake"
         assert h._adbc_quote_ident("id") == '"id"'
-        assert h._adbc_quote_qualified("public", "t") == '"public"."t"'
+        # Snowflake's default schema is unquoted PUBLIC; lower-case
+        # ``public`` is normalized to match the real warehouse schema.
+        assert h._adbc_quote_qualified("public", "t") == '"PUBLIC"."t"'
+        assert h._adbc_quote_qualified("analytics", "t") == '"analytics"."t"'
+
+    def test_snowflake_normalize_public_to_uppercase(self):
+        h = DatabaseDestinationHandler()
+        h._driver = "snowflake"
+        assert h._normalize_adbc_schema("public") == "PUBLIC"
+        assert h._normalize_adbc_schema("PUBLIC") == "PUBLIC"
+        assert h._normalize_adbc_schema("Public") == "PUBLIC"
+        assert h._normalize_adbc_schema("analytics") == "analytics"
+
+    def test_bigquery_does_not_normalize_schema(self):
+        h = DatabaseDestinationHandler()
+        h._driver = "bigquery"
+        # BigQuery datasets are case-sensitive; never normalize.
+        assert h._normalize_adbc_schema("public") == "public"
+        assert h._normalize_adbc_schema("Analytics") == "Analytics"
 
     def test_postgres_quotes_with_double_quotes(self):
         h = DatabaseDestinationHandler()
@@ -368,3 +386,21 @@ class TestAdbcDdlBuilders:
         pg = self._make("postgresql")._build_adbc_batch_commits_ddl("analytics")
         assert "BYTEA" in pg
         assert "TIMESTAMP" in pg
+
+    def test_pk_clause_bigquery_not_enforced(self):
+        # BigQuery's parser rejects bare PRIMARY KEY (...) — it
+        # requires NOT ENFORCED. Snowflake and Postgres accept the
+        # bare form. The _batch_commits DDL builder hits this path on
+        # every stream, so a regression would block every BQ pipeline.
+        bq = self._make("bigquery")
+        assert "NOT ENFORCED" in bq._build_adbc_pk_clause("`id`")
+        bq_commits = bq._build_adbc_batch_commits_ddl("analytics")
+        assert "NOT ENFORCED" in bq_commits
+
+        snow = self._make("snowflake")
+        assert "NOT ENFORCED" not in snow._build_adbc_pk_clause('"id"')
+        snow_commits = snow._build_adbc_batch_commits_ddl("analytics")
+        assert "NOT ENFORCED" not in snow_commits
+
+        pg = self._make("postgresql")
+        assert "NOT ENFORCED" not in pg._build_adbc_pk_clause('"id"')

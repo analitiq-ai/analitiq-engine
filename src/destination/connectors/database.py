@@ -99,6 +99,9 @@ def _reclassify_as_fatal(exc: BaseException) -> AdbcConfigurationError:
     return wrapped
 
 
+WriteMode = Literal["insert", "upsert", "truncate_insert"]
+
+
 class AdbcCommitRecordError(RuntimeError):
     """ADBC ingest succeeded, but ``_batch_commits`` recording failed.
 
@@ -115,8 +118,6 @@ class AdbcCommitRecordError(RuntimeError):
     summary surfaces the divergence rather than a generic commit
     error.
     """
-
-    WriteMode = Literal["insert", "upsert", "truncate_insert"]
 
     _RETRY_SEMANTICS: Dict[str, str] = {
         "insert": "retry will duplicate rows",
@@ -143,7 +144,7 @@ class AdbcCommitRecordError(RuntimeError):
             f"({self._RETRY_SEMANTICS[write_mode]}): {inner}"
         )
         self.__cause__ = inner
-        self.write_mode: AdbcCommitRecordError.WriteMode = write_mode
+        self.write_mode: WriteMode = write_mode
 
 
 @dataclass
@@ -169,7 +170,7 @@ class _StreamState:
     # set and falls back to ``primary_keys``. Empty here means INSERT
     # mode or no conflict target available.
     conflict_keys: List[str] = field(default_factory=list)
-    write_mode: str = "upsert"
+    write_mode: WriteMode = "upsert"
     endpoint_document: Dict[str, Any] = field(default_factory=dict)
     schema_contract: Optional[SchemaContract] = None
     metadata: MetaData = field(default_factory=MetaData)
@@ -421,9 +422,15 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         SQLAlchemy runtime a chance to dispose its engine pool.
         ``CancelledError`` is re-raised after both releases so the
         caller's cancellation is honored.
+
+        The ``_adbc_conn`` mutation goes through ``_adbc_conn_lock``
+        so a worker thread mid-poison cannot race with disconnect on
+        the same handle (libpq double-close risk).
         """
         cancelled: Optional[BaseException] = None
-        adbc_conn = self._adbc_conn
+        with self._adbc_conn_lock:
+            adbc_conn = self._adbc_conn
+            self._adbc_conn = None
         if adbc_conn is not None:
             try:
                 await asyncio.to_thread(adbc_conn.close)
@@ -439,8 +446,6 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
                     "server-side resources may remain allocated",
                     exc_info=True,
                 )
-            finally:
-                self._adbc_conn = None
         if self._runtime:
             try:
                 await self._runtime.close()
@@ -1125,21 +1130,30 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         Raises :class:`AdbcConfigurationError` when the driver module
         or URI cannot be produced. The cached handle is dropped on any
         ingest error so a poisoned connection is not reused.
+
+        Lock-guarded check-then-act: without the lock, two worker
+        threads can both observe ``self._adbc_conn is None`` and each
+        call ``module.connect(uri)``, leaking the loser's connection.
+        Connection establishment runs inside the lock; the lock
+        sections are short relative to the network RTT a real connect
+        takes, which is acceptable because contention is rare (only
+        first-use plus post-poison reopens).
         """
-        if self._adbc_conn is not None:
+        with self._adbc_conn_lock:
+            if self._adbc_conn is not None:
+                return self._adbc_conn
+            module = self._load_adbc_module()
+            if module is _ADBC_IMPORT_FAILED:
+                raise AdbcConfigurationError(
+                    f"ADBC module for driver={self._driver!r} not available"
+                )
+            uri = self._build_adbc_uri()
+            if uri is None:
+                raise AdbcConfigurationError(
+                    f"Could not build ADBC URI for driver={self._driver!r}"
+                )
+            self._adbc_conn = module.connect(uri)
             return self._adbc_conn
-        module = self._load_adbc_module()
-        if module is _ADBC_IMPORT_FAILED:
-            raise AdbcConfigurationError(
-                f"ADBC module for driver={self._driver!r} not available"
-            )
-        uri = self._build_adbc_uri()
-        if uri is None:
-            raise AdbcConfigurationError(
-                f"Could not build ADBC URI for driver={self._driver!r}"
-            )
-        self._adbc_conn = module.connect(uri)
-        return self._adbc_conn
 
     def _adbc_ingest_sync(
         self,
@@ -1155,6 +1169,9 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         misconfiguration raised by ``_open_adbc_connection`` does not
         touch a connection (none was opened) and the
         ``AdbcConfigurationError`` propagates straight through.
+        Poisoning goes through :meth:`_poison_adbc_connection` so the
+        ``_adbc_conn_lock`` is honored (avoiding a libpq double-close
+        when two concurrent ingest failures race).
         """
         conn = self._open_adbc_connection()
         try:
@@ -1168,22 +1185,14 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
                 )
                 conn.commit()
             finally:
-                cursor.close()
-        except Exception:
-            poisoned = self._adbc_conn
-            self._adbc_conn = None
-            if poisoned is not None:
                 try:
-                    poisoned.close()
+                    cursor.close()
                 except Exception:
-                    # Best-effort. The conn is being discarded and the
-                    # original ingest exception is what the caller
-                    # needs to see; the close failure is logged at
-                    # DEBUG so a libpq leak still leaves evidence.
-                    logger.debug(
-                        "Discarded poisoned ADBC connection; close failed",
-                        exc_info=True,
-                    )
+                    logger.debug("ADBC cursor close failed", exc_info=True)
+        except Exception as exc:
+            self._poison_adbc_connection()
+            if _is_fatal_adbc_error(exc):
+                raise _reclassify_as_fatal(exc) from exc
             raise
 
     async def _write_via_adbc(
@@ -1267,8 +1276,29 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
 
     def _adbc_quote_qualified(self, schema: str, name: str) -> str:
         if schema:
-            return f"{self._adbc_quote_ident(schema)}.{self._adbc_quote_ident(name)}"
+            return f"{self._adbc_quote_ident(self._normalize_adbc_schema(schema))}.{self._adbc_quote_ident(name)}"
         return self._adbc_quote_ident(name)
+
+    def _normalize_adbc_schema(self, schema: str) -> str:
+        """Normalize a schema name for the active ADBC driver.
+
+        Snowflake folds unquoted identifiers to upper case; its built-in
+        default schema is unquoted ``PUBLIC``. If a connector declares
+        the common lowercase ``public``, quoting it as ``"public"``
+        targets a different (usually non-existent) schema and DDL fails.
+        Upcase ``public`` → ``PUBLIC`` so the quoted form matches the
+        real schema; preserve any other case-sensitive name verbatim
+        because the connector author may have intended a quoted-name
+        namespace.
+
+        BigQuery and Postgres are case-sensitive after quoting in the
+        ways operators expect (BigQuery datasets are case-sensitive;
+        Postgres unquoted folds to lowercase, so quoted ``"public"``
+        matches the conventional default). No normalization there.
+        """
+        if self._driver == "snowflake" and schema.lower() == "public":
+            return "PUBLIC"
+        return schema
 
     def _adbc_native_renderer(self):
         """Return the native-type → DDL renderer for the active ADBC driver."""
@@ -1352,12 +1382,14 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
                 f"{self._adbc_timestamp_default_type()} DEFAULT CURRENT_TIMESTAMP"
             )
 
-        # PRIMARY KEY clause: BigQuery does not enforce PKs but accepts
-        # the clause (used as a planner hint). Snowflake and Postgres
-        # both honour it. Omit it when the contract declares no PKs.
+        # PRIMARY KEY clause is per-driver: Snowflake/Postgres accept
+        # bare ``PRIMARY KEY (...)``; BigQuery requires the
+        # ``NOT ENFORCED`` suffix (it does not enforce PK constraints
+        # and the parser rejects them without the qualifier). Omit the
+        # clause entirely when no PKs are declared.
         if state.primary_keys:
             pk_cols = ", ".join(self._adbc_quote_ident(k) for k in state.primary_keys)
-            column_defs.append(f"PRIMARY KEY ({pk_cols})")
+            column_defs.append(self._build_adbc_pk_clause(pk_cols))
 
         qualified = self._adbc_quote_qualified(state.schema_name, state.table_name)
         return (
@@ -1366,8 +1398,25 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
             + "\n)"
         )
 
+    def _build_adbc_pk_clause(self, pk_cols: str) -> str:
+        """Per-driver PRIMARY KEY clause for inclusion in a CREATE TABLE.
+
+        BigQuery's parser rejects bare ``PRIMARY KEY (...)`` — it
+        requires the ``NOT ENFORCED`` qualifier and does not actually
+        enforce the constraint at runtime (it's a planner hint).
+        Snowflake and Postgres accept and enforce the bare form.
+        """
+        if self._driver == "bigquery":
+            return f"PRIMARY KEY ({pk_cols}) NOT ENFORCED"
+        return f"PRIMARY KEY ({pk_cols})"
+
     def _build_adbc_batch_commits_ddl(self, schema_name: str) -> str:
         qualified = self._adbc_quote_qualified(schema_name, self.BATCH_COMMITS_TABLE)
+        pk_cols = (
+            f"{self._adbc_quote_ident('run_id')}, "
+            f"{self._adbc_quote_ident('stream_id')}, "
+            f"{self._adbc_quote_ident('batch_seq')}"
+        )
         return (
             f"CREATE TABLE IF NOT EXISTS {qualified} (\n"
             f"  {self._adbc_quote_ident('run_id')} VARCHAR(255) NOT NULL,\n"
@@ -1378,9 +1427,7 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
             f"  {self._adbc_quote_ident('records_written')} INTEGER,\n"
             f"  {self._adbc_quote_ident('committed_at')} "
             f"{self._adbc_commit_timestamp_type()} DEFAULT CURRENT_TIMESTAMP,\n"
-            f"  PRIMARY KEY ({self._adbc_quote_ident('run_id')}, "
-            f"{self._adbc_quote_ident('stream_id')}, "
-            f"{self._adbc_quote_ident('batch_seq')})\n"
+            f"  {self._build_adbc_pk_clause(pk_cols)}\n"
             f")"
         )
 
@@ -1420,9 +1467,12 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         if not self._schema_is_implicit_default(state.schema_name):
             # BigQuery uses ``CREATE SCHEMA`` for datasets (Standard
             # SQL). Snowflake and Postgres both accept the same DDL.
+            # Normalize before quoting so a Snowflake ``public`` matches
+            # the warehouse's real ``PUBLIC`` schema instead of creating
+            # a quoted-lowercase sibling.
             statements.append(
                 f"CREATE SCHEMA IF NOT EXISTS "
-                f"{self._adbc_quote_ident(state.schema_name)}"
+                f"{self._adbc_quote_ident(self._normalize_adbc_schema(state.schema_name))}"
             )
         statements.extend([create_table_sql, create_commits_sql])
         async with self._ddl_lock:
@@ -1579,15 +1629,32 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         except AdbcConfigurationError as exc:
             # An IntegrityError on the (run_id, stream_id, batch_seq)
             # PK means a concurrent retry already wrote the commit row.
-            # Surfacing it as fatal would leave the ingested rows
-            # orphaned without a _batch_commits entry — cold-start
-            # would re-ingest and duplicate. Treat as success.
+            # For idempotent write modes (truncate_insert, upsert) the
+            # destination's rows are unchanged by the retry's re-ingest,
+            # so surfacing fatal would orphan ingested rows without a
+            # _batch_commits entry → cold-start would re-ingest and
+            # duplicate. Treat as success.
+            #
+            # For ``insert`` mode the re-ingest already duplicated rows
+            # in the target table; reporting success would hide the
+            # duplication. Surface as AdbcCommitRecordError so the
+            # engine's failure summary carries the divergence and DLQ
+            # rules can route on it.
             cause = exc.__cause__
             if cause is not None and type(cause).__name__ == "IntegrityError":
+                if state.write_mode == "insert":
+                    logger.error(
+                        "ADBC _batch_commits INSERT raced concurrent retry "
+                        "for %s/%s/%s in insert mode — rows likely duplicated "
+                        "by the loser's prior adbc_ingest",
+                        run_id, stream_id, batch_seq,
+                    )
+                    raise AdbcCommitRecordError(cause, state.write_mode) from cause
                 logger.info(
-                    "ADBC _batch_commits INSERT raced (concurrent retry); "
-                    "treating as already-committed for %s/%s/%s",
-                    run_id, stream_id, batch_seq,
+                    "ADBC _batch_commits INSERT raced concurrent retry "
+                    "for %s/%s/%s (%s mode); idempotent — treating as "
+                    "already-committed",
+                    run_id, stream_id, batch_seq, state.write_mode,
                 )
                 return
             raise
@@ -1816,15 +1883,23 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
                 schema_name, table_name,
             )
         conn = self._reopen_adbc_if_needed_sync()
-        stage_created = False
         try:
             cursor = conn.cursor()
             try:
+                # DROP-IF-EXISTS before CREATE so a retry of the same
+                # (run_id, batch_seq) — typical when the previous
+                # attempt crashed between adbc_ingest and the success-
+                # path DROP — finds a clean slate. Without this, the
+                # retry's CREATE TABLE hits "already exists" → PEP-249
+                # ProgrammingError → fatal reclassification → engine
+                # stops retrying a recoverable batch. The leftover
+                # stage is opaque to the warehouse's planner, so the
+                # extra DROP is one cheap statement per upsert.
+                cursor.execute(f"DROP TABLE IF EXISTS {stage_qualified}")
                 cursor.execute(
                     self._build_adbc_stage_table_sql(stage_qualified, target_qualified)
                 )
                 conn.commit()
-                stage_created = True
                 cursor.adbc_ingest(
                     stage_name,
                     cast_batch,
@@ -1864,38 +1939,45 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
                 except Exception:
                     logger.debug("ADBC cursor close failed", exc_info=True)
         except Exception as exc:
-            # Best-effort stage cleanup so a failed MERGE doesn't leave
-            # the stage table around for the next batch to collide on.
-            # Connection may be poisoned at this point, so swallow any
-            # DROP failure — the unique stage_token gives the retry a
-            # different name anyway.
-            if stage_created and self._adbc_conn is not None:
+            # Best-effort stage cleanup using the local ``conn`` (not
+            # ``self._adbc_conn``) so a concurrent poisoning by another
+            # thread cannot turn this into a use-after-poison race or
+            # commit() against a freshly-reopened connection that owns
+            # no transaction state for the stage. If ``conn`` itself is
+            # the one that failed, the DROP will also fail and the warn
+            # below will fire — same observable outcome, no race.
+            try:
+                drop_cursor = conn.cursor()
                 try:
-                    drop_cursor = self._adbc_conn.cursor()
-                    try:
-                        drop_cursor.execute(
-                            f"DROP TABLE IF EXISTS {stage_qualified}"
-                        )
-                        self._adbc_conn.commit()
-                    finally:
-                        try:
-                            drop_cursor.close()
-                        except Exception:
-                            logger.debug(
-                                "ADBC cursor close failed", exc_info=True
-                            )
-                except Exception:
-                    logger.warning(
-                        "ADBC stage table %s left behind after MERGE failure; "
-                        "DROP will be retried implicitly by IF EXISTS on next write",
-                        stage_qualified, exc_info=True,
+                    drop_cursor.execute(
+                        f"DROP TABLE IF EXISTS {stage_qualified}"
                     )
+                    conn.commit()
+                finally:
+                    try:
+                        drop_cursor.close()
+                    except Exception:
+                        logger.debug(
+                            "ADBC cursor close failed", exc_info=True
+                        )
+            except Exception:
+                # The next retry's pre-flight DROP-IF-EXISTS will clean
+                # the orphan up; warn so an operator sees the leftover
+                # in the meantime.
+                logger.warning(
+                    "ADBC stage table %s left behind after MERGE failure; "
+                    "the next retry's pre-flight DROP-IF-EXISTS will clean it up",
+                    stage_qualified, exc_info=True,
+                )
             self._poison_adbc_connection()
             if _is_fatal_adbc_error(exc):
                 raise _reclassify_as_fatal(exc) from exc
             raise
         # Successful path — DROP the stage so subsequent writes start
-        # clean (CREATE TABLE already errored if it existed).
+        # clean. If this DROP fails, the next retry of the same batch
+        # cleans it up via the pre-flight DROP-IF-EXISTS at the top of
+        # this method, so even a persistent DROP failure does not break
+        # idempotency.
         try:
             drop_cursor = conn.cursor()
             try:
@@ -1907,13 +1989,9 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
                 except Exception:
                     logger.debug("ADBC cursor close failed", exc_info=True)
         except Exception:
-            # The MERGE succeeded; leaving the stage around is a
-            # cosmetic leak, not a correctness issue. Next write will
-            # collide on the same name only if stage_token repeats,
-            # which the per-batch token prevents.
             logger.warning(
-                "ADBC stage table %s DROP failed; will be cleaned up on next "
-                "write with the same stage_token",
+                "ADBC stage table %s post-MERGE DROP failed; next retry of "
+                "this batch will clean it up via pre-flight DROP-IF-EXISTS",
                 stage_qualified, exc_info=True,
             )
 

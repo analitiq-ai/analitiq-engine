@@ -31,7 +31,11 @@ class TestBuildSelectSql:
             schema_name="public",
         )
         sql, params = _build_select_sql(plan, "snowflake")
-        assert sql == 'SELECT "id", "status" FROM "public"."orders"'
+        # Always emits ORDER BY (first column when no cursor) so
+        # OFFSET paging stays deterministic across pages.
+        assert sql == (
+            'SELECT "id", "status" FROM "public"."orders" ORDER BY "id" ASC'
+        )
         assert params == ()
 
     def test_basic_select_bigquery_backticks(self):
@@ -43,7 +47,9 @@ class TestBuildSelectSql:
             schema_name="analytics",
         )
         sql, params = _build_select_sql(plan, "bigquery")
-        assert sql == "SELECT `id`, `status` FROM `analytics`.`orders`"
+        assert sql == (
+            "SELECT `id`, `status` FROM `analytics`.`orders` ORDER BY `id` ASC"
+        )
         assert params == ()
 
     def test_basic_select_postgres_double_quotes(self):
@@ -53,12 +59,12 @@ class TestBuildSelectSql:
             schema_name="public",
         )
         sql, _ = _build_select_sql(plan, "postgresql")
-        assert sql == 'SELECT "id" FROM "public"."orders"'
+        assert sql == 'SELECT "id" FROM "public"."orders" ORDER BY "id" ASC'
 
     def test_unqualified_when_no_schema(self):
         plan = AdbcReadPlan(table_name="orders", columns=("id",))
         sql, params = _build_select_sql(plan, "snowflake")
-        assert sql == 'SELECT "id" FROM "orders"'
+        assert sql == 'SELECT "id" FROM "orders" ORDER BY "id" ASC'
         assert params == ()
 
     def test_quote_escaping(self):

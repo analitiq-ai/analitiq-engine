@@ -26,7 +26,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, AsyncIterator, List, Literal, Optional, Tuple
 
 import pyarrow as pa
@@ -42,6 +42,17 @@ from src.shared.adbc_registry import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class AdbcReaderClosedError(RuntimeError):
+    """Fetch attempted on an already-closed :class:`AdbcReader`.
+
+    A usage-protocol failure (caller held the reader past its context
+    manager scope), not a transient DB error — retries cannot recover
+    from this. Subclasses ``RuntimeError`` so existing catch-alls keep
+    working; the specific class lets callers distinguish closed-reader
+    bugs from "the database is unreachable" failures.
+    """
 
 
 _demotion_logged: set = set()
@@ -202,10 +213,17 @@ def _close_quietly(conn: Any) -> None:
     try:
         conn.close()
     except Exception:
-        # Best-effort -- the connection is being discarded and the
-        # caller already has the original exception (if any). Leave
-        # evidence at DEBUG so a libpq-style leak is still traceable.
-        logger.debug("ADBC connection close failed", exc_info=True)
+        # Connection-close failures here are server-side resource
+        # leaks (warehouse session, libpq fd, gRPC context) operators
+        # may need to act on. WARNING mirrors the destination
+        # handler's _poison_adbc_connection treatment of the same
+        # condition. The caller's original exception (if any) is not
+        # masked — this is a separate log line.
+        logger.warning(
+            "ADBC source connection close failed — potential server-side "
+            "resource leak",
+            exc_info=True,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -271,6 +289,11 @@ class AdbcReadPlan:
                 f"AdbcReadPlan.cursor_mode must be 'inclusive' or 'exclusive', "
                 f"got {self.cursor_mode!r}"
             )
+        # Coerce list (or any iterable) to tuple so frozen=True actually
+        # holds. Without this, ``plan.columns.append(...)`` would slip
+        # past the immutability promise.
+        if not isinstance(self.columns, tuple):
+            object.__setattr__(self, "columns", tuple(self.columns))
         if not self.columns:
             raise ValueError("AdbcReadPlan.columns must not be empty")
 
@@ -288,6 +311,15 @@ def _build_select_sql(
     — the source connector raises ``ReadError`` if a stream defines
     them. Adding filter support means extending this helper to render
     the operators ``QueryBuilder`` already knows.
+
+    Always emits ``ORDER BY``: when ``cursor_field`` is set we order by
+    it (for stable incremental reads); otherwise we order by the first
+    selected column. Paging via ``OFFSET`` without a stable order is
+    implementation-defined on Postgres / Snowflake / BigQuery (a
+    concurrent vacuum, micropartition shuffle, or slot reassignment can
+    silently skip or duplicate rows across page boundaries) — falling
+    back to the first column gives deterministic paging without
+    requiring the caller to declare a cursor.
     """
     # Non-empty columns is enforced by AdbcReadPlan.__post_init__; the
     # renderer can trust the invariant.
@@ -304,8 +336,8 @@ def _build_select_sql(
     sql = f"SELECT {col_list} FROM {qualified}"
     if where_parts:
         sql += " WHERE " + " AND ".join(where_parts)
-    if plan.cursor_field:
-        sql += f" ORDER BY {_quote_ident(plan.cursor_field, driver)} ASC"
+    order_col = plan.cursor_field if plan.cursor_field else plan.columns[0]
+    sql += f" ORDER BY {_quote_ident(order_col, driver)} ASC"
     if plan.limit is not None:
         sql += f" LIMIT {int(plan.limit)}"
     if plan.offset is not None:
@@ -332,7 +364,10 @@ class AdbcReader:
 
     def _fetch_page_sync(self, plan: AdbcReadPlan) -> List[pa.RecordBatch]:
         if self._conn is None:
-            raise RuntimeError("AdbcReader is closed")
+            raise AdbcReaderClosedError(
+                "AdbcReader.fetch_page() called after close(); "
+                "reopen via open_adbc_reader()"
+            )
         sql, params = _build_select_sql(plan, self.driver)
         cursor = self._conn.cursor()
         try:
