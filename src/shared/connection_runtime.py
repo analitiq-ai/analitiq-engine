@@ -6,8 +6,9 @@ that fills in credential values. It is the single place the engine touches
 provider configuration: everything provider-specific is encoded in the
 connector's ``transports`` block, resolved through the typed
 :class:`~src.engine.resolver.ResolutionContext`, and turned into a
-concrete transport (:class:`~src.shared.transport_factory.SqlAlchemyTransport`
-or :class:`~src.shared.transport_factory.HttpTransport`) by the transport
+concrete transport (:class:`~src.shared.transport_factory.SqlAlchemyTransport`,
+:class:`~src.shared.transport_factory.AdbcTransport`, or
+:class:`~src.shared.transport_factory.HttpTransport`) by the transport
 factory. The runtime never inspects host strings, header dicts, DSN
 formats, or SSL flags directly.
 
@@ -160,8 +161,14 @@ class ConnectionRuntime:
 
     @property
     def driver_string(self) -> Optional[str]:
-        """Full SQLAlchemy driver string (``postgresql+asyncpg``) once the
-        transport has been materialized."""
+        """Driver identifier as materialised.
+
+        SA transports return the full SQLAlchemy driver string
+        (``postgresql+asyncpg``). ADBC transports return the ADBC
+        driver name (``snowflake``, ``bigquery``, ``postgresql``),
+        which is the closed-enum value the schema's
+        ``AdbcTransport.driver`` allows.
+        """
         return self._transport_driver
 
     @property

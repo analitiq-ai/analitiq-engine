@@ -364,7 +364,7 @@ def _select_transport(
 # ---------------------------------------------------------------------------
 
 
-@dataclass
+@dataclass(frozen=True)
 class SqlAlchemyTransport:
     """Materialized SQLAlchemy transport.
 
@@ -468,21 +468,24 @@ _ADBC_DRIVER_MODULES: Dict[str, str] = {
 }
 
 
-@dataclass
+@dataclass(frozen=True)
 class AdbcTransport:
     """Materialized ADBC transport.
 
     ADBC drivers are synchronous DBAPI 2.0. There is no connection pool;
-    callers open a fresh connection via :meth:`connect` and own its
-    lifecycle (close on disconnect, drop on ingest failure to avoid
-    reusing a poisoned handle). Driver-side concurrency is managed by
-    running each cursor operation on a worker thread via
+    callers open a fresh connection via the ``connect`` callable and
+    own its lifecycle (close on disconnect, drop on ingest failure to
+    avoid reusing a poisoned handle). Driver-side concurrency is
+    managed by running each cursor operation on a worker thread via
     ``asyncio.to_thread``.
+
+    Frozen so a buggy caller cannot mutate ``driver`` after the
+    transport is wired into a runtime — the driver string drives
+    per-warehouse SQL dispatch in the destination handler.
     """
 
     connect: Callable[[], Any]
     driver: str
-    driver_module_path: str
 
 
 def _resolve_db_kwargs(
@@ -493,8 +496,13 @@ def _resolve_db_kwargs(
     Each value goes through the resolver so secrets and connection
     parameters flow in the same way as DSN bindings. ADBC accepts
     non-string scalar values; stringification is left to the driver.
+
     Keys whose values resolve to ``None`` are dropped — that matches
-    the schema's treatment of optional credential fields.
+    the schema's treatment of optional credential fields, where an
+    unset secret should not override the driver's own default. The
+    drop is logged at INFO so an operator can distinguish "field was
+    intentionally absent" from "the expression I authored resolved to
+    None (likely an unbound placeholder or empty secret)".
     """
     if raw is None:
         return {}
@@ -504,6 +512,12 @@ def _resolve_db_kwargs(
     for name, value in raw.items():
         resolved = resolver.resolve(value)
         if resolved is None:
+            logger.info(
+                "adbc db_kwargs[%s] resolved to None; passing driver default. "
+                "If you intended a value, check the secret store and connection "
+                "parameters.",
+                name,
+            )
             continue
         out[str(name)] = resolved
     return out
@@ -587,11 +601,7 @@ async def build_adbc_transport(
         except Exception:
             logger.debug("ADBC probe connection close failed", exc_info=True)
 
-    return AdbcTransport(
-        connect=_open_connection,
-        driver=driver,
-        driver_module_path=driver_module_path,
-    )
+    return AdbcTransport(connect=_open_connection, driver=driver)
 
 
 def _ping_adbc(conn: Any) -> None:
@@ -608,7 +618,7 @@ def _ping_adbc(conn: Any) -> None:
 # ---------------------------------------------------------------------------
 
 
-@dataclass
+@dataclass(frozen=True)
 class HttpTransport:
     """Materialized HTTP transport ready for ``aiohttp`` requests."""
 

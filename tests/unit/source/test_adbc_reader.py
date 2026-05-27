@@ -24,39 +24,65 @@ from src.source.drivers.adbc_reader import AdbcReadPlan, _build_select_sql
 
 
 class TestBuildSelectSql:
-    def test_basic_select(self):
+    def test_basic_select_snowflake_double_quotes(self):
         plan = AdbcReadPlan(
             table_name="orders",
-            columns=["id", "status"],
+            columns=("id", "status",),
             schema_name="public",
         )
-        sql, params = _build_select_sql(plan)
+        sql, params = _build_select_sql(plan, "snowflake")
         assert sql == 'SELECT "id", "status" FROM "public"."orders"'
         assert params == ()
 
+    def test_basic_select_bigquery_backticks(self):
+        # BigQuery uses backticks — double quotes denote STRING literals
+        # and would syntax-error against the warehouse.
+        plan = AdbcReadPlan(
+            table_name="orders",
+            columns=("id", "status",),
+            schema_name="analytics",
+        )
+        sql, params = _build_select_sql(plan, "bigquery")
+        assert sql == "SELECT `id`, `status` FROM `analytics`.`orders`"
+        assert params == ()
+
+    def test_basic_select_postgres_double_quotes(self):
+        plan = AdbcReadPlan(
+            table_name="orders",
+            columns=("id",),
+            schema_name="public",
+        )
+        sql, _ = _build_select_sql(plan, "postgresql")
+        assert sql == 'SELECT "id" FROM "public"."orders"'
+
     def test_unqualified_when_no_schema(self):
-        plan = AdbcReadPlan(table_name="orders", columns=["id"])
-        sql, params = _build_select_sql(plan)
+        plan = AdbcReadPlan(table_name="orders", columns=("id",))
+        sql, params = _build_select_sql(plan, "snowflake")
         assert sql == 'SELECT "id" FROM "orders"'
         assert params == ()
 
     def test_quote_escaping(self):
         plan = AdbcReadPlan(
-            table_name='ord"ers', columns=['id"col'], schema_name='pu"blic',
+            table_name='ord"ers', columns=('id"col',), schema_name='pu"blic',
         )
-        sql, _ = _build_select_sql(plan)
+        sql, _ = _build_select_sql(plan, "snowflake")
         assert '"pu""blic"."ord""ers"' in sql
         assert '"id""col"' in sql
+
+    def test_bigquery_rejects_backtick_in_name(self):
+        plan = AdbcReadPlan(table_name="ord`ers", columns=("id",))
+        with pytest.raises(ValueError, match="backtick"):
+            _build_select_sql(plan, "bigquery")
 
     def test_cursor_inclusive(self):
         plan = AdbcReadPlan(
             table_name="orders",
-            columns=["id"],
+            columns=("id",),
             cursor_field="id",
             cursor_value=100,
             cursor_mode="inclusive",
         )
-        sql, params = _build_select_sql(plan)
+        sql, params = _build_select_sql(plan, "snowflake")
         assert 'WHERE "id" >= ?' in sql
         assert 'ORDER BY "id" ASC' in sql
         assert params == (100,)
@@ -64,23 +90,23 @@ class TestBuildSelectSql:
     def test_cursor_exclusive(self):
         plan = AdbcReadPlan(
             table_name="orders",
-            columns=["id"],
+            columns=("id",),
             cursor_field="id",
             cursor_value=100,
             cursor_mode="exclusive",
         )
-        sql, params = _build_select_sql(plan)
+        sql, params = _build_select_sql(plan, "snowflake")
         assert 'WHERE "id" > ?' in sql
         assert params == (100,)
 
     def test_cursor_field_without_value_no_where(self):
         plan = AdbcReadPlan(
             table_name="orders",
-            columns=["id"],
+            columns=("id",),
             cursor_field="id",
             cursor_value=None,
         )
-        sql, params = _build_select_sql(plan)
+        sql, params = _build_select_sql(plan, "snowflake")
         assert "WHERE" not in sql
         # ORDER BY still applies so paging stays deterministic
         assert 'ORDER BY "id" ASC' in sql
@@ -89,19 +115,19 @@ class TestBuildSelectSql:
     def test_limit_offset_inlined(self):
         plan = AdbcReadPlan(
             table_name="orders",
-            columns=["id"],
+            columns=("id",),
             limit=100,
             offset=200,
         )
-        sql, _ = _build_select_sql(plan)
+        sql, _ = _build_select_sql(plan, "snowflake")
         assert "LIMIT 100" in sql
         assert "OFFSET 200" in sql
 
-    def test_empty_columns_rejected(self):
+    def test_empty_columns_rejected_at_construction(self):
+        # The check now lives in __post_init__ so the type carries
+        # the invariant rather than relying on the renderer.
         with pytest.raises(ValueError, match="columns must not be empty"):
-            _build_select_sql(
-                AdbcReadPlan(table_name="orders", columns=[]),
-            )
+            AdbcReadPlan(table_name="orders", columns=())
 
 
 class TestAdbcReadPlanValidation:
@@ -109,10 +135,10 @@ class TestAdbcReadPlanValidation:
         with pytest.raises(ValueError, match="cursor_mode"):
             AdbcReadPlan(
                 table_name="orders",
-                columns=["id"],
+                columns=("id",),
                 cursor_mode="inclusiv",  # typo
             )
 
     def test_default_cursor_mode_inclusive(self):
-        plan = AdbcReadPlan(table_name="orders", columns=["id"])
+        plan = AdbcReadPlan(table_name="orders", columns=("id",))
         assert plan.cursor_mode == "inclusive"

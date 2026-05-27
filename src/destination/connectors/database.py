@@ -9,9 +9,10 @@ efficient columnar type conversion for batch operations.
 
 import asyncio
 import logging
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Mapping, Optional, Set, Tuple
+from typing import Any, Dict, List, Literal, Mapping, Optional, Set, Tuple
 
 import pyarrow as pa
 from sqlalchemy import (
@@ -115,22 +116,34 @@ class AdbcCommitRecordError(RuntimeError):
     error.
     """
 
-    _RETRY_SEMANTICS = {
+    WriteMode = Literal["insert", "upsert", "truncate_insert"]
+
+    _RETRY_SEMANTICS: Dict[str, str] = {
         "insert": "retry will duplicate rows",
         "truncate_insert": "retry is idempotent (truncate + re-ingest)",
         "upsert": "retry is idempotent under conflict keys (re-MERGE)",
     }
 
-    def __init__(self, inner: BaseException, write_mode: str = "insert") -> None:
-        retry_note = self._RETRY_SEMANTICS.get(
-            write_mode, f"retry semantics for write_mode={write_mode!r} unknown"
-        )
+    def __init__(
+        self,
+        inner: BaseException,
+        write_mode: WriteMode = "insert",
+    ) -> None:
+        if write_mode not in self._RETRY_SEMANTICS:
+            # The Literal already constrains callers at type-check time;
+            # this guards against runtime values that bypass typing (e.g.
+            # constructed from arbitrary strings in tests). Loud here
+            # beats a misleading "retry semantics unknown" in production.
+            raise ValueError(
+                f"AdbcCommitRecordError.write_mode must be one of "
+                f"{sorted(self._RETRY_SEMANTICS)}; got {write_mode!r}"
+            )
         super().__init__(
             f"adbc ingest committed; commit-record failed "
-            f"({retry_note}): {inner}"
+            f"({self._RETRY_SEMANTICS[write_mode]}): {inner}"
         )
         self.__cause__ = inner
-        self.write_mode = write_mode
+        self.write_mode: AdbcCommitRecordError.WriteMode = write_mode
 
 
 @dataclass
@@ -163,24 +176,25 @@ class _StreamState:
 
 
 class DatabaseDestinationHandler(BaseDestinationHandler):
-    """
-    Unified database destination handler using SQLAlchemy.
+    """Unified database destination handler.
 
-    Supports any database that SQLAlchemy supports via the `driver` config field.
-    The handler automatically:
-    - Creates the target table if it doesn't exist
-    - Creates the idempotency tracking table
-    - Handles upsert operations for supported databases
-    - Tracks batch commits for idempotency
+    Supports two transports, selected by the connector definition and
+    set on the runtime that ``connect()`` consumes:
 
-    Configuration (connection config):
-    - driver: Database driver (postgresql, mysql, sqlite, etc.)
-    - host: Database host
-    - port: Database port
-    - database: Database name
-    - username: Database username
-    - password: Database password
-    - ssl_mode: Optional SSL mode
+    * ``transport_type: "sqlalchemy"`` — async SQLAlchemy engine
+      (Postgres asyncpg, MySQL aiomysql). DDL via ``MetaData.create_all``,
+      DML via the dialect's INSERT/INSERT-ON-CONFLICT/MERGE compilers.
+    * ``transport_type: "adbc"`` — direct ADBC DBAPI 2.0 connection
+      (Snowflake, BigQuery, Postgres-via-ADBC for Redshift). DDL via
+      ``cursor.execute`` of per-driver native SQL, ingest via
+      ``cursor.adbc_ingest``, upsert via stage-table + ``MERGE INTO``.
+
+    Both modes share idempotency tracking (``_batch_commits`` table
+    keyed on ``(run_id, stream_id, batch_seq)``), the schema-contract
+    Arrow cast, and the per-stream state machine. Configuration is
+    resolved through ``ConnectionRuntime`` rather than read off the
+    raw connection JSON — the handler never inspects host/port/secret
+    fields directly.
 
     Per-stream destination settings (schema, table, primary keys,
     columns) are read from the preloaded contract endpoint document at
@@ -235,22 +249,36 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         # at startup.
         self._stream_endpoints: Dict[str, Dict[str, Any]] = {}
 
-        # Lazily-imported ADBC dbapi module. ``None`` means the import
-        # has not been attempted; ``_ADBC_IMPORT_FAILED`` means it was
-        # attempted and the package is unavailable in this process — we
-        # do not retry within the handler's lifetime.
+        # Lazily-imported ADBC dbapi module — used only by the Postgres
+        # fast path (SA engine + opportunistic ADBC ingest). ADBC-only
+        # mode does NOT use this field; its driver module is captured in
+        # the closure returned by ``runtime.open_adbc_connection``.
+        # ``None`` means the import has not been attempted;
+        # ``_ADBC_IMPORT_FAILED`` means it was attempted and the package
+        # is unavailable — we do not retry within the handler's lifetime.
         self._adbc_module: Any = None
-        # ADBC connection cached for the handler's lifetime. ADBC uses
-        # its own libpq transport, separate from the SQLAlchemy
-        # AsyncEngine pool. Opened lazily, nulled on any ingest error
-        # so the next batch reconnects instead of reusing a poisoned
-        # handle.
+        # Cached ADBC DBAPI connection. Shared by:
+        #   * Fast path (Postgres, opened lazily via _open_adbc_connection,
+        #     libpq transport).
+        #   * ADBC-only mode (Snowflake / BigQuery / Postgres, opened
+        #     eagerly in connect() via runtime.open_adbc_connection(),
+        #     driver-specific transport).
+        # Nulled on any failure under _adbc_conn_lock so the next
+        # operation reopens instead of reusing a poisoned handle.
         self._adbc_conn: Any = None
         # Set of ``(stream_id, reason)`` pairs already logged when the
         # fast path was demoted to SQLAlchemy. Keyed on stream_id so
         # two streams writing to the same physical table each get their
         # own first-demotion log line.
         self._adbc_demotion_logged: Set[Tuple[str, str]] = set()
+        # Guards mutations of ``self._adbc_conn`` from worker threads.
+        # ``asyncio.to_thread`` dispatches each ADBC call to the default
+        # thread pool; without this lock two concurrent failures could
+        # double-close the same DBAPI handle (libpq segfault risk) and
+        # two concurrent reopens could open and leak a second connection.
+        # Sync (``threading.Lock``) because the protected sections run
+        # off the event loop.
+        self._adbc_conn_lock: threading.Lock = threading.Lock()
 
     def set_endpoint_refs(self, endpoint_refs: Mapping[str, Any]) -> None:
         """Register stream_id → endpoint_ref for each stream writing to this
@@ -304,12 +332,25 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
 
     @property
     def supports_upsert(self) -> bool:
-        """PostgreSQL and MySQL support upsert."""
+        """True when the active driver has an upsert path.
+
+        SA-mode dialects use INSERT ON CONFLICT / ON DUPLICATE KEY
+        UPDATE; ADBC-only mode uses stage-table + ``MERGE INTO``.
+        """
+        if self._adbc_only:
+            return self._driver in ("postgresql", "snowflake", "bigquery")
         return self._driver in ("postgresql", "postgres", "mysql", "mariadb")
 
     @property
     def supports_bulk_load(self) -> bool:
-        """Bulk load support depends on database."""
+        """Bulk-load capability is not advertised here.
+
+        ADBC dialects use Arrow-native ingest (``adbc_ingest``) for every
+        write regardless of this flag; SA dialects use parameterized
+        INSERT batches. Returning False keeps the destination protocol
+        unaware of the distinction — the engine always batches the same
+        way.
+        """
         return False
 
     async def connect(self, runtime: ConnectionRuntime) -> None:
@@ -993,8 +1034,9 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         active dialect or the engine URL is missing required parts.
         TLS mode flows in from the runtime so the ADBC connection
         matches the SQLAlchemy engine's posture; ``verify-ca`` /
-        ``verify-full`` with a CA bundle demotes to the SA path
-        because the URI can't carry an inline PEM.
+        ``verify-full`` always demote to the SA path because the URI
+        cannot carry the CA file path (``sslrootcert=``) those modes
+        need.
         """
         if self._engine is None:
             return None
@@ -1039,11 +1081,16 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         * Opt-in feature flag (``ADBC_FAST_PATH`` env var) is set.
         * Stream is append-only (``write_mode == "insert"``);
           ``adbc_ingest`` is INSERT/APPEND only.
-        * The dialect is in ``_ADBC_MODULES`` and the matching driver
-          package is importable.
+        * The dialect is in ``_ADBC_MODULES`` (from
+          ``src.shared.adbc_registry``) and the matching driver package
+          is importable.
         * A connection URI can be built from the engine's URL.
         * The stream has a configured schema contract (needed for the
           vectorized cast before ingest).
+
+        This is the SA-backed fast path only — ADBC-only mode (set by
+        the runtime's ``transport_type: "adbc"``) bypasses this method
+        and dispatches via :meth:`_write_batch_adbc_only`.
         """
         if not _adbc_flag_enabled():
             return False
@@ -1196,13 +1243,26 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
     # but its SA path remains the primary route.
 
     def _adbc_quote_ident(self, name: str) -> str:
-        """Quote a SQL identifier for ADBC dialects.
+        """Quote a SQL identifier for the active ADBC driver.
 
-        Snowflake uppercases unquoted identifiers, so we double-quote
-        everything to preserve the engine's lower-case-by-convention
-        column / table / schema names exactly. BigQuery and Postgres
-        also accept double-quoted identifiers.
+        BigQuery GoogleSQL uses backticks for identifier quoting;
+        double-quoted strings are STRING literals there. Snowflake and
+        Postgres use ANSI double quotes. Per-driver dispatch keeps the
+        engine's lower-case-by-convention names intact across dialects
+        (Snowflake uppercases unquoted identifiers; BigQuery's name
+        rules are case-sensitive; Postgres folds unquoted to lowercase).
         """
+        if self._driver == "bigquery":
+            # BigQuery does not accept embedded backticks in identifier
+            # names — they are quote-only. Defensively raise so the
+            # failure mode is loud rather than a confusing parse error
+            # from the warehouse.
+            if "`" in name:
+                raise ValueError(
+                    f"BigQuery identifier {name!r} contains a backtick; "
+                    "BigQuery does not support escaped backticks in names"
+                )
+            return f"`{name}`"
         return '"' + name.replace('"', '""') + '"'
 
     def _adbc_quote_qualified(self, schema: str, name: str) -> str:
@@ -1338,8 +1398,11 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         if self._driver == "snowflake":
             return normalized == "public"
         if self._driver == "bigquery":
-            # BigQuery has no "default dataset" — every DML names one
-            # explicitly. Treat no name as implicit; never auto-create.
+            # BigQuery has no implicit default dataset; any named dataset
+            # must be created explicitly. Returning False for any non-
+            # empty name causes _ensure_tables_via_adbc to always emit
+            # CREATE SCHEMA IF NOT EXISTS for it (the empty case is
+            # already short-circuited above).
             return False
         # Postgres / Redshift
         return normalized == "public"
@@ -1392,17 +1455,25 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         """Drop and close the cached ADBC connection after a failure.
 
         The next operation re-opens via ``runtime.open_adbc_connection``.
-        Close errors are logged at DEBUG — the original failure is what
-        the caller needs to see.
+        Close runs outside the lock so a slow libpq close path doesn't
+        block other threads waiting to reopen; ``_adbc_conn_lock``
+        ensures only one thread runs the close, preventing double-free
+        on libpq handles.
         """
-        conn = self._adbc_conn
-        self._adbc_conn = None
+        with self._adbc_conn_lock:
+            conn = self._adbc_conn
+            self._adbc_conn = None
         if conn is not None:
             try:
                 conn.close()
             except Exception:
-                logger.debug(
-                    "Discarded poisoned ADBC connection; close failed",
+                # Promoted from DEBUG: a failing close on a Snowflake /
+                # BigQuery / Postgres ADBC handle is a server-side
+                # resource leak (warehouse session, libpq fd, gRPC
+                # context) operators may need to act on.
+                logger.warning(
+                    "Discarded poisoned ADBC connection; close failed — "
+                    "potential server-side resource leak",
                     exc_info=True,
                 )
 
@@ -1412,13 +1483,22 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         In ADBC-only mode the connection is opened in ``connect()`` but
         may be poisoned by an earlier failure. This helper transparently
         re-opens via the runtime so each write is self-healing.
+        The lock guards a check-then-act race: two threads could both
+        observe ``_adbc_conn is None`` and each open a new connection,
+        leaking one.
         """
-        if self._adbc_conn is not None:
+        with self._adbc_conn_lock:
+            if self._adbc_conn is not None:
+                return self._adbc_conn
+            if self._runtime is None:
+                raise AdbcConfigurationError(
+                    "Runtime not available for ADBC reconnect"
+                )
+            # open_adbc_connection is sync; safe to call inside the lock
+            # because the lock is fast (no I/O) — only the connect() call
+            # itself blocks, but that's the work this method is doing.
+            self._adbc_conn = self._runtime.open_adbc_connection()
             return self._adbc_conn
-        if self._runtime is None:
-            raise AdbcConfigurationError("Runtime not available for ADBC reconnect")
-        self._adbc_conn = self._runtime.open_adbc_connection()
-        return self._adbc_conn
 
     async def _check_batch_committed_via_adbc(
         self,
@@ -1571,10 +1651,15 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
                 cast_batch, state.schema_name, state.table_name,
             )
         elif state.write_mode == "upsert" and conflict_keys:
+            # Per-batch token prevents stage-table name collisions across
+            # concurrent streams writing to the same target and across
+            # retries that overlap the previous attempt's DROP.
+            stage_token = f"{run_id}_{batch_seq}".replace("-", "")[:48]
             await asyncio.to_thread(
                 self._merge_ingest_sync,
                 cast_batch, state.schema_name, state.table_name,
                 list(cast_batch.schema.names), conflict_keys,
+                stage_token,
             )
         else:
             await asyncio.to_thread(
@@ -1655,39 +1740,38 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
             raise
         self._adbc_only_ingest_sync(cast_batch, schema_name, table_name)
 
-    def _build_adbc_temp_table_sql(
-        self, temp_name: str, target_qualified: str
+    def _build_adbc_stage_table_sql(
+        self,
+        stage_qualified: str,
+        target_qualified: str,
     ) -> str:
-        """Per-driver SQL to create a session-scoped staging table.
+        """SQL to create an empty staging table shaped like the target.
 
-        Driver-specific because each warehouse has its own syntax:
+        Uses ``CREATE TABLE`` (not ``TEMP``) so the table lives in the
+        target schema across all drivers and the engine controls
+        cleanup explicitly via ``DROP TABLE``. Each driver has its own
+        column-copy syntax:
 
-        * Snowflake — ``CREATE OR REPLACE TEMPORARY TABLE``; ``LIKE``
-          copies the column list. Session-scoped temp tables drop at
-          session close.
-        * BigQuery — ``CREATE TEMP TABLE`` (no OR REPLACE for temps);
-          ``LIKE`` is not supported, so we use
-          ``AS SELECT * FROM target WHERE FALSE``. Temp tables drop at
-          session close (~24h max).
-        * Postgres — ``CREATE TEMP TABLE`` with ``LIKE INCLUDING
-          DEFAULTS``. Temp tables drop at session close. ``ON COMMIT
-          DROP`` would also work but we want the table to survive
-          across the ingest/MERGE commit boundary.
+        * Snowflake — ``CREATE TABLE … LIKE`` copies columns only.
+        * BigQuery — ``CREATE TABLE … LIKE`` is not supported in
+          GoogleSQL; use ``AS SELECT * FROM target WHERE FALSE``.
+        * Postgres — ``CREATE TABLE … (LIKE target INCLUDING DEFAULTS)``.
+
+        The previous design used TEMP tables for auto-cleanup, but BQ
+        TEMP tables require an explicit session (which the ADBC driver
+        does not open by default) and the per-driver TEMP+namespace
+        rules diverge enough that explicit DROP is simpler.
         """
-        quoted_temp = self._adbc_quote_ident(temp_name)
         if self._driver == "snowflake":
-            return (
-                f"CREATE OR REPLACE TEMPORARY TABLE {quoted_temp} "
-                f"LIKE {target_qualified}"
-            )
+            return f"CREATE TABLE {stage_qualified} LIKE {target_qualified}"
         if self._driver == "bigquery":
             return (
-                f"CREATE TEMP TABLE {quoted_temp} AS "
+                f"CREATE TABLE {stage_qualified} AS "
                 f"SELECT * FROM {target_qualified} WHERE FALSE"
             )
         # Postgres / Redshift
         return (
-            f"CREATE TEMP TABLE {quoted_temp} "
+            f"CREATE TABLE {stage_qualified} "
             f"(LIKE {target_qualified} INCLUDING DEFAULTS)"
         )
 
@@ -1698,45 +1782,62 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         table_name: str,
         all_columns: List[str],
         conflict_keys: List[str],
+        stage_token: str,
     ) -> None:
-        """Upsert via ingest-to-temp + ``MERGE INTO`` target.
+        """Upsert via ingest-to-stage + ``MERGE INTO`` target.
 
-        Temporary tables are session-scoped on every supported ADBC
-        dialect so no explicit cleanup is required; collisions inside
-        a single session are avoided by suffixing the table name.
-        Snowflake's ``CREATE OR REPLACE`` covers same-session retries;
-        BigQuery and Postgres tear down the temp table at session end.
+        Creates a stage table named ``_analitiq_stage_<target>_<token>``
+        in the target schema, ingests the cast batch via
+        ``adbc_ingest``, runs ``MERGE INTO target USING stage``, then
+        explicitly DROPs the stage. ``stage_token`` (typically the
+        batch_seq) makes the name unique per write so two concurrent
+        streams writing to the same target — or a retry overlapping
+        the previous attempt's DROP — do not collide on the stage
+        table name.
 
-        Postgres temp tables are created in ``pg_temp`` regardless of
-        the schema name, so the ingest into the temp passes
-        ``db_schema_name=None``.
+        When every column is a conflict key (composite-PK table with
+        no non-key columns), MERGE's ``WHEN MATCHED THEN UPDATE`` is
+        omitted and the operation degrades to insert-if-not-exists. A
+        warning surfaces this so operators don't silently see "matched
+        rows unchanged" without an explanation.
         """
-        # Suffix the staging name with a unique-ish token to defend
-        # against same-session collisions when multiple streams write
-        # to the same target via one shared handler.
-        temp_name = f"_analitiq_stage_{table_name}"
+        # Suffix with the per-write token so concurrent streams and
+        # retries (which may overlap before the previous DROP completes)
+        # do not collide on the stage table name.
+        stage_name = f"_analitiq_stage_{table_name}_{stage_token}"
         target_qualified = self._adbc_quote_qualified(schema_name, table_name)
+        stage_qualified = self._adbc_quote_qualified(schema_name, stage_name)
+        update_cols = [c for c in all_columns if c not in conflict_keys]
+        if not update_cols:
+            logger.warning(
+                "ADBC upsert into %s.%s has no non-key columns to update "
+                "(all_columns == conflict_keys); MERGE will only INSERT "
+                "new rows. Consider write_mode='insert' for clarity.",
+                schema_name, table_name,
+            )
         conn = self._reopen_adbc_if_needed_sync()
+        stage_created = False
         try:
             cursor = conn.cursor()
             try:
-                cursor.execute(self._build_adbc_temp_table_sql(temp_name, target_qualified))
+                cursor.execute(
+                    self._build_adbc_stage_table_sql(stage_qualified, target_qualified)
+                )
                 conn.commit()
+                stage_created = True
                 cursor.adbc_ingest(
-                    temp_name,
+                    stage_name,
                     cast_batch,
                     mode="append",
-                    # Temp tables live in a session-private namespace on
-                    # every supported dialect; omitting db_schema_name
-                    # lets the driver resolve via pg_temp / temp.
-                    db_schema_name=None,
+                    # Stage lives in the target schema; the driver needs
+                    # the schema name to resolve the right table.
+                    db_schema_name=schema_name or None,
                 )
                 conn.commit()
                 on_clause = " AND ".join(
                     f"t.{self._adbc_quote_ident(k)} = s.{self._adbc_quote_ident(k)}"
                     for k in conflict_keys
                 )
-                update_cols = [c for c in all_columns if c not in conflict_keys]
                 set_clause = ", ".join(
                     f"t.{self._adbc_quote_ident(c)} = s.{self._adbc_quote_ident(c)}"
                     for c in update_cols
@@ -1745,9 +1846,8 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
                 insert_vals = ", ".join(
                     f"s.{self._adbc_quote_ident(c)}" for c in all_columns
                 )
-                quoted_temp = self._adbc_quote_ident(temp_name)
                 merge_sql = (
-                    f"MERGE INTO {target_qualified} t USING {quoted_temp} s "
+                    f"MERGE INTO {target_qualified} t USING {stage_qualified} s "
                     f"ON {on_clause} "
                 )
                 if update_cols:
@@ -1764,10 +1864,58 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
                 except Exception:
                     logger.debug("ADBC cursor close failed", exc_info=True)
         except Exception as exc:
+            # Best-effort stage cleanup so a failed MERGE doesn't leave
+            # the stage table around for the next batch to collide on.
+            # Connection may be poisoned at this point, so swallow any
+            # DROP failure — the unique stage_token gives the retry a
+            # different name anyway.
+            if stage_created and self._adbc_conn is not None:
+                try:
+                    drop_cursor = self._adbc_conn.cursor()
+                    try:
+                        drop_cursor.execute(
+                            f"DROP TABLE IF EXISTS {stage_qualified}"
+                        )
+                        self._adbc_conn.commit()
+                    finally:
+                        try:
+                            drop_cursor.close()
+                        except Exception:
+                            logger.debug(
+                                "ADBC cursor close failed", exc_info=True
+                            )
+                except Exception:
+                    logger.warning(
+                        "ADBC stage table %s left behind after MERGE failure; "
+                        "DROP will be retried implicitly by IF EXISTS on next write",
+                        stage_qualified, exc_info=True,
+                    )
             self._poison_adbc_connection()
             if _is_fatal_adbc_error(exc):
                 raise _reclassify_as_fatal(exc) from exc
             raise
+        # Successful path — DROP the stage so subsequent writes start
+        # clean (CREATE TABLE already errored if it existed).
+        try:
+            drop_cursor = conn.cursor()
+            try:
+                drop_cursor.execute(f"DROP TABLE IF EXISTS {stage_qualified}")
+                conn.commit()
+            finally:
+                try:
+                    drop_cursor.close()
+                except Exception:
+                    logger.debug("ADBC cursor close failed", exc_info=True)
+        except Exception:
+            # The MERGE succeeded; leaving the stage around is a
+            # cosmetic leak, not a correctness issue. Next write will
+            # collide on the same name only if stage_token repeats,
+            # which the per-batch token prevents.
+            logger.warning(
+                "ADBC stage table %s DROP failed; will be cleaned up on next "
+                "write with the same stage_token",
+                stage_qualified, exc_info=True,
+            )
 
     async def health_check(self) -> bool:
         """Check database health."""
@@ -1796,10 +1944,11 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         """Health probe for ADBC-only mode.
 
         Self-heals a poisoned cached connection by reopening through
-        the runtime — without that, a single transient ingest failure
-        would leave health_check returning False forever (until the
-        next write_batch reopens), causing avoidable liveness failures
-        and restarts.
+        the runtime. Without the reopen, a poisoned cache would make
+        this probe fail until some other caller (next write_batch)
+        repopulated the cache — i.e. liveness would lag the actual
+        DB reachability by one batch interval. The reopen makes the
+        probe self-sufficient.
         """
         conn = self._reopen_adbc_if_needed_sync()
         try:

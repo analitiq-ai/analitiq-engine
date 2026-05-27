@@ -221,20 +221,26 @@ def _close_quietly(conn: Any) -> None:
 # paramstyle every ADBC driver in the registry accepts.
 
 
-def _quote_ident(name: str) -> str:
-    """Quote a SQL identifier for ADBC dialects.
+def _quote_ident(name: str, driver: str) -> str:
+    """Quote a SQL identifier for the active ADBC driver.
 
-    Snowflake uppercases unquoted identifiers, so we double-quote
-    everything to preserve the engine's lower-case convention exactly.
-    BigQuery and Postgres also accept double-quoted identifiers.
+    BigQuery GoogleSQL uses backticks (double quotes denote STRING
+    literals). Snowflake and Postgres use ANSI double quotes.
     """
+    if driver == "bigquery":
+        if "`" in name:
+            raise ValueError(
+                f"BigQuery identifier {name!r} contains a backtick; "
+                "BigQuery does not support escaped backticks in names"
+            )
+        return f"`{name}`"
     return '"' + name.replace('"', '""') + '"'
 
 
-def _quote_qualified(schema: Optional[str], name: str) -> str:
+def _quote_qualified(schema: Optional[str], name: str, driver: str) -> str:
     if schema:
-        return f"{_quote_ident(schema)}.{_quote_ident(name)}"
-    return _quote_ident(name)
+        return f"{_quote_ident(schema, driver)}.{_quote_ident(name, driver)}"
+    return _quote_ident(name, driver)
 
 
 @dataclass(frozen=True)
@@ -246,10 +252,12 @@ class AdbcReadPlan:
     schema contract or state manager. ``cursor_mode`` is validated in
     ``__post_init__`` so a typo (``"inclusiv"`` -> defaults to ``>``)
     cannot silently degrade an incremental read into a full re-scan.
+    ``columns`` is a tuple so the ``frozen=True`` promise actually
+    holds (a List would leave the interior mutable).
     """
 
     table_name: str
-    columns: List[str]
+    columns: Tuple[str, ...]
     schema_name: Optional[str] = None
     cursor_field: Optional[str] = None
     cursor_value: Any = None
@@ -263,35 +271,41 @@ class AdbcReadPlan:
                 f"AdbcReadPlan.cursor_mode must be 'inclusive' or 'exclusive', "
                 f"got {self.cursor_mode!r}"
             )
+        if not self.columns:
+            raise ValueError("AdbcReadPlan.columns must not be empty")
 
 
-def _build_select_sql(plan: AdbcReadPlan) -> Tuple[str, Tuple[Any, ...]]:
-    """Render ``plan`` as an ANSI SELECT with positional ``?`` parameters.
+def _build_select_sql(
+    plan: AdbcReadPlan, driver: str
+) -> Tuple[str, Tuple[Any, ...]]:
+    """Render ``plan`` as a SELECT with positional ``?`` parameters.
 
     Every supported ADBC driver (postgresql, snowflake, bigquery)
-    accepts qmark paramstyle, ``LIMIT n OFFSET n`` clauses, and
-    standard double-quoted identifiers. Stream-level filters are NOT
-    supported here — the source connector raises ``ReadError`` if a
-    stream defines them. Adding filter support means extending this
-    helper to render the operators ``QueryBuilder`` already knows.
+    accepts qmark paramstyle and ``LIMIT n OFFSET n`` clauses;
+    identifier quoting differs per driver (backticks for BigQuery,
+    ANSI double quotes for the others) and is handled by
+    :func:`_quote_ident`. Stream-level filters are NOT supported here
+    — the source connector raises ``ReadError`` if a stream defines
+    them. Adding filter support means extending this helper to render
+    the operators ``QueryBuilder`` already knows.
     """
-    if not plan.columns:
-        raise ValueError("AdbcReadPlan.columns must not be empty")
-    col_list = ", ".join(_quote_ident(c) for c in plan.columns)
-    qualified = _quote_qualified(plan.schema_name, plan.table_name)
+    # Non-empty columns is enforced by AdbcReadPlan.__post_init__; the
+    # renderer can trust the invariant.
+    col_list = ", ".join(_quote_ident(c, driver) for c in plan.columns)
+    qualified = _quote_qualified(plan.schema_name, plan.table_name, driver)
 
     where_parts: List[str] = []
     params: List[Any] = []
     if plan.cursor_field and plan.cursor_value is not None:
         op = ">=" if plan.cursor_mode == "inclusive" else ">"
-        where_parts.append(f"{_quote_ident(plan.cursor_field)} {op} ?")
+        where_parts.append(f"{_quote_ident(plan.cursor_field, driver)} {op} ?")
         params.append(plan.cursor_value)
 
     sql = f"SELECT {col_list} FROM {qualified}"
     if where_parts:
         sql += " WHERE " + " AND ".join(where_parts)
     if plan.cursor_field:
-        sql += f" ORDER BY {_quote_ident(plan.cursor_field)} ASC"
+        sql += f" ORDER BY {_quote_ident(plan.cursor_field, driver)} ASC"
     if plan.limit is not None:
         sql += f" LIMIT {int(plan.limit)}"
     if plan.offset is not None:
@@ -317,7 +331,9 @@ class AdbcReader:
         return await asyncio.to_thread(self._fetch_page_sync, plan)
 
     def _fetch_page_sync(self, plan: AdbcReadPlan) -> List[pa.RecordBatch]:
-        sql, params = _build_select_sql(plan)
+        if self._conn is None:
+            raise RuntimeError("AdbcReader is closed")
+        sql, params = _build_select_sql(plan, self.driver)
         cursor = self._conn.cursor()
         try:
             if params:

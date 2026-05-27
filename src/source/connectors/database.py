@@ -315,24 +315,31 @@ class DatabaseConnector(BaseConnector):
 
         Holds one DBAPI connection for the lifetime of the read; each
         page goes ``cursor.execute -> fetch_arrow_table -> cast``,
-        mirroring :meth:`_read_via_adbc` but without the SQLAlchemy
-        engine dependency.
+        mirroring :meth:`_read_via_adbc`. The WHERE clause is fixed at
+        the read's initial cursor_value (matching the SA path); paging
+        advances via OFFSET only. Mixing cursor advancement with OFFSET
+        would skip rows on every page after the first (the cursor moves
+        right while OFFSET continues to skip rows the cursor would have
+        included).
         """
         if self._runtime is None:
             raise ReadError(
                 "DatabaseConnector._read_via_adbc_only requires a materialized runtime"
             )
-        offset = 0
+        # Initial cursor value is fixed for the duration of the read;
+        # last_cursor_value advances purely for checkpoint state.
+        initial_cursor_value = cursor_value
         last_cursor_value: Any = cursor_value
+        offset = 0
         cursor_missing_warned = False
         async with open_adbc_reader(self._driver, self._runtime) as reader:
             while True:
                 plan = AdbcReadPlan(
                     table_name=table_name,
-                    columns=columns,
+                    columns=tuple(columns),
                     schema_name=schema_name,
                     cursor_field=cursor_field,
-                    cursor_value=last_cursor_value if cursor_field else None,
+                    cursor_value=initial_cursor_value if cursor_field else None,
                     cursor_mode="inclusive",
                     limit=batch_size,
                     offset=offset,
