@@ -8,6 +8,7 @@ efficient columnar type conversion for batch operations.
 """
 
 import asyncio
+import hashlib
 import logging
 import threading
 from dataclasses import dataclass, field
@@ -1692,7 +1693,7 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
                 f"VALUES (?, ?, ?, ?, ?)"
             )
         try:
-            await asyncio.to_thread(
+            rowcount = await asyncio.to_thread(
                 self._execute_adbc_dml_sync,
                 sql,
                 (run_id, stream_id, batch_seq, cursor_bytes, records_written),
@@ -1713,31 +1714,84 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
             # rules can route on it.
             cause = exc.__cause__
             if cause is not None and type(cause).__name__ == "IntegrityError":
-                if state.write_mode == "insert":
-                    logger.error(
-                        "ADBC _batch_commits INSERT raced concurrent retry "
-                        "for %s/%s/%s in insert mode — rows likely duplicated "
-                        "by the loser's prior adbc_ingest",
-                        run_id, stream_id, batch_seq,
-                    )
-                    raise AdbcCommitRecordError(cause, state.write_mode) from cause
-                logger.info(
-                    "ADBC _batch_commits INSERT raced concurrent retry "
-                    "for %s/%s/%s (%s mode); idempotent — treating as "
-                    "already-committed",
-                    run_id, stream_id, batch_seq, state.write_mode,
+                self._handle_commit_collision(
+                    state, run_id, stream_id, batch_seq, cause,
                 )
                 return
             raise
+        # BigQuery's MERGE-based commit-record path doesn't raise
+        # IntegrityError on a (run_id, stream_id, batch_seq) collision —
+        # MERGE matches the existing row and the WHEN NOT MATCHED INSERT
+        # silently no-ops with rowcount=0. Without this check, insert-mode
+        # duplication would slip through reported as success. rowcount=-1
+        # means the driver did not report a count; we accept that as
+        # success (the same Snowflake/Postgres INSERT path returns -1 too
+        # for some driver versions and is treated as success there).
+        if self._driver == "bigquery" and rowcount == 0:
+            collision_marker = RuntimeError(
+                "BigQuery _batch_commits MERGE no-op: a row for "
+                f"({run_id!r}, {stream_id!r}, {batch_seq}) already exists; "
+                "concurrent retry won"
+            )
+            self._handle_commit_collision(
+                state, run_id, stream_id, batch_seq, collision_marker,
+            )
 
-    def _execute_adbc_dml_sync(self, sql: str, params: Tuple[Any, ...]) -> None:
+    def _handle_commit_collision(
+        self,
+        state: _StreamState,
+        run_id: str,
+        stream_id: str,
+        batch_seq: int,
+        cause: BaseException,
+    ) -> None:
+        """Centralise the per-write_mode handling of a concurrent commit
+        collision (whichever driver-specific signal surfaced it — PG/Snow
+        IntegrityError, or BigQuery MERGE rowcount=0).
+
+        For ``insert`` mode the colliding retry already ingested rows
+        and reporting success here would hide the duplication. Raise
+        ``AdbcCommitRecordError`` so the engine's failure summary carries
+        the divergence. For ``upsert`` / ``truncate_insert`` the re-ingest
+        is idempotent, so we treat the collision as already-committed.
+        """
+        if state.write_mode == "insert":
+            logger.error(
+                "ADBC _batch_commits raced concurrent retry for %s/%s/%s "
+                "in insert mode — rows likely duplicated by the loser's "
+                "prior adbc_ingest",
+                run_id, stream_id, batch_seq,
+            )
+            raise AdbcCommitRecordError(cause, state.write_mode) from cause
+        logger.info(
+            "ADBC _batch_commits raced concurrent retry for %s/%s/%s "
+            "(%s mode); idempotent — treating as already-committed",
+            run_id, stream_id, batch_seq, state.write_mode,
+        )
+
+    def _execute_adbc_dml_sync(self, sql: str, params: Tuple[Any, ...]) -> int:
+        """Execute ``sql`` with ``params``; return DBAPI ``rowcount`` or -1.
+
+        ``rowcount`` matters for BigQuery's MERGE-based commit-record
+        path: a successful MERGE that NO-OPs (because the conflict row
+        already exists) returns 0 rows-affected. Without a rowcount
+        check, the BigQuery PK NOT-ENFORCED collision is indistinguishable
+        from a fresh insert, and insert-mode duplication slips through
+        silently — re-introducing exactly the bug the Snowflake/Postgres
+        IntegrityError path catches.
+
+        Some ADBC drivers return -1 when rowcount is unavailable; callers
+        must treat -1 as "unknown" rather than "no rows affected".
+        """
         with self._adbc_op_lock:
             conn = self._reopen_adbc_if_needed_sync()
             try:
                 cursor = conn.cursor()
                 try:
                     cursor.execute(sql, params)
+                    rowcount = getattr(cursor, "rowcount", -1)
                     conn.commit()
+                    return rowcount if isinstance(rowcount, int) else -1
                 finally:
                     try:
                         cursor.close()
@@ -1790,14 +1844,19 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
                 cast_batch, state.schema_name, state.table_name,
             )
         elif state.write_mode == "upsert" and conflict_keys:
-            # Per-(stream, batch) token prevents stage-table name
-            # collisions across concurrent streams writing to the same
-            # target (same run_id + same batch_seq is common when two
-            # streams share a target table) and across retries that
-            # overlap the previous attempt's DROP.
-            stage_token = (
-                f"{run_id}_{stream_id}_{batch_seq}".replace("-", "")[:48]
-            )
+            # Fingerprint via SHA-256 over (run_id, stream_id, batch_seq)
+            # gives a fixed-width collision-resistant token that survives
+            # any future identifier-length pressure. Critical here because
+            # Postgres' NAMEDATALEN is 63 and a UUID-shaped stream_id would
+            # otherwise force truncation that drops batch_seq, defeating
+            # the per-batch uniqueness this token exists to provide. Hex
+            # digest first 16 chars = 64 bits of entropy, plenty for
+            # per-(stream, batch) uniqueness within a destination handler's
+            # lifetime; "b" prefix keeps the token a valid identifier in
+            # every supported dialect.
+            stage_token = "b" + hashlib.sha256(
+                f"{run_id}|{stream_id}|{batch_seq}".encode("utf-8")
+            ).hexdigest()[:16]
             await asyncio.to_thread(
                 self._merge_ingest_sync,
                 cast_batch, state.schema_name, state.table_name,
@@ -1946,11 +2005,12 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         Creates a stage table named ``_analitiq_stage_<target>_<token>``
         in the target schema, ingests the cast batch via
         ``adbc_ingest``, runs ``MERGE INTO target USING stage``, then
-        explicitly DROPs the stage. ``stage_token`` (typically the
-        batch_seq) makes the name unique per write so two concurrent
-        streams writing to the same target — or a retry overlapping
-        the previous attempt's DROP — do not collide on the stage
-        table name.
+        explicitly DROPs the stage. ``stage_token`` is a fixed-width
+        SHA-256 fingerprint of ``(run_id, stream_id, batch_seq)``
+        computed at the call site, so the name is unique across
+        concurrent streams writing to the same target, across batches
+        of the same stream, and across retries overlapping the previous
+        attempt's DROP — all within Postgres' 63-char NAMEDATALEN budget.
 
         When every column is a conflict key (composite-PK table with
         no non-key columns), MERGE's ``WHEN MATCHED THEN UPDATE`` is

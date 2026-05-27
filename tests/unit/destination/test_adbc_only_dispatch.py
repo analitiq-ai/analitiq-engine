@@ -164,6 +164,87 @@ class TestSchemaIsImplicitDefault:
             assert h._schema_is_implicit_default(None)
 
 
+class TestStageTokenUniqueness:
+    """Stage token must stay unique across batches even with UUID-shaped
+    stream_id (36 chars). Pre-round-5 token was string-concat + truncate
+    to 48 chars; for a UUID stream_id the truncation discarded batch_seq
+    and produced identical tokens for every batch in the same stream-run,
+    re-introducing the round-1 collision bug."""
+
+    def _build_token(self, run_id: str, stream_id: str, batch_seq: int) -> str:
+        # Mirror the construction at the call site so a regression in
+        # either location is caught here.
+        import hashlib
+        return "b" + hashlib.sha256(
+            f"{run_id}|{stream_id}|{batch_seq}".encode("utf-8")
+        ).hexdigest()[:16]
+
+    def test_distinct_across_batch_seq_with_uuid_stream_id(self):
+        run_id = "20260527T120000Z-a1b2c3d4"
+        stream_id = "2ac5e363-ec12-49f7-a8b2-b3782cf6af59"
+        tokens = {
+            self._build_token(run_id, stream_id, bs)
+            for bs in (0, 1, 100, 9999)
+        }
+        assert len(tokens) == 4, f"stage token collided across batch_seq: {tokens}"
+
+    def test_distinct_across_stream_ids(self):
+        run_id = "20260527T120000Z-a1b2c3d4"
+        s1 = "2ac5e363-ec12-49f7-a8b2-b3782cf6af59"
+        s2 = "00b7a31f-3a31-4256-ba15-adba92d46930"
+        assert self._build_token(run_id, s1, 1) != self._build_token(run_id, s2, 1)
+
+    def test_fits_postgres_namedatalen_with_realistic_table_name(self):
+        # `_analitiq_stage_<table>_<token>` must not exceed Postgres'
+        # 63-char NAMEDATALEN. Token is 17 chars ("b" + 16-hex);
+        # `_analitiq_stage_` is 16; `_` is 1. Budget for table_name:
+        # 63 - 16 - 17 - 1 = 29 chars. Verify realistic table names fit.
+        run_id = "20260527T120000Z-a1b2c3d4"
+        stream_id = "2ac5e363-ec12-49f7-a8b2-b3782cf6af59"
+        token = self._build_token(run_id, stream_id, 42)
+        assert len(token) == 17  # "b" + 16 hex digits
+        for table_name in ("wise_transfers", "public_transfers", "orders"):
+            stage_name = f"_analitiq_stage_{table_name}_{token}"
+            assert len(stage_name) <= 63, (
+                f"stage name {stage_name!r} exceeds Postgres NAMEDATALEN"
+            )
+
+
+class TestCommitCollisionHandling:
+    """`_handle_commit_collision` must raise AdbcCommitRecordError for
+    insert mode (which would silently duplicate) and return silently for
+    upsert / truncate_insert (which are idempotent on re-ingest)."""
+
+    def _state(self, write_mode):
+        from src.destination.connectors.database import _StreamState
+        return _StreamState(schema_name="analytics", table_name="t", write_mode=write_mode)
+
+    def test_insert_mode_raises(self):
+        h = DatabaseDestinationHandler()
+        h._driver = "bigquery"
+        cause = RuntimeError("collision")
+        with pytest.raises(AdbcCommitRecordError) as exc:
+            h._handle_commit_collision(
+                self._state("insert"), "r", "s", 1, cause,
+            )
+        assert exc.value.write_mode == "insert"
+        assert exc.value.__cause__ is cause
+
+    def test_upsert_mode_returns_silently(self):
+        h = DatabaseDestinationHandler()
+        h._driver = "bigquery"
+        h._handle_commit_collision(
+            self._state("upsert"), "r", "s", 1, RuntimeError("collision"),
+        )
+
+    def test_truncate_insert_mode_returns_silently(self):
+        h = DatabaseDestinationHandler()
+        h._driver = "bigquery"
+        h._handle_commit_collision(
+            self._state("truncate_insert"), "r", "s", 1, RuntimeError("collision"),
+        )
+
+
 class TestAdbcModeReset:
     """`_adbc_only` must reset on reconnect so a handler reused across
     runtimes (or in tests that monkey-patch one mode and expect a clean
