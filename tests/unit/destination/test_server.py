@@ -141,6 +141,7 @@ class TestGetCapabilities:
         )
         resp = await servicer.GetCapabilities(GetCapabilitiesRequest(), MagicMock())
         assert WriteMode.WRITE_MODE_UPSERT not in resp.supported_write_modes
+        assert resp.supports_upsert is False
 
     @pytest.mark.asyncio
     async def test_upsert_present_when_supported(self):
@@ -150,12 +151,13 @@ class TestGetCapabilities:
         resp = await servicer.GetCapabilities(GetCapabilitiesRequest(), MagicMock())
         assert WriteMode.WRITE_MODE_UPSERT in resp.supported_write_modes
         assert WriteMode.WRITE_MODE_INSERT in resp.supported_write_modes
+        assert resp.supports_upsert is True
 
     @pytest.mark.asyncio
-    async def test_truncate_insert_always_present(self):
-        for supports_upsert in (True, False):
-            servicer = DestinationServicer(
-                self._make_handler(supports_upsert=supports_upsert), server=MagicMock()
-            )
-            resp = await servicer.GetCapabilities(GetCapabilitiesRequest(), MagicMock())
-            assert WriteMode.WRITE_MODE_TRUNCATE_INSERT in resp.supported_write_modes
+    @pytest.mark.parametrize("supports_upsert", [True, False])
+    async def test_truncate_insert_always_present(self, supports_upsert: bool):
+        servicer = DestinationServicer(
+            self._make_handler(supports_upsert=supports_upsert), server=MagicMock()
+        )
+        resp = await servicer.GetCapabilities(GetCapabilitiesRequest(), MagicMock())
+        assert WriteMode.WRITE_MODE_TRUNCATE_INSERT in resp.supported_write_modes
