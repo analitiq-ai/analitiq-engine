@@ -280,6 +280,21 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         # Sync (``threading.Lock``) because the protected sections run
         # off the event loop.
         self._adbc_conn_lock: threading.Lock = threading.Lock()
+        # PEP-249 reports ``threadsafety = 1`` for every ADBC driver
+        # we ship — "threads may share the module, but not connections".
+        # ``asyncio.to_thread`` gives no guarantee that subsequent
+        # awaited calls land on the same worker thread, so concurrent
+        # batches against one cached connection can corrupt cursor /
+        # transaction state. This lock serializes ALL cursor operations
+        # on the cached connection. Concurrent batches against the same
+        # destination handler queue here — acceptable given the
+        # PEP-249 constraint; the alternative is opening a fresh
+        # connection per batch, which is far more expensive.
+        # ``RLock`` (reentrant) because some sync helpers compose
+        # internally (e.g. ``_truncate_then_ingest_sync`` calls
+        # ``_adbc_only_ingest_sync`` after the truncate); both run on
+        # the same worker thread within one ``asyncio.to_thread`` call.
+        self._adbc_op_lock: threading.RLock = threading.RLock()
 
     def set_endpoint_refs(self, endpoint_refs: Mapping[str, Any]) -> None:
         """Register stream_id → endpoint_ref for each stream writing to this
@@ -1171,32 +1186,35 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         ``AdbcConfigurationError`` propagates straight through.
         Poisoning goes through :meth:`_poison_adbc_connection` so the
         ``_adbc_conn_lock`` is honored (avoiding a libpq double-close
-        when two concurrent ingest failures race).
+        when two concurrent ingest failures race). The outer
+        ``_adbc_op_lock`` serializes cursor use against PEP-249
+        ``threadsafety=1``.
         """
-        conn = self._open_adbc_connection()
-        try:
-            cursor = conn.cursor()
+        with self._adbc_op_lock:
+            conn = self._open_adbc_connection()
             try:
-                cursor.adbc_ingest(
-                    table_name,
-                    cast_batch,
-                    mode="append",
-                    db_schema_name=(
-                        self._normalize_adbc_schema(schema_name)
-                        if schema_name else None
-                    ),
-                )
-                conn.commit()
-            finally:
+                cursor = conn.cursor()
                 try:
-                    cursor.close()
-                except Exception:
-                    logger.debug("ADBC cursor close failed", exc_info=True)
-        except Exception as exc:
-            self._poison_adbc_connection()
-            if _is_fatal_adbc_error(exc):
-                raise _reclassify_as_fatal(exc) from exc
-            raise
+                    cursor.adbc_ingest(
+                        table_name,
+                        cast_batch,
+                        mode="append",
+                        db_schema_name=(
+                            self._normalize_adbc_schema(schema_name)
+                            if schema_name else None
+                        ),
+                    )
+                    conn.commit()
+                finally:
+                    try:
+                        cursor.close()
+                    except Exception:
+                        logger.debug("ADBC cursor close failed", exc_info=True)
+            except Exception as exc:
+                self._poison_adbc_connection()
+                if _is_fatal_adbc_error(exc):
+                    raise _reclassify_as_fatal(exc) from exc
+                raise
 
     async def _write_via_adbc(
         self,
@@ -1413,6 +1431,17 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
             return f"PRIMARY KEY ({pk_cols}) NOT ENFORCED"
         return f"PRIMARY KEY ({pk_cols})"
 
+    def _adbc_text_type(self) -> str:
+        """Per-driver native string type for the _batch_commits text columns.
+
+        BigQuery's GoogleSQL has only ``STRING`` (with optional length);
+        ``VARCHAR(n)`` is rejected at parse time. Snowflake and Postgres
+        both accept ``VARCHAR(n)``.
+        """
+        if self._driver == "bigquery":
+            return "STRING"
+        return "VARCHAR(255)"
+
     def _build_adbc_batch_commits_ddl(self, schema_name: str) -> str:
         qualified = self._adbc_quote_qualified(schema_name, self.BATCH_COMMITS_TABLE)
         pk_cols = (
@@ -1420,10 +1449,11 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
             f"{self._adbc_quote_ident('stream_id')}, "
             f"{self._adbc_quote_ident('batch_seq')}"
         )
+        text_type = self._adbc_text_type()
         return (
             f"CREATE TABLE IF NOT EXISTS {qualified} (\n"
-            f"  {self._adbc_quote_ident('run_id')} VARCHAR(255) NOT NULL,\n"
-            f"  {self._adbc_quote_ident('stream_id')} VARCHAR(255) NOT NULL,\n"
+            f"  {self._adbc_quote_ident('run_id')} {text_type} NOT NULL,\n"
+            f"  {self._adbc_quote_ident('stream_id')} {text_type} NOT NULL,\n"
             f"  {self._adbc_quote_ident('batch_seq')} BIGINT NOT NULL,\n"
             f"  {self._adbc_quote_ident('committed_cursor')} "
             f"{self._adbc_binary_type()},\n"
@@ -1485,24 +1515,29 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         )
 
     def _execute_adbc_ddl_sync(self, statements: List[str]) -> None:
-        """Run a list of DDL statements on the ADBC connection."""
-        conn = self._reopen_adbc_if_needed_sync()
-        try:
-            cursor = conn.cursor()
+        """Run a list of DDL statements on the ADBC connection.
+
+        ``_adbc_op_lock`` held for the duration so concurrent batches
+        can't interleave cursor use against PEP-249 threadsafety=1.
+        """
+        with self._adbc_op_lock:
+            conn = self._reopen_adbc_if_needed_sync()
             try:
-                for stmt in statements:
-                    cursor.execute(stmt)
-                conn.commit()
-            finally:
+                cursor = conn.cursor()
                 try:
-                    cursor.close()
-                except Exception:
-                    logger.debug("ADBC cursor close failed", exc_info=True)
-        except Exception as exc:
-            self._poison_adbc_connection()
-            if _is_fatal_adbc_error(exc):
-                raise _reclassify_as_fatal(exc) from exc
-            raise
+                    for stmt in statements:
+                        cursor.execute(stmt)
+                    conn.commit()
+                finally:
+                    try:
+                        cursor.close()
+                    except Exception:
+                        logger.debug("ADBC cursor close failed", exc_info=True)
+            except Exception as exc:
+                self._poison_adbc_connection()
+                if _is_fatal_adbc_error(exc):
+                    raise _reclassify_as_fatal(exc) from exc
+                raise
 
     def _poison_adbc_connection(self) -> None:
         """Drop and close the cached ADBC connection after a failure.
@@ -1585,22 +1620,23 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
     def _fetch_one_adbc_sync(
         self, sql: str, params: Tuple[Any, ...]
     ) -> Optional[Tuple[Any, ...]]:
-        conn = self._reopen_adbc_if_needed_sync()
-        try:
-            cursor = conn.cursor()
+        with self._adbc_op_lock:
+            conn = self._reopen_adbc_if_needed_sync()
             try:
-                cursor.execute(sql, params)
-                return cursor.fetchone()
-            finally:
+                cursor = conn.cursor()
                 try:
-                    cursor.close()
-                except Exception:
-                    logger.debug("ADBC cursor close failed", exc_info=True)
-        except Exception as exc:
-            self._poison_adbc_connection()
-            if _is_fatal_adbc_error(exc):
-                raise _reclassify_as_fatal(exc) from exc
-            raise
+                    cursor.execute(sql, params)
+                    return cursor.fetchone()
+                finally:
+                    try:
+                        cursor.close()
+                    except Exception:
+                        logger.debug("ADBC cursor close failed", exc_info=True)
+            except Exception as exc:
+                self._poison_adbc_connection()
+                if _is_fatal_adbc_error(exc):
+                    raise _reclassify_as_fatal(exc) from exc
+                raise
 
     async def _record_batch_commit_via_adbc(
         self,
@@ -1614,15 +1650,47 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         qualified = self._adbc_quote_qualified(
             state.schema_name, self.BATCH_COMMITS_TABLE
         )
-        sql = (
-            f"INSERT INTO {qualified} ("
-            f"{self._adbc_quote_ident('run_id')}, "
-            f"{self._adbc_quote_ident('stream_id')}, "
-            f"{self._adbc_quote_ident('batch_seq')}, "
-            f"{self._adbc_quote_ident('committed_cursor')}, "
-            f"{self._adbc_quote_ident('records_written')}) "
-            f"VALUES (?, ?, ?, ?, ?)"
-        )
+        if self._driver == "bigquery":
+            # BigQuery PRIMARY KEY is NOT ENFORCED (parser allows it
+            # only as a planner hint), so a plain INSERT racing a
+            # concurrent retry would produce two commit rows instead
+            # of one — no IntegrityError to detect. ``MERGE INTO ...
+            # WHEN NOT MATCHED THEN INSERT`` is atomic per-statement
+            # on BigQuery and gives the same idempotency the enforced
+            # PK provides on Snowflake / Postgres.
+            sql = (
+                f"MERGE INTO {qualified} t USING (\n"
+                f"  SELECT ? AS {self._adbc_quote_ident('run_id')}, "
+                f"? AS {self._adbc_quote_ident('stream_id')}, "
+                f"? AS {self._adbc_quote_ident('batch_seq')}, "
+                f"? AS {self._adbc_quote_ident('committed_cursor')}, "
+                f"? AS {self._adbc_quote_ident('records_written')}\n"
+                f") s\n"
+                f"ON t.{self._adbc_quote_ident('run_id')} = s.{self._adbc_quote_ident('run_id')} "
+                f"AND t.{self._adbc_quote_ident('stream_id')} = s.{self._adbc_quote_ident('stream_id')} "
+                f"AND t.{self._adbc_quote_ident('batch_seq')} = s.{self._adbc_quote_ident('batch_seq')}\n"
+                f"WHEN NOT MATCHED THEN INSERT ("
+                f"{self._adbc_quote_ident('run_id')}, "
+                f"{self._adbc_quote_ident('stream_id')}, "
+                f"{self._adbc_quote_ident('batch_seq')}, "
+                f"{self._adbc_quote_ident('committed_cursor')}, "
+                f"{self._adbc_quote_ident('records_written')}) "
+                f"VALUES (s.{self._adbc_quote_ident('run_id')}, "
+                f"s.{self._adbc_quote_ident('stream_id')}, "
+                f"s.{self._adbc_quote_ident('batch_seq')}, "
+                f"s.{self._adbc_quote_ident('committed_cursor')}, "
+                f"s.{self._adbc_quote_ident('records_written')})"
+            )
+        else:
+            sql = (
+                f"INSERT INTO {qualified} ("
+                f"{self._adbc_quote_ident('run_id')}, "
+                f"{self._adbc_quote_ident('stream_id')}, "
+                f"{self._adbc_quote_ident('batch_seq')}, "
+                f"{self._adbc_quote_ident('committed_cursor')}, "
+                f"{self._adbc_quote_ident('records_written')}) "
+                f"VALUES (?, ?, ?, ?, ?)"
+            )
         try:
             await asyncio.to_thread(
                 self._execute_adbc_dml_sync,
@@ -1663,22 +1731,23 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
             raise
 
     def _execute_adbc_dml_sync(self, sql: str, params: Tuple[Any, ...]) -> None:
-        conn = self._reopen_adbc_if_needed_sync()
-        try:
-            cursor = conn.cursor()
+        with self._adbc_op_lock:
+            conn = self._reopen_adbc_if_needed_sync()
             try:
-                cursor.execute(sql, params)
-                conn.commit()
-            finally:
+                cursor = conn.cursor()
                 try:
-                    cursor.close()
-                except Exception:
-                    logger.debug("ADBC cursor close failed", exc_info=True)
-        except Exception as exc:
-            self._poison_adbc_connection()
-            if _is_fatal_adbc_error(exc):
-                raise _reclassify_as_fatal(exc) from exc
-            raise
+                    cursor.execute(sql, params)
+                    conn.commit()
+                finally:
+                    try:
+                        cursor.close()
+                    except Exception:
+                        logger.debug("ADBC cursor close failed", exc_info=True)
+            except Exception as exc:
+                self._poison_adbc_connection()
+                if _is_fatal_adbc_error(exc):
+                    raise _reclassify_as_fatal(exc) from exc
+                raise
 
     async def _write_batch_adbc_only(
         self,
@@ -1721,10 +1790,14 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
                 cast_batch, state.schema_name, state.table_name,
             )
         elif state.write_mode == "upsert" and conflict_keys:
-            # Per-batch token prevents stage-table name collisions across
-            # concurrent streams writing to the same target and across
-            # retries that overlap the previous attempt's DROP.
-            stage_token = f"{run_id}_{batch_seq}".replace("-", "")[:48]
+            # Per-(stream, batch) token prevents stage-table name
+            # collisions across concurrent streams writing to the same
+            # target (same run_id + same batch_seq is common when two
+            # streams share a target table) and across retries that
+            # overlap the previous attempt's DROP.
+            stage_token = (
+                f"{run_id}_{stream_id}_{batch_seq}".replace("-", "")[:48]
+            )
             await asyncio.to_thread(
                 self._merge_ingest_sync,
                 cast_batch, state.schema_name, state.table_name,
@@ -1770,30 +1843,31 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         table_name: str,
     ) -> None:
         """ADBC ingest for ADBC-only mode (poison-aware, fatal-reclassifying)."""
-        conn = self._reopen_adbc_if_needed_sync()
-        try:
-            cursor = conn.cursor()
+        with self._adbc_op_lock:
+            conn = self._reopen_adbc_if_needed_sync()
             try:
-                cursor.adbc_ingest(
-                    table_name,
-                    cast_batch,
-                    mode="append",
-                    db_schema_name=(
-                        self._normalize_adbc_schema(schema_name)
-                        if schema_name else None
-                    ),
-                )
-                conn.commit()
-            finally:
+                cursor = conn.cursor()
                 try:
-                    cursor.close()
-                except Exception:
-                    logger.debug("ADBC cursor close failed", exc_info=True)
-        except Exception as exc:
-            self._poison_adbc_connection()
-            if _is_fatal_adbc_error(exc):
-                raise _reclassify_as_fatal(exc) from exc
-            raise
+                    cursor.adbc_ingest(
+                        table_name,
+                        cast_batch,
+                        mode="append",
+                        db_schema_name=(
+                            self._normalize_adbc_schema(schema_name)
+                            if schema_name else None
+                        ),
+                    )
+                    conn.commit()
+                finally:
+                    try:
+                        cursor.close()
+                    except Exception:
+                        logger.debug("ADBC cursor close failed", exc_info=True)
+            except Exception as exc:
+                self._poison_adbc_connection()
+                if _is_fatal_adbc_error(exc):
+                    raise _reclassify_as_fatal(exc) from exc
+                raise
 
     def _truncate_then_ingest_sync(
         self,
@@ -1802,23 +1876,26 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         table_name: str,
     ) -> None:
         qualified = self._adbc_quote_qualified(schema_name, table_name)
-        conn = self._reopen_adbc_if_needed_sync()
-        try:
-            cursor = conn.cursor()
+        with self._adbc_op_lock:
+            conn = self._reopen_adbc_if_needed_sync()
             try:
-                cursor.execute(f"TRUNCATE TABLE {qualified}")
-            finally:
+                cursor = conn.cursor()
                 try:
-                    cursor.close()
-                except Exception:
-                    logger.debug("ADBC cursor close failed", exc_info=True)
-            conn.commit()
-        except Exception as exc:
-            self._poison_adbc_connection()
-            if _is_fatal_adbc_error(exc):
-                raise _reclassify_as_fatal(exc) from exc
-            raise
-        self._adbc_only_ingest_sync(cast_batch, schema_name, table_name)
+                    cursor.execute(f"TRUNCATE TABLE {qualified}")
+                finally:
+                    try:
+                        cursor.close()
+                    except Exception:
+                        logger.debug("ADBC cursor close failed", exc_info=True)
+                conn.commit()
+            except Exception as exc:
+                self._poison_adbc_connection()
+                if _is_fatal_adbc_error(exc):
+                    raise _reclassify_as_fatal(exc) from exc
+                raise
+            # RLock is reentrant: this same-thread acquire inside
+            # _adbc_only_ingest_sync is safe.
+            self._adbc_only_ingest_sync(cast_batch, schema_name, table_name)
 
     def _build_adbc_stage_table_sql(
         self,
@@ -1895,6 +1972,33 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
                 "new rows. Consider write_mode='insert' for clarity.",
                 schema_name, table_name,
             )
+        # _adbc_op_lock serializes the full DROP+CREATE+INGEST+MERGE+DROP
+        # sequence so concurrent streams against the same handler don't
+        # interleave cursor operations on the cached connection
+        # (PEP-249 threadsafety=1). One acquire for the whole transaction
+        # so a parallel ingest can't slip between CREATE and INGEST and
+        # leave the stage table empty.
+        with self._adbc_op_lock:
+            self._merge_ingest_locked_sync(
+                cast_batch, target_qualified, stage_qualified, stage_name,
+                schema_name, all_columns, conflict_keys, update_cols,
+            )
+
+    def _merge_ingest_locked_sync(
+        self,
+        cast_batch: pa.RecordBatch,
+        target_qualified: str,
+        stage_qualified: str,
+        stage_name: str,
+        schema_name: str,
+        all_columns: List[str],
+        conflict_keys: List[str],
+        update_cols: List[str],
+    ) -> None:
+        """Body of :meth:`_merge_ingest_sync`, called while
+        ``_adbc_op_lock`` is held. Extracted so the lock acquisition
+        site is small and obvious; the inner method assumes the lock
+        and never reacquires."""
         conn = self._reopen_adbc_if_needed_sync()
         try:
             cursor = conn.cursor()
@@ -2045,19 +2149,22 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         this probe fail until some other caller (next write_batch)
         repopulated the cache — i.e. liveness would lag the actual
         DB reachability by one batch interval. The reopen makes the
-        probe self-sufficient.
+        probe self-sufficient. ``_adbc_op_lock`` held so the SELECT 1
+        does not interleave with a concurrent ingest on the same
+        connection.
         """
-        conn = self._reopen_adbc_if_needed_sync()
-        try:
-            cursor = conn.cursor()
+        with self._adbc_op_lock:
+            conn = self._reopen_adbc_if_needed_sync()
             try:
-                cursor.execute("SELECT 1")
-                cursor.fetchone()
-            finally:
+                cursor = conn.cursor()
                 try:
-                    cursor.close()
-                except Exception:
-                    logger.debug("ADBC cursor close failed", exc_info=True)
-        except Exception:
-            self._poison_adbc_connection()
-            raise
+                    cursor.execute("SELECT 1")
+                    cursor.fetchone()
+                finally:
+                    try:
+                        cursor.close()
+                    except Exception:
+                        logger.debug("ADBC cursor close failed", exc_info=True)
+            except Exception:
+                self._poison_adbc_connection()
+                raise

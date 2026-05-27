@@ -32,11 +32,25 @@ class TestBuildSelectSql:
         )
         sql, params = _build_select_sql(plan, "snowflake")
         # Always emits ORDER BY (first column when no cursor) so
-        # OFFSET paging stays deterministic across pages.
+        # OFFSET paging stays deterministic across pages. Snowflake's
+        # default schema is unquoted PUBLIC; lower-case "public" is
+        # normalized to match the real warehouse schema.
         assert sql == (
-            'SELECT "id", "status" FROM "public"."orders" ORDER BY "id" ASC'
+            'SELECT "id", "status" FROM "PUBLIC"."orders" ORDER BY "id" ASC'
         )
         assert params == ()
+
+    def test_snowflake_public_normalized_in_source(self):
+        # Same normalization the destination handler applies, ensuring
+        # parity between read and write paths for the conventional
+        # lower-case ``public`` schema declaration.
+        from src.source.drivers.adbc_reader import _normalize_schema
+        assert _normalize_schema("public", "snowflake") == "PUBLIC"
+        assert _normalize_schema("PUBLIC", "snowflake") == "PUBLIC"
+        assert _normalize_schema("analytics", "snowflake") == "analytics"
+        # Non-Snowflake: pass-through.
+        assert _normalize_schema("public", "bigquery") == "public"
+        assert _normalize_schema("public", "postgresql") == "public"
 
     def test_basic_select_bigquery_backticks(self):
         # BigQuery uses backticks — double quotes denote STRING literals

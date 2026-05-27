@@ -220,8 +220,8 @@ class TestAdbcIngestSchemaNormalization:
             def close(self): pass
 
         class _FakeConn:
-            def cursor(self_inner): return _FakeCursor()
-            def commit(self_inner): pass
+            def cursor(self): return _FakeCursor()
+            def commit(self): pass
 
         return _FakeConn(), captured
 
@@ -452,6 +452,18 @@ class TestAdbcDdlBuilders:
         pg = self._make("postgresql")._build_adbc_batch_commits_ddl("analytics")
         assert "BYTEA" in pg
         assert "TIMESTAMP" in pg
+
+    def test_batch_commits_text_type_per_driver(self):
+        # BigQuery's GoogleSQL has only STRING (no VARCHAR(n)).
+        bq = self._make("bigquery")._build_adbc_batch_commits_ddl("analytics")
+        assert "VARCHAR" not in bq
+        assert "STRING" in bq
+
+        snow = self._make("snowflake")._build_adbc_batch_commits_ddl("analytics")
+        assert "VARCHAR(255)" in snow
+
+        pg = self._make("postgresql")._build_adbc_batch_commits_ddl("analytics")
+        assert "VARCHAR(255)" in pg
 
     def test_pk_clause_bigquery_not_enforced(self):
         # BigQuery's parser rejects bare PRIMARY KEY (...) — it

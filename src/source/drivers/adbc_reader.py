@@ -255,9 +255,29 @@ def _quote_ident(name: str, driver: str) -> str:
     return '"' + name.replace('"', '""') + '"'
 
 
+def _normalize_schema(schema: str, driver: str) -> str:
+    """Snowflake-only ``public`` -> ``PUBLIC`` normalization.
+
+    Mirrors :meth:`DatabaseDestinationHandler._normalize_adbc_schema`.
+    Snowflake folds unquoted identifiers to upper case; its built-in
+    default schema is unquoted ``PUBLIC``. A connector declaring the
+    common lowercase ``public`` would otherwise produce a quoted
+    ``"public"`` literal that targets a different (usually
+    non-existent) schema, so reads from the default schema fail.
+    BigQuery and Postgres do not need this — see the destination
+    handler's docstring for the per-driver rationale.
+    """
+    if driver == "snowflake" and schema.lower() == "public":
+        return "PUBLIC"
+    return schema
+
+
 def _quote_qualified(schema: Optional[str], name: str, driver: str) -> str:
     if schema:
-        return f"{_quote_ident(schema, driver)}.{_quote_ident(name, driver)}"
+        return (
+            f"{_quote_ident(_normalize_schema(schema, driver), driver)}"
+            f".{_quote_ident(name, driver)}"
+        )
     return _quote_ident(name, driver)
 
 
