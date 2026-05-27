@@ -17,8 +17,7 @@ import pytest
 from src.destination.server import DestinationServicer
 from src.engine.type_map import InvalidTypeMapError, UnmappedTypeError
 from src.grpc.generated.analitiq.v1 import (
-    DatabaseConfig,
-    DestinationConfig,
+    GetCapabilitiesRequest,
     SchemaMessage,
     StreamRequest,
     WriteMode,
@@ -34,13 +33,7 @@ def _schema_request(stream_id: str = "s1") -> StreamRequest:
         schema=SchemaMessage(
             stream_id=stream_id,
             version=1,
-            json_schema='{"columns":[{"name":"id","type":"BIGINT"}]}',
-            primary_key=["id"],
             write_mode=WriteMode.WRITE_MODE_INSERT,
-            destination_config=DestinationConfig(
-                connector_type="database",
-                database=DatabaseConfig(schema_name="public", table_name="t"),
-            ),
         )
     )
 
@@ -120,3 +113,49 @@ class TestSchemaAckTypeMapError:
                 _iter_once(_schema_request("s4")), context=MagicMock()
             ):
                 pass
+
+
+class TestGetCapabilities:
+    def _make_handler(self, *, supports_upsert: bool) -> MagicMock:
+        handler = MagicMock()
+        handler.supports_upsert = supports_upsert
+        handler.connector_type = "database"
+        handler.supports_transactions = True
+        handler.supports_bulk_load = False
+        handler.max_batch_size = 1000
+        handler.max_batch_bytes = 0
+        return handler
+
+    @pytest.mark.asyncio
+    async def test_insert_always_present(self):
+        servicer = DestinationServicer(
+            self._make_handler(supports_upsert=False), server=MagicMock()
+        )
+        resp = await servicer.GetCapabilities(GetCapabilitiesRequest(), MagicMock())
+        assert WriteMode.WRITE_MODE_INSERT in resp.supported_write_modes
+
+    @pytest.mark.asyncio
+    async def test_upsert_absent_when_not_supported(self):
+        servicer = DestinationServicer(
+            self._make_handler(supports_upsert=False), server=MagicMock()
+        )
+        resp = await servicer.GetCapabilities(GetCapabilitiesRequest(), MagicMock())
+        assert WriteMode.WRITE_MODE_UPSERT not in resp.supported_write_modes
+
+    @pytest.mark.asyncio
+    async def test_upsert_present_when_supported(self):
+        servicer = DestinationServicer(
+            self._make_handler(supports_upsert=True), server=MagicMock()
+        )
+        resp = await servicer.GetCapabilities(GetCapabilitiesRequest(), MagicMock())
+        assert WriteMode.WRITE_MODE_UPSERT in resp.supported_write_modes
+        assert WriteMode.WRITE_MODE_INSERT in resp.supported_write_modes
+
+    @pytest.mark.asyncio
+    async def test_truncate_insert_always_present(self):
+        for supports_upsert in (True, False):
+            servicer = DestinationServicer(
+                self._make_handler(supports_upsert=supports_upsert), server=MagicMock()
+            )
+            resp = await servicer.GetCapabilities(GetCapabilitiesRequest(), MagicMock())
+            assert WriteMode.WRITE_MODE_TRUNCATE_INSERT in resp.supported_write_modes
