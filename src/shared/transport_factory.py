@@ -8,7 +8,12 @@ concrete transport object.
 
 Currently registered transport families:
 
-* ``sqlalchemy`` — SQLAlchemy ``AsyncEngine`` for database connectors.
+* ``sqlalchemy`` — SQLAlchemy ``AsyncEngine`` for database connectors
+  whose dialect has an async driver (Postgres asyncpg, MySQL aiomysql).
+* ``adbc``       — ADBC DBAPI 2.0 connection for database connectors
+  whose dialect has no async SA driver (Snowflake, BigQuery) or wants
+  the Arrow-native bulk path (Postgres). Driver enum closed to the
+  registry in ``_ADBC_DRIVER_MODULES``.
 * ``http``       — ``aiohttp.ClientSession`` for API connectors.
 
 Plugin packages call :func:`register_transport_kind` at import time to
@@ -17,7 +22,9 @@ add new families.
 
 from __future__ import annotations
 
+import asyncio
 import copy
+import importlib
 import logging
 import ssl as _ssl
 import urllib.parse
@@ -357,7 +364,7 @@ def _select_transport(
 # ---------------------------------------------------------------------------
 
 
-@dataclass
+@dataclass(frozen=True)
 class SqlAlchemyTransport:
     """Materialized SQLAlchemy transport.
 
@@ -433,11 +440,185 @@ async def build_sqlalchemy_transport(
 
 
 # ---------------------------------------------------------------------------
+# ADBC transport
+#
+# ADBC (Arrow Database Connectivity) drivers expose a synchronous DBAPI
+# 2.0 connection that exchanges Arrow record batches with the database's
+# native bulk protocol (libpq COPY BINARY for Postgres, Snowflake's
+# internal stages, BigQuery's Storage Write API, …). This transport is
+# the only path for drivers without an async SQLAlchemy driver
+# (Snowflake, BigQuery); for Postgres it provides an alternative to the
+# SQLAlchemy + asyncpg path.
+#
+# The closed enum for ``driver`` here mirrors the published
+# ``AdbcTransport.driver`` enum in
+# ``schemas.analitiq.ai/connector/latest.json``. Adding a driver here
+# without first updating the schema produces connectors the validators
+# will reject; adding to the schema without registering here produces
+# connectors the engine cannot materialize.
+# ---------------------------------------------------------------------------
+
+
+# Driver -> dotted ADBC dbapi module path. Closed enum: extending this
+# table requires a matching change in the published connector schema.
+_ADBC_DRIVER_MODULES: Dict[str, str] = {
+    "postgresql": "adbc_driver_postgresql.dbapi",
+    "snowflake": "adbc_driver_snowflake.dbapi",
+    "bigquery": "adbc_driver_bigquery.dbapi",
+}
+
+
+@dataclass(frozen=True)
+class AdbcTransport:
+    """Materialized ADBC transport.
+
+    ADBC drivers are synchronous DBAPI 2.0. There is no connection pool;
+    callers open a fresh connection via the ``connect`` callable and
+    own its lifecycle (close on disconnect, drop on ingest failure to
+    avoid reusing a poisoned handle). Driver-side concurrency is
+    managed by running each cursor operation on a worker thread via
+    ``asyncio.to_thread``.
+
+    Frozen so a buggy caller cannot mutate ``driver`` after the
+    transport is wired into a runtime — the driver string drives
+    per-warehouse SQL dispatch in the destination handler.
+    """
+
+    connect: Callable[[], Any]
+    driver: str
+
+
+def _resolve_db_kwargs(
+    raw: Optional[Mapping[str, Any]], resolver: Resolver
+) -> Dict[str, Any]:
+    """Resolve the optional ``db_kwargs`` block.
+
+    Each value goes through the resolver so secrets and connection
+    parameters flow in the same way as DSN bindings. ADBC accepts
+    non-string scalar values; stringification is left to the driver.
+
+    Keys whose values resolve to ``None`` are dropped — that matches
+    the schema's treatment of optional credential fields, where an
+    unset secret should not override the driver's own default. The
+    drop is logged at INFO so an operator can distinguish "field was
+    intentionally absent" from "the expression I authored resolved to
+    None (likely an unbound placeholder or empty secret)".
+    """
+    if raw is None:
+        return {}
+    if not isinstance(raw, Mapping):
+        raise TypeError("adbc transport `db_kwargs` must be an object")
+    out: Dict[str, Any] = {}
+    for name, value in raw.items():
+        resolved = resolver.resolve(value)
+        if resolved is None:
+            logger.info(
+                "adbc db_kwargs[%s] resolved to None; passing driver default. "
+                "If you intended a value, check the secret store and connection "
+                "parameters.",
+                name,
+            )
+            continue
+        out[str(name)] = resolved
+    return out
+
+
+async def build_adbc_transport(
+    spec: Mapping[str, Any], *, resolver: Resolver
+) -> AdbcTransport:
+    """Materialize an ADBC transport from a resolved connector spec.
+
+    The spec shape matches ``AdbcTransport`` in the published connector
+    schema: ``driver`` is required and closed to the registry,
+    ``dsn`` and ``db_kwargs`` are both optional but at least one must
+    be present. Drivers that accept all connection state via
+    ``db_kwargs`` (Snowflake, BigQuery) typically omit ``dsn``.
+
+    The probe ``SELECT 1`` fires at materialize time so a bad DSN,
+    missing credential, or network reachability problem fails before
+    the engine starts a pipeline run, not on the first batch.
+    """
+    driver = spec.get("driver")
+    if not isinstance(driver, str) or not driver:
+        raise ValueError(
+            "adbc transport requires `driver` (one of "
+            f"{sorted(_ADBC_DRIVER_MODULES)})"
+        )
+    driver = driver.lower()
+    driver_module_path = _ADBC_DRIVER_MODULES.get(driver)
+    if driver_module_path is None:
+        raise ValueError(
+            f"adbc transport driver {driver!r} is not registered; "
+            f"known drivers: {sorted(_ADBC_DRIVER_MODULES)}"
+        )
+
+    # Validate the spec shape before touching the driver package so a
+    # schema-violating connector still raises a useful spec error even
+    # in environments where the driver wheel isn't installed.
+    raw_dsn = spec.get("dsn")
+    uri: Optional[str] = None
+    if raw_dsn is not None:
+        if not isinstance(raw_dsn, Mapping):
+            raise TypeError(
+                "adbc transport `dsn` must be the structured "
+                "{kind: url_template, template, bindings} object"
+            )
+        uri = _render_url_template_dsn(raw_dsn, resolver)
+
+    db_kwargs = _resolve_db_kwargs(spec.get("db_kwargs"), resolver)
+
+    if uri is None and not db_kwargs:
+        raise ValueError(
+            "adbc transport requires at least one of `dsn` or `db_kwargs` "
+            "(schema anyOf constraint)"
+        )
+
+    try:
+        driver_module = importlib.import_module(driver_module_path)
+    except ImportError as exc:
+        raise RuntimeError(
+            f"ADBC driver package not installed for driver={driver!r}: "
+            f"{driver_module_path} is not importable ({exc}). Install the "
+            f"matching `adbc-driver-*` extra."
+        ) from exc
+
+    def _open_connection() -> Any:
+        # The driver's positional URI vs db_kwargs handling differs per
+        # driver. Pass only what was provided so a Snowflake spec (db_kwargs
+        # only) doesn't accidentally hand an empty string to ``connect``.
+        if uri is not None and db_kwargs:
+            return driver_module.connect(uri, db_kwargs=db_kwargs)
+        if uri is not None:
+            return driver_module.connect(uri)
+        return driver_module.connect(db_kwargs=db_kwargs)
+
+    probe_conn = await asyncio.to_thread(_open_connection)
+    try:
+        await asyncio.to_thread(_ping_adbc, probe_conn)
+    finally:
+        try:
+            await asyncio.to_thread(probe_conn.close)
+        except Exception:
+            logger.debug("ADBC probe connection close failed", exc_info=True)
+
+    return AdbcTransport(connect=_open_connection, driver=driver)
+
+
+def _ping_adbc(conn: Any) -> None:
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT 1")
+        cursor.fetchone()
+    finally:
+        cursor.close()
+
+
+# ---------------------------------------------------------------------------
 # HTTP transport
 # ---------------------------------------------------------------------------
 
 
-@dataclass
+@dataclass(frozen=True)
 class HttpTransport:
     """Materialized HTTP transport ready for ``aiohttp`` requests."""
 
@@ -541,6 +722,7 @@ def registered_transport_kinds() -> list[str]:
 
 
 register_transport_kind("sqlalchemy", build_sqlalchemy_transport)
+register_transport_kind("adbc", build_adbc_transport)
 register_transport_kind("http", build_http_transport)
 
 

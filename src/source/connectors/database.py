@@ -24,7 +24,12 @@ from typing import Any, AsyncIterator, Dict, List, Optional
 import pyarrow as pa
 
 from .base import BaseConnector, ConnectionError, ReadError
-from ..drivers.adbc_reader import open_session as open_adbc_session, source_adbc_eligible
+from ..drivers.adbc_reader import (
+    AdbcReadPlan,
+    open_adbc_reader,
+    open_session as open_adbc_session,
+    source_adbc_eligible,
+)
 from ...destination.schema_contract import SchemaContract
 from ...engine.type_map import InvalidTypeMapError, UnmappedTypeError
 from ...secrets.exceptions import PlaceholderExpansionError
@@ -45,6 +50,10 @@ class DatabaseConnector(BaseConnector):
         self._engine = None
         self._driver: str = ""
         self._initialized = False
+        # ADBC-only mode mirrors the destination handler: set in
+        # ``connect()`` from ``runtime.is_adbc``. When True, ``_engine``
+        # stays None and reads go through ``open_adbc_reader``.
+        self._adbc_only: bool = False
 
     async def connect(self, runtime: ConnectionRuntime):
         self._runtime = runtime
@@ -64,16 +73,28 @@ class DatabaseConnector(BaseConnector):
         except Exception as e:
             logger.error("Failed to connect to database: %s", e)
             raise ConnectionError(f"Database connection failed: {e}") from e
-        self._engine = runtime.engine
         self._driver = runtime.driver or ""
+        # Reset prior-connection state so a reused connector instance
+        # doesn't carry an old mode forward.
+        self._adbc_only = False
+        self._engine = None
+        if runtime.is_adbc:
+            self._adbc_only = True
+        else:
+            self._engine = runtime.engine
         self.is_connected = True
         self._initialized = True
-        logger.info("Connected to database via %s", self._driver)
+        logger.info(
+            "Connected to database via %s (%s)",
+            self._driver,
+            "ADBC" if self._adbc_only else "SQLAlchemy",
+        )
 
     async def disconnect(self):
         if self._runtime:
             await self._runtime.close()
         self._engine = None
+        self._adbc_only = False
         self.is_connected = False
         self._initialized = False
         logger.info("Database connection closed")
@@ -88,7 +109,11 @@ class DatabaseConnector(BaseConnector):
         batch_size: int = 1000,
     ) -> AsyncIterator[pa.RecordBatch]:
         """Read upstream rows as Arrow batches typed via the endpoint contract."""
-        if not self._initialized or self._engine is None:
+        if not self._initialized:
+            raise ReadError(
+                "DatabaseConnector.read_batches() called before connect()"
+            )
+        if not self._adbc_only and self._engine is None:
             raise ReadError(
                 "DatabaseConnector.read_batches() called before connect()"
             )
@@ -148,6 +173,34 @@ class DatabaseConnector(BaseConnector):
         cursor_state = await state_manager.get_cursor(stream_name, partition)
         stored_cursor = cursor_state.get("cursor") if cursor_state else None
         cursor_value = stored_cursor if replication_method == "incremental" else None
+
+        if self._adbc_only:
+            # Stream-level filters require dialect-aware operator
+            # rendering that the minimal ADBC SQL builder does not
+            # implement today; reject loudly rather than silently
+            # dropping the filter clauses.
+            if filters:
+                raise ReadError(
+                    "ADBC-only source does not support stream-level filters yet; "
+                    "remove filters[] or pick transport_type='sqlalchemy'"
+                )
+            async for batch in self._read_via_adbc_only(
+                schema_contract=schema_contract,
+                schema_name=schema_name,
+                table_name=table_name,
+                columns=column_names,
+                cursor_field=(
+                    cursor_field if replication_method == "incremental" else None
+                ),
+                cursor_value=cursor_value,
+                batch_size=batch_size,
+                state_manager=state_manager,
+                stream_name=stream_name,
+                partition=partition,
+            ):
+                yield batch
+            logger.debug("Database read (ADBC-only) completed")
+            return
 
         builder = QueryBuilder(self._driver)
 
@@ -243,6 +296,87 @@ class DatabaseConnector(BaseConnector):
                     break
 
         logger.debug("Database read completed with cursor: %s", last_cursor_value)
+
+    async def _read_via_adbc_only(
+        self,
+        *,
+        schema_contract: SchemaContract,
+        schema_name: Optional[str],
+        table_name: str,
+        columns: List[str],
+        cursor_field: Optional[str],
+        cursor_value: Any,
+        batch_size: int,
+        state_manager: StateManager,
+        stream_name: str,
+        partition: Dict[str, Any],
+    ) -> AsyncIterator[pa.RecordBatch]:
+        """Stream Arrow batches via the ADBC-only path.
+
+        Holds one DBAPI connection for the lifetime of the read; each
+        page goes ``cursor.execute -> fetch_arrow_table -> cast``,
+        mirroring :meth:`_read_via_adbc`. The WHERE clause is fixed at
+        the read's initial cursor_value (matching the SA path); paging
+        advances via OFFSET only. Mixing cursor advancement with OFFSET
+        would skip rows on every page after the first (the cursor moves
+        right while OFFSET continues to skip rows the cursor would have
+        included).
+        """
+        if self._runtime is None:
+            raise ReadError(
+                "DatabaseConnector._read_via_adbc_only requires a materialized runtime"
+            )
+        # Initial cursor value is fixed for the duration of the read;
+        # last_cursor_value advances purely for checkpoint state.
+        initial_cursor_value = cursor_value
+        last_cursor_value: Any = cursor_value
+        offset = 0
+        cursor_missing_warned = False
+        async with open_adbc_reader(self._driver, self._runtime) as reader:
+            while True:
+                plan = AdbcReadPlan(
+                    table_name=table_name,
+                    columns=tuple(columns),
+                    schema_name=schema_name,
+                    cursor_field=cursor_field,
+                    cursor_value=initial_cursor_value if cursor_field else None,
+                    cursor_mode="inclusive",
+                    limit=batch_size,
+                    offset=offset,
+                )
+                batches = await reader.fetch_page(plan)
+                if not batches:
+                    break
+
+                page_rows = 0
+                for batch in batches:
+                    cast_batch = schema_contract.cast_arrow_batch(batch)
+                    page_rows += cast_batch.num_rows
+                    if cursor_field and cast_batch.num_rows > 0:
+                        if cursor_field in cast_batch.schema.names:
+                            last_cursor_value = cast_batch.column(cursor_field)[-1].as_py()
+                        elif not cursor_missing_warned:
+                            logger.warning(
+                                "stream %r: cursor_field %r not present in "
+                                "result batch; cursor will not advance",
+                                stream_name,
+                                cursor_field,
+                            )
+                            cursor_missing_warned = True
+                    self.metrics["records_read"] += cast_batch.num_rows
+                    self.metrics["batches_read"] += 1
+                    yield cast_batch
+
+                if last_cursor_value is not None:
+                    await state_manager.save_cursor(
+                        stream_name,
+                        partition,
+                        {"cursor": last_cursor_value},
+                    )
+
+                if page_rows < batch_size:
+                    break
+                offset += page_rows
 
     async def _read_via_adbc(
         self,
