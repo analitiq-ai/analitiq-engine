@@ -32,7 +32,12 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncConnection
 
 from ..base_handler import BaseDestinationHandler, BatchWriteResult
 from ..schema_contract import SchemaContract
-from ..sql_types import native_to_sqlalchemy
+from ..sql_types import (
+    native_to_bigquery,
+    native_to_postgres,
+    native_to_snowflake,
+    native_to_sqlalchemy,
+)
 from ...engine.type_map import (
     InvalidTypeMapError,
     TypeMapper,
@@ -57,22 +62,75 @@ from ...shared.connection_runtime import ConnectionRuntime
 logger = logging.getLogger(__name__)
 
 
+# PEP-249 exception class names that indicate the failure cannot heal
+# between retries against an identical request: bad SQL, missing
+# objects, permission denials, type mismatches, unsupported operations.
+# Driver modules re-export these names per PEP-249; we match on the
+# class name so the check works without importing the optional driver.
+_FATAL_ADBC_ERROR_NAMES = frozenset({
+    "ProgrammingError",
+    "NotSupportedError",
+    "IntegrityError",
+    "DataError",
+})
+
+
+def _is_fatal_adbc_error(exc: BaseException) -> bool:
+    """``True`` when *exc* is a class of failure retries cannot heal."""
+    for cls in type(exc).__mro__:
+        if cls.__name__ in _FATAL_ADBC_ERROR_NAMES:
+            return True
+    return False
+
+
+def _reclassify_as_fatal(exc: BaseException) -> AdbcConfigurationError:
+    """Wrap a fatal PEP-249 exception in ``AdbcConfigurationError``.
+
+    The wrapped message preserves the original class name so operators
+    triaging an opaque ``str(exception)`` in the engine's failure
+    summary can still distinguish ProgrammingError (syntax / missing
+    object / permission denial) from IntegrityError (PK collision)
+    from DataError (type / value mismatch).
+    """
+    inner_name = type(exc).__name__
+    wrapped = AdbcConfigurationError(f"{inner_name}: {exc}")
+    wrapped.__cause__ = exc
+    return wrapped
+
+
 class AdbcCommitRecordError(RuntimeError):
     """ADBC ingest succeeded, but ``_batch_commits`` recording failed.
 
-    The data is already in the destination table. A retry will pass
-    the pre-flight idempotency check and ingest the batch again,
-    duplicating rows. The exception carries the inner error so the
-    engine's failure summary surfaces the divergence rather than a
-    generic commit error.
+    The data is already in the destination table. Retry behavior
+    depends on ``write_mode``:
+
+    * ``insert`` — retry re-ingests, duplicating rows.
+    * ``truncate_insert`` — retry truncates then re-ingests, so the
+      net effect is idempotent (no duplication).
+    * ``upsert`` — retry re-MERGEs on the conflict keys; idempotent
+      provided the conflict-key set is actually unique.
+
+    The exception carries the inner error so the engine's failure
+    summary surfaces the divergence rather than a generic commit
+    error.
     """
 
-    def __init__(self, inner: BaseException) -> None:
+    _RETRY_SEMANTICS = {
+        "insert": "retry will duplicate rows",
+        "truncate_insert": "retry is idempotent (truncate + re-ingest)",
+        "upsert": "retry is idempotent under conflict keys (re-MERGE)",
+    }
+
+    def __init__(self, inner: BaseException, write_mode: str = "insert") -> None:
+        retry_note = self._RETRY_SEMANTICS.get(
+            write_mode, f"retry semantics for write_mode={write_mode!r} unknown"
+        )
         super().__init__(
             f"adbc ingest committed; commit-record failed "
-            f"(retry will duplicate): {inner}"
+            f"({retry_note}): {inner}"
         )
         self.__cause__ = inner
+        self.write_mode = write_mode
 
 
 @dataclass
@@ -144,6 +202,14 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         self._config: Dict[str, Any] = {}
         self._connected: bool = False
         self._driver: str = ""
+        # ADBC-only mode: the runtime exposes no SQLAlchemy engine and
+        # every write/DDL/idempotency operation runs through the cached
+        # ADBC DBAPI connection. Set in ``connect()`` from
+        # ``runtime.is_adbc``. The fast-path code that was added for
+        # Postgres (SA engine + opportunistic ADBC ingest) is unrelated:
+        # that path still uses ``self._engine`` for everything except
+        # the ingest itself.
+        self._adbc_only: bool = False
 
         # Per-stream state derived from the contract endpoint document at
         # configure_schema() time. The SchemaMessage off the wire only
@@ -271,10 +337,38 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         except Exception as e:
             logger.error(f"Database destination connection failed: {e}")
             raise ConnectionError(f"Database connection failed: {e}") from e
-        self._engine = runtime.engine
         self._driver = runtime.driver or ""
+        # Reset prior-connection state so a long-lived handler that
+        # reconnects across runtimes (e.g. tests) doesn't carry the
+        # previous mode forward.
+        self._adbc_only = False
+        self._engine = None
+        if runtime.is_adbc:
+            self._adbc_only = True
+            # Open the ADBC connection eagerly so a bad credential
+            # fails at connect() time, not on the first batch. Wrap
+            # the driver-specific exception in ConnectionError to
+            # match the materialize() failure shape.
+            try:
+                self._adbc_conn = await asyncio.to_thread(
+                    runtime.open_adbc_connection
+                )
+            except Exception as e:
+                logger.error(
+                    "ADBC eager-open failed during connect: %s", e, exc_info=True
+                )
+                raise ConnectionError(f"ADBC connection failed: {e}") from e
+            logger.info(
+                "DatabaseDestinationHandler connected via ADBC to %s",
+                self._driver,
+            )
+        else:
+            self._engine = runtime.engine
+            logger.info(
+                "DatabaseDestinationHandler connected via SQLAlchemy to %s",
+                self._driver,
+            )
         self._connected = True
-        logger.info("DatabaseDestinationHandler connected to %s", self._driver)
 
     async def disconnect(self) -> None:
         """Close database connection.
@@ -331,7 +425,7 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         directly. Both engine and destination load the same artifacts via
         ``PipelineConfigPrep``, so no schema details cross the wire.
         """
-        if not self._engine:
+        if not self._connected:
             logger.error("Cannot configure schema: not connected")
             return False
 
@@ -366,8 +460,25 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
                 conflict_keys = list(endpoint_doc["_write_conflict_keys"] or [])
             else:
                 conflict_keys = list(primary_keys)
+            raw_schema = database_object.get("schema")
+            if self._adbc_only:
+                # Snowflake's default schema is account-/role-dependent;
+                # BigQuery requires an explicit dataset. Falling back to
+                # "public" silently writes into a Postgres-shaped
+                # namespace that may not exist. Require the endpoint
+                # document to declare the schema explicitly.
+                if not raw_schema:
+                    logger.error(
+                        "ADBC destination requires database_object.schema "
+                        "for stream %r (no implicit default)",
+                        stream_id,
+                    )
+                    return False
+                schema_name = raw_schema
+            else:
+                schema_name = raw_schema or "public"
             state = _StreamState(
-                schema_name=database_object.get("schema") or "public",
+                schema_name=schema_name,
                 table_name=table_name,
                 endpoint_document=dict(endpoint_doc),
                 write_mode=self._get_write_mode(schema_msg.write_mode),
@@ -435,9 +546,6 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         do not race the database catalog (e.g. PostgreSQL's
         ``pg_type_typname_nsp_index``).
         """
-        if not self._engine:
-            return
-
         state.batch_commits_table = Table(
             self.BATCH_COMMITS_TABLE,
             state.metadata,
@@ -464,6 +572,13 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
             logger.warning(
                 "No endpoint document available; table must already exist"
             )
+
+        if self._adbc_only:
+            await self._ensure_tables_via_adbc(state, type_mapper)
+            return
+
+        if self._engine is None:
+            return
 
         # Serialize DDL across concurrent streams. ``create_all`` only
         # adds tables that don't yet exist; pre-existing tables are left
@@ -565,7 +680,13 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         (``cast_arrow_batch``) and only materialized to dicts at the very
         last SQLAlchemy boundary.
         """
-        if not self._engine or not self._connected:
+        if not self._connected:
+            return BatchWriteResult(
+                status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
+                records_written=0,
+                failure_summary="Handler not connected",
+            )
+        if not self._adbc_only and self._engine is None:
             return BatchWriteResult(
                 status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
                 records_written=0,
@@ -600,13 +721,25 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
             )
 
         try:
-            if self._can_use_adbc(stream_id, state):
+            if self._adbc_only:
+                await self._write_batch_adbc_only(
+                    state, run_id, stream_id, batch_seq,
+                    record_batch, cursor.token, record_count,
+                )
+            elif self._can_use_adbc(stream_id, state):
                 await self._write_via_adbc(state, record_batch)
                 try:
                     await self._record_batch_commit(
                         state, run_id, stream_id, batch_seq,
                         cursor.token, record_count,
                     )
+                except AdbcConfigurationError:
+                    # Fatal classification from the commit-record path
+                    # (e.g. ProgrammingError on a missing table). Let
+                    # it propagate as fatal — wrapping it as a
+                    # commit-record error would re-classify a fatal
+                    # failure as retryable and burn cycles forever.
+                    raise
                 except Exception as commit_exc:
                     # The ingest already committed on the ADBC
                     # connection; the SA ``_batch_commits`` write
@@ -620,7 +753,7 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
                         run_id, stream_id, batch_seq, record_count,
                         exc_info=True,
                     )
-                    raise AdbcCommitRecordError(commit_exc) from commit_exc
+                    raise AdbcCommitRecordError(commit_exc, state.write_mode) from commit_exc
             else:
                 prepared = self._prepare_for_sqlalchemy(state, record_batch)
 
@@ -691,7 +824,13 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         batch_seq: int,
     ) -> Optional[Dict[str, Any]]:
         """Check if batch was already committed."""
-        if self._engine is None or state.batch_commits_table is None:
+        if state.batch_commits_table is None:
+            return None
+        if self._adbc_only:
+            return await self._check_batch_committed_via_adbc(
+                state, run_id, stream_id, batch_seq,
+            )
+        if self._engine is None:
             return None
 
         commits = state.batch_commits_table
@@ -721,7 +860,14 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         records_written: int,
     ) -> None:
         """Record batch commit (outside transaction)."""
-        if self._engine is None or state.batch_commits_table is None:
+        if state.batch_commits_table is None:
+            return
+        if self._adbc_only:
+            await self._record_batch_commit_via_adbc(
+                state, run_id, stream_id, batch_seq, cursor_bytes, records_written,
+            )
+            return
+        if self._engine is None:
             return
 
         async with self._engine.begin() as conn:
@@ -1038,11 +1184,606 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
             return record_batch.to_pylist()
         return state.schema_contract.to_db_records(record_batch)
 
+    # ------------------------------------------------------------------
+    # ADBC-only mode (DDL + idempotency + writes via ADBC cursor)
+    # ------------------------------------------------------------------
+    #
+    # When the runtime exposes an ADBC transport instead of a SQLAlchemy
+    # engine, every DDL/idempotency/write call goes through the cached
+    # ADBC DBAPI connection. Snowflake and BigQuery are the dialects
+    # that require this path today (no async SA driver). Postgres can
+    # also opt in (e.g. for Redshift via the libpq-compatible driver),
+    # but its SA path remains the primary route.
+
+    def _adbc_quote_ident(self, name: str) -> str:
+        """Quote a SQL identifier for ADBC dialects.
+
+        Snowflake uppercases unquoted identifiers, so we double-quote
+        everything to preserve the engine's lower-case-by-convention
+        column / table / schema names exactly. BigQuery and Postgres
+        also accept double-quoted identifiers.
+        """
+        return '"' + name.replace('"', '""') + '"'
+
+    def _adbc_quote_qualified(self, schema: str, name: str) -> str:
+        if schema:
+            return f"{self._adbc_quote_ident(schema)}.{self._adbc_quote_ident(name)}"
+        return self._adbc_quote_ident(name)
+
+    def _adbc_native_renderer(self):
+        """Return the native-type → DDL renderer for the active ADBC driver."""
+        if self._driver == "snowflake":
+            return native_to_snowflake
+        if self._driver == "bigquery":
+            return native_to_bigquery
+        if self._driver in ("postgresql", "postgres"):
+            return native_to_postgres
+        raise AdbcConfigurationError(
+            f"ADBC-only mode has no DDL renderer for driver={self._driver!r}; "
+            f"supported: snowflake, bigquery, postgresql"
+        )
+
+    def _adbc_timestamp_default_type(self) -> str:
+        """Per-driver native timestamp type for the _synced_at audit column."""
+        if self._driver == "snowflake":
+            return "TIMESTAMP_TZ"
+        if self._driver == "bigquery":
+            return "TIMESTAMP"
+        # PG, Redshift
+        return "TIMESTAMP WITH TIME ZONE"
+
+    def _adbc_binary_type(self) -> str:
+        """Per-driver native binary column type for committed_cursor."""
+        if self._driver == "snowflake":
+            return "BINARY"
+        if self._driver == "bigquery":
+            return "BYTES"
+        return "BYTEA"
+
+    def _adbc_commit_timestamp_type(self) -> str:
+        """Per-driver type used for committed_at in _batch_commits."""
+        if self._driver == "snowflake":
+            return "TIMESTAMP_NTZ"
+        if self._driver == "bigquery":
+            return "DATETIME"
+        return "TIMESTAMP"
+
+    def _build_adbc_create_table_ddl(
+        self,
+        state: _StreamState,
+        type_mapper: TypeMapper,
+    ) -> str:
+        """Build a ``CREATE TABLE IF NOT EXISTS`` for the active ADBC driver.
+
+        Mirrors :meth:`_create_table_from_schema` but emits a DDL string
+        instead of a SQLAlchemy ``Table``. Always appends ``_synced_at``
+        as a server-defaulted timestamp when the endpoint document does
+        not declare it.
+        """
+        renderer = self._adbc_native_renderer()
+        column_defs: List[str] = []
+        declared_names: set[str] = set()
+        for index, col_def in enumerate(state.endpoint_document.get("columns") or []):
+            col_name = col_def.get("name")
+            if not col_name:
+                raise ValueError(
+                    f"endpoint column at index {index} has no 'name' field"
+                )
+            native_type = col_def.get("native_type")
+            if not native_type:
+                raise ValueError(
+                    f"column {col_name!r} has no 'native_type' field"
+                )
+            sql_type = renderer(native_type, type_mapper)
+            is_pk = col_name in state.primary_keys
+            nullable = col_def.get("nullable", True) and not is_pk
+            parts = [self._adbc_quote_ident(col_name), sql_type]
+            if not nullable:
+                parts.append("NOT NULL")
+            raw_default = col_def.get("default")
+            if isinstance(raw_default, str) and raw_default.strip():
+                parts.append(f"DEFAULT {raw_default}")
+            column_defs.append(" ".join(parts))
+            declared_names.add(col_name)
+
+        if self.SYNCED_AT_COLUMN not in declared_names:
+            column_defs.append(
+                f"{self._adbc_quote_ident(self.SYNCED_AT_COLUMN)} "
+                f"{self._adbc_timestamp_default_type()} DEFAULT CURRENT_TIMESTAMP"
+            )
+
+        # PRIMARY KEY clause: BigQuery does not enforce PKs but accepts
+        # the clause (used as a planner hint). Snowflake and Postgres
+        # both honour it. Omit it when the contract declares no PKs.
+        if state.primary_keys:
+            pk_cols = ", ".join(self._adbc_quote_ident(k) for k in state.primary_keys)
+            column_defs.append(f"PRIMARY KEY ({pk_cols})")
+
+        qualified = self._adbc_quote_qualified(state.schema_name, state.table_name)
+        return (
+            f"CREATE TABLE IF NOT EXISTS {qualified} (\n  "
+            + ",\n  ".join(column_defs)
+            + "\n)"
+        )
+
+    def _build_adbc_batch_commits_ddl(self, schema_name: str) -> str:
+        qualified = self._adbc_quote_qualified(schema_name, self.BATCH_COMMITS_TABLE)
+        return (
+            f"CREATE TABLE IF NOT EXISTS {qualified} (\n"
+            f"  {self._adbc_quote_ident('run_id')} VARCHAR(255) NOT NULL,\n"
+            f"  {self._adbc_quote_ident('stream_id')} VARCHAR(255) NOT NULL,\n"
+            f"  {self._adbc_quote_ident('batch_seq')} BIGINT NOT NULL,\n"
+            f"  {self._adbc_quote_ident('committed_cursor')} "
+            f"{self._adbc_binary_type()},\n"
+            f"  {self._adbc_quote_ident('records_written')} INTEGER,\n"
+            f"  {self._adbc_quote_ident('committed_at')} "
+            f"{self._adbc_commit_timestamp_type()} DEFAULT CURRENT_TIMESTAMP,\n"
+            f"  PRIMARY KEY ({self._adbc_quote_ident('run_id')}, "
+            f"{self._adbc_quote_ident('stream_id')}, "
+            f"{self._adbc_quote_ident('batch_seq')})\n"
+            f")"
+        )
+
+    def _schema_is_implicit_default(self, schema_name: str) -> bool:
+        """True when the schema name is the dialect's implicit default.
+
+        Avoids issuing ``CREATE SCHEMA "public"`` against Snowflake
+        roles that can create tables in PUBLIC but lack CREATE SCHEMA
+        on the database. The connector's case-sensitive declaration
+        is preserved when the user intends a quoted-name namespace.
+        """
+        if not schema_name:
+            return True
+        normalized = schema_name.lower()
+        if self._driver == "snowflake":
+            return normalized == "public"
+        if self._driver == "bigquery":
+            # BigQuery has no "default dataset" — every DML names one
+            # explicitly. Treat no name as implicit; never auto-create.
+            return False
+        # Postgres / Redshift
+        return normalized == "public"
+
+    async def _ensure_tables_via_adbc(
+        self, state: _StreamState, type_mapper: TypeMapper
+    ) -> None:
+        if not state.endpoint_document:
+            raise AdbcConfigurationError(
+                "ADBC-only mode requires an endpoint document for DDL"
+            )
+        create_table_sql = self._build_adbc_create_table_ddl(state, type_mapper)
+        create_commits_sql = self._build_adbc_batch_commits_ddl(state.schema_name)
+        statements: List[str] = []
+        if not self._schema_is_implicit_default(state.schema_name):
+            # BigQuery uses ``CREATE SCHEMA`` for datasets (Standard
+            # SQL). Snowflake and Postgres both accept the same DDL.
+            statements.append(
+                f"CREATE SCHEMA IF NOT EXISTS "
+                f"{self._adbc_quote_ident(state.schema_name)}"
+            )
+        statements.extend([create_table_sql, create_commits_sql])
+        async with self._ddl_lock:
+            await asyncio.to_thread(self._execute_adbc_ddl_sync, statements)
+        logger.debug(
+            "ADBC-only DDL applied for %s.%s", state.schema_name, state.table_name
+        )
+
+    def _execute_adbc_ddl_sync(self, statements: List[str]) -> None:
+        """Run a list of DDL statements on the ADBC connection."""
+        conn = self._reopen_adbc_if_needed_sync()
+        try:
+            cursor = conn.cursor()
+            try:
+                for stmt in statements:
+                    cursor.execute(stmt)
+                conn.commit()
+            finally:
+                try:
+                    cursor.close()
+                except Exception:
+                    logger.debug("ADBC cursor close failed", exc_info=True)
+        except Exception as exc:
+            self._poison_adbc_connection()
+            if _is_fatal_adbc_error(exc):
+                raise _reclassify_as_fatal(exc) from exc
+            raise
+
+    def _poison_adbc_connection(self) -> None:
+        """Drop and close the cached ADBC connection after a failure.
+
+        The next operation re-opens via ``runtime.open_adbc_connection``.
+        Close errors are logged at DEBUG — the original failure is what
+        the caller needs to see.
+        """
+        conn = self._adbc_conn
+        self._adbc_conn = None
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                logger.debug(
+                    "Discarded poisoned ADBC connection; close failed",
+                    exc_info=True,
+                )
+
+    def _reopen_adbc_if_needed_sync(self) -> Any:
+        """Return the cached ADBC connection, opening on demand.
+
+        In ADBC-only mode the connection is opened in ``connect()`` but
+        may be poisoned by an earlier failure. This helper transparently
+        re-opens via the runtime so each write is self-healing.
+        """
+        if self._adbc_conn is not None:
+            return self._adbc_conn
+        if self._runtime is None:
+            raise AdbcConfigurationError("Runtime not available for ADBC reconnect")
+        self._adbc_conn = self._runtime.open_adbc_connection()
+        return self._adbc_conn
+
+    async def _check_batch_committed_via_adbc(
+        self,
+        state: _StreamState,
+        run_id: str,
+        stream_id: str,
+        batch_seq: int,
+    ) -> Optional[Dict[str, Any]]:
+        qualified = self._adbc_quote_qualified(
+            state.schema_name, self.BATCH_COMMITS_TABLE
+        )
+        sql = (
+            f"SELECT {self._adbc_quote_ident('records_written')}, "
+            f"{self._adbc_quote_ident('committed_cursor')} "
+            f"FROM {qualified} "
+            f"WHERE {self._adbc_quote_ident('run_id')} = ? "
+            f"AND {self._adbc_quote_ident('stream_id')} = ? "
+            f"AND {self._adbc_quote_ident('batch_seq')} = ?"
+        )
+        row = await asyncio.to_thread(
+            self._fetch_one_adbc_sync, sql, (run_id, stream_id, batch_seq),
+        )
+        if row is None:
+            return None
+        records_written, committed_cursor = row
+        return {
+            "records_written": int(records_written) if records_written is not None else 0,
+            "committed_cursor": bytes(committed_cursor) if committed_cursor else b"",
+        }
+
+    def _fetch_one_adbc_sync(
+        self, sql: str, params: Tuple[Any, ...]
+    ) -> Optional[Tuple[Any, ...]]:
+        conn = self._reopen_adbc_if_needed_sync()
+        try:
+            cursor = conn.cursor()
+            try:
+                cursor.execute(sql, params)
+                return cursor.fetchone()
+            finally:
+                try:
+                    cursor.close()
+                except Exception:
+                    logger.debug("ADBC cursor close failed", exc_info=True)
+        except Exception as exc:
+            self._poison_adbc_connection()
+            if _is_fatal_adbc_error(exc):
+                raise _reclassify_as_fatal(exc) from exc
+            raise
+
+    async def _record_batch_commit_via_adbc(
+        self,
+        state: _StreamState,
+        run_id: str,
+        stream_id: str,
+        batch_seq: int,
+        cursor_bytes: bytes,
+        records_written: int,
+    ) -> None:
+        qualified = self._adbc_quote_qualified(
+            state.schema_name, self.BATCH_COMMITS_TABLE
+        )
+        sql = (
+            f"INSERT INTO {qualified} ("
+            f"{self._adbc_quote_ident('run_id')}, "
+            f"{self._adbc_quote_ident('stream_id')}, "
+            f"{self._adbc_quote_ident('batch_seq')}, "
+            f"{self._adbc_quote_ident('committed_cursor')}, "
+            f"{self._adbc_quote_ident('records_written')}) "
+            f"VALUES (?, ?, ?, ?, ?)"
+        )
+        try:
+            await asyncio.to_thread(
+                self._execute_adbc_dml_sync,
+                sql,
+                (run_id, stream_id, batch_seq, cursor_bytes, records_written),
+            )
+        except AdbcConfigurationError as exc:
+            # An IntegrityError on the (run_id, stream_id, batch_seq)
+            # PK means a concurrent retry already wrote the commit row.
+            # Surfacing it as fatal would leave the ingested rows
+            # orphaned without a _batch_commits entry — cold-start
+            # would re-ingest and duplicate. Treat as success.
+            cause = exc.__cause__
+            if cause is not None and type(cause).__name__ == "IntegrityError":
+                logger.info(
+                    "ADBC _batch_commits INSERT raced (concurrent retry); "
+                    "treating as already-committed for %s/%s/%s",
+                    run_id, stream_id, batch_seq,
+                )
+                return
+            raise
+
+    def _execute_adbc_dml_sync(self, sql: str, params: Tuple[Any, ...]) -> None:
+        conn = self._reopen_adbc_if_needed_sync()
+        try:
+            cursor = conn.cursor()
+            try:
+                cursor.execute(sql, params)
+                conn.commit()
+            finally:
+                try:
+                    cursor.close()
+                except Exception:
+                    logger.debug("ADBC cursor close failed", exc_info=True)
+        except Exception as exc:
+            self._poison_adbc_connection()
+            if _is_fatal_adbc_error(exc):
+                raise _reclassify_as_fatal(exc) from exc
+            raise
+
+    async def _write_batch_adbc_only(
+        self,
+        state: _StreamState,
+        run_id: str,
+        stream_id: str,
+        batch_seq: int,
+        record_batch: pa.RecordBatch,
+        cursor_bytes: bytes,
+        record_count: int,
+    ) -> None:
+        """Full write path for ADBC-only mode.
+
+        Insert: append via ``adbc_ingest``. Truncate-insert: TRUNCATE
+        TABLE then append. Upsert: ingest into a session-scoped temp
+        table, then ``MERGE INTO`` the target.
+
+        Unlike the SA path's atomicity (write + commit-record in one
+        transaction), the ADBC path commits the ingest separately from
+        the ``_batch_commits`` INSERT. A crash between the two will
+        cause the next retry to:
+
+        * ``insert`` — re-ingest, duplicating rows.
+        * ``truncate_insert`` — TRUNCATE then re-ingest; idempotent.
+        * ``upsert`` — re-MERGE on conflict keys; idempotent.
+
+        See :class:`AdbcCommitRecordError` for the exception that
+        surfaces this divergence to the engine's failure summary.
+        """
+        if state.schema_contract is None:
+            raise AdbcConfigurationError(
+                "ADBC-only write requires a configured SchemaContract"
+            )
+        cast_batch = state.schema_contract.cast_arrow_batch(record_batch)
+        conflict_keys = state.conflict_keys or state.primary_keys
+
+        if state.write_mode == "truncate_insert":
+            await asyncio.to_thread(
+                self._truncate_then_ingest_sync,
+                cast_batch, state.schema_name, state.table_name,
+            )
+        elif state.write_mode == "upsert" and conflict_keys:
+            await asyncio.to_thread(
+                self._merge_ingest_sync,
+                cast_batch, state.schema_name, state.table_name,
+                list(cast_batch.schema.names), conflict_keys,
+            )
+        else:
+            await asyncio.to_thread(
+                self._adbc_only_ingest_sync,
+                cast_batch, state.schema_name, state.table_name,
+            )
+
+        try:
+            await self._record_batch_commit_via_adbc(
+                state, run_id, stream_id, batch_seq, cursor_bytes, record_count,
+            )
+        except AdbcConfigurationError:
+            # Already classified as fatal by _record_batch_commit_via_adbc
+            # (PEP-249 ProgrammingError, NotSupportedError, DataError).
+            # IntegrityError on retry collision is handled there too.
+            # Propagate as fatal — wrapping would re-classify as retryable.
+            raise
+        except Exception as commit_exc:
+            logger.error(
+                "ADBC-only ingest committed but commit-record failed "
+                "for %s/%s/%s — see AdbcCommitRecordError for retry semantics",
+                run_id, stream_id, batch_seq,
+                exc_info=True,
+            )
+            raise AdbcCommitRecordError(commit_exc, state.write_mode) from commit_exc
+
+    def _adbc_only_ingest_sync(
+        self,
+        cast_batch: pa.RecordBatch,
+        schema_name: str,
+        table_name: str,
+    ) -> None:
+        """ADBC ingest for ADBC-only mode (poison-aware, fatal-reclassifying)."""
+        conn = self._reopen_adbc_if_needed_sync()
+        try:
+            cursor = conn.cursor()
+            try:
+                cursor.adbc_ingest(
+                    table_name,
+                    cast_batch,
+                    mode="append",
+                    db_schema_name=schema_name or None,
+                )
+                conn.commit()
+            finally:
+                try:
+                    cursor.close()
+                except Exception:
+                    logger.debug("ADBC cursor close failed", exc_info=True)
+        except Exception as exc:
+            self._poison_adbc_connection()
+            if _is_fatal_adbc_error(exc):
+                raise _reclassify_as_fatal(exc) from exc
+            raise
+
+    def _truncate_then_ingest_sync(
+        self,
+        cast_batch: pa.RecordBatch,
+        schema_name: str,
+        table_name: str,
+    ) -> None:
+        qualified = self._adbc_quote_qualified(schema_name, table_name)
+        conn = self._reopen_adbc_if_needed_sync()
+        try:
+            cursor = conn.cursor()
+            try:
+                cursor.execute(f"TRUNCATE TABLE {qualified}")
+            finally:
+                try:
+                    cursor.close()
+                except Exception:
+                    logger.debug("ADBC cursor close failed", exc_info=True)
+            conn.commit()
+        except Exception as exc:
+            self._poison_adbc_connection()
+            if _is_fatal_adbc_error(exc):
+                raise _reclassify_as_fatal(exc) from exc
+            raise
+        self._adbc_only_ingest_sync(cast_batch, schema_name, table_name)
+
+    def _build_adbc_temp_table_sql(
+        self, temp_name: str, target_qualified: str
+    ) -> str:
+        """Per-driver SQL to create a session-scoped staging table.
+
+        Driver-specific because each warehouse has its own syntax:
+
+        * Snowflake — ``CREATE OR REPLACE TEMPORARY TABLE``; ``LIKE``
+          copies the column list. Session-scoped temp tables drop at
+          session close.
+        * BigQuery — ``CREATE TEMP TABLE`` (no OR REPLACE for temps);
+          ``LIKE`` is not supported, so we use
+          ``AS SELECT * FROM target WHERE FALSE``. Temp tables drop at
+          session close (~24h max).
+        * Postgres — ``CREATE TEMP TABLE`` with ``LIKE INCLUDING
+          DEFAULTS``. Temp tables drop at session close. ``ON COMMIT
+          DROP`` would also work but we want the table to survive
+          across the ingest/MERGE commit boundary.
+        """
+        quoted_temp = self._adbc_quote_ident(temp_name)
+        if self._driver == "snowflake":
+            return (
+                f"CREATE OR REPLACE TEMPORARY TABLE {quoted_temp} "
+                f"LIKE {target_qualified}"
+            )
+        if self._driver == "bigquery":
+            return (
+                f"CREATE TEMP TABLE {quoted_temp} AS "
+                f"SELECT * FROM {target_qualified} WHERE FALSE"
+            )
+        # Postgres / Redshift
+        return (
+            f"CREATE TEMP TABLE {quoted_temp} "
+            f"(LIKE {target_qualified} INCLUDING DEFAULTS)"
+        )
+
+    def _merge_ingest_sync(
+        self,
+        cast_batch: pa.RecordBatch,
+        schema_name: str,
+        table_name: str,
+        all_columns: List[str],
+        conflict_keys: List[str],
+    ) -> None:
+        """Upsert via ingest-to-temp + ``MERGE INTO`` target.
+
+        Temporary tables are session-scoped on every supported ADBC
+        dialect so no explicit cleanup is required; collisions inside
+        a single session are avoided by suffixing the table name.
+        Snowflake's ``CREATE OR REPLACE`` covers same-session retries;
+        BigQuery and Postgres tear down the temp table at session end.
+
+        Postgres temp tables are created in ``pg_temp`` regardless of
+        the schema name, so the ingest into the temp passes
+        ``db_schema_name=None``.
+        """
+        # Suffix the staging name with a unique-ish token to defend
+        # against same-session collisions when multiple streams write
+        # to the same target via one shared handler.
+        temp_name = f"_analitiq_stage_{table_name}"
+        target_qualified = self._adbc_quote_qualified(schema_name, table_name)
+        conn = self._reopen_adbc_if_needed_sync()
+        try:
+            cursor = conn.cursor()
+            try:
+                cursor.execute(self._build_adbc_temp_table_sql(temp_name, target_qualified))
+                conn.commit()
+                cursor.adbc_ingest(
+                    temp_name,
+                    cast_batch,
+                    mode="append",
+                    # Temp tables live in a session-private namespace on
+                    # every supported dialect; omitting db_schema_name
+                    # lets the driver resolve via pg_temp / temp.
+                    db_schema_name=None,
+                )
+                conn.commit()
+                on_clause = " AND ".join(
+                    f"t.{self._adbc_quote_ident(k)} = s.{self._adbc_quote_ident(k)}"
+                    for k in conflict_keys
+                )
+                update_cols = [c for c in all_columns if c not in conflict_keys]
+                set_clause = ", ".join(
+                    f"t.{self._adbc_quote_ident(c)} = s.{self._adbc_quote_ident(c)}"
+                    for c in update_cols
+                )
+                insert_cols = ", ".join(self._adbc_quote_ident(c) for c in all_columns)
+                insert_vals = ", ".join(
+                    f"s.{self._adbc_quote_ident(c)}" for c in all_columns
+                )
+                quoted_temp = self._adbc_quote_ident(temp_name)
+                merge_sql = (
+                    f"MERGE INTO {target_qualified} t USING {quoted_temp} s "
+                    f"ON {on_clause} "
+                )
+                if update_cols:
+                    merge_sql += f"WHEN MATCHED THEN UPDATE SET {set_clause} "
+                merge_sql += (
+                    f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) "
+                    f"VALUES ({insert_vals})"
+                )
+                cursor.execute(merge_sql)
+                conn.commit()
+            finally:
+                try:
+                    cursor.close()
+                except Exception:
+                    logger.debug("ADBC cursor close failed", exc_info=True)
+        except Exception as exc:
+            self._poison_adbc_connection()
+            if _is_fatal_adbc_error(exc):
+                raise _reclassify_as_fatal(exc) from exc
+            raise
+
     async def health_check(self) -> bool:
         """Check database health."""
-        if not self._engine or not self._connected:
+        if not self._connected:
             return False
 
+        if self._adbc_only:
+            try:
+                await asyncio.to_thread(self._health_check_adbc_sync)
+                return True
+            except Exception as e:
+                logger.warning(f"Health check failed: {e}")
+                return False
+
+        if self._engine is None:
+            return False
         try:
             async with self._engine.connect() as conn:
                 await conn.execute(text("SELECT 1"))
@@ -1050,3 +1791,27 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         except Exception as e:
             logger.warning(f"Health check failed: {e}")
             return False
+
+    def _health_check_adbc_sync(self) -> None:
+        """Health probe for ADBC-only mode.
+
+        Self-heals a poisoned cached connection by reopening through
+        the runtime — without that, a single transient ingest failure
+        would leave health_check returning False forever (until the
+        next write_batch reopens), causing avoidable liveness failures
+        and restarts.
+        """
+        conn = self._reopen_adbc_if_needed_sync()
+        try:
+            cursor = conn.cursor()
+            try:
+                cursor.execute("SELECT 1")
+                cursor.fetchone()
+            finally:
+                try:
+                    cursor.close()
+                except Exception:
+                    logger.debug("ADBC cursor close failed", exc_info=True)
+        except Exception:
+            self._poison_adbc_connection()
+            raise
