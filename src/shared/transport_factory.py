@@ -381,11 +381,14 @@ async def build_sqlalchemy_transport(
 # ---------------------------------------------------------------------------
 
 
-# Dialect -> dotted ADBC dbapi module path consulted by the
-# ``transport_type: "adbc"`` builder. Additions here are append-only.
+# Driver identifier -> dotted ADBC dbapi module path consulted by the
+# ``transport_type: "adbc"`` builder. The schema's closed driver enum
+# (``postgresql``, ``snowflake``, ``bigquery``) defines the universe of
+# legal values; this engine table only needs entries for drivers it
+# actually ships. Drivers listed in the schema but absent here produce
+# a clean ``ValueError`` at materialize time. Additions append-only.
 _ADBC_DRIVER_MODULES: Dict[str, str] = {
     "postgresql": "adbc_driver_postgresql.dbapi",
-    "postgres": "adbc_driver_postgresql.dbapi",
     "snowflake": "adbc_driver_snowflake.dbapi",
 }
 
@@ -398,11 +401,14 @@ class AdbcTransport:
     DBAPI 2.0 protocol synchronously and is not a connection pool.
     Callers obtain a fresh DBAPI connection via :meth:`connect`;
     lifecycle (close on disconnect, poison-on-error) is owned by the
-    caller — the runtime keeps no live ADBC handles.
+    caller — the runtime keeps no live ADBC handles. ``driver`` matches
+    the connector contract's discriminator value (one of the schema
+    enum); ``driver_module_path`` is the dotted dbapi module the
+    builder imported (kept for diagnostics).
     """
 
     connect: Callable[[], Any]
-    dialect: str
+    driver: str
     driver_module_path: str
 
 
@@ -413,7 +419,7 @@ def _resolve_db_kwargs(
 
     Each value goes through the resolver so secrets and connection
     parameters flow in the same way as DSN bindings. The resolved dict
-    is passed verbatim to ``driver_module.connect(uri, db_kwargs=...)``;
+    is passed verbatim to ``driver_module.connect(db_kwargs=...)``;
     per-driver requirements for value types (usually ``str``) are the
     caller's responsibility.
     """
@@ -435,47 +441,67 @@ async def build_adbc_transport(
 ) -> AdbcTransport:
     """Materialize an ADBC transport from a connector ``transports[ref]`` block.
 
-    Validates the declared ``dialect`` against ``_ADBC_DRIVER_MODULES``,
-    imports the matching ``adbc_driver_*`` package, renders the
-    ``dsn.url_template`` block, resolves any ``db_kwargs``, then opens
-    one probe connection synchronously to ping ``SELECT 1`` so a bad
-    credential or missing driver fails at materialize time, not on the
-    first batch. The probe handle is closed before returning; the
+    Validates the declared ``driver`` against ``_ADBC_DRIVER_MODULES``,
+    imports the matching ``adbc_driver_*`` package, optionally renders
+    the ``dsn.url_template`` block, resolves any ``db_kwargs``, then
+    opens one probe connection synchronously to ping ``SELECT 1`` so a
+    bad credential or missing driver fails at materialize time, not on
+    the first batch. The probe handle is closed before returning; the
     transport returned to the caller is a connection factory.
+
+    ``dsn`` and ``db_kwargs`` are both optional individually, but at
+    least one must be present — the schema's ``anyOf`` requirement
+    (Postgres drives via libpq URI; Snowflake and BigQuery authenticate
+    entirely through ``db_kwargs``).
     """
-    dialect = spec.get("dialect")
-    if not isinstance(dialect, str) or not dialect:
+    driver = spec.get("driver")
+    if not isinstance(driver, str) or not driver:
         raise ValueError(
-            "adbc transport requires `dialect` (e.g. 'snowflake', 'postgresql')"
+            "adbc transport requires `driver` (e.g. 'snowflake', 'postgresql', "
+            "'bigquery')"
         )
-    dialect = dialect.lower()
-    driver_module_path = _ADBC_DRIVER_MODULES.get(dialect)
+    driver = driver.lower()
+    driver_module_path = _ADBC_DRIVER_MODULES.get(driver)
     if driver_module_path is None:
         raise ValueError(
-            f"adbc transport dialect {dialect!r} is not registered; "
-            f"known dialects: {sorted(_ADBC_DRIVER_MODULES)}"
+            f"adbc transport driver {driver!r} is not registered in this "
+            f"engine; known drivers: {sorted(_ADBC_DRIVER_MODULES)}"
         )
 
     try:
         driver_module = importlib.import_module(driver_module_path)
     except ImportError as exc:
         raise RuntimeError(
-            f"ADBC driver package not installed for dialect={dialect!r}: "
+            f"ADBC driver package not installed for driver={driver!r}: "
             f"{driver_module_path} is not importable ({exc}). Install the "
             f"matching `adbc-driver-*` extra."
         ) from exc
 
     raw_dsn = spec.get("dsn")
-    if not isinstance(raw_dsn, Mapping):
-        raise TypeError(
-            "adbc transport `dsn` must be the structured "
-            "{kind: url_template, template, bindings} object"
-        )
-    uri = _render_url_template_dsn(raw_dsn, resolver)
+    uri: Optional[str] = None
+    if raw_dsn is not None:
+        if not isinstance(raw_dsn, Mapping):
+            raise TypeError(
+                "adbc transport `dsn`, when present, must be the structured "
+                "{kind: url_template, template, bindings} object"
+            )
+        uri = _render_url_template_dsn(raw_dsn, resolver)
 
     db_kwargs = _resolve_db_kwargs(spec.get("db_kwargs"), resolver)
 
+    if uri is None and not db_kwargs:
+        raise ValueError(
+            f"adbc transport for driver={driver!r} declares neither `dsn` nor "
+            f"`db_kwargs`; the schema requires at least one"
+        )
+
     def _open_connection() -> Any:
+        # Three call shapes covering the schema's anyOf:
+        #   uri only          -> driver_module.connect(uri)
+        #   db_kwargs only    -> driver_module.connect(db_kwargs=...)
+        #   uri + db_kwargs   -> driver_module.connect(uri, db_kwargs=...)
+        if uri is None:
+            return driver_module.connect(db_kwargs=db_kwargs)
         if db_kwargs:
             return driver_module.connect(uri, db_kwargs=db_kwargs)
         return driver_module.connect(uri)
@@ -499,7 +525,7 @@ async def build_adbc_transport(
 
     return AdbcTransport(
         connect=_open_connection,
-        dialect=dialect,
+        driver=driver,
         driver_module_path=driver_module_path,
     )
 

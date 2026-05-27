@@ -68,10 +68,10 @@ def _derive_dialect(connector_definition: Optional[Mapping[str, Any]]) -> Option
             return None
         return driver.split("+", 1)[0]
     if transport_type == "adbc":
-        dialect = transport.get("dialect")
-        if not isinstance(dialect, str) or not dialect:
+        driver = transport.get("driver")
+        if not isinstance(driver, str) or not driver:
             return None
-        return dialect.lower()
+        return driver.lower()
     return None
 
 
@@ -242,9 +242,12 @@ class ConnectionRuntime:
                 self._transport_dialect = transport.dialect
             elif isinstance(transport, AdbcTransport):
                 self._adbc_transport = transport
-                self._transport_dialect = transport.dialect
-                # ADBC has no SQLAlchemy driver string; record the
-                # module path so debugging output is informative.
+                # ADBC's driver discriminator (``postgresql`` / ``snowflake`` /
+                # ``bigquery``) is the closest analogue to a SQLAlchemy
+                # base dialect. ``driver_string`` carries the dotted
+                # dbapi module path so debugging logs still tell you
+                # which driver package was imported.
+                self._transport_dialect = transport.driver
                 self._transport_driver = transport.driver_module_path
             elif isinstance(transport, HttpTransport):
                 self._session = transport.session
