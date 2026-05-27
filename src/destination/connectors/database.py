@@ -1713,7 +1713,14 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
             # engine's failure summary carries the divergence and DLQ
             # rules can route on it.
             cause = exc.__cause__
-            if cause is not None and type(cause).__name__ == "IntegrityError":
+            # MRO walk (mirroring _is_fatal_adbc_error) so a driver-side
+            # subclass like ``MyDriverIntegrityError(IntegrityError)``
+            # is still recognised. A bare ``type(cause).__name__`` check
+            # would let the subclass slip past and be re-raised as fatal,
+            # orphaning ingested rows on idempotent write modes.
+            if cause is not None and any(
+                cls.__name__ == "IntegrityError" for cls in type(cause).__mro__
+            ):
                 self._handle_commit_collision(
                     state, run_id, stream_id, batch_seq, cause,
                 )
@@ -1723,19 +1730,40 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         # IntegrityError on a (run_id, stream_id, batch_seq) collision —
         # MERGE matches the existing row and the WHEN NOT MATCHED INSERT
         # silently no-ops with rowcount=0. Without this check, insert-mode
-        # duplication would slip through reported as success. rowcount=-1
-        # means the driver did not report a count; we accept that as
-        # success (the same Snowflake/Postgres INSERT path returns -1 too
-        # for some driver versions and is treated as success there).
-        if self._driver == "bigquery" and rowcount == 0:
-            collision_marker = RuntimeError(
-                "BigQuery _batch_commits MERGE no-op: a row for "
-                f"({run_id!r}, {stream_id!r}, {batch_seq}) already exists; "
-                "concurrent retry won"
-            )
-            self._handle_commit_collision(
-                state, run_id, stream_id, batch_seq, collision_marker,
-            )
+        # duplication would slip through reported as success.
+        #
+        # This rowcount-as-collision invariant is tightly coupled to the
+        # exact MERGE SQL shape constructed above: a single-row constant
+        # source CTE plus a WHEN NOT MATCHED INSERT clause only. Adding
+        # a WHEN MATCHED UPDATE clause, or replacing the source CTE
+        # with a multi-row SELECT, breaks the invariant — rowcount could
+        # then legitimately be 0 for non-collision reasons. Do not add
+        # either without revisiting this branch.
+        if self._driver == "bigquery":
+            if rowcount == 0:
+                collision_marker = RuntimeError(
+                    "BigQuery _batch_commits MERGE no-op: a row for "
+                    f"({run_id!r}, {stream_id!r}, {batch_seq}) already exists; "
+                    "concurrent retry won"
+                )
+                self._handle_commit_collision(
+                    state, run_id, stream_id, batch_seq, collision_marker,
+                )
+                return
+            if rowcount < 0:
+                # PEP-249 -1 means "unavailable". The BQ ADBC driver
+                # documents non-negative counts on DML, so seeing -1
+                # here is suspicious — we can't distinguish a successful
+                # insert from a collision-no-op. Log loudly because
+                # insert-mode duplication would silently slip through.
+                logger.warning(
+                    "BigQuery _batch_commits MERGE returned rowcount=%r "
+                    "for (%s, %s, %s); cannot verify whether the commit "
+                    "row was inserted or no-op'd on existing PK collision. "
+                    "Insert-mode duplication may be silently masked. "
+                    "Check the adbc-driver-bigquery version.",
+                    rowcount, run_id, stream_id, batch_seq,
+                )
 
     def _handle_commit_collision(
         self,

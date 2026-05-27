@@ -245,6 +245,43 @@ class TestCommitCollisionHandling:
         )
 
 
+class TestIntegrityErrorMroDetection:
+    """Driver-side subclasses of IntegrityError must still trigger the
+    commit-collision branch. The detection walks ``type(cause).__mro__``
+    so a driver that wraps PEP-249 IntegrityError in its own subclass
+    cannot slip past the branch and be re-raised as fatal — which
+    would orphan ingested rows on idempotent write modes."""
+
+    def test_bare_integrity_error_detected(self):
+        # Locally-defined class with the right name → direct match.
+        class IntegrityError(Exception):
+            pass
+        exc = IntegrityError()
+        assert any(
+            cls.__name__ == "IntegrityError" for cls in type(exc).__mro__
+        )
+
+    def test_subclassed_integrity_error_detected(self):
+        # A driver wrapping IntegrityError in its own subclass — must
+        # still trigger collision handling, NOT be re-raised as fatal.
+        class IntegrityError(Exception):
+            pass
+        class MyDriverIntegrityError(IntegrityError):
+            pass
+        exc = MyDriverIntegrityError()
+        assert any(
+            cls.__name__ == "IntegrityError" for cls in type(exc).__mro__
+        )
+
+    def test_unrelated_exception_not_detected(self):
+        class ProgrammingError(Exception):
+            pass
+        exc = ProgrammingError()
+        assert not any(
+            cls.__name__ == "IntegrityError" for cls in type(exc).__mro__
+        )
+
+
 class TestAdbcModeReset:
     """`_adbc_only` must reset on reconnect so a handler reused across
     runtimes (or in tests that monkey-patch one mode and expect a clean
