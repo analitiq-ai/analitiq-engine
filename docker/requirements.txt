@@ -74,6 +74,7 @@ pyarrow>=12.0.0
 # flag flip needs no rebuild.
 adbc-driver-manager>=1.1.0
 adbc-driver-postgresql>=1.1.0
+# Snowflake: driver wheel only; URI builder registration tracked in #98.
 adbc-driver-snowflake>=1.1.0
 
 # For NoSQL databases
