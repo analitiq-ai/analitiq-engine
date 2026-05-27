@@ -2,6 +2,7 @@
 
 import json
 import logging
+from datetime import date, datetime, time
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
@@ -79,31 +80,28 @@ class SchemaContract:
     ) -> List[Dict[str, Any]]:
         """Materialise a batch for a SQL destination.
 
-        Arrow-space schema alignment, then ``to_pylist``, then Json wire-
-        strings → dicts. SQLAlchemy is the wire-format-aware receiver
-        beyond this point — it serialises ``datetime`` / ``Decimal`` /
-        ``dict`` natively into their column types.
-
-        JSON-emitting destinations (the API handler) use this same
-        materialisation and let ``orjson`` handle the ``datetime`` /
-        ``Decimal`` conversion at serialisation time rather than
-        pre-casting in Arrow space.
+        JSON columns stay as wire-format strings (their Arrow shape is
+        ``pa.large_string``) — they bind directly into TEXT / JSONB
+        columns without per-row coercion. ``datetime`` / ``Decimal`` /
+        ``date`` pass through as Python objects; SA's column adapters
+        handle them uniformly across dialects.
         """
         record_batch = self.cast_arrow_batch(record_batch)
-        records = record_batch.to_pylist()
-        return self.decode_json_columns(records)
+        return record_batch.to_pylist()
 
     def decode_json_columns(
         self, records: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
-        """Parse JSON-encoded string values back into Python dict/list.
+        """Parse JSON-encoded string values into Python dict/list.
 
-        Decode is idempotent: ``None`` and already-parsed dict/list values
-        pass through untouched so the caller can apply this more than
-        once. Malformed strings raise ``ValueError`` carrying the column
-        name and row index — the destination handler classifies that as
-        a data-shape failure rather than letting a bare
-        ``JSONDecodeError`` escape from deep in the stack.
+        Available for callers that need decoded objects (e.g. an API
+        destination handing values to ``orjson``). The SQL destination
+        path keeps strings — JSON columns bind directly to TEXT/JSONB
+        without coercion.
+
+        Idempotent on ``None`` and already-parsed dict/list values.
+        Malformed strings raise ``ValueError`` carrying the column
+        name and row index.
         """
         json_cols = self.json_columns
         if not json_cols or not records:
@@ -255,7 +253,59 @@ class SchemaContract:
             ]
             return pa.array(converted, type=field.type)
 
+        if (
+            pa.types.is_timestamp(field.type)
+            or pa.types.is_date(field.type)
+            or pa.types.is_time(field.type)
+        ) and any(isinstance(v, str) for v in values if v is not None):
+            return SchemaContract._build_temporal_from_strings(field, values)
+
         return pa.array(values, type=field.type)
+
+    @staticmethod
+    def _build_temporal_from_strings(
+        field: pa.Field, values: List[Any]
+    ) -> pa.Array:
+        """Parse ISO-8601 strings into a timestamp / date / time column.
+
+        Triggered for JSON-Schema ``format: date-time | date | time`` fields
+        whose endpoint declares an Arrow temporal ``arrow_type`` but does not
+        pin a ``source_format``. PyArrow refuses to coerce strings into a
+        timestamp/date/time array directly, so we parse with the stdlib
+        first and hand typed Python objects to ``pa.array``.
+        """
+        is_ts = pa.types.is_timestamp(field.type)
+        is_date = pa.types.is_date(field.type)
+        tz = getattr(field.type, "tz", None) if is_ts else None
+
+        parsed: List[Any] = []
+        for row, v in enumerate(values):
+            if v is None:
+                parsed.append(None)
+                continue
+            if not isinstance(v, str):
+                parsed.append(v)
+                continue
+            try:
+                if is_ts:
+                    dt = datetime.fromisoformat(v.replace("Z", "+00:00"))
+                    if tz and dt.tzinfo is None:
+                        raise ValueError(
+                            f"value {v!r} is naive but column declares tz={tz!r}"
+                        )
+                    if not tz and dt.tzinfo is not None:
+                        dt = dt.replace(tzinfo=None)
+                    parsed.append(dt)
+                elif is_date:
+                    parsed.append(date.fromisoformat(v[:10]))
+                else:
+                    parsed.append(time.fromisoformat(v))
+            except ValueError as exc:
+                raise ValueError(
+                    f"column {field.name!r} at row {row}: cannot parse "
+                    f"{v!r} as {field.type}: {exc}"
+                ) from exc
+        return pa.array(parsed, type=field.type)
 
     @staticmethod
     def _schema_from_columns(

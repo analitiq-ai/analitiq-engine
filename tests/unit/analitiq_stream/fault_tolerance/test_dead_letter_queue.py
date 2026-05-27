@@ -454,6 +454,25 @@ class TestDeadLetterQueueEdgeCases:
         assert fallback_record["pipeline_id"] == "test-pipeline"
     
     @pytest.mark.asyncio
+    async def test_write_to_dlq_fallback_also_fails(self):
+        """Test that a CRITICAL log is emitted and no exception propagates when both primary and fallback writes fail."""
+        dlq = DeadLetterQueue(dlq_path=str(self.dlq_path))
+
+        with patch("builtins.open", side_effect=OSError("disk full")):
+            with patch("src.state.dead_letter_queue.logger") as mock_logger:
+                # Must not raise even though both writes fail
+                await dlq.send_to_dlq({"id": 999}, Exception("write error"), "test-pipeline")
+
+                mock_logger.error.assert_called_once()
+                mock_logger.critical.assert_called_once()
+                critical_msg, critical_kwargs = (
+                    mock_logger.critical.call_args[0][0],
+                    mock_logger.critical.call_args[1],
+                )
+                assert "record lost permanently" in critical_msg
+                assert critical_kwargs.get("exc_info") is True
+
+    @pytest.mark.asyncio
     async def test_traceback_extraction(self):
         """Test traceback extraction from exceptions."""
         dlq = DeadLetterQueue(dlq_path=str(self.dlq_path))

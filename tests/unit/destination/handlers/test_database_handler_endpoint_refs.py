@@ -46,14 +46,14 @@ def _runtime(
 class TestEndpointRefDispatch:
     def test_pre_connect_raises(self):
         handler = DatabaseDestinationHandler()
-        handler.set_endpoint_refs({"s1": {"scope": "connector", "connection_id": "pg", "alias": "transfers"}})
+        handler.set_endpoint_refs({"s1": {"scope": "connector", "connection_id": "pg", "endpoint_id": "transfers"}})
         with pytest.raises(RuntimeError, match="called before connect"):
             handler._type_mapper_for_stream("s1")
 
     def test_unknown_stream_id_raises(self):
         handler = DatabaseDestinationHandler()
         handler._runtime = _runtime(connector_mapper=_mapper("pg"))
-        handler.set_endpoint_refs({"s1": {"scope": "connector", "connection_id": "pg", "alias": "transfers"}})
+        handler.set_endpoint_refs({"s1": {"scope": "connector", "connection_id": "pg", "endpoint_id": "transfers"}})
         with pytest.raises(RuntimeError, match="no endpoint_ref registered"):
             handler._type_mapper_for_stream("unregistered-stream")
 
@@ -64,7 +64,7 @@ class TestEndpointRefDispatch:
             connector_mapper=connector_map,
             connection_mapper=_mapper("connection:dest-conn"),
         )
-        handler.set_endpoint_refs({"s1": {"scope": "connector", "connection_id": "pg", "alias": "transfers"}})
+        handler.set_endpoint_refs({"s1": {"scope": "connector", "connection_id": "pg", "endpoint_id": "transfers"}})
         assert handler._type_mapper_for_stream("s1") is connector_map
 
     def test_connection_scoped_uses_connection_mapper(self):
@@ -74,19 +74,19 @@ class TestEndpointRefDispatch:
             connector_mapper=_mapper("pg"),
             connection_mapper=connection_map,
         )
-        handler.set_endpoint_refs({"s1": {"scope": "connection", "connection_id": "dest-conn", "alias": "orders"}})
+        handler.set_endpoint_refs({"s1": {"scope": "connection", "connection_id": "dest-conn", "endpoint_id": "orders"}})
         assert handler._type_mapper_for_stream("s1") is connection_map
 
     def test_set_endpoint_refs_copies_mapping(self):
         """External mutations must not leak into the handler's state."""
         handler = DatabaseDestinationHandler()
-        source = {"s1": {"scope": "connector", "connection_id": "pg", "alias": "transfers"}}
+        source = {"s1": {"scope": "connector", "connection_id": "pg", "endpoint_id": "transfers"}}
         handler.set_endpoint_refs(source)
-        source["s1"] = {"scope": "connector", "connection_id": "evil", "alias": "injected"}
+        source["s1"] = {"scope": "connector", "connection_id": "evil", "endpoint_id": "injected"}
         handler._runtime = _runtime(connector_mapper=_mapper("pg"))
         # Original registration wins — set_endpoint_refs took a defensive copy.
         assert handler._endpoint_refs["s1"] == {
-            "scope": "connector", "connection_id": "pg", "alias": "transfers",
+            "scope": "connector", "connection_id": "pg", "endpoint_id": "transfers",
         }
 
 
@@ -192,13 +192,13 @@ class TestWriteModeDispatch:
             handler._get_write_mode(99)
 
 
-class TestPrepareForSqlAlchemyDecodesJson:
-    """Json columns travel as JSON-encoded strings; ``_prepare_for_sqlalchemy``
-    must reverse the encoding so SQLAlchemy's JSON column receives a dict,
-    not a quoted string. Regression catcher for: 'drops the decode call',
-    'order swap (decode before cast)', 'forgets non-Postgres dialects'."""
+class TestPrepareForSqlAlchemy:
+    """``_prepare_for_sqlalchemy`` aligns the batch to the destination
+    schema and materialises once. Json columns stay as their
+    wire-format string so they bind directly into TEXT / JSONB columns
+    without per-row coercion."""
 
-    def test_json_column_decodes_to_dict(self):
+    def test_json_column_kept_as_wire_string(self):
         import pyarrow as pa
         from src.destination.connectors.database import (
             DatabaseDestinationHandler,
@@ -232,13 +232,12 @@ class TestPrepareForSqlAlchemyDecodesJson:
             schema=contract.arrow_schema,
         )
         records = handler._prepare_for_sqlalchemy(state, batch)
-        assert records == [{"id": "r1", "metadata": {"k": "v", "n": 1}}]
+        # The Json column bind value is the raw wire string -- PG
+        # accepts it as JSONB text input; other dialects treat it as
+        # TEXT. No per-row dict/list parsing happens here.
+        assert records == [{"id": "r1", "metadata": '{"k": "v", "n": 1}'}]
 
-    def test_malformed_json_surfaces_column_context(self):
-        """Without context the developer sees ``json.JSONDecodeError`` and
-        has to grep records to find the offender. The handler relies on
-        ``decode_json_columns`` raising ``ValueError`` with the column
-        name."""
+    def test_null_json_column_passes_through(self):
         import pyarrow as pa
         from src.destination.connectors.database import (
             DatabaseDestinationHandler,
@@ -261,10 +260,10 @@ class TestPrepareForSqlAlchemyDecodesJson:
         )
         state = _StreamState(schema_contract=contract)
         batch = pa.RecordBatch.from_pylist(
-            [{"metadata": "not-json{"}], schema=contract.arrow_schema,
+            [{"metadata": None}], schema=contract.arrow_schema,
         )
-        with pytest.raises(ValueError, match="Json column 'metadata'"):
-            handler._prepare_for_sqlalchemy(state, batch)
+        records = handler._prepare_for_sqlalchemy(state, batch)
+        assert records == [{"metadata": None}]
 
 
 class TestDDLLockSerialization:

@@ -9,8 +9,6 @@ concrete transport object.
 Currently registered transport families:
 
 * ``sqlalchemy`` — SQLAlchemy ``AsyncEngine`` for database connectors.
-* ``adbc``       — Apache Arrow Database Connectivity (DBAPI 2.0) for
-  dialects without an async SQLAlchemy driver (Snowflake today).
 * ``http``       — ``aiohttp.ClientSession`` for API connectors.
 
 Plugin packages call :func:`register_transport_kind` at import time to
@@ -19,9 +17,7 @@ add new families.
 
 from __future__ import annotations
 
-import asyncio
 import copy
-import importlib
 import logging
 import ssl as _ssl
 import urllib.parse
@@ -154,28 +150,24 @@ def _apply_encoding(encoding: str, value: Any, *, binding: str) -> str:
 
 # ---------------------------------------------------------------------------
 # TLS materialization (database transports)
+#
+# Each driver speaks its own native SSL vocabulary. The engine resolves
+# the ``tls.mode`` and ``tls.ca_certificate`` refs to whatever strings
+# the connection stored and hands them to a driver-specific helper that
+# knows how to apply those strings to that driver's API. No shared
+# canonical set, no implicit translation.
 # ---------------------------------------------------------------------------
-
-
-# Modes that skip server certificate verification entirely. Asyncpg accepts
-# these as plain strings.
-_PLAIN_TLS_MODES = {"disable", "allow", "prefer", "require"}
-# Modes that require certificate verification — we hand asyncpg a
-# pre-built SSLContext so the CA bundle declared on the connection is
-# honoured.
-_VERIFIED_TLS_MODES = {"verify-ca", "verify-full"}
 
 
 def _resolve_tls_mode(
     tls_spec: Optional[Mapping[str, Any]], resolver: Resolver
 ) -> tuple[Optional[str], Optional[str]]:
-    """Resolve ``tls.mode`` and (when needed) ``tls.ca_certificate``.
+    """Resolve ``tls.mode`` and ``tls.ca_certificate`` to their stored values.
 
-    Returns ``(mode, ca_pem)`` where:
-    * ``mode`` is one of the canonical strings or ``None`` when no TLS
-      block was declared.
-    * ``ca_pem`` is the PEM bundle string for verified modes (only
-      required for ``verify-ca`` / ``verify-full``).
+    Returns ``(mode, ca_pem)``. Neither value is validated against any
+    canonical vocabulary — the driver-specific materializer interprets the
+    native string. ``ca_pem`` is ``None`` unless the connection provided
+    a CA bundle.
     """
     if tls_spec is None:
         return None, None
@@ -192,86 +184,131 @@ def _resolve_tls_mode(
         raise TypeError(
             f"tls.mode must resolve to a string, got {type(mode).__name__}"
         )
-    if mode not in _PLAIN_TLS_MODES and mode not in _VERIFIED_TLS_MODES:
-        raise ValueError(
-            f"tls.mode {mode!r} is not in the canonical set "
-            f"{sorted(_PLAIN_TLS_MODES | _VERIFIED_TLS_MODES)}"
-        )
 
     ca_value: Optional[str] = None
-    if mode in _VERIFIED_TLS_MODES:
-        raw_ca = tls_spec.get("ca_certificate")
-        if raw_ca is not None:
-            try:
-                resolved = resolver.resolve(raw_ca)
-            except KeyError:
-                resolved = None
-            if isinstance(resolved, str) and resolved:
-                ca_value = resolved
-        if ca_value is None:
-            raise ValueError(
-                f"tls.mode={mode!r} requires tls.ca_certificate to resolve "
-                f"to a PEM certificate bundle"
-            )
+    raw_ca = tls_spec.get("ca_certificate")
+    if raw_ca is not None:
+        try:
+            resolved = resolver.resolve(raw_ca)
+        except KeyError:
+            resolved = None
+        if isinstance(resolved, str) and resolved:
+            ca_value = resolved
 
     return mode, ca_value
 
 
-def _build_verified_ssl_context(mode: str, ca_pem: str) -> _ssl.SSLContext:
+def _ca_ssl_context(ca_pem: str, *, check_hostname: bool) -> _ssl.SSLContext:
     ctx = _ssl.create_default_context(cadata=ca_pem)
-    ctx.check_hostname = mode == "verify-full"
+    ctx.check_hostname = check_hostname
     ctx.verify_mode = _ssl.CERT_REQUIRED
     return ctx
+
+
+def _materialize_tls_postgres(mode: str, ca_pem: Optional[str]) -> Any:
+    """Apply libpq-native SSL modes to asyncpg.
+
+    asyncpg accepts ``disable``/``allow``/``prefer``/``require`` as
+    strings; ``verify-ca``/``verify-full`` need an explicit SSLContext
+    built from the connection's CA bundle.
+    """
+    if mode in ("disable", "allow", "prefer", "require"):
+        return mode
+    if mode == "verify-ca":
+        if not ca_pem:
+            raise ValueError(
+                "tls.mode='verify-ca' requires tls.ca_certificate to resolve "
+                "to a PEM certificate bundle"
+            )
+        return _ca_ssl_context(ca_pem, check_hostname=False)
+    if mode == "verify-full":
+        if not ca_pem:
+            raise ValueError(
+                "tls.mode='verify-full' requires tls.ca_certificate to resolve "
+                "to a PEM certificate bundle"
+            )
+        return _ca_ssl_context(ca_pem, check_hostname=True)
+    raise ValueError(
+        f"postgresql tls.mode {mode!r} not recognized; expected one of: "
+        "disable, allow, prefer, require, verify-ca, verify-full"
+    )
+
+
+def _materialize_tls_mysql(mode: str, ca_pem: Optional[str]) -> Any:
+    """Apply MySQL-native SSL modes to aiomysql.
+
+    aiomysql accepts ``False`` (no TLS), an SSLContext, or no argument at
+    all — it does not accept native string modes. MySQL's vocabulary is
+    ``DISABLED`` / ``PREFERRED`` / ``REQUIRED`` / ``VERIFY_CA`` /
+    ``VERIFY_IDENTITY``; comparison is case-insensitive on the stored
+    value.
+    """
+    canonical = mode.upper()
+    if canonical == "DISABLED":
+        return False
+    if canonical in ("PREFERRED", "REQUIRED"):
+        # Negotiate TLS without verifying the server certificate (the
+        # connection didn't ship a CA bundle). ``check_hostname`` must be
+        # False whenever ``verify_mode`` is ``CERT_NONE`` or CPython raises.
+        ctx = _ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = _ssl.CERT_NONE
+        return ctx
+    if canonical == "VERIFY_CA":
+        if not ca_pem:
+            raise ValueError(
+                "tls.mode='VERIFY_CA' requires tls.ca_certificate to resolve "
+                "to a PEM certificate bundle"
+            )
+        return _ca_ssl_context(ca_pem, check_hostname=False)
+    if canonical == "VERIFY_IDENTITY":
+        if not ca_pem:
+            raise ValueError(
+                "tls.mode='VERIFY_IDENTITY' requires tls.ca_certificate to resolve "
+                "to a PEM certificate bundle"
+            )
+        return _ca_ssl_context(ca_pem, check_hostname=True)
+    raise ValueError(
+        f"mysql tls.mode {mode!r} not recognized; expected one of: "
+        "DISABLED, PREFERRED, REQUIRED, VERIFY_CA, VERIFY_IDENTITY"
+    )
 
 
 def _materialize_tls_for_driver(
     driver: str,
     tls_spec: Optional[Mapping[str, Any]],
     resolver: Resolver,
-) -> Any:
+) -> tuple[Any, Optional[str], bool]:
     """Dispatch TLS materialization based on the SQLAlchemy driver string.
 
-    asyncpg accepts plain ``"disable"``/``"allow"``/``"prefer"``/``"require"``
-    strings or an :class:`ssl.SSLContext`. aiomysql (and PyMySQL) only
-    accept ``True`` / ``False`` / an ``SSLContext`` — string modes raise
-    ``'str' object has no attribute 'wrap_bio'``. The connector contract
-    keeps a single canonical vocabulary; this helper translates it to
-    each driver's expected shape.
+    Each branch speaks its driver's native SSL vocabulary. Connectors
+    whose driver isn't listed here fall through to a portable default:
+    if a CA bundle was provided, build a verifying SSLContext; otherwise
+    pass the resolved mode through and let the downstream materializer
+    decide.
+
+    Returns ``(connect_args_value, raw_mode, has_ca_bundle)``. The raw
+    mode and CA-presence flag travel with the transport so the ADBC
+    URI builder can include ``sslmode=...`` and decide whether to
+    demote (verify-ca / verify-full need a CA file path the URI can't
+    inline).
     """
     mode, ca_pem = _resolve_tls_mode(tls_spec, resolver)
     if mode is None:
-        return None
+        return None, None, False
 
     base_driver = driver.split("+", 1)[0].lower()
+    has_ca = ca_pem is not None
 
     if base_driver in ("postgresql", "postgres"):
-        # asyncpg understands the canonical string vocabulary directly
-        # and SSLContext for verified modes.
-        if mode in _VERIFIED_TLS_MODES:
-            return _build_verified_ssl_context(mode, ca_pem or "")
-        return mode
+        return _materialize_tls_postgres(mode, ca_pem), mode, has_ca
 
     if base_driver in ("mysql", "mariadb"):
-        # aiomysql wants an SSLContext or no ssl arg at all.
-        if mode == "disable":
-            return None
-        if mode in _VERIFIED_TLS_MODES:
-            return _build_verified_ssl_context(mode, ca_pem or "")
-        # For ``allow`` / ``prefer`` / ``require`` we negotiate TLS but
-        # do not verify the server certificate — the user has not
-        # provided a CA bundle. ``check_hostname`` must be False for
-        # ``CERT_NONE`` or CPython raises.
-        ctx = _ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = _ssl.CERT_NONE
-        return ctx
+        return _materialize_tls_mysql(mode, ca_pem), mode, has_ca
 
-    # Unknown driver: pass the resolved mode through and let the
-    # downstream materializer decide. SSLContext for verified modes is
-    # the safest portable default.
-    if mode in _VERIFIED_TLS_MODES:
-        return _build_verified_ssl_context(mode, ca_pem or "")
-    return mode
+    if ca_pem:
+        return _ca_ssl_context(ca_pem, check_hostname=False), mode, has_ca
+    return mode, mode, has_ca
 
 
 # ---------------------------------------------------------------------------
@@ -296,18 +333,18 @@ def _select_transport(
     transports = connector.get("transports") or {}
     if not transports:
         raise ValueError(
-            f"Connector {connector.get('alias')!r} has no `transports` block; "
+            f"Connector {connector.get('connector_id')!r} has no `transports` block; "
             f"cannot materialize transport"
         )
     ref = transport_ref or connector.get("default_transport")
     if not ref:
         raise ValueError(
-            f"Connector {connector.get('alias')!r}: transport_ref not given "
+            f"Connector {connector.get('connector_id')!r}: transport_ref not given "
             f"and default_transport not declared"
         )
     if ref not in transports:
         raise KeyError(
-            f"Connector {connector.get('alias')!r}: transport {ref!r} not in "
+            f"Connector {connector.get('connector_id')!r}: transport {ref!r} not in "
             f"declared transports {sorted(transports)}"
         )
     defaults = connector.get("transport_defaults") or {}
@@ -320,13 +357,24 @@ def _select_transport(
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
+@dataclass
 class SqlAlchemyTransport:
-    """Materialized SQLAlchemy transport."""
+    """Materialized SQLAlchemy transport.
+
+    ``tls_mode`` carries the resolved ``tls.mode`` string (the
+    connector's native vocabulary, e.g. PG ``"require"`` or MySQL
+    ``"VERIFY_IDENTITY"``) so the ADBC URI builder can embed it as a
+    libpq ``sslmode=`` parameter. ``tls_ca_bundle_present`` is True
+    when a CA PEM was materialised into the SQLAlchemy SSLContext --
+    the ADBC URI cannot inline raw PEM, so eligibility checks demote
+    to SA when this is True.
+    """
 
     engine: AsyncEngine
     driver: str
     dialect: str
+    tls_mode: Optional[str] = None
+    tls_ca_bundle_present: bool = False
 
 
 async def build_sqlalchemy_transport(
@@ -347,7 +395,9 @@ async def build_sqlalchemy_transport(
     dsn = _render_url_template_dsn(raw_dsn, resolver)
 
     connect_args: Dict[str, Any] = {}
-    tls_value = _materialize_tls_for_driver(driver, spec.get("tls"), resolver)
+    tls_value, tls_mode, tls_has_ca = _materialize_tls_for_driver(
+        driver, spec.get("tls"), resolver
+    )
     if tls_value is not None:
         connect_args["ssl"] = tls_value
 
@@ -373,176 +423,13 @@ async def build_sqlalchemy_transport(
         raise
 
     base_dialect = driver.split("+", 1)[0]
-    return SqlAlchemyTransport(engine=engine, driver=driver, dialect=base_dialect)
-
-
-# ---------------------------------------------------------------------------
-# ADBC transport
-# ---------------------------------------------------------------------------
-
-
-# Driver identifier -> dotted ADBC dbapi module path consulted by the
-# ``transport_type: "adbc"`` builder. The schema's closed driver enum
-# (``postgresql``, ``snowflake``, ``bigquery``) defines the universe of
-# legal values; this engine table only needs entries for drivers it
-# actually ships. Drivers listed in the schema but absent here produce
-# a clean ``ValueError`` at materialize time. Additions append-only.
-_ADBC_DRIVER_MODULES: Dict[str, str] = {
-    "postgresql": "adbc_driver_postgresql.dbapi",
-    "snowflake": "adbc_driver_snowflake.dbapi",
-}
-
-
-@dataclass(frozen=True)
-class AdbcTransport:
-    """Materialized ADBC transport.
-
-    Unlike :class:`SqlAlchemyTransport`, the ADBC driver exposes the
-    DBAPI 2.0 protocol synchronously and is not a connection pool.
-    Callers obtain a fresh DBAPI connection via :meth:`connect`;
-    lifecycle (close on disconnect, poison-on-error) is owned by the
-    caller — the runtime keeps no live ADBC handles. ``driver`` matches
-    the connector contract's discriminator value (one of the schema
-    enum); ``driver_module_path`` is the dotted dbapi module the
-    builder imported (kept for diagnostics).
-    """
-
-    connect: Callable[[], Any]
-    driver: str
-    driver_module_path: str
-
-
-def _resolve_db_kwargs(
-    raw: Optional[Mapping[str, Any]], resolver: Resolver
-) -> Dict[str, Any]:
-    """Resolve the optional ``db_kwargs`` block.
-
-    Each value goes through the resolver so secrets and connection
-    parameters flow in the same way as DSN bindings. The resolved dict
-    is passed verbatim to ``driver_module.connect(db_kwargs=...)``;
-    per-driver requirements for value types (usually ``str``) are the
-    caller's responsibility.
-    """
-    if raw is None:
-        return {}
-    if not isinstance(raw, Mapping):
-        raise TypeError("adbc transport `db_kwargs` must be an object")
-    out: Dict[str, Any] = {}
-    for name, value in raw.items():
-        resolved = resolver.resolve(value)
-        if resolved is None:
-            continue
-        out[str(name)] = resolved
-    return out
-
-
-async def build_adbc_transport(
-    spec: Mapping[str, Any], *, resolver: Resolver
-) -> AdbcTransport:
-    """Materialize an ADBC transport from a connector ``transports[ref]`` block.
-
-    Validates the declared ``driver`` against ``_ADBC_DRIVER_MODULES``,
-    imports the matching ``adbc_driver_*`` package, optionally renders
-    the ``dsn.url_template`` block, resolves any ``db_kwargs``, then
-    opens one probe connection synchronously to ping ``SELECT 1`` so a
-    bad credential or missing driver fails at materialize time, not on
-    the first batch. The probe handle is closed before returning; the
-    transport returned to the caller is a connection factory.
-
-    ``dsn`` and ``db_kwargs`` are both optional individually, but at
-    least one must be present — the schema's ``anyOf`` requirement
-    (Postgres drives via libpq URI; Snowflake and BigQuery authenticate
-    entirely through ``db_kwargs``).
-    """
-    driver = spec.get("driver")
-    if not isinstance(driver, str) or not driver:
-        raise ValueError(
-            "adbc transport requires `driver` (e.g. 'snowflake', 'postgresql', "
-            "'bigquery')"
-        )
-    driver = driver.lower()
-    driver_module_path = _ADBC_DRIVER_MODULES.get(driver)
-    if driver_module_path is None:
-        raise ValueError(
-            f"adbc transport driver {driver!r} is not registered in this "
-            f"engine; known drivers: {sorted(_ADBC_DRIVER_MODULES)}"
-        )
-
-    try:
-        driver_module = importlib.import_module(driver_module_path)
-    except ImportError as exc:
-        raise RuntimeError(
-            f"ADBC driver package not installed for driver={driver!r}: "
-            f"{driver_module_path} is not importable ({exc}). Install the "
-            f"matching `adbc-driver-*` extra."
-        ) from exc
-
-    raw_dsn = spec.get("dsn")
-    uri: Optional[str] = None
-    if raw_dsn is not None:
-        if not isinstance(raw_dsn, Mapping):
-            raise TypeError(
-                "adbc transport `dsn`, when present, must be the structured "
-                "{kind: url_template, template, bindings} object"
-            )
-        uri = _render_url_template_dsn(raw_dsn, resolver)
-
-    db_kwargs = _resolve_db_kwargs(spec.get("db_kwargs"), resolver)
-
-    if uri is None and not db_kwargs:
-        raise ValueError(
-            f"adbc transport for driver={driver!r} declares neither `dsn` nor "
-            f"`db_kwargs`; the schema requires at least one"
-        )
-
-    def _open_connection() -> Any:
-        # Three call shapes covering the schema's anyOf:
-        #   uri only          -> driver_module.connect(uri)
-        #   db_kwargs only    -> driver_module.connect(db_kwargs=...)
-        #   uri + db_kwargs   -> driver_module.connect(uri, db_kwargs=...)
-        if uri is None:
-            return driver_module.connect(db_kwargs=db_kwargs)
-        if db_kwargs:
-            return driver_module.connect(uri, db_kwargs=db_kwargs)
-        return driver_module.connect(uri)
-
-    # Ping the driver once at materialize time so a bad DSN or missing
-    # credential fails here, before the engine starts a pipeline run.
-    probe_conn = await asyncio.to_thread(_open_connection)
-    try:
-        await asyncio.to_thread(_ping_adbc, probe_conn)
-    finally:
-        try:
-            await asyncio.to_thread(probe_conn.close)
-        except Exception:
-            # A leaked Snowflake / libpq session is a billable resource —
-            # surface at WARNING so operators see it without -vvv.
-            logger.warning(
-                "ADBC probe connection close failed; server-side session "
-                "may remain allocated",
-                exc_info=True,
-            )
-
-    return AdbcTransport(
-        connect=_open_connection,
+    return SqlAlchemyTransport(
+        engine=engine,
         driver=driver,
-        driver_module_path=driver_module_path,
+        dialect=base_dialect,
+        tls_mode=tls_mode,
+        tls_ca_bundle_present=tls_has_ca,
     )
-
-
-def _ping_adbc(conn: Any) -> None:
-    cursor = conn.cursor()
-    try:
-        cursor.execute("SELECT 1")
-        cursor.fetchone()
-    finally:
-        # Wrap the cursor close so a failure here does not mask the
-        # original execute/fetchone exception (Python's default
-        # finally-replaces-exception behaviour).
-        try:
-            cursor.close()
-        except Exception:
-            logger.debug("ADBC ping cursor close failed", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -550,7 +437,7 @@ def _ping_adbc(conn: Any) -> None:
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
+@dataclass
 class HttpTransport:
     """Materialized HTTP transport ready for ``aiohttp`` requests."""
 
@@ -654,7 +541,6 @@ def registered_transport_kinds() -> list[str]:
 
 
 register_transport_kind("sqlalchemy", build_sqlalchemy_transport)
-register_transport_kind("adbc", build_adbc_transport)
 register_transport_kind("http", build_http_transport)
 
 
@@ -675,7 +561,7 @@ async def build_transport(
     if not transport_type:
         raise ValueError(
             f"Resolved transport spec missing `transport_type`; connector "
-            f"{connector.get('alias')!r}, transport {transport_ref!r}"
+            f"{connector.get('connector_id')!r}, transport {transport_ref!r}"
         )
     builder = _TRANSPORT_BUILDERS.get(transport_type)
     if builder is None:

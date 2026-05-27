@@ -4,16 +4,25 @@ Supports multiple database dialects (PostgreSQL, MySQL, etc.) and provides
 SQL injection protection through proper identifier quoting and value parameterization.
 """
 
+import importlib
 import logging
-import re
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from sqlalchemy import Column, MetaData, Table, and_, asc, desc, select, text
-from sqlalchemy.dialects import mysql, postgresql
+from sqlalchemy.dialects import mssql, mysql, sqlite
+from sqlalchemy.dialects.postgresql.asyncpg import dialect as _asyncpg_dialect
 from sqlalchemy.engine import Dialect as SADialect
 from sqlalchemy.sql import Select
+
+
+# Parameters returned by build_select_query: positional list for
+# paramstyles that bind by index (qmark, format, numeric, numeric_dollar)
+# and a name->value dict for named paramstyles (named, pyformat).
+# Snowflake / BigQuery dialects compile to named/pyformat by default;
+# their drivers consume dicts.
+ParamsLike = Union[List[Any], Dict[str, Any]]
 
 logger = logging.getLogger(__name__)
 
@@ -73,23 +82,72 @@ class QueryConfig:
             self.filters = []
 
 
+# Third-party SQLAlchemy dialects loaded on demand. Each entry names the
+# importable module that calling ``import_module`` triggers the dialect
+# registration side effect for, so we can resolve ``dialect()`` after.
+_LAZY_DIALECT_PACKAGES: Dict[str, str] = {
+    "snowflake": "snowflake.sqlalchemy",
+    "bigquery": "sqlalchemy_bigquery",
+    "redshift": "sqlalchemy_redshift.dialect",
+    "duckdb": "duckdb_engine",
+    "clickhouse": "clickhouse_sqlalchemy",
+}
+
+
+# Built-in SQLAlchemy dialect factories. ``postgresql``/``postgres`` and
+# ``mysql``/``mariadb`` are aliases — same SA dialect underneath.
+#
+# PostgreSQL uses the ``asyncpg``-specific dialect so compiled SQL ships
+# with ``$N`` placeholders (asyncpg's native paramstyle). The default
+# ``postgresql.dialect()`` would emit ``%(name)s`` and require a manual
+# conversion pass that drifts out of sync whenever SQLAlchemy adds new
+# bound parameters (limit / offset being the obvious case).
+_BUILTIN_DIALECT_FACTORIES: Dict[str, Callable[[], SADialect]] = {
+    "postgresql": _asyncpg_dialect,
+    "postgres": _asyncpg_dialect,
+    "mysql": mysql.dialect,
+    "mariadb": mysql.dialect,
+    "mssql": mssql.dialect,
+    "sqlite": sqlite.dialect,
+}
+
+
 def _get_sqlalchemy_dialect(dialect: str) -> SADialect:
-    """Get SQLAlchemy dialect instance from dialect string.
+    """Resolve a dialect string to a SQLAlchemy dialect instance.
 
-    Args:
-        dialect: Database dialect string from config (e.g., 'postgresql', 'postgres', 'mysql')
+    Built-in dialects (postgresql, mysql, mssql, sqlite) resolve directly.
+    Third-party dialects (snowflake, bigquery, redshift, duckdb,
+    clickhouse) are loaded by importing the package that registers them
+    with SQLAlchemy's dialect registry; this lets the engine compile SQL
+    for those dialects without forcing the package into the base install.
 
-    Returns:
-        SQLAlchemy dialect instance
+    Raises ``ValueError`` for unknown dialects and ``ImportError`` (with
+    actionable text) when a third-party dialect package is missing.
     """
     dialect_lower = dialect.lower()
+    factory = _BUILTIN_DIALECT_FACTORIES.get(dialect_lower)
+    if factory is not None:
+        return factory()
 
-    if dialect_lower in ("postgresql", "postgres"):
-        return postgresql.dialect()
-    elif dialect_lower in ("mysql", "mariadb"):
-        return mysql.dialect()
-    else:
+    package = _LAZY_DIALECT_PACKAGES.get(dialect_lower)
+    if package is None:
         raise ValueError(f"Unsupported dialect: {dialect}")
+
+    try:
+        importlib.import_module(package)
+    except ImportError as exc:
+        raise ImportError(
+            f"SQLAlchemy dialect for {dialect!r} requires the "
+            f"{package!r} package. Install the matching extra "
+            f"(e.g. `poetry install -E {dialect_lower}`)."
+        ) from exc
+
+    # The package's import side effect registers the dialect; resolve
+    # it via SQLAlchemy's URL machinery so we don't hard-code each
+    # third-party dialect's module path.
+    from sqlalchemy.dialects import registry
+    cls = registry.load(dialect_lower)
+    return cls()
 
 
 def _is_postgresql_dialect(dialect: str) -> bool:
@@ -138,14 +196,19 @@ class QueryBuilder:
         self.dialect = dialect
         self._sa_dialect = _get_sqlalchemy_dialect(dialect)
 
-    def build_select_query(self, config: QueryConfig) -> Tuple[str, List[Any]]:
+    def build_select_query(self, config: QueryConfig) -> Tuple[str, ParamsLike]:
         """Build a SELECT query from configuration.
 
-        Args:
-            config: Query configuration
+        Returns ``(sql, params)`` where ``params`` is either:
 
-        Returns:
-            Tuple of (query_string, params_list)
+        * a positional ``list`` for dialects whose driver binds by index
+          (PG asyncpg / SQLite qmark / MySQL format / MSSQL qmark), or
+        * a name->value ``dict`` for dialects whose driver binds by
+          name (Snowflake pyformat, BigQuery named, generic ``:foo``
+          dialects).
+
+        Callers must dispatch on the returned type before passing to
+        ``exec_driver_sql``.
         """
         # Create table reference with proper schema
         metadata = MetaData()
@@ -197,6 +260,11 @@ class QueryBuilder:
                 query = query.order_by(desc(order_col))
             else:
                 query = query.order_by(asc(order_col))
+        elif config.offset is not None and self.dialect.lower() == "mssql":
+            # T-SQL refuses OFFSET / FETCH NEXT without ORDER BY.
+            # ``ORDER BY (SELECT NULL)`` is Microsoft's documented escape
+            # hatch for paginated reads that don't need a stable order.
+            query = query.order_by(text("(SELECT NULL)"))
 
         # Apply limit/offset
         if config.limit is not None:
@@ -305,66 +373,41 @@ class QueryBuilder:
         Returns:
             Tuple of (query_string, params_list)
         """
-        # Compile with literal_binds=False to get parameterized query
-        compiled = query.compile(
-            dialect=self._sa_dialect,
-            compile_kwargs={"literal_binds": False}
-        )
+        # MSSQL's default dialect compiles to ``:name`` (named paramstyle),
+        # but aioodbc / pyodbc DBAPI drivers consume ``?`` (qmark) and
+        # ``exec_driver_sql`` bypasses SA's bind translation. Force the
+        # MSSQL compile to qmark so the SQL placeholders match what the
+        # driver expects. Other dialects already compile to a paramstyle
+        # their async driver accepts directly.
+        compile_kwargs: Dict[str, Any] = {"literal_binds": False}
+        sa_dialect = self._sa_dialect
+        if sa_dialect.name == "mssql":
+            from sqlalchemy.dialects import mssql as _mssql
+            sa_dialect = _mssql.dialect(paramstyle="qmark")
+
+        compiled = query.compile(dialect=sa_dialect, compile_kwargs=compile_kwargs)
 
         query_str = str(compiled)
 
-        # For PostgreSQL, convert :param_N to $N format for asyncpg
-        if _is_postgresql_dialect(self.dialect):
-            query_str, params = self._convert_to_positional_params(
-                query_str, compiled.params, params
-            )
+        # SA sets ``compiled.positiontup`` only for positional
+        # paramstyles (qmark, format, numeric, numeric_dollar). For
+        # named/pyformat it's None -- iterating would TypeError.
+        # Snowflake / BigQuery dialects fall into the named bucket,
+        # so callers must accept the dict form too.
+        params: ParamsLike
+        if compiled.positiontup is not None:
+            # The same name can repeat in positiontup (MSSQL
+            # ROW_NUMBER pagination reuses ``param_1``), so dict-iter
+            # alone would drop the repeat. Iterating positiontup
+            # produces the right positional value list.
+            params = [compiled.params[name] for name in compiled.positiontup]
+        else:
+            params = dict(compiled.params)
 
         logger.debug(f"Compiled query: {query_str}")
         logger.debug(f"Parameters: {params}")
 
         return query_str, params
-
-    def _convert_to_positional_params(
-        self,
-        query_str: str,
-        compiled_params: Dict[str, Any],
-        explicit_params: List[Any]
-    ) -> Tuple[str, List[Any]]:
-        """Convert named parameters to positional ($1, $2) for asyncpg.
-
-        Args:
-            query_str: Query with named parameters
-            compiled_params: Parameters from SQLAlchemy compilation
-            explicit_params: Explicitly provided parameter values
-
-        Returns:
-            Tuple of (query_string with $N placeholders, ordered params list)
-        """
-        # If we have explicit params, they're already in order
-        if explicit_params:
-            param_index = 0
-
-            def replace_param(match):
-                nonlocal param_index
-                param_index += 1
-                return f"${param_index}"
-
-            # Match :param_name patterns
-            query_str = re.sub(r':[\w_]+', replace_param, query_str)
-            return query_str, explicit_params
-
-        # Otherwise extract from compiled params
-        ordered_params = []
-        param_mapping = {}
-
-        for i, (name, value) in enumerate(compiled_params.items(), 1):
-            param_mapping[f":{name}"] = f"${i}"
-            ordered_params.append(value)
-
-        for old, new in param_mapping.items():
-            query_str = query_str.replace(old, new)
-
-        return query_str, ordered_params
 
 
 def build_select_query(

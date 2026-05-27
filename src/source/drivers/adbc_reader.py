@@ -1,187 +1,207 @@
-"""ADBC-backed reader for database sources without an async SQLAlchemy driver.
+"""Source-side ADBC fast path.
 
-Snowflake is the first dialect to use this path. The reader consumes the
-cached ADBC DBAPI connection that the source connector holds, executes a
-parameterized SELECT, and streams Arrow ``RecordBatch`` instances out
-via ``cursor.fetch_record_batch()``. All blocking DBAPI calls are
-wrapped in ``asyncio.to_thread`` so the engine's event loop stays
-responsive.
+The SQLAlchemy source path goes:
 
-This module deliberately uses its own minimal query builder rather than
-``src.shared.query_builder.QueryBuilder``: that builder targets specific
-SQLAlchemy dialects (postgres/mysql) and emits driver-specific
-parameter syntax. ADBC uses standard DBAPI positional ``?`` placeholders
-which neither of those dialects produce.
+    rows = exec_driver_sql(...)
+    dicts = [dict(r._mapping) for r in rows]
+    batch = schema_contract.from_pylist(dicts)
+
+The ADBC path skips the intermediate Python-row materialization:
+
+    table = cursor.execute(...).fetch_arrow_table()
+    batch = schema_contract.cast_arrow_batch(table_batch)
+
+ADBC's DBAPI is synchronous, so each operation runs on a worker thread
+via ``asyncio.to_thread``. Connection lifetime is bound to the
+:func:`open_session` async context manager so a stream's pages share a
+single ADBC connection.
+
+Activation: ``ADBC_FAST_PATH=1`` env var (same gate as the destination
+side) and a dialect whose URI builder is registered in
+:mod:`src.shared.adbc_registry`.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, List, Literal, Optional, Protocol, Tuple
+from contextlib import asynccontextmanager
+from typing import Any, AsyncIterator, List, Optional
 
 import pyarrow as pa
+from sqlalchemy.ext.asyncio import AsyncEngine
 
+from src.shared.adbc_registry import (
+    _ADBC_IMPORT_FAILED,
+    AdbcConfigurationError,
+    adbc_flag_enabled,
+    adbc_uri_supported,
+    build_adbc_uri,
+    load_adbc_module,
+)
 
 logger = logging.getLogger(__name__)
 
 
-class _AdbcCursor(Protocol):
-    """Subset of DBAPI 2.0 the reader needs from an ADBC cursor."""
-
-    def execute(self, sql: str, params: Tuple[Any, ...] = ...) -> None: ...
-
-    def fetch_record_batch(self) -> Any: ...
-
-    def close(self) -> None: ...
+_demotion_logged: set = set()
 
 
-class _AdbcConnection(Protocol):
-    """Subset of DBAPI 2.0 the reader needs from an ADBC connection."""
-
-    def cursor(self) -> _AdbcCursor: ...
-
-    def close(self) -> None: ...
-
-
-@dataclass(frozen=True)
-class AdbcReadPlan:
-    """Inputs needed to issue a single SELECT against an ADBC source.
-
-    ``cursor_field`` and ``cursor_value`` co-vary: the cursor predicate is
-    emitted only when both are set. ``cursor_mode`` is constrained to the
-    two inclusive/exclusive choices so a typo cannot silently fall back to
-    ``>``.
+def _note_demotion(dialect: str, reason: str) -> None:
+    """Log once per ``(dialect, reason)`` why the source-side fast path
+    was skipped. Silent when the flag is off — demotion is the default
+    then, only worth surfacing when the user actually opted in. Matches
+    the destination handler's ``_note_adbc_demotion`` shape so operators
+    see symmetric signals on both sides of the pipeline.
     """
-
-    schema_name: Optional[str]
-    table_name: str
-    columns: List[str] = field(default_factory=list)
-    cursor_field: Optional[str] = None
-    cursor_value: Any = None
-    cursor_mode: Literal["inclusive", "exclusive"] = "inclusive"
-
-    def __post_init__(self) -> None:
-        if self.cursor_mode not in ("inclusive", "exclusive"):
-            raise ValueError(
-                f"AdbcReadPlan.cursor_mode must be 'inclusive' or "
-                f"'exclusive'; got {self.cursor_mode!r}"
-            )
-
-
-def _quote_ident(name: str) -> str:
-    return '"' + name.replace('"', '""') + '"'
-
-
-def _quote_qualified(schema: Optional[str], name: str) -> str:
-    if schema:
-        return f"{_quote_ident(schema)}.{_quote_ident(name)}"
-    return _quote_ident(name)
-
-
-def _build_select_sql(
-    plan: AdbcReadPlan, *, batch_size: int, offset: int
-) -> Tuple[str, Tuple[Any, ...]]:
-    """Return ``(sql, params)`` for a single paged SELECT.
-
-    Identifier interpolation is limited to the table reference, the
-    column list, and the cursor predicate's field name; user-supplied
-    scalar values always flow through positional ``?`` placeholders.
-    """
-    if plan.columns:
-        col_list = ", ".join(_quote_ident(c) for c in plan.columns)
-    else:
-        col_list = "*"
-    qualified = _quote_qualified(plan.schema_name, plan.table_name)
-    where_parts: List[str] = []
-    params: List[Any] = []
-    if plan.cursor_field and plan.cursor_value is not None:
-        op = ">=" if plan.cursor_mode == "inclusive" else ">"
-        where_parts.append(f"{_quote_ident(plan.cursor_field)} {op} ?")
-        params.append(plan.cursor_value)
-    where_clause = f" WHERE {' AND '.join(where_parts)}" if where_parts else ""
-    order_clause = (
-        f" ORDER BY {_quote_ident(plan.cursor_field)} ASC"
-        if plan.cursor_field
-        else ""
+    if not adbc_flag_enabled():
+        return
+    key = (dialect, reason)
+    if key in _demotion_logged:
+        return
+    _demotion_logged.add(key)
+    logger.info(
+        "ADBC source fast path disabled (dialect=%s): %s",
+        dialect or "<empty>",
+        reason,
     )
-    sql = (
-        f"SELECT {col_list} FROM {qualified}{where_clause}{order_clause} "
-        f"LIMIT {int(batch_size)} OFFSET {int(offset)}"
-    )
-    return sql, tuple(params)
 
 
-class AdbcReader:
-    """Stream Arrow record batches from an ADBC DBAPI connection.
+def source_adbc_eligible(
+    dialect: str,
+    engine: Optional[AsyncEngine],
+    *,
+    tls_mode: Optional[str] = None,
+    tls_ca_bundle_present: bool = False,
+) -> bool:
+    """Return ``True`` when the source-side ADBC fast path is available.
 
-    The reader does not own the connection — the caller (source
-    connector) keeps the single cached handle for its lifetime and
-    passes it in here. On any cursor error, the reader closes the
-    cursor and the exception propagates; no connection-level recovery
-    happens at this layer.
+    Eligibility requires the env-var flag, a registered URI builder
+    for the dialect, an importable driver package, and an engine URL
+    that actually renders to a usable ADBC connect string -- including
+    a TLS configuration the URI can carry. CA-bundle-backed modes
+    (verify-ca / verify-full) demote here so the SQLAlchemy path can
+    use its materialized SSLContext.
     """
-
-    def __init__(self, connection: _AdbcConnection) -> None:
-        if connection is None:
-            raise ValueError("AdbcReader requires an open ADBC connection")
-        self._connection = connection
-
-    async def read_batches(
-        self, plan: AdbcReadPlan, *, batch_size: int
-    ) -> AsyncIterator[pa.RecordBatch]:
-        """Yield Arrow record batches for *plan*, paginated by ``batch_size``.
-
-        Each page issues a fresh ``cursor.execute`` with the next
-        ``OFFSET`` value, so pagination is repeated independent SELECTs
-        rather than a server-side scroll cursor.
-        ``cursor.fetch_record_batch()`` returns an Arrow record-batch
-        reader for the current page; iteration over that reader runs on
-        a worker thread.
-        """
-        offset = 0
-        while True:
-            sql, params = _build_select_sql(
-                plan, batch_size=batch_size, offset=offset
+    if not adbc_flag_enabled():
+        return False
+    if not dialect or engine is None:
+        _note_demotion(dialect, "engine not materialized or dialect unknown")
+        return False
+    if not adbc_uri_supported(dialect):
+        _note_demotion(dialect, "no URI builder registered for dialect")
+        return False
+    if load_adbc_module(dialect) is _ADBC_IMPORT_FAILED:
+        _note_demotion(dialect, "ADBC driver package not importable")
+        return False
+    uri = build_adbc_uri(
+        dialect,
+        engine,
+        tls_mode=tls_mode,
+        tls_ca_bundle_present=tls_ca_bundle_present,
+    )
+    if uri is None:
+        if tls_mode and tls_mode.lower() in {"verify-ca", "verify-full"}:
+            _note_demotion(
+                dialect,
+                f"tls.mode={tls_mode!r} requires SQLAlchemy "
+                "(ADBC URI cannot carry an inline CA bundle)",
             )
-            page_batches = await asyncio.to_thread(
-                self._fetch_page_sync, sql, params
-            )
-            if not page_batches:
-                return
-            yielded = 0
-            for batch in page_batches:
-                yielded += batch.num_rows
-                yield batch
-            if yielded < batch_size:
-                return
-            offset += yielded
+        else:
+            _note_demotion(dialect, "engine URL could not be rendered as an ADBC URI")
+        return False
+    return True
 
-    def _fetch_page_sync(
-        self, sql: str, params: Tuple[Any, ...]
+
+class _AdbcSession:
+    """Holds an open ADBC connection. Use via :func:`open_session`."""
+
+    def __init__(self, dialect: str, conn: Any) -> None:
+        self.dialect = dialect
+        self._conn = conn
+
+    async def fetch_page(
+        self,
+        sql: str,
+        params: Optional[Any] = None,
     ) -> List[pa.RecordBatch]:
-        """Execute one page and materialize its batches.
+        """Execute ``sql`` and return its result as Arrow record batches.
 
-        We materialize inside the worker thread (rather than handing
-        the live ``RecordBatchReader`` back to the event loop) because
-        ADBC readers are bound to the cursor's lifetime — yielding
-        across an ``await`` would risk fetching after the cursor closes.
+        ``params`` may be a positional sequence (for qmark / numeric
+        dialects) or a name->value mapping (for named / pyformat
+        dialects); the underlying ADBC cursor accepts both. Empty
+        results return ``[]`` so the caller's loop terminates
+        without special-casing ``None``.
         """
-        cursor = self._connection.cursor()
+        return await asyncio.to_thread(self._fetch_sync, sql, params)
+
+    def _fetch_sync(
+        self, sql: str, params: Optional[Any]
+    ) -> List[pa.RecordBatch]:
+        cursor = self._conn.cursor()
         try:
-            if params:
+            if isinstance(params, dict):
+                # ADBC's DBAPI cursor.execute accepts a parameters
+                # mapping for named-paramstyle dialects. Today the
+                # registered ADBC URI builders only cover positional
+                # dialects (PG / Redshift / SQLite / DuckDB), so
+                # ``dict`` here implies a future named dialect got
+                # added. Pass it through unchanged.
                 cursor.execute(sql, params)
+            elif params:
+                cursor.execute(sql, list(params))
             else:
                 cursor.execute(sql)
-            reader = cursor.fetch_record_batch()
-            # ``RecordBatchReader`` is iterable per the documented Arrow
-            # API; iterating yields batches until exhaustion. Avoids
-            # relying on ``read_next_batch`` raising ``StopIteration``
-            # which is a less-stable sentinel.
-            return list(reader)
+            table = cursor.fetch_arrow_table()
         finally:
-            try:
-                cursor.close()
-            except Exception:
-                logger.debug("ADBC cursor close failed", exc_info=True)
+            cursor.close()
+        if table.num_rows == 0:
+            return []
+        return table.to_batches()
+
+
+@asynccontextmanager
+async def open_session(
+    dialect: str,
+    engine: AsyncEngine,
+    *,
+    tls_mode: Optional[str] = None,
+    tls_ca_bundle_present: bool = False,
+) -> AsyncIterator[_AdbcSession]:
+    """Open an ADBC connection for the lifetime of the context manager.
+
+    Raises :class:`AdbcConfigurationError` when the driver module or URI
+    cannot be produced -- both are deterministic misconfigurations the
+    caller should classify as fatal rather than retry. TLS settings
+    flow through to ``build_adbc_uri`` so the ADBC connection matches
+    the SQLAlchemy engine's posture.
+    """
+    module = load_adbc_module(dialect)
+    if module is _ADBC_IMPORT_FAILED:
+        raise AdbcConfigurationError(
+            f"ADBC module for dialect={dialect!r} not available"
+        )
+    uri = build_adbc_uri(
+        dialect,
+        engine,
+        tls_mode=tls_mode,
+        tls_ca_bundle_present=tls_ca_bundle_present,
+    )
+    if uri is None:
+        raise AdbcConfigurationError(
+            f"Could not build ADBC URI for dialect={dialect!r}"
+        )
+    conn = await asyncio.to_thread(module.connect, uri)
+    try:
+        yield _AdbcSession(dialect, conn)
+    finally:
+        await asyncio.to_thread(_close_quietly, conn)
+
+
+def _close_quietly(conn: Any) -> None:
+    try:
+        conn.close()
+    except Exception:
+        # Best-effort -- the connection is being discarded and the
+        # caller already has the original exception (if any). Leave
+        # evidence at DEBUG so a libpq-style leak is still traceable.
+        logger.debug("ADBC connection close failed", exc_info=True)

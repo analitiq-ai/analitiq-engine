@@ -138,9 +138,6 @@ class DestinationGRPCClient:
         options = [
             ("grpc.max_send_message_length", self.max_message_size),
             ("grpc.max_receive_message_length", self.max_message_size),
-            ("grpc.keepalive_time_ms", 10000),
-            ("grpc.keepalive_timeout_ms", 5000),
-            ("grpc.keepalive_permit_without_calls", True),
         ]
 
         self._channel = grpc_aio.insecure_channel(self.address, options=options)

@@ -118,7 +118,6 @@ class Pipeline:
         return {
             "pipeline_id": self.pipeline_config["pipeline_id"],
             "name": self.pipeline_config.get("display_name")
-            or self.pipeline_config.get("alias")
             or self.pipeline_config["pipeline_id"],
             "streams": streams,
             "runtime": self.pipeline_config.get("runtime") or {},

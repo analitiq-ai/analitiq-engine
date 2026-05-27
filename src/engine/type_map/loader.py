@@ -1,15 +1,12 @@
-"""Filesystem loaders for ``type-map.json`` and ``ssl-mode-map.json``.
+"""Filesystem loaders for ``type-map.json``.
 
 Two parallel locations are supported:
 
-- ``connectors/{slug}/definition/type-map.json`` — required. Covers the
-  connector's public endpoints (API schemas shipped with the connector).
-- ``connections/{alias}/definition/type-map.json`` — optional. Covers the
-  connection's private endpoints (e.g. user-specific DB tables). Absent
+- ``connectors/{connector_id}/definition/type-map.json`` — required. Covers
+  the connector's public endpoints (API schemas shipped with the connector).
+- ``connections/{connection_id}/definition/type-map.json`` — optional. Covers
+  the connection's private endpoints (e.g. user-specific DB tables). Absent
   when a connection only uses public endpoints from its connector.
-
-``ssl-mode-map.json`` only lives at the connector level — SSL vocabularies
-are driver-specific, not connection-specific.
 """
 
 from __future__ import annotations
@@ -19,18 +16,14 @@ import logging
 from pathlib import Path
 from typing import Optional
 
-from .exceptions import (
-    InvalidSSLModeMapError,
-    InvalidTypeMapError,
-)
-from .mapper import SSLModeMapper, TypeMapper
+from .exceptions import InvalidTypeMapError
+from .mapper import TypeMapper
 from .rules import parse_rules
 
 logger = logging.getLogger(__name__)
 
 
 TYPE_MAP_FILENAME = "type-map.json"
-SSL_MODE_MAP_FILENAME = "ssl-mode-map.json"
 
 
 def _definition_dir(connectors_dir: Path, slug: str) -> Path:
@@ -72,58 +65,31 @@ def load_type_map(connectors_dir: Path, slug: str) -> TypeMapper:
 
 
 def load_connection_type_map(
-    connections_dir: Path, alias: str
+    connections_dir: Path, connection_id: str
 ) -> Optional[TypeMapper]:
     """Load a connection-scoped ``type-map.json`` if present.
 
-    Lives at ``connections/{alias}/definition/type-map.json`` and governs
-    type translation for private endpoints under the same
-    ``connections/{alias}/definition/endpoints/`` tree. Absent file →
+    Lives at ``connections/{connection_id}/definition/type-map.json`` and
+    governs type translation for private endpoints under the same
+    ``connections/{connection_id}/definition/endpoints/`` tree. Absent file →
     ``None``; the caller decides whether that's an error (private
     endpoints referenced) or fine (pipeline only uses public endpoints).
     """
-    path = connections_dir / alias / "definition" / TYPE_MAP_FILENAME
+    path = connections_dir / connection_id / "definition" / TYPE_MAP_FILENAME
     if not path.is_file():
         return None
     try:
         payload = json.loads(path.read_text())
     except json.JSONDecodeError as err:
         raise InvalidTypeMapError(
-            f"connection {alias!r}: {path} is not valid JSON: {err}"
+            f"connection {connection_id!r}: {path} is not valid JSON: {err}"
         ) from err
     if not isinstance(payload, list):
         raise InvalidTypeMapError(
-            f"connection {alias!r}: {path} must contain a JSON array of rules"
+            f"connection {connection_id!r}: {path} must contain a JSON array of rules"
         )
     rules = parse_rules(payload, source=str(path))
     logger.info(
-        "Loaded connection type-map for '%s' (%d rules)", alias, len(rules)
+        "Loaded connection type-map for '%s' (%d rules)", connection_id, len(rules)
     )
-    return TypeMapper(f"connection:{alias}", rules)
-
-
-def load_ssl_mode_map(connectors_dir: Path, slug: str) -> Optional[SSLModeMapper]:
-    """Load ``ssl-mode-map.json`` if present. Returns ``None`` when absent."""
-    path = _definition_dir(connectors_dir, slug) / SSL_MODE_MAP_FILENAME
-    if not path.is_file():
-        return None
-    try:
-        payload = json.loads(path.read_text())
-    except json.JSONDecodeError as err:
-        raise InvalidSSLModeMapError(
-            f"connector {slug!r}: {path} is not valid JSON: {err}"
-        ) from err
-    if not isinstance(payload, dict):
-        raise InvalidSSLModeMapError(
-            f"connector {slug!r}: {path} must contain a JSON object"
-        )
-    # Drop JSON Schema metadata keys — ``$schema`` / ``$id`` are allowed in
-    # the file but are not mapping entries.
-    entries = {k: v for k, v in payload.items() if not k.startswith("$")}
-    mapper = SSLModeMapper(slug, entries)
-    logger.info(
-        "Loaded ssl-mode-map for connector '%s' (%d entries)",
-        slug,
-        len(mapper.entries),
-    )
-    return mapper
+    return TypeMapper(f"connection:{connection_id}", rules)

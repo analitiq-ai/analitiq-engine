@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
+from src.shared.run_id import get_run_id
 from src.state.log_emitter import emit_log
 
 logger = logging.getLogger(__name__)
@@ -29,13 +30,17 @@ def emit_dlq_log(
 ) -> None:
     """Emit a lightweight DLQ summary to stdout for observability.
 
-    Never emits record payloads -- only counts.
+    Never emits record payloads -- only counts. ``run_id`` and an
+    ISO-8601 UTC ``timestamp`` are included so downstream consumers can
+    correlate the summary back to the run that produced it.
     """
     data: Dict[str, Any] = {
         "type": "dlq",
+        "run_id": get_run_id() or 0,
         "pipeline_id": pipeline_id,
         "added": added,
         "total": total,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
     }
     if stream_id:
         data["stream_id"] = stream_id
@@ -105,14 +110,26 @@ class LocalDLQStorage:
                 self.current_file_size += len(record_bytes)
 
             except Exception as e:
-                logger.error(f"Failed to write to DLQ: {e}")
-                # Fallback to unique file
+                logger.error(
+                    "Failed to write record %s to DLQ (stream=%s): %s",
+                    record.get("id"),
+                    stream_id,
+                    e,
+                    exc_info=True,
+                )
                 fallback_file = (
                     self.dlq_path
                     / f"dlq_fallback_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}.json"
                 )
-                with open(fallback_file, "w", encoding="utf-8") as f:
-                    json.dump(record, f, indent=2, cls=DateTimeEncoder)
+                try:
+                    with open(fallback_file, "w", encoding="utf-8") as f:
+                        json.dump(record, f, indent=2, cls=DateTimeEncoder)
+                except (OSError, TypeError, ValueError) as fallback_error:
+                    logger.critical(
+                        "DLQ fallback write failed — record lost permanently: %s",
+                        fallback_error,
+                        exc_info=True,
+                    )
 
     async def get_records(
         self, pipeline_id: Optional[str] = None, stream_id: Optional[str] = None

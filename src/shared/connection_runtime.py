@@ -6,9 +6,8 @@ that fills in credential values. It is the single place the engine touches
 provider configuration: everything provider-specific is encoded in the
 connector's ``transports`` block, resolved through the typed
 :class:`~src.engine.resolver.ResolutionContext`, and turned into a
-concrete transport (:class:`~src.shared.transport_factory.SqlAlchemyTransport`,
-:class:`~src.shared.transport_factory.AdbcTransport`, or
-:class:`~src.shared.transport_factory.HttpTransport`) by the transport
+concrete transport (:class:`~src.shared.transport_factory.SqlAlchemyTransport`
+or :class:`~src.shared.transport_factory.HttpTransport`) by the transport
 factory. The runtime never inspects host strings, header dicts, DSN
 formats, or SSL flags directly.
 
@@ -38,7 +37,6 @@ from src.secrets.protocol import SecretsResolver
 from src.secrets.exceptions import SecretNotFoundError, SecretResolutionError
 from src.shared.rate_limiter import RateLimiter
 from src.shared.transport_factory import (
-    AdbcTransport,
     HttpTransport,
     SqlAlchemyTransport,
     build_transport,
@@ -53,7 +51,7 @@ VALID_CONNECTOR_TYPES = frozenset({"database", "api", "file", "s3", "stdout"})
 
 def _derive_dialect(connector_definition: Optional[Mapping[str, Any]]) -> Optional[str]:
     """Return the base SQL dialect (e.g. ``postgresql``) from a connector
-    definition, or ``None`` if not a database connector."""
+    definition, or ``None`` if not a sqlalchemy connector."""
     if not connector_definition:
         return None
     transports = connector_definition.get("transports") or {}
@@ -61,18 +59,12 @@ def _derive_dialect(connector_definition: Optional[Mapping[str, Any]]) -> Option
     if not default_ref or default_ref not in transports:
         return None
     transport = transports[default_ref]
-    transport_type = transport.get("transport_type")
-    if transport_type == "sqlalchemy":
-        driver = transport.get("driver")
-        if not isinstance(driver, str) or not driver:
-            return None
-        return driver.split("+", 1)[0]
-    if transport_type == "adbc":
-        driver = transport.get("driver")
-        if not isinstance(driver, str) or not driver:
-            return None
-        return driver.lower()
-    return None
+    if transport.get("transport_type") != "sqlalchemy":
+        return None
+    driver = transport.get("driver")
+    if not isinstance(driver, str) or not driver:
+        return None
+    return driver.split("+", 1)[0]
 
 
 class ConnectionRuntime:
@@ -123,11 +115,8 @@ class ConnectionRuntime:
         self._resolved_config: Optional[Dict[str, Any]] = None
         self._transport_dialect: Optional[str] = None
         self._transport_driver: Optional[str] = None
-        # ADBC transport state. ``_adbc_transport`` is the materialized
-        # transport (carries the connect factory); the runtime does not
-        # own a live connection — callers open and manage their own
-        # DBAPI handles via :meth:`open_adbc_connection`.
-        self._adbc_transport: Optional[AdbcTransport] = None
+        self._tls_mode: Optional[str] = None
+        self._tls_ca_bundle_present: bool = False
 
         # Reference counting for shared ownership across streams
         self._ref_count = 0
@@ -157,12 +146,24 @@ class ConnectionRuntime:
 
     @property
     def driver_string(self) -> Optional[str]:
-        """Full transport driver identifier once the transport has been
-        materialized: the SQLAlchemy driver string
-        (``postgresql+asyncpg``) for SQLAlchemy transports, or the ADBC
-        driver module path (``adbc_driver_snowflake.dbapi``) for ADBC
-        transports. ``None`` for non-database connectors."""
+        """Full SQLAlchemy driver string (``postgresql+asyncpg``) once the
+        transport has been materialized."""
         return self._transport_driver
+
+    @property
+    def tls_mode(self) -> Optional[str]:
+        """Resolved ``tls.mode`` string (the connector's native vocabulary)
+        once materialized, or ``None`` if the transport has no TLS."""
+        return self._tls_mode
+
+    @property
+    def tls_ca_bundle_present(self) -> bool:
+        """True when materialisation consumed a CA PEM bundle. ADBC URI
+        builders use this to decide whether to demote: ADBC accepts
+        libpq ``sslmode=`` in the URI but cannot inline raw PEM, so
+        ``verify-ca`` / ``verify-full`` with a CA bundle must stay on
+        the SQLAlchemy path that holds the SSLContext."""
+        return self._tls_ca_bundle_present
 
     @property
     def raw_config(self) -> Dict[str, Any]:
@@ -186,20 +187,23 @@ class ConnectionRuntime:
         return self._connection_type_mapper
 
     def type_mapper_for(self, endpoint_ref: Any) -> TypeMapper:
-        """Pick the type mapper whose scope matches ``endpoint_ref``."""
+        """Pick the type mapper whose scope matches ``endpoint_ref``.
+
+        For ``scope="connection"`` the connection's own ``type-map.json``
+        wins when present; otherwise the connector's mapper is used. The
+        connector's native vocabulary is authoritative for the driver
+        (e.g. MySQL ``BIGINT`` is the same in every MySQL installation),
+        so a connection only needs its own map to override or extend it.
+        """
         from src.models.stream import EndpointRef
 
         ref = EndpointRef.from_dict(endpoint_ref)
         if ref.scope == "connector":
             return self.connector_type_mapper
         if ref.scope == "connection":
-            if self._connection_type_mapper is None:
-                raise RuntimeError(
-                    f"endpoint {ref} is connection-scoped but connection "
-                    f"{self._connection_id!r} has no type-map (expected at "
-                    f"connections/{self._connection_id}/definition/type-map.json)"
-                )
-            return self._connection_type_mapper
+            if self._connection_type_mapper is not None:
+                return self._connection_type_mapper
+            return self.connector_type_mapper
         raise ValueError(f"type_mapper_for: unknown endpoint scope in {ref}")
 
     # ------------------------------------------------------------------
@@ -240,15 +244,8 @@ class ConnectionRuntime:
                 self._engine = transport.engine
                 self._transport_driver = transport.driver
                 self._transport_dialect = transport.dialect
-            elif isinstance(transport, AdbcTransport):
-                self._adbc_transport = transport
-                # ADBC's driver discriminator (``postgresql`` / ``snowflake`` /
-                # ``bigquery``) is the closest analogue to a SQLAlchemy
-                # base dialect. ``driver_string`` carries the dotted
-                # dbapi module path so debugging logs still tell you
-                # which driver package was imported.
-                self._transport_dialect = transport.driver
-                self._transport_driver = transport.driver_module_path
+                self._tls_mode = transport.tls_mode
+                self._tls_ca_bundle_present = transport.tls_ca_bundle_present
             elif isinstance(transport, HttpTransport):
                 self._session = transport.session
                 self._base_url = transport.base_url
@@ -273,35 +270,10 @@ class ConnectionRuntime:
     @property
     def engine(self) -> AsyncEngine:
         if not self._materialized or self._engine is None:
-            if self._adbc_transport is not None:
-                raise RuntimeError(
-                    f"connection {self._connection_id!r} uses an ADBC "
-                    f"transport; SQLAlchemy `engine` is not available. "
-                    f"Use `open_adbc_connection()` instead."
-                )
             raise RuntimeError(
                 "engine not available: call materialize() first or wrong connector_type"
             )
         return self._engine
-
-    @property
-    def is_adbc(self) -> bool:
-        """``True`` when this runtime is backed by an ADBC transport."""
-        return self._adbc_transport is not None
-
-    def open_adbc_connection(self) -> Any:
-        """Open a fresh ADBC DBAPI connection. Caller owns lifecycle.
-
-        The runtime keeps no live ADBC handles. Each call returns a new
-        connection; the caller is responsible for closing it (typically
-        cached for the consumer's lifetime, then closed on disconnect).
-        """
-        if not self._materialized or self._adbc_transport is None:
-            raise RuntimeError(
-                f"adbc connection not available for {self._connection_id!r}: "
-                f"call materialize() first or wrong transport type"
-            )
-        return self._adbc_transport.connect()
 
     @property
     def session(self) -> aiohttp.ClientSession:
@@ -416,7 +388,8 @@ class ConnectionRuntime:
             self._materialized = False
             self._transport_dialect = None
             self._transport_driver = None
-            self._adbc_transport = None
+            self._tls_mode = None
+            self._tls_ca_bundle_present = False
 
     # ------------------------------------------------------------------
     # Private helpers
