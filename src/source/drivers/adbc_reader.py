@@ -320,6 +320,15 @@ def _build_select_sql(
     silently skip or duplicate rows across page boundaries) — falling
     back to the first column gives deterministic paging without
     requiring the caller to declare a cursor.
+
+    **Caveat on the first-column fallback**: if ``columns[0]`` is a
+    non-orderable type (Snowflake ``VARIANT`` / ``OBJECT`` / ``ARRAY``,
+    BigQuery ``STRUCT`` / ``ARRAY`` / ``JSON`` / ``GEOGRAPHY``, Postgres
+    types without an ordering operator), the warehouse will reject the
+    query. Callers should set ``cursor_field`` to a scalar primary-key
+    column for streams with non-orderable first columns. A WARNING is
+    logged once per (table, fallback_column) so the operator sees the
+    implicit choice.
     """
     # Non-empty columns is enforced by AdbcReadPlan.__post_init__; the
     # renderer can trust the invariant.
@@ -336,7 +345,11 @@ def _build_select_sql(
     sql = f"SELECT {col_list} FROM {qualified}"
     if where_parts:
         sql += " WHERE " + " AND ".join(where_parts)
-    order_col = plan.cursor_field if plan.cursor_field else plan.columns[0]
+    if plan.cursor_field:
+        order_col = plan.cursor_field
+    else:
+        order_col = plan.columns[0]
+        _note_order_by_fallback(plan.table_name, order_col)
     sql += f" ORDER BY {_quote_ident(order_col, driver)} ASC"
     if plan.limit is not None:
         sql += f" LIMIT {int(plan.limit)}"
@@ -344,6 +357,31 @@ def _build_select_sql(
         sql += f" OFFSET {int(plan.offset)}"
 
     return sql, tuple(params)
+
+
+_order_by_fallback_logged: set = set()
+
+
+def _note_order_by_fallback(table_name: str, column_name: str) -> None:
+    """Log once per (table, column) that ORDER BY fell back to the first column.
+
+    A WARNING (not INFO) because the operator may need to act: a JSON /
+    STRUCT / VARIANT first column will fail at query time with an opaque
+    "ORDER BY does not support this type" error, and the fix is to set
+    ``cursor_field`` on the stream — not something a stack trace points
+    at directly.
+    """
+    key = (table_name, column_name)
+    if key in _order_by_fallback_logged:
+        return
+    _order_by_fallback_logged.add(key)
+    logger.warning(
+        "ADBC reader: no cursor_field for table %r; defaulting ORDER BY to "
+        "first selected column %r. Set cursor_field on the stream if this "
+        "column is a non-orderable type (JSON / STRUCT / VARIANT) — the "
+        "warehouse will otherwise reject the query.",
+        table_name, column_name,
+    )
 
 
 class AdbcReader:

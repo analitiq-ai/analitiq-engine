@@ -197,6 +197,72 @@ class TestAdbcModeReset:
         assert h._engine is None
 
 
+class TestAdbcIngestSchemaNormalization:
+    """The Snowflake `public` -> `PUBLIC` normalization must reach every
+    `cursor.adbc_ingest(db_schema_name=...)` site. Round-2 fixed the
+    quoted-DDL path; round-3 added it to all three ingest sites
+    (`_adbc_ingest_sync`, `_adbc_only_ingest_sync`, `_merge_ingest_sync`).
+    Regression coverage so a future refactor cannot drop the normalize
+    on the ingest dimension while keeping it on the DDL dimension."""
+
+    def _captured_ingest(self):
+        """Build a fake ADBC connection that captures the kwargs handed
+        to ``cursor.adbc_ingest``. Returns ``(conn, captured)`` where
+        ``captured`` is a dict populated on the first ingest call."""
+        captured: dict = {}
+
+        class _FakeCursor:
+            def adbc_ingest(self, table, batch, mode, db_schema_name):
+                captured["table"] = table
+                captured["mode"] = mode
+                captured["db_schema_name"] = db_schema_name
+
+            def close(self): pass
+
+        class _FakeConn:
+            def cursor(self_inner): return _FakeCursor()
+            def commit(self_inner): pass
+
+        return _FakeConn(), captured
+
+    def test_snowflake_public_normalized_for_adbc_only_ingest(self):
+        h = DatabaseDestinationHandler()
+        h._driver = "snowflake"
+        h._adbc_only = True
+        h._adbc_conn, captured = self._captured_ingest()
+        import pyarrow as pa
+        h._adbc_only_ingest_sync(
+            pa.record_batch([pa.array([1])], names=["id"]),
+            "public", "orders",
+        )
+        assert captured["db_schema_name"] == "PUBLIC"
+
+    def test_bigquery_schema_not_normalized_for_adbc_only_ingest(self):
+        # BigQuery datasets are case-sensitive; never normalize.
+        h = DatabaseDestinationHandler()
+        h._driver = "bigquery"
+        h._adbc_only = True
+        h._adbc_conn, captured = self._captured_ingest()
+        import pyarrow as pa
+        h._adbc_only_ingest_sync(
+            pa.record_batch([pa.array([1])], names=["id"]),
+            "analytics", "orders",
+        )
+        assert captured["db_schema_name"] == "analytics"
+
+    def test_snowflake_empty_schema_yields_none(self):
+        h = DatabaseDestinationHandler()
+        h._driver = "snowflake"
+        h._adbc_only = True
+        h._adbc_conn, captured = self._captured_ingest()
+        import pyarrow as pa
+        h._adbc_only_ingest_sync(
+            pa.record_batch([pa.array([1])], names=["id"]),
+            "", "orders",
+        )
+        assert captured["db_schema_name"] is None
+
+
 class TestPerDriverQuoting:
     """BigQuery uses backticks; everything else uses ANSI double quotes."""
 

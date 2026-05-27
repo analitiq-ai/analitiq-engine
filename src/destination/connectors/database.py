@@ -1181,7 +1181,10 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
                     table_name,
                     cast_batch,
                     mode="append",
-                    db_schema_name=schema_name or None,
+                    db_schema_name=(
+                        self._normalize_adbc_schema(schema_name)
+                        if schema_name else None
+                    ),
                 )
                 conn.commit()
             finally:
@@ -1741,8 +1744,15 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         except AdbcConfigurationError:
             # Already classified as fatal by _record_batch_commit_via_adbc
             # (PEP-249 ProgrammingError, NotSupportedError, DataError).
-            # IntegrityError on retry collision is handled there too.
             # Propagate as fatal — wrapping would re-classify as retryable.
+            raise
+        except AdbcCommitRecordError:
+            # The insert-mode IntegrityError-on-PK collision branch in
+            # _record_batch_commit_via_adbc raises this directly with
+            # the right write_mode and "retry will duplicate" message.
+            # Re-wrapping would double-prefix the failure_summary and
+            # collapse the precise insert-race wording into a generic
+            # "commit-record failed".
             raise
         except Exception as commit_exc:
             logger.error(
@@ -1768,7 +1778,10 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
                     table_name,
                     cast_batch,
                     mode="append",
-                    db_schema_name=schema_name or None,
+                    db_schema_name=(
+                        self._normalize_adbc_schema(schema_name)
+                        if schema_name else None
+                    ),
                 )
                 conn.commit()
             finally:
@@ -1905,8 +1918,14 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
                     cast_batch,
                     mode="append",
                     # Stage lives in the target schema; the driver needs
-                    # the schema name to resolve the right table.
-                    db_schema_name=schema_name or None,
+                    # the schema name to resolve the right table. Same
+                    # normalization as the DDL path so Snowflake's real
+                    # PUBLIC schema is matched when the connector
+                    # declared lowercase ``public``.
+                    db_schema_name=(
+                        self._normalize_adbc_schema(schema_name)
+                        if schema_name else None
+                    ),
                 )
                 conn.commit()
                 on_clause = " AND ".join(
