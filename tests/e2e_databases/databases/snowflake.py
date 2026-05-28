@@ -68,8 +68,8 @@ class SnowflakeSpec(DatabaseSpec):
     def connection(self, role: str) -> ConnectionDescriptor:
         raise NotImplementedError("Snowflake pairs skipped until DIP ships a connector")
 
-    def native_compose_services(self) -> List[str]:
-        return []
+    def upsert_rows(self, role: str, rows: Iterable[SeedRow]) -> None:
+        raise NotImplementedError
 
     def up(self, role: str) -> None:
         pass

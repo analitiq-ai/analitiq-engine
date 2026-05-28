@@ -21,9 +21,14 @@ from __future__ import annotations
 import abc
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, List, Mapping, Optional
+from typing import Iterable, List, Literal, Mapping, Optional
 
 from tests.e2e_databases.seeds import SeedRow
+
+# A database participates in a pair under one of two roles. Source and
+# destination are always distinct instances (distinct containers, even for the
+# same DB type), so role selects which one a spec method talks to.
+Role = Literal["source", "destination"]
 
 
 @dataclass(frozen=True)
@@ -77,29 +82,44 @@ class DatabaseSpec(abc.ABC):
     # ``True`` if this DB only runs as a managed cloud service.
     is_cloud: bool = False
 
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        super().__init_subclass__(**kwargs)
+        if not getattr(cls, "slug", ""):
+            raise TypeError(
+                f"{cls.__name__} must define a non-empty 'slug' class attribute"
+            )
+
     @abc.abstractmethod
     def columns(self) -> List[ColumnSpec]:
         """Canonical column definitions in this DB's native types."""
 
     @abc.abstractmethod
-    def connection(self, role: str) -> ConnectionDescriptor:
-        """Connection details for the given role (``"source"`` or ``"destination"``).
+    def connection(self, role: Role) -> ConnectionDescriptor:
+        """Connection details for the given role.
 
         Local-container specs return different docker hostnames per role so
         source and destination point at distinct instances.
         """
 
     @abc.abstractmethod
-    def up(self, role: str) -> None:
+    def up(self, role: Role) -> None:
         """Bring this DB up for the given role. No-op for embedded / cloud."""
 
     @abc.abstractmethod
-    def down(self, role: str) -> None:
+    def down(self, role: Role) -> None:
         """Tear this DB down. No-op for embedded / cloud unless we created data."""
 
     @abc.abstractmethod
-    def seed(self, role: str, rows: Iterable[SeedRow]) -> None:
+    def seed(self, role: Role, rows: Iterable[SeedRow]) -> None:
         """Drop the seed table if it exists, recreate it, and insert ``rows``."""
+
+    @abc.abstractmethod
+    def upsert_rows(self, role: Role, rows: Iterable[SeedRow]) -> None:
+        """Insert-or-update ``rows`` into the seed table by primary key.
+
+        Used between incremental syncs to mutate the source (the delta) and to
+        plant the destination sentinel, without dropping the existing table.
+        """
 
     @abc.abstractmethod
     def prepare_destination(self) -> None:
@@ -108,10 +128,6 @@ class DatabaseSpec(abc.ABC):
     @abc.abstractmethod
     def read_destination(self) -> List[SeedRow]:
         """Read the seed table back from the destination, ordered by primary key."""
-
-    @abc.abstractmethod
-    def native_compose_services(self) -> List[str]:
-        """docker compose service names this DB contributes (empty for embedded/cloud)."""
 
     # ---- introspection helpers used by the orchestrator -----------------
 

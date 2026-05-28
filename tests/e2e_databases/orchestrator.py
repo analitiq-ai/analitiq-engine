@@ -15,7 +15,7 @@ import logging
 import os
 import sys
 from dataclasses import dataclass, fields
-from typing import List, Optional
+from typing import List, Optional, get_args
 
 from tests.e2e_databases.databases import all_specs, spec_for
 from tests.e2e_databases.databases._base import DatabaseSpec
@@ -44,7 +44,7 @@ class DestinationMismatch(AssertionError):
     """Destination rows did not match the canonical seed."""
 
 
-@dataclass
+@dataclass(frozen=True)
 class PipelineResult:
     pair: GeneratedPair
     actual_rows: List[SeedRow]
@@ -67,9 +67,15 @@ class E2ETestRun:
         self._pair: Optional[GeneratedPair] = None
         self._engine_services_started = False
 
-    def run(self) -> PipelineResult:
+    def setup(self) -> GeneratedPair:
+        """Bring the DBs up, seed the source, prepare the destination, and
+        write the pipeline config.
+
+        ``build_pair`` wipes runtime state, so the first ``sync()`` after this
+        starts from an empty cursor bookmark.
+        """
         logger.info(
-            "E2E run: %s -> %s (%s, %s)",
+            "E2E setup: %s -> %s (%s, %s)",
             self.source.slug,
             self.destination.slug,
             self.mode,
@@ -80,9 +86,28 @@ class E2ETestRun:
         self._pair = build_pair(
             self.source, self.destination, self.mode, self.write_mode
         )
+        return self._pair
+
+    def sync(self) -> List[SeedRow]:
+        """Invoke the engine once and read the destination back.
+
+        Runtime state is preserved between calls, so a second ``sync()``
+        resumes from the cursor bookmark the previous one left behind. That
+        resumption is what makes the incremental delta and no-op assertions
+        meaningful — without it every sync would re-read the whole source.
+        """
+        if self._pair is None:
+            raise RuntimeError("sync() requires setup() first")
         self._invoke_engine(self._pair.pipeline_id)
-        actual = self.destination.read_destination()
+        return self.destination.read_destination()
+
+    def run(self) -> PipelineResult:
+        """Single full sync: set up, sync once, assert the destination matches
+        the canonical seed."""
+        self.setup()
+        actual = self.sync()
         self._assert_rows(actual, canonical_seed_rows())
+        assert self._pair is not None  # set by setup()
         return PipelineResult(pair=self._pair, actual_rows=actual)
 
     def teardown(self, *, keep_databases: bool = False) -> None:
@@ -187,9 +212,11 @@ def _main() -> int:
     parser.add_argument("--source", help="Source DB slug")
     parser.add_argument("--dest", help="Destination DB slug")
     parser.add_argument(
-        "--mode", choices=("full_refresh", "incremental"), default="full_refresh"
+        "--mode", choices=get_args(ReplicationMode), default="full_refresh"
     )
-    parser.add_argument("--write-mode", choices=("insert", "upsert"), default="insert")
+    parser.add_argument(
+        "--write-mode", choices=get_args(WriteMode), default="insert"
+    )
     parser.add_argument(
         "--keep-up",
         action="store_true",
