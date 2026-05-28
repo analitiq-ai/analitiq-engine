@@ -61,10 +61,10 @@ class RedshiftSpec(DatabaseSpec):
         return []
 
     def up(self, role: str) -> None:
-        ...
+        pass
 
     def down(self, role: str) -> None:
-        ...
+        pass
 
     def seed(self, role: str, rows: Iterable[SeedRow]) -> None:
         raise NotImplementedError
