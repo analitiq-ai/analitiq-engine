@@ -10,6 +10,7 @@ from typing import Any, Dict, Optional
 from ..shared.run_id import get_or_generate_run_id
 from .batch_commit_tracker import BatchCommitTracker
 from .state_emission import emit_state_log
+from .store import CursorStore
 
 logger = logging.getLogger(__name__)
 
@@ -41,8 +42,11 @@ class StateManager:
         # In-run batch commit tracker (initialized by init_commit_tracker)
         self._commit_tracker: Optional[BatchCommitTracker] = None
 
-        # In-run cursor state keyed by (stream_name, partition_key)
+        # In-run cursor cache keyed by (stream_name, partition_key). Backed by
+        # an on-disk checkpoint so a fresh process resumes from where the last
+        # run left off instead of re-scanning the whole source.
         self._cursors: Dict[str, Dict[str, Any]] = {}
+        self._cursor_store = CursorStore(self.base_dir)
 
     def init_commit_tracker(self, run_id: str) -> None:
         """Initialize batch commit tracker for the current run."""
@@ -113,10 +117,22 @@ class StateManager:
     async def get_cursor(
         self, stream_name: str, partition: Optional[Dict[str, Any]] = None
     ) -> Optional[Dict[str, Any]]:
-        """Return the last saved cursor for a stream/partition, or None."""
+        """Return the last saved cursor for a stream/partition, or None.
+
+        Falls back to the on-disk checkpoint when the in-run cache is empty so
+        a newly started process resumes from the previous run's bookmark.
+        """
         key = self._cursor_key(stream_name, partition or {})
         with self.lock:
-            return self._cursors.get(key)
+            cached = self._cursors.get(key)
+            if cached is not None:
+                return cached
+            persisted = self._cursor_store.get(self.pipeline_id, stream_name)
+            if persisted is None:
+                return None
+            cursor = {"cursor": persisted}
+            self._cursors[key] = cursor
+            return cursor
 
     async def save_cursor(
         self,
@@ -124,10 +140,17 @@ class StateManager:
         partition: Optional[Dict[str, Any]],
         cursor: Dict[str, Any],
     ) -> None:
-        """Persist cursor state for a stream/partition in the current run."""
+        """Persist cursor state for a stream/partition.
+
+        Written both to the in-run cache and to the on-disk checkpoint so the
+        next run resumes from it. Partitioned cursors share one document per
+        ``(pipeline, stream)`` (the store's documented scope); partitions are
+        not exercised today.
+        """
         key = self._cursor_key(stream_name, partition or {})
         with self.lock:
             self._cursors[key] = cursor
+            self._cursor_store.set(self.pipeline_id, stream_name, cursor.get("cursor"))
 
     def get_run_info(self) -> Dict[str, Any]:
         """Get current run information."""
