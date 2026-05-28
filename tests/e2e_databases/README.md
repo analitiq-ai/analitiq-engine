@@ -11,24 +11,42 @@ everything down. There is no shared long-lived state.
 
 ## What it tests
 
-For every supported database pair `(source, destination)` and replication mode
-`{full_refresh, incremental}`:
+Three test files, each driving the real engine Docker image against real
+databases:
+
+**`test_matrix_local.py` / `test_matrix_cloud.py` — full refresh.** For every
+supported pair `(source, destination)` and each write mode `{insert, upsert}`:
 
 1. Seed `e2e_seed_data` in the source.
 2. Wire a pipeline that streams `e2e_seed_data` from source to destination.
 3. Run the engine.
 4. Read the destination back and assert row-for-row equality with the seed.
 
+**`test_incremental.py` — true incremental.** A single sync on a fresh table is
+indistinguishable from a full refresh, so this runs three syncs and proves the
+engine resumes from its cursor bookmark: initial load, then a sentinel planted
+below the bookmark plus a source mutation above it (a correct delta sync leaves
+the sentinel untouched and moves only the changed/new rows), then a no-op third
+sync that must leave the destination byte-for-byte identical. Incremental uses
+`upsert` because the inclusive `>=` cursor re-reads the boundary row each sync.
+
+**`test_negative.py` — deliberate failure.** One pair is wired to fail inside
+the engine (a source endpoint advertising a column the table lacks). It asserts
+the orchestrator surfaces the non-zero engine exit as `PipelineRunFailed` — so a
+framework bug that swallowed engine errors could never leave the suite falsely
+green.
+
 The matrix shape:
 
-- **Local databases (Postgres, MySQL, DuckDB, SQLite, MongoDB, ClickHouse) — N×N.**
-  Every local DB is tested as source against every other local DB as destination.
-- **Cloud databases (Snowflake, BigQuery, Redshift) — hub-and-spoke around Postgres.**
-  Each cloud DB is tested against Postgres only, in both directions.
+- **Local databases — N×N.** Every local DB spec is tested as source against
+  every local DB as destination.
+- **Cloud databases — hub-and-spoke around Postgres.** Each cloud DB spec is
+  tested against Postgres only, in both directions.
 
-Pairs whose connectors are not in the DIP registry skip automatically with a
-clear pytest reason. Cloud pairs whose credentials are missing from `.env` also
-skip automatically.
+Specs are auto-discovered from `databases/*.py`, so the participating set is a
+function of the registry, not a hand-maintained list. Pairs whose connectors
+are not in the DIP registry skip automatically with a clear pytest reason, as do
+cloud pairs whose credentials are missing from `.env`.
 
 ## What this framework will NOT do
 
@@ -57,29 +75,34 @@ tests/e2e_databases/
 │   ├── mysql.py
 │   └── ...
 ├── seeds/
-│   └── canonical.sql         # canonical seed table DDL + rows (SQL flavor)
+│   └── __init__.py           # canonical seed rows (single source of truth)
 ├── factory.py                # generates connection / pipeline / stream / endpoint JSON
 ├── orchestrator.py           # spin up, seed, run engine, assert, tear down
 ├── workspace/                # generated configs (gitignored)
 └── _tests/
-    ├── test_matrix_local.py  # N×N for local DBs
-    └── test_matrix_cloud.py  # hub-and-spoke for cloud DBs
+    ├── test_matrix_local.py  # N×N for local DBs, per write mode
+    ├── test_matrix_cloud.py  # hub-and-spoke for cloud DBs, per write mode
+    ├── test_incremental.py   # resume-from-bookmark / delta / no-op
+    └── test_negative.py      # proves the harness can go red
 ```
 
 ## The canonical seed table
 
 Every database receives the same logical table:
 
-| column     | type           | notes                                  |
-|------------|----------------|----------------------------------------|
-| id         | INT (PK)       | row identity                           |
-| name       | VARCHAR(100)   |                                        |
-| email      | VARCHAR(255)   |                                        |
-| score      | INT            | nullable                               |
-| created_at | TIMESTAMP      |                                        |
-| updated_at | TIMESTAMP      | used as the incremental cursor field   |
+| column     | type           | notes                                          |
+|------------|----------------|------------------------------------------------|
+| id         | INT (PK)       | row identity                                   |
+| name       | VARCHAR(100)   |                                                |
+| email      | VARCHAR(255)   |                                                |
+| score      | INT            | nullable (one row is NULL)                     |
+| created_at | TIMESTAMP(µs)  | distinct, non-zero microseconds per row        |
+| updated_at | TIMESTAMP(µs)  | used as the incremental cursor field           |
 
-Native types are translated per DB by each `DatabaseSpec`.
+Native types are translated per DB by each `DatabaseSpec`. Timestamps carry
+microsecond precision deliberately: it catches precision-truncating destination
+DDL (a MySQL `DATETIME` without `(6)` silently drops the sub-second part), so
+the exact-equality read-back goes red if the engine ever loses it.
 
 ## Running it
 
@@ -105,8 +128,13 @@ containers.
 ### Run a single pair
 
 ```bash
+# Full-refresh matrix ids are {source}_to_{dest}_{write_mode}:
 poetry run pytest tests/e2e_databases/_tests/test_matrix_local.py \
-    -k "postgres_to_mysql_incremental"
+    -k "postgres_to_mysql_upsert"
+
+# Incremental ids are {source}_to_{dest}:
+poetry run pytest tests/e2e_databases/_tests/test_incremental.py \
+    -k "postgres_to_mysql"
 ```
 
 ### Run one pipeline manually (no pytest)

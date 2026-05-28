@@ -18,6 +18,7 @@ from tests.e2e_databases.databases._base import (
     ColumnSpec,
     ConnectionDescriptor,
     DatabaseSpec,
+    Role,
 )
 from tests.e2e_databases.databases._docker import compose_down, compose_up
 from tests.e2e_databases.seeds import SEED_TABLE_NAME, SeedRow
@@ -55,7 +56,7 @@ class MySQLSpec(DatabaseSpec):
             ),
         ]
 
-    def connection(self, role: str) -> ConnectionDescriptor:
+    def connection(self, role: Role) -> ConnectionDescriptor:
         service, host_port = self._ROLES[role]
         return ConnectionDescriptor(
             engine_host=service,
@@ -69,20 +70,20 @@ class MySQLSpec(DatabaseSpec):
             extra_parameters={"ssl_mode": "DISABLED"},
         )
 
-    def native_compose_services(self) -> List[str]:
-        return [service for service, _ in self._ROLES.values()]
-
-    def up(self, role: str) -> None:
+    def up(self, role: Role) -> None:
         service, _ = self._ROLES[role]
         compose_up(service)
         self._wait_until_ready(role)
 
-    def down(self, role: str) -> None:
+    def down(self, role: Role) -> None:
         service, _ = self._ROLES[role]
         compose_down(service)
 
-    def seed(self, role: str, rows: Iterable[SeedRow]) -> None:
+    def seed(self, role: Role, rows: Iterable[SeedRow]) -> None:
         asyncio.run(self._seed_async(role, list(rows)))
+
+    def upsert_rows(self, role: Role, rows: Iterable[SeedRow]) -> None:
+        asyncio.run(self._upsert_async(role, list(rows)))
 
     def prepare_destination(self) -> None:
         asyncio.run(self._drop_table("destination"))
@@ -92,7 +93,7 @@ class MySQLSpec(DatabaseSpec):
 
     # ---- internals ------------------------------------------------------
 
-    async def _connect(self, role: str):
+    async def _connect(self, role: Role):
         desc = self.connection(role)
         return await aiomysql.connect(
             host=desc.host_address,
@@ -103,7 +104,7 @@ class MySQLSpec(DatabaseSpec):
             autocommit=True,
         )
 
-    async def _seed_async(self, role: str, rows: List[SeedRow]) -> None:
+    async def _seed_async(self, role: Role, rows: List[SeedRow]) -> None:
         conn = await self._connect(role)
         try:
             async with conn.cursor() as cur:
@@ -115,8 +116,8 @@ class MySQLSpec(DatabaseSpec):
                         name        VARCHAR(100) NOT NULL,
                         email       VARCHAR(255) NOT NULL,
                         score       INT,
-                        created_at  DATETIME     NOT NULL,
-                        updated_at  DATETIME     NOT NULL
+                        created_at  DATETIME(6)  NOT NULL,
+                        updated_at  DATETIME(6)  NOT NULL
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                     """
                 )
@@ -132,7 +133,27 @@ class MySQLSpec(DatabaseSpec):
         finally:
             conn.close()
 
-    async def _drop_table(self, role: str) -> None:
+    async def _upsert_async(self, role: Role, rows: List[SeedRow]) -> None:
+        conn = await self._connect(role)
+        try:
+            async with conn.cursor() as cur:
+                await cur.executemany(
+                    f"INSERT INTO `{SEED_TABLE_NAME}` "
+                    f"(id, name, email, score, created_at, updated_at) "
+                    f"VALUES (%s, %s, %s, %s, %s, %s) "
+                    f"ON DUPLICATE KEY UPDATE "
+                    f"name = VALUES(name), email = VALUES(email), "
+                    f"score = VALUES(score), created_at = VALUES(created_at), "
+                    f"updated_at = VALUES(updated_at)",
+                    [
+                        (r.id, r.name, r.email, r.score, r.created_at, r.updated_at)
+                        for r in rows
+                    ],
+                )
+        finally:
+            conn.close()
+
+    async def _drop_table(self, role: Role) -> None:
         conn = await self._connect(role)
         try:
             async with conn.cursor() as cur:
@@ -140,7 +161,7 @@ class MySQLSpec(DatabaseSpec):
         finally:
             conn.close()
 
-    async def _read_async(self, role: str) -> List[SeedRow]:
+    async def _read_async(self, role: Role) -> List[SeedRow]:
         conn = await self._connect(role)
         try:
             async with conn.cursor() as cur:
@@ -163,7 +184,7 @@ class MySQLSpec(DatabaseSpec):
         finally:
             conn.close()
 
-    def _wait_until_ready(self, role: str, timeout_seconds: int = 90) -> None:
+    def _wait_until_ready(self, role: Role, timeout_seconds: int = 90) -> None:
         async def _probe() -> None:
             deadline = asyncio.get_event_loop().time() + timeout_seconds
             last_err: Exception | None = None

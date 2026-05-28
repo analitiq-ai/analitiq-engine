@@ -19,9 +19,16 @@ from sqlalchemy import (
     Text,
     Time,
 )
+from sqlalchemy.dialects.mysql import DATETIME as MySQLDateTime
 from sqlalchemy.dialects.postgresql import JSONB
 
 from src.engine.type_map import TypeMapper, parse_arrow_type
+
+# MySQL fractional-seconds precision (fsp) per Arrow timestamp unit. Generic
+# SQLAlchemy ``DateTime`` compiles to a bare MySQL ``DATETIME`` (fsp 0), which
+# silently truncates sub-second precision; MySQL caps fsp at 6 so nanoseconds
+# round down to microseconds.
+_MYSQL_FSP_BY_UNIT = {"s": 0, "ms": 3, "us": 6, "ns": 6}
 
 
 def arrow_to_sqlalchemy(dtype: pa.DataType) -> Any:
@@ -54,7 +61,15 @@ def arrow_to_sqlalchemy(dtype: pa.DataType) -> Any:
     if pa.types.is_time(dtype):
         return Time()
     if pa.types.is_timestamp(dtype):
-        return DateTime(timezone=dtype.tz is not None)
+        tz = dtype.tz is not None
+        column = DateTime(timezone=tz)
+        fsp = _MYSQL_FSP_BY_UNIT.get(dtype.unit, 6)
+        if fsp:
+            # Generic DATETIME on MySQL truncates fractional seconds; pin the
+            # precision so microseconds survive the round trip. Postgres
+            # TIMESTAMP already stores microseconds and keeps the generic type.
+            column = column.with_variant(MySQLDateTime(fsp=fsp, timezone=tz), "mysql")
+        return column
     if (
         pa.types.is_struct(dtype)
         or pa.types.is_list(dtype)
