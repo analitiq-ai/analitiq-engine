@@ -51,6 +51,20 @@ def test_json_native_cursors_pass_through(tmp_path, value):
     assert store.get(_PIPELINE, _STREAM) == value
 
 
+def test_unknown_type_tag_passes_through_unchanged(tmp_path):
+    # A dict carrying an unrecognized __type__ (e.g. a tag written by a future
+    # version) is returned verbatim rather than crashing the decode.
+    import json
+
+    store = CursorStore(tmp_path)
+    path = tmp_path / _PIPELINE / f"{_STREAM}.json"
+    path.parent.mkdir(parents=True)
+    payload = {"__type__": "future-kind", "value": "x"}
+    path.write_text(json.dumps({"cursor": payload}))
+
+    assert store.get(_PIPELINE, _STREAM) == payload
+
+
 def test_get_missing_returns_none(tmp_path):
     assert CursorStore(tmp_path).get(_PIPELINE, _STREAM) is None
 
