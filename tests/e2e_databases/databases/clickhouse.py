@@ -14,6 +14,7 @@ from tests.e2e_databases.databases._base import (
     ColumnSpec,
     ConnectionDescriptor,
     DatabaseSpec,
+    Role,
 )
 from tests.e2e_databases.seeds import SeedRow
 
@@ -39,21 +40,21 @@ class ClickHouseSpec(DatabaseSpec):
             ),
         ]
 
-    def connection(self, role: str) -> ConnectionDescriptor:
+    def connection(self, role: Role) -> ConnectionDescriptor:
         raise NotImplementedError(
             "ClickHouse pairs are skipped until DIP ships a connector"
         )
 
-    def upsert_rows(self, role: str, rows: Iterable[SeedRow]) -> None:
+    def upsert_rows(self, role: Role, rows: Iterable[SeedRow]) -> None:
         raise NotImplementedError
 
-    def up(self, role: str) -> None:
+    def up(self, role: Role) -> None:
         pass
 
-    def down(self, role: str) -> None:
+    def down(self, role: Role) -> None:
         pass
 
-    def seed(self, role: str, rows: Iterable[SeedRow]) -> None:
+    def seed(self, role: Role, rows: Iterable[SeedRow]) -> None:
         raise NotImplementedError
 
     def prepare_destination(self) -> None:
