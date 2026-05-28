@@ -1,12 +1,12 @@
 """Shared ADBC error type.
 
 The ADBC-only transport (``transport_type: "adbc"``) opens its DBAPI
-connections through :func:`ConnectionRuntime.open_adbc_connection`; the
-source reader (:mod:`src.source.drivers.adbc_reader`) and the
-destination handler (:mod:`src.destination.connectors.database`) both
-raise :class:`AdbcConfigurationError` for misconfigurations a retry
-cannot heal (missing driver, unsupported dialect, bad credentials).
-This module exists to hold that shared error type.
+connections through :func:`ConnectionRuntime.open_adbc_connection`. The
+destination handler (:mod:`src.destination.connectors.database`) raises
+:class:`AdbcConfigurationError` for misconfigurations a retry cannot
+heal (missing driver, unsupported dialect, bad credentials). It lives
+in ``shared`` because the type is part of the engine's fatal-vs-
+retryable classification contract, not handler-private.
 """
 
 from __future__ import annotations

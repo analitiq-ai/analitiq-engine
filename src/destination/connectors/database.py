@@ -810,9 +810,9 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
                 failure_summary=f"adbc: {e}",
             )
         except AdbcCommitRecordError as e:
-            # Ingest already committed; the SA _batch_commits write
-            # failed. The retry will re-ingest. Stay RETRYABLE so the
-            # engine reconciles, but surface the divergence text in
+            # ADBC ingest already committed; the _batch_commits record
+            # write failed. The retry will re-ingest. Stay RETRYABLE so
+            # the engine reconciles, but surface the divergence text in
             # failure_summary so DLQ / monitoring can route on it.
             return BatchWriteResult(
                 status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
