@@ -28,12 +28,13 @@ prior crash an operator should see.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Set
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +45,7 @@ _VALUE_KEY = "value"
 class CursorStore:
     def __init__(self, root: Path) -> None:
         self._root = root
-        self._write_failure_logged = False
+        self._write_failures_warned: Set[Path] = set()
 
     def _path(self, pipeline_id: str, stream_id: str) -> Path:
         return self._root / pipeline_id / f"{stream_id}.json"
@@ -79,16 +80,21 @@ class CursorStore:
             # Atomic swap so a concurrent/next-run reader never sees a torn file.
             os.replace(tmp, path)
         except OSError as exc:
+            # Don't leave a stale partial temp file behind if the swap failed.
+            with contextlib.suppress(OSError):
+                tmp.unlink(missing_ok=True)
             # A write failure must not abort an otherwise-successful load; warn
-            # once so the silent degradation to full re-scan stays visible.
-            if not self._write_failure_logged:
+            # once per path so the silent degradation to full re-scan stays
+            # visible without spamming a line per batch, while a distinct second
+            # path's failure is still reported.
+            if path not in self._write_failures_warned:
+                self._write_failures_warned.add(path)
                 logger.warning(
                     "failed to persist cursor checkpoint %s (%s); incremental "
                     "resume is disabled until the path is writable",
                     path,
                     exc,
                 )
-                self._write_failure_logged = True
 
 
 def _encode(value: Any) -> Any:
