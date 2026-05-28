@@ -53,7 +53,12 @@ def test_engine_failure_surfaces_as_pipeline_run_failed() -> None:
     run = E2ETestRun(source, dest, "full_refresh", write_mode="insert")
     try:
         run.setup()
-        with pytest.raises(PipelineRunFailed):
+        with pytest.raises(PipelineRunFailed) as exc_info:
             run.sync()
+        # PipelineRunFailed fires on any non-zero engine exit, so assert it
+        # failed for the intended reason: the phantom column the source SELECT
+        # referenced. Otherwise an unrelated infra hiccup would keep this test
+        # green while proving nothing about error propagation.
+        assert _PHANTOM_COLUMN in str(exc_info.value)
     finally:
         run.teardown(keep_databases=True)

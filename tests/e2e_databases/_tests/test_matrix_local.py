@@ -6,9 +6,9 @@ depth (resuming from a bookmark, deltas, no-op syncs) lives in
 ``test_incremental.py``; this file fixes ``full_refresh`` and varies the
 write mode (insert vs upsert) instead.
 
-Only pairs whose DIP connectors are present actually run; the rest skip with
-a clear reason. Today that means the Postgres/MySQL combinations execute and
-DuckDB / SQLite / MongoDB / ClickHouse skip until their connectors ship.
+Only pairs whose DIP connectors are present actually run; every other pair
+skips with a clear reason. Specs are discovered automatically, so which DBs
+run is a function of the registry, not a hand-maintained list here.
 """
 from __future__ import annotations
 

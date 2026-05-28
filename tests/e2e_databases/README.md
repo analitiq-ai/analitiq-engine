@@ -38,14 +38,15 @@ green.
 
 The matrix shape:
 
-- **Local databases (Postgres, MySQL, DuckDB, SQLite, MongoDB, ClickHouse) — N×N.**
-  Every local DB is tested as source against every other local DB as destination.
-- **Cloud databases (Snowflake, BigQuery, Redshift) — hub-and-spoke around Postgres.**
-  Each cloud DB is tested against Postgres only, in both directions.
+- **Local databases — N×N.** Every local DB spec is tested as source against
+  every local DB as destination.
+- **Cloud databases — hub-and-spoke around Postgres.** Each cloud DB spec is
+  tested against Postgres only, in both directions.
 
-Pairs whose connectors are not in the DIP registry skip automatically with a
-clear pytest reason. Cloud pairs whose credentials are missing from `.env` also
-skip automatically.
+Specs are auto-discovered from `databases/*.py`, so the participating set is a
+function of the registry, not a hand-maintained list. Pairs whose connectors
+are not in the DIP registry skip automatically with a clear pytest reason, as do
+cloud pairs whose credentials are missing from `.env`.
 
 ## What this framework will NOT do
 

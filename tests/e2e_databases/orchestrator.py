@@ -148,21 +148,23 @@ class E2ETestRun:
         # otherwise reuse whatever destination happens to be running.
         compose_recreate("engine-destination")
         result = compose_run_source_engine(pipeline_id)
-        if result.stdout:
-            logger.info("engine stdout:\n%s", result.stdout.strip())
+        stdout = (result.stdout or "").strip()
+        stderr = (result.stderr or "").strip()
+        if stdout:
+            logger.info("engine stdout:\n%s", stdout)
         if result.returncode != 0:
-            # On failure the stderr tail is the only thing that explains why,
-            # so log it loudly and fold it into the exception itself rather
-            # than leaving a bare exit code in the pytest report.
-            stderr = (result.stderr or "").strip()
+            # The engine logs its stack trace to stdout; docker compose's
+            # container-lifecycle chatter is what lands on stderr. Fold the
+            # stdout tail into the exception so the actual failure reason
+            # travels with it instead of a bare exit code in the pytest report.
             logger.error("engine stderr:\n%s", stderr)
-            tail = "\n".join(stderr.splitlines()[-20:])
+            tail = "\n".join(stdout.splitlines()[-30:])
             raise PipelineRunFailed(
                 f"source_engine exited with code {result.returncode} for "
-                f"pipeline {pipeline_id}\n--- engine stderr (tail) ---\n{tail}"
+                f"pipeline {pipeline_id}\n--- engine output (tail) ---\n{tail}"
             )
-        if result.stderr:
-            logger.info("engine stderr:\n%s", result.stderr.strip())
+        if stderr:
+            logger.info("engine stderr:\n%s", stderr)
 
     @staticmethod
     def _assert_rows(actual: List[SeedRow], expected: List[SeedRow]) -> None:
