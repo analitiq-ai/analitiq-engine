@@ -317,11 +317,11 @@ class TestAdbcModeReset:
 
 class TestAdbcIngestSchemaNormalization:
     """The Snowflake `public` -> `PUBLIC` normalization must reach every
-    `cursor.adbc_ingest(db_schema_name=...)` site. Round-2 fixed the
-    quoted-DDL path; round-3 added it to all three ingest sites
-    (`_adbc_ingest_sync`, `_adbc_only_ingest_sync`, `_merge_ingest_sync`).
-    Regression coverage so a future refactor cannot drop the normalize
-    on the ingest dimension while keeping it on the DDL dimension."""
+    `cursor.adbc_ingest(db_schema_name=...)` site: the quoted-DDL path
+    and both ADBC-only ingest sites (`_adbc_only_ingest_sync`,
+    `_merge_ingest_sync`). Regression coverage so a future refactor
+    cannot drop the normalize on the ingest dimension while keeping it
+    on the DDL dimension."""
 
     def _captured_ingest(self):
         """Build a fake ADBC connection that captures the kwargs handed

@@ -27,8 +27,6 @@ from .base import BaseConnector, ConnectionError, ReadError
 from ..drivers.adbc_reader import (
     AdbcReadPlan,
     open_adbc_reader,
-    open_session as open_adbc_session,
-    source_adbc_eligible,
 )
 from ...destination.schema_contract import SchemaContract
 from ...engine.type_map import InvalidTypeMapError, UnmappedTypeError
@@ -231,31 +229,6 @@ class DatabaseConnector(BaseConnector):
         last_cursor_value = cursor_value
         offset = 0
 
-        tls_mode = self._runtime.tls_mode if self._runtime else None
-        tls_has_ca = (
-            self._runtime.tls_ca_bundle_present if self._runtime else False
-        )
-        if source_adbc_eligible(
-            self._driver,
-            self._engine,
-            tls_mode=tls_mode,
-            tls_ca_bundle_present=tls_has_ca,
-        ):
-            async for batch in self._read_via_adbc(
-                page_query=page_query,
-                schema_contract=schema_contract,
-                cursor_field=cursor_field,
-                batch_size=batch_size,
-                state_manager=state_manager,
-                stream_name=stream_name,
-                partition=partition,
-                tls_mode=tls_mode,
-                tls_ca_bundle_present=tls_has_ca,
-            ):
-                yield batch
-            logger.debug("Database read (ADBC) completed")
-            return
-
         async with acquire_connection(self._engine) as conn:
             while True:
                 paged_query, paged_params = page_query(offset)
@@ -314,9 +287,9 @@ class DatabaseConnector(BaseConnector):
         """Stream Arrow batches via the ADBC-only path.
 
         Holds one DBAPI connection for the lifetime of the read; each
-        page goes ``cursor.execute -> fetch_arrow_table -> cast``,
-        mirroring :meth:`_read_via_adbc`. The WHERE clause is fixed at
-        the read's initial cursor_value (matching the SA path); paging
+        page goes ``cursor.execute -> fetch_arrow_table -> cast``. The
+        WHERE clause is fixed at the read's initial cursor_value
+        (matching the SA path); paging
         advances via OFFSET only. Mixing cursor advancement with OFFSET
         would skip rows on every page after the first (the cursor moves
         right while OFFSET continues to skip rows the cursor would have
@@ -356,78 +329,6 @@ class DatabaseConnector(BaseConnector):
                         if cursor_field in cast_batch.schema.names:
                             last_cursor_value = cast_batch.column(cursor_field)[-1].as_py()
                         elif not cursor_missing_warned:
-                            logger.warning(
-                                "stream %r: cursor_field %r not present in "
-                                "result batch; cursor will not advance",
-                                stream_name,
-                                cursor_field,
-                            )
-                            cursor_missing_warned = True
-                    self.metrics["records_read"] += cast_batch.num_rows
-                    self.metrics["batches_read"] += 1
-                    yield cast_batch
-
-                if last_cursor_value is not None:
-                    await state_manager.save_cursor(
-                        stream_name,
-                        partition,
-                        {"cursor": last_cursor_value},
-                    )
-
-                if page_rows < batch_size:
-                    break
-                offset += page_rows
-
-    async def _read_via_adbc(
-        self,
-        *,
-        page_query,
-        schema_contract: SchemaContract,
-        cursor_field: Optional[str],
-        batch_size: int,
-        state_manager: StateManager,
-        stream_name: str,
-        partition: Dict[str, Any],
-        tls_mode: Optional[str] = None,
-        tls_ca_bundle_present: bool = False,
-    ) -> AsyncIterator[pa.RecordBatch]:
-        """Stream Arrow batches via ADBC, holding one connection across pages.
-
-        Each page goes ``cursor.execute → fetch_arrow_table → cast``,
-        skipping the rows-to-dicts-to-Arrow conversion the SQLAlchemy
-        path takes. Cursor state is saved after each yielded batch using
-        the last row's ``cursor_field`` value, mirroring the SQLAlchemy
-        path's checkpoint shape.
-        """
-        offset = 0
-        last_cursor_value: Any = None
-        cursor_missing_warned = False
-        async with open_adbc_session(
-            self._driver,
-            self._engine,
-            tls_mode=tls_mode,
-            tls_ca_bundle_present=tls_ca_bundle_present,
-        ) as session:
-            while True:
-                sql, params = page_query(offset)
-                batches = await session.fetch_page(sql, params)
-                if not batches:
-                    break
-
-                page_rows = 0
-                for batch in batches:
-                    cast_batch = schema_contract.cast_arrow_batch(batch)
-                    page_rows += cast_batch.num_rows
-                    if cursor_field and cast_batch.num_rows > 0:
-                        if cursor_field in cast_batch.schema.names:
-                            last_cursor_value = cast_batch.column(cursor_field)[-1].as_py()
-                        elif not cursor_missing_warned:
-                            # Silent here means the next run re-reads from
-                            # the old cursor — incremental degrades to
-                            # repeated full-scan-with-upsert. Warn loudly
-                            # once per stream so the operator can fix the
-                            # projection (likely missing from
-                            # ``selected_columns``).
                             logger.warning(
                                 "stream %r: cursor_field %r not present in "
                                 "result batch; cursor will not advance",

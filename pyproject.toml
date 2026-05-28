@@ -89,11 +89,12 @@ cryptography = {version = "^41.0.0", optional = true}
 passlib = {version = "^1.7.4", optional = true}
 apscheduler = {version = "^3.10.0", optional = true}
 
-# ADBC (Arrow Database Connectivity) — opt-in fast path for the
-# database source and destination. When the driver is importable and
-# ``ADBC_FAST_PATH=1`` is set, append-only writes go through
-# ``adbc_ingest`` and reads stream Arrow batches via ``fetch_arrow_table``
-# instead of SQLAlchemy ``executemany`` / row mapping.
+# ADBC (Arrow Database Connectivity) — drivers for the ADBC transport
+# (``transport_type: "adbc"``). The mandatory path for dialects without
+# an async SQLAlchemy driver (Snowflake, BigQuery) and an alternative
+# for Postgres (e.g. Redshift via the libpq-compatible driver). Reads
+# stream Arrow batches via ``fetch_arrow_table`` and writes via
+# ``adbc_ingest``.
 adbc-driver-manager = {version = "^1.1.0", optional = true}
 adbc-driver-postgresql = {version = "^1.1.0", optional = true}
 adbc-driver-sqlite = {version = "^1.1.0", optional = true}
