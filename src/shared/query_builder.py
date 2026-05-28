@@ -138,9 +138,10 @@ def _get_sqlalchemy_dialect(
     construction (so ``dialect.positional`` is set consistently). The
     ADBC-only path passes ``"qmark"`` because every ADBC driver binds
     ``?`` placeholders. For PostgreSQL a forced paramstyle also swaps the
-    asyncpg dialect for the plain psycopg dialect: asyncpg renders inline
-    bind casts (``?::INTEGER``) that only the asyncpg driver understands,
-    whereas the ADBC libpq driver wants bare ``?`` placeholders.
+    asyncpg dialect for the default (non-asyncpg) PostgreSQL dialect:
+    asyncpg renders inline bind casts (``?::INTEGER``) that only the
+    asyncpg driver understands, whereas the ADBC libpq driver wants bare
+    ``?`` placeholders.
 
     Raises ``ValueError`` for unknown dialects and ``ImportError`` (with
     actionable text) when a third-party dialect package is missing.

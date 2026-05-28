@@ -337,8 +337,6 @@ class DatabaseConnector(BaseConnector):
             normalize_adbc_schema(schema_name, self._driver) if schema_name else None
         )
 
-        # The cursor field doubles as the sort key for stable OFFSET
-        # paging; without a cursor fall back to the first selected column.
         if cursor_field:
             order_by = cursor_field
         else:
@@ -374,6 +372,19 @@ class DatabaseConnector(BaseConnector):
                         offset=offset,
                     )
                 )
+                if isinstance(params, dict):
+                    # QueryBuilder is built with paramstyle="qmark", so it
+                    # must return positional params. A dict means the
+                    # dialect ignored the forced paramstyle; the ADBC
+                    # execute path (cursor.execute(sql, list(params))) would
+                    # then bind parameter *names* instead of values. Fail
+                    # loudly rather than corrupt the binds.
+                    raise ReadError(
+                        f"ADBC-only source for driver {self._driver!r}: "
+                        f"expected positional qmark parameters but QueryBuilder "
+                        f"produced named parameters; the ADBC execute path "
+                        f"binds positionally"
+                    )
                 batches = await reader.fetch_page(sql, params)
                 if not batches:
                     break

@@ -252,3 +252,98 @@ class TestAdbcConnectorBranch:
                 connector._stop_patch()
 
         assert any("defaulting ORDER BY" in r.message for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_offset_advances_across_pages_with_fixed_where(self, state_manager):
+        # Two full pages then drain. The cursor is pinned at the read's
+        # initial value; only OFFSET moves, so the WHERE params must be
+        # byte-for-byte identical across pages.
+        state_manager.get_cursor = AsyncMock(return_value={"cursor": "2024-01-01"})
+        page1 = [pa.RecordBatch.from_pydict(
+            {"id": [1, 2], "updated_at": ["2024-01-02", "2024-01-03"]}
+        )]
+        page2 = [pa.RecordBatch.from_pydict(
+            {"id": [3, 4], "updated_at": ["2024-01-04", "2024-01-05"]}
+        )]
+        connector, reader = _adbc_connector([page1, page2, []])
+        with patch("src.source.connectors.database.SchemaContract") as sc:
+            sc.return_value.cast_arrow_batch.side_effect = lambda b: b
+            try:
+                config = _endpoint_config(
+                    filters=[{"field": "status", "operator": "eq", "value": "active"}],
+                    replication={"method": "incremental", "cursor_field": ["updated_at"]},
+                )
+                await _drain(connector, config, state_manager, batch_size=2)
+            finally:
+                connector._stop_patch()
+
+        assert len(reader.calls) == 3
+        sql0, params0 = reader.calls[0]
+        sql1, params1 = reader.calls[1]
+        assert "OFFSET 0" in sql0
+        assert "OFFSET 2" in sql1
+        # Same WHERE predicate and identical params on every page.
+        assert params0 == params1 == ["active", "2024-01-01"]
+
+    @pytest.mark.asyncio
+    async def test_saves_last_cursor_value_from_batch(self, state_manager):
+        state_manager.get_cursor = AsyncMock(return_value=None)
+        page = [pa.RecordBatch.from_pydict(
+            {"id": [1, 2], "updated_at": ["2024-01-02", "2024-01-09"]}
+        )]
+        connector, _ = _adbc_connector([page, []])
+        with patch("src.source.connectors.database.SchemaContract") as sc:
+            sc.return_value.cast_arrow_batch.side_effect = lambda b: b
+            try:
+                config = _endpoint_config(
+                    replication={"method": "incremental", "cursor_field": ["updated_at"]},
+                )
+                await _drain(connector, config, state_manager, batch_size=2)
+            finally:
+                connector._stop_patch()
+
+        # Checkpoint advances to the last row's cursor-column value.
+        saved = [c.args[2]["cursor"] for c in state_manager.save_cursor.call_args_list]
+        assert saved[-1] == "2024-01-09"
+
+    @pytest.mark.asyncio
+    async def test_order_by_fallback_dedupes_across_drains(self, state_manager, caplog):
+        from src.source.connectors import database as db_mod
+
+        db_mod._order_by_fallback_logged.clear()
+        with patch("src.source.connectors.database.SchemaContract") as sc:
+            sc.return_value.cast_arrow_batch.side_effect = lambda b: b
+            with caplog.at_level("WARNING"):
+                for _ in range(2):
+                    page = [pa.RecordBatch.from_pydict(
+                        {"id": [1], "updated_at": ["2024-01-01"]}
+                    )]
+                    connector, _ = _adbc_connector([page, []])
+                    try:
+                        await _drain(connector, _endpoint_config(), state_manager)
+                    finally:
+                        connector._stop_patch()
+
+        # Same (table, column) -> warned only on the first drain.
+        warnings = [r for r in caplog.records if "defaulting ORDER BY" in r.message]
+        assert len(warnings) == 1
+
+    @pytest.mark.asyncio
+    async def test_named_params_rejected_on_adbc_path(self, state_manager):
+        # If the dialect ignores the forced qmark paramstyle and yields a
+        # dict, the ADBC execute path would bind parameter names instead of
+        # values. The connector must fail loudly before that happens.
+        connector, _ = _adbc_connector([])
+        with patch("src.source.connectors.database.SchemaContract") as sc, patch(
+            "src.source.connectors.database.QueryBuilder"
+        ) as qb:
+            sc.return_value.cast_arrow_batch.side_effect = lambda b: b
+            qb.return_value.build_select_query.return_value = (
+                "SELECT 1",
+                {"status_1": "active"},
+            )
+            try:
+                with pytest.raises(ReadError, match="positional qmark parameters"):
+                    await _drain(connector, _endpoint_config(), state_manager)
+            finally:
+                connector._stop_patch()
