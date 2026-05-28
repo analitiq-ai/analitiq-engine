@@ -158,6 +158,12 @@ adbc = [
     "adbc-driver-snowflake",
     "adbc-driver-bigquery",
     "adbc-driver-duckdb",
+    # Compile-only SQLAlchemy dialects: the ADBC source path renders
+    # SELECTs through the shared QueryBuilder, which must import the
+    # dialect to compile (never to connect). Postgres/SQLite/DuckDB use
+    # built-in SA dialects; Snowflake/BigQuery need their packages.
+    "snowflake-sqlalchemy",
+    "sqlalchemy-bigquery",
 ]
 # Per-database extras. Each pulls in the SQLAlchemy dialect plus the
 # matching ADBC driver where one exists. Install with
