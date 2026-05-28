@@ -7,8 +7,12 @@ and SQL dispatch, where regressions silently change retry semantics.
 
 from __future__ import annotations
 
+import logging
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 
+from src.destination.connectors import database as database_module
 from src.destination.connectors.database import (
     AdbcCommitRecordError,
     AdbcConfigurationError,
@@ -600,3 +604,76 @@ class TestAdbcDdlBuilders:
 
         pg = self._make("postgresql")
         assert "NOT ENFORCED" not in pg._build_adbc_pk_clause('"id"')
+
+
+class TestDisconnectClosesAdbc:
+    """``disconnect()`` must release the cached ADBC connection and the
+    SQLAlchemy runtime even when one side fails, and always flip
+    ``_connected`` so callers can re-acquire cleanly. ``_adbc_conn`` is
+    the ADBC-only mode's connection (Snowflake / BigQuery / Postgres);
+    a regression here leaks a server-side session on shutdown."""
+
+    @pytest.mark.asyncio
+    async def test_closes_adbc_connection(self):
+        handler = DatabaseDestinationHandler()
+        handler._connected = True
+        adbc_conn = MagicMock()
+        handler._adbc_conn = adbc_conn
+        handler._runtime = AsyncMock()
+        handler._runtime.close = AsyncMock()
+
+        await handler.disconnect()
+
+        adbc_conn.close.assert_called_once()
+        assert handler._adbc_conn is None
+        assert handler._connected is False
+        handler._runtime.close.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_close_failure_logged_at_error_and_runtime_still_released(
+        self, caplog
+    ):
+        handler = DatabaseDestinationHandler()
+        handler._connected = True
+        adbc_conn = MagicMock()
+        adbc_conn.close.side_effect = RuntimeError("already closed")
+        handler._adbc_conn = adbc_conn
+        handler._runtime = AsyncMock()
+        handler._runtime.close = AsyncMock()
+
+        with caplog.at_level(logging.ERROR, logger=database_module.logger.name):
+            await handler.disconnect()
+
+        errors = [
+            r for r in caplog.records
+            if "Failed to close ADBC connection" in r.message
+        ]
+        assert errors and errors[0].levelno == logging.ERROR
+        assert errors[0].exc_info is not None
+        assert handler._adbc_conn is None
+        assert handler._connected is False
+        # Engine is still released so we don't leak it on top of the
+        # ADBC handle.
+        handler._runtime.close.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_runtime_close_failure_still_flips_connected_state(self, caplog):
+        """If ``runtime.close()`` raises, the handler must still
+        transition to ``_connected = False`` so callers can re-acquire
+        without observing a half-disconnected state."""
+        handler = DatabaseDestinationHandler()
+        handler._connected = True
+        handler._runtime = AsyncMock()
+        handler._runtime.close = AsyncMock(
+            side_effect=RuntimeError("engine.dispose failed")
+        )
+
+        with caplog.at_level(logging.ERROR, logger=database_module.logger.name):
+            await handler.disconnect()
+
+        errors = [
+            r for r in caplog.records
+            if "Failed to close SQLAlchemy runtime" in r.message
+        ]
+        assert errors and errors[0].levelno == logging.ERROR
+        assert handler._connected is False

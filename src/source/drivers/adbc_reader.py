@@ -251,8 +251,8 @@ class AdbcReader:
                 cursor.execute(sql)
             # Some ADBC drivers expose ``fetch_record_batch`` (a streaming
             # iterator). Materialising the whole result via
-            # ``fetch_arrow_table`` is simpler and matches the existing
-            # session helper; per-page paging keeps memory bounded.
+            # ``fetch_arrow_table`` is simpler; per-page paging keeps
+            # memory bounded.
             table = cursor.fetch_arrow_table()
         finally:
             try:
