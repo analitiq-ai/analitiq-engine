@@ -308,3 +308,119 @@ class TestPositionalParamConversion:
         )
         assert sql.count("$") == 2
         assert params == [10, 0]
+
+
+class TestAdbcQmarkMode:
+    """The ADBC-only source compiles through QueryBuilder with
+    ``paramstyle="qmark"`` + ``quote_identifiers`` + ``inline_paging`` so
+    one builder serves both transports. Postgres is the only ADBC dialect
+    installed in the base env; Snowflake/BigQuery sit behind extras and
+    are covered by the cloud E2E matrix. The per-dialect quote char and
+    qmark rendering are SQLAlchemy's job -- these tests freeze the knobs.
+    """
+
+    def _adbc_builder(self):
+        return QueryBuilder(
+            "postgresql",
+            paramstyle="qmark",
+            quote_identifiers=True,
+            inline_paging=True,
+        )
+
+    def test_qmark_placeholders_no_dollar_or_named(self):
+        sql, params = self._adbc_builder().build_select_query(
+            QueryConfig(
+                schema_name="public",
+                table_name="orders",
+                columns=["id"],
+                filters=[Filter(field="id", op="gt", value=10)],
+            )
+        )
+        assert "?" in sql
+        assert "$" not in sql  # not asyncpg numeric_dollar
+        assert ":param" not in sql  # not named
+        assert isinstance(params, list)
+        assert params == [10]
+
+    def test_postgres_qmark_has_no_asyncpg_bind_casts(self):
+        # The asyncpg dialect renders ``?::INTEGER`` casts; the ADBC libpq
+        # driver wants bare ``?``. Forcing qmark must resolve the plain PG
+        # dialect, so no inline ``::TYPE`` casts leak into the SQL.
+        sql, _ = self._adbc_builder().build_select_query(
+            QueryConfig(
+                schema_name="public",
+                table_name="orders",
+                columns=["id"],
+                filters=[Filter(field="id", op="gte", value=5)],
+            )
+        )
+        assert "::" not in sql
+
+    def test_identifiers_quoted(self):
+        sql, _ = self._adbc_builder().build_select_query(
+            QueryConfig(
+                schema_name="public",
+                table_name="orders",
+                columns=["id", "status"],
+            )
+        )
+        assert '"public"."orders"' in sql
+        assert '"id"' in sql and '"status"' in sql
+
+    def test_limit_offset_inlined_not_bound(self):
+        sql, params = self._adbc_builder().build_select_query(
+            QueryConfig(
+                schema_name="public",
+                table_name="orders",
+                columns=["id"],
+                filters=[Filter(field="id", op="gt", value=1)],
+                limit=100,
+                offset=200,
+            )
+        )
+        assert "LIMIT 100" in sql
+        assert "OFFSET 200" in sql
+        # Only the filter value is bound; paging is literal.
+        assert params == [1]
+
+    def test_filters_and_cursor_compose_one_where(self):
+        sql, params = self._adbc_builder().build_select_query(
+            QueryConfig(
+                schema_name="public",
+                table_name="orders",
+                columns=["id"],
+                filters=[
+                    Filter(field="status", op="eq", value="active"),
+                    Filter(field="amount", op="gte", value=10),
+                ],
+                cursor_field="updated_at",
+                cursor_value="2024-01-01",
+                cursor_mode="inclusive",
+                order_by="updated_at",
+                limit=50,
+                offset=0,
+            )
+        )
+        assert sql.count("WHERE") == 1
+        assert '"status" = ?' in sql
+        assert '"amount" >= ?' in sql
+        assert '"updated_at" >= ?' in sql
+        assert 'ORDER BY "updated_at"' in sql
+        # Filters first (declaration order), cursor last.
+        assert params == ["active", 10, "2024-01-01"]
+
+    def test_in_filter_expands_to_qmark_list(self):
+        # render_postcompile turns the expanding IN bind into individual
+        # ``?`` placeholders so the raw cursor.execute gets a flat param
+        # list rather than an unexpanded POSTCOMPILE marker.
+        sql, params = self._adbc_builder().build_select_query(
+            QueryConfig(
+                schema_name=None,
+                table_name="orders",
+                columns=["id"],
+                filters=[Filter(field="id", op="in", value=[1, 2, 3])],
+            )
+        )
+        assert "POSTCOMPILE" not in sql
+        assert "IN (?, ?, ?)" in sql
+        assert params == [1, 2, 3]

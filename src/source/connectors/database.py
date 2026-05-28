@@ -24,19 +24,44 @@ from typing import Any, AsyncIterator, Dict, List, Optional
 import pyarrow as pa
 
 from .base import BaseConnector, ConnectionError, ReadError
-from ..drivers.adbc_reader import (
-    AdbcReadPlan,
-    open_adbc_reader,
-)
+from ..drivers.adbc_reader import open_adbc_reader
 from ...destination.schema_contract import SchemaContract
 from ...engine.type_map import InvalidTypeMapError, UnmappedTypeError
 from ...secrets.exceptions import PlaceholderExpansionError
 from ...shared.connection_runtime import ConnectionRuntime
-from ...shared.database_utils import acquire_connection
+from ...shared.database_utils import acquire_connection, normalize_adbc_schema
 from ...shared.query_builder import Filter, QueryBuilder, QueryConfig
 from ...state.state_manager import StateManager
 
 logger = logging.getLogger(__name__)
+
+
+_order_by_fallback_logged: set = set()
+
+
+def _note_order_by_fallback(table_name: str, column_name: str) -> None:
+    """Warn once per (table, column) that ORDER BY fell back to a column.
+
+    The ADBC-only path pages with OFFSET, which needs a stable ORDER BY or
+    rows silently skip/duplicate across pages on PG/Snowflake/BigQuery.
+    When a stream has no cursor we order by the first selected column. A
+    WARNING (not INFO) because the operator may need to act: a JSON /
+    STRUCT / VARIANT first column fails at query time with an opaque
+    "ORDER BY does not support this type" error, and the fix is to set
+    ``cursor_field`` on the stream -- not something a stack trace points
+    at directly.
+    """
+    key = (table_name, column_name)
+    if key in _order_by_fallback_logged:
+        return
+    _order_by_fallback_logged.add(key)
+    logger.warning(
+        "ADBC reader: no cursor_field for table %r; defaulting ORDER BY to "
+        "first selected column %r. Set cursor_field on the stream if this "
+        "column is a non-orderable type (JSON / STRUCT / VARIANT) -- the "
+        "warehouse will otherwise reject the query.",
+        table_name, column_name,
+    )
 
 
 class DatabaseConnector(BaseConnector):
@@ -173,20 +198,12 @@ class DatabaseConnector(BaseConnector):
         cursor_value = stored_cursor if replication_method == "incremental" else None
 
         if self._adbc_only:
-            # Stream-level filters require dialect-aware operator
-            # rendering that the minimal ADBC SQL builder does not
-            # implement today; reject loudly rather than silently
-            # dropping the filter clauses.
-            if filters:
-                raise ReadError(
-                    "ADBC-only source does not support stream-level filters yet; "
-                    "remove filters[] or pick transport_type='sqlalchemy'"
-                )
             async for batch in self._read_via_adbc_only(
                 schema_contract=schema_contract,
                 schema_name=schema_name,
                 table_name=table_name,
                 columns=column_names,
+                filters=filters,
                 cursor_field=(
                     cursor_field if replication_method == "incremental" else None
                 ),
@@ -277,6 +294,7 @@ class DatabaseConnector(BaseConnector):
         schema_name: Optional[str],
         table_name: str,
         columns: List[str],
+        filters: List[Filter],
         cursor_field: Optional[str],
         cursor_value: Any,
         batch_size: int,
@@ -286,19 +304,54 @@ class DatabaseConnector(BaseConnector):
     ) -> AsyncIterator[pa.RecordBatch]:
         """Stream Arrow batches via the ADBC-only path.
 
-        Holds one DBAPI connection for the lifetime of the read; each
-        page goes ``cursor.execute -> fetch_arrow_table -> cast``. The
-        WHERE clause is fixed at the read's initial cursor_value
-        (matching the SA path); paging
-        advances via OFFSET only. Mixing cursor advancement with OFFSET
-        would skip rows on every page after the first (the cursor moves
-        right while OFFSET continues to skip rows the cursor would have
-        included).
+        SQL is compiled by the shared :class:`QueryBuilder` in qmark mode
+        (forced ``?`` placeholders, every identifier quoted, inlined
+        LIMIT/OFFSET) so filters and the incremental cursor render through
+        the same WHERE machinery as the SQLAlchemy transport. Holds one
+        DBAPI connection for the lifetime of the read; each page goes
+        ``cursor.execute -> fetch_arrow_table -> cast``.
+
+        The WHERE clause is fixed at the read's initial cursor_value
+        (matching the SA path); paging advances via OFFSET only. Mixing
+        cursor advancement with OFFSET would skip rows on every page after
+        the first (the cursor moves right while OFFSET continues to skip
+        rows the cursor would have included).
         """
         if self._runtime is None:
             raise ReadError(
                 "DatabaseConnector._read_via_adbc_only requires a materialized runtime"
             )
+        if not columns:
+            # The first selected column is the ORDER BY fallback and an
+            # empty projection compiles to ``SELECT`` with no columns; fail
+            # loudly rather than emit an invalid statement.
+            raise ReadError(
+                "ADBC-only source requires a non-empty column projection"
+            )
+
+        # The ADBC path quotes every identifier, so normalize the schema
+        # the same way the destination handler does (Snowflake lowercase
+        # ``public`` -> ``PUBLIC``) or the quoted name targets a different
+        # schema.
+        effective_schema = (
+            normalize_adbc_schema(schema_name, self._driver) if schema_name else None
+        )
+
+        # The cursor field doubles as the sort key for stable OFFSET
+        # paging; without a cursor fall back to the first selected column.
+        if cursor_field:
+            order_by = cursor_field
+        else:
+            order_by = columns[0]
+            _note_order_by_fallback(table_name, order_by)
+
+        builder = QueryBuilder(
+            self._driver,
+            paramstyle="qmark",
+            quote_identifiers=True,
+            inline_paging=True,
+        )
+
         # Initial cursor value is fixed for the duration of the read;
         # last_cursor_value advances purely for checkpoint state.
         initial_cursor_value = cursor_value
@@ -307,17 +360,21 @@ class DatabaseConnector(BaseConnector):
         cursor_missing_warned = False
         async with open_adbc_reader(self._driver, self._runtime) as reader:
             while True:
-                plan = AdbcReadPlan(
-                    table_name=table_name,
-                    columns=tuple(columns),
-                    schema_name=schema_name,
-                    cursor_field=cursor_field,
-                    cursor_value=initial_cursor_value if cursor_field else None,
-                    cursor_mode="inclusive",
-                    limit=batch_size,
-                    offset=offset,
+                sql, params = builder.build_select_query(
+                    QueryConfig(
+                        schema_name=effective_schema,
+                        table_name=table_name,
+                        columns=columns,
+                        filters=filters,
+                        cursor_field=cursor_field,
+                        cursor_value=initial_cursor_value if cursor_field else None,
+                        cursor_mode="inclusive",
+                        order_by=order_by,
+                        limit=batch_size,
+                        offset=offset,
+                    )
                 )
-                batches = await reader.fetch_page(plan)
+                batches = await reader.fetch_page(sql, params)
                 if not batches:
                     break
 
