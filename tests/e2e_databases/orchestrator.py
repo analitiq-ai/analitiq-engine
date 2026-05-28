@@ -13,10 +13,8 @@ from __future__ import annotations
 import argparse
 import logging
 import os
-import subprocess
 import sys
 from dataclasses import dataclass, fields
-from pathlib import Path
 from typing import List, Optional
 
 from tests.e2e_databases.databases import all_specs, spec_for
