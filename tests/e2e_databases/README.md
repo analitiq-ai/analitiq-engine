@@ -97,6 +97,11 @@ Native types are translated per DB by each `DatabaseSpec`.
 poetry run pytest tests/e2e_databases/_tests/
 ```
 
+Run the matrix **sequentially** — do not use `pytest-xdist` (`-n`). Every run
+shares one `workspace/` and one set of fixed-name compose containers, so
+parallel workers would overwrite each other's configs and collide on
+containers.
+
 ### Run a single pair
 
 ```bash
@@ -131,7 +136,7 @@ poetry run python -m tests.e2e_databases.orchestrator --down-all
 The matrix discovers DBs by importing every module in `databases/`, so there
 is nothing to register manually.
 
-## Why a separate compose / workspace
+## Why a separate workspace
 
 The engine's production Docker compose at the repo root reads
 `../connectors`, `../connections`, `../pipelines`. The test framework needs
@@ -142,3 +147,5 @@ mounts:
 - `../../connectors:/app/connectors`  (read-only, from the repo)
 - `./workspace/connections:/app/connections` (written per test run)
 - `./workspace/pipelines:/app/pipelines`   (written per test run)
+- `./workspace/state:/app/state`   (cursor bookmarks; wiped between runs)
+- `./workspace/deadletter:/app/deadletter` (failed records, if any)

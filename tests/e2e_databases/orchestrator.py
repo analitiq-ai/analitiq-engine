@@ -15,7 +15,7 @@ import logging
 import os
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import List, Optional
 
@@ -24,8 +24,8 @@ from tests.e2e_databases.databases._base import DatabaseSpec
 from tests.e2e_databases.databases._docker import (
     compose_down,
     compose_down_all,
+    compose_recreate,
     compose_run_source_engine,
-    compose_up,
 )
 from tests.e2e_databases.factory import (
     GeneratedPair,
@@ -119,19 +119,27 @@ class E2ETestRun:
 
     def _invoke_engine(self, pipeline_id: str) -> None:
         os.environ["PIPELINE_ID"] = pipeline_id
-        # The engine destination service is started implicitly by compose run
-        # because source_engine depends on it. We track it so teardown brings
-        # it down too.
         self._engine_services_started = True
+        # Force-recreate the destination so it binds THIS pipeline's config.
+        # source_engine depends on it being healthy, so compose run would
+        # otherwise reuse whatever destination happens to be running.
+        compose_recreate("engine-destination")
         result = compose_run_source_engine(pipeline_id)
         if result.stdout:
             logger.info("engine stdout:\n%s", result.stdout.strip())
+        if result.returncode != 0:
+            # On failure the stderr tail is the only thing that explains why,
+            # so log it loudly and fold it into the exception itself rather
+            # than leaving a bare exit code in the pytest report.
+            stderr = (result.stderr or "").strip()
+            logger.error("engine stderr:\n%s", stderr)
+            tail = "\n".join(stderr.splitlines()[-20:])
+            raise PipelineRunFailed(
+                f"source_engine exited with code {result.returncode} for "
+                f"pipeline {pipeline_id}\n--- engine stderr (tail) ---\n{tail}"
+            )
         if result.stderr:
             logger.info("engine stderr:\n%s", result.stderr.strip())
-        if result.returncode != 0:
-            raise PipelineRunFailed(
-                f"source_engine exited with code {result.returncode} for pipeline {pipeline_id}"
-            )
 
     @staticmethod
     def _assert_rows(actual: List[SeedRow], expected: List[SeedRow]) -> None:
@@ -140,10 +148,15 @@ class E2ETestRun:
                 f"row count mismatch: expected {len(expected)}, got {len(actual)}"
             )
         for got, want in zip(actual, expected):
-            if got != want:
-                raise DestinationMismatch(
-                    f"row mismatch: expected {want!r}, got {got!r}"
-                )
+            if got == want:
+                continue
+            diffs = [
+                f"{f.name}: expected {getattr(want, f.name)!r}, "
+                f"got {getattr(got, f.name)!r}"
+                for f in fields(want)
+                if getattr(got, f.name) != getattr(want, f.name)
+            ]
+            raise DestinationMismatch(f"row id={want.id} mismatch: " + "; ".join(diffs))
 
 
 # ---------------------------------------------------------------------------

@@ -1,9 +1,9 @@
 """Thin wrapper around ``docker compose`` for the test framework.
 
 Every test uses one compose project, rooted at ``tests/e2e_databases/``,
-that defines all services across all DBs. Profiles control which
-services come up — bringing up only the source DB + destination DB +
-engine services for each test.
+that defines all services across all DBs. The framework brings up only the
+services a given pair needs by naming them explicitly on ``compose up`` /
+``compose run`` — there are no compose profiles.
 """
 from __future__ import annotations
 
@@ -31,8 +31,31 @@ def compose_up(*services: str) -> None:
     subprocess.run(cmd, check=True)
 
 
+def compose_recreate(*services: str) -> None:
+    """Force-recreate services so they pick up the current environment.
+
+    Used for the destination engine: it binds ``PIPELINE_ID`` at container
+    start, so a container left over from a previous pipeline would serve
+    stale config. ``--force-recreate`` guarantees a fresh binding for the
+    current run regardless of whether the prior teardown succeeded;
+    ``--wait`` blocks until it is healthy so a startup failure surfaces
+    here rather than as a confusing gRPC error later.
+    """
+    if not services:
+        return
+    cmd = _compose_cmd(["up", "-d", "--force-recreate", "--wait", *services])
+    logger.info("compose up --force-recreate: %s", " ".join(services))
+    subprocess.run(cmd, check=True)
+
+
 def compose_down(*services: str) -> None:
-    """Stop and remove the given services. Volumes are wiped."""
+    """Stop and remove the given services (best effort).
+
+    Anonymous volumes attached to those containers are removed too; the DB
+    services here declare no named volumes, so nothing persists between
+    runs. Teardown ignores failures — a container that is already gone is
+    not an error.
+    """
     if not services:
         return
     cmd = _compose_cmd(["rm", "-f", "-s", "-v", *services])
