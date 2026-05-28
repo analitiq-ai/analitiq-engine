@@ -314,9 +314,10 @@ class TestAdbcQmarkMode:
     """The ADBC-only source compiles through QueryBuilder with
     ``paramstyle="qmark"`` + ``quote_identifiers`` + ``inline_paging`` so
     one builder serves both transports. Postgres is the only ADBC dialect
-    installed in the base env; Snowflake/BigQuery sit behind extras and
-    are covered by the cloud E2E matrix. The per-dialect quote char and
-    qmark rendering are SQLAlchemy's job -- these tests freeze the knobs.
+    installed in the base env, so these tests freeze the knobs against it;
+    the Snowflake/BigQuery dialects are pinned separately in
+    :class:`TestAdbcQmarkModeRealDialects` (skipped where their optional
+    packages are absent).
     """
 
     def _adbc_builder(self):
@@ -424,3 +425,77 @@ class TestAdbcQmarkMode:
         assert "POSTCOMPILE" not in sql
         assert "IN (?, ?, ?)" in sql
         assert params == [1, 2, 3]
+
+
+class TestAdbcQmarkModeRealDialects:
+    """Compile-only checks against the actual Snowflake / BigQuery
+    dialects, skipped where the optional packages are not installed.
+
+    They freeze the two contract points the Postgres-only tests cannot:
+    (1) forcing ``paramstyle="qmark"`` yields *positional* params -- a
+    dict would make the ADBC reader bind parameter names, which the source
+    rejects with a ReadError; and (2) each dialect's quote character
+    matches what the destination handler emits (backticks for BigQuery,
+    double quotes for Snowflake) so reads and writes resolve the same
+    physical object.
+    """
+
+    def test_bigquery_qmark_positional_and_backtick_quoted(self):
+        pytest.importorskip("sqlalchemy_bigquery")
+        builder = QueryBuilder(
+            "bigquery",
+            paramstyle="qmark",
+            quote_identifiers=True,
+            inline_paging=True,
+        )
+        sql, params = builder.build_select_query(
+            QueryConfig(
+                schema_name="analytics",
+                table_name="orders",
+                columns=["id", "status"],
+                filters=[Filter(field="status", op="eq", value="active")],
+                cursor_field="updated_at",
+                cursor_value="2024-01-01",
+                cursor_mode="inclusive",
+                order_by="updated_at",
+                limit=50,
+                offset=0,
+            )
+        )
+        # qmark -> positional list (filter value, then cursor value); a
+        # dict here would mean the dialect ignored the forced paramstyle.
+        assert isinstance(params, list)
+        assert params == ["active", "2024-01-01"]
+        assert "?" in sql and "$" not in sql
+        # BigQuery quotes with backticks (matches the destination handler);
+        # paging is inlined, proven by params carrying no 50/0.
+        assert "`id`" in sql and "`status`" in sql
+        assert '"id"' not in sql
+        assert "LIMIT" in sql.upper()
+
+    def test_snowflake_qmark_positional_and_double_quoted(self):
+        pytest.importorskip("snowflake.sqlalchemy")
+        builder = QueryBuilder(
+            "snowflake",
+            paramstyle="qmark",
+            quote_identifiers=True,
+            inline_paging=True,
+        )
+        sql, params = builder.build_select_query(
+            QueryConfig(
+                schema_name="PUBLIC",
+                table_name="orders",
+                columns=["id", "status"],
+                filters=[Filter(field="status", op="eq", value="active")],
+                limit=25,
+                offset=0,
+            )
+        )
+        assert isinstance(params, list)
+        assert params == ["active"]
+        assert "?" in sql and "$" not in sql
+        # Snowflake quotes with double quotes (matches the destination);
+        # never backticks.
+        assert '"orders"' in sql and '"id"' in sql
+        assert "`" not in sql
+        assert "LIMIT" in sql.upper()

@@ -233,8 +233,10 @@ class QueryBuilder:
                 driver's native style.
             quote_identifiers: Force quoting of every table/column/schema
                 name. The ADBC destination quotes all identifiers, so the
-                ADBC source must too or Snowflake/BigQuery (which fold
-                unquoted names) would read a different, case-shifted table.
+                ADBC source must too: Snowflake folds unquoted names to
+                upper case and BigQuery treats names case-sensitively, so
+                an unquoted name could resolve to a different object than
+                the one the destination wrote.
             inline_paging: Render ``LIMIT``/``OFFSET`` as literal integers
                 rather than bound parameters. Snowflake rejects bind
                 variables in ``LIMIT``/``OFFSET``; filter and cursor
