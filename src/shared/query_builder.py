@@ -10,11 +10,22 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
-from sqlalchemy import Column, MetaData, Table, and_, asc, desc, select, text
+from sqlalchemy import (
+    Column,
+    MetaData,
+    Table,
+    and_,
+    asc,
+    desc,
+    literal_column,
+    select,
+    text,
+)
 from sqlalchemy.dialects import mssql, mysql, sqlite
 from sqlalchemy.dialects.postgresql.asyncpg import dialect as _asyncpg_dialect
 from sqlalchemy.engine import Dialect as SADialect
 from sqlalchemy.sql import Select
+from sqlalchemy.sql.elements import quoted_name
 
 
 # Parameters returned by build_select_query: positional list for
@@ -112,7 +123,9 @@ _BUILTIN_DIALECT_FACTORIES: Dict[str, Callable[[], SADialect]] = {
 }
 
 
-def _get_sqlalchemy_dialect(dialect: str) -> SADialect:
+def _get_sqlalchemy_dialect(
+    dialect: str, paramstyle: Optional[str] = None
+) -> SADialect:
     """Resolve a dialect string to a SQLAlchemy dialect instance.
 
     Built-in dialects (postgresql, mysql, mssql, sqlite) resolve directly.
@@ -121,13 +134,29 @@ def _get_sqlalchemy_dialect(dialect: str) -> SADialect:
     with SQLAlchemy's dialect registry; this lets the engine compile SQL
     for those dialects without forcing the package into the base install.
 
+    ``paramstyle`` forces the dialect's bind-parameter style at
+    construction (so ``dialect.positional`` is set consistently). The
+    ADBC-only path passes ``"qmark"`` because every ADBC driver binds
+    ``?`` placeholders. For PostgreSQL a forced paramstyle also swaps the
+    asyncpg dialect for the default (non-asyncpg) PostgreSQL dialect:
+    asyncpg renders inline bind casts (``?::INTEGER``) that only the
+    asyncpg driver understands, whereas the ADBC libpq driver wants bare
+    ``?`` placeholders.
+
     Raises ``ValueError`` for unknown dialects and ``ImportError`` (with
     actionable text) when a third-party dialect package is missing.
     """
     dialect_lower = dialect.lower()
+    kwargs: Dict[str, Any] = {}
+    if paramstyle is not None:
+        kwargs["paramstyle"] = paramstyle
+
     factory = _BUILTIN_DIALECT_FACTORIES.get(dialect_lower)
     if factory is not None:
-        return factory()
+        if paramstyle is not None and _is_postgresql_dialect(dialect_lower):
+            from sqlalchemy.dialects import postgresql
+            return postgresql.dialect(**kwargs)
+        return factory(**kwargs)
 
     package = _LAZY_DIALECT_PACKAGES.get(dialect_lower)
     if package is None:
@@ -147,7 +176,7 @@ def _get_sqlalchemy_dialect(dialect: str) -> SADialect:
     # third-party dialect's module path.
     from sqlalchemy.dialects import registry
     cls = registry.load(dialect_lower)
-    return cls()
+    return cls(**kwargs)
 
 
 def _is_postgresql_dialect(dialect: str) -> bool:
@@ -187,14 +216,46 @@ class QueryBuilder:
         "is_not_null": FilterOperator.IS_NOT_NULL,
     }
 
-    def __init__(self, dialect: str):
+    def __init__(
+        self,
+        dialect: str,
+        *,
+        paramstyle: Optional[str] = None,
+        quote_identifiers: bool = False,
+        inline_paging: bool = False,
+    ):
         """Initialize query builder with specified dialect.
 
         Args:
-            dialect: Database dialect string from config (e.g., 'postgresql', 'mysql')
+            dialect: Database dialect string from config (e.g., 'postgresql', 'mysql').
+            paramstyle: Force the dialect's bind-parameter style (the
+                ADBC-only path passes ``"qmark"``); ``None`` keeps the
+                driver's native style.
+            quote_identifiers: Force quoting of every table/column/schema
+                name. The ADBC destination quotes all identifiers, so the
+                ADBC source must too: Snowflake folds unquoted names to
+                upper case and BigQuery treats names case-sensitively, so
+                an unquoted name could resolve to a different object than
+                the one the destination wrote.
+            inline_paging: Render ``LIMIT``/``OFFSET`` as literal integers
+                rather than bound parameters. Snowflake rejects bind
+                variables in ``LIMIT``/``OFFSET``; filter and cursor
+                values stay parameterized.
         """
         self.dialect = dialect
-        self._sa_dialect = _get_sqlalchemy_dialect(dialect)
+        self._quote_identifiers = quote_identifiers
+        self._inline_paging = inline_paging
+        self._sa_dialect = _get_sqlalchemy_dialect(dialect, paramstyle=paramstyle)
+
+    def _ident(self, name: str) -> Any:
+        """Wrap *name* so SQLAlchemy quotes it when ``quote_identifiers``."""
+        return quoted_name(name, quote=True) if self._quote_identifiers else name
+
+    def _paging_value(self, value: int) -> Any:
+        """Render a LIMIT/OFFSET value as a literal int or a bound param."""
+        if self._inline_paging:
+            return literal_column(str(int(value)))
+        return value
 
     def build_select_query(self, config: QueryConfig) -> Tuple[str, ParamsLike]:
         """Build a SELECT query from configuration.
@@ -213,16 +274,16 @@ class QueryBuilder:
         # Create table reference with proper schema
         metadata = MetaData()
         table = Table(
-            config.table_name,
+            self._ident(config.table_name),
             metadata,
-            schema=config.schema_name,
+            schema=self._ident(config.schema_name) if config.schema_name else None,
         )
 
         # Build column list
         if config.columns == ["*"] or not config.columns:
             query = select(text("*")).select_from(table)
         else:
-            columns = [Column(col) for col in config.columns]
+            columns = [Column(self._ident(col)) for col in config.columns]
             query = select(*columns).select_from(table)
 
         # Collect parameters
@@ -255,7 +316,7 @@ class QueryBuilder:
         # Apply ordering
         order_field = config.order_by or config.cursor_field
         if order_field:
-            order_col = Column(order_field)
+            order_col = Column(self._ident(order_field))
             if config.order_direction.lower() == "desc":
                 query = query.order_by(desc(order_col))
             else:
@@ -268,9 +329,9 @@ class QueryBuilder:
 
         # Apply limit/offset
         if config.limit is not None:
-            query = query.limit(config.limit)
+            query = query.limit(self._paging_value(config.limit))
         if config.offset is not None:
-            query = query.offset(config.offset)
+            query = query.offset(self._paging_value(config.offset))
 
         # Compile to dialect-specific SQL
         return self._compile_query(query, params)
@@ -297,7 +358,7 @@ class QueryBuilder:
             logger.warning(f"Unknown filter operator: {op_str}, skipping filter")
             return None, []
 
-        col = Column(field)
+        col = Column(self._ident(field))
 
         # Build condition based on operator
         if op == FilterOperator.IS_NULL:
@@ -354,7 +415,7 @@ class QueryBuilder:
         Returns:
             Tuple of (SQLAlchemy condition, list of parameter values)
         """
-        col = Column(cursor_field)
+        col = Column(self._ident(cursor_field))
 
         if cursor_mode == "inclusive":
             return col >= cursor_value, [cursor_value]
@@ -379,7 +440,16 @@ class QueryBuilder:
         # MSSQL compile to qmark so the SQL placeholders match what the
         # driver expects. Other dialects already compile to a paramstyle
         # their async driver accepts directly.
-        compile_kwargs: Dict[str, Any] = {"literal_binds": False}
+        # ``render_postcompile`` expands "expanding" bind parameters
+        # (``IN (...)``) into individual placeholders at compile time.
+        # Both transports execute the raw compiled string -- the SA path
+        # via ``exec_driver_sql`` (which bypasses SA's bind expansion) and
+        # the ADBC path via ``cursor.execute`` -- so an unexpanded
+        # ``__[POSTCOMPILE_...]`` marker would otherwise reach the driver.
+        compile_kwargs: Dict[str, Any] = {
+            "literal_binds": False,
+            "render_postcompile": True,
+        }
         sa_dialect = self._sa_dialect
         if sa_dialect.name == "mssql":
             from sqlalchemy.dialects import mssql as _mssql

@@ -1,0 +1,8 @@
+.env
+workspace/connections/
+workspace/pipelines/
+workspace/state/
+workspace/deadletter/
+workspace/logs/
+*.log
+__pycache__/
