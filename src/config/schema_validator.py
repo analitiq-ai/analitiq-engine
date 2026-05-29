@@ -32,6 +32,8 @@ from typing import Any, Dict, Iterable
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import ValidationError
 
+from src.config.utils import load_json_file
+
 logger = logging.getLogger(__name__)
 
 
@@ -125,10 +127,6 @@ def validate_file(kind: str, path: Path) -> Dict[str, Any]:
     """Convenience: read a JSON file, validate it, and return the parsed dict."""
     if not path.is_file():
         raise FileNotFoundError(f"Artifact not found: {path}")
-    try:
-        with path.open() as fh:
-            document = json.load(fh)
-    except json.JSONDecodeError as err:
-        raise ValueError(f"Invalid JSON in {path}: {err}") from err
+    document = load_json_file(path)
     validate(kind, document, source=str(path))
     return document

@@ -21,6 +21,10 @@ from .type_map.exceptions import InvalidTypeMapError
 logger = logging.getLogger(__name__)
 
 
+def _normalize_iso_z(value: str) -> str:
+    return value[:-1] + "+00:00" if value.endswith("Z") else value
+
+
 class AssignmentTransformer:
     """
     Handles assignment-based mapping as per MAPPING_AND_TRANSFORMATIONS.md spec.
@@ -301,9 +305,7 @@ class AssignmentTransformer:
         if value is None:
             return None
         try:
-            iso_str = str(value)
-            if iso_str.endswith('Z'):
-                iso_str = iso_str.replace('Z', '+00:00')
+            iso_str = _normalize_iso_z(str(value))
             dt = datetime.fromisoformat(iso_str)
             return dt.strftime('%Y-%m-%d')
         except (ValueError, TypeError) as e:
@@ -315,9 +317,7 @@ class AssignmentTransformer:
         if value is None:
             return None
         try:
-            iso_str = str(value)
-            if iso_str.endswith('Z'):
-                iso_str = iso_str.replace('Z', '+00:00')
+            iso_str = _normalize_iso_z(str(value))
             return datetime.fromisoformat(iso_str)
         except (ValueError, TypeError) as e:
             logger.warning(f"iso_to_datetime failed for '{value}': {e}")
@@ -711,9 +711,7 @@ class DataTransformer:
         passing the bad value through to the destination's schema is a
         more localized failure than raising mid-batch."""
         try:
-            if value.endswith('Z'):
-                value = value.replace('Z', '+00:00')
-            dt = datetime.fromisoformat(value)
+            dt = datetime.fromisoformat(_normalize_iso_z(value))
             return dt.strftime('%Y-%m-%d')
         except ValueError as e:
             logger.warning("Failed to parse ISO date '%s': %s", value, e)
@@ -723,9 +721,7 @@ class DataTransformer:
         """Parse ISO datetime string to datetime object. Raises on
         unparseable input — a ``datetime.now()`` fallback would silently
         re-window cursors and corrupt incremental sync."""
-        if value.endswith('Z'):
-            value = value.replace('Z', '+00:00')
-        return datetime.fromisoformat(value)
+        return datetime.fromisoformat(_normalize_iso_z(value))
 
     async def _parse_iso_to_datetime_object(self, value: Any) -> datetime:
         """Convert ISO timestamp string or datetime to datetime object.
@@ -736,11 +732,7 @@ class DataTransformer:
         if isinstance(value, datetime):
             return value
 
-        iso_string = str(value)
-        if iso_string.endswith('Z'):
-            iso_string = iso_string.replace('Z', '+00:00')
-
-        return datetime.fromisoformat(iso_string)
+        return datetime.fromisoformat(_normalize_iso_z(str(value)))
 
 
 def _json_target_names(assignments: List[Dict[str, Any]]) -> set:
