@@ -33,9 +33,13 @@ import aiohttp
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from src.engine.resolver import ResolutionContext
-from src.engine.type_map import TypeMapper
+from src.engine.type_map import InvalidTypeMapError, TypeMapper, UnmappedTypeError
 from src.secrets.protocol import SecretsResolver
-from src.secrets.exceptions import SecretNotFoundError, SecretResolutionError
+from src.secrets.exceptions import (
+    PlaceholderExpansionError,
+    SecretNotFoundError,
+    SecretResolutionError,
+)
 from src.shared.rate_limiter import RateLimiter
 from src.shared.transport_factory import (
     AdbcTransport,
@@ -539,3 +543,25 @@ class ConnectionRuntime:
             f"ConnectionRuntime({self._connection_id}, "
             f"type={self._connector_type}, {status})"
         )
+
+
+#: Exception types that indicate deterministic configuration problems.
+#: Re-raise these unchanged in database ``connect()`` methods so callers can
+#: distinguish "your type-map is missing a rule" from "the DB is unreachable".
+DETERMINISTIC_CONNECT_ERRORS: tuple = (
+    InvalidTypeMapError,
+    UnmappedTypeError,
+    PlaceholderExpansionError,
+    ValueError,
+)
+
+
+async def materialize_runtime(runtime: "ConnectionRuntime", require_port: bool) -> None:
+    """Acquire and materialize a runtime.
+
+    Callers are responsible for catching exceptions; use
+    ``DETERMINISTIC_CONNECT_ERRORS`` to distinguish configuration errors from
+    connectivity failures.
+    """
+    runtime.acquire()
+    await runtime.materialize(require_port=require_port)

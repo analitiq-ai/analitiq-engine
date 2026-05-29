@@ -52,7 +52,11 @@ from ...grpc.generated.analitiq.v1 import (
     SchemaMessage,
 )
 from ...shared.adbc_registry import AdbcConfigurationError
-from ...shared.connection_runtime import ConnectionRuntime
+from ...shared.connection_runtime import (
+    ConnectionRuntime,
+    DETERMINISTIC_CONNECT_ERRORS,
+    materialize_runtime,
+)
 from ...shared.database_utils import normalize_adbc_schema
 
 
@@ -356,22 +360,12 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
             runtime: ConnectionRuntime with enriched config
         """
         self._runtime = runtime
-        runtime.acquire()
         try:
-            await runtime.materialize(require_port=False)
-        except (
-            InvalidTypeMapError,
-            UnmappedTypeError,
-            PlaceholderExpansionError,
-            ValueError,
-        ):
-            # Deterministic configuration / secret-resolution errors: let
-            # them propagate with their real type so the caller can
-            # distinguish "your type-map is missing a rule" from "the DB
-            # is unreachable".
+            await materialize_runtime(runtime, require_port=False)
+        except DETERMINISTIC_CONNECT_ERRORS:
             raise
         except Exception as e:
-            logger.error(f"Database destination connection failed: {e}")
+            logger.error("Database destination connection failed: %s", e)
             raise ConnectionError(f"Database connection failed: {e}") from e
         self._driver = runtime.driver or ""
         # Reset prior-connection state so a long-lived handler that
@@ -883,15 +877,8 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
             return
 
         async with self._engine.begin() as conn:
-            await conn.execute(
-                state.batch_commits_table.insert().values(
-                    run_id=run_id,
-                    stream_id=stream_id,
-                    batch_seq=batch_seq,
-                    committed_cursor=cursor_bytes,
-                    records_written=records_written,
-                    committed_at=datetime.utcnow(),
-                )
+            await self._record_batch_commit_in_txn(
+                conn, state, run_id, stream_id, batch_seq, cursor_bytes, records_written
             )
 
     async def _record_batch_commit_in_txn(
