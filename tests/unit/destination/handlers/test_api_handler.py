@@ -581,6 +581,67 @@ class TestApiHandlerConfigureSchemaModeDispatch:
 
 
 @pytest.mark.unit
+class TestApiHandlerSupportsUpsert:
+    """``supports_upsert`` is contract-driven: it reflects whether a
+    registered endpoint declares ``operations.write.upsert``, never a
+    hardcoded value. This is what ``GetCapabilities`` advertises."""
+
+    def _doc(self, *, modes):
+        write: Dict[str, Any] = {}
+        for mode in modes:
+            write[mode] = {"request": {"method": "POST", "path": f"/v1/{mode}"}}
+        return {"operations": {"write": write}}
+
+    @pytest.fixture
+    def handler(self):
+        return ApiDestinationHandler()
+
+    def test_false_when_no_endpoints_registered(self, handler):
+        assert handler.supports_upsert is False
+
+    def test_false_when_only_insert_endpoint(self, handler):
+        handler.set_stream_endpoints({"s1": self._doc(modes=("insert",))})
+        assert handler.supports_upsert is False
+
+    def test_true_when_endpoint_declares_upsert(self, handler):
+        handler.set_stream_endpoints({"s1": self._doc(modes=("insert", "upsert"))})
+        assert handler.supports_upsert is True
+
+    def test_true_when_any_of_several_endpoints_declares_upsert(self, handler):
+        handler.set_stream_endpoints(
+            {
+                "s1": self._doc(modes=("insert",)),
+                "s2": self._doc(modes=("insert", "upsert")),
+            }
+        )
+        assert handler.supports_upsert is True
+
+    def test_false_when_upsert_block_has_no_request_path(self, handler):
+        """A malformed upsert block (no request.path) is not a usable
+        upsert operation, so capability must not be advertised — mirroring
+        configure_schema's rejection of the same block."""
+        doc = {"operations": {"write": {"upsert": {"request": {"method": "POST"}}}}}
+        handler.set_stream_endpoints({"s1": doc})
+        assert handler.supports_upsert is False
+
+    @pytest.mark.parametrize(
+        "doc",
+        [
+            {"operations": "write"},  # operations not a mapping
+            {"operations": {"write": "upsert"}},  # write not a mapping
+            {"operations": {"write": {"upsert": "/v1/upsert"}}},  # block not a mapping
+            {"operations": {"write": {"upsert": {"request": "/v1/upsert"}}}},  # request not a mapping
+        ],
+    )
+    def test_malformed_contract_returns_false_not_raises(self, handler, doc):
+        """supports_upsert runs at startup over arbitrary contract docs.
+        A malformed document must yield False, never crash the
+        GetCapabilities RPC with AttributeError."""
+        handler.set_stream_endpoints({"s1": doc})
+        assert handler.supports_upsert is False
+
+
+@pytest.mark.unit
 class TestApiHandlerJsonFields:
     """Json-typed body fields travel as JSON-encoded ``pa.large_string``
     over the wire; the handler must reverse the encoding so aiohttp posts
