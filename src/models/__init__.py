@@ -35,15 +35,6 @@ from .engine import (
     TaskExecutionInfo,
 )
 
-# API models
-from .api import (
-    APIReadConfig,
-    FilterConfig,
-    HTTPResponse,
-    RateLimitConfig,
-    RecordBatch,
-)
-
 # Transformation models
 from .transformations import (
     TransformationConfig,
@@ -94,12 +85,6 @@ __all__ = [
     "StreamProcessingConfig",
     "StreamStageConfig",
     "TaskExecutionInfo",
-    # API models
-    "APIReadConfig",
-    "FilterConfig",
-    "HTTPResponse",
-    "RateLimitConfig",
-    "RecordBatch",
     # Transformation models
     "TransformationConfig",
     "TransformationType",

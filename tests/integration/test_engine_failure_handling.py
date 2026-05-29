@@ -6,6 +6,7 @@ properly propagate to mark streams and pipelines as failed.
 
 import asyncio
 import pytest
+import pyarrow as pa
 from unittest.mock import AsyncMock, MagicMock, patch
 from dataclasses import dataclass
 from typing import Dict, Any, List, Optional
@@ -113,10 +114,10 @@ class TestEngineFatalFailureHandling:
         output_queue = asyncio.Queue()
 
         # Put a batch in the input queue
-        test_batch = [
+        test_batch = pa.RecordBatch.from_pylist([
             {"id": 1, "name": "Record 1"},
             {"id": 2, "name": "Record 2"},
-        ]
+        ])
         await input_queue.put(test_batch)
         await input_queue.put(None)  # Signal end of stream
 
@@ -172,7 +173,7 @@ class TestEngineFatalFailureHandling:
         output_queue = asyncio.Queue()
 
         # Put batches in input queue
-        test_batch = [{"id": 1}, {"id": 2}]
+        test_batch = pa.RecordBatch.from_pylist([{"id": 1}, {"id": 2}])
         await input_queue.put(test_batch)
         await input_queue.put(None)
 
@@ -227,7 +228,7 @@ class TestEngineFatalFailureHandling:
         input_queue = asyncio.Queue()
         output_queue = asyncio.Queue()
 
-        test_batch = [{"id": 1}]
+        test_batch = pa.RecordBatch.from_pylist([{"id": 1}])
         await input_queue.put(test_batch)
         await input_queue.put(None)
 
@@ -282,7 +283,7 @@ class TestEngineFatalFailureHandling:
         input_queue = asyncio.Queue()
         output_queue = asyncio.Queue()
 
-        test_batch = [{"id": 1}, {"id": 2}, {"id": 3}]
+        test_batch = pa.RecordBatch.from_pylist([{"id": 1}, {"id": 2}, {"id": 3}])
         await input_queue.put(test_batch)
         await input_queue.put(None)
 
@@ -448,7 +449,7 @@ class TestEngineDLQOnFailure:
         input_queue = asyncio.Queue()
         output_queue = asyncio.Queue()
 
-        test_batch = [{"id": 1, "data": "test"}]
+        test_batch = pa.RecordBatch.from_pylist([{"id": 1, "data": "test"}])
         await input_queue.put(test_batch)
         await input_queue.put(None)
 

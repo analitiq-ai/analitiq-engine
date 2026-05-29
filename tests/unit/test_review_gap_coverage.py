@@ -30,6 +30,7 @@ class TestWriteConflictKeysWiring:
         from src.engine.type_map.rules import parse_rules
 
         handler = DatabaseDestinationHandler()
+        handler._connected = True
         handler._engine = MagicMock()
         handler._runtime = MagicMock()
         handler._runtime.type_mapper_for = MagicMock(
@@ -48,8 +49,8 @@ class TestWriteConflictKeysWiring:
             "s1": {
                 "database_object": {"name": "orders", "schema": "public"},
                 "columns": [
-                    {"name": "tenant_id", "native_type": "BIGINT", "nullable": False},
-                    {"name": "id", "native_type": "BIGINT", "nullable": False},
+                    {"name": "tenant_id", "native_type": "BIGINT", "arrow_type": "Int64", "nullable": False},
+                    {"name": "id", "native_type": "BIGINT", "arrow_type": "Int64", "nullable": False},
                 ],
                 "primary_keys": ["id"],
                 "_write_conflict_keys": ["tenant_id", "id"],
@@ -76,6 +77,7 @@ class TestWriteConflictKeysWiring:
         from src.engine.type_map.rules import parse_rules
 
         handler = DatabaseDestinationHandler()
+        handler._connected = True
         handler._engine = MagicMock()
         handler._runtime = MagicMock()
         handler._runtime.type_mapper_for = MagicMock(
@@ -93,7 +95,7 @@ class TestWriteConflictKeysWiring:
         handler._stream_endpoints = {
             "s1": {
                 "database_object": {"name": "orders", "schema": "public"},
-                "columns": [{"name": "id", "native_type": "BIGINT", "nullable": False}],
+                "columns": [{"name": "id", "native_type": "BIGINT", "arrow_type": "Int64", "nullable": False}],
                 "primary_keys": ["id"],
             },
         }
