@@ -10,10 +10,10 @@ from src.engine.engine import StreamingEngine
 from src.engine.orchestrator import _deep_merge_dicts
 from src.engine.exceptions import ConfigurationError, StreamProcessingError
 from src.models.resolved import (
-    ResolvedDestination, ResolvedPipeline, ResolvedSource, ResolvedStream, RuntimeConfig,
+    ResolvedPipeline, ResolvedSource, ResolvedStream, RuntimeConfig,
 )
 from src.models.stream import (
-    DestinationConfig, EndpointRef, MappingConfig, ReplicationConfig, SourceConfig, WriteConfig,
+    EndpointRef, MappingConfig, SourceConfig,
 )
 from src.source.connectors.base import BaseConnector
 

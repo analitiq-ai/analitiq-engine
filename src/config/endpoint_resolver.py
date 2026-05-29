@@ -18,13 +18,13 @@ via :class:`ConnectionLookup`.
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Mapping, Union
 
 from src.config.exceptions import EndpointNotFoundError
+from src.config.utils import load_json_file
 from src.models.stream import EndpointRef
 
 logger = logging.getLogger(__name__)
@@ -111,10 +111,6 @@ def resolve_endpoint_ref(
     """Resolve an endpoint reference and return the parsed endpoint document."""
     parsed = _coerce(ref)
     file_path = resolve_endpoint_path(parsed, paths, lookup)
-    try:
-        with file_path.open() as fh:
-            endpoint = json.load(fh)
-    except json.JSONDecodeError as err:
-        raise ValueError(f"Invalid JSON in endpoint file {file_path}: {err}") from err
+    endpoint = load_json_file(file_path)
     logger.info("Resolved endpoint_ref %s from %s", parsed, file_path)
     return endpoint

@@ -18,12 +18,14 @@ import pyarrow as pa
 from aiohttp_retry import ExponentialRetry, RetryClient
 
 from ..base_handler import BaseDestinationHandler, BatchWriteResult
+from ..utils import decode_json_fields
 from ...grpc.generated.analitiq.v1 import (
     AckStatus,
     Cursor,
     SchemaMessage,
 )
 from ...shared.connection_runtime import ConnectionRuntime
+from ...shared.http_utils import join_url
 from ...shared.rate_limiter import RateLimiter
 
 
@@ -84,32 +86,6 @@ def _orjson_default(obj: Any) -> Any:
         f"orjson cannot serialise {type(obj).__name__}; add a handler "
         f"if this type should appear in API destination bodies"
     )
-
-
-def _decode_json_fields(
-    records: List[Dict[str, Any]], json_fields: Set[str]
-) -> None:
-    """Reverse the source-side ``json.dumps`` on Json columns in place.
-
-    Malformed input raises ``ValueError`` with the offending column and
-    row. ``write_batch`` catches it in its broad ``except Exception``
-    branch and returns ``ACK_STATUS_FATAL_FAILURE`` — bad JSON is a
-    data-shape failure, not a transport one, so retrying cannot help.
-    """
-    if not json_fields:
-        return
-    for row, record in enumerate(records):
-        for col in json_fields:
-            value = record.get(col)
-            if not isinstance(value, str):
-                continue
-            try:
-                record[col] = json.loads(value)
-            except json.JSONDecodeError as exc:
-                raise ValueError(
-                    f"Json field {col!r} at row {row}: value is not "
-                    f"valid JSON ({exc})"
-                ) from exc
 
 
 def _collect_json_fields(mode_block: Mapping[str, Any]) -> Set[str]:
@@ -416,7 +392,7 @@ class ApiDestinationHandler(BaseDestinationHandler):
             )
 
         try:
-            _decode_json_fields(records, state.json_fields)
+            decode_json_fields(records, state.json_fields)
             if state.batch_mode == self.BATCH_MODE_SINGLE:
                 written = await self._write_single_mode(state, records, record_ids)
             elif state.batch_mode == self.BATCH_MODE_BULK:
@@ -540,10 +516,7 @@ class ApiDestinationHandler(BaseDestinationHandler):
         if self._rate_limiter:
             await self._rate_limiter.acquire()
 
-        # Preserve both the base URL's path (e.g. ``/api/v1``) and the
-        # endpoint's path; ``urljoin``-style behavior would drop the
-        # base's path when the endpoint starts with ``/``.
-        url = self._base_url.rstrip("/") + "/" + state.endpoint.lstrip("/")
+        url = join_url(self._base_url, state.endpoint)
 
         # ``aiohttp.request(json=...)`` would call stdlib ``json.dumps``
         # which doesn't understand ``datetime`` / ``Decimal``. orjson is

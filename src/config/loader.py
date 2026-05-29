@@ -6,7 +6,6 @@ This is the core configuration loading mechanism that works for both local
 development and cloud deployments (after config fetcher populates local files).
 """
 
-import json
 import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -17,6 +16,7 @@ from src.config.exceptions import (
     ConnectorNotFoundError,
     EndpointNotFoundError,
 )
+from src.config.utils import load_json_file
 
 logger = logging.getLogger(__name__)
 
@@ -91,11 +91,8 @@ class PathBasedConfigLoader:
             raise ConfigNotFoundError(str(path))
 
         try:
-            with open(path) as f:
-                return json.load(f)
-        except json.JSONDecodeError as e:
-            raise ConfigValidationError(f"Invalid JSON in {path}: {e}")
-        except PermissionError as e:
+            return load_json_file(path, ConfigValidationError)
+        except PermissionError:
             raise ConfigNotFoundError(f"Permission denied: {path}")
         except OSError as e:
             raise ConfigNotFoundError(f"Error reading {path}: {e}")

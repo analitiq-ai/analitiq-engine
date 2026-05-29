@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 import pyarrow as pa
 import pyarrow.compute as pc
 
+from src.destination.utils import decode_json_fields
 from src.engine.type_map import resolve_arrow_type
 from src.engine.type_map.exceptions import InvalidTypeMapError
 
@@ -103,22 +104,7 @@ class SchemaContract:
         Malformed strings raise ``ValueError`` carrying the column
         name and row index.
         """
-        json_cols = self.json_columns
-        if not json_cols or not records:
-            return records
-        for row, record in enumerate(records):
-            for col in json_cols:
-                value = record.get(col)
-                if not isinstance(value, str):
-                    continue
-                try:
-                    record[col] = json.loads(value)
-                except json.JSONDecodeError as exc:
-                    raise ValueError(
-                        f"Json column {col!r} at row {row}: value is not "
-                        f"valid JSON ({exc})"
-                    ) from exc
-        return records
+        return decode_json_fields(records, self.json_columns)
 
     def from_pylist(self, records: List[Dict[str, Any]]) -> pa.RecordBatch:
         """Build a record batch from dict rows using this endpoint's schema."""

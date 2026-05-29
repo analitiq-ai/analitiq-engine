@@ -33,7 +33,6 @@ contract before it is consumed.
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 from dataclasses import dataclass
@@ -50,6 +49,7 @@ from src.config.connection_loader import (
     load_connection_file,
     load_connector_definition,
 )
+from src.config.utils import load_json_file
 from src.engine.type_map import (
     InvalidTypeMapError,
     TypeMapper,
@@ -57,6 +57,10 @@ from src.engine.type_map import (
     load_type_map,
 )
 from src.models.stream import (
+    Assignment,
+    AssignmentTarget,
+    AssignmentValue,
+    ConstantValue,
     DatabasePagination,
     DestinationConfig,
     EndpointRef,
@@ -69,7 +73,6 @@ from src.models.stream import (
     WriteConfig,
     WriteMode,
 )
-from src.models.stream import Assignment, AssignmentTarget, AssignmentValue, ConstantValue
 from src.models.resolved import (
     ResolvedDestination,
     ResolvedPipeline,
@@ -178,11 +181,7 @@ class PipelineConfigPrep:
         manifest_path = self._paths["pipelines"] / "manifest.json"
         if not manifest_path.is_file():
             raise FileNotFoundError(f"Pipeline manifest not found: {manifest_path}")
-        with manifest_path.open() as fh:
-            try:
-                manifest = json.load(fh)
-            except json.JSONDecodeError as err:
-                raise ValueError(f"Invalid JSON in {manifest_path}: {err}") from err
+        manifest = load_json_file(manifest_path)
         if not isinstance(manifest, Mapping) or "pipelines" not in manifest:
             raise ValueError("manifest.json missing required key: 'pipelines'")
         return manifest
@@ -210,11 +209,7 @@ class PipelineConfigPrep:
         path = self._paths["pipelines"] / entry["path"]
         if not path.is_file():
             raise FileNotFoundError(f"Pipeline document not found: {path}")
-        with path.open() as fh:
-            try:
-                document = json.load(fh)
-            except json.JSONDecodeError as err:
-                raise ValueError(f"Invalid JSON in {path}: {err}") from err
+        document = load_json_file(path)
         validate_artifact("pipeline", document, source=str(path))
         self._manifest_entry = dict(entry)
         self._pipeline_dir = path.parent
@@ -292,11 +287,7 @@ class PipelineConfigPrep:
             raise FileNotFoundError(f"Streams directory not found: {streams_dir}")
 
         for stream_file in sorted(streams_dir.glob("*.json")):
-            with stream_file.open() as fh:
-                try:
-                    document = json.load(fh)
-                except json.JSONDecodeError as err:
-                    raise ValueError(f"Invalid JSON in {stream_file}: {err}") from err
+            document = load_json_file(stream_file)
             validate_artifact("stream", document, source=str(stream_file))
             stream_id = document.get("stream_id")
             if not stream_id:
@@ -698,11 +689,6 @@ def _parse_destination_config(raw: Dict[str, Any]) -> DestinationConfig:
 
 def _parse_mapping_config(raw: Dict[str, Any]) -> MappingConfig:
     """Parse the raw ``mapping`` block from a stream document into :class:`MappingConfig`."""
-    from src.models.stream import (
-        Assignment, AssignmentTarget, AssignmentValue, ConstantValue,
-        GetExpression, ExpressionOp, ValidationConfig, ValidationRule, ValidationType,
-    )
-
     assignments = []
     for raw_a in raw.get("assignments") or []:
         raw_target = raw_a.get("target") or {}
@@ -713,6 +699,8 @@ def _parse_mapping_config(raw: Dict[str, Any]) -> MappingConfig:
             arrow_type=raw_target.get("arrow_type", "Utf8"),
             native_type=raw_target.get("native_type"),
             nullable=raw_target.get("nullable", True),
+            properties=raw_target.get("properties"),
+            items=raw_target.get("items"),
         )
 
         value = AssignmentValue()
@@ -725,6 +713,8 @@ def _parse_mapping_config(raw: Dict[str, Any]) -> MappingConfig:
                 value=raw_const.get("value"),
             )
 
-        assignments.append(Assignment(target=target, value=value))
+        assignments.append(
+            Assignment(target=target, value=value, validate=raw_a.get("validate"))
+        )
 
     return MappingConfig(assignments=assignments)

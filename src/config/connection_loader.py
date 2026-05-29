@@ -10,12 +10,12 @@ connection identity is the directory name (= ``connection_id``) under
 
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
 from typing import Any, Dict
 
 from src.config.exceptions import ConnectionConfigError, ConnectorNotFoundError
+from src.config.utils import load_json_file
 
 logger = logging.getLogger(__name__)
 
@@ -24,11 +24,7 @@ def load_connection_file(path: Path) -> Dict[str, Any]:
     """Read and JSON-parse a connection.json. Raises with file context on bad JSON."""
     if not path.is_file():
         raise FileNotFoundError(f"connection.json not found: {path}")
-    try:
-        with path.open() as fh:
-            return json.load(fh)
-    except json.JSONDecodeError as err:
-        raise ValueError(f"Invalid JSON in {path}: {err}") from err
+    return load_json_file(path)
 
 
 def load_connection(connection_id: str, connections_dir: Path) -> Dict[str, Any]:
@@ -58,7 +54,7 @@ def load_connection(connection_id: str, connections_dir: Path) -> Dict[str, Any]
 
     try:
         config = load_connection_file(conn_file)
-    except (ValueError, json.JSONDecodeError) as err:
+    except ValueError as err:
         raise ConnectionConfigError(connection_id, detail=str(err)) from err
 
     logger.info("Loaded connection %r from %s", connection_id, conn_file)
@@ -80,12 +76,11 @@ def load_connector_definition(
     for candidate in candidates:
         if candidate.is_file():
             try:
-                with candidate.open() as fh:
-                    config = json.load(fh)
-            except json.JSONDecodeError as err:
+                config = load_json_file(candidate)
+            except ValueError as err:
                 raise ConnectorNotFoundError(
                     connector_id,
-                    detail=f"Invalid JSON in {candidate}: {err}",
+                    detail=str(err),
                 ) from err
             logger.info("Loaded connector %r from %s", connector_id, candidate)
             return config

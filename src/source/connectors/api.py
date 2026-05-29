@@ -36,6 +36,7 @@ from ...models.stream import StreamFilter
 from ...models.state import CursorField, StreamCursor, StreamStats
 from ...shared.connection_runtime import ConnectionRuntime
 from ...shared.expressions import resolve_value_expression
+from ...shared.http_utils import join_url
 from ...state.state_manager import StateManager
 
 logger = logging.getLogger(__name__)
@@ -110,7 +111,7 @@ class APIConnector(BaseConnector):
                 "operations.read.request.path is required"
             )
         # Preserve the base URL's path (e.g. /api/v1) and the endpoint path.
-        full_url = self.base_url.rstrip("/") + "/" + path.lstrip("/")
+        full_url = join_url(self.base_url, path)
 
         # Typed access — ReplicationConfig guarantees these fields exist.
         replication = source.config.replication

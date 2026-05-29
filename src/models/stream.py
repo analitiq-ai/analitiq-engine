@@ -194,12 +194,21 @@ class ConstantValue:
 
 @dataclass
 class AssignmentTarget:
-    """Target field specification for a stream mapping assignment."""
+    """Target field specification for a stream mapping assignment.
+
+    ``properties`` (for ``arrow_type: "Object"``) and ``items`` (for
+    ``arrow_type: "List"``) carry the recursive JSON-Schema-shaped sub-schema
+    that :func:`resolve_arrow_type` walks to build ``pa.struct`` / ``pa.list_``
+    targets. They are arbitrary nested contract fragments, so they stay as raw
+    dicts rather than a further typed shape.
+    """
 
     path: str = ""
     arrow_type: str = "Utf8"
     native_type: Optional[str] = None
     nullable: bool = True
+    properties: Optional[Dict[str, Any]] = None
+    items: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -230,11 +239,18 @@ class ValidationConfig:
 
 @dataclass
 class Assignment:
-    """Single field assignment rule."""
+    """Single field assignment rule.
+
+    ``validate`` is the raw contract validation block consumed verbatim by
+    :meth:`AssignmentTransformer.transform_record` — it reads ``rules``,
+    ``on_error`` and ``default`` (and per-rule ``min`` / ``max``) directly off
+    this dict. Those keys are richer than :class:`ValidationConfig`, so the
+    block is carried as-is rather than narrowed through that dataclass.
+    """
 
     target: AssignmentTarget = field(default_factory=AssignmentTarget)
     value: AssignmentValue = field(default_factory=AssignmentValue)
-    validate: Optional[ValidationConfig] = None
+    validate: Optional[Dict[str, Any]] = None
 
     def model_dump(self) -> Dict[str, Any]:
         return _serialize(self)
