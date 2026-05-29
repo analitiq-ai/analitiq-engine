@@ -17,3 +17,7 @@ def load_json_file(path: Path, error_cls: Type[Exception] = ValueError) -> Dict[
             return json.load(fh)
     except json.JSONDecodeError as err:
         raise error_cls(f"Invalid JSON in {path}: {err}") from err
+    except PermissionError as err:
+        raise error_cls(f"Permission denied reading {path}: {err}") from err
+    except OSError as err:
+        raise error_cls(f"Error reading {path}: {err}") from err

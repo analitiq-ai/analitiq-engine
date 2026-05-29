@@ -567,9 +567,16 @@ class PipelineConfigPrep:
                 endpoint=dest_endpoint,
             ))
 
+        stream_pipeline_id = document.get("pipeline_id") or ""
+        if not stream_pipeline_id:
+            logger.warning(
+                "Stream %s has no 'pipeline_id' field; state key will fall back to 'unknown-stream'",
+                stream_id,
+            )
+
         return ResolvedStream(
             stream_id=stream_id,
-            pipeline_id=document.get("pipeline_id") or "",
+            pipeline_id=stream_pipeline_id,
             display_name=document.get("display_name"),
             description=document.get("description"),
             status=document.get("status", "draft"),
