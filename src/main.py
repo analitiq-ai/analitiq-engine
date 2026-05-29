@@ -35,7 +35,6 @@ import asyncio
 import logging
 import os
 import sys
-from typing import Any, Dict
 
 from src.models.stream import WriteConfig, WriteMode
 
@@ -145,81 +144,44 @@ async def run_destination_mode() -> None:
     # Load configuration using PipelineConfigPrep (same as engine)
     logger.info("Loading pipeline configuration via PipelineConfigPrep")
     config_prep = PipelineConfigPrep()
-    pipeline_config, stream_configs, resolved_connections, resolved_endpoints, _connectors = config_prep.create_config()
+    resolved_pipeline = config_prep.create_config()
 
-    # Get destination connection from pipeline config
-    destinations = pipeline_config["connections"]["destinations"]
-    if not destinations:
+    dest_ids = resolved_pipeline.destination_connection_ids
+    if not dest_ids:
         logger.error("Pipeline has no destinations configured")
         sys.exit(1)
 
-    if destination_index >= len(destinations):
+    if destination_index >= len(dest_ids):
         logger.error(
             f"DESTINATION_INDEX={destination_index} is out of range. "
-            f"Pipeline has {len(destinations)} destination(s)."
+            f"Pipeline has {len(dest_ids)} destination(s)."
         )
         sys.exit(1)
 
-    # Get the connection id for the selected destination
-    dest_connection_id = destinations[destination_index]
-
+    dest_connection_id = dest_ids[destination_index]
     logger.info(f"Using destination index {destination_index}: connection_id={dest_connection_id}")
 
-    # Get ConnectionRuntime for selected destination
-    if dest_connection_id not in resolved_connections:
+    runtime = resolved_pipeline.connections.get(dest_connection_id)
+    if runtime is None:
         logger.error(f"Connection '{dest_connection_id}' not found in resolved connections")
         sys.exit(1)
-
-    runtime = resolved_connections[dest_connection_id]
 
     logger.info(f"Connector type: {runtime.connector_type}")
     logger.info(f"gRPC port: {grpc_port}")
 
-    # Build per-stream context for streams that target this destination:
-    #   - endpoint_refs: stream_id -> dict-shape EndpointRef payload, used
-    #     by the handler to pick the right TypeMapper (connector-scoped
-    #     vs connection-scoped endpoints) for each SchemaMessage.
-    #   - stream_endpoints: stream_id -> resolved contract endpoint
-    #     document. Engine and destination both load these via
-    #     PipelineConfigPrep, so handlers read schema details from this
-    #     map instead of unpacking them off the wire.
-    endpoint_refs: Dict[str, Dict[str, Any]] = {}
-    stream_endpoints: Dict[str, Dict[str, Any]] = {}
-    for stream in stream_configs:
-        for dest in stream.get("destinations", []):
-            if dest.get("connection_ref") != dest_connection_id:
+    # Build per-stream context for streams that target this destination.
+    endpoint_refs = {}
+    stream_endpoints = {}
+    for stream in resolved_pipeline.streams:
+        for dest in stream.destinations:
+            if dest.runtime.connection_id != dest_connection_id:
                 continue
-            stream_id = stream["stream_id"]
-            endpoint_refs[stream_id] = dest["endpoint_ref"]
-            endpoint_doc = dest.get("_endpoint")
-            if endpoint_doc is None:
-                logger.error(
-                    "Destination for stream %s has no resolved endpoint document; "
-                    "PipelineConfigPrep should have populated _endpoint",
-                    stream_id,
-                )
-                sys.exit(1)
-            # Resolve effective conflict keys via WriteConfig. The
-            # database handler uses a single flat list, so we flatten
-            # the first composite returned by the helper. Errors
-            # (unknown mode, UPSERT without keys) propagate so a
-            # misconfigured pipeline fails at startup instead of
-            # silently downgrading UPSERT to INSERT.
-            write_block = dest.get("write") or {}
-            mode_value = write_block.get("mode") or "upsert"
+            stream_id = stream.stream_id
+            endpoint_refs[stream_id] = dest.config.endpoint_ref.to_dict()
+            endpoint_doc = dest.endpoint
+            # Resolve effective conflict keys via the typed WriteConfig.
             primary_keys = list(endpoint_doc.get("primary_keys") or [])
-            try:
-                write_mode = WriteMode(mode_value)
-            except ValueError as e:
-                raise ValueError(
-                    f"Stream {stream_id!r} destination has unknown write.mode "
-                    f"{mode_value!r}; expected one of {[m.value for m in WriteMode]}"
-                ) from e
-            wc = WriteConfig(
-                mode=write_mode,
-                conflict_keys=write_block.get("conflict_keys"),
-            )
-            composites = wc.effective_conflict_keys(primary_keys) or []
+            composites = dest.config.write.effective_conflict_keys(primary_keys) or []
             conflict_keys: list[str] = list(composites[0]) if composites else []
             enriched_endpoint = dict(endpoint_doc)
             enriched_endpoint["_write_conflict_keys"] = conflict_keys

@@ -1,8 +1,13 @@
 """Base connector interface for data sources and destinations."""
 
+from __future__ import annotations
+
 import logging
 from abc import ABC, abstractmethod
-from typing import Any, AsyncIterator, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, AsyncIterator, Dict, List, Optional
+
+if TYPE_CHECKING:
+    from ...models.resolved import ResolvedSource
 
 logger = logging.getLogger(__name__)
 
@@ -52,25 +57,25 @@ class BaseConnector(ABC):
     @abstractmethod
     async def read_batches(
         self,
-        config: Dict[str, Any],
+        source: "ResolvedSource",
         *,
         state_manager: "StateManager",
         stream_name: str,
         partition: Optional[Dict[str, Any]] = None,
-        batch_size: int = 1000
-    ) -> AsyncIterator[List[Dict[str, Any]]]:
+        batch_size: int = 1000,
+    ) -> AsyncIterator[Any]:
         """
-        Read data in batches from the source with state management.
+        Read data in batches from the source.
 
         Args:
-            config: Read configuration
-            state_manager: State manager for incremental replication
-            stream_name: Name of the stream for state tracking
-            partition: Optional partition identifier for sharded streams
-            batch_size: Number of records per batch
+            source: Resolved source with typed config, runtime, and endpoint.
+            state_manager: State manager for incremental replication.
+            stream_name: Stream name for state tracking.
+            partition: Optional partition identifier for sharded streams.
+            batch_size: Records per batch.
 
         Yields:
-            Batches of records as dictionaries
+            Arrow RecordBatch instances.
         """
         pass
 

@@ -13,8 +13,7 @@ pre-materialized ``ConnectionRuntime`` to verify:
 * incremental replication reads cursor from state manager and applies
   the safety window to the outgoing request params,
 * non-200 responses raise :class:`ReadError`,
-* ``read_batches`` called before ``connect()`` raises :class:`ReadError`,
-* missing ``endpoint_document`` raises :class:`ReadError`.
+* ``read_batches`` called before ``connect()`` raises :class:`ReadError`.
 
 Tie-breaker dedup is intentionally not exercised here: ``read_batches``
 initialises ``state["bookmarks"]`` empty, so the dedup comparators are
@@ -34,6 +33,10 @@ from unittest.mock import AsyncMock, MagicMock
 import pyarrow as pa
 import pytest
 
+from src.models.resolved import ResolvedSource
+from src.models.stream import (
+    EndpointRef, ReplicationConfig, ReplicationMethod, SourceConfig, StreamFilter,
+)
 from src.secrets import InMemorySecretsResolver
 from src.shared.connection_runtime import ConnectionRuntime
 from src.source.connectors.api import APIConnector
@@ -136,29 +139,38 @@ def _endpoint_doc_with_records(
     }
 
 
-def _stream_source(
+def _resolved_source(
+    runtime: ConnectionRuntime,
+    endpoint_doc: Optional[Dict[str, Any]] = None,
     *,
     replication_method: str = "full_refresh",
     cursor_field: Optional[str] = None,
     safety_window: Optional[int] = None,
     tie_breaker_fields: Optional[List[str]] = None,
-) -> Dict[str, Any]:
-    block: Dict[str, Any] = {
-        "endpoint_ref": {
-            "scope": "connector",
-            "connection_id": "test-conn",
-            "endpoint_id": "items",
-        },
-        "primary_keys": ["id"],
-        "replication": {"method": replication_method},
-    }
-    if cursor_field:
-        block["replication"]["cursor_field"] = cursor_field
-    if safety_window is not None:
-        block["replication"]["safety_window_seconds"] = safety_window
-    if tie_breaker_fields:
-        block["replication"]["tie_breaker_fields"] = tie_breaker_fields
-    return block
+    filters: Optional[List[StreamFilter]] = None,
+) -> ResolvedSource:
+    """Build a ResolvedSource for connector tests."""
+    replication = ReplicationConfig(
+        method=ReplicationMethod(replication_method),
+        cursor_field=cursor_field,
+        safety_window_seconds=safety_window,
+        tie_breaker_fields=tie_breaker_fields,
+    )
+    config = SourceConfig(
+        endpoint_ref=EndpointRef(
+            scope="connector",
+            connection_id="test-conn",
+            endpoint_id="items",
+        ),
+        primary_keys=["id"],
+        replication=replication,
+        filters=filters or [],
+    )
+    return ResolvedSource(
+        config=config,
+        runtime=runtime,
+        endpoint=endpoint_doc or _endpoint_doc_with_records(),
+    )
 
 
 async def _consume(connector: APIConnector, **kwargs) -> List[pa.RecordBatch]:
@@ -195,10 +207,7 @@ class TestReadBatchesNoPagination:
 
         batches = await _consume(
             connector,
-            config={
-                "endpoint_document": _endpoint_doc_with_records(),
-                "stream_source": _stream_source(),
-            },
+            source=_resolved_source(runtime),
             state_manager=MagicMock(),
             stream_name="items",
             batch_size=100,
@@ -250,7 +259,7 @@ class TestReadBatchesOffsetPagination:
         )
         batches = await _consume(
             connector,
-            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            source=_resolved_source(runtime, endpoint),
             state_manager=MagicMock(),
             stream_name="items",
             batch_size=2,
@@ -295,7 +304,7 @@ class TestReadBatchesPagePagination:
         )
         batches = await _consume(
             connector,
-            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            source=_resolved_source(runtime, endpoint),
             state_manager=MagicMock(),
             stream_name="items",
             batch_size=2,
@@ -347,7 +356,7 @@ class TestReadBatchesCursorPagination:
         )
         batches = await _consume(
             connector,
-            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            source=_resolved_source(runtime, endpoint),
             state_manager=MagicMock(),
             stream_name="items",
             batch_size=10,
@@ -391,7 +400,7 @@ class TestReadBatchesKeysetPagination:
         )
         batches = await _consume(
             connector,
-            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            source=_resolved_source(runtime, endpoint),
             state_manager=MagicMock(),
             stream_name="items",
             batch_size=2,
@@ -419,10 +428,7 @@ class TestReadBatchesKeysetPagination:
         with pytest.raises(ReadError, match="keyset.from_record"):
             await _consume(
                 connector,
-                config={
-                    "endpoint_document": endpoint,
-                    "stream_source": _stream_source(),
-                },
+                source=_resolved_source(runtime, endpoint),
                 state_manager=MagicMock(),
                 stream_name="items",
                 batch_size=2,
@@ -464,14 +470,13 @@ class TestReadBatchesIncrementalReplication:
         )
         await _consume(
             connector,
-            config={
-                "endpoint_document": endpoint,
-                "stream_source": _stream_source(
-                    replication_method="incremental",
-                    cursor_field="updated_at",
-                    safety_window=60,
-                ),
-            },
+            source=_resolved_source(
+                runtime,
+                endpoint,
+                replication_method="incremental",
+                cursor_field="updated_at",
+                safety_window=60,
+            ),
             state_manager=state_manager,
             stream_name="items",
             partition={},
@@ -506,14 +511,13 @@ class TestReadBatchesIncrementalReplication:
         )
         await _consume(
             connector,
-            config={
-                "endpoint_document": endpoint,
-                "stream_source": _stream_source(
-                    replication_method="incremental",
-                    cursor_field="updated_at",
-                    safety_window=60,
-                ),
-            },
+            source=_resolved_source(
+                runtime,
+                endpoint,
+                replication_method="incremental",
+                cursor_field="updated_at",
+                safety_window=60,
+            ),
             state_manager=state_manager,
             stream_name="items",
             partition={},
@@ -544,10 +548,7 @@ class TestReadBatchesErrorPaths:
         with pytest.raises(ReadError, match="status 500"):
             await _consume(
                 connector,
-                config={
-                    "endpoint_document": _endpoint_doc_with_records(),
-                    "stream_source": _stream_source(),
-                },
+                source=_resolved_source(runtime),
                 state_manager=MagicMock(),
                 stream_name="items",
                 batch_size=10,
@@ -556,48 +557,11 @@ class TestReadBatchesErrorPaths:
     @pytest.mark.asyncio
     async def test_read_batches_before_connect_raises(self):
         connector = APIConnector("test")
+        runtime = _runtime_with_session(_FakeSession([]))
         with pytest.raises(ReadError, match="called before connect"):
             await _consume(
                 connector,
-                config={
-                    "endpoint_document": _endpoint_doc_with_records(),
-                    "stream_source": _stream_source(),
-                },
-                state_manager=MagicMock(),
-                stream_name="items",
-                batch_size=10,
-            )
-
-    @pytest.mark.asyncio
-    async def test_missing_endpoint_document_raises(self):
-        session = _FakeSession([])
-        runtime = _runtime_with_session(session)
-        connector = APIConnector("test")
-        await connector.connect(runtime)
-
-        with pytest.raises(ReadError, match="missing 'endpoint_document'"):
-            await _consume(
-                connector,
-                config={"stream_source": _stream_source()},
-                state_manager=MagicMock(),
-                stream_name="items",
-                batch_size=10,
-            )
-
-    @pytest.mark.asyncio
-    async def test_missing_stream_source_endpoint_ref_raises(self):
-        session = _FakeSession([])
-        runtime = _runtime_with_session(session)
-        connector = APIConnector("test")
-        await connector.connect(runtime)
-
-        with pytest.raises(ReadError, match="stream_source missing 'endpoint_ref'"):
-            await _consume(
-                connector,
-                config={
-                    "endpoint_document": _endpoint_doc_with_records(),
-                    "stream_source": {"primary_keys": ["id"]},
-                },
+                source=_resolved_source(runtime),
                 state_manager=MagicMock(),
                 stream_name="items",
                 batch_size=10,

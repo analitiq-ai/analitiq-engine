@@ -1,5 +1,13 @@
 """Data models for configuration and state."""
 
+from .resolved import (
+    ResolvedDestination,
+    ResolvedPipeline,
+    ResolvedSource,
+    ResolvedStream,
+    RuntimeConfig,
+)
+
 from .stream import (
     Assignment,
     AssignmentTarget,
@@ -55,6 +63,12 @@ from .state import (
 )
 
 __all__ = [
+    # Resolved runtime models
+    "ResolvedDestination",
+    "ResolvedPipeline",
+    "ResolvedSource",
+    "ResolvedStream",
+    "RuntimeConfig",
     # Stream models
     "Assignment",
     "AssignmentTarget",

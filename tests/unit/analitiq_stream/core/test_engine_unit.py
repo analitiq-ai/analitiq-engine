@@ -2,12 +2,19 @@
 
 import asyncio
 from typing import Any, Dict, List
+from unittest.mock import MagicMock
 
 import pytest
 
 from src.engine.engine import StreamingEngine
 from src.engine.orchestrator import _deep_merge_dicts
 from src.engine.exceptions import ConfigurationError, StreamProcessingError
+from src.models.resolved import (
+    ResolvedDestination, ResolvedPipeline, ResolvedSource, ResolvedStream, RuntimeConfig,
+)
+from src.models.stream import (
+    DestinationConfig, EndpointRef, MappingConfig, ReplicationConfig, SourceConfig, WriteConfig,
+)
 from src.source.connectors.base import BaseConnector
 
 
@@ -106,63 +113,85 @@ class TestStreamingEngine:
         assert engine.metrics is not None
 
     @pytest.mark.asyncio
-    async def test_invalid_pipeline_configuration(self, engine):
-        """Test error handling for invalid pipeline configuration."""
-        invalid_config = {
-            "pipeline_id": "test",
-            # Missing required fields
-        }
-
+    async def test_no_streams_raises_configuration_error(self, engine):
+        """stream_data raises ConfigurationError when the pipeline has no streams."""
+        pipeline = ResolvedPipeline(
+            pipeline_id="test-pipeline",
+            display_name=None,
+            description=None,
+            status="active",
+            tags=[],
+            source_connection_id="src",
+            destination_connection_ids=["dst"],
+            streams=[],  # empty
+            runtime=RuntimeConfig(),
+            schedule={},
+            engine_config={},
+            connections={},
+        )
         with pytest.raises(ConfigurationError, match="No streams configured"):
-            await engine.stream_data(invalid_config)
+            await engine.stream_data(pipeline)
 
-    @pytest.mark.asyncio
-    async def test_no_streams_configuration(self, engine):
-        """Test error handling when no streams are configured."""
-        config = {
-            "pipeline_id": "test-pipeline",
-            "name": "Test Pipeline",
-            "version": "1.0",
-            "source": {"connection_id": "test-src"},
-            "destination": {"connection_id": "test-dst"},
-            "runtime": {"buffer_size": 100, "batching": {"batch_size": 10, "max_concurrent_batches": 1}, "logging": {"log_level": "DEBUG", "metrics_enabled": False}, "error_handling": {"strategy": "dlq", "max_retries": 3, "retry_delay": 1}},
-            "streams": {}  # Empty streams
-        }
+    def test_create_source_connector_unsupported_type(self, engine):
+        """_create_source_connector raises for an unknown connector type."""
+        runtime = MagicMock()
+        runtime.connector_type = "unsupported"
+        source = ResolvedSource(
+            config=SourceConfig(),
+            runtime=runtime,
+            endpoint={},
+        )
+        with pytest.raises(ValueError, match="Unsupported source connector kind"):
+            engine._create_source_connector(source)
 
-        with pytest.raises(ConfigurationError, match="No streams configured"):
-            await engine.stream_data(config)
+    def test_get_stream_name_with_endpoint_ref(self, engine):
+        """_get_stream_name returns a stable endpoint-scoped name."""
+        runtime = MagicMock()
+        runtime.connection_id = "wise"
+        source = ResolvedSource(
+            config=SourceConfig(
+                endpoint_ref=EndpointRef(
+                    scope="connector",
+                    connection_id="wise",
+                    endpoint_id="transfers",
+                )
+            ),
+            runtime=runtime,
+            endpoint={},
+        )
+        stream = ResolvedStream(
+            stream_id="s1",
+            pipeline_id="test-pipeline",
+            display_name=None,
+            description=None,
+            status="active",
+            tags=[],
+            source=source,
+            destinations=[],
+            mapping=MappingConfig(),
+        )
+        assert engine._get_stream_name(stream) == "endpoint.connector:wise/transfers"
 
-    def test_create_source_connector_missing_runtime(self, engine):
-        """Test error handling when _runtime is missing."""
-        config = {"type": "unknown"}
-
-        with pytest.raises(ValueError, match="Missing _runtime"):
-            engine._create_source_connector(config)
-
-    def test_get_stream_name(self, engine):
-        """Test stream name generation."""
-        # With structured endpoint_ref
-        config = {
-            "source": {
-                "endpoint_ref": {
-                    "scope": "connector",
-                    "connection_id": "wise",
-                    "endpoint_id": "transfers",
-                },
-            },
-        }
-        result = engine._get_stream_name(config)
-        assert result == "endpoint.connector:wise/transfers"
-
-        # Without endpoint_ref, with pipeline ID
-        config = {"pipeline_id": "test-pipeline"}
-        result = engine._get_stream_name(config)
-        assert result == "test-pipeline"
-
-        # No identifiers
-        config = {}
-        result = engine._get_stream_name(config)
-        assert result == "unknown-stream"
+    def test_get_stream_name_fallback_to_pipeline_id(self, engine):
+        """Falls back to pipeline_id when endpoint_ref is absent."""
+        runtime = MagicMock()
+        source = ResolvedSource(
+            config=SourceConfig(endpoint_ref=None),
+            runtime=runtime,
+            endpoint={},
+        )
+        stream = ResolvedStream(
+            stream_id="s1",
+            pipeline_id="test-pipeline",
+            display_name=None,
+            description=None,
+            status="active",
+            tags=[],
+            source=source,
+            destinations=[],
+            mapping=MappingConfig(),
+        )
+        assert engine._get_stream_name(stream) == "test-pipeline"
 
     def test_metrics_initialization(self, engine):
         """Test that metrics are properly initialized."""

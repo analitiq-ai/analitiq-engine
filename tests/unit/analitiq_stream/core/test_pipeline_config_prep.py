@@ -22,6 +22,8 @@ import pytest
 
 from src.config.schema_validator import _load_schema
 from src.engine.pipeline_config_prep import PipelineConfigPrep
+from src.models.resolved import ResolvedPipeline, ResolvedStream
+from src.models.stream import ReplicationMethod
 
 # ---------------------------------------------------------------------------
 # Schema-mirror infrastructure
@@ -268,52 +270,53 @@ def pipeline_tree(
 
 
 class TestCreateConfigHappyPath:
-    def test_returns_five_tuple_with_expected_shapes(self, pipeline_tree: Path) -> None:
+    def test_returns_resolved_pipeline_with_expected_shapes(self, pipeline_tree: Path) -> None:
         prep = PipelineConfigPrep()
-        (
-            pipeline_config,
-            stream_configs,
-            connections,
-            endpoints,
-            connectors,
-        ) = prep.create_config()
+        pipeline = prep.create_config()
 
-        assert pipeline_config["pipeline_id"] == PIPELINE_ID
-        assert pipeline_config["display_name"] == "Demo Pipeline"
-        assert pipeline_config["status"] == "active"
-        assert pipeline_config["connections"]["source"] == CONNECTION_SRC_ID
-        assert pipeline_config["connections"]["destinations"] == [CONNECTION_DST_ID]
+        assert isinstance(pipeline, ResolvedPipeline)
+        assert pipeline.pipeline_id == PIPELINE_ID
+        assert pipeline.display_name == "Demo Pipeline"
+        assert pipeline.status == "active"
+        assert pipeline.source_connection_id == CONNECTION_SRC_ID
+        assert pipeline.destination_connection_ids == [CONNECTION_DST_ID]
 
-        assert len(stream_configs) == 1
-        stream = stream_configs[0]
-        assert stream["stream_id"] == STREAM_ID
-        assert stream["source"]["connection_ref"] == CONNECTION_SRC_ID
-        assert stream["source"]["_runtime"] is connections[CONNECTION_SRC_ID]
-        assert stream["source"]["_endpoint"]["endpoint_id"] == ENDPOINT_SRC
-        assert stream["destinations"][0]["_runtime"] is connections[CONNECTION_DST_ID]
-        assert stream["destinations"][0]["_endpoint"]["endpoint_id"] == ENDPOINT_DST
+        assert len(pipeline.streams) == 1
+        stream = pipeline.streams[0]
+        assert isinstance(stream, ResolvedStream)
+        assert stream.stream_id == STREAM_ID
+        assert stream.source.runtime.connection_id == CONNECTION_SRC_ID
+        assert stream.source.runtime is pipeline.connections[CONNECTION_SRC_ID]
+        assert stream.source.endpoint["endpoint_id"] == ENDPOINT_SRC
+        assert stream.destinations[0].runtime is pipeline.connections[CONNECTION_DST_ID]
+        assert stream.destinations[0].endpoint["endpoint_id"] == ENDPOINT_DST
 
-        assert set(connections) == {CONNECTION_SRC_ID, CONNECTION_DST_ID}
-        assert len(endpoints) == 2
+        assert set(pipeline.connections) == {CONNECTION_SRC_ID, CONNECTION_DST_ID}
 
-        assert len(connectors) == 1
-        assert connectors[0]["connector_id"] == CONNECTOR_ID
+    def test_source_config_is_typed(self, pipeline_tree: Path) -> None:
+        """Stream source config is parsed into a typed SourceConfig."""
+        prep = PipelineConfigPrep()
+        pipeline = prep.create_config()
+
+        source_config = pipeline.streams[0].source.config
+        assert source_config.primary_keys == ["id"]
+        assert source_config.replication.method == ReplicationMethod.FULL_REFRESH
+        assert source_config.filters == []
 
     def test_runtime_injection_is_shared_across_source_and_destination(
         self, pipeline_tree: Path
     ) -> None:
-        """Each ``connection_id`` resolves to exactly one ``ConnectionRuntime``,
-        and the instance injected as ``source._runtime`` / ``destinations[]._runtime``
-        is the *same object* held in the returned ``connections`` map (identity,
-        not a copy) — the engine relies on this to share TLS / connection pools.
-        Distinct connection ids yield distinct runtimes."""
+        """Each ``connection_id`` resolves to exactly one ``ConnectionRuntime``;
+        the same instance appears in both the stream's source/destination and
+        the ``connections`` map — the engine relies on identity to share pools."""
         prep = PipelineConfigPrep()
-        _, stream_configs, connections, _, _ = prep.create_config()
+        pipeline = prep.create_config()
 
-        src_runtime = stream_configs[0]["source"]["_runtime"]
-        dst_runtime = stream_configs[0]["destinations"][0]["_runtime"]
-        assert src_runtime is connections[CONNECTION_SRC_ID]
-        assert dst_runtime is connections[CONNECTION_DST_ID]
+        stream = pipeline.streams[0]
+        src_runtime = stream.source.runtime
+        dst_runtime = stream.destinations[0].runtime
+        assert src_runtime is pipeline.connections[CONNECTION_SRC_ID]
+        assert dst_runtime is pipeline.connections[CONNECTION_DST_ID]
         assert src_runtime is not dst_runtime
 
 

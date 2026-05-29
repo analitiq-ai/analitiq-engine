@@ -31,6 +31,8 @@ import pyarrow as pa
 
 from .base import BaseConnector, ConnectionError, ReadError
 from ...destination.schema_contract import SchemaContract
+from ...models.resolved import ResolvedSource
+from ...models.stream import StreamFilter
 from ...models.state import CursorField, StreamCursor, StreamStats
 from ...shared.connection_runtime import ConnectionRuntime
 from ...shared.expressions import resolve_value_expression
@@ -76,7 +78,7 @@ class APIConnector(BaseConnector):
 
     async def read_batches(
         self,
-        config: Dict[str, Any],
+        source: ResolvedSource,
         *,
         state_manager: StateManager,
         stream_name: str,
@@ -94,56 +96,36 @@ class APIConnector(BaseConnector):
         if self._runtime is None or self.session is None:
             raise ReadError("APIConnector.read_batches() called before connect()")
 
-        endpoint_doc = config.get("endpoint_document")
-        if not endpoint_doc:
-            raise ReadError(
-                "APIConnector: source config missing 'endpoint_document'"
-            )
-        stream_source = config.get("stream_source") or {}
-        endpoint_ref = stream_source.get("endpoint_ref")
-        if not endpoint_ref:
-            raise ReadError(
-                "APIConnector: stream_source missing 'endpoint_ref'; "
-                "the source contract requires it to declare per-field types"
-            )
+        endpoint_doc = source.endpoint
         read_spec = ((endpoint_doc.get("operations") or {}).get("read") or {})
-        records_items_schema = self._resolve_records_items_schema(
-            endpoint_doc, read_spec,
-        )
+        records_items_schema = self._resolve_records_items_schema(endpoint_doc, read_spec)
         schema_contract = SchemaContract(records_items_schema)
+
         request = read_spec.get("request") or {}
         path = request.get("path")
         method = (request.get("method") or "GET").upper()
         if not isinstance(path, str) or not path:
             raise ReadError(
-                f"endpoint {endpoint_doc.get('endpoint_id')!r}: operations.read.request.path is required"
+                f"endpoint {endpoint_doc.get('endpoint_id')!r}: "
+                "operations.read.request.path is required"
             )
-        # Preserve both the base URL's path (e.g. ``/api/v1``) and the
-        # endpoint's path. ``urljoin`` treats a leading ``/`` on the second
-        # argument as absolute-path-relative and drops the base's path,
-        # which would mis-route ``https://host/api/v1`` + ``/Foo`` to
-        # ``https://host/Foo``.
+        # Preserve the base URL's path (e.g. /api/v1) and the endpoint path.
         full_url = self.base_url.rstrip("/") + "/" + path.lstrip("/")
 
-        replication_block = stream_source.get("replication") or {}
-        replication_method = replication_block.get("method", "full_refresh")
-        cursor_field = replication_block.get("cursor_field")
+        # Typed access — ReplicationConfig guarantees these fields exist.
+        replication = source.config.replication
+        replication_method = replication.method.value
+        cursor_field = replication.cursor_field
         if isinstance(cursor_field, list):
             cursor_field = cursor_field[0] if cursor_field else None
-        safety_window = replication_block.get("safety_window_seconds")
-        tie_breaker_fields = list(replication_block.get("tie_breaker_fields") or [])
+        safety_window = replication.safety_window_seconds
+        tie_breaker_fields = list(replication.tie_breaker_fields or [])
 
-        # Build query params from the declared ``params`` block: defaults
-        # via value-expression resolution, then stream-level filter
-        # overrides. ``controlled_by: pagination|replication`` params are
-        # filled by their respective loops.
+        # Build query params from the declared ``params`` block.
         base_params, controlled_params = self._build_base_params(
-            read_spec, config, stream_source.get("filters") or []
+            read_spec, batch_size, list(source.config.filters)
         )
 
-        # Set up incremental replication: subtract safety window from the
-        # stored cursor, then write the value into the cursor's mapped
-        # param.
         if replication_method == "incremental":
             await self._apply_incremental_replication(
                 base_params,
@@ -246,16 +228,14 @@ class APIConnector(BaseConnector):
     def _build_base_params(
         self,
         read_spec: Dict[str, Any],
-        config: Dict[str, Any],
-        stream_filters: List[Dict[str, Any]],
+        batch_size: int,
+        stream_filters: "List[StreamFilter]",
     ) -> tuple[Dict[str, Any], Dict[str, str]]:
         """Resolve declared param defaults and apply stream filter overrides.
 
         Returns ``(base_params, controlled_params)`` where
         ``controlled_params`` maps controller name (``pagination`` or
-        ``replication``) to the controlled-by group recorded for the
-        param. Callers use it to keep pagination/replication loops from
-        clobbering each other's values.
+        ``replication``) to the controlled-by group recorded for the param.
         """
         base_params: Dict[str, Any] = {}
         controlled: Dict[str, str] = {}
@@ -271,18 +251,14 @@ class APIConnector(BaseConnector):
                 value = resolve_value_expression(
                     decl["default"],
                     self._runtime,
-                    extra_scopes={"runtime": {"batch_size": config.get("batch_size")}},
+                    extra_scopes={"runtime": {"batch_size": batch_size}},
                 )
                 if value is not None:
                     base_params[name] = value
 
         for f in stream_filters:
-            target = f.get("field")
-            if not target:
-                continue
-            value = f.get("value")
-            if value is not None:
-                base_params[target] = value
+            if f.field and f.value is not None:
+                base_params[f.field] = f.value
         return base_params, controlled
 
     # ------------------------------------------------------------------

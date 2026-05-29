@@ -38,7 +38,7 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional
 
 from src.config.schema_validator import validate as validate_artifact
 from src.config.endpoint_resolver import (
@@ -56,7 +56,27 @@ from src.engine.type_map import (
     load_connection_type_map,
     load_type_map,
 )
-from src.models.stream import EndpointRef
+from src.models.stream import (
+    DatabasePagination,
+    DestinationConfig,
+    EndpointRef,
+    ExecutionConfig,
+    MappingConfig,
+    ReplicationConfig,
+    ReplicationMethod,
+    SourceConfig,
+    StreamFilter,
+    WriteConfig,
+    WriteMode,
+)
+from src.models.stream import Assignment, AssignmentTarget, AssignmentValue, ConstantValue
+from src.models.resolved import (
+    ResolvedDestination,
+    ResolvedPipeline,
+    ResolvedSource,
+    ResolvedStream,
+    RuntimeConfig,
+)
 from src.secrets import LocalFileSecretsResolver, SecretsResolver
 from src.shared.connection_runtime import ConnectionRuntime
 
@@ -438,30 +458,13 @@ class PipelineConfigPrep:
     # Public entry point
     # ------------------------------------------------------------------
 
-    def create_config(
-        self,
-    ) -> Tuple[
-        Dict[str, Any],
-        List[Dict[str, Any]],
-        Dict[str, ConnectionRuntime],
-        Dict[EndpointRef, Dict[str, Any]],
-        List[Dict[str, Any]],
-    ]:
+    def create_config(self) -> ResolvedPipeline:
         """Load and return the validated, resolved pipeline configuration.
 
-        Returns a tuple of:
-
-        * ``pipeline_config``: dict with ``pipeline_id``, ``status``,
-          ``connections``, ``streams``, ``runtime``, ``engine``, ``schedule``,
-          plus server-managed identity fields.
-        * ``stream_configs``: list of fully-resolved stream dicts (the new
-          contract shape, with ``_runtime`` and ``_endpoint`` injected on
-          each source/destination for downstream convenience).
-        * ``resolved_connections``: dict keyed by ``connection_id`` of
-          :class:`ConnectionRuntime` (one per saved connection used by
-          the pipeline).
-        * ``resolved_endpoints``: dict keyed by :class:`EndpointRef`.
-        * ``connectors``: list of connector documents loaded.
+        Returns a :class:`ResolvedPipeline` with all connections, endpoints,
+        and stream configs resolved to typed runtime objects. This is the
+        single point at which raw JSON is parsed; everything downstream uses
+        typed attributes instead of dict key access.
         """
         pipeline_doc = self._load_pipeline_document()
 
@@ -478,9 +481,8 @@ class PipelineConfigPrep:
         for dest_id in dest_ids:
             self._resolve_connection_by_id(dest_id)
 
-        # Stream configs
         pipeline_stream_ids = list(pipeline_doc.get("streams") or [])
-        stream_configs: List[Dict[str, Any]] = []
+        resolved_streams: List[ResolvedStream] = []
         for stream_id in pipeline_stream_ids:
             record = self._stream_records.get(stream_id)
             if record is None:
@@ -489,75 +491,70 @@ class PipelineConfigPrep:
                     f"file in {self._pipeline_dir}/streams declares that id; "
                     f"known: {sorted(self._stream_records)}"
                 )
-            stream_configs.append(self._build_stream_config(record))
+            resolved_streams.append(self._build_resolved_stream(record))
 
         pipeline_id = pipeline_doc.get("pipeline_id")
-        pipeline_config = {
-            "pipeline_id": pipeline_id,
-            "name": pipeline_doc.get("display_name") or pipeline_id,
-            "display_name": pipeline_doc.get("display_name"),
-            "description": pipeline_doc.get("description"),
-            "status": pipeline_doc.get("status", "draft"),
-            "tags": pipeline_doc.get("tags") or [],
-            "connections": {
-                "source": source_id,
-                "destinations": dest_ids,
-            },
-            "schedule": pipeline_doc.get("schedule") or {"type": "manual"},
-            "engine": pipeline_doc.get("engine") or {"vcpu": 1, "memory": 8192},
-            "runtime": pipeline_doc.get("runtime") or {},
-        }
+        raw_runtime = pipeline_doc.get("runtime") or {}
+        runtime_cfg = RuntimeConfig(
+            batching=raw_runtime.get("batching") or {},
+            error_handling=raw_runtime.get("error_handling") or {},
+            buffer_size=int(raw_runtime.get("buffer_size", 5000)),
+        )
 
-        connectors = list(self._loaded_connectors.values())
+        pipeline = ResolvedPipeline(
+            pipeline_id=pipeline_id,
+            display_name=pipeline_doc.get("display_name"),
+            description=pipeline_doc.get("description"),
+            status=pipeline_doc.get("status", "draft"),
+            tags=list(pipeline_doc.get("tags") or []),
+            source_connection_id=source_id,
+            destination_connection_ids=dest_ids,
+            streams=resolved_streams,
+            runtime=runtime_cfg,
+            schedule=pipeline_doc.get("schedule") or {"type": "manual"},
+            engine_config=pipeline_doc.get("engine") or {"vcpu": 1, "memory": 8192},
+            connections=dict(self._resolved_connections),
+        )
+
         logger.info(
             "Configuration assembled: pipeline=%s, streams=%d, connections=%d, "
-            "endpoints=%d, connectors=%d",
+            "endpoints=%d",
             pipeline_id,
-            len(stream_configs),
+            len(resolved_streams),
             len(self._resolved_connections),
             len(self._resolved_endpoints),
-            len(connectors),
         )
-        return (
-            pipeline_config,
-            stream_configs,
-            dict(self._resolved_connections),
-            dict(self._resolved_endpoints),
-            connectors,
-        )
+        return pipeline
 
     # ------------------------------------------------------------------
-    # Stream config construction
+    # Stream resolution
     # ------------------------------------------------------------------
 
-    def _build_stream_config(self, record: _StreamRecord) -> Dict[str, Any]:
-        """Translate a saved stream document into the runtime-facing dict."""
+    def _build_resolved_stream(self, record: _StreamRecord) -> ResolvedStream:
+        """Parse a saved stream document into a fully typed :class:`ResolvedStream`."""
         document = record.raw_document
         stream_id = record.stream_id
 
-        # ---- source ----
-        source = dict(document["source"])
-        source_endpoint_ref_dict = source.get("endpoint_ref")
+        raw_source = document["source"]
+        source_endpoint_ref_dict = raw_source.get("endpoint_ref")
         if not source_endpoint_ref_dict:
-            raise ValueError(
-                f"Stream {stream_id} source missing 'endpoint_ref'"
-            )
+            raise ValueError(f"Stream {stream_id} source missing 'endpoint_ref'")
+
         source_endpoint_ref = EndpointRef.from_dict(source_endpoint_ref_dict)
         source_runtime = self._resolve_connection_by_id(
             source_endpoint_ref.connection_id
         )
         source_endpoint = self._resolve_endpoint(source_endpoint_ref)
 
-        source["endpoint_ref"] = source_endpoint_ref.to_dict()
-        source["connection_ref"] = source_runtime.connection_id
-        source["_runtime"] = source_runtime
-        source["_endpoint"] = source_endpoint
+        resolved_source = ResolvedSource(
+            config=_parse_source_config(raw_source),
+            runtime=source_runtime,
+            endpoint=source_endpoint,
+        )
 
-        # ---- destinations ----
-        destinations: List[Dict[str, Any]] = []
+        resolved_destinations: List[ResolvedDestination] = []
         for raw_dest in document.get("destinations") or []:
-            dest = dict(raw_dest)
-            dest_endpoint_ref_dict = dest.get("endpoint_ref")
+            dest_endpoint_ref_dict = raw_dest.get("endpoint_ref")
             if not dest_endpoint_ref_dict:
                 raise ValueError(
                     f"Stream {stream_id} destination missing 'endpoint_ref'"
@@ -568,24 +565,23 @@ class PipelineConfigPrep:
             )
             dest_endpoint = self._resolve_endpoint(dest_endpoint_ref)
 
-            dest["endpoint_ref"] = dest_endpoint_ref.to_dict()
-            dest["connection_ref"] = dest_runtime.connection_id
-            dest["_runtime"] = dest_runtime
-            dest["_endpoint"] = dest_endpoint
-            destinations.append(dest)
+            resolved_destinations.append(ResolvedDestination(
+                config=_parse_destination_config(raw_dest),
+                runtime=dest_runtime,
+                endpoint=dest_endpoint,
+            ))
 
-        return {
-            "stream_id": stream_id,
-            "display_name": document.get("display_name"),
-            "description": document.get("description"),
-            "pipeline_id": document.get("pipeline_id"),
-            "status": document.get("status", "draft"),
-            "is_enabled": document.get("status") == "active",
-            "tags": document.get("tags") or [],
-            "source": source,
-            "destinations": destinations,
-            "mapping": document.get("mapping") or {"assignments": []},
-        }
+        return ResolvedStream(
+            stream_id=stream_id,
+            pipeline_id=document.get("pipeline_id") or "",
+            display_name=document.get("display_name"),
+            description=document.get("description"),
+            status=document.get("status", "draft"),
+            tags=list(document.get("tags") or []),
+            source=resolved_source,
+            destinations=resolved_destinations,
+            mapping=_parse_mapping_config(document.get("mapping") or {}),
+        )
 
     # ------------------------------------------------------------------
     # Convenience accessors
@@ -610,3 +606,125 @@ class PipelineConfigPrep:
                 f"known: {sorted(self._connection_records)}"
             )
         return self._loaded_connectors[record.connector_id]
+
+
+# ---------------------------------------------------------------------------
+# Typed parsers: raw JSON dict -> dataclass (called once, at load time)
+# ---------------------------------------------------------------------------
+
+
+def _parse_replication_config(raw: Dict[str, Any]) -> ReplicationConfig:
+    method_str = raw.get("method", ReplicationMethod.FULL_REFRESH.value)
+    try:
+        method = ReplicationMethod(method_str)
+    except ValueError:
+        raise ValueError(
+            f"Unknown replication method {method_str!r}; "
+            f"expected one of {[m.value for m in ReplicationMethod]}"
+        )
+    return ReplicationConfig(
+        method=method,
+        cursor_field=raw.get("cursor_field"),
+        safety_window_seconds=raw.get("safety_window_seconds"),
+        tie_breaker_fields=list(raw["tie_breaker_fields"])
+        if raw.get("tie_breaker_fields")
+        else None,
+    )
+
+
+def _parse_stream_filter(raw: Dict[str, Any]) -> StreamFilter:
+    return StreamFilter(
+        field=raw.get("field", ""),
+        operator=raw.get("operator", "eq"),
+        value=raw.get("value"),
+    )
+
+
+def _parse_database_pagination(raw: Optional[Dict[str, Any]]) -> Optional[DatabasePagination]:
+    if not raw:
+        return None
+    return DatabasePagination(
+        type=raw.get("type", "offset"),
+        page_size=raw.get("page_size"),
+        order_by_field=raw.get("order_by_field"),
+    )
+
+
+def _parse_source_config(raw: Dict[str, Any]) -> SourceConfig:
+    """Parse the raw ``source`` block from a stream document into :class:`SourceConfig`."""
+    return SourceConfig(
+        endpoint_ref=EndpointRef.from_dict(raw["endpoint_ref"]),
+        selected_columns=list(raw["selected_columns"]) if raw.get("selected_columns") else None,
+        filters=[_parse_stream_filter(f) for f in (raw.get("filters") or [])],
+        replication=_parse_replication_config(raw.get("replication") or {}),
+        database_pagination=_parse_database_pagination(raw.get("database_pagination")),
+        primary_keys=list(raw["primary_keys"]) if raw.get("primary_keys") else None,
+    )
+
+
+def _parse_write_config(raw: Dict[str, Any]) -> WriteConfig:
+    mode_str = raw.get("mode", WriteMode.UPSERT.value)
+    try:
+        mode = WriteMode(mode_str)
+    except ValueError:
+        raise ValueError(
+            f"Unknown write mode {mode_str!r}; "
+            f"expected one of {[m.value for m in WriteMode]}"
+        )
+    conflict_keys = raw.get("conflict_keys")
+    return WriteConfig(
+        mode=mode,
+        conflict_keys=conflict_keys if conflict_keys else None,
+    )
+
+
+def _parse_execution_config(raw: Optional[Dict[str, Any]]) -> Optional[ExecutionConfig]:
+    if not raw:
+        return None
+    return ExecutionConfig(
+        batch_size=raw.get("batch_size"),
+        max_concurrent_batches=raw.get("max_concurrent_batches"),
+    )
+
+
+def _parse_destination_config(raw: Dict[str, Any]) -> DestinationConfig:
+    """Parse the raw ``destination`` block from a stream document into :class:`DestinationConfig`."""
+    return DestinationConfig(
+        endpoint_ref=EndpointRef.from_dict(raw["endpoint_ref"]),
+        write=_parse_write_config(raw.get("write") or {}),
+        execution=_parse_execution_config(raw.get("execution")),
+    )
+
+
+def _parse_mapping_config(raw: Dict[str, Any]) -> MappingConfig:
+    """Parse the raw ``mapping`` block from a stream document into :class:`MappingConfig`."""
+    from src.models.stream import (
+        Assignment, AssignmentTarget, AssignmentValue, ConstantValue,
+        GetExpression, ExpressionOp, ValidationConfig, ValidationRule, ValidationType,
+    )
+
+    assignments = []
+    for raw_a in raw.get("assignments") or []:
+        raw_target = raw_a.get("target") or {}
+        raw_value = raw_a.get("value") or {}
+
+        target = AssignmentTarget(
+            path=raw_target.get("path", ""),
+            arrow_type=raw_target.get("arrow_type", "Utf8"),
+            native_type=raw_target.get("native_type"),
+            nullable=raw_target.get("nullable", True),
+        )
+
+        value = AssignmentValue()
+        if "expression" in raw_value:
+            value.expression = raw_value["expression"]
+        elif "constant" in raw_value:
+            raw_const = raw_value["constant"] or {}
+            value.constant = ConstantValue(
+                arrow_type=raw_const.get("arrow_type", "Utf8"),
+                value=raw_const.get("value"),
+            )
+
+        assignments.append(Assignment(target=target, value=value))
+
+    return MappingConfig(assignments=assignments)

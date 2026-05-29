@@ -21,6 +21,44 @@ from .type_map.exceptions import InvalidTypeMapError
 logger = logging.getLogger(__name__)
 
 
+def _translate_assignment(assignment: Dict[str, Any]) -> Dict[str, Any]:
+    """Translate a contract-shaped assignment dict to the transformer's internal shape.
+
+    Contract:  ``target.path`` is a dotted string; value uses ``expression``/``constant``.
+    Transformer: ``target.path`` is a list; value uses ``kind``/``expr``/``const``.
+    """
+    raw_target = assignment.get("target") or {}
+    raw_value = assignment.get("value") or {}
+
+    target_path_raw = raw_target.get("path", "")
+    if isinstance(target_path_raw, str):
+        target_path: List[str] = [seg for seg in target_path_raw.split(".") if seg]
+    elif isinstance(target_path_raw, list):
+        target_path = list(target_path_raw)
+    else:
+        target_path = []
+
+    target = dict(raw_target)
+    target["path"] = target_path
+
+    value: Dict[str, Any]
+    if "expression" in raw_value and raw_value["expression"] is not None:
+        expression = dict(raw_value["expression"])
+        expr_path = expression.get("path")
+        if isinstance(expr_path, str):
+            expression["path"] = [seg for seg in expr_path.split(".") if seg]
+        value = {"kind": "expr", "expr": expression}
+    elif "constant" in raw_value and raw_value["constant"] is not None:
+        value = {"kind": "const", "const": dict(raw_value["constant"] or {})}
+    else:
+        value = dict(raw_value)
+
+    out: Dict[str, Any] = {"target": target, "value": value}
+    if "validate" in assignment:
+        out["validate"] = assignment["validate"]
+    return out
+
+
 class AssignmentTransformer:
     """
     Handles assignment-based mapping as per MAPPING_AND_TRANSFORMATIONS.md spec.

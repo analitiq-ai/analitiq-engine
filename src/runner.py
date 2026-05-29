@@ -1,9 +1,4 @@
-"""
-Pipeline runner for executing Analitiq Stream pipelines.
-
-Configuration paths are defined in manifest.json (single source of truth).
-Requires PIPELINE_ID environment variable.
-"""
+"""Pipeline runner for executing Analitiq Stream pipelines."""
 
 import logging
 import os
@@ -19,38 +14,18 @@ logger = logging.getLogger(__name__)
 
 
 class PipelineRunner:
-    """Executes Analitiq Stream pipelines with proper error handling and metrics.
-
-    Configuration paths are defined in manifest.json (single source of truth).
-    Requires PIPELINE_ID environment variable to be set.
-    """
+    """Executes Analitiq Stream pipelines with proper error handling and metrics."""
 
     def __init__(self):
-        """
-        Initialize pipeline runner.
-
-        Configuration paths are loaded from manifest.json.
-        Pipeline ID is read from PIPELINE_ID environment variable.
-        """
         self.pipeline_id = os.getenv("PIPELINE_ID")
         if not self.pipeline_id:
-            raise ValueError(
-                "PIPELINE_ID environment variable is required"
-            )
+            raise ValueError("PIPELINE_ID environment variable is required")
 
     async def run(self) -> bool:
-        """
-        Execute the pipeline.
-
-        Returns:
-            True if successful, False if failed.
-        """
-        # Get run_id from centralized source (already initialized at startup)
         run_id = get_run_id()
         start_time = datetime.now(timezone.utc)
 
-        # Initialize variables for metrics
-        pipeline_config = None
+        resolved_pipeline = None
         records_processed = 0
         records_failed = 0
         batches_processed = 0
@@ -58,31 +33,20 @@ class PipelineRunner:
         error_message = None
 
         try:
-            # Create pipeline config prep instance
-            # Configuration paths are loaded from manifest.json
             logger.info("Initializing PipelineConfigPrep...")
+            config_prep = PipelineConfigPrep()
+            resolved_pipeline = config_prep.create_config()
 
-            pipeline_config_prep = PipelineConfigPrep()
-            pipeline_config, stream_configs, resolved_connections, resolved_endpoints, connectors = pipeline_config_prep.create_config()
-
-            # Create and run pipeline
-            logger.info(f"Starting {pipeline_config['name']} (ID: {pipeline_config['pipeline_id']})")
-
-            # Create pipeline instance
-            pipeline = Pipeline(
-                pipeline_config=pipeline_config,
-                stream_configs=stream_configs,
-                resolved_connections=resolved_connections,
-                resolved_endpoints=resolved_endpoints,
-                connectors=connectors,
+            logger.info(
+                f"Starting {resolved_pipeline.display_name or resolved_pipeline.pipeline_id} "
+                f"(ID: {resolved_pipeline.pipeline_id})"
             )
 
-            logger.info("Starting pipeline execution...")
+            pipeline = Pipeline(pipeline=resolved_pipeline)
 
-            # Run the pipeline
+            logger.info("Starting pipeline execution...")
             await pipeline.run()
 
-            # Log results
             end_time = datetime.now(timezone.utc)
             duration = end_time - start_time
             metrics = pipeline.get_metrics()
@@ -90,10 +54,9 @@ class PipelineRunner:
             logger.info("Pipeline execution completed successfully!")
             logger.info(f"Duration: {duration}")
 
-            # Safely access metrics attributes
-            records_processed = getattr(metrics, 'records_processed', 0)
-            batches_processed = getattr(metrics, 'batches_processed', 0)
-            records_failed = getattr(metrics, 'records_failed', 0)
+            records_processed = getattr(metrics, "records_processed", 0)
+            batches_processed = getattr(metrics, "batches_processed", 0)
+            records_failed = getattr(metrics, "records_failed", 0)
 
             logger.info(f"Records processed: {records_processed}")
             logger.info(f"Batches processed: {batches_processed}")
@@ -112,7 +75,6 @@ class PipelineRunner:
             return False
 
         finally:
-            # Always emit metrics, even on failure
             end_time = datetime.now(timezone.utc)
             try:
                 save_pipeline_metrics(
@@ -125,11 +87,10 @@ class PipelineRunner:
                     batches_processed=batches_processed,
                     status=status,
                     error_message=error_message,
-                    pipeline_name=pipeline_config["name"] if pipeline_config else None,
+                    pipeline_name=(
+                        resolved_pipeline.display_name if resolved_pipeline else None
+                    ),
                 )
                 logger.info("Emitted pipeline metrics to logs")
-
             except Exception as metrics_error:
                 logger.error(f"Failed to emit pipeline metrics: {metrics_error}")
-
-

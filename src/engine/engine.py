@@ -1,4 +1,4 @@
-"""Modern multi-stream engine with state management and improved architecture."""
+"""Multi-stream engine: extract, transform, load, checkpoint."""
 
 import asyncio
 import json
@@ -23,7 +23,8 @@ from ..models.engine import (
     StreamProcessingConfig, PipelineStagesConfig,
     StreamStageConfig, PipelineMetricsSnapshot
 )
-from .data_transformer import DataTransformer, build_output_schema
+from ..models.resolved import ResolvedPipeline, ResolvedStream, ResolvedSource
+from .data_transformer import DataTransformer, build_output_schema, _translate_assignment
 from .exceptions import (
     ConfigurationError, StreamProcessingError, StreamExecutionError,
     StreamConfigurationError, StageConfigurationError
@@ -45,7 +46,6 @@ class StreamingEngine:
     Features:
     - Multi-stream concurrent processing
     - State management for scalability
-    - Pydantic validation for configuration
     - Async/await pattern for non-blocking I/O
     - Fault tolerance with retries, circuit breakers, and DLQ
     - Configurable batch processing with backpressure handling
@@ -69,133 +69,110 @@ class StreamingEngine:
         self.max_retries = max_retries
         self.retry_delay = retry_delay
         self.semaphore = Semaphore(max_concurrent_batches)
-        
-        # Setup structured logging
+
         self.logger = logging.getLogger(f"{__name__}.{pipeline_id}")
-        
-        # Pipeline orchestration
+
         self.orchestrator = PipelineOrchestrator(pipeline_id)
 
-        # Fault tolerance components with state management
         self.sharded_state_manager = StateManager(pipeline_id, "./state")
         self._state_manager = self.sharded_state_manager
         self.retry_handler = RetryHandler(max_retries=max_retries, base_delay=retry_delay)
         self.circuit_breaker = CircuitBreaker()
         self.dlq = DeadLetterQueue(self.dlq_path)
-        
-        # Data transformation component
+
         self.data_transformer = DataTransformer()
 
-        # Metrics tracking with Pydantic validation
         self.metrics = PipelineMetrics()
 
-        # Stage configurations
         self.stage_configs = PipelineStagesConfig()
 
+    async def stream_data(self, pipeline: ResolvedPipeline) -> None:
+        """Process all streams concurrently."""
 
-    async def stream_data(self, pipeline_config: Dict[str, Any]) -> None:
-        """Process all streams concurrently with state management."""
-
-        pipeline_id = pipeline_config["pipeline_id"]
-        streams = pipeline_config.get("streams", {})
-
+        streams = pipeline.streams
         if not streams:
             raise ConfigurationError("No streams configured in pipeline")
 
-        logger.info(f"Starting pipeline: {pipeline_id}")
+        logger.info(f"Starting pipeline: {pipeline.pipeline_id}")
         logger.info(f"Processing {len(streams)} streams concurrently")
-            
-        # Start new run
-        run_id = self.state_manager.start_run(pipeline_config)
+
+        run_id = self.state_manager.start_run({"pipeline_id": pipeline.pipeline_id})
         logger.info(f"Started state run: {run_id}")
 
-        # Initialize in-run commit tracker
         self.state_manager.init_commit_tracker(run_id)
 
         stream_exceptions = []
         stream_tasks = []
-        
-        try:
-            # Create a task for each stream with names for better debugging
-            for stream_id, stream_config in streams.items():
-                stream_name = stream_config.get('name', stream_id)
-                logger.info(f"Starting stream: {stream_name}")
-                
-                task = asyncio.create_task(
-                    self._process_stream(
-                        stream_id=stream_id,
-                        stream_config=stream_config,
-                        pipeline_config=pipeline_config
-                    ),
-                    name=f"stream-{stream_name}"
-                )
-                stream_tasks.append((stream_id, stream_name, task))
 
-            # Wait for all streams with exception collection
+        try:
+            for stream in streams:
+                logger.info(f"Starting stream: {stream.stream_id}")
+                task = asyncio.create_task(
+                    self._process_stream(stream=stream, pipeline=pipeline),
+                    name=f"stream-{stream.stream_id}"
+                )
+                stream_tasks.append((stream.stream_id, task))
+
             results = await asyncio.gather(
-                *[task for _, _, task in stream_tasks], 
+                *[task for _, task in stream_tasks],
                 return_exceptions=True
             )
-            
-            # Collect exceptions using Python 3.11+ pattern
-            for (stream_id, stream_name, _), result in zip(stream_tasks, results):
+
+            for (stream_id, _), result in zip(stream_tasks, results):
                 if isinstance(result, Exception):
                     stream_error = StreamProcessingError(
-                        f"Stream processing failed: {result}", 
+                        f"Stream processing failed: {result}",
                         stream_id=stream_id,
                         original_error=result
                     )
                     stream_exceptions.append(stream_error)
                     self.metrics.increment_streams_failed()
-                    logger.error(f"Stream {stream_name} failed: {result}")
+                    logger.error(f"Stream {stream_id} failed: {result}")
                 else:
                     self.metrics.increment_streams_processed()
-                    logger.info(f"Stream {stream_name} completed successfully")
+                    logger.info(f"Stream {stream_id} completed successfully")
 
-            # Handle collected exceptions with ExceptionGroup
             if stream_exceptions:
                 if len(stream_exceptions) == len(streams):
-                    # All streams failed - critical failure
                     logger.error("All streams failed - pipeline failed completely")
                     raise ExceptionGroup("All streams failed", stream_exceptions)
                 else:
-                    # Partial failure - log but allow pipeline to complete
-                    logger.warning(f"Pipeline completed with {len(stream_exceptions)} failed streams out of {len(streams)}")
-                    # Could optionally raise ExceptionGroup based on failure threshold
+                    logger.warning(
+                        f"Pipeline completed with {len(stream_exceptions)} failed "
+                        f"streams out of {len(streams)}"
+                    )
             else:
-                logger.info(f"Pipeline {pipeline_id} completed successfully - all {len(streams)} streams processed")
+                logger.info(
+                    f"Pipeline {pipeline.pipeline_id} completed successfully - "
+                    f"all {len(streams)} streams processed"
+                )
 
         except* StreamProcessingError as eg:
-            # Handle stream processing errors specifically (Python 3.11+)
             logger.error(f"Stream processing errors occurred: {len(eg.exceptions)} streams failed")
             for exc in eg.exceptions:
                 logger.error(f"  - {exc}")
-            # Cancel remaining tasks
-            for _, _, task in stream_tasks:
+            for _, task in stream_tasks:
                 if not task.done():
                     task.cancel()
             raise
         except* Exception as eg:
-            # Handle other unexpected errors (Python 3.11+)
             logger.error(f"Unexpected errors in pipeline: {len(eg.exceptions)} errors")
             for exc in eg.exceptions:
                 logger.error(f"  - Unexpected error: {exc}")
-            # Cancel remaining tasks
-            for _, _, task in stream_tasks:
+            for _, task in stream_tasks:
                 if not task.done():
                     task.cancel()
             raise
 
     async def _process_stream(
         self,
-        stream_id: str,
-        stream_config: Dict[str, Any],
-        pipeline_config: Dict[str, Any]
+        stream: ResolvedStream,
+        pipeline: ResolvedPipeline,
     ) -> None:
         """Process a single stream with extract-transform-load pipeline."""
 
-        stream_name = stream_config.get('name', stream_id)
-        logger.info(f"Processing stream: {stream_name}")
+        stream_id = stream.stream_id
+        logger.info(f"Processing stream: {stream_id}")
 
         source_connector = None
         grpc_client = None
@@ -212,85 +189,63 @@ class StreamingEngine:
         error_message: Optional[str] = None
 
         try:
-            source_cfg = stream_config["source"]
-            destination_cfg = stream_config["destination"]
+            source = stream.source
+            dest = stream.get_primary_destination()
 
-            source_connector = self._create_source_connector(source_cfg)
+            source_connector = self._create_source_connector(source)
 
             stream_dlq_path = f"{self.dlq.dlq_path}/{stream_id}"
             stream_dlq = DeadLetterQueue(stream_dlq_path)
 
-            runtime = source_cfg.get("_runtime")
-            if not runtime:
-                raise StreamConfigurationError(
-                    "Missing _runtime in source config",
-                    stream_id=stream_id,
-                )
-            await source_connector.connect(runtime)
+            await source_connector.connect(source.runtime)
 
             run_id = self.state_manager.current_run_id or get_or_generate_run_id()
 
-            grpc_client = self._create_grpc_client(destination_cfg)
+            grpc_client = self._create_grpc_client(dest)
             connected = await grpc_client.connect()
             if not connected:
                 raise StreamProcessingError(
-                    f"Failed to connect to gRPC destination for stream {stream_name}",
+                    f"Failed to connect to gRPC destination for stream {stream_id}",
                     stream_id=stream_id,
                 )
 
             schema_accepted = await grpc_client.start_stream(
                 run_id=run_id,
                 stream_id=stream_id,
-                schema_config=destination_cfg,
+                schema_config={"write_mode": dest.config.write.mode.value},
             )
             if not schema_accepted:
                 raise StreamProcessingError(
-                    f"Destination rejected schema for stream {stream_name}",
+                    f"Destination rejected schema for stream {stream_id}",
                     stream_id=stream_id,
                 )
-            logger.info(f"Stream {stream_name}: gRPC stream started, schema accepted")
+            logger.info(f"Stream {stream_id}: gRPC stream started, schema accepted")
 
             extract_queue = Queue(maxsize=self.buffer_size)
             transform_queue = Queue(maxsize=self.buffer_size)
             load_queue = Queue(maxsize=self.buffer_size)
 
-            # Per-stream context handed to each pipeline stage. Carries
-            # only what the stages actually read; the contract source and
-            # destination dicts are nested verbatim.
-            stream_processing_config = {
-                "pipeline_id": pipeline_config["pipeline_id"],
-                "stream_id": stream_id,
-                "stream_name": stream_name,
-                "source": source_cfg,
-                "destination": destination_cfg,
-                "mapping": stream_config.get("mapping") or {},
-                "runtime": pipeline_config.get("runtime") or {},
-            }
-
-            # Start pipeline stages for this stream
             tasks = self._create_pipeline_stages(
                 source_connector=source_connector,
                 grpc_client=grpc_client,
                 extract_queue=extract_queue,
                 transform_queue=transform_queue,
                 load_queue=load_queue,
-                stream_processing_config=stream_processing_config,
+                stream=stream,
+                pipeline=pipeline,
                 stream_dlq=stream_dlq,
-                stream_name=stream_name,
                 run_id=run_id,
                 stream_metrics=stream_metrics,
             )
 
-            # Wait for all stream stages to complete
             await asyncio.gather(*tasks)
 
-            logger.info(f"Stream {stream_name} completed successfully")
+            logger.info(f"Stream {stream_id} completed successfully")
 
         except Exception as e:
             status = "failed"
             error_message = str(e)
-            logger.exception("Stream %s processing failed: %s", stream_name, e)
-            # Cancel any running tasks for this stream
+            logger.exception("Stream %s processing failed: %s", stream_id, e)
             for task in tasks:
                 if not task.done():
                     task.cancel()
@@ -298,21 +253,19 @@ class StreamingEngine:
 
         finally:
             end_time = datetime.now(timezone.utc)
-            # Clean up connections for this stream
             try:
                 if source_connector:
                     await source_connector.disconnect()
                 if grpc_client:
                     await grpc_client.disconnect()
-                logger.debug(f"Stream {stream_name} connectors disconnected successfully")
+                logger.debug(f"Stream {stream_id} connectors disconnected successfully")
             except Exception as e:
                 logger.warning(
                     "Failed to disconnect connectors for stream %s: %s",
-                    stream_name, e, exc_info=True,
+                    stream_id, e, exc_info=True,
                 )
 
             try:
-                pipeline_name = pipeline_config.get("name")
                 record = create_metrics_record(
                     run_id=self.state_manager.current_run_id or get_or_generate_run_id(),
                     pipeline_id=self.pipeline_id,
@@ -323,7 +276,7 @@ class StreamingEngine:
                     batches_processed=stream_metrics["batches_processed"],
                     status=status,
                     error_message=error_message,
-                    pipeline_name=pipeline_name,
+                    pipeline_name=pipeline.display_name,
                 )
                 if os.getenv("METRICS_ENABLED", "false").lower() == "true":
                     emit_metrics_log({
@@ -331,64 +284,72 @@ class StreamingEngine:
                         "stream_id": stream_id,
                         **record.model_dump(),
                     })
-                    logger.info(f"Emitted stream metrics for {stream_name}")
+                    logger.info(f"Emitted stream metrics for {stream_id}")
             except Exception as metrics_error:
                 logger.error(
                     "Failed to emit stream metrics for %s: %s",
-                    stream_name, metrics_error, exc_info=True,
+                    stream_id, metrics_error, exc_info=True,
                 )
 
     async def _extract_stage(
-        self, source_connector: BaseConnector, queue: Queue, config: Dict[str, Any]
+        self,
+        source_connector: BaseConnector,
+        queue: Queue,
+        stream: ResolvedStream,
     ):
-        """Extract data from source in batches with state management."""
-        stream_name = config["stream_name"]
-        logger.debug(f"Starting extract stage for stream {stream_name}")
+        """Extract data from source in batches."""
+        stream_id = stream.stream_id
+        logger.debug(f"Starting extract stage for stream {stream_id}")
 
         try:
-            # The connectors read the contract documents directly off the
-            # source config (``endpoint_document``, ``stream_source``).
-            # No flattening or replication-field injection is needed.
-            source_config = config["source"]
-            state_stream_name = config["stream_id"]
-            partition: Dict[str, Any] = {}
-
             batch_count = 0
             async for batch in source_connector.read_batches(
-                source_config,
+                source=stream.source,
                 state_manager=self.state_manager,
-                stream_name=state_stream_name,
-                partition=partition,
+                stream_name=stream_id,
+                partition={},
                 batch_size=self.batch_size,
             ):
                 await queue.put(batch)
                 batch_count += 1
-                logger.debug(f"Stream {stream_name}: Extracted batch {batch_count} with {len(batch)} records")
+                logger.debug(
+                    f"Stream {stream_id}: Extracted batch {batch_count} "
+                    f"with {len(batch)} records"
+                )
 
-            # Signal end of stream
             await queue.put(None)
-            logger.info(f"Stream {stream_name}: Extract stage completed with {batch_count} batches")
+            logger.info(
+                f"Stream {stream_id}: Extract stage completed with {batch_count} batches"
+            )
 
         except Exception as e:
             logger.exception(
-                "Stream %s: Extract stage failed: %s", stream_name, e,
+                "Stream %s: Extract stage failed: %s", stream_id, e,
             )
-            await queue.put(None)  # Signal end even on error
+            await queue.put(None)
             raise
 
     async def _transform_stage(
         self,
         input_queue: Queue,
         output_queue: Queue,
-        config: Dict[str, Any],
+        stream: ResolvedStream,
         stream_metrics: Dict[str, int],
     ):
-        """Transform data with field mappings and validation."""
-        stream_name = config["stream_name"]
-        logger.debug(f"Starting transform stage for stream {stream_name}")
+        """Transform data with field mappings."""
+        stream_id = stream.stream_id
+        logger.debug(f"Starting transform stage for stream {stream_id}")
 
-        assignments = (config.get("mapping") or {}).get("assignments") or []
-        output_schema = build_output_schema(assignments) if assignments else None
+        assignments_raw = [
+            _translate_assignment(a.model_dump()) for a in stream.mapping.assignments
+        ]
+        output_schema = build_output_schema(assignments_raw) if assignments_raw else None
+
+        transform_config = {
+            "stream_id": stream_id,
+            "mapping": {"assignments": assignments_raw},
+        }
+
         batch_count = 0
         try:
             while True:
@@ -396,12 +357,12 @@ class StreamingEngine:
                 if batch is None:
                     break
 
-                if not assignments:
+                if not assignments_raw:
                     transformed_batch = batch
                 else:
                     pylist = batch.to_pylist()
                     transformed_pylist = await self.data_transformer.apply_transformations(
-                        pylist, config
+                        pylist, transform_config
                     )
                     transformed_batch = pa.RecordBatch.from_pylist(
                         transformed_pylist, schema=output_schema,
@@ -413,15 +374,16 @@ class StreamingEngine:
                 self.metrics.increment_batches_processed()
                 stream_metrics["batches_processed"] += 1
 
-            # Signal end of stream
             await output_queue.put(None)
-            logger.info(f"Stream {stream_name}: Transform stage completed with {batch_count} batches")
+            logger.info(
+                f"Stream {stream_id}: Transform stage completed with {batch_count} batches"
+            )
 
         except Exception as e:
             logger.exception(
-                "Stream %s: Transform stage failed: %s", stream_name, e,
+                "Stream %s: Transform stage failed: %s", stream_id, e,
             )
-            await output_queue.put(None)  # Signal end even on error
+            await output_queue.put(None)
             self.metrics.increment_batches_failed()
             stream_metrics["batches_failed"] += 1
             raise
@@ -431,47 +393,32 @@ class StreamingEngine:
         input_queue: Queue,
         output_queue: Queue,
         grpc_client: DestinationGRPCClient,
-        config: Dict[str, Any],
-        stream_dlq: 'DeadLetterQueue',
+        stream: ResolvedStream,
+        pipeline: ResolvedPipeline,
+        stream_dlq: "DeadLetterQueue",
         run_id: str,
         stream_metrics: Dict[str, int],
     ) -> None:
-        """
-        Load transformed data to destination via gRPC streaming.
+        """Load transformed data to destination via gRPC streaming."""
+        stream_id = stream.stream_id
 
-        Implements strict in-order: send batch -> await ACK -> send next.
-
-        Args:
-            input_queue: Queue of transformed batches
-            output_queue: Queue for checkpoint stage
-            grpc_client: Connected gRPC client
-            config: Stream processing configuration
-            stream_dlq: Dead letter queue for failed batches
-            run_id: Unique run identifier
-        """
-        stream_name = config["stream_name"]
-        stream_id = config["stream_id"]
-
-        # Source-side contract dict carries replication and primary-key
-        # metadata. Record IDs hash the source primary key (stable across
-        # the pipeline); cursor field comes from the same replication
-        # block the source connector uses.
-        stream_source = (config.get("source") or {}).get("stream_source") or {}
-        replication = stream_source.get("replication") or {}
-        cursor_field = replication.get("cursor_field")
+        # Typed access — no dict key lookups.
+        replication = stream.source.config.replication
+        cursor_field = replication.cursor_field
         if isinstance(cursor_field, list):
             cursor_field = cursor_field[0] if cursor_field else None
-        tie_breaker_fields = replication.get("tie_breaker_fields")
-        primary_key_fields = list(stream_source.get("primary_keys") or [])
+        tie_breaker_fields = replication.tie_breaker_fields
+        primary_key_fields = list(stream.source.config.primary_keys or [])
 
-        logger.info(f"Stream {stream_name}: Starting gRPC load stage")
+        error_strategy = (
+            pipeline.runtime.error_handling.get("strategy", "fail")
+        )
+
+        logger.info(f"Stream {stream_id}: Starting gRPC load stage")
 
         batch_seq = 0
         max_retries = self.max_retries
         retry_base_delay = self.retry_delay
-        error_strategy = (
-            (config.get("runtime") or {}).get("error_handling") or {}
-        ).get("strategy", "fail")
 
         try:
             while True:
@@ -481,18 +428,14 @@ class StreamingEngine:
 
                 batch_seq += 1
 
-                # Materialize once for record-id generation, cursor
-                # extraction, and DLQ payloads. The Arrow batch travels
-                # the wire untouched.
                 record_count = batch.num_rows
                 record_dicts = batch.to_pylist()
 
                 logger.debug(
-                    f"Stream {stream_name}: Processing batch {batch_seq} "
+                    f"Stream {stream_id}: Processing batch {batch_seq} "
                     f"with {record_count} records"
                 )
 
-                # Generate stable record IDs for DLQ correlation
                 record_ids = [
                     generate_record_id(
                         record=record,
@@ -504,7 +447,6 @@ class StreamingEngine:
                     for i, record in enumerate(record_dicts)
                 ]
 
-                # Compute MAX cursor value in batch (batch may be unordered)
                 cursor = None
                 if cursor_field:
                     cursor = compute_max_cursor(
@@ -513,7 +455,6 @@ class StreamingEngine:
                         tie_breaker_fields=tie_breaker_fields,
                     )
 
-                # In-run idempotency check (skip send, don't re-count)
                 if self.state_manager.commit_tracker:
                     existing = self.state_manager.commit_tracker.check_committed(
                         stream_id=stream_id,
@@ -521,15 +462,11 @@ class StreamingEngine:
                     )
                     if existing:
                         logger.info(
-                            f"Stream {stream_name}: Batch {batch_seq} already committed "
+                            f"Stream {stream_id}: Batch {batch_seq} already committed "
                             f"(in-run), skipping send"
                         )
-                        # Skip metrics increment and output_queue - batch was already counted
-                        # when first committed. Checkpoint stage will show unique batches
-                        # written this run, not total send attempts.
                         continue
 
-                # Retry loop for RETRYABLE_FAILURE
                 retry_count = 0
                 while True:
                     result: BatchResult = await grpc_client.send_batch(
@@ -542,29 +479,26 @@ class StreamingEngine:
                     )
 
                     if result.status == AckStatus.ACK_STATUS_SUCCESS:
-                        # Batch committed, persist cursor
                         cursor_data = {}
                         hwm = ""
                         if result.committed_cursor:
                             state_dict = cursor_to_state_dict(result.committed_cursor)
-                            state_stream_name = stream_id
                             cursor_data = state_dict.get("cursor", {})
                             primary = cursor_data.get("primary", {})
                             hwm = primary.get("value", datetime.now(timezone.utc).isoformat())
                             self.state_manager.save_stream_checkpoint(
-                                stream_name=state_stream_name,
+                                stream_name=stream_id,
                                 partition={},
                                 cursor=cursor_data,
                                 hwm=hwm,
                             )
                         logger.debug(
-                            f"Stream {stream_name}: Batch {batch_seq} committed, "
+                            f"Stream {stream_id}: Batch {batch_seq} committed, "
                             f"{result.records_written} records written"
                         )
                         self.metrics.increment_records_processed(result.records_written)
                         stream_metrics["records_processed"] += result.records_written
 
-                        # Record batch commit for in-run idempotency
                         if self.state_manager.commit_tracker:
                             self.state_manager.commit_tracker.record_commit(
                                 stream_id=stream_id,
@@ -573,7 +507,6 @@ class StreamingEngine:
                                 cursor_bytes=result.committed_cursor.token if result.committed_cursor else b"",
                             )
 
-                        # Emit per-batch metrics
                         if os.getenv("METRICS_ENABLED", "false").lower() == "true":
                             emit_metrics_log({
                                 "type": "batch",
@@ -594,23 +527,20 @@ class StreamingEngine:
                         break
 
                     elif result.status == AckStatus.ACK_STATUS_ALREADY_COMMITTED:
-                        # Idempotent replay - batch was already processed
                         cursor_data = {}
                         hwm = ""
                         if result.committed_cursor:
                             state_dict = cursor_to_state_dict(result.committed_cursor)
-                            state_stream_name = stream_id
                             cursor_data = state_dict.get("cursor", {})
                             primary = cursor_data.get("primary", {})
                             hwm = primary.get("value", datetime.now(timezone.utc).isoformat())
                             self.state_manager.save_stream_checkpoint(
-                                stream_name=state_stream_name,
+                                stream_name=stream_id,
                                 partition={},
                                 cursor=cursor_data,
                                 hwm=hwm,
                             )
 
-                        # Record batch commit for in-run idempotency (prevents re-send on retry)
                         if self.state_manager.commit_tracker:
                             self.state_manager.commit_tracker.record_commit(
                                 stream_id=stream_id,
@@ -620,7 +550,7 @@ class StreamingEngine:
                             )
 
                         logger.info(
-                            f"Stream {stream_name}: Batch {batch_seq} already committed "
+                            f"Stream {stream_id}: Batch {batch_seq} already committed "
                             "(idempotent replay)"
                         )
                         await output_queue.put(batch)
@@ -630,7 +560,7 @@ class StreamingEngine:
                         retry_count += 1
                         if retry_count > max_retries:
                             logger.error(
-                                f"Stream {stream_name}: Batch {batch_seq} failed after "
+                                f"Stream {stream_id}: Batch {batch_seq} failed after "
                                 f"{max_retries} retries: {result.failure_summary}"
                             )
                             self.metrics.increment_records_failed(record_count)
@@ -643,19 +573,17 @@ class StreamingEngine:
                                 )
                             break
 
-                        # Exponential backoff
                         delay = retry_base_delay * (2 ** (retry_count - 1))
                         logger.warning(
-                            f"Stream {stream_name}: Batch {batch_seq} retryable failure, "
+                            f"Stream {stream_id}: Batch {batch_seq} retryable failure, "
                             f"retry {retry_count}/{max_retries} after {delay:.2f}s: "
                             f"{result.failure_summary}"
                         )
                         await asyncio.sleep(delay)
 
                     elif result.status == AckStatus.ACK_STATUS_FATAL_FAILURE:
-                        # Non-retryable failure - send entire batch to DLQ
                         logger.error(
-                            f"Stream {stream_name}: Batch {batch_seq} fatal failure: "
+                            f"Stream {stream_id}: Batch {batch_seq} fatal failure: "
                             f"{result.failure_summary}"
                         )
                         self.metrics.increment_records_failed(record_count)
@@ -663,21 +591,18 @@ class StreamingEngine:
                         stream_metrics["records_failed"] += record_count
                         stream_metrics["batches_failed"] += 1
 
-                        # Send entire batch to DLQ with record_ids for correlation
                         if error_strategy == "dlq":
                             await stream_dlq.send_batch(
                                 record_dicts, result.failure_summary, self.pipeline_id
                             )
 
-                        # Raise exception to mark stream as failed
                         raise StreamProcessingError(
                             f"Batch {batch_seq} fatal failure: {result.failure_summary}"
                         )
 
                     else:
-                        # Unknown status - treat as fatal
                         logger.error(
-                            f"Stream {stream_name}: Batch {batch_seq} unknown status: "
+                            f"Stream {stream_id}: Batch {batch_seq} unknown status: "
                             f"{result.status}"
                         )
                         self.metrics.increment_records_failed(record_count)
@@ -690,23 +615,22 @@ class StreamingEngine:
                             )
                         break
 
-            # Signal end of stream
             await output_queue.put(None)
             logger.info(
-                f"Stream {stream_name}: gRPC load stage completed with {batch_seq} batches"
+                f"Stream {stream_id}: gRPC load stage completed with {batch_seq} batches"
             )
 
         except Exception as e:
             logger.exception(
-                "Stream %s: gRPC load stage failed: %s", stream_name, e,
+                "Stream %s: gRPC load stage failed: %s", stream_id, e,
             )
             await output_queue.put(None)
             raise
 
-    async def _checkpoint_stage(self, input_queue: Queue, config: Dict[str, Any]):
-        """Checkpoint processing progress with state management."""
-        stream_name = config["stream_name"]
-        logger.debug(f"Starting checkpoint stage for stream {stream_name}")
+    async def _checkpoint_stage(self, input_queue: Queue, stream: ResolvedStream):
+        """Track checkpoint progress."""
+        stream_id = stream.stream_id
+        logger.debug(f"Starting checkpoint stage for stream {stream_id}")
 
         batch_count = 0
         try:
@@ -714,27 +638,21 @@ class StreamingEngine:
                 batch = await input_queue.get()
                 if batch is None:
                     break
-
-                # Checkpoint is handled by the API connector during read_batches
-                # This stage just tracks completion
                 batch_count += 1
 
-            logger.info(f"Stream {stream_name}: Checkpoint stage completed with {batch_count} batches")
+            logger.info(
+                f"Stream {stream_id}: Checkpoint stage completed with {batch_count} batches"
+            )
 
         except Exception as e:
             logger.exception(
-                "Stream %s: Checkpoint stage failed: %s", stream_name, e,
+                "Stream %s: Checkpoint stage failed: %s", stream_id, e,
             )
             raise
 
-
-    def _create_source_connector(self, config: Dict[str, Any]) -> BaseConnector:
-        """Create source connector based on configuration."""
-        runtime = config.get("_runtime")
-        if not runtime:
-            raise ValueError("Missing _runtime in source config")
-
-        connector_type = runtime.connector_type
+    def _create_source_connector(self, source: ResolvedSource) -> BaseConnector:
+        """Create source connector based on the resolved source runtime."""
+        connector_type = source.runtime.connector_type
 
         if connector_type == "api":
             from ..source.connectors.api import APIConnector
@@ -743,7 +661,7 @@ class StreamingEngine:
             from ..source.connectors.database import DatabaseConnector
             return DatabaseConnector()
         else:
-            raise ValueError(f"Unknown connector_type '{connector_type}'")
+            raise ValueError(f"Unsupported source connector kind: {connector_type!r}")
 
     def _create_pipeline_stages(
         self,
@@ -752,72 +670,53 @@ class StreamingEngine:
         extract_queue: Queue,
         transform_queue: Queue,
         load_queue: Queue,
-        stream_processing_config: Dict[str, Any],
+        stream: ResolvedStream,
+        pipeline: ResolvedPipeline,
         stream_dlq,
-        stream_name: str,
         run_id: str,
         stream_metrics: Dict[str, int],
     ) -> List[asyncio.Task]:
-        """Create all pipeline stage tasks using factory pattern."""
+        """Create all pipeline stage tasks."""
+        stream_id = stream.stream_id
         return [
             asyncio.create_task(
-                self._extract_stage(
-                    source_connector, extract_queue, stream_processing_config
-                ),
-                name=f"extract-{stream_name}"
+                self._extract_stage(source_connector, extract_queue, stream),
+                name=f"extract-{stream_id}"
             ),
             asyncio.create_task(
                 self._transform_stage(
-                    extract_queue,
-                    transform_queue,
-                    stream_processing_config,
-                    stream_metrics,
+                    extract_queue, transform_queue, stream, stream_metrics,
                 ),
-                name=f"transform-{stream_name}"
+                name=f"transform-{stream_id}"
             ),
             asyncio.create_task(
                 self._load_stage(
                     input_queue=transform_queue,
                     output_queue=load_queue,
                     grpc_client=grpc_client,
-                    config=stream_processing_config,
+                    stream=stream,
+                    pipeline=pipeline,
                     stream_dlq=stream_dlq,
                     run_id=run_id,
                     stream_metrics=stream_metrics,
                 ),
-                name=f"load-{stream_name}"
+                name=f"load-{stream_id}"
             ),
             asyncio.create_task(
-                self._checkpoint_stage(load_queue, stream_processing_config),
-                name=f"checkpoint-{stream_name}"
+                self._checkpoint_stage(load_queue, stream),
+                name=f"checkpoint-{stream_id}"
             ),
         ]
 
     def _create_grpc_client(
         self,
-        dest_config: Dict[str, Any],
+        dest: "ResolvedDestination",
     ) -> DestinationGRPCClient:
-        """
-        Create a gRPC client for destination streaming.
-
-        Configuration priority:
-        1. Environment variables (DESTINATION_GRPC_HOST, DESTINATION_GRPC_PORT)
-        2. Config dict (destination.grpc.host, destination.grpc.port)
-        3. Defaults (localhost:50051)
-
-        Args:
-            dest_config: Destination configuration
-
-        Returns:
-            Configured DestinationGRPCClient instance
-        """
-        grpc_config = dest_config.get("grpc", {})
-
-        host = os.getenv("DESTINATION_GRPC_HOST") or grpc_config.get("host", "localhost")
-        port = int(os.getenv("DESTINATION_GRPC_PORT", "0")) or grpc_config.get("port", 50051)
-        timeout = int(os.getenv("GRPC_TIMEOUT_SECONDS", "0")) or grpc_config.get("timeout_seconds", 300)
-        max_retries = self.max_retries
-        max_message_size = grpc_config.get("max_message_size", 16 * 1024 * 1024)
+        """Create gRPC client. Env vars take precedence over defaults."""
+        host = os.getenv("DESTINATION_GRPC_HOST", "localhost")
+        port = int(os.getenv("DESTINATION_GRPC_PORT", "50051"))
+        timeout = int(os.getenv("GRPC_TIMEOUT_SECONDS", "300"))
+        max_message_size = 16 * 1024 * 1024
 
         logger.info(f"Creating gRPC client for {host}:{port}")
 
@@ -825,34 +724,22 @@ class StreamingEngine:
             host=host,
             port=port,
             timeout_seconds=timeout,
-            max_retries=max_retries,
+            max_retries=self.max_retries,
             max_message_size=max_message_size,
         )
 
-
-    def _get_stream_name(self, config: Dict[str, Any]) -> str:
-        """Generate stream name for state management.
-
-        Returns ``endpoint.<scope>:<connection_id>/<endpoint_id>`` (the
-        ``endpoint.`` prefix namespaces the key in shared state stores)
-        so the metric path is stable across runs.
-        """
-        source = config.get("source")
-        if isinstance(source, dict):
-            ref = source.get("endpoint_ref")
-            if isinstance(ref, dict):
-                return (
-                    f"endpoint.{ref.get('scope', '')}:"
-                    f"{ref.get('connection_id', '')}/{ref.get('endpoint_id', '')}"
-                )
-        return config.get("pipeline_id", "unknown-stream")
+    def _get_stream_name(self, stream: ResolvedStream) -> str:
+        """Generate a stable stream name for state management."""
+        ref = stream.source.config.endpoint_ref
+        if ref:
+            return f"endpoint.{ref.scope}:{ref.connection_id}/{ref.endpoint_id}"
+        return stream.pipeline_id or "unknown-stream"
 
     def get_metrics(self) -> PipelineMetrics:
-        """Get pipeline execution metrics as a validated Pydantic model."""
+        """Get pipeline execution metrics."""
         return self.metrics
 
     def get_state_manager(self) -> StateManager:
-        """Get the state manager instance."""
         return self.state_manager
 
     @property

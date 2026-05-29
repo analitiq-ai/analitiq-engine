@@ -27,6 +27,8 @@ from .base import BaseConnector, ConnectionError, ReadError
 from ..drivers.adbc_reader import open_adbc_reader
 from ...destination.schema_contract import SchemaContract
 from ...engine.type_map import InvalidTypeMapError, UnmappedTypeError
+from ...models.resolved import ResolvedSource
+from ...models.stream import SourceConfig, StreamFilter
 from ...secrets.exceptions import PlaceholderExpansionError
 from ...shared.connection_runtime import ConnectionRuntime
 from ...shared.database_utils import acquire_connection, normalize_adbc_schema
@@ -124,7 +126,7 @@ class DatabaseConnector(BaseConnector):
 
     async def read_batches(
         self,
-        config: Dict[str, Any],
+        source: ResolvedSource,
         *,
         state_manager: StateManager,
         stream_name: str,
@@ -140,40 +142,30 @@ class DatabaseConnector(BaseConnector):
             raise ReadError(
                 "DatabaseConnector.read_batches() called before connect()"
             )
-
-        endpoint_doc = config.get("endpoint_document")
-        if not endpoint_doc:
-            raise ReadError(
-                "DatabaseConnector: source config missing 'endpoint_document'"
-            )
-        database_object = endpoint_doc.get("database_object") or {}
-        table_name = database_object.get("name")
-        if not table_name:
-            raise ReadError(
-                "endpoint document missing database_object.name"
-            )
-        # No default schema: dialects without a schema concept
-        # (sqlite, duckdb) would emit invalid ``public.<table>``
-        # references if we forced one. When the endpoint omits
-        # ``schema``, QueryBuilder emits an unqualified table name
-        # and the driver uses the connection's current
-        # schema/database -- which is what every dialect expects.
-        schema_name = database_object.get("schema")
-
         if self._runtime is None:
             raise ReadError(
                 "DatabaseConnector.read_batches() called before connect()"
             )
-        stream_source = config.get("stream_source") or {}
-        schema_contract = SchemaContract(endpoint_doc)
-        column_names = self._select_columns(endpoint_doc, stream_source)
-        filters = self._build_filters(stream_source.get("filters") or [])
 
-        replication = stream_source.get("replication") or {}
-        cursor_field = replication.get("cursor_field")
+        endpoint_doc = source.endpoint
+        database_object = endpoint_doc.get("database_object") or {}
+        table_name = database_object.get("name")
+        if not table_name:
+            raise ReadError("endpoint document missing database_object.name")
+        # No default schema: dialects without a schema concept (sqlite, duckdb)
+        # would emit invalid ``public.<table>`` references if we forced one.
+        schema_name = database_object.get("schema")
+
+        schema_contract = SchemaContract(endpoint_doc)
+        # Typed access: selected_columns and filters come from the resolved config.
+        column_names = self._select_columns(endpoint_doc, source.config)
+        filters = self._build_typed_filters(list(source.config.filters))
+
+        replication = source.config.replication
+        cursor_field = replication.cursor_field
         if isinstance(cursor_field, list):
             cursor_field = cursor_field[0] if cursor_field else None
-        replication_method = replication.get("method", "full_refresh")
+        replication_method = replication.method.value
 
         if (
             replication_method == "incremental"
@@ -425,16 +417,25 @@ class DatabaseConnector(BaseConnector):
 
     @staticmethod
     def _select_columns(
-        endpoint_doc: Dict[str, Any], stream_source: Dict[str, Any]
+        endpoint_doc: Dict[str, Any],
+        source_config: "SourceConfig",
     ) -> List[str]:
-        selected = stream_source.get("selected_columns")
-        if selected:
-            return list(selected)
+        if source_config.selected_columns:
+            return list(source_config.selected_columns)
         columns = endpoint_doc.get("columns") or []
         return [c["name"] for c in columns if c.get("name")]
 
     @staticmethod
+    def _build_typed_filters(stream_filters: "List[StreamFilter]") -> List[Filter]:
+        return [
+            Filter(field=f.field, op=f.operator, value=f.value)
+            for f in stream_filters
+            if f.field
+        ]
+
+    @staticmethod
     def _build_filters(stream_filters: List[Dict[str, Any]]) -> List[Filter]:
+        """Legacy helper for raw dict filter lists (used by tests only)."""
         out: List[Filter] = []
         for f in stream_filters:
             field = f.get("field")

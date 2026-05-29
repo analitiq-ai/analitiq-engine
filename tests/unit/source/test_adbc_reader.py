@@ -17,12 +17,18 @@ These tests freeze:
 
 from __future__ import annotations
 
-from typing import Any, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from unittest.mock import AsyncMock, patch
 
 import pyarrow as pa
 import pytest
 
+from src.models.resolved import ResolvedSource
+from src.models.stream import (
+    EndpointRef, ReplicationConfig, ReplicationMethod, SourceConfig, StreamFilter,
+)
+from src.secrets import InMemorySecretsResolver
+from src.shared.connection_runtime import ConnectionRuntime
 from src.source.connectors.base import ReadError
 from src.source.connectors.database import DatabaseConnector
 from src.source.drivers.adbc_reader import AdbcReader, AdbcReaderClosedError
@@ -139,23 +145,62 @@ def _adbc_connector(pages: List[List[pa.RecordBatch]]) -> Tuple[DatabaseConnecto
     return connector, reader
 
 
-def _endpoint_config(filters=None, replication=None, columns=("id", "updated_at")):
-    return {
-        "endpoint_document": {
-            "database_object": {"name": "orders", "schema": "public"},
-            "columns": [{"name": c} for c in columns],
-        },
-        "stream_source": {
-            "filters": filters or [],
-            "replication": replication or {},
-        },
+def _dummy_runtime() -> ConnectionRuntime:
+    runtime = ConnectionRuntime(
+        raw_config={"parameters": {}},
+        connection_id="test-conn",
+        connector_type="database",
+        driver=None,
+        resolver=InMemorySecretsResolver({}),
+    )
+    return runtime
+
+
+def _resolved_source(
+    filters: Optional[List[Dict[str, Any]]] = None,
+    replication: Optional[Dict[str, Any]] = None,
+    columns: Tuple[str, ...] = ("id", "updated_at"),
+) -> ResolvedSource:
+    raw_rep = replication or {}
+    method_str = raw_rep.get("method", "full_refresh")
+    cursor_field_raw = raw_rep.get("cursor_field")
+    if isinstance(cursor_field_raw, list):
+        cursor_field = cursor_field_raw[0] if cursor_field_raw else None
+    else:
+        cursor_field = cursor_field_raw
+
+    stream_filters = [
+        StreamFilter(
+            field=f["field"],
+            operator=f.get("operator", "eq"),
+            value=f.get("value"),
+        )
+        for f in (filters or [])
+    ]
+    config = SourceConfig(
+        endpoint_ref=EndpointRef(
+            scope="connector",
+            connection_id="test-conn",
+            endpoint_id="orders",
+        ),
+        primary_keys=["id"],
+        replication=ReplicationConfig(
+            method=ReplicationMethod(method_str),
+            cursor_field=cursor_field,
+        ),
+        filters=stream_filters,
+    )
+    endpoint_doc: Dict[str, Any] = {
+        "database_object": {"name": "orders", "schema": "public"},
+        "columns": [{"name": c} for c in columns],
     }
+    return ResolvedSource(config=config, runtime=_dummy_runtime(), endpoint=endpoint_doc)
 
 
-async def _drain(connector, config, state_manager, batch_size=2):
+async def _drain(connector, source: ResolvedSource, state_manager, batch_size=2):
     out = []
     async for batch in connector.read_batches(
-        config,
+        source,
         state_manager=state_manager,
         stream_name="s",
         batch_size=batch_size,
@@ -184,11 +229,11 @@ class TestAdbcConnectorBranch:
         ) as sc:
             sc.return_value.cast_arrow_batch.side_effect = lambda b: b
             try:
-                config = _endpoint_config(
+                source = _resolved_source(
                     filters=[{"field": "status", "operator": "eq", "value": "active"}],
                     replication={"method": "incremental", "cursor_field": ["updated_at"]},
                 )
-                await _drain(connector, config, state_manager)
+                await _drain(connector, source, state_manager)
             finally:
                 connector._stop_patch()
 
@@ -209,10 +254,10 @@ class TestAdbcConnectorBranch:
         with patch("src.source.connectors.database.SchemaContract") as sc:
             sc.return_value.cast_arrow_batch.side_effect = lambda b: b
             try:
-                config = _endpoint_config(
+                source = _resolved_source(
                     filters=[{"field": "status", "operator": "eq", "value": "x"}],
                 )
-                await _drain(connector, config, state_manager)
+                await _drain(connector, source, state_manager)
             finally:
                 connector._stop_patch()
 
@@ -228,11 +273,9 @@ class TestAdbcConnectorBranch:
         connector, _ = _adbc_connector([])
         with patch("src.source.connectors.database.SchemaContract"):
             try:
-                config = _endpoint_config(columns=())
-                # endpoint columns empty AND no selected_columns -> guard fires.
-                config["endpoint_document"]["columns"] = []
+                source = _resolved_source(columns=())
                 with pytest.raises(ReadError, match="non-empty column projection"):
-                    await _drain(connector, config, state_manager)
+                    await _drain(connector, source, state_manager)
             finally:
                 connector._stop_patch()
 
@@ -247,7 +290,7 @@ class TestAdbcConnectorBranch:
             sc.return_value.cast_arrow_batch.side_effect = lambda b: b
             try:
                 with caplog.at_level("WARNING"):
-                    await _drain(connector, _endpoint_config(), state_manager)
+                    await _drain(connector, _resolved_source(), state_manager)
             finally:
                 connector._stop_patch()
 
@@ -269,11 +312,11 @@ class TestAdbcConnectorBranch:
         with patch("src.source.connectors.database.SchemaContract") as sc:
             sc.return_value.cast_arrow_batch.side_effect = lambda b: b
             try:
-                config = _endpoint_config(
+                source = _resolved_source(
                     filters=[{"field": "status", "operator": "eq", "value": "active"}],
                     replication={"method": "incremental", "cursor_field": ["updated_at"]},
                 )
-                await _drain(connector, config, state_manager, batch_size=2)
+                await _drain(connector, source, state_manager, batch_size=2)
             finally:
                 connector._stop_patch()
 
@@ -295,10 +338,10 @@ class TestAdbcConnectorBranch:
         with patch("src.source.connectors.database.SchemaContract") as sc:
             sc.return_value.cast_arrow_batch.side_effect = lambda b: b
             try:
-                config = _endpoint_config(
+                source = _resolved_source(
                     replication={"method": "incremental", "cursor_field": ["updated_at"]},
                 )
-                await _drain(connector, config, state_manager, batch_size=2)
+                await _drain(connector, source, state_manager, batch_size=2)
             finally:
                 connector._stop_patch()
 
@@ -320,7 +363,7 @@ class TestAdbcConnectorBranch:
                     )]
                     connector, _ = _adbc_connector([page, []])
                     try:
-                        await _drain(connector, _endpoint_config(), state_manager)
+                        await _drain(connector, _resolved_source(), state_manager)
                     finally:
                         connector._stop_patch()
 
@@ -344,6 +387,6 @@ class TestAdbcConnectorBranch:
             )
             try:
                 with pytest.raises(ReadError, match="positional qmark parameters"):
-                    await _drain(connector, _endpoint_config(), state_manager)
+                    await _drain(connector, _resolved_source(), state_manager)
             finally:
                 connector._stop_patch()
