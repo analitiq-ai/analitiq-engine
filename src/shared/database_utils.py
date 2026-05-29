@@ -40,6 +40,28 @@ def get_full_table_name(schema_name: str, table_name: str) -> str:
     return f"{schema_name}.{table_name}" if schema_name else table_name
 
 
+def normalize_adbc_schema(schema: str, driver: str) -> str:
+    """Normalize a schema name for an ADBC driver before it is quoted.
+
+    Snowflake folds unquoted identifiers to upper case; its built-in
+    default schema is unquoted ``PUBLIC``. The ADBC paths quote every
+    identifier, so a connector declaring the conventional lowercase
+    ``public`` would produce a quoted ``"public"`` that targets a
+    different (usually non-existent) schema. Upcasing ``public`` ->
+    ``PUBLIC`` makes the quoted form match the real schema; any other
+    case-sensitive name is preserved verbatim.
+
+    BigQuery and Postgres need no normalization (BigQuery datasets are
+    case-sensitive; Postgres folds unquoted to lowercase, so quoted
+    ``"public"`` already matches the conventional default). Shared by the
+    source reader and the destination handler so read and write resolve
+    the same physical schema.
+    """
+    if driver == "snowflake" and schema.lower() == "public":
+        return "PUBLIC"
+    return schema
+
+
 @asynccontextmanager
 async def acquire_connection(engine: AsyncEngine) -> AsyncIterator:
     """Yield an :class:`AsyncConnection` from *engine* for the lifetime of the

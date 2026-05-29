@@ -67,13 +67,27 @@ sqlalchemy[asyncio]>=2.0.0
 # numpy>=1.24.0
 pyarrow>=12.0.0
 
-# ADBC (Arrow Database Connectivity) fast path for the database
-# destination. Always installed in the Docker image; ``ADBC_FAST_PATH=1``
-# at runtime is what gates use. pip consumers see ADBC as the optional
-# ``adbc`` extra in pyproject.toml — the runtime image bundles it so a
-# flag flip needs no rebuild.
+# ADBC (Arrow Database Connectivity) drivers for the ADBC transport
+# (transport_type='adbc'). Postgres can use it as an alternative to
+# the asyncpg path (e.g. Redshift via the libpq-compatible driver).
+# pip consumers see ADBC as the optional ``adbc`` extra in
+# pyproject.toml — the runtime image bundles it so a connector flip
+# needs no rebuild.
 adbc-driver-manager>=1.1.0
 adbc-driver-postgresql>=1.1.0
+# Snowflake and BigQuery: no async SQLAlchemy driver, so they are
+# only reachable via transport_type='adbc' (see
+# src/shared/transport_factory.py). The wheels are always bundled
+# so a connector flip needs no rebuild.
+adbc-driver-snowflake>=1.1.0
+adbc-driver-bigquery>=1.1.0
+# Compile-only SQLAlchemy dialects for the ADBC source path: the shared
+# QueryBuilder compiles SELECTs (filters, cursor, qmark binds, identifier
+# quoting) against these dialects. They are never used to open a
+# connection -- reads/writes go through the ADBC driver above -- but the
+# dialect package must be importable for QueryBuilder to resolve it.
+snowflake-sqlalchemy>=1.5.0
+sqlalchemy-bigquery>=1.11.0
 
 # For NoSQL databases
 # motor>=3.0.0

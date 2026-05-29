@@ -6,8 +6,9 @@ that fills in credential values. It is the single place the engine touches
 provider configuration: everything provider-specific is encoded in the
 connector's ``transports`` block, resolved through the typed
 :class:`~src.engine.resolver.ResolutionContext`, and turned into a
-concrete transport (:class:`~src.shared.transport_factory.SqlAlchemyTransport`
-or :class:`~src.shared.transport_factory.HttpTransport`) by the transport
+concrete transport (:class:`~src.shared.transport_factory.SqlAlchemyTransport`,
+:class:`~src.shared.transport_factory.AdbcTransport`, or
+:class:`~src.shared.transport_factory.HttpTransport`) by the transport
 factory. The runtime never inspects host strings, header dicts, DSN
 formats, or SSL flags directly.
 
@@ -37,6 +38,7 @@ from src.secrets.protocol import SecretsResolver
 from src.secrets.exceptions import SecretNotFoundError, SecretResolutionError
 from src.shared.rate_limiter import RateLimiter
 from src.shared.transport_factory import (
+    AdbcTransport,
     HttpTransport,
     SqlAlchemyTransport,
     build_transport,
@@ -51,7 +53,13 @@ VALID_CONNECTOR_TYPES = frozenset({"database", "api", "file", "s3", "stdout"})
 
 def _derive_dialect(connector_definition: Optional[Mapping[str, Any]]) -> Optional[str]:
     """Return the base SQL dialect (e.g. ``postgresql``) from a connector
-    definition, or ``None`` if not a sqlalchemy connector."""
+    definition, or ``None`` if not a database connector.
+
+    Handles both ``sqlalchemy`` (``driver: 'postgresql+asyncpg'``) and
+    ``adbc`` (``driver: 'snowflake'``) transports — both store the
+    dialect/driver under ``transports[default].driver``; the SQLAlchemy
+    flavour is composite (``base+async_driver``) so we split on ``+``.
+    """
     if not connector_definition:
         return None
     transports = connector_definition.get("transports") or {}
@@ -59,7 +67,8 @@ def _derive_dialect(connector_definition: Optional[Mapping[str, Any]]) -> Option
     if not default_ref or default_ref not in transports:
         return None
     transport = transports[default_ref]
-    if transport.get("transport_type") != "sqlalchemy":
+    transport_type = transport.get("transport_type")
+    if transport_type not in ("sqlalchemy", "adbc"):
         return None
     driver = transport.get("driver")
     if not isinstance(driver, str) or not driver:
@@ -115,8 +124,12 @@ class ConnectionRuntime:
         self._resolved_config: Optional[Dict[str, Any]] = None
         self._transport_dialect: Optional[str] = None
         self._transport_driver: Optional[str] = None
-        self._tls_mode: Optional[str] = None
-        self._tls_ca_bundle_present: bool = False
+        # Set when materialize() built an AdbcTransport. Callers query
+        # ``is_adbc`` to choose between the SA path (engine-backed) and
+        # the ADBC-only path (cursor-backed); ``open_adbc_connection()``
+        # hands them a fresh DBAPI connection from the closure baked at
+        # materialize time.
+        self._adbc_transport: Optional[AdbcTransport] = None
 
         # Reference counting for shared ownership across streams
         self._ref_count = 0
@@ -146,24 +159,15 @@ class ConnectionRuntime:
 
     @property
     def driver_string(self) -> Optional[str]:
-        """Full SQLAlchemy driver string (``postgresql+asyncpg``) once the
-        transport has been materialized."""
+        """Driver identifier as materialised.
+
+        SA transports return the full SQLAlchemy driver string
+        (``postgresql+asyncpg``). ADBC transports return the ADBC
+        driver name (``snowflake``, ``bigquery``, ``postgresql``),
+        which is the closed-enum value the schema's
+        ``AdbcTransport.driver`` allows.
+        """
         return self._transport_driver
-
-    @property
-    def tls_mode(self) -> Optional[str]:
-        """Resolved ``tls.mode`` string (the connector's native vocabulary)
-        once materialized, or ``None`` if the transport has no TLS."""
-        return self._tls_mode
-
-    @property
-    def tls_ca_bundle_present(self) -> bool:
-        """True when materialisation consumed a CA PEM bundle. ADBC URI
-        builders use this to decide whether to demote: ADBC accepts
-        libpq ``sslmode=`` in the URI but cannot inline raw PEM, so
-        ``verify-ca`` / ``verify-full`` with a CA bundle must stay on
-        the SQLAlchemy path that holds the SSLContext."""
-        return self._tls_ca_bundle_present
 
     @property
     def raw_config(self) -> Dict[str, Any]:
@@ -244,8 +248,10 @@ class ConnectionRuntime:
                 self._engine = transport.engine
                 self._transport_driver = transport.driver
                 self._transport_dialect = transport.dialect
-                self._tls_mode = transport.tls_mode
-                self._tls_ca_bundle_present = transport.tls_ca_bundle_present
+            elif isinstance(transport, AdbcTransport):
+                self._adbc_transport = transport
+                self._transport_driver = transport.driver
+                self._transport_dialect = transport.driver
             elif isinstance(transport, HttpTransport):
                 self._session = transport.session
                 self._base_url = transport.base_url
@@ -269,11 +275,53 @@ class ConnectionRuntime:
 
     @property
     def engine(self) -> AsyncEngine:
-        if not self._materialized or self._engine is None:
+        if not self._materialized:
             raise RuntimeError(
-                "engine not available: call materialize() first or wrong connector_type"
+                "engine not available: call materialize() first"
+            )
+        if self._adbc_transport is not None and self._engine is None:
+            raise RuntimeError(
+                f"engine not available for {self._connection_id}: this runtime "
+                f"was materialized with transport_type='adbc' (driver="
+                f"{self._adbc_transport.driver!r}); use is_adbc / "
+                f"open_adbc_connection() instead"
+            )
+        if self._engine is None:
+            raise RuntimeError(
+                "engine not available: wrong connector_type for SQLAlchemy"
             )
         return self._engine
+
+    @property
+    def is_adbc(self) -> bool:
+        """True when this runtime was materialized with an AdbcTransport.
+
+        Source/destination handlers branch on this to choose between the
+        SA path (``self.engine`` + AsyncConnection) and the ADBC-only
+        path (``self.open_adbc_connection()`` + DBAPI cursor).
+        """
+        return self._adbc_transport is not None
+
+    def open_adbc_connection(self) -> Any:
+        """Return a fresh ADBC DBAPI connection.
+
+        ADBC drivers do not pool connections, so each caller owns the
+        full lifecycle: close on disconnect, drop on ingest failure.
+        Synchronous because the DBAPI itself is synchronous — callers
+        wrap cursor operations in ``asyncio.to_thread`` rather than
+        making this method async.
+        """
+        if not self._materialized:
+            raise RuntimeError(
+                "open_adbc_connection() requires materialize() first"
+            )
+        if self._adbc_transport is None:
+            raise RuntimeError(
+                f"open_adbc_connection() called on non-ADBC runtime "
+                f"{self._connection_id!r} (transport is "
+                f"{'SQLAlchemy' if self._engine else 'HTTP/file/stdout'})"
+            )
+        return self._adbc_transport.connect()
 
     @property
     def session(self) -> aiohttp.ClientSession:
@@ -388,8 +436,11 @@ class ConnectionRuntime:
             self._materialized = False
             self._transport_dialect = None
             self._transport_driver = None
-            self._tls_mode = None
-            self._tls_ca_bundle_present = False
+            # AdbcTransport itself holds no shared resources (its
+            # ``connect`` is a closure over the resolved spec); dropping
+            # the reference is sufficient. Live DBAPI connections opened
+            # via ``open_adbc_connection()`` are owned by their callers.
+            self._adbc_transport = None
 
     # ------------------------------------------------------------------
     # Private helpers

@@ -30,6 +30,7 @@ class TestWriteConflictKeysWiring:
         from src.engine.type_map.rules import parse_rules
 
         handler = DatabaseDestinationHandler()
+        handler._connected = True
         handler._engine = MagicMock()
         handler._runtime = MagicMock()
         handler._runtime.type_mapper_for = MagicMock(
@@ -76,6 +77,7 @@ class TestWriteConflictKeysWiring:
         from src.engine.type_map.rules import parse_rules
 
         handler = DatabaseDestinationHandler()
+        handler._connected = True
         handler._engine = MagicMock()
         handler._runtime = MagicMock()
         handler._runtime.type_mapper_for = MagicMock(

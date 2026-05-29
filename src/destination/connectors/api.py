@@ -10,7 +10,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Any, Dict, List, Mapping, Set
+from typing import Any, Dict, List, Mapping, Optional, Set
 
 import aiohttp
 import orjson
@@ -38,6 +38,33 @@ _API_WRITE_MODE_KEYS: Dict[int, str] = {
     1: "insert",
     2: "upsert",
 }
+
+
+def _endpoint_write_mode_block(
+    endpoint_doc: Mapping[str, Any], mode_key: str
+) -> Optional[Dict[str, Any]]:
+    """Return the ``operations.write.<mode_key>`` block when it is a usable
+    request definition, else ``None``.
+
+    A block is usable when it is a dict carrying a truthy ``request.path``.
+    This is the single acceptance predicate for an API write mode:
+    ``supports_upsert`` (capability advertisement) and ``configure_schema``
+    (per-stream dispatch) both apply it, so the two cannot disagree on
+    whether a given write-mode block is usable.
+
+    Tolerant of malformed contract documents: any level that is not the
+    expected mapping yields ``None`` rather than raising, so capability
+    advertisement over arbitrary endpoint docs never crashes.
+    """
+    operations = endpoint_doc.get("operations")
+    write = operations.get("write") if isinstance(operations, Mapping) else None
+    mode_block = write.get(mode_key) if isinstance(write, Mapping) else None
+    if not isinstance(mode_block, Mapping):
+        return None
+    request = mode_block.get("request")
+    if not isinstance(request, Mapping) or not request.get("path"):
+        return None
+    return dict(mode_block)
 
 
 def _orjson_default(obj: Any) -> Any:
@@ -213,8 +240,21 @@ class ApiDestinationHandler(BaseDestinationHandler):
 
     @property
     def supports_upsert(self) -> bool:
-        """Upsert depends on API implementation."""
-        return False
+        """True when any registered endpoint declares an upsert write
+        operation (``operations.write.upsert``) in its contract.
+
+        Upsert capability is contract-driven, never hardcoded: the
+        api-endpoint document owns whether an endpoint can upsert.
+        ``GetCapabilities`` advertises a single connector-wide boolean,
+        so the handler reports upsert support when at least one
+        registered endpoint declares it; ``configure_schema`` still
+        rejects an individual stream whose own endpoint lacks the
+        upsert block.
+        """
+        return any(
+            _endpoint_write_mode_block(doc, "upsert") is not None
+            for doc in self._stream_endpoints.values()
+        )
 
     @property
     def supports_bulk_load(self) -> bool:
@@ -287,31 +327,26 @@ class ApiDestinationHandler(BaseDestinationHandler):
             )
             return False
 
-        operations = endpoint_doc.get("operations") or {}
-        write = operations.get("write") or {}
-        mode_block = write.get(mode_key)
-        if not isinstance(mode_block, dict):
+        mode_block = _endpoint_write_mode_block(endpoint_doc, mode_key)
+        if mode_block is None:
+            operations = endpoint_doc.get("operations")
+            write = operations.get("write") if isinstance(operations, Mapping) else None
+            available = (
+                sorted(write.keys()) if isinstance(write, Mapping) else None
+            )
             logger.error(
-                "API endpoint document for stream %r is missing "
-                "operations.write.%s",
+                "API endpoint document for stream %r does not define a usable "
+                "operations.write.%s block (needs a dict with a truthy "
+                "request.path); write modes present: %s",
                 stream_id,
                 mode_key,
+                available,
             )
             return False
 
         request = mode_block.get("request") or {}
-        path = request.get("path") or ""
-        if not path:
-            logger.error(
-                "API endpoint document for stream %r is missing "
-                "operations.write.%s.request.path",
-                stream_id,
-                mode_key,
-            )
-            return False
-
         state = _StreamState(
-            endpoint=path,
+            endpoint=request["path"],
             method=(request.get("method") or "POST").upper(),
             json_fields=_collect_json_fields(mode_block),
         )
