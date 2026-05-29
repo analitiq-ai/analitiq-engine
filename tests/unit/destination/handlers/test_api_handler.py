@@ -624,6 +624,22 @@ class TestApiHandlerSupportsUpsert:
         handler.set_stream_endpoints({"s1": doc})
         assert handler.supports_upsert is False
 
+    @pytest.mark.parametrize(
+        "doc",
+        [
+            {"operations": "write"},  # operations not a mapping
+            {"operations": {"write": "upsert"}},  # write not a mapping
+            {"operations": {"write": {"upsert": "/v1/upsert"}}},  # block not a mapping
+            {"operations": {"write": {"upsert": {"request": "/v1/upsert"}}}},  # request not a mapping
+        ],
+    )
+    def test_malformed_contract_returns_false_not_raises(self, handler, doc):
+        """supports_upsert runs at startup over arbitrary contract docs.
+        A malformed document must yield False, never crash the
+        GetCapabilities RPC with AttributeError."""
+        handler.set_stream_endpoints({"s1": doc})
+        assert handler.supports_upsert is False
+
 
 @pytest.mark.unit
 class TestApiHandlerJsonFields:

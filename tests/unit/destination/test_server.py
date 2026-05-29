@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from src.destination.connectors.api import ApiDestinationHandler
 from src.destination.server import DestinationServicer
 from src.engine.type_map import InvalidTypeMapError, UnmappedTypeError
 from src.grpc.generated.analitiq.v1 import (
@@ -161,3 +162,38 @@ class TestGetCapabilities:
         )
         resp = await servicer.GetCapabilities(GetCapabilitiesRequest(), MagicMock())
         assert WriteMode.WRITE_MODE_TRUNCATE_INSERT in resp.supported_write_modes
+
+
+class TestGetCapabilitiesApiHandlerIntegration:
+    """End-to-end: a real ApiDestinationHandler composed with the servicer.
+
+    Guards the PR's central claim that advertised capability follows the
+    endpoint contract. A mock handler can't catch drift between the
+    handler property and the servicer field reference; this can.
+    """
+
+    def _doc(self, *, modes):
+        write = {
+            mode: {"request": {"method": "POST", "path": f"/v1/{mode}"}}
+            for mode in modes
+        }
+        return {"operations": {"write": write}}
+
+    @pytest.mark.asyncio
+    async def test_upsert_advertised_when_endpoint_declares_it(self):
+        handler = ApiDestinationHandler()
+        handler.set_stream_endpoints({"s1": self._doc(modes=("insert", "upsert"))})
+        servicer = DestinationServicer(handler, server=MagicMock())
+        resp = await servicer.GetCapabilities(GetCapabilitiesRequest(), MagicMock())
+        assert WriteMode.WRITE_MODE_UPSERT in resp.supported_write_modes
+        assert resp.supports_upsert is True
+
+    @pytest.mark.asyncio
+    async def test_upsert_not_advertised_for_insert_only_endpoint(self):
+        handler = ApiDestinationHandler()
+        handler.set_stream_endpoints({"s1": self._doc(modes=("insert",))})
+        servicer = DestinationServicer(handler, server=MagicMock())
+        resp = await servicer.GetCapabilities(GetCapabilitiesRequest(), MagicMock())
+        assert WriteMode.WRITE_MODE_UPSERT not in resp.supported_write_modes
+        assert WriteMode.WRITE_MODE_INSERT in resp.supported_write_modes
+        assert resp.supports_upsert is False

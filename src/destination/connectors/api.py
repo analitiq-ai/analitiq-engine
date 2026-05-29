@@ -46,21 +46,25 @@ def _endpoint_write_mode_block(
     """Return the ``operations.write.<mode_key>`` block when it is a usable
     request definition, else ``None``.
 
-    A block is usable when it is a dict carrying a non-empty
-    ``request.path``. This is the single acceptance predicate for an API
-    write mode: ``supports_upsert`` (capability advertisement) and
-    ``configure_schema`` (per-stream dispatch) both go through it, so
-    advertised capability and runtime dispatch cannot diverge.
+    A block is usable when it is a dict carrying a truthy ``request.path``.
+    This is the single acceptance predicate for an API write mode:
+    ``supports_upsert`` (capability advertisement) and ``configure_schema``
+    (per-stream dispatch) both apply it, so the two cannot disagree on
+    whether a given write-mode block is usable.
+
+    Tolerant of malformed contract documents: any level that is not the
+    expected mapping yields ``None`` rather than raising, so capability
+    advertisement over arbitrary endpoint docs never crashes.
     """
-    operations = endpoint_doc.get("operations") or {}
-    write = operations.get("write") or {}
-    mode_block = write.get(mode_key)
-    if not isinstance(mode_block, dict):
+    operations = endpoint_doc.get("operations")
+    write = operations.get("write") if isinstance(operations, Mapping) else None
+    mode_block = write.get(mode_key) if isinstance(write, Mapping) else None
+    if not isinstance(mode_block, Mapping):
         return None
-    request = mode_block.get("request") or {}
-    if not request.get("path"):
+    request = mode_block.get("request")
+    if not isinstance(request, Mapping) or not request.get("path"):
         return None
-    return mode_block
+    return dict(mode_block)
 
 
 def _orjson_default(obj: Any) -> Any:
@@ -325,11 +329,18 @@ class ApiDestinationHandler(BaseDestinationHandler):
 
         mode_block = _endpoint_write_mode_block(endpoint_doc, mode_key)
         if mode_block is None:
+            operations = endpoint_doc.get("operations")
+            write = operations.get("write") if isinstance(operations, Mapping) else None
+            available = (
+                sorted(write.keys()) if isinstance(write, Mapping) else None
+            )
             logger.error(
                 "API endpoint document for stream %r does not define a usable "
-                "operations.write.%s block (needs a dict with request.path)",
+                "operations.write.%s block (needs a dict with a truthy "
+                "request.path); write modes present: %s",
                 stream_id,
                 mode_key,
+                available,
             )
             return False
 
