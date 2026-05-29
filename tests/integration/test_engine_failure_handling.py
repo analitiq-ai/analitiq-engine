@@ -15,9 +15,9 @@ from src.engine.engine import StreamingEngine
 from src.engine.exceptions import StreamProcessingError
 from src.grpc.generated.analitiq.v1 import AckStatus
 from src.models.resolved import (
-    ResolvedDestination, ResolvedPipeline, ResolvedSource, ResolvedStream, RuntimeConfig,
+    ResolvedPipeline, ResolvedSource, ResolvedStream, RuntimeConfig,
 )
-from src.models.stream import DestinationConfig, MappingConfig, ReplicationConfig, SourceConfig
+from src.models.stream import MappingConfig, ReplicationConfig, SourceConfig
 
 
 @dataclass
