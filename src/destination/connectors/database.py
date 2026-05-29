@@ -53,6 +53,7 @@ from ...grpc.generated.analitiq.v1 import (
 )
 from ...shared.adbc_registry import AdbcConfigurationError
 from ...shared.connection_runtime import ConnectionRuntime
+from ...shared.database_utils import normalize_adbc_schema
 
 
 logger = logging.getLogger(__name__)
@@ -1038,23 +1039,11 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
     def _normalize_adbc_schema(self, schema: str) -> str:
         """Normalize a schema name for the active ADBC driver.
 
-        Snowflake folds unquoted identifiers to upper case; its built-in
-        default schema is unquoted ``PUBLIC``. If a connector declares
-        the common lowercase ``public``, quoting it as ``"public"``
-        targets a different (usually non-existent) schema and DDL fails.
-        Upcase ``public`` → ``PUBLIC`` so the quoted form matches the
-        real schema; preserve any other case-sensitive name verbatim
-        because the connector author may have intended a quoted-name
-        namespace.
-
-        BigQuery and Postgres are case-sensitive after quoting in the
-        ways operators expect (BigQuery datasets are case-sensitive;
-        Postgres unquoted folds to lowercase, so quoted ``"public"``
-        matches the conventional default). No normalization there.
+        Thin wrapper over the shared :func:`normalize_adbc_schema` so the
+        destination handler and the source reader resolve the same
+        physical schema (Snowflake ``public`` -> ``PUBLIC``).
         """
-        if self._driver == "snowflake" and schema.lower() == "public":
-            return "PUBLIC"
-        return schema
+        return normalize_adbc_schema(schema, self._driver)
 
     def _adbc_native_renderer(self):
         """Return the native-type → DDL renderer for the active ADBC driver."""
