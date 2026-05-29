@@ -16,7 +16,7 @@ from .stream import DestinationConfig, MappingConfig, SourceConfig
 from ..shared.connection_runtime import ConnectionRuntime
 
 
-@dataclass
+@dataclass(frozen=True)
 class ResolvedSource:
     """Source connector fully resolved to a runtime and endpoint document."""
 
@@ -25,7 +25,7 @@ class ResolvedSource:
     endpoint: Dict[str, Any]  # raw endpoint contract document (external JSON)
 
 
-@dataclass
+@dataclass(frozen=True)
 class ResolvedDestination:
     """Destination connector fully resolved to a runtime and endpoint document."""
 
@@ -34,7 +34,7 @@ class ResolvedDestination:
     endpoint: Dict[str, Any]
 
 
-@dataclass
+@dataclass(frozen=True)
 class ResolvedStream:
     """Stream with all endpoint references resolved to runtimes and documents."""
 
@@ -56,7 +56,7 @@ class ResolvedStream:
         return self.destinations[0]
 
 
-@dataclass
+@dataclass(frozen=True)
 class RuntimeConfig:
     """Pipeline runtime tuning parameters."""
 
@@ -65,7 +65,7 @@ class RuntimeConfig:
     buffer_size: int = 5000
 
 
-@dataclass
+@dataclass(frozen=True)
 class ResolvedPipeline:
     """Complete resolved pipeline, ready for execution by StreamingEngine."""
 

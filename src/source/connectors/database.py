@@ -433,19 +433,6 @@ class DatabaseConnector(BaseConnector):
             if f.field
         ]
 
-    @staticmethod
-    def _build_filters(stream_filters: List[Dict[str, Any]]) -> List[Filter]:
-        """Legacy helper for raw dict filter lists (used by tests only)."""
-        out: List[Filter] = []
-        for f in stream_filters:
-            field = f.get("field")
-            if not field:
-                continue
-            out.append(
-                Filter(field=field, op=f.get("operator", "eq"), value=f.get("value"))
-            )
-        return out
-
     # ------------------------------------------------------------------
     # Base interface stubs
     # ------------------------------------------------------------------

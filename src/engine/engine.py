@@ -201,7 +201,7 @@ class StreamingEngine:
 
             run_id = self.state_manager.current_run_id or get_or_generate_run_id()
 
-            grpc_client = self._create_grpc_client(dest)
+            grpc_client = self._create_grpc_client()
             connected = await grpc_client.connect()
             if not connected:
                 raise StreamProcessingError(
@@ -708,10 +708,7 @@ class StreamingEngine:
             ),
         ]
 
-    def _create_grpc_client(
-        self,
-        dest: "ResolvedDestination",
-    ) -> DestinationGRPCClient:
+    def _create_grpc_client(self) -> DestinationGRPCClient:
         """Create gRPC client. Env vars take precedence over defaults."""
         host = os.getenv("DESTINATION_GRPC_HOST", "localhost")
         port = int(os.getenv("DESTINATION_GRPC_PORT", "50051"))
