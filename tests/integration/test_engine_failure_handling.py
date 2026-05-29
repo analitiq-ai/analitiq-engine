@@ -14,6 +14,10 @@ from typing import Dict, Any, List, Optional
 from src.engine.engine import StreamingEngine
 from src.engine.exceptions import StreamProcessingError
 from src.grpc.generated.analitiq.v1 import AckStatus
+from src.models.resolved import (
+    ResolvedDestination, ResolvedPipeline, ResolvedSource, ResolvedStream, RuntimeConfig,
+)
+from src.models.stream import DestinationConfig, MappingConfig, ReplicationConfig, SourceConfig
 
 
 @dataclass
@@ -61,31 +65,46 @@ def mock_source_connector():
 
 
 @pytest.fixture
-def sample_stream_config():
-    """Sample stream processing config."""
-    return {
-        "pipeline_id": "test-pipeline",
-        "name": "Test Pipeline",
-        "version": "1.0",
-        "stream_id": "test-stream-001",
-        "stream_name": "test-stream",
-        "source": {
-            "connector_type": "api",
-            "host": "https://api.example.com",
-        },
-        "destination": {
-            "connector_type": "api",
-            "host": "https://dest.example.com",
-        },
-        "cursor_field": "updated_at",
-        "runtime": {
-            "error_handling": {
-                "strategy": "dlq",
-                "max_retries": 3,
-                "retry_delay": 1,
-            },
-        },
-    }
+def resolved_stream():
+    """Minimal resolved stream for _load_stage tests."""
+    runtime = MagicMock()
+    source = ResolvedSource(
+        config=SourceConfig(replication=ReplicationConfig()),
+        runtime=runtime,
+        endpoint={},
+    )
+    return ResolvedStream(
+        stream_id="test-stream-001",
+        pipeline_id="test-pipeline",
+        display_name="Test Stream",
+        description=None,
+        status="active",
+        tags=[],
+        source=source,
+        destinations=[],
+        mapping=MappingConfig(),
+    )
+
+
+@pytest.fixture
+def resolved_pipeline():
+    """Minimal resolved pipeline for _load_stage tests (DLQ strategy)."""
+    return ResolvedPipeline(
+        pipeline_id="test-pipeline",
+        display_name="Test Pipeline",
+        description=None,
+        status="active",
+        tags=[],
+        source_connection_id="src-connection",
+        destination_connection_ids=["dst-connection"],
+        streams=[],
+        runtime=RuntimeConfig(
+            error_handling={"strategy": "dlq", "max_retries": 3, "retry_delay": 1},
+        ),
+        schedule={},
+        engine_config={},
+        connections={},
+    )
 
 
 @pytest.mark.integration
@@ -97,7 +116,8 @@ class TestEngineFatalFailureHandling:
         self,
         engine: StreamingEngine,
         mock_grpc_client: AsyncMock,
-        sample_stream_config: Dict[str, Any],
+        resolved_stream: ResolvedStream,
+        resolved_pipeline: ResolvedPipeline,
         temp_dir: str,
     ):
         """
@@ -147,7 +167,8 @@ class TestEngineFatalFailureHandling:
                 input_queue=input_queue,
                 output_queue=output_queue,
                 grpc_client=mock_grpc_client,
-                config=sample_stream_config,
+                stream=resolved_stream,
+                pipeline=resolved_pipeline,
                 stream_dlq=stream_dlq,
                 run_id="test-run-001",
                 stream_metrics=stream_metrics,
@@ -162,7 +183,8 @@ class TestEngineFatalFailureHandling:
         self,
         engine: StreamingEngine,
         mock_grpc_client: AsyncMock,
-        sample_stream_config: Dict[str, Any],
+        resolved_stream: ResolvedStream,
+        resolved_pipeline: ResolvedPipeline,
         temp_dir: str,
     ):
         """Test that _load_stage completes normally when all batches succeed."""
@@ -199,7 +221,8 @@ class TestEngineFatalFailureHandling:
                 input_queue=input_queue,
                 output_queue=output_queue,
                 grpc_client=mock_grpc_client,
-                config=sample_stream_config,
+                stream=resolved_stream,
+                pipeline=resolved_pipeline,
                 stream_dlq=stream_dlq,
                 run_id="test-run-001",
                 stream_metrics=stream_metrics,
@@ -218,7 +241,8 @@ class TestEngineFatalFailureHandling:
         self,
         engine: StreamingEngine,
         mock_grpc_client: AsyncMock,
-        sample_stream_config: Dict[str, Any],
+        resolved_stream: ResolvedStream,
+        resolved_pipeline: ResolvedPipeline,
         temp_dir: str,
     ):
         """Test that retryable failures are retried before going to DLQ."""
@@ -254,7 +278,8 @@ class TestEngineFatalFailureHandling:
                 input_queue=input_queue,
                 output_queue=output_queue,
                 grpc_client=mock_grpc_client,
-                config=sample_stream_config,
+                stream=resolved_stream,
+                pipeline=resolved_pipeline,
                 stream_dlq=stream_dlq,
                 run_id="test-run-001",
                 stream_metrics=stream_metrics,
@@ -269,7 +294,8 @@ class TestEngineFatalFailureHandling:
         self,
         engine: StreamingEngine,
         mock_grpc_client: AsyncMock,
-        sample_stream_config: Dict[str, Any],
+        resolved_stream: ResolvedStream,
+        resolved_pipeline: ResolvedPipeline,
         temp_dir: str,
     ):
         """Test that metrics are updated when fatal failure occurs."""
@@ -308,7 +334,8 @@ class TestEngineFatalFailureHandling:
                 input_queue=input_queue,
                 output_queue=output_queue,
                 grpc_client=mock_grpc_client,
-                config=sample_stream_config,
+                stream=resolved_stream,
+                pipeline=resolved_pipeline,
                 stream_dlq=stream_dlq,
                 run_id="test-run-001",
                 stream_metrics=stream_metrics,
@@ -327,28 +354,31 @@ class TestEngineStreamFailurePropagation:
     async def test_stream_exception_collected_in_pipeline(
         self,
         engine: StreamingEngine,
+        resolved_stream: ResolvedStream,
         temp_dir: str,
     ):
         """
         Test that when a stream fails, the exception is collected
         and the stream is marked as failed in metrics.
         """
-        # Create a pipeline config with one stream
-        pipeline_config = {
-            "pipeline_id": "test-pipeline",
-            "name": "Test Pipeline",
-            "version": "1.0",
-            "source": {"connector_type": "api"},
-            "destination": {"connector_type": "api"},
-            "runtime": {"buffer_size": 100, "batching": {"batch_size": 10, "max_concurrent_batches": 1}, "logging": {"log_level": "DEBUG", "metrics_enabled": False}, "error_handling": {"strategy": "dlq", "max_retries": 3, "retry_delay": 1}},
-            "streams": {
-                "stream-001": {
-                    "name": "failing-stream",
-                    "source": {"endpoint_id": "src-endpoint"},
-                    "destination": {"endpoint_id": "dst-endpoint"},
-                }
-            },
-        }
+        pipeline = ResolvedPipeline(
+            pipeline_id="test-pipeline",
+            display_name="Test Pipeline",
+            description=None,
+            status="active",
+            tags=[],
+            source_connection_id="src-connection",
+            destination_connection_ids=["dst-connection"],
+            streams=[resolved_stream],
+            runtime=RuntimeConfig(
+                error_handling={"strategy": "dlq", "max_retries": 3, "retry_delay": 1},
+                batching={"batch_size": 10, "max_concurrent_batches": 1},
+                buffer_size=100,
+            ),
+            schedule={},
+            engine_config={},
+            connections={},
+        )
 
         # Mock _process_stream to raise an exception
         async def mock_process_stream(*args, **kwargs):
@@ -365,7 +395,7 @@ class TestEngineStreamFailurePropagation:
 
         # Execute - should raise ExceptionGroup since all streams failed
         with pytest.raises(ExceptionGroup):
-            await engine.stream_data(pipeline_config)
+            await engine.stream_data(pipeline)
 
         # Assert: stream was marked as failed
         assert engine.metrics.streams_failed == 1
@@ -381,37 +411,65 @@ class TestEngineStreamFailurePropagation:
         Test that when some streams fail and others succeed,
         metrics reflect this accurately.
         """
-        # Create a pipeline config with two streams
-        pipeline_config = {
-            "pipeline_id": "test-pipeline",
-            "name": "Test Pipeline",
-            "version": "1.0",
-            "source": {"connector_type": "api"},
-            "destination": {"connector_type": "api"},
-            "runtime": {"buffer_size": 100, "batching": {"batch_size": 10, "max_concurrent_batches": 1}, "logging": {"log_level": "DEBUG", "metrics_enabled": False}, "error_handling": {"strategy": "dlq", "max_retries": 3, "retry_delay": 1}},
-            "streams": {
-                "stream-001": {
-                    "name": "successful-stream",
-                    "source": {"endpoint_id": "src-1"},
-                    "destination": {"endpoint_id": "dst-1"},
-                },
-                "stream-002": {
-                    "name": "failing-stream",
-                    "source": {"endpoint_id": "src-2"},
-                    "destination": {"endpoint_id": "dst-2"},
-                },
-            },
-        }
+        mock_runtime = MagicMock()
+        successful_source = ResolvedSource(
+            config=SourceConfig(replication=ReplicationConfig()),
+            runtime=mock_runtime,
+            endpoint={},
+        )
+        failing_source = ResolvedSource(
+            config=SourceConfig(replication=ReplicationConfig()),
+            runtime=mock_runtime,
+            endpoint={},
+        )
+        successful_stream = ResolvedStream(
+            stream_id="stream-001",
+            pipeline_id="test-pipeline",
+            display_name="successful-stream",
+            description=None,
+            status="active",
+            tags=[],
+            source=successful_source,
+            destinations=[],
+            mapping=MappingConfig(),
+        )
+        failing_stream = ResolvedStream(
+            stream_id="stream-002",
+            pipeline_id="test-pipeline",
+            display_name="failing-stream",
+            description=None,
+            status="active",
+            tags=[],
+            source=failing_source,
+            destinations=[],
+            mapping=MappingConfig(),
+        )
+        pipeline = ResolvedPipeline(
+            pipeline_id="test-pipeline",
+            display_name="Test Pipeline",
+            description=None,
+            status="active",
+            tags=[],
+            source_connection_id="src-connection",
+            destination_connection_ids=["dst-connection"],
+            streams=[successful_stream, failing_stream],
+            runtime=RuntimeConfig(
+                error_handling={"strategy": "dlq", "max_retries": 3, "retry_delay": 1},
+                batching={"batch_size": 10, "max_concurrent_batches": 1},
+                buffer_size=100,
+            ),
+            schedule={},
+            engine_config={},
+            connections={},
+        )
 
-        # Track which stream is being processed
         call_count = 0
 
-        async def mock_process_stream(stream_id, stream_config, pipeline_config):
+        async def mock_process_stream(stream: ResolvedStream, pipeline: ResolvedPipeline):
             nonlocal call_count
             call_count += 1
-            if stream_config.get("name") == "failing-stream":
-                raise StreamProcessingError("Stream failed", stream_id=stream_id)
-            # Success for other streams
+            if stream.display_name == "failing-stream":
+                raise StreamProcessingError("Stream failed", stream_id=stream.stream_id)
             return None
 
         engine._process_stream = mock_process_stream
@@ -422,7 +480,7 @@ class TestEngineStreamFailurePropagation:
         engine.metrics.streams_processed = 0
 
         # Execute - should complete but log warning about partial failure
-        await engine.stream_data(pipeline_config)
+        await engine.stream_data(pipeline)
 
         # Assert: one succeeded, one failed
         assert engine.metrics.streams_failed == 1
@@ -438,7 +496,8 @@ class TestEngineDLQOnFailure:
         self,
         engine: StreamingEngine,
         mock_grpc_client: AsyncMock,
-        sample_stream_config: Dict[str, Any],
+        resolved_stream: ResolvedStream,
+        resolved_pipeline: ResolvedPipeline,
         temp_dir: str,
     ):
         """Test that batches with fatal failures are sent to DLQ before raising."""
@@ -475,7 +534,8 @@ class TestEngineDLQOnFailure:
                 input_queue=input_queue,
                 output_queue=output_queue,
                 grpc_client=mock_grpc_client,
-                config=sample_stream_config,
+                stream=resolved_stream,
+                pipeline=resolved_pipeline,
                 stream_dlq=stream_dlq,
                 run_id="test-run-001",
                 stream_metrics=stream_metrics,

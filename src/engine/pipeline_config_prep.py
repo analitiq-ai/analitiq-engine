@@ -485,6 +485,11 @@ class PipelineConfigPrep:
             resolved_streams.append(self._build_resolved_stream(record))
 
         pipeline_id = pipeline_doc.get("pipeline_id")
+        if not pipeline_id:
+            raise ValueError(
+                f"Pipeline document in {self._pipeline_dir} is missing required "
+                f"field 'pipeline_id'"
+            )
         raw_runtime = pipeline_doc.get("runtime") or {}
         runtime_cfg = RuntimeConfig(
             batching=raw_runtime.get("batching") or {},
@@ -624,8 +629,13 @@ def _parse_replication_config(raw: Dict[str, Any]) -> ReplicationConfig:
 
 
 def _parse_stream_filter(raw: Dict[str, Any]) -> StreamFilter:
+    field = raw.get("field")
+    if not field:
+        raise ValueError(
+            f"Stream filter entry is missing required 'field' key: {raw!r}"
+        )
     return StreamFilter(
-        field=raw.get("field", ""),
+        field=field,
         operator=raw.get("operator", "eq"),
         value=raw.get("value"),
     )
@@ -711,6 +721,11 @@ def _parse_mapping_config(raw: Dict[str, Any]) -> MappingConfig:
             value.constant = ConstantValue(
                 arrow_type=raw_const.get("arrow_type", "Utf8"),
                 value=raw_const.get("value"),
+            )
+        else:
+            raise ValueError(
+                f"Assignment value block has neither 'expression' nor 'constant': "
+                f"{raw_value!r}"
             )
 
         assignments.append(
