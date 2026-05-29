@@ -34,6 +34,7 @@ from ...destination.schema_contract import SchemaContract
 from ...models.state import CursorField, StreamCursor, StreamStats
 from ...shared.connection_runtime import ConnectionRuntime
 from ...shared.expressions import resolve_value_expression
+from ...shared.http_utils import join_url
 from ...state.state_manager import StateManager
 
 logger = logging.getLogger(__name__)
@@ -118,12 +119,7 @@ class APIConnector(BaseConnector):
             raise ReadError(
                 f"endpoint {endpoint_doc.get('endpoint_id')!r}: operations.read.request.path is required"
             )
-        # Preserve both the base URL's path (e.g. ``/api/v1``) and the
-        # endpoint's path. ``urljoin`` treats a leading ``/`` on the second
-        # argument as absolute-path-relative and drops the base's path,
-        # which would mis-route ``https://host/api/v1`` + ``/Foo`` to
-        # ``https://host/Foo``.
-        full_url = self.base_url.rstrip("/") + "/" + path.lstrip("/")
+        full_url = join_url(self.base_url, path)
 
         replication_block = stream_source.get("replication") or {}
         replication_method = replication_block.get("method", "full_refresh")
