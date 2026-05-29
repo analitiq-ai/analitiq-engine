@@ -57,11 +57,33 @@ class ResolvedStream:
 
 
 @dataclass(frozen=True)
-class RuntimeConfig:
-    """Pipeline runtime tuning parameters."""
+class BatchingConfig:
+    """Batch sizing for the engine's producer/consumer loop."""
 
-    batching: Dict[str, Any] = field(default_factory=dict)
-    error_handling: Dict[str, Any] = field(default_factory=dict)
+    batch_size: int = 1000
+    max_concurrent_batches: int = 3
+
+
+@dataclass(frozen=True)
+class ErrorHandlingConfig:
+    """Fault-handling policy for a pipeline run."""
+
+    strategy: str = "fail"
+    max_retries: int = 3
+    retry_delay_seconds: int = 5
+
+
+@dataclass(frozen=True)
+class RuntimeConfig:
+    """Pipeline runtime tuning parameters.
+
+    ``batching`` / ``error_handling`` are typed sub-configs (closed, known
+    key sets) so consumers read attributes instead of doing ``dict.get(...)``
+    with per-call-site defaults -- the defaults live once, in the parser.
+    """
+
+    batching: BatchingConfig = field(default_factory=BatchingConfig)
+    error_handling: ErrorHandlingConfig = field(default_factory=ErrorHandlingConfig)
     buffer_size: int = 5000
 
 

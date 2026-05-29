@@ -1,6 +1,8 @@
 """Data models for configuration and state."""
 
 from .resolved import (
+    BatchingConfig,
+    ErrorHandlingConfig,
     ResolvedDestination,
     ResolvedPipeline,
     ResolvedSource,
@@ -65,6 +67,8 @@ from .state import (
 __all__ = [
     # Resolved runtime models
     "ResolvedDestination",
+    "BatchingConfig",
+    "ErrorHandlingConfig",
     "ResolvedPipeline",
     "ResolvedSource",
     "ResolvedStream",

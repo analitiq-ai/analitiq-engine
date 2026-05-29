@@ -74,6 +74,8 @@ from src.models.stream import (
     WriteMode,
 )
 from src.models.resolved import (
+    BatchingConfig,
+    ErrorHandlingConfig,
     ResolvedDestination,
     ResolvedPipeline,
     ResolvedSource,
@@ -492,8 +494,10 @@ class PipelineConfigPrep:
             )
         raw_runtime = pipeline_doc.get("runtime") or {}
         runtime_cfg = RuntimeConfig(
-            batching=raw_runtime.get("batching") or {},
-            error_handling=raw_runtime.get("error_handling") or {},
+            batching=_parse_batching_config(raw_runtime.get("batching") or {}),
+            error_handling=_parse_error_handling_config(
+                raw_runtime.get("error_handling") or {}
+            ),
             buffer_size=int(raw_runtime.get("buffer_size", 5000)),
         )
 
@@ -567,6 +571,12 @@ class PipelineConfigPrep:
                 endpoint=dest_endpoint,
             ))
 
+        if not resolved_destinations:
+            raise ValueError(
+                f"Stream {stream_id} has no destinations; an executable stream "
+                f"requires at least one"
+            )
+
         return ResolvedStream(
             stream_id=stream_id,
             pipeline_id=document.get("pipeline_id") or "",
@@ -609,15 +619,30 @@ class PipelineConfigPrep:
 # ---------------------------------------------------------------------------
 
 
+def _parse_batching_config(raw: Dict[str, Any]) -> BatchingConfig:
+    return BatchingConfig(
+        batch_size=int(raw.get("batch_size", 1000)),
+        max_concurrent_batches=int(raw.get("max_concurrent_batches", 3)),
+    )
+
+
+def _parse_error_handling_config(raw: Dict[str, Any]) -> ErrorHandlingConfig:
+    return ErrorHandlingConfig(
+        strategy=raw.get("strategy", "fail"),
+        max_retries=int(raw.get("max_retries", 3)),
+        retry_delay_seconds=int(raw.get("retry_delay_seconds", 5)),
+    )
+
+
 def _parse_replication_config(raw: Dict[str, Any]) -> ReplicationConfig:
     method_str = raw.get("method", ReplicationMethod.FULL_REFRESH.value)
     try:
         method = ReplicationMethod(method_str)
-    except ValueError:
+    except ValueError as e:
         raise ValueError(
             f"Unknown replication method {method_str!r}; "
             f"expected one of {[m.value for m in ReplicationMethod]}"
-        )
+        ) from e
     return ReplicationConfig(
         method=method,
         cursor_field=raw.get("cursor_field"),
@@ -667,11 +692,11 @@ def _parse_write_config(raw: Dict[str, Any]) -> WriteConfig:
     mode_str = raw.get("mode", WriteMode.UPSERT.value)
     try:
         mode = WriteMode(mode_str)
-    except ValueError:
+    except ValueError as e:
         raise ValueError(
             f"Unknown write mode {mode_str!r}; "
             f"expected one of {[m.value for m in WriteMode]}"
-        )
+        ) from e
     conflict_keys = raw.get("conflict_keys")
     return WriteConfig(
         mode=mode,
@@ -713,19 +738,24 @@ def _parse_mapping_config(raw: Dict[str, Any]) -> MappingConfig:
             items=raw_target.get("items"),
         )
 
+        # Match _translate_assignment's semantics: a present-but-null
+        # expression/constant is not a valid value block. Checking key
+        # presence alone would let {"expression": null} through as a silent
+        # null-fill (the transformer then defaults it to None on every row).
         value = AssignmentValue()
-        if "expression" in raw_value:
-            value.expression = raw_value["expression"]
-        elif "constant" in raw_value:
-            raw_const = raw_value["constant"] or {}
+        expr = raw_value.get("expression")
+        const = raw_value.get("constant")
+        if expr is not None:
+            value.expression = expr
+        elif const is not None:
             value.constant = ConstantValue(
-                arrow_type=raw_const.get("arrow_type", "Utf8"),
-                value=raw_const.get("value"),
+                arrow_type=const.get("arrow_type", "Utf8"),
+                value=const.get("value"),
             )
         else:
             raise ValueError(
-                f"Assignment value block has neither 'expression' nor 'constant': "
-                f"{raw_value!r}"
+                f"Assignment value block must have a non-null 'expression' or "
+                f"'constant': {raw_value!r}"
             )
 
         assignments.append(

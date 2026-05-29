@@ -15,7 +15,8 @@ from src.engine.engine import StreamingEngine
 from src.engine.exceptions import StreamProcessingError
 from src.grpc.generated.analitiq.v1 import AckStatus
 from src.models.resolved import (
-    ResolvedPipeline, ResolvedSource, ResolvedStream, RuntimeConfig,
+    BatchingConfig, ErrorHandlingConfig, ResolvedPipeline, ResolvedSource,
+    ResolvedStream, RuntimeConfig,
 )
 from src.models.stream import MappingConfig, ReplicationConfig, SourceConfig
 
@@ -99,7 +100,9 @@ def resolved_pipeline():
         destination_connection_ids=["dst-connection"],
         streams=[],
         runtime=RuntimeConfig(
-            error_handling={"strategy": "dlq", "max_retries": 3, "retry_delay": 1},
+            error_handling=ErrorHandlingConfig(
+                strategy="dlq", max_retries=3, retry_delay_seconds=1
+            ),
         ),
         schedule={},
         engine_config={},
@@ -371,8 +374,10 @@ class TestEngineStreamFailurePropagation:
             destination_connection_ids=["dst-connection"],
             streams=[resolved_stream],
             runtime=RuntimeConfig(
-                error_handling={"strategy": "dlq", "max_retries": 3, "retry_delay": 1},
-                batching={"batch_size": 10, "max_concurrent_batches": 1},
+                error_handling=ErrorHandlingConfig(
+                    strategy="dlq", max_retries=3, retry_delay_seconds=1
+                ),
+                batching=BatchingConfig(batch_size=10, max_concurrent_batches=1),
                 buffer_size=100,
             ),
             schedule={},
@@ -454,8 +459,10 @@ class TestEngineStreamFailurePropagation:
             destination_connection_ids=["dst-connection"],
             streams=[successful_stream, failing_stream],
             runtime=RuntimeConfig(
-                error_handling={"strategy": "dlq", "max_retries": 3, "retry_delay": 1},
-                batching={"batch_size": 10, "max_concurrent_batches": 1},
+                error_handling=ErrorHandlingConfig(
+                    strategy="dlq", max_retries=3, retry_delay_seconds=1
+                ),
+                batching=BatchingConfig(batch_size=10, max_concurrent_batches=1),
                 buffer_size=100,
             ),
             schedule={},

@@ -34,19 +34,16 @@ class Pipeline:
         self.dlq_dir = str(project_root / "deadletter" / pipeline_id)
         self._ensure_directories()
 
-        batching = pipeline.runtime.batching or {"batch_size": 1000, "max_concurrent_batches": 3}
-        error_handling = pipeline.runtime.error_handling or {
-            "max_retries": 3,
-            "retry_delay_seconds": 5,
-        }
+        batching = pipeline.runtime.batching
+        error_handling = pipeline.runtime.error_handling
         self.engine = StreamingEngine(
             pipeline_id=pipeline_id,
-            batch_size=batching.get("batch_size", 1000),
-            max_concurrent_batches=batching.get("max_concurrent_batches", 3),
+            batch_size=batching.batch_size,
+            max_concurrent_batches=batching.max_concurrent_batches,
             buffer_size=pipeline.runtime.buffer_size,
             dlq_path=self.dlq_dir,
-            max_retries=error_handling.get("max_retries", 3),
-            retry_delay=error_handling.get("retry_delay_seconds", 5),
+            max_retries=error_handling.max_retries,
+            retry_delay=error_handling.retry_delay_seconds,
         )
 
     def _ensure_directories(self) -> None:
