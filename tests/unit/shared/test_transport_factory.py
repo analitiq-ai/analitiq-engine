@@ -1,32 +1,27 @@
 """Tests for :mod:`src.shared.transport_factory`.
 
-These cover transport spec resolution and the synchronous validation
-paths in :func:`build_sqlalchemy_transport` and :func:`build_http_transport`.
-The actual engine/session probes are not exercised here (they would
-require a live database / HTTP endpoint); they are covered by the
-integration fixtures in ``tests/fixtures/``.
+These cover transport spec resolution (:func:`resolve_transport_spec`)
+and the kind registry (register / unregister / dispatch via
+:func:`build_transport`). The resolver-aware validation paths inside
+:func:`build_sqlalchemy_transport` / :func:`build_http_transport`, and
+the engine/session probes that require a live database / HTTP endpoint,
+are not exercised here.
 """
 
 from __future__ import annotations
 
-import ssl
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 
 from src.engine.resolver import ResolutionContext
 from src.shared.transport_factory import (
-    HttpTransport,
-    SqlAlchemyTransport,
-    build_http_transport,
-    build_sqlalchemy_transport,
     build_transport,
     register_transport_kind,
     registered_transport_kinds,
     resolve_transport_spec,
     unregister_transport_kind,
 )
-
 
 # ---------------------------------------------------------------------------
 # resolve_transport_spec

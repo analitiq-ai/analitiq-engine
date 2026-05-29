@@ -23,7 +23,6 @@ import pytest
 from src.config.schema_validator import _load_schema
 from src.engine.pipeline_config_prep import PipelineConfigPrep
 
-
 # ---------------------------------------------------------------------------
 # Schema-mirror infrastructure
 # ---------------------------------------------------------------------------
@@ -209,7 +208,9 @@ def _build_tree(
     inactive status, stream-id mismatch, missing stream file).
     """
     if include_manifest:
-        _write_json(root / "pipelines" / "manifest.json", _manifest(status=manifest_status))
+        _write_json(
+            root / "pipelines" / "manifest.json", _manifest(status=manifest_status)
+        )
     _write_json(root / "pipelines" / PIPELINE_ID / "pipeline.json", _pipeline_doc())
     if include_stream_file:
         stream_doc = _stream_doc(stream_id_in_file)
@@ -238,7 +239,12 @@ def _build_tree(
     )
     for endpoint_id in (ENDPOINT_SRC, ENDPOINT_DST):
         _write_json(
-            root / "connectors" / CONNECTOR_ID / "definition" / "endpoints" / f"{endpoint_id}.json",
+            root
+            / "connectors"
+            / CONNECTOR_ID
+            / "definition"
+            / "endpoints"
+            / f"{endpoint_id}.json",
             _endpoint_doc(endpoint_id),
         )
     return root
@@ -264,7 +270,13 @@ def pipeline_tree(
 class TestCreateConfigHappyPath:
     def test_returns_five_tuple_with_expected_shapes(self, pipeline_tree: Path) -> None:
         prep = PipelineConfigPrep()
-        pipeline_config, stream_configs, connections, endpoints, connectors = prep.create_config()
+        (
+            pipeline_config,
+            stream_configs,
+            connections,
+            endpoints,
+            connectors,
+        ) = prep.create_config()
 
         assert pipeline_config["pipeline_id"] == PIPELINE_ID
         assert pipeline_config["display_name"] == "Demo Pipeline"
@@ -290,9 +302,11 @@ class TestCreateConfigHappyPath:
     def test_runtime_injection_is_shared_across_source_and_destination(
         self, pipeline_tree: Path
     ) -> None:
-        """Same connection used in two streams should yield the *same*
-        ``ConnectionRuntime`` instance — not a fresh copy. The destination
-        engine relies on this to share TLS / connection pools."""
+        """Each ``connection_id`` resolves to exactly one ``ConnectionRuntime``,
+        and the instance injected as ``source._runtime`` / ``destinations[]._runtime``
+        is the *same object* held in the returned ``connections`` map (identity,
+        not a copy) — the engine relies on this to share TLS / connection pools.
+        Distinct connection ids yield distinct runtimes."""
         prep = PipelineConfigPrep()
         _, stream_configs, connections, _, _ = prep.create_config()
 
@@ -355,7 +369,9 @@ class TestCreateConfigErrorPaths:
         deep.mkdir()
         monkeypatch.chdir(deep)
         monkeypatch.setenv("PIPELINE_ID", PIPELINE_ID)
-        with pytest.raises(RuntimeError, match="Could not find pipelines/manifest.json"):
+        with pytest.raises(
+            RuntimeError, match="Could not find pipelines/manifest.json"
+        ):
             PipelineConfigPrep()
 
     def test_stream_id_mismatch_rejected(
@@ -386,5 +402,7 @@ class TestCreateConfigErrorPaths:
         monkeypatch.chdir(root)
         monkeypatch.setenv("PIPELINE_ID", PIPELINE_ID)
         prep = PipelineConfigPrep()
-        with pytest.raises(FileNotFoundError, match="Streams directory not found|stream file"):
+        with pytest.raises(
+            FileNotFoundError, match="Streams directory not found|stream file"
+        ):
             prep.create_config()
