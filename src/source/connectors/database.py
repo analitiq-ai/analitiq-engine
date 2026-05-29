@@ -26,9 +26,11 @@ import pyarrow as pa
 from .base import BaseConnector, ConnectionError, ReadError
 from ..drivers.adbc_reader import open_adbc_reader
 from ...destination.schema_contract import SchemaContract
-from ...engine.type_map import InvalidTypeMapError, UnmappedTypeError
-from ...secrets.exceptions import PlaceholderExpansionError
-from ...shared.connection_runtime import ConnectionRuntime
+from ...shared.connection_runtime import (
+    ConnectionRuntime,
+    DETERMINISTIC_CONNECT_ERRORS,
+    materialize_runtime,
+)
 from ...shared.database_utils import acquire_connection, normalize_adbc_schema
 from ...shared.query_builder import Filter, QueryBuilder, QueryConfig
 from ...state.state_manager import StateManager
@@ -80,18 +82,9 @@ class DatabaseConnector(BaseConnector):
 
     async def connect(self, runtime: ConnectionRuntime):
         self._runtime = runtime
-        runtime.acquire()
         try:
-            await runtime.materialize(require_port=True)
-        except (
-            InvalidTypeMapError,
-            UnmappedTypeError,
-            PlaceholderExpansionError,
-            ValueError,
-        ):
-            # Deterministic configuration / secret errors propagate with
-            # their real type so callers distinguish "your type-map is
-            # missing a rule" from "the DB is unreachable".
+            await materialize_runtime(runtime, require_port=True)
+        except DETERMINISTIC_CONNECT_ERRORS:
             raise
         except Exception as e:
             logger.error("Failed to connect to database: %s", e)
