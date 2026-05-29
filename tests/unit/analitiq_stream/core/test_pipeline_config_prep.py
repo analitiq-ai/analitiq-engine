@@ -21,9 +21,15 @@ from typing import Any, Dict
 import pytest
 
 from src.config.schema_validator import _load_schema
-from src.engine.pipeline_config_prep import PipelineConfigPrep
+from src.engine.pipeline_config_prep import (
+    PipelineConfigPrep,
+    _parse_mapping_config,
+    _parse_replication_config,
+    _parse_stream_filter,
+    _parse_write_config,
+)
 from src.models.resolved import ResolvedPipeline, ResolvedStream
-from src.models.stream import ReplicationMethod
+from src.models.stream import ReplicationMethod, WriteMode
 
 # ---------------------------------------------------------------------------
 # Schema-mirror infrastructure
@@ -409,3 +415,93 @@ class TestCreateConfigErrorPaths:
             FileNotFoundError, match="Streams directory not found|stream file"
         ):
             prep.create_config()
+
+
+# ---------------------------------------------------------------------------
+# Parser unit tests — exercise the module-level typed parsers directly
+# ---------------------------------------------------------------------------
+
+
+class TestParserErrorPaths:
+    def test_parse_replication_config_unknown_method_raises(self) -> None:
+        with pytest.raises(ValueError, match="Unknown replication method"):
+            _parse_replication_config({"method": "cdc_bogus"})
+
+    def test_parse_replication_config_valid_incremental(self) -> None:
+        cfg = _parse_replication_config({"method": "incremental", "cursor_field": "updated_at"})
+        assert cfg.method == ReplicationMethod.INCREMENTAL
+        assert cfg.cursor_field == "updated_at"
+
+    def test_parse_write_config_unknown_mode_raises(self) -> None:
+        with pytest.raises(ValueError, match="Unknown write mode"):
+            _parse_write_config({"mode": "typo_mode"})
+
+    def test_parse_write_config_valid_insert(self) -> None:
+        cfg = _parse_write_config({"mode": "insert"})
+        assert cfg.mode == WriteMode.INSERT
+
+    def test_parse_stream_filter_missing_field_raises(self) -> None:
+        with pytest.raises(ValueError, match="missing required 'field' key"):
+            _parse_stream_filter({"operator": "eq", "value": "x"})
+
+    def test_parse_stream_filter_valid(self) -> None:
+        f = _parse_stream_filter({"field": "status", "operator": "eq", "value": "active"})
+        assert f.field == "status"
+        assert f.operator == "eq"
+        assert f.value == "active"
+
+    def test_parse_mapping_config_expression_assignment(self) -> None:
+        raw = {
+            "assignments": [
+                {
+                    "target": {"path": "name", "arrow_type": "Utf8"},
+                    "value": {"expression": "$.source_name"},
+                }
+            ]
+        }
+        cfg = _parse_mapping_config(raw)
+        assert len(cfg.assignments) == 1
+        assert cfg.assignments[0].value.expression == "$.source_name"
+        assert cfg.assignments[0].value.constant is None
+
+    def test_parse_mapping_config_constant_assignment(self) -> None:
+        raw = {
+            "assignments": [
+                {
+                    "target": {"path": "region", "arrow_type": "Utf8"},
+                    "value": {"constant": {"arrow_type": "Utf8", "value": "EU"}},
+                }
+            ]
+        }
+        cfg = _parse_mapping_config(raw)
+        assert len(cfg.assignments) == 1
+        assert cfg.assignments[0].value.constant is not None
+        assert cfg.assignments[0].value.constant.value == "EU"
+
+    def test_parse_mapping_config_no_expression_or_constant_raises(self) -> None:
+        raw = {
+            "assignments": [
+                {
+                    "target": {"path": "x", "arrow_type": "Utf8"},
+                    "value": {},
+                }
+            ]
+        }
+        with pytest.raises(ValueError, match="non-null 'expression' or 'constant'"):
+            _parse_mapping_config(raw)
+
+    def test_stream_missing_pipeline_id_logs_warning(
+        self, pipeline_tree: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        stream_doc = _stream_doc(STREAM_ID)
+        del stream_doc["pipeline_id"]
+        _write_json(
+            pipeline_tree / "pipelines" / PIPELINE_ID / "streams" / f"{STREAM_ID}.json",
+            stream_doc,
+        )
+        import logging
+        with caplog.at_level(logging.WARNING, logger="src.engine.pipeline_config_prep"):
+            prep = PipelineConfigPrep()
+            pipeline = prep.create_config()
+        assert pipeline.streams[0].pipeline_id == ""
+        assert any("pipeline_id" in r.message for r in caplog.records)

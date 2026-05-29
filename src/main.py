@@ -36,8 +36,6 @@ import logging
 import os
 import sys
 
-from src.models.stream import WriteConfig, WriteMode
-
 # Set up logging
 log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
