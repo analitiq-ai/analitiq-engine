@@ -7,6 +7,7 @@ from .arrow import parse_arrow_type, resolve_arrow_type
 from .exceptions import (
     InvalidTypeMapError,
     TypeMapError,
+    TypeMapNotFoundError,
     UnmappedTypeError,
 )
 from .loader import (
@@ -30,6 +31,7 @@ __all__ = [
     "TYPE_MAP_FILENAME",
     "WRITE_TYPE_MAP_FILENAME",
     "TypeMapError",
+    "TypeMapNotFoundError",
     "TypeMapRule",
     "TypeMapper",
     "UnmappedTypeError",

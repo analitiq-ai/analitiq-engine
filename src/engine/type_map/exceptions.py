@@ -9,6 +9,16 @@ class InvalidTypeMapError(TypeMapError):
     """Raised when a type-map file or rule is structurally invalid."""
 
 
+class TypeMapNotFoundError(InvalidTypeMapError):
+    """Raised when a *required* type-map file is absent (not malformed).
+
+    A distinct subclass so callers can tell "this connector simply ships no
+    type-map" (fine for API connectors) apart from "the type-map is present but
+    broken" (a hard error that must never be silently downgraded). Subclasses
+    :class:`InvalidTypeMapError` so existing broad handlers still catch it.
+    """
+
+
 class UnmappedTypeError(TypeMapError):
     """Raised when a native type has no matching rule in the connector's type-map.
 

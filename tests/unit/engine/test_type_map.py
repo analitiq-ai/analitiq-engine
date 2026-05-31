@@ -14,13 +14,13 @@ Covers every acceptance bullet from GH #28:
 from __future__ import annotations
 
 import json
-import logging
 from pathlib import Path
 
 import pytest
 
 from src.engine.type_map import (
     InvalidTypeMapError,
+    TypeMapNotFoundError,
     TypeMapper,
     UnmappedTypeError,
     WriteTypeMapRule,
@@ -601,7 +601,15 @@ class TestWriteTypeMapRuleValidation:
                 match="regex", canonical="^Foo${bar}$", native="TEXT"
             )
 
-    @pytest.mark.parametrize("bad_native", ["VARCHAR(${length-p})", "VARCHAR(${length })"])
+    @pytest.mark.parametrize(
+        "bad_native",
+        [
+            "VARCHAR(${length-p})",   # bad character
+            "VARCHAR(${length })",    # trailing space
+            "VARCHAR(${length)",      # unterminated opener
+            "VARCHAR(${})",           # empty name
+        ],
+    )
     def test_rejects_malformed_placeholder_in_native(self, bad_native):
         # A typo'd placeholder must fail at load time, not leak literal ${...}
         # into the rendered DDL.
@@ -830,35 +838,35 @@ class TestWriteMapLoader:
         assert mapper.has_write_map is False
         assert mapper.to_arrow_type("BIGINT") == "Int64"
 
-    def test_malformed_write_map_preserves_read_mapper(self, tmp_path, caplog):
-        # A broken OPTIONAL write map must not discard the valid read mapper;
-        # it is downgraded to a logged warning and read-only behavior.
+    def test_malformed_write_map_raises_at_load(self, tmp_path):
+        # A present-but-broken write map fails fast (caught by registry CI),
+        # not silently downgraded. It is NOT a TypeMapNotFoundError, so the
+        # connector loader treats it as fatal rather than "no type-map".
         _write_connector(
             tmp_path,
             "busted",
             type_map=[{"match": "exact", "native": "BIGINT", "canonical": "Int64"}],
         )
         (tmp_path / "busted" / "definition" / "write-type-map.json").write_text("nope")
-        with caplog.at_level(logging.WARNING):
-            mapper = load_type_map(tmp_path, "busted")
-        assert mapper.to_arrow_type("BIGINT") == "Int64"  # read still works
-        assert mapper.has_write_map is False
-        assert "malformed optional write-type-map" in caplog.text
-        # The write path then surfaces the precise unavailability.
-        with pytest.raises(InvalidTypeMapError, match="no write-type-map loaded"):
-            mapper.to_native_type("Int64")
+        with pytest.raises(InvalidTypeMapError, match="not valid JSON") as exc:
+            load_type_map(tmp_path, "busted")
+        assert not isinstance(exc.value, TypeMapNotFoundError)
 
-    def test_non_array_write_map_preserves_read_mapper(self, tmp_path, caplog):
+    def test_non_array_write_map_raises_at_load(self, tmp_path):
         _write_connector(
             tmp_path,
             "wrong",
             type_map=[{"match": "exact", "native": "BIGINT", "canonical": "Int64"}],
         )
         (tmp_path / "wrong" / "definition" / "write-type-map.json").write_text("{}")
-        with caplog.at_level(logging.WARNING):
-            mapper = load_type_map(tmp_path, "wrong")
-        assert mapper.to_arrow_type("BIGINT") == "Int64"
-        assert mapper.has_write_map is False
+        with pytest.raises(InvalidTypeMapError, match="must contain a JSON array"):
+            load_type_map(tmp_path, "wrong")
+
+    def test_absent_read_map_raises_not_found(self, tmp_path):
+        # Absence is the benign case the connector loader downgrades to None.
+        _write_connector(tmp_path, "apionly")  # connector.json only, no type-map
+        with pytest.raises(TypeMapNotFoundError, match="required type-map not found"):
+            load_type_map(tmp_path, "apionly")
 
     def test_connection_scoped_write_map_loaded(self, tmp_path: Path):
         definition = tmp_path / "my-pg" / "definition"

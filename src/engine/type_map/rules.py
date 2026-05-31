@@ -31,10 +31,10 @@ from .exceptions import InvalidTypeMapError
 
 _NAMED_GROUP_RE2: Final[Pattern[str]] = re.compile(r"\(\?<([A-Za-z_][A-Za-z0-9_]*)>")
 _SUBSTITUTION_TOKEN: Final[Pattern[str]] = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
-# Anything shaped like a placeholder, well-formed or not, used to catch typos
-# (``${length-p}``, ``${length }``) that the strict token above would skip over
-# and leave as literal text in the rendered output.
-_PLACEHOLDER_CANDIDATE: Final[Pattern[str]] = re.compile(r"\$\{[^}]*\}")
+# Every ``${`` opener, used to catch typos (``${length-p}``, ``${length }``,
+# the unterminated ``${length``) that the strict token above skips over and
+# would otherwise leave as literal text in the rendered output.
+_PLACEHOLDER_OPENER: Final[Pattern[str]] = re.compile(r"\$\{")
 
 # RE2 excludes these Perl/Python extensions. We reject any rule that uses them
 # at load time so the committed rule set stays portable.
@@ -108,17 +108,19 @@ def _to_python_named_groups(pattern: str) -> str:
 
 
 def _assert_well_formed_placeholders(template: str, *, field: str) -> None:
-    """Reject ``${...}`` sequences that are not valid ``${identifier}`` tokens.
+    """Reject every ``${`` that is not the start of a valid ``${identifier}``.
 
-    A malformed placeholder (``${length-p}``, ``${length }``) is not matched by
-    the strict substitution token, so without this check it would survive
+    A malformed placeholder — bad characters (``${length-p}``), trailing space
+    (``${length }``), or an unterminated opener (``${length``) — is not matched
+    by the strict substitution token, so without this check it would survive
     rendering as literal text and corrupt the emitted DDL silently.
     """
-    for candidate in _PLACEHOLDER_CANDIDATE.findall(template):
-        if not _SUBSTITUTION_TOKEN.fullmatch(candidate):
+    for opener in _PLACEHOLDER_OPENER.finditer(template):
+        if _SUBSTITUTION_TOKEN.match(template, opener.start()) is None:
             raise InvalidTypeMapError(
                 f"{field} {template!r} contains a malformed substitution token "
-                f"{candidate!r}; expected ${{name}} with an identifier name"
+                f"at offset {opener.start()}; expected ${{name}} with an "
+                f"identifier name"
             )
 
 
