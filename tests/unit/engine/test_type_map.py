@@ -530,6 +530,15 @@ class TestNormalizeCanonicalType:
     def test_strips_outer_and_collapses_internal_whitespace(self):
         assert normalize_canonical_type("  Decimal128(38,  9) ") == "Decimal128(38, 9)"
 
+    def test_canonicalizes_comma_spacing(self):
+        # Spacing-only variants accepted by parse_arrow_type must normalize to
+        # the same form so an exact rule matches either spelling.
+        assert normalize_canonical_type("Decimal128(38,9)") == "Decimal128(38, 9)"
+        assert normalize_canonical_type("Timestamp(MICROSECOND,UTC)") == (
+            "Timestamp(MICROSECOND, UTC)"
+        )
+        assert normalize_canonical_type("Decimal128(38 , 9)") == "Decimal128(38, 9)"
+
     def test_rejects_non_string(self):
         with pytest.raises(TypeError):
             normalize_canonical_type(None)  # type: ignore[arg-type]
@@ -648,6 +657,15 @@ class TestToNativeTypeExact:
     def test_whitespace_tolerated(self):
         m = _write_mapper([{"match": "exact", "canonical": "Int64", "native": "BIGINT"}])
         assert m.to_native_type("  Int64  ") == "BIGINT"
+
+    def test_exact_rule_for_parameterized_type_matches_spacing_variants(self):
+        # An exact rule authored with comma-space still matches the no-space
+        # spelling (and vice versa), since both normalize identically.
+        m = _write_mapper([
+            {"match": "exact", "canonical": "Decimal128(38, 9)", "native": "NUMERIC(38, 9)"}
+        ])
+        assert m.to_native_type("Decimal128(38, 9)") == "NUMERIC(38, 9)"
+        assert m.to_native_type("Decimal128(38,9)") == "NUMERIC(38, 9)"
 
     def test_unmapped_raises_reverse(self):
         m = _write_mapper([{"match": "exact", "canonical": "Int64", "native": "BIGINT"}])
