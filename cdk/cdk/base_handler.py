@@ -6,11 +6,14 @@ delegates all data operations to these handlers.
 """
 
 from abc import ABC, abstractmethod
-from typing import Any, List, Mapping
+from typing import TYPE_CHECKING, Any, List, Mapping
 
 import pyarrow as pa
 
 from .types import BatchWriteResult, Cursor, SchemaSpec
+
+if TYPE_CHECKING:
+    from .connection_runtime import ConnectionRuntime
 
 # ``BatchWriteResult``, ``Cursor`` and ``SchemaSpec`` are CDK-native value types
 # (``cdk.types``), decoupled from the gRPC messages this module once imported —

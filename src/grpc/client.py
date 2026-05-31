@@ -88,6 +88,10 @@ class DestinationGRPCClient:
         max_retries: int = DEFAULT_MAX_RETRIES,
         max_message_size: int = DEFAULT_MAX_MESSAGE_SIZE,
     ):
+        # Coalesce a blank host (env baked as ``DESTINATION_GRPC_HOST=""`` or an
+        # explicit ``host=""``) to localhost so the address is never hostless
+        # (``:50051``). Mirrors the engine-side fallback in engine.py.
+        host = host or "localhost"
         self.address = f"{host}:{port}"
         self.timeout = timeout_seconds
         self.max_retries = max_retries

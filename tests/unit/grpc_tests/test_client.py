@@ -126,6 +126,12 @@ class TestDestinationGRPCClient:
         assert client.timeout == 60
         assert client.max_retries == 5
 
+    def test_blank_host_falls_back_to_localhost(self):
+        """A blank host (env baked as ``DESTINATION_GRPC_HOST=""``) must
+        coalesce to localhost, never a hostless ``:50051`` address."""
+        client = DestinationGRPCClient(host="", port=50051)
+        assert client.address == "localhost:50051"
+
     def test_client_not_connected_initially(self):
         """Test that client is not connected initially."""
         client = DestinationGRPCClient()

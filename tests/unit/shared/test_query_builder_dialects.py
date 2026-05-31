@@ -23,6 +23,7 @@ from cdk.query_builder import (
     QueryBuilder,
     QueryConfig,
     _get_sqlalchemy_dialect,
+    _positional_params,
 )
 
 
@@ -265,6 +266,46 @@ class TestNamedParamstyleReturnsDict:
             )
         )
         assert isinstance(params, list)
+
+
+class TestPositionalParamMapping:
+    """``_positional_params`` underlies the BigQuery type-suffix fix.
+
+    The real BigQuery dialect tags each ``positiontup`` entry with its bind
+    type (``status_1:STRING``) while ``compiled.params`` is keyed by the bare
+    name. The real-dialect tests that exercise this are ``importorskip``-guarded
+    (BigQuery package absent in CI), so these unit tests pin the mapping logic
+    directly with synthetic input — no optional package required.
+    """
+
+    def test_bigquery_type_suffix_falls_back_to_bare_name(self):
+        # positiontup entries carry ``:TYPE``; params keyed by bare name.
+        positiontup = ["id_1:INT64", "name_2:STRING"]
+        bind_params = {"id_1": 7, "name_2": "alpha"}
+        assert _positional_params(positiontup, bind_params) == [7, "alpha"]
+
+    def test_untagged_names_used_directly(self):
+        # Non-BigQuery positional dialects: names match params verbatim.
+        positiontup = ["id_1", "cursor_2", "param_3"]
+        bind_params = {"id_1": 1, "cursor_2": "2024-01-01", "param_3": 100}
+        assert _positional_params(positiontup, bind_params) == [
+            1,
+            "2024-01-01",
+            100,
+        ]
+
+    def test_repeated_name_preserves_order_and_count(self):
+        # MSSQL ROW_NUMBER pagination reuses a bind name; iterating
+        # positiontup (not the dict) keeps the repeat.
+        positiontup = ["param_1", "param_2", "param_1"]
+        bind_params = {"param_1": 10, "param_2": 20}
+        assert _positional_params(positiontup, bind_params) == [10, 20, 10]
+
+    def test_missing_bind_name_raises_keyerror(self):
+        # A name absent under both the tagged and bare form is a real error,
+        # not silently dropped.
+        with pytest.raises(KeyError):
+            _positional_params(["ghost_1:STRING"], {"id_1": 1})
 
 
 class TestPositionalParamConversion:

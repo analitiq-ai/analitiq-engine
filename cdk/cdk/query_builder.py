@@ -38,6 +38,26 @@ ParamsLike = Union[List[Any], Dict[str, Any]]
 logger = logging.getLogger(__name__)
 
 
+def _positional_params(
+    positiontup: List[str], bind_params: Dict[str, Any]
+) -> List[Any]:
+    """Map an ordered positional bind-name tuple to its values.
+
+    ``positiontup`` is SA's ordered list of bind names for a positional
+    paramstyle; a name can repeat (MSSQL ROW_NUMBER pagination reuses
+    ``param_1``), so iterating it (not the dict) preserves the right count and
+    order. The BigQuery dialect tags each entry with its bind type
+    (``status_1:STRING``) while ``bind_params`` is keyed by the bare name, so
+    fall back to the prefix before the ``:`` when the tagged name misses. SA
+    sanitizes bind names to ``[A-Za-z0-9_]``, so a real name never contains a
+    ``:`` and the fallback cannot collide.
+    """
+    return [
+        bind_params[name if name in bind_params else name.split(":", 1)[0]]
+        for name in positiontup
+    ]
+
+
 class FilterOperator(Enum):
     """Supported filter operators."""
     EQ = "="
@@ -466,20 +486,7 @@ class QueryBuilder:
         # so callers must accept the dict form too.
         params: ParamsLike
         if compiled.positiontup is not None:
-            # The same name can repeat in positiontup (MSSQL
-            # ROW_NUMBER pagination reuses ``param_1``), so dict-iter
-            # alone would drop the repeat. Iterating positiontup
-            # produces the right positional value list.
-            #
-            # The BigQuery dialect tags each positiontup entry with its
-            # bind type (e.g. ``status_1:STRING``) while ``compiled.params``
-            # is keyed by the bare name; fall back to the prefix before the
-            # ``:`` so the lookup matches for every positional dialect.
-            bind_params = compiled.params
-            params = [
-                bind_params[name if name in bind_params else name.split(":", 1)[0]]
-                for name in compiled.positiontup
-            ]
+            params = _positional_params(compiled.positiontup, compiled.params)
         else:
             params = dict(compiled.params)
 
