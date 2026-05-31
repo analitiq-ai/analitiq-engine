@@ -601,6 +601,12 @@ class TestWriteTypeMapRuleValidation:
                 match="regex", canonical="^Foo${bar}$", native="TEXT"
             )
 
+    @pytest.mark.parametrize("bad_canonical", ["Decimal128(${p)", "Utf8${", "X${p-q}"])
+    def test_rejects_malformed_opener_on_match_side(self, bad_canonical):
+        # Any ${ on the match side is a dead-rule footgun, well-formed or not.
+        with pytest.raises(InvalidTypeMapError, match="belong only in the rendered"):
+            WriteTypeMapRule(match="exact", canonical=bad_canonical, native="NUMERIC")
+
     @pytest.mark.parametrize(
         "bad_native",
         [

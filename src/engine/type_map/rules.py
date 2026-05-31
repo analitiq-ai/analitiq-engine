@@ -257,13 +257,15 @@ class WriteTypeMapRule(BaseModel):
 
     @model_validator(mode="after")
     def _validate(self) -> "WriteTypeMapRule":
-        # Substitution tokens render into ``native``; one on the match side
-        # would be matched as the literal text ``${...}`` and never fire.
-        if _SUBSTITUTION_TOKEN.search(self.canonical):
+        # Substitution tokens render into ``native``; any ``${`` on the match
+        # side (well-formed or a typo like ``${p)``) would be matched as literal
+        # text and never fire, so reject the whole class rather than just the
+        # well-formed form.
+        if _PLACEHOLDER_OPENER.search(self.canonical):
             raise InvalidTypeMapError(
                 f"write rule canonical {self.canonical!r} contains a ${{...}} "
-                f"token; substitution tokens belong only in the rendered native "
-                f"type"
+                f"sequence; substitution tokens belong only in the rendered "
+                f"native type"
             )
 
         # A typo'd placeholder in the render template would otherwise leak into
