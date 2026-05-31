@@ -763,6 +763,15 @@ class TestToNativeTypeRegex:
         ])
         assert m.to_native_type("Utf8", params={"length": 255}) == "VARCHAR(255)"
 
+    def test_none_param_hint_treated_as_missing(self):
+        # A null/None hint (nullable or absent metadata field) is dropped, not
+        # rendered as literal "None" — so a token needing it fails explicitly.
+        m = _write_mapper([
+            {"match": "exact", "canonical": "Utf8", "native": "VARCHAR(${length})"}
+        ])
+        with pytest.raises(InvalidTypeMapError, match="render hint"):
+            m.to_native_type("Utf8", params={"length": None})
+
     def test_missing_hint_raises(self):
         m = _write_mapper([
             {"match": "exact", "canonical": "Utf8", "native": "VARCHAR(${length})"}

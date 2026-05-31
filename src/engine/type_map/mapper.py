@@ -136,9 +136,14 @@ class TypeMapper:
                 f"render a native type for canonical {canonical!r}"
             )
         normalized = normalize_canonical_type(canonical)
-        # Captures are always str; hints may arrive as ints (e.g. a JSON length)
-        # — render them to str so the substitution callback never trips.
-        hints: dict[str, str] = {k: str(v) for k, v in (params or {}).items()}
+        # Hints may arrive as ints (e.g. a JSON length) — render them to str so
+        # the substitution callback never trips. A None hint (a nullable/absent
+        # metadata field) is treated as not provided, mirroring how a
+        # non-participating optional capture is dropped below; otherwise it would
+        # render literal "None" into the DDL.
+        hints: dict[str, str] = {
+            k: str(v) for k, v in (params or {}).items() if v is not None
+        }
         for rule, compiled, exact in zip(
             self._write_rules, self._write_compiled, self._exact_canonical
         ):
