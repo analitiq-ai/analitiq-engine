@@ -22,7 +22,7 @@ pattern works with ``re.fullmatch``.
 from __future__ import annotations
 
 import re
-from typing import Final, Iterable, Literal, Pattern
+from typing import Final, Iterable, Literal, Pattern, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -160,21 +160,30 @@ class TypeMapRule(BaseModel):
         return re.compile(translated)
 
 
-def parse_rules(payload: Iterable[object], *, source: str) -> list[TypeMapRule]:
-    """Validate and parse a list of rule dicts loaded from JSON.
+_RuleT = TypeVar("_RuleT", bound=BaseModel)
+
+
+def _parse_rule_list(
+    payload: Iterable[object], model: type[_RuleT], *, source: str
+) -> list[_RuleT]:
+    """Validate and parse a JSON array into *model* instances.
+
+    Shared by the read (:class:`TypeMapRule`) and write
+    (:class:`WriteTypeMapRule`) directions so the two never diverge.
 
     Args:
         payload: Iterable of rule dicts, typically the top-level JSON array.
+        model: The rule model to instantiate each item as.
         source: Human-readable origin (e.g. file path) used in error messages.
     """
-    rules: list[TypeMapRule] = []
+    rules: list[_RuleT] = []
     for index, item in enumerate(payload):
         if not isinstance(item, dict):
             raise InvalidTypeMapError(
                 f"{source}: rule #{index} is not a JSON object"
             )
         try:
-            rules.append(TypeMapRule(**item))
+            rules.append(model(**item))
         except InvalidTypeMapError:
             raise
         except Exception as err:
@@ -184,6 +193,11 @@ def parse_rules(payload: Iterable[object], *, source: str) -> list[TypeMapRule]:
     if not rules:
         raise InvalidTypeMapError(f"{source}: rule list is empty")
     return rules
+
+
+def parse_rules(payload: Iterable[object], *, source: str) -> list[TypeMapRule]:
+    """Validate and parse a read-direction (native -> canonical) rule array."""
+    return _parse_rule_list(payload, TypeMapRule, source=source)
 
 
 class WriteTypeMapRule(BaseModel):
@@ -197,9 +211,16 @@ class WriteTypeMapRule(BaseModel):
       ``canonical`` pattern must be authored in Arrow case.
     - ``native`` may carry ``${name}`` tokens fed by **either** named captures
       in the ``canonical`` regex **or** per-column hints passed at render time
-      (e.g. ``length``). So tokens are NOT required to be regex captures — this
-      is the one place the write rule is looser than the read rule, which the
-      render step backstops by raising on any unresolved token.
+      (e.g. ``length``). Because a hint cannot be known at load time, write
+      rules defer **all** ``native``-token validation to render time, where
+      :func:`~src.engine.type_map.mapper._substitute_tokens` raises on any
+      unresolved token. This is the one place the write rule is looser than the
+      read rule, which can cross-check its output tokens against captures at
+      load time.
+
+    The **match** side (``canonical``) is still validated eagerly: it must not
+    contain ``${...}`` tokens (those belong only in the rendered ``native``),
+    and a regex ``canonical`` must compile within the RE2 subset.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -210,6 +231,15 @@ class WriteTypeMapRule(BaseModel):
 
     @model_validator(mode="after")
     def _validate(self) -> "WriteTypeMapRule":
+        # Substitution tokens render into ``native``; one on the match side
+        # would be matched as the literal text ``${...}`` and never fire.
+        if _SUBSTITUTION_TOKEN.search(self.canonical):
+            raise InvalidTypeMapError(
+                f"write rule canonical {self.canonical!r} contains a ${{...}} "
+                f"token; substitution tokens belong only in the rendered native "
+                f"type"
+            )
+
         if self.match == "exact":
             return self
 
@@ -235,22 +265,8 @@ class WriteTypeMapRule(BaseModel):
         return re.compile(translated)
 
 
-def parse_write_rules(payload: Iterable[object], *, source: str) -> list[WriteTypeMapRule]:
-    """Validate and parse a list of write-rule dicts loaded from JSON."""
-    rules: list[WriteTypeMapRule] = []
-    for index, item in enumerate(payload):
-        if not isinstance(item, dict):
-            raise InvalidTypeMapError(
-                f"{source}: rule #{index} is not a JSON object"
-            )
-        try:
-            rules.append(WriteTypeMapRule(**item))
-        except InvalidTypeMapError:
-            raise
-        except Exception as err:
-            raise InvalidTypeMapError(
-                f"{source}: rule #{index} is invalid: {err}"
-            ) from err
-    if not rules:
-        raise InvalidTypeMapError(f"{source}: rule list is empty")
-    return rules
+def parse_write_rules(
+    payload: Iterable[object], *, source: str
+) -> list[WriteTypeMapRule]:
+    """Validate and parse a write-direction (canonical -> native) rule array."""
+    return _parse_rule_list(payload, WriteTypeMapRule, source=source)

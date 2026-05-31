@@ -10,7 +10,7 @@ inverted at runtime — inverting would be lossy and ambiguous.
 
 from __future__ import annotations
 
-from typing import Mapping, Optional, Pattern
+from typing import Mapping, Pattern
 
 from .exceptions import (
     InvalidTypeMapError,
@@ -41,7 +41,7 @@ class TypeMapper:
         self,
         connector_slug: str,
         rules: list[TypeMapRule],
-        write_rules: Optional[list[WriteTypeMapRule]] = None,
+        write_rules: list[WriteTypeMapRule] | None = None,
     ) -> None:
         if not rules:
             raise InvalidTypeMapError(
@@ -63,8 +63,8 @@ class TypeMapper:
                 self._compiled.append(rule.compile_pattern())
 
         # Write direction (canonical -> native). Optional: API connectors and
-        # source-only connectors have no write map. Compiled lazily-symmetric to
-        # the read side: exact rules keep their normalized literal, regex rules a
+        # source-only connectors have no write map. Built symmetrically to the
+        # read side: exact rules keep their normalized literal, regex rules a
         # compiled pattern.
         self._write_rules: tuple[WriteTypeMapRule, ...] = tuple(write_rules or ())
         self._write_compiled: list[Pattern[str] | None] = []
@@ -124,9 +124,10 @@ class TypeMapper:
         ``length``) that a rule's ``native`` template may reference via
         ``${name}`` alongside any named captures from the canonical regex;
         named captures take precedence on a name clash. Raises
-        :class:`UnmappedTypeError` (``direction="reverse"``) on a miss and
-        :class:`InvalidTypeMapError` if the matched template references a token
-        that neither the capture groups nor ``params`` provide.
+        :class:`InvalidTypeMapError` if this connector has no write-type-map
+        loaded, or if the matched template references a token that neither the
+        capture groups nor ``params`` provide; raises :class:`UnmappedTypeError`
+        (``direction="reverse"``) when no rule matches *canonical*.
         """
         if not self._write_rules:
             raise InvalidTypeMapError(

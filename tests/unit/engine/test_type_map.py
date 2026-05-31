@@ -570,6 +570,20 @@ class TestWriteTypeMapRuleValidation:
         with pytest.raises(InvalidTypeMapError, match="failed to compile"):
             WriteTypeMapRule(match="regex", canonical="^[", native="TEXT")
 
+    def test_exact_rule_rejects_token_on_match_side(self):
+        # A ${...} token in the canonical (match) side would be matched as the
+        # literal text and never fire — reject it at load time.
+        with pytest.raises(InvalidTypeMapError, match="belong only in the rendered"):
+            WriteTypeMapRule(
+                match="exact", canonical="Decimal128(${p})", native="NUMERIC"
+            )
+
+    def test_regex_rule_rejects_token_on_match_side(self):
+        with pytest.raises(InvalidTypeMapError, match="belong only in the rendered"):
+            WriteTypeMapRule(
+                match="regex", canonical="^Foo${bar}$", native="TEXT"
+            )
+
 
 class TestParseWriteRules:
     def test_empty_list_rejected(self):
@@ -579,6 +593,29 @@ class TestParseWriteRules:
     def test_non_object_rejected(self):
         with pytest.raises(InvalidTypeMapError, match="not a JSON object"):
             parse_write_rules(["oops"], source="<test>")
+
+    def test_validator_error_passes_through(self):
+        # An InvalidTypeMapError from the rule validator is re-raised as-is.
+        with pytest.raises(InvalidTypeMapError, match="failed to compile"):
+            parse_write_rules(
+                [
+                    {"match": "exact", "canonical": "Int64", "native": "BIGINT"},
+                    {"match": "regex", "canonical": "^[", "native": "TEXT"},
+                ],
+                source="<test>",
+            )
+
+    def test_pydantic_error_wrapped_with_index(self):
+        # A non-InvalidTypeMapError (here a bad ``match`` literal) is wrapped
+        # with the offending rule's index.
+        with pytest.raises(InvalidTypeMapError, match=r"rule #1 is invalid"):
+            parse_write_rules(
+                [
+                    {"match": "exact", "canonical": "Int64", "native": "BIGINT"},
+                    {"match": "partial", "canonical": "Int32", "native": "INT"},
+                ],
+                source="<test>",
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -631,6 +668,20 @@ class TestToNativeTypeExact:
         with pytest.raises(InvalidTypeMapError, match="no write-type-map loaded"):
             m.to_native_type("Int64")
 
+    def test_empty_write_rules_is_no_write_map(self):
+        # An explicit empty list is treated as "no write map", not an empty
+        # ruleset that would mis-raise UnmappedTypeError.
+        m = TypeMapper(
+            "test",
+            parse_rules(
+                [{"match": "exact", "native": "X", "canonical": "Utf8"}], source="<r>"
+            ),
+            write_rules=[],
+        )
+        assert m.has_write_map is False
+        with pytest.raises(InvalidTypeMapError, match="no write-type-map loaded"):
+            m.to_native_type("Int64")
+
 
 class TestToNativeTypeRegex:
     def test_decimal_named_captures(self):
@@ -656,6 +707,16 @@ class TestToNativeTypeRegex:
         ])
         with pytest.raises(InvalidTypeMapError, match="render hint"):
             m.to_native_type("Utf8")
+
+    def test_regex_rule_missing_hint_raises(self):
+        # The looser branch: a regex rule whose native references a token that
+        # is neither a capture nor a supplied hint must raise at render time.
+        m = _write_mapper([
+            {"match": "regex", "canonical": r"^Utf8$", "native": "VARCHAR(${length})"}
+        ])
+        with pytest.raises(InvalidTypeMapError, match="render hint"):
+            m.to_native_type("Utf8")
+        assert m.to_native_type("Utf8", params={"length": "64"}) == "VARCHAR(64)"
 
     def test_capture_takes_precedence_over_hint(self):
         m = _write_mapper([

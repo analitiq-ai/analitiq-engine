@@ -14,10 +14,9 @@ class UnmappedTypeError(TypeMapError):
 
     The engine must never silently default to ``Utf8`` (or any other type).
     This exception carries the unmapped input so operators can see exactly
-    what the source reported. ``direction`` is always ``"forward"`` today;
-    the field is kept as a structured attribute so future destination-side
-    files (authored from the canonical end) can report ``"reverse"`` misses
-    without changing the type.
+    what the source reported. ``direction`` is ``"forward"`` for read-map
+    misses (native -> canonical, via ``to_arrow_type``) and ``"reverse"`` for
+    write-map misses (canonical -> native, via ``to_native_type``).
     """
 
     def __init__(self, connector_slug: str, direction: str, value: str) -> None:
