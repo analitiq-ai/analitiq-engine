@@ -22,7 +22,13 @@ classifiers = [
     "Topic :: Internet :: WWW/HTTP",
     "Topic :: System :: Distributed Computing",
 ]
-packages = [{include = "src"}]
+# The engine (``src``) consumes the in-tree CDK (``cdk/cdk``), so a Poetry
+# install / built wheel must expose both as importable top-level packages —
+# otherwise ``import cdk`` fails for any non-Docker, non-pytest run (Docker sets
+# PYTHONPATH=/app:/app/cdk; pytest sets ``pythonpath = ["cdk"]``). ``packages``
+# is build metadata only and is not part of Poetry's lock content-hash, so this
+# needs no relock.
+packages = [{include = "src"}, {include = "cdk", from = "cdk"}]
 
 [tool.poetry.dependencies]
 python = "^3.11"
