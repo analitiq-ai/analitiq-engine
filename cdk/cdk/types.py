@@ -30,6 +30,21 @@ class AckStatus(IntEnum):
     ACK_STATUS_FATAL_FAILURE = 4      # No commit occurred, do not retry, send to DLQ
 
 
+class WriteMode(IntEnum):
+    """Destination write mode for a stream.
+
+    Integer values mirror the ``WriteMode`` enum in ``stream.proto`` exactly, so
+    the engine translates the wire value with ``WriteMode(msg.write_mode)`` and
+    the value still reads as its integer when a handler keys a lookup table by
+    the raw proto int.
+    """
+
+    WRITE_MODE_UNSPECIFIED = 0
+    WRITE_MODE_INSERT = 1            # Insert only, fail on conflict
+    WRITE_MODE_UPSERT = 2            # Upsert (insert or update on conflict)
+    WRITE_MODE_TRUNCATE_INSERT = 3  # Truncate table before insert (full refresh)
+
+
 @dataclass(frozen=True)
 class Cursor:
     """Opaque checkpoint cursor.
@@ -50,12 +65,11 @@ class SchemaSpec:
     identification fields the wire message does: the destination looks up the
     full contract endpoint document (columns, primary keys, target table) by
     ``stream_id`` from configuration it already loaded, not from this object.
-    ``write_mode`` is the integer value of the proto ``WriteMode`` enum.
     """
 
     stream_id: str
     version: int
-    write_mode: int
+    write_mode: WriteMode
 
 
 # Statuses that count as a successful (committed) batch. Module-level so the

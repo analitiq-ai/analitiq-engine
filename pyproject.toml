@@ -275,6 +275,10 @@ ignore_missing_imports = true
 minversion = "7.0"
 addopts = "-ra -v --strict-markers --strict-config --ignore=tests/unit/src/fault_tolerance"
 testpaths = ["tests"]
+# The CDK is a sibling package (cdk/cdk/), consumed in-tree. Put cdk/ on the
+# path so `import cdk` resolves to cdk/cdk without an editable install. Docker
+# sets PYTHONPATH=/app:/app/cdk for the same reason.
+pythonpath = ["cdk"]
 python_files = ["test_*.py", "*_test.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]

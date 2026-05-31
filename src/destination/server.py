@@ -37,7 +37,7 @@ from ..grpc.generated.analitiq.v1 import (
     DestinationServiceServicer,
 )
 from cdk.base_handler import BaseDestinationHandler
-from cdk.types import Cursor as CdkCursor, SchemaSpec
+from cdk.types import Cursor as CdkCursor, SchemaSpec, WriteMode as CdkWriteMode
 from .connectors import get_handler
 from cdk.type_map import InvalidTypeMapError, UnmappedTypeError
 
@@ -174,7 +174,7 @@ class DestinationServicer(DestinationServiceServicer):
                         schema_spec = SchemaSpec(
                             stream_id=schema_msg.stream_id,
                             version=schema_msg.version,
-                            write_mode=schema_msg.write_mode,
+                            write_mode=CdkWriteMode(schema_msg.write_mode),
                         )
                         accepted = await self.handler.configure_schema(schema_spec)
                         ack_message = "" if accepted else "Schema configuration failed"
