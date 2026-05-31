@@ -6,49 +6,19 @@ delegates all data operations to these handlers.
 """
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
-from typing import Any, List, Mapping, Optional
+from typing import Any, List, Mapping
 
 import pyarrow as pa
 
-from ..grpc.generated.analitiq.v1 import (
-    AckStatus,
-    Cursor,
-    SchemaMessage,
-)
+from .types import BatchWriteResult, Cursor, SchemaSpec
 
-
-_SUCCESS_STATUSES = frozenset({
-    AckStatus.ACK_STATUS_SUCCESS,
-    AckStatus.ACK_STATUS_ALREADY_COMMITTED,
-})
-
-
-@dataclass(frozen=True)
-class BatchWriteResult:
-    """Immutable result of writing a batch to the destination.
-
-    ``success`` is a derived property: a result is successful when its
-    ``status`` is SUCCESS or ALREADY_COMMITTED. Modeling it as a property
-    (instead of a constructor argument) makes status the single source
-    of truth — callers cannot construct an inconsistent result.
-    """
-
-    status: AckStatus
-    records_written: int
-    committed_cursor: Optional[Cursor] = None
-    failed_record_ids: List[str] = field(default_factory=list)
-    failure_summary: str = ""
-
-    def __post_init__(self) -> None:
-        if self.records_written < 0:
-            raise ValueError(
-                f"records_written must be non-negative, got {self.records_written}"
-            )
-
-    @property
-    def success(self) -> bool:
-        return self.status in _SUCCESS_STATUSES
+# ``BatchWriteResult``, ``Cursor`` and ``SchemaSpec`` are CDK-native value types
+# (``cdk.types``), decoupled from the gRPC messages this module once imported —
+# the CDK must not depend on ``src/grpc`` (ADR §4.1). The engine's gRPC server
+# translates protobuf <-> these types at the wire boundary. ``BatchWriteResult``
+# is re-exported here because handlers/tests import it as
+# ``from cdk.base_handler import BaseDestinationHandler, BatchWriteResult``.
+__all__ = ["BaseDestinationHandler", "BatchWriteResult"]
 
 
 class BaseDestinationHandler(ABC):
@@ -88,8 +58,8 @@ class BaseDestinationHandler(ABC):
         ``PipelineConfigPrep`` as the engine, so the contract endpoint
         document (database object, columns, primary keys, API operations,
         …) is already on disk by the time ``configure_schema`` fires for
-        an incoming :class:`SchemaMessage`. Handlers read from this map
-        instead of unpacking the message.
+        an incoming :class:`~cdk.types.SchemaSpec`. Handlers read from this
+        map instead of unpacking the spec.
 
         Called once by the destination entrypoint before the gRPC server
         starts. Default is a no-op; handlers that need the document
@@ -120,9 +90,9 @@ class BaseDestinationHandler(ABC):
         pass
 
     @abstractmethod
-    async def configure_schema(self, schema_msg: SchemaMessage) -> bool:
+    async def configure_schema(self, schema_spec: SchemaSpec) -> bool:
         """
-        Configure destination schema based on SchemaMessage.
+        Configure destination schema based on the SchemaSpec.
 
         This may involve:
         - Creating schemas/databases
@@ -131,7 +101,7 @@ class BaseDestinationHandler(ABC):
         - Setting up constraints
 
         Args:
-            schema_msg: Schema configuration from engine
+            schema_spec: Schema identification from engine (CDK-native)
 
         Returns:
             True if schema configuration succeeded, False otherwise

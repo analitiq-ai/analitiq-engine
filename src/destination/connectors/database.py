@@ -32,32 +32,34 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.mysql import insert as mysql_insert
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncConnection
 
-from ..base_handler import BaseDestinationHandler, BatchWriteResult
+from cdk.base_handler import BaseDestinationHandler, BatchWriteResult
 from ..schema_contract import SchemaContract
+from ...models.stream import EndpointRef
 from ..sql_types import (
     native_to_bigquery,
     native_to_postgres,
     native_to_snowflake,
     native_to_sqlalchemy,
 )
-from ...engine.type_map import (
+from cdk.type_map import (
     InvalidTypeMapError,
     TypeMapper,
     UnmappedTypeError,
 )
-from ...secrets.exceptions import PlaceholderExpansionError
-from ...grpc.generated.analitiq.v1 import (
+from cdk.secrets.exceptions import PlaceholderExpansionError
+from cdk.types import (
     AckStatus,
     Cursor,
-    SchemaMessage,
+    EndpointScope,
+    SchemaSpec,
 )
-from ...shared.adbc_registry import AdbcConfigurationError
-from ...shared.connection_runtime import (
+from cdk.adbc_registry import AdbcConfigurationError
+from cdk.connection_runtime import (
     ConnectionRuntime,
     DETERMINISTIC_CONNECT_ERRORS,
     materialize_runtime,
 )
-from ...shared.database_utils import normalize_adbc_schema
+from cdk.database_utils import normalize_adbc_schema
 
 
 logger = logging.getLogger(__name__)
@@ -199,7 +201,7 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
 
     Per-stream destination settings (schema, table, primary keys,
     columns) are read from the preloaded contract endpoint document at
-    ``configure_schema`` time. The SchemaMessage off the wire only
+    ``configure_schema`` time. The SchemaSpec off the wire only
     carries ``stream_id``, ``version``, and ``write_mode``.
     """
 
@@ -226,7 +228,7 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         self._adbc_only: bool = False
 
         # Per-stream state derived from the contract endpoint document at
-        # configure_schema() time. The SchemaMessage off the wire only
+        # configure_schema() time. The SchemaSpec off the wire only
         # carries stream_id, version, and write_mode; everything else comes
         # from the preloaded ``stream_endpoints`` map. Keyed by stream_id
         # so concurrent streams sharing this handler instance do not race
@@ -282,7 +284,7 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
     def set_endpoint_refs(self, endpoint_refs: Mapping[str, Any]) -> None:
         """Register stream_id → endpoint_ref for each stream writing to this
         destination. Called once by ``src.main`` before the gRPC server starts;
-        the handler consults the map per incoming ``SchemaMessage`` to decide
+        the handler consults the map per incoming ``SchemaSpec`` to decide
         which ``TypeMapper`` applies (public endpoint → connector's map,
         private endpoint → connection's map).
 
@@ -317,7 +319,12 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
                 f"stream_id={stream_id!r}; call set_endpoint_refs() before the "
                 f"gRPC server starts"
             )
-        return self._runtime.type_mapper_for(endpoint_ref)
+        # Parse + validate the endpoint_ref engine-side (the CDK takes only the
+        # resolved scope, never the engine model), then hand the runtime the
+        # CDK-native EndpointScope. EndpointRef.from_dict already rejects an
+        # unknown scope, so the enum construction cannot fail here.
+        ref = EndpointRef.from_dict(endpoint_ref)
+        return self._runtime.type_mapper_for(scope=EndpointScope(ref.scope))
 
     @property
     def connector_type(self) -> str:
@@ -450,10 +457,10 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         if cancelled is not None:
             raise cancelled
 
-    async def configure_schema(self, schema_msg: SchemaMessage) -> bool:
+    async def configure_schema(self, schema_spec: SchemaSpec) -> bool:
         """Configure the destination from the preloaded contract endpoint.
 
-        The SchemaMessage only carries identification fields; this method
+        The SchemaSpec only carries identification fields; this method
         looks up the contract database endpoint document by stream_id and
         reads its ``database_object``, ``columns``, and ``primary_keys``
         directly. Both engine and destination load the same artifacts via
@@ -463,7 +470,7 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
             logger.error("Cannot configure schema: not connected")
             return False
 
-        stream_id = schema_msg.stream_id
+        stream_id = schema_spec.stream_id
         endpoint_doc = self._stream_endpoints.get(stream_id)
         if endpoint_doc is None:
             logger.error(
@@ -515,7 +522,7 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
                 schema_name=schema_name,
                 table_name=table_name,
                 endpoint_document=dict(endpoint_doc),
-                write_mode=self._get_write_mode(schema_msg.write_mode),
+                write_mode=self._get_write_mode(schema_spec.write_mode),
                 primary_keys=primary_keys,
                 conflict_keys=conflict_keys,
             )

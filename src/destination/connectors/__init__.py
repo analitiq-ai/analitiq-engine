@@ -2,7 +2,7 @@
 
 from typing import Any, Dict, Type
 
-from ..base_handler import BaseDestinationHandler
+from cdk.base_handler import BaseDestinationHandler
 from .database import DatabaseDestinationHandler
 from .stream import StreamDestinationHandler
 from .file import FileDestinationHandler

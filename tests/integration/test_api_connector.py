@@ -7,10 +7,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from aiohttp import ClientTimeout, TCPConnector, ClientSession
 
 from src.source.connectors.api import APIConnector
-from src.shared.rate_limiter import RateLimiter
+from cdk.rate_limiter import RateLimiter
 from src.source.connectors.base import ConnectionError, ReadError
-from src.shared.connection_runtime import ConnectionRuntime
-from src.secrets.resolvers.memory import InMemorySecretsResolver
+from cdk.connection_runtime import ConnectionRuntime
+from cdk.secrets.resolvers.memory import InMemorySecretsResolver
 from src.state.state_manager import StateManager
 
 
@@ -100,7 +100,7 @@ class TestConnection:
     @pytest.mark.asyncio
     async def test_connect_with_rate_limit(self, connector):
         """Connector exposes the runtime's rate limiter when present."""
-        from src.shared.rate_limiter import RateLimiter
+        from cdk.rate_limiter import RateLimiter
 
         runtime = _make_api_runtime({"host": "https://api.example.com"})
         runtime._session = AsyncMock()

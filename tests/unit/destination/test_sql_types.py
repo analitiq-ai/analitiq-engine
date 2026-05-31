@@ -25,8 +25,8 @@ from sqlalchemy import (
 )
 
 from src.destination.sql_types import arrow_to_sqlalchemy, native_to_sqlalchemy
-from src.engine.type_map import TypeMapper
-from src.engine.type_map.rules import parse_rules
+from cdk.type_map import TypeMapper
+from cdk.type_map.rules import parse_rules
 
 
 class TestArrowToSqlAlchemyPrimitives:
@@ -148,7 +148,7 @@ class TestNativeToSqlAlchemyChain:
         assert isinstance(native_to_sqlalchemy("VARCHAR(255)", mapper), Text)
 
     def test_unmapped_native_bubbles_up(self, mapper):
-        from src.engine.type_map import UnmappedTypeError
+        from cdk.type_map import UnmappedTypeError
 
         with pytest.raises(UnmappedTypeError):
             native_to_sqlalchemy("MONEY", mapper)

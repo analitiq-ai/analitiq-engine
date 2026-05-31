@@ -96,7 +96,7 @@ class TypeMapper:
     def to_arrow_type(self, native: str) -> str:
         """Map a native type string to its Arrow-type-string form.
 
-        Pair with :func:`~src.engine.type_map.arrow.parse_arrow_type` to
+        Pair with :func:`~cdk.type_map.arrow.parse_arrow_type` to
         get a ``pa.DataType``. Raises :class:`UnmappedTypeError` on miss.
         """
         normalized = normalize_native_type(native)

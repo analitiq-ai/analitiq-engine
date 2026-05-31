@@ -5,7 +5,7 @@ Used when the source connector is materialized with ``transport_type:
 SQLAlchemy engine, so reads run directly against an ADBC connection
 obtained via :func:`ConnectionRuntime.open_adbc_connection`.
 
-SQL is compiled by the shared :class:`~src.shared.query_builder.QueryBuilder`
+SQL is compiled by the shared :class:`~cdk.query_builder.QueryBuilder`
 in qmark mode (see ``src/source/connectors/database.py``); the reader is
 pure execution -- it takes a ``(sql, params)`` pair and returns Arrow
 batches. Centralizing rendering in QueryBuilder gives the ADBC path the

@@ -6,7 +6,7 @@ This module provides:
 - DestinationGRPCServer: gRPC server for receiving streamed data
 """
 
-from .base_handler import BaseDestinationHandler, BatchWriteResult
+from cdk.base_handler import BaseDestinationHandler, BatchWriteResult
 from .server import DestinationGRPCServer
 
 __all__ = [

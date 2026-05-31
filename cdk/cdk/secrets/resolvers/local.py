@@ -9,8 +9,8 @@ import logging
 from pathlib import Path
 from typing import Dict, Optional
 
-from src.secrets.protocol import SecretsResolver
-from src.secrets.exceptions import SecretNotFoundError, SecretResolutionError
+from cdk.secrets.protocol import SecretsResolver
+from cdk.secrets.exceptions import SecretNotFoundError, SecretResolutionError
 
 logger = logging.getLogger(__name__)
 

@@ -26,8 +26,8 @@ class TestWriteConflictKeysWiring:
         from src.destination.connectors.database import (
             DatabaseDestinationHandler,
         )
-        from src.engine.type_map import TypeMapper
-        from src.engine.type_map.rules import parse_rules
+        from cdk.type_map import TypeMapper
+        from cdk.type_map.rules import parse_rules
 
         handler = DatabaseDestinationHandler()
         handler._connected = True
@@ -73,8 +73,8 @@ class TestWriteConflictKeysWiring:
         from src.destination.connectors.database import (
             DatabaseDestinationHandler,
         )
-        from src.engine.type_map import TypeMapper
-        from src.engine.type_map.rules import parse_rules
+        from cdk.type_map import TypeMapper
+        from cdk.type_map.rules import parse_rules
 
         handler = DatabaseDestinationHandler()
         handler._connected = True

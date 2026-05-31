@@ -239,7 +239,7 @@ class WriteTypeMapRule(BaseModel):
       in the ``canonical`` regex **or** per-column hints passed at render time
       (e.g. ``length``). Because a hint cannot be known at load time, write
       rules defer **all** ``native``-token validation to render time, where
-      :func:`~src.engine.type_map.mapper._substitute_tokens` raises on any
+      :func:`~cdk.type_map.mapper._substitute_tokens` raises on any
       unresolved token. This is the one place the write rule is looser than the
       read rule, which can cross-check its output tokens against captures at
       load time.

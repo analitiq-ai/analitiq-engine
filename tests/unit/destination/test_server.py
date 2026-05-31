@@ -16,7 +16,7 @@ import pytest
 
 from src.destination.connectors.api import ApiDestinationHandler
 from src.destination.server import DestinationServicer
-from src.engine.type_map import InvalidTypeMapError, UnmappedTypeError
+from cdk.type_map import InvalidTypeMapError, UnmappedTypeError
 from src.grpc.generated.analitiq.v1 import (
     GetCapabilitiesRequest,
     SchemaMessage,

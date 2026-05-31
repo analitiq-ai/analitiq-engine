@@ -18,7 +18,7 @@ from unittest.mock import patch
 
 import pytest
 
-from src.shared.query_builder import (
+from cdk.query_builder import (
     Filter,
     QueryBuilder,
     QueryConfig,
@@ -54,7 +54,7 @@ class TestLazyDialectLoading:
     def test_missing_third_party_package_raises_actionable_import_error(self):
         # Patch importlib so the lookup acts as if the package isn't
         # installed even when it actually is (or vice versa).
-        with patch("src.shared.query_builder.importlib.import_module") as imp:
+        with patch("cdk.query_builder.importlib.import_module") as imp:
             imp.side_effect = ImportError("not installed")
             with pytest.raises(ImportError, match="snowflake"):
                 _get_sqlalchemy_dialect("snowflake")

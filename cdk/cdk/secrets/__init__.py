@@ -9,15 +9,15 @@ Secrets are resolved at connection time (late-binding), not at config load time,
 providing better security by minimizing the time secrets are in memory.
 """
 
-from src.secrets.protocol import SecretsResolver
-from src.secrets.exceptions import (
+from cdk.secrets.protocol import SecretsResolver
+from cdk.secrets.exceptions import (
     SecretNotFoundError,
     SecretAccessDeniedError,
     SecretResolutionError,
     PlaceholderExpansionError,
 )
-from src.secrets.resolvers.local import LocalFileSecretsResolver
-from src.secrets.resolvers.memory import InMemorySecretsResolver
+from cdk.secrets.resolvers.local import LocalFileSecretsResolver
+from cdk.secrets.resolvers.memory import InMemorySecretsResolver
 
 __all__ = [
     # Protocol

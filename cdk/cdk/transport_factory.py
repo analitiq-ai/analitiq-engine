@@ -2,7 +2,7 @@
 
 The connector contract owns provider-specific transport recipes. This
 module reads ``connector.transports.<ref>``, resolves expressions via a
-typed :class:`~src.engine.resolver.ResolutionContext`, applies the
+typed :class:`~cdk.resolver.ResolutionContext`, applies the
 declared per-binding encodings to render the DSN, and produces a
 concrete transport object.
 
@@ -35,9 +35,9 @@ import aiohttp
 from sqlalchemy import text as _sa_text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
-from src.engine.derived_functions import DEFAULT_FUNCTIONS
-from src.engine.resolver import ResolutionContext, Resolver
-from src.shared.rate_limiter import RateLimiter
+from cdk.derived_functions import DEFAULT_FUNCTIONS
+from cdk.resolver import ResolutionContext, Resolver
+from cdk.rate_limiter import RateLimiter
 
 logger = logging.getLogger(__name__)
 

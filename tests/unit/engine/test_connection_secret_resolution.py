@@ -1,7 +1,7 @@
 """Tests for ConnectionRuntime materialization and lifecycle.
 
 The runtime now drives transport creation through
-:mod:`src.shared.transport_factory` based on the connector definition's
+:mod:`cdk.transport_factory` based on the connector definition's
 ``transports`` block. These tests exercise that contract using mock
 transports rather than the legacy ``${PLACEHOLDER}`` expansion path.
 """
@@ -10,9 +10,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.secrets.exceptions import SecretNotFoundError
-from src.shared.connection_runtime import ConnectionRuntime
-from src.shared.transport_factory import HttpTransport, SqlAlchemyTransport
+from cdk.secrets.exceptions import SecretNotFoundError
+from cdk.connection_runtime import ConnectionRuntime
+from cdk.transport_factory import HttpTransport, SqlAlchemyTransport
 
 
 # ---------------------------------------------------------------------------
@@ -130,7 +130,7 @@ class TestConnectionRuntimeMaterialize:
             connector_definition=_db_connector(),
         )
         with patch(
-            "src.shared.connection_runtime.build_transport",
+            "cdk.connection_runtime.build_transport",
             new=AsyncMock(return_value=transport),
         ) as mock_build:
             await runtime.materialize()
@@ -156,7 +156,7 @@ class TestConnectionRuntimeMaterialize:
             connector_definition=_api_connector(),
         )
         with patch(
-            "src.shared.connection_runtime.build_transport",
+            "cdk.connection_runtime.build_transport",
             new=AsyncMock(return_value=transport),
         ):
             await runtime.materialize()
@@ -228,7 +228,7 @@ class TestConnectionRuntimeClose:
             connector_definition=_db_connector(),
         )
         with patch(
-            "src.shared.connection_runtime.build_transport",
+            "cdk.connection_runtime.build_transport",
             new=AsyncMock(return_value=transport),
         ):
             await runtime.materialize()
@@ -252,7 +252,7 @@ class TestConnectionRuntimeClose:
             connector_definition=_api_connector(),
         )
         with patch(
-            "src.shared.connection_runtime.build_transport",
+            "cdk.connection_runtime.build_transport",
             new=AsyncMock(return_value=transport),
         ):
             await runtime.materialize()
@@ -274,7 +274,7 @@ class TestConnectionRuntimeClose:
             connector_definition=_db_connector(),
         )
         with patch(
-            "src.shared.connection_runtime.build_transport",
+            "cdk.connection_runtime.build_transport",
             new=AsyncMock(return_value=transport),
         ):
             await runtime.materialize()
@@ -390,7 +390,7 @@ class TestScrubResolvedConfig:
             connector_definition=_db_connector(),
         )
         with patch(
-            "src.shared.connection_runtime.build_transport",
+            "cdk.connection_runtime.build_transport",
             new=AsyncMock(return_value=transport),
         ):
             await runtime.materialize()

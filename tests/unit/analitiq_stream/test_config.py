@@ -242,7 +242,7 @@ class TestBatchWriteResultInvariant:
 
     @pytest.mark.unit
     def test_success_derived_from_status(self):
-        from src.destination.base_handler import BatchWriteResult
+        from cdk.base_handler import BatchWriteResult
         from src.grpc.generated.analitiq.v1 import AckStatus
 
         assert BatchWriteResult(
@@ -262,7 +262,7 @@ class TestBatchWriteResultInvariant:
     def test_success_is_not_constructor_kwarg(self):
         """Removing the ``success`` constructor arg prevents the
         success/status drift bug entirely."""
-        from src.destination.base_handler import BatchWriteResult
+        from cdk.base_handler import BatchWriteResult
         from src.grpc.generated.analitiq.v1 import AckStatus
 
         with pytest.raises(TypeError):
@@ -274,7 +274,7 @@ class TestBatchWriteResultInvariant:
 
     @pytest.mark.unit
     def test_negative_records_written_raises(self):
-        from src.destination.base_handler import BatchWriteResult
+        from cdk.base_handler import BatchWriteResult
         from src.grpc.generated.analitiq.v1 import AckStatus
 
         with pytest.raises(ValueError, match="non-negative"):
@@ -285,7 +285,7 @@ class TestBatchWriteResultInvariant:
     @pytest.mark.unit
     def test_frozen_rejects_mutation(self):
         from dataclasses import FrozenInstanceError
-        from src.destination.base_handler import BatchWriteResult
+        from cdk.base_handler import BatchWriteResult
         from src.grpc.generated.analitiq.v1 import AckStatus
 
         r = BatchWriteResult(

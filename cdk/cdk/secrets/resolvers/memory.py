@@ -7,8 +7,8 @@ Stores secrets in memory, useful for unit tests and development.
 import logging
 from typing import Dict, Optional
 
-from src.secrets.protocol import SecretsResolver
-from src.secrets.exceptions import SecretNotFoundError
+from cdk.secrets.protocol import SecretsResolver
+from cdk.secrets.exceptions import SecretNotFoundError
 
 logger = logging.getLogger(__name__)
 

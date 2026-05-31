@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional, AsyncIterator, Tuple
 import pyarrow as pa
 
 from ..source.connectors.base import BaseConnector
-from ..shared.connection_runtime import ConnectionRuntime
+from cdk.connection_runtime import ConnectionRuntime
 from ..shared.run_id import get_or_generate_run_id
 from ..state.circuit_breaker import CircuitBreaker
 from ..state.dead_letter_queue import DeadLetterQueue

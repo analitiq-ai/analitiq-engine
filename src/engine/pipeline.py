@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 
 from .engine import StreamingEngine
 from ..models.stream import EndpointRef
-from ..shared.connection_runtime import ConnectionRuntime
+from cdk.connection_runtime import ConnectionRuntime
 
 logger = logging.getLogger(__name__)
 
