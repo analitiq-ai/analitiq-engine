@@ -11,23 +11,35 @@ from .exceptions import (
 )
 from .loader import (
     TYPE_MAP_FILENAME,
+    WRITE_TYPE_MAP_FILENAME,
     load_connection_type_map,
     load_type_map,
 )
 from .mapper import TypeMapper
-from .rules import TypeMapRule, normalize_native_type, parse_rules
+from .rules import (
+    TypeMapRule,
+    WriteTypeMapRule,
+    normalize_canonical_type,
+    normalize_native_type,
+    parse_rules,
+    parse_write_rules,
+)
 
 __all__ = [
     "InvalidTypeMapError",
     "TYPE_MAP_FILENAME",
+    "WRITE_TYPE_MAP_FILENAME",
     "TypeMapError",
     "TypeMapRule",
     "TypeMapper",
     "UnmappedTypeError",
+    "WriteTypeMapRule",
     "parse_arrow_type",
     "resolve_arrow_type",
     "load_connection_type_map",
     "load_type_map",
+    "normalize_canonical_type",
     "normalize_native_type",
     "parse_rules",
+    "parse_write_rules",
 ]

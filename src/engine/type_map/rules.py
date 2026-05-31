@@ -63,6 +63,23 @@ def normalize_native_type(value: str) -> str:
     return re.sub(r"\s+", " ", value.strip()).upper()
 
 
+def normalize_canonical_type(value: str) -> str:
+    """Normalize an Arrow canonical type string for write-direction matching.
+
+    Unlike :func:`normalize_native_type` this is **case-preserving**: the Arrow
+    vocabulary is mixed-case (``Int64``, ``Decimal128(38, 9)``,
+    ``Timestamp(MICROSECOND, UTC)``) and matching it case-insensitively would
+    collapse distinct types. Whitespace is trimmed and internal runs collapsed
+    so spacing differences (``Decimal128(38,9)`` vs ``Decimal128(38, 9)``) do
+    not cause a spurious miss.
+    """
+    if not isinstance(value, str):
+        raise TypeError(
+            f"canonical type must be a string, got {type(value).__name__}"
+        )
+    return re.sub(r"\s+", " ", value.strip())
+
+
 def _assert_re2_subset(pattern: str) -> None:
     """Reject Perl/Python regex extensions that RE2 does not support."""
     for token, label in _FORBIDDEN_CONSTRUCTS:
@@ -158,6 +175,76 @@ def parse_rules(payload: Iterable[object], *, source: str) -> list[TypeMapRule]:
             )
         try:
             rules.append(TypeMapRule(**item))
+        except InvalidTypeMapError:
+            raise
+        except Exception as err:
+            raise InvalidTypeMapError(
+                f"{source}: rule #{index} is invalid: {err}"
+            ) from err
+    if not rules:
+        raise InvalidTypeMapError(f"{source}: rule list is empty")
+    return rules
+
+
+class WriteTypeMapRule(BaseModel):
+    """A single entry in ``write-type-map.json`` (canonical -> native).
+
+    The inverse of :class:`TypeMapRule`: it matches on the **canonical** Arrow
+    type and renders the **native** DDL type. Two grammar differences follow
+    from the inversion:
+
+    - Matching is case-sensitive (the Arrow vocabulary is mixed-case), so the
+      ``canonical`` pattern must be authored in Arrow case.
+    - ``native`` may carry ``${name}`` tokens fed by **either** named captures
+      in the ``canonical`` regex **or** per-column hints passed at render time
+      (e.g. ``length``). So tokens are NOT required to be regex captures — this
+      is the one place the write rule is looser than the read rule, which the
+      render step backstops by raising on any unresolved token.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    match: Literal["exact", "regex"]
+    canonical: str = Field(min_length=1)
+    native: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _validate(self) -> "WriteTypeMapRule":
+        if self.match == "exact":
+            return self
+
+        _assert_re2_subset(self.canonical)
+        translated = _to_python_named_groups(self.canonical)
+        try:
+            re.compile(translated)
+        except re.error as err:
+            raise InvalidTypeMapError(
+                f"regex pattern {self.canonical!r} failed to compile: {err}"
+            ) from err
+        return self
+
+    def compile_pattern(self) -> Pattern[str]:
+        """Compile the canonical-matching regex (RE2-subset).
+
+        Canonical inputs are matched case-sensitively, so the pattern is used
+        verbatim (no case folding).
+        """
+        if self.match != "regex":
+            raise RuntimeError("compile_pattern is only defined for regex rules")
+        translated = _to_python_named_groups(self.canonical)
+        return re.compile(translated)
+
+
+def parse_write_rules(payload: Iterable[object], *, source: str) -> list[WriteTypeMapRule]:
+    """Validate and parse a list of write-rule dicts loaded from JSON."""
+    rules: list[WriteTypeMapRule] = []
+    for index, item in enumerate(payload):
+        if not isinstance(item, dict):
+            raise InvalidTypeMapError(
+                f"{source}: rule #{index} is not a JSON object"
+            )
+        try:
+            rules.append(WriteTypeMapRule(**item))
         except InvalidTypeMapError:
             raise
         except Exception as err:

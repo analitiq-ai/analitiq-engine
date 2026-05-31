@@ -22,12 +22,18 @@ from src.engine.type_map import (
     InvalidTypeMapError,
     TypeMapper,
     UnmappedTypeError,
+    WriteTypeMapRule,
     parse_arrow_type,
     load_connection_type_map,
     load_type_map,
+    normalize_canonical_type,
     normalize_native_type,
 )
-from src.engine.type_map.rules import TypeMapRule, parse_rules
+from src.engine.type_map.rules import TypeMapRule, parse_rules, parse_write_rules
+
+# Repository root, for loading the real connector write-type-maps.
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_CONNECTORS_DIR = _REPO_ROOT / "connectors"
 
 
 # ---------------------------------------------------------------------------
@@ -419,6 +425,7 @@ def _write_connector(
     slug: str,
     *,
     type_map: list | None = None,
+    write_type_map: list | None = None,
 ) -> None:
     definition = root / slug / "definition"
     definition.mkdir(parents=True, exist_ok=True)
@@ -427,6 +434,8 @@ def _write_connector(
     )
     if type_map is not None:
         (definition / "type-map.json").write_text(json.dumps(type_map))
+    if write_type_map is not None:
+        (definition / "write-type-map.json").write_text(json.dumps(write_type_map))
 
 
 class TestLoaders:
@@ -504,3 +513,301 @@ class TestLoadConnectionTypeMap:
         (definition / "type-map.json").write_text("{}")
         with pytest.raises(InvalidTypeMapError, match="must contain a JSON array"):
             load_connection_type_map(tmp_path, "bad")
+
+
+# ---------------------------------------------------------------------------
+# normalize_canonical_type (write direction, case-preserving)
+# ---------------------------------------------------------------------------
+
+
+class TestNormalizeCanonicalType:
+    def test_preserves_case(self):
+        assert normalize_canonical_type("Int64") == "Int64"
+        assert normalize_canonical_type("Timestamp(MICROSECOND, UTC)") == (
+            "Timestamp(MICROSECOND, UTC)"
+        )
+
+    def test_strips_outer_and_collapses_internal_whitespace(self):
+        assert normalize_canonical_type("  Decimal128(38,  9) ") == "Decimal128(38, 9)"
+
+    def test_rejects_non_string(self):
+        with pytest.raises(TypeError):
+            normalize_canonical_type(None)  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# WriteTypeMapRule validation
+# ---------------------------------------------------------------------------
+
+
+class TestWriteTypeMapRuleValidation:
+    def test_exact_rule_allows_literal_native(self):
+        rule = WriteTypeMapRule(match="exact", canonical="Int64", native="BIGINT")
+        assert rule.match == "exact"
+
+    def test_exact_rule_allows_param_token_in_native(self):
+        # Unlike read rules, a write rule's render template may carry tokens fed
+        # by per-column hints (e.g. length) rather than regex captures.
+        rule = WriteTypeMapRule(
+            match="exact", canonical="Utf8", native="VARCHAR(${length})"
+        )
+        assert rule.native == "VARCHAR(${length})"
+
+    def test_regex_rule_allows_non_capture_token(self):
+        # ${length} is supplied at render time, not captured — must not raise.
+        rule = WriteTypeMapRule(
+            match="regex", canonical="^Utf8$", native="VARCHAR(${length})"
+        )
+        assert rule.match == "regex"
+
+    def test_regex_rule_rejects_lookahead_in_canonical(self):
+        with pytest.raises(InvalidTypeMapError, match="lookahead"):
+            WriteTypeMapRule(
+                match="regex", canonical="^Foo(?=Bar)$", native="TEXT"
+            )
+
+    def test_regex_rule_rejects_malformed_pattern(self):
+        with pytest.raises(InvalidTypeMapError, match="failed to compile"):
+            WriteTypeMapRule(match="regex", canonical="^[", native="TEXT")
+
+
+class TestParseWriteRules:
+    def test_empty_list_rejected(self):
+        with pytest.raises(InvalidTypeMapError, match="rule list is empty"):
+            parse_write_rules([], source="<test>")
+
+    def test_non_object_rejected(self):
+        with pytest.raises(InvalidTypeMapError, match="not a JSON object"):
+            parse_write_rules(["oops"], source="<test>")
+
+
+# ---------------------------------------------------------------------------
+# TypeMapper — reverse lookup (to_native_type)
+# ---------------------------------------------------------------------------
+
+
+def _write_mapper(write_rules: list[dict]) -> TypeMapper:
+    """A mapper with a throwaway read rule plus the given write rules."""
+    return TypeMapper(
+        "test",
+        parse_rules(
+            [{"match": "exact", "native": "X", "canonical": "Utf8"}], source="<r>"
+        ),
+        parse_write_rules(write_rules, source="<w>"),
+    )
+
+
+class TestToNativeTypeExact:
+    def test_exact_hit(self):
+        m = _write_mapper([{"match": "exact", "canonical": "Int64", "native": "BIGINT"}])
+        assert m.to_native_type("Int64") == "BIGINT"
+
+    def test_match_is_case_sensitive(self):
+        # Arrow vocabulary is mixed-case; "int64" must NOT match "Int64".
+        m = _write_mapper([{"match": "exact", "canonical": "Int64", "native": "BIGINT"}])
+        with pytest.raises(UnmappedTypeError):
+            m.to_native_type("int64")
+
+    def test_whitespace_tolerated(self):
+        m = _write_mapper([{"match": "exact", "canonical": "Int64", "native": "BIGINT"}])
+        assert m.to_native_type("  Int64  ") == "BIGINT"
+
+    def test_unmapped_raises_reverse(self):
+        m = _write_mapper([{"match": "exact", "canonical": "Int64", "native": "BIGINT"}])
+        with pytest.raises(UnmappedTypeError) as exc:
+            m.to_native_type("Float64")
+        assert exc.value.direction == "reverse"
+        assert exc.value.value == "Float64"
+        assert "Float64" in str(exc.value)
+
+    def test_no_write_map_raises(self):
+        m = TypeMapper(
+            "test",
+            parse_rules(
+                [{"match": "exact", "native": "X", "canonical": "Utf8"}], source="<r>"
+            ),
+        )
+        assert m.has_write_map is False
+        with pytest.raises(InvalidTypeMapError, match="no write-type-map loaded"):
+            m.to_native_type("Int64")
+
+
+class TestToNativeTypeRegex:
+    def test_decimal_named_captures(self):
+        m = _write_mapper([
+            {
+                "match": "regex",
+                "canonical": r"^Decimal128\((?<p>\d+),\s*(?<s>\d+)\)$",
+                "native": "NUMERIC(${p}, ${s})",
+            }
+        ])
+        assert m.to_native_type("Decimal128(18, 2)") == "NUMERIC(18, 2)"
+        assert m.to_native_type("Decimal128(38,9)") == "NUMERIC(38, 9)"
+
+    def test_param_hint_substitution(self):
+        m = _write_mapper([
+            {"match": "exact", "canonical": "Utf8", "native": "VARCHAR(${length})"}
+        ])
+        assert m.to_native_type("Utf8", params={"length": "255"}) == "VARCHAR(255)"
+
+    def test_missing_hint_raises(self):
+        m = _write_mapper([
+            {"match": "exact", "canonical": "Utf8", "native": "VARCHAR(${length})"}
+        ])
+        with pytest.raises(InvalidTypeMapError, match="render hint"):
+            m.to_native_type("Utf8")
+
+    def test_capture_takes_precedence_over_hint(self):
+        m = _write_mapper([
+            {
+                "match": "regex",
+                "canonical": r"^Decimal128\((?<p>\d+),\s*(?<s>\d+)\)$",
+                "native": "NUMERIC(${p}, ${s})",
+            }
+        ])
+        # A stray hint with the same name must not override the capture.
+        assert m.to_native_type("Decimal128(10, 4)", params={"p": "99"}) == (
+            "NUMERIC(10, 4)"
+        )
+
+    def test_first_match_wins(self):
+        m = _write_mapper([
+            {"match": "exact", "canonical": "Int64", "native": "FIRST"},
+            {"match": "regex", "canonical": r"^Int\d+$", "native": "SECOND"},
+        ])
+        assert m.to_native_type("Int64") == "FIRST"
+        assert m.to_native_type("Int32") == "SECOND"
+
+
+# ---------------------------------------------------------------------------
+# Loader — write-type-map.json sibling
+# ---------------------------------------------------------------------------
+
+
+class TestWriteMapLoader:
+    def test_sibling_write_map_loaded(self, tmp_path: Path):
+        _write_connector(
+            tmp_path,
+            "demo",
+            type_map=[{"match": "exact", "native": "BIGINT", "canonical": "Int64"}],
+            write_type_map=[{"match": "exact", "canonical": "Int64", "native": "BIGINT"}],
+        )
+        mapper = load_type_map(tmp_path, "demo")
+        assert mapper.has_write_map is True
+        assert mapper.to_native_type("Int64") == "BIGINT"
+
+    def test_absent_write_map_leaves_read_only_mapper(self, tmp_path: Path):
+        _write_connector(
+            tmp_path,
+            "readonly",
+            type_map=[{"match": "exact", "native": "BIGINT", "canonical": "Int64"}],
+        )
+        mapper = load_type_map(tmp_path, "readonly")
+        assert mapper.has_write_map is False
+        assert mapper.to_arrow_type("BIGINT") == "Int64"
+
+    def test_malformed_write_map_raises(self, tmp_path: Path):
+        _write_connector(
+            tmp_path,
+            "busted",
+            type_map=[{"match": "exact", "native": "BIGINT", "canonical": "Int64"}],
+        )
+        (tmp_path / "busted" / "definition" / "write-type-map.json").write_text("nope")
+        with pytest.raises(InvalidTypeMapError, match="not valid JSON"):
+            load_type_map(tmp_path, "busted")
+
+    def test_non_array_write_map_raises(self, tmp_path: Path):
+        _write_connector(
+            tmp_path,
+            "wrong",
+            type_map=[{"match": "exact", "native": "BIGINT", "canonical": "Int64"}],
+        )
+        (tmp_path / "wrong" / "definition" / "write-type-map.json").write_text("{}")
+        with pytest.raises(InvalidTypeMapError, match="must contain a JSON array"):
+            load_type_map(tmp_path, "wrong")
+
+    def test_connection_scoped_write_map_loaded(self, tmp_path: Path):
+        definition = tmp_path / "my-pg" / "definition"
+        definition.mkdir(parents=True)
+        (definition / "type-map.json").write_text(
+            json.dumps([{"match": "exact", "native": "BIGINT", "canonical": "Int64"}])
+        )
+        (definition / "write-type-map.json").write_text(
+            json.dumps([{"match": "exact", "canonical": "Int64", "native": "BIGINT"}])
+        )
+        mapper = load_connection_type_map(tmp_path, "my-pg")
+        assert mapper is not None
+        assert mapper.to_native_type("Int64") == "BIGINT"
+
+
+# ---------------------------------------------------------------------------
+# Real connector write-type-maps (#564 acceptance: round-trip the vocabulary)
+# ---------------------------------------------------------------------------
+
+
+def _require_connector_write_map(slug: str) -> TypeMapper:
+    """Load a real connector's mapper or skip.
+
+    ``connectors/`` is registry-owned data populated at runtime (gitignored),
+    so it is absent in a clean CI checkout. These tests validate the authored
+    postgres/snowflake write-maps when present (local dev) and skip otherwise.
+    """
+    definition = _CONNECTORS_DIR / slug / "definition"
+    if not (definition / "type-map.json").is_file():
+        pytest.skip(f"connector {slug!r} not populated in {_CONNECTORS_DIR}")
+    mapper = load_type_map(_CONNECTORS_DIR, slug)
+    if not mapper.has_write_map:
+        pytest.skip(f"connector {slug!r} has no write-type-map.json")
+    return mapper
+
+
+class TestRealConnectorWriteMaps:
+    def test_postgres_write_map(self):
+        m = _require_connector_write_map("postgres")
+        assert m.has_write_map is True
+        assert m.to_native_type("Boolean") == "BOOLEAN"
+        assert m.to_native_type("Int16") == "SMALLINT"
+        assert m.to_native_type("Int32") == "INTEGER"
+        assert m.to_native_type("Int64") == "BIGINT"
+        assert m.to_native_type("Float32") == "REAL"
+        assert m.to_native_type("Float64") == "DOUBLE PRECISION"
+        assert m.to_native_type("Decimal128(18, 2)") == "NUMERIC(18, 2)"
+        assert m.to_native_type("Decimal128(38, 9)") == "NUMERIC(38, 9)"
+        assert m.to_native_type("Utf8") == "TEXT"
+        assert m.to_native_type("Json") == "JSONB"
+        assert m.to_native_type("Binary") == "BYTEA"
+        assert m.to_native_type("Date32") == "DATE"
+        assert m.to_native_type("Time64(MICROSECOND)") == "TIME"
+        assert m.to_native_type("Timestamp(MICROSECOND)") == "TIMESTAMP"
+        assert m.to_native_type("Timestamp(MICROSECOND, UTC)") == "TIMESTAMPTZ"
+
+    def test_postgres_round_trips_read_canonicals(self):
+        # Every canonical the read map can emit must render to *some* native type
+        # (acceptance: round-trip the canonical vocabulary, no silent default).
+        m = _require_connector_write_map("postgres")
+        for native in ("BOOLEAN", "SMALLINT", "INTEGER", "BIGINT", "REAL",
+                       "DOUBLE PRECISION", "NUMERIC(18, 4)", "TEXT", "JSONB",
+                       "BYTEA", "DATE", "TIMESTAMPTZ"):
+            canonical = m.to_arrow_type(native)
+            assert m.to_native_type(canonical)  # non-empty, no raise
+
+    def test_snowflake_write_map(self):
+        m = _require_connector_write_map("snowflake")
+        assert m.has_write_map is True
+        assert m.to_native_type("Boolean") == "BOOLEAN"
+        assert m.to_native_type("Int64") == "NUMBER(38, 0)"
+        assert m.to_native_type("Float64") == "FLOAT"
+        assert m.to_native_type("Decimal128(10, 2)") == "NUMBER(10, 2)"
+        assert m.to_native_type("Utf8") == "VARCHAR"
+        assert m.to_native_type("Json") == "VARIANT"
+        assert m.to_native_type("Binary") == "BINARY"
+        assert m.to_native_type("Date32") == "DATE"
+        assert m.to_native_type("Time64(NANOSECOND)") == "TIME"
+        assert m.to_native_type("Timestamp(NANOSECOND)") == "TIMESTAMP_NTZ"
+        assert m.to_native_type("Timestamp(NANOSECOND, UTC)") == "TIMESTAMP_TZ"
+
+    def test_unmapped_canonical_raises_not_defaults(self):
+        m = _require_connector_write_map("postgres")
+        with pytest.raises(UnmappedTypeError) as exc:
+            m.to_native_type("UInt256")
+        assert exc.value.direction == "reverse"

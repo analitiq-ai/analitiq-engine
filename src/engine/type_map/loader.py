@@ -18,12 +18,39 @@ from typing import Optional
 
 from .exceptions import InvalidTypeMapError
 from .mapper import TypeMapper
-from .rules import parse_rules
+from .rules import WriteTypeMapRule, parse_rules, parse_write_rules
 
 logger = logging.getLogger(__name__)
 
 
 TYPE_MAP_FILENAME = "type-map.json"
+WRITE_TYPE_MAP_FILENAME = "write-type-map.json"
+
+
+def _load_write_rules(
+    definition_dir: Path, label: str
+) -> Optional[list[WriteTypeMapRule]]:
+    """Load the optional sibling ``write-type-map.json`` from *definition_dir*.
+
+    Absent file → ``None`` (source-only / API connectors have no write map).
+    A present-but-malformed file is a hard error, mirroring the read map.
+    """
+    path = definition_dir / WRITE_TYPE_MAP_FILENAME
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text())
+    except json.JSONDecodeError as err:
+        raise InvalidTypeMapError(
+            f"{label}: {path} is not valid JSON: {err}"
+        ) from err
+    if not isinstance(payload, list):
+        raise InvalidTypeMapError(
+            f"{label}: {path} must contain a JSON array of rules"
+        )
+    rules = parse_write_rules(payload, source=str(path))
+    logger.info("Loaded write-type-map for %s (%d rules)", label, len(rules))
+    return rules
 
 
 def _definition_dir(connectors_dir: Path, slug: str) -> Path:
@@ -44,7 +71,8 @@ def load_type_map(connectors_dir: Path, slug: str) -> TypeMapper:
     Raises ``InvalidTypeMapError`` if the file is missing or malformed — the
     engine cannot canonicalize types without it.
     """
-    path = _definition_dir(connectors_dir, slug) / TYPE_MAP_FILENAME
+    definition = _definition_dir(connectors_dir, slug)
+    path = definition / TYPE_MAP_FILENAME
     if not path.is_file():
         raise InvalidTypeMapError(
             f"connector {slug!r}: required type-map not found at {path}"
@@ -60,8 +88,9 @@ def load_type_map(connectors_dir: Path, slug: str) -> TypeMapper:
             f"connector {slug!r}: {path} must contain a JSON array of rules"
         )
     rules = parse_rules(payload, source=str(path))
+    write_rules = _load_write_rules(definition, f"connector {slug!r}")
     logger.info("Loaded type-map for connector '%s' (%d rules)", slug, len(rules))
-    return TypeMapper(slug, rules)
+    return TypeMapper(slug, rules, write_rules)
 
 
 def load_connection_type_map(
@@ -75,7 +104,8 @@ def load_connection_type_map(
     ``None``; the caller decides whether that's an error (private
     endpoints referenced) or fine (pipeline only uses public endpoints).
     """
-    path = connections_dir / connection_id / "definition" / TYPE_MAP_FILENAME
+    definition = connections_dir / connection_id / "definition"
+    path = definition / TYPE_MAP_FILENAME
     if not path.is_file():
         return None
     try:
@@ -89,7 +119,8 @@ def load_connection_type_map(
             f"connection {connection_id!r}: {path} must contain a JSON array of rules"
         )
     rules = parse_rules(payload, source=str(path))
+    write_rules = _load_write_rules(definition, f"connection {connection_id!r}")
     logger.info(
         "Loaded connection type-map for '%s' (%d rules)", connection_id, len(rules)
     )
-    return TypeMapper(f"connection:{connection_id}", rules)
+    return TypeMapper(f"connection:{connection_id}", rules, write_rules)
