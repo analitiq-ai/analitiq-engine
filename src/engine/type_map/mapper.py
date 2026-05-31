@@ -10,7 +10,7 @@ inverted at runtime — inverting would be lossy and ambiguous.
 
 from __future__ import annotations
 
-from typing import Mapping, Pattern
+from typing import Any, Mapping, Pattern
 
 from .exceptions import (
     InvalidTypeMapError,
@@ -115,7 +115,7 @@ class TypeMapper:
         raise UnmappedTypeError(self._slug, "forward", native)
 
     def to_native_type(
-        self, canonical: str, *, params: Mapping[str, str] | None = None
+        self, canonical: str, *, params: Mapping[str, Any] | None = None
     ) -> str:
         """Map an Arrow canonical type string to its native DDL type.
 
@@ -123,7 +123,8 @@ class TypeMapper:
         ``write-type-map.json``. ``params`` supplies per-column hints (e.g.
         ``length``) that a rule's ``native`` template may reference via
         ``${name}`` alongside any named captures from the canonical regex;
-        named captures take precedence on a name clash. Raises
+        named captures take precedence on a name clash. Hint values are rendered
+        via ``str()``, so numeric hints (e.g. ``length=255``) are accepted. Raises
         :class:`InvalidTypeMapError` if this connector has no write-type-map
         loaded, or if the matched template references a token that neither the
         capture groups nor ``params`` provide; raises :class:`UnmappedTypeError`
@@ -135,7 +136,9 @@ class TypeMapper:
                 f"render a native type for canonical {canonical!r}"
             )
         normalized = normalize_canonical_type(canonical)
-        hints: dict[str, str] = dict(params or {})
+        # Captures are always str; hints may arrive as ints (e.g. a JSON length)
+        # — render them to str so the substitution callback never trips.
+        hints: dict[str, str] = {k: str(v) for k, v in (params or {}).items()}
         for rule, compiled, exact in zip(
             self._write_rules, self._write_compiled, self._exact_canonical
         ):

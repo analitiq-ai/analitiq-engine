@@ -69,18 +69,20 @@ def normalize_canonical_type(value: str) -> str:
     Unlike :func:`normalize_native_type` this is **case-preserving**: the Arrow
     vocabulary is mixed-case (``Int64``, ``Decimal128(38, 9)``,
     ``Timestamp(MICROSECOND, UTC)``) and matching it case-insensitively would
-    collapse distinct types. Whitespace is trimmed, internal runs collapsed, and
-    comma separators canonicalized to ``", "`` so that spacing-only variants of
-    a parameterized type (``Decimal128(38,9)`` vs ``Decimal128(38, 9)``, both
-    accepted by ``parse_arrow_type``) normalize identically and an exact write
-    rule matches either spelling.
+    collapse distinct types. Whitespace around the structural punctuation
+    ``(`` ``)`` ``,`` is removed and commas are re-spaced to ``", "``, so every
+    spacing-only variant that ``parse_arrow_type`` accepts (``Decimal128(38,9)``,
+    ``Decimal128( 38, 9 )``, ``Time64( MICROSECOND )``) normalizes to the single
+    canonical spelling and an exact write rule matches any of them.
     """
     if not isinstance(value, str):
         raise TypeError(
             f"canonical type must be a string, got {type(value).__name__}"
         )
-    collapsed = re.sub(r"\s+", " ", value.strip())
-    return re.sub(r"\s*,\s*", ", ", collapsed)
+    # Drop whitespace adjacent to parentheses/commas, then standardize ", ".
+    # Identifiers themselves never contain spaces, so this is lossless.
+    compact = re.sub(r"\s*([(),])\s*", r"\1", value.strip())
+    return compact.replace(",", ", ")
 
 
 def _assert_re2_subset(pattern: str) -> None:

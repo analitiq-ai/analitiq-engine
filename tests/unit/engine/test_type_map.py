@@ -14,6 +14,7 @@ Covers every acceptance bullet from GH #28:
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import pytest
@@ -539,6 +540,13 @@ class TestNormalizeCanonicalType:
         )
         assert normalize_canonical_type("Decimal128(38 , 9)") == "Decimal128(38, 9)"
 
+    def test_canonicalizes_paren_adjacent_whitespace(self):
+        # parse_arrow_type strips each parsed arg, so these are all valid; they
+        # must all normalize to the single canonical spelling.
+        assert normalize_canonical_type("Decimal128( 38, 9 )") == "Decimal128(38, 9)"
+        assert normalize_canonical_type("Time64( MICROSECOND )") == "Time64(MICROSECOND)"
+        assert normalize_canonical_type("Decimal128( 38 , 9 )") == "Decimal128(38, 9)"
+
     def test_rejects_non_string(self):
         with pytest.raises(TypeError):
             normalize_canonical_type(None)  # type: ignore[arg-type]
@@ -660,12 +668,13 @@ class TestToNativeTypeExact:
 
     def test_exact_rule_for_parameterized_type_matches_spacing_variants(self):
         # An exact rule authored with comma-space still matches the no-space
-        # spelling (and vice versa), since both normalize identically.
+        # and paren-padded spellings, since all normalize identically.
         m = _write_mapper([
             {"match": "exact", "canonical": "Decimal128(38, 9)", "native": "NUMERIC(38, 9)"}
         ])
         assert m.to_native_type("Decimal128(38, 9)") == "NUMERIC(38, 9)"
         assert m.to_native_type("Decimal128(38,9)") == "NUMERIC(38, 9)"
+        assert m.to_native_type("Decimal128( 38, 9 )") == "NUMERIC(38, 9)"
 
     def test_unmapped_raises_reverse(self):
         m = _write_mapper([{"match": "exact", "canonical": "Int64", "native": "BIGINT"}])
@@ -718,6 +727,14 @@ class TestToNativeTypeRegex:
             {"match": "exact", "canonical": "Utf8", "native": "VARCHAR(${length})"}
         ])
         assert m.to_native_type("Utf8", params={"length": "255"}) == "VARCHAR(255)"
+
+    def test_numeric_param_hint_is_stringified(self):
+        # Hints sourced from JSON/schema metadata arrive as ints; they must
+        # render, not raise a TypeError in the substitution callback.
+        m = _write_mapper([
+            {"match": "exact", "canonical": "Utf8", "native": "VARCHAR(${length})"}
+        ])
+        assert m.to_native_type("Utf8", params={"length": 255}) == "VARCHAR(255)"
 
     def test_missing_hint_raises(self):
         m = _write_mapper([
@@ -785,25 +802,35 @@ class TestWriteMapLoader:
         assert mapper.has_write_map is False
         assert mapper.to_arrow_type("BIGINT") == "Int64"
 
-    def test_malformed_write_map_raises(self, tmp_path: Path):
+    def test_malformed_write_map_preserves_read_mapper(self, tmp_path, caplog):
+        # A broken OPTIONAL write map must not discard the valid read mapper;
+        # it is downgraded to a logged warning and read-only behavior.
         _write_connector(
             tmp_path,
             "busted",
             type_map=[{"match": "exact", "native": "BIGINT", "canonical": "Int64"}],
         )
         (tmp_path / "busted" / "definition" / "write-type-map.json").write_text("nope")
-        with pytest.raises(InvalidTypeMapError, match="not valid JSON"):
-            load_type_map(tmp_path, "busted")
+        with caplog.at_level(logging.WARNING):
+            mapper = load_type_map(tmp_path, "busted")
+        assert mapper.to_arrow_type("BIGINT") == "Int64"  # read still works
+        assert mapper.has_write_map is False
+        assert "malformed optional write-type-map" in caplog.text
+        # The write path then surfaces the precise unavailability.
+        with pytest.raises(InvalidTypeMapError, match="no write-type-map loaded"):
+            mapper.to_native_type("Int64")
 
-    def test_non_array_write_map_raises(self, tmp_path: Path):
+    def test_non_array_write_map_preserves_read_mapper(self, tmp_path, caplog):
         _write_connector(
             tmp_path,
             "wrong",
             type_map=[{"match": "exact", "native": "BIGINT", "canonical": "Int64"}],
         )
         (tmp_path / "wrong" / "definition" / "write-type-map.json").write_text("{}")
-        with pytest.raises(InvalidTypeMapError, match="must contain a JSON array"):
-            load_type_map(tmp_path, "wrong")
+        with caplog.at_level(logging.WARNING):
+            mapper = load_type_map(tmp_path, "wrong")
+        assert mapper.to_arrow_type("BIGINT") == "Int64"
+        assert mapper.has_write_map is False
 
     def test_connection_scoped_write_map_loaded(self, tmp_path: Path):
         definition = tmp_path / "my-pg" / "definition"

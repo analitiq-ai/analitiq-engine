@@ -32,8 +32,10 @@ def _load_write_rules(
 ) -> Optional[list[WriteTypeMapRule]]:
     """Load the optional sibling ``write-type-map.json`` from *definition_dir*.
 
-    Absent file → ``None`` (source-only / API connectors have no write map).
-    A present-but-malformed file is a hard error, mirroring the read map.
+    Absent file → ``None`` (source-only / API connectors have no write map). A
+    present-but-malformed file raises ``InvalidTypeMapError``; callers downgrade
+    that to a warning so a broken *optional* write map never discards the valid
+    *required* read mapper (see :func:`load_type_map`).
     """
     path = definition_dir / WRITE_TYPE_MAP_FILENAME
     if not path.is_file():
@@ -51,6 +53,28 @@ def _load_write_rules(
     rules = parse_write_rules(payload, source=str(path))
     logger.info("Loaded write-type-map for %s (%d rules)", label, len(rules))
     return rules
+
+
+def _optional_write_rules(
+    definition_dir: Path, label: str
+) -> Optional[list[WriteTypeMapRule]]:
+    """Load the write map but never let a broken *optional* file fail the load.
+
+    The read map is required; the write map is additive. A malformed write map
+    is logged loudly and downgraded to ``None`` so the valid read mapper still
+    returns — a later ``to_native_type`` call then raises the precise
+    "no write-type-map loaded" error rather than silently mis-typing.
+    """
+    try:
+        return _load_write_rules(definition_dir, label)
+    except InvalidTypeMapError as err:
+        logger.warning(
+            "%s: ignoring malformed optional write-type-map (%s); native-type "
+            "rendering (create_table) is unavailable until it is fixed",
+            label,
+            err,
+        )
+        return None
 
 
 def _definition_dir(connectors_dir: Path, slug: str) -> Path:
@@ -88,7 +112,7 @@ def load_type_map(connectors_dir: Path, slug: str) -> TypeMapper:
             f"connector {slug!r}: {path} must contain a JSON array of rules"
         )
     rules = parse_rules(payload, source=str(path))
-    write_rules = _load_write_rules(definition, f"connector {slug!r}")
+    write_rules = _optional_write_rules(definition, f"connector {slug!r}")
     logger.info("Loaded type-map for connector '%s' (%d rules)", slug, len(rules))
     return TypeMapper(slug, rules, write_rules)
 
@@ -119,7 +143,7 @@ def load_connection_type_map(
             f"connection {connection_id!r}: {path} must contain a JSON array of rules"
         )
     rules = parse_rules(payload, source=str(path))
-    write_rules = _load_write_rules(definition, f"connection {connection_id!r}")
+    write_rules = _optional_write_rules(definition, f"connection {connection_id!r}")
     logger.info(
         "Loaded connection type-map for '%s' (%d rules)", connection_id, len(rules)
     )
