@@ -150,7 +150,11 @@ class TypeMapper:
             match = compiled.fullmatch(normalized)
             if match is None:
                 continue
-            values = {**hints, **match.groupdict()}
+            # Drop optional groups that did not participate (groupdict gives them
+            # None) so an absent capture neither shadows a same-named hint nor
+            # feeds None into the substitution callback.
+            captures = {k: v for k, v in match.groupdict().items() if v is not None}
+            values = {**hints, **captures}
             return _substitute_tokens(rule.native, values)
         raise UnmappedTypeError(self._slug, "reverse", canonical)
 

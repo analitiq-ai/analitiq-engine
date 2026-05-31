@@ -601,6 +601,19 @@ class TestWriteTypeMapRuleValidation:
                 match="regex", canonical="^Foo${bar}$", native="TEXT"
             )
 
+    @pytest.mark.parametrize("bad_native", ["VARCHAR(${length-p})", "VARCHAR(${length })"])
+    def test_rejects_malformed_placeholder_in_native(self, bad_native):
+        # A typo'd placeholder must fail at load time, not leak literal ${...}
+        # into the rendered DDL.
+        with pytest.raises(InvalidTypeMapError, match="malformed substitution token"):
+            WriteTypeMapRule(match="exact", canonical="Utf8", native=bad_native)
+
+    def test_well_formed_placeholder_in_native_accepted(self):
+        rule = WriteTypeMapRule(
+            match="exact", canonical="Utf8", native="VARCHAR(${length})"
+        )
+        assert rule.native == "VARCHAR(${length})"
+
 
 class TestParseWriteRules:
     def test_empty_list_rejected(self):
@@ -752,6 +765,21 @@ class TestToNativeTypeRegex:
         with pytest.raises(InvalidTypeMapError, match="render hint"):
             m.to_native_type("Utf8")
         assert m.to_native_type("Utf8", params={"length": "64"}) == "VARCHAR(64)"
+
+    def test_absent_optional_capture_falls_back_to_hint(self):
+        # An optional capture that does not participate must not shadow a
+        # same-named hint nor feed None into substitution.
+        m = _write_mapper([
+            {
+                "match": "regex",
+                "canonical": r"^Utf8(\((?<length>\d+)\))?$",
+                "native": "VARCHAR(${length})",
+            }
+        ])
+        # Group present in the canonical -> capture wins.
+        assert m.to_native_type("Utf8(10)") == "VARCHAR(10)"
+        # Group absent -> the hint supplies the value instead of crashing.
+        assert m.to_native_type("Utf8", params={"length": 255}) == "VARCHAR(255)"
 
     def test_capture_takes_precedence_over_hint(self):
         m = _write_mapper([

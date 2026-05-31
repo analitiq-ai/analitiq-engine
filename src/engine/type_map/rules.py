@@ -31,6 +31,10 @@ from .exceptions import InvalidTypeMapError
 
 _NAMED_GROUP_RE2: Final[Pattern[str]] = re.compile(r"\(\?<([A-Za-z_][A-Za-z0-9_]*)>")
 _SUBSTITUTION_TOKEN: Final[Pattern[str]] = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+# Anything shaped like a placeholder, well-formed or not, used to catch typos
+# (``${length-p}``, ``${length }``) that the strict token above would skip over
+# and leave as literal text in the rendered output.
+_PLACEHOLDER_CANDIDATE: Final[Pattern[str]] = re.compile(r"\$\{[^}]*\}")
 
 # RE2 excludes these Perl/Python extensions. We reject any rule that uses them
 # at load time so the committed rule set stays portable.
@@ -101,6 +105,21 @@ def _assert_re2_subset(pattern: str) -> None:
 def _to_python_named_groups(pattern: str) -> str:
     """Translate RE2-style ``(?<name>...)`` groups to Python ``(?P<name>...)``."""
     return _NAMED_GROUP_RE2.sub(lambda m: f"(?P<{m.group(1)}>", pattern)
+
+
+def _assert_well_formed_placeholders(template: str, *, field: str) -> None:
+    """Reject ``${...}`` sequences that are not valid ``${identifier}`` tokens.
+
+    A malformed placeholder (``${length-p}``, ``${length }``) is not matched by
+    the strict substitution token, so without this check it would survive
+    rendering as literal text and corrupt the emitted DDL silently.
+    """
+    for candidate in _PLACEHOLDER_CANDIDATE.findall(template):
+        if not _SUBSTITUTION_TOKEN.fullmatch(candidate):
+            raise InvalidTypeMapError(
+                f"{field} {template!r} contains a malformed substitution token "
+                f"{candidate!r}; expected ${{name}} with an identifier name"
+            )
 
 
 class TypeMapRule(BaseModel):
@@ -244,6 +263,10 @@ class WriteTypeMapRule(BaseModel):
                 f"token; substitution tokens belong only in the rendered native "
                 f"type"
             )
+
+        # A typo'd placeholder in the render template would otherwise leak into
+        # the emitted DDL as literal text instead of failing at load time.
+        _assert_well_formed_placeholders(self.native, field="write rule native")
 
         if self.match == "exact":
             return self
