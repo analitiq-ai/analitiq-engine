@@ -242,7 +242,7 @@ class TestBatchWriteResultInvariant:
 
     @pytest.mark.unit
     def test_success_derived_from_status(self):
-        from src.destination.base_handler import BatchWriteResult
+        from cdk.base_handler import BatchWriteResult
         from src.grpc.generated.analitiq.v1 import AckStatus
 
         assert BatchWriteResult(
@@ -262,7 +262,7 @@ class TestBatchWriteResultInvariant:
     def test_success_is_not_constructor_kwarg(self):
         """Removing the ``success`` constructor arg prevents the
         success/status drift bug entirely."""
-        from src.destination.base_handler import BatchWriteResult
+        from cdk.base_handler import BatchWriteResult
         from src.grpc.generated.analitiq.v1 import AckStatus
 
         with pytest.raises(TypeError):
@@ -274,7 +274,7 @@ class TestBatchWriteResultInvariant:
 
     @pytest.mark.unit
     def test_negative_records_written_raises(self):
-        from src.destination.base_handler import BatchWriteResult
+        from cdk.base_handler import BatchWriteResult
         from src.grpc.generated.analitiq.v1 import AckStatus
 
         with pytest.raises(ValueError, match="non-negative"):
@@ -285,7 +285,7 @@ class TestBatchWriteResultInvariant:
     @pytest.mark.unit
     def test_frozen_rejects_mutation(self):
         from dataclasses import FrozenInstanceError
-        from src.destination.base_handler import BatchWriteResult
+        from cdk.base_handler import BatchWriteResult
         from src.grpc.generated.analitiq.v1 import AckStatus
 
         r = BatchWriteResult(
@@ -293,6 +293,42 @@ class TestBatchWriteResultInvariant:
         )
         with pytest.raises(FrozenInstanceError):
             r.records_written = 99  # type: ignore[misc]
+
+
+class TestEnumWireAlignment:
+    """The CDK-native ``AckStatus`` / ``WriteMode`` integer values mirror the
+    proto enums 1:1 — the load-bearing invariant the entire wire <-> CDK
+    translation in ``server.py`` rests on (``WriteMode(msg.write_mode)`` and
+    ``status=result.status`` are identity only while the ints agree). If the
+    proto enum is ever renumbered, this fails loudly instead of silently
+    mistranslating a status or write mode.
+    """
+
+    @pytest.mark.unit
+    def test_ack_status_values_match_proto(self):
+        from cdk.types import AckStatus as CdkAckStatus
+        from src.grpc.generated.analitiq.v1 import AckStatus as ProtoAckStatus
+
+        # Proto enums are protobuf ``EnumTypeWrapper`` (not iterable): names via
+        # ``.keys()``, value via ``getattr``/attribute access (returns the int).
+        for member in CdkAckStatus:
+            assert int(member) == getattr(ProtoAckStatus, member.name), (
+                f"AckStatus.{member.name} drifted from proto"
+            )
+        # Both enums enumerate the same member names — neither side has an
+        # extra value the other lacks.
+        assert {m.name for m in CdkAckStatus} == set(ProtoAckStatus.keys())
+
+    @pytest.mark.unit
+    def test_write_mode_values_match_proto(self):
+        from cdk.types import WriteMode as CdkWriteMode
+        from src.grpc.generated.analitiq.v1 import WriteMode as ProtoWriteMode
+
+        for member in CdkWriteMode:
+            assert int(member) == getattr(ProtoWriteMode, member.name), (
+                f"WriteMode.{member.name} drifted from proto"
+            )
+        assert {m.name for m in CdkWriteMode} == set(ProtoWriteMode.keys())
 
 
 class TestEndpointRefResolver:

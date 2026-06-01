@@ -1,0 +1,24 @@
+[tool.poetry]
+name = "analitiq-cdk"
+version = "0.1.0"
+description = "Analitiq Connector Development Kit: vendor-neutral, transport-neutral building blocks (transports, ConnectionRuntime, type-map, secrets seam, query builder, read/write contracts) shared by the engine and the cloud control-plane."
+authors = ["Analitiq Core Team <dev@analitiq.com>"]
+license = "MIT"
+readme = "README.md"
+packages = [{ include = "cdk" }]
+
+[tool.poetry.dependencies]
+# The CDK is deliberately small: it knows SQL-in-general and HTTP, never a
+# specific database (the "would this change when you add Clickhouse?" test) and
+# never the streaming wire protocol. Explicitly NOT grpcio / protobuf.
+# Per-driver DB packages (asyncpg, adbc-driver-*, ...) are pulled in by the
+# connector that needs them, not by the CDK core.
+python = "^3.11"
+pyarrow = ">=14.0.0"
+sqlalchemy = { version = "^2.0.0", extras = ["asyncio"] }
+aiohttp = "^3.8.0"
+pydantic = "^2.0.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

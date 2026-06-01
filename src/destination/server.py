@@ -21,6 +21,7 @@ from ..grpc.generated.analitiq.v1 import (
     AckStatus,
     BatchAck,
     ConnectionStatus,
+    Cursor,
     GetCapabilitiesRequest,
     GetCapabilitiesResponse,
     HealthCheckRequest,
@@ -35,9 +36,10 @@ from ..grpc.generated.analitiq.v1 import (
     add_DestinationServiceServicer_to_server,
     DestinationServiceServicer,
 )
-from .base_handler import BaseDestinationHandler
+from cdk.base_handler import BaseDestinationHandler
+from cdk.types import Cursor as CdkCursor, SchemaSpec, WriteMode as CdkWriteMode
 from .connectors import get_handler
-from ..engine.type_map import InvalidTypeMapError, UnmappedTypeError
+from cdk.type_map import InvalidTypeMapError, UnmappedTypeError
 
 logger = logging.getLogger(__name__)
 
@@ -166,7 +168,15 @@ class DestinationServicer(DestinationServiceServicer):
                     # them to DLQ instead of treating them as a transient
                     # "schema configuration failed".
                     try:
-                        accepted = await self.handler.configure_schema(schema_msg)
+                        # Translate the wire message to the CDK-native SchemaSpec
+                        # the handler contract now takes (the CDK must not import
+                        # gRPC types). Field-for-field; structurally identical.
+                        schema_spec = SchemaSpec(
+                            stream_id=schema_msg.stream_id,
+                            version=schema_msg.version,
+                            write_mode=CdkWriteMode(schema_msg.write_mode),
+                        )
+                        accepted = await self.handler.configure_schema(schema_spec)
                         ack_message = "" if accepted else "Schema configuration failed"
                     except (UnmappedTypeError, InvalidTypeMapError) as e:
                         logger.error(
@@ -223,7 +233,7 @@ class DestinationServicer(DestinationServiceServicer):
                         batch_seq=batch_msg.batch_seq,
                         record_batch=record_batch,
                         record_ids=list(batch_msg.record_ids),
-                        cursor=batch_msg.cursor,
+                        cursor=CdkCursor(token=batch_msg.cursor.token),
                     )
 
                     # Build ACK response
@@ -234,7 +244,13 @@ class DestinationServicer(DestinationServiceServicer):
                             batch_seq=batch_msg.batch_seq,
                             status=result.status,
                             records_written=result.records_written,
-                            committed_cursor=result.committed_cursor,
+                            # CDK-native Cursor -> wire Cursor (or omit when the
+                            # handler advanced no cursor, e.g. a failure result).
+                            committed_cursor=(
+                                Cursor(token=result.committed_cursor.token)
+                                if result.committed_cursor is not None
+                                else None
+                            ),
                             failed_record_ids=result.failed_record_ids,
                             failure_summary=result.failure_summary,
                         )

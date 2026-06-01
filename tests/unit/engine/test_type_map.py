@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from src.engine.type_map import (
+from cdk.type_map import (
     InvalidTypeMapError,
     TypeMapNotFoundError,
     TypeMapper,
@@ -30,7 +30,7 @@ from src.engine.type_map import (
     normalize_canonical_type,
     normalize_native_type,
 )
-from src.engine.type_map.rules import TypeMapRule, parse_rules, parse_write_rules
+from cdk.type_map.rules import TypeMapRule, parse_rules, parse_write_rules
 
 # Repository root, for loading the real connector write-type-maps.
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -331,13 +331,13 @@ class TestParseArrowType:
 
 class TestResolveArrowType:
     def test_scalar_forwards_to_parse(self):
-        from src.engine.type_map import resolve_arrow_type
+        from cdk.type_map import resolve_arrow_type
         import pyarrow as pa
 
         assert resolve_arrow_type({"arrow_type": "Int64"}) == pa.int64()
 
     def test_object_builds_struct(self):
-        from src.engine.type_map import resolve_arrow_type
+        from cdk.type_map import resolve_arrow_type
         import pyarrow as pa
 
         dt = resolve_arrow_type(
@@ -353,7 +353,7 @@ class TestResolveArrowType:
         assert [f.name for f in dt] == ["id", "objectName"]
 
     def test_object_respects_required(self):
-        from src.engine.type_map import resolve_arrow_type
+        from cdk.type_map import resolve_arrow_type
 
         dt = resolve_arrow_type(
             {
@@ -369,7 +369,7 @@ class TestResolveArrowType:
         assert names == {"id": False, "objectName": True}
 
     def test_list_of_scalars(self):
-        from src.engine.type_map import resolve_arrow_type
+        from cdk.type_map import resolve_arrow_type
         import pyarrow as pa
 
         dt = resolve_arrow_type(
@@ -379,7 +379,7 @@ class TestResolveArrowType:
         assert pa.types.is_int32(dt.value_type)
 
     def test_nested_list_of_objects(self):
-        from src.engine.type_map import resolve_arrow_type
+        from cdk.type_map import resolve_arrow_type
         import pyarrow as pa
 
         dt = resolve_arrow_type(
@@ -398,19 +398,19 @@ class TestResolveArrowType:
         assert pa.types.is_struct(dt.value_type)
 
     def test_missing_arrow_type_raises(self):
-        from src.engine.type_map import resolve_arrow_type
+        from cdk.type_map import resolve_arrow_type
 
         with pytest.raises(InvalidTypeMapError, match="missing 'arrow_type'"):
             resolve_arrow_type({})
 
     def test_object_missing_properties_raises(self):
-        from src.engine.type_map import resolve_arrow_type
+        from cdk.type_map import resolve_arrow_type
 
         with pytest.raises(InvalidTypeMapError, match="non-empty 'properties'"):
             resolve_arrow_type({"arrow_type": "Object"})
 
     def test_list_missing_items_raises(self):
-        from src.engine.type_map import resolve_arrow_type
+        from cdk.type_map import resolve_arrow_type
 
         with pytest.raises(InvalidTypeMapError, match="'items' object"):
             resolve_arrow_type({"arrow_type": "List"})

@@ -6,8 +6,8 @@ from typing import Any, Dict, List
 
 from src.source.connectors.database import DatabaseConnector
 from src.source.connectors.base import ConnectionError, ReadError
-from src.shared.connection_runtime import ConnectionRuntime
-from src.shared.transport_factory import SqlAlchemyTransport
+from cdk.connection_runtime import ConnectionRuntime
+from cdk.transport_factory import SqlAlchemyTransport
 
 
 @pytest.fixture
@@ -121,7 +121,7 @@ class TestDatabaseConnectorConnection:
         )
 
         with patch(
-            'src.shared.connection_runtime.build_transport',
+            'cdk.connection_runtime.build_transport',
             new=AsyncMock(return_value=transport),
         ):
             await connector.connect(database_runtime)
@@ -135,7 +135,7 @@ class TestDatabaseConnectorConnection:
     async def test_connect_engine_error(self, connector, database_runtime):
         """Test connection failure at engine level."""
         with patch(
-            'src.shared.connection_runtime.build_transport',
+            'cdk.connection_runtime.build_transport',
             new=AsyncMock(side_effect=Exception("Engine creation failed")),
         ):
             with pytest.raises(ConnectionError) as exc_info:
@@ -197,7 +197,7 @@ class TestDatabaseConnectorContextManager:
         )
 
         with patch(
-            'src.shared.connection_runtime.build_transport',
+            'cdk.connection_runtime.build_transport',
             new=AsyncMock(return_value=transport),
         ):
             connector = DatabaseConnector("ContextTestConnector")

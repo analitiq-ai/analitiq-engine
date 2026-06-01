@@ -34,8 +34,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pyarrow as pa
 import pytest
 
-from src.secrets import InMemorySecretsResolver
-from src.shared.connection_runtime import ConnectionRuntime
+from cdk.secrets import InMemorySecretsResolver
+from cdk.connection_runtime import ConnectionRuntime
 from src.source.connectors.api import APIConnector
 from src.source.connectors.base import ReadError
 

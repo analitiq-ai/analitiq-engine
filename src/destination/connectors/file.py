@@ -10,18 +10,18 @@ from typing import Any, Dict, List, Optional
 
 import pyarrow as pa
 
-from ..base_handler import BaseDestinationHandler, BatchWriteResult
+from cdk.base_handler import BaseDestinationHandler, BatchWriteResult
 from ..formatters import get_formatter
 from ..formatters.base import BaseFormatter
 from ..storage import get_storage_backend
 from ..storage.base import BaseStorageBackend
 from ..idempotency.manifest import ManifestTracker
-from ...grpc.generated.analitiq.v1 import (
+from cdk.types import (
     AckStatus,
     Cursor,
-    SchemaMessage,
+    SchemaSpec,
 )
-from ...shared.connection_runtime import ConnectionRuntime
+from cdk.connection_runtime import ConnectionRuntime
 
 
 logger = logging.getLogger(__name__)
@@ -143,7 +143,7 @@ class FileDestinationHandler(BaseDestinationHandler):
         self._connected = False
         logger.info("FileDestinationHandler disconnected")
 
-    async def configure_schema(self, schema_msg: SchemaMessage) -> bool:
+    async def configure_schema(self, schema_spec: SchemaSpec) -> bool:
         """Accept the schema for a stream.
 
         File destinations don't pre-create anything; the formatter shapes
@@ -152,7 +152,7 @@ class FileDestinationHandler(BaseDestinationHandler):
         """
         logger.info(
             "FileDestinationHandler: schema accepted for stream %s",
-            schema_msg.stream_id,
+            schema_spec.stream_id,
         )
         return True
 

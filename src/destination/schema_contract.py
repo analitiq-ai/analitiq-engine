@@ -10,8 +10,8 @@ import pyarrow as pa
 import pyarrow.compute as pc
 
 from src.destination.utils import decode_json_fields
-from src.engine.type_map import resolve_arrow_type
-from src.engine.type_map.exceptions import InvalidTypeMapError
+from cdk.type_map import resolve_arrow_type
+from cdk.type_map.exceptions import InvalidTypeMapError
 
 logger = logging.getLogger(__name__)
 

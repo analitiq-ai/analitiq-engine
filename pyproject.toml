@@ -22,7 +22,13 @@ classifiers = [
     "Topic :: Internet :: WWW/HTTP",
     "Topic :: System :: Distributed Computing",
 ]
-packages = [{include = "src"}]
+# The engine (``src``) consumes the in-tree CDK (``cdk/cdk``), so a Poetry
+# install / built wheel must expose both as importable top-level packages —
+# otherwise ``import cdk`` fails for any non-Docker, non-pytest run (Docker sets
+# PYTHONPATH=/app:/app/cdk; pytest sets ``pythonpath = ["cdk"]``). ``packages``
+# is build metadata only and is not part of Poetry's lock content-hash, so this
+# needs no relock.
+packages = [{include = "src"}, {include = "cdk", from = "cdk"}]
 
 [tool.poetry.dependencies]
 python = "^3.11"
@@ -275,6 +281,10 @@ ignore_missing_imports = true
 minversion = "7.0"
 addopts = "-ra -v --strict-markers --strict-config --ignore=tests/unit/src/fault_tolerance"
 testpaths = ["tests"]
+# The CDK is a sibling package (cdk/cdk/), consumed in-tree. Put cdk/ on the
+# path so `import cdk` resolves to cdk/cdk without an editable install. Docker
+# sets PYTHONPATH=/app:/app/cdk for the same reason.
+pythonpath = ["cdk"]
 python_files = ["test_*.py", "*_test.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]

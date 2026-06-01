@@ -16,7 +16,7 @@ from src.destination.connectors.api import (
     _API_WRITE_MODE_KEYS,
     _StreamState,
 )
-from src.destination.base_handler import BatchWriteResult
+from cdk.base_handler import BatchWriteResult
 from src.grpc.generated.analitiq.v1 import AckStatus, SchemaMessage, WriteMode
 
 

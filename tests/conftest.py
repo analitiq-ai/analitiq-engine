@@ -198,7 +198,7 @@ def database_cleanup():
         try:
             import asyncio
             from sqlalchemy import text
-            from src.shared.database_utils import create_database_engine
+            from cdk.database_utils import create_database_engine
 
             async def cleanup():
                 config = {

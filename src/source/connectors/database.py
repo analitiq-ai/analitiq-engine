@@ -26,13 +26,13 @@ import pyarrow as pa
 from .base import BaseConnector, ConnectionError, ReadError
 from ..drivers.adbc_reader import open_adbc_reader
 from ...destination.schema_contract import SchemaContract
-from ...shared.connection_runtime import (
+from cdk.connection_runtime import (
     ConnectionRuntime,
     DETERMINISTIC_CONNECT_ERRORS,
     materialize_runtime,
 )
-from ...shared.database_utils import acquire_connection, normalize_adbc_schema
-from ...shared.query_builder import Filter, QueryBuilder, QueryConfig
+from cdk.database_utils import acquire_connection, normalize_adbc_schema
+from cdk.query_builder import Filter, QueryBuilder, QueryConfig
 from ...state.state_manager import StateManager
 
 logger = logging.getLogger(__name__)

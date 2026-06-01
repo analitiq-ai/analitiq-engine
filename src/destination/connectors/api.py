@@ -17,16 +17,16 @@ import orjson
 import pyarrow as pa
 from aiohttp_retry import ExponentialRetry, RetryClient
 
-from ..base_handler import BaseDestinationHandler, BatchWriteResult
+from cdk.base_handler import BaseDestinationHandler, BatchWriteResult
 from ..utils import decode_json_fields
-from ...grpc.generated.analitiq.v1 import (
+from cdk.types import (
     AckStatus,
     Cursor,
-    SchemaMessage,
+    SchemaSpec,
 )
-from ...shared.connection_runtime import ConnectionRuntime
+from cdk.connection_runtime import ConnectionRuntime
 from ...shared.http_utils import join_url
-from ...shared.rate_limiter import RateLimiter
+from cdk.rate_limiter import RateLimiter
 
 
 logger = logging.getLogger(__name__)
@@ -152,7 +152,7 @@ class ApiDestinationHandler(BaseDestinationHandler):
     Per-stream endpoint settings (path, method, batch mode, batch size)
     are read from the preloaded contract API endpoint document at
     ``configure_schema`` time, keyed by ``operations.write.<mode>``. The
-    SchemaMessage off the wire only carries ``stream_id``, ``version``,
+    SchemaSpec off the wire only carries ``stream_id``, ``version``,
     and ``write_mode``.
     """
 
@@ -274,7 +274,7 @@ class ApiDestinationHandler(BaseDestinationHandler):
         self._connected = False
         logger.info("ApiDestinationHandler disconnected")
 
-    async def configure_schema(self, schema_msg: SchemaMessage) -> bool:
+    async def configure_schema(self, schema_spec: SchemaSpec) -> bool:
         """Configure the API endpoint from the preloaded contract document.
 
         ``operations.write`` is a closed map keyed by write mode in the
@@ -282,7 +282,7 @@ class ApiDestinationHandler(BaseDestinationHandler):
         stream's ``write.mode`` and read its ``request.{path,method}``
         plus optional ``batching`` block.
         """
-        stream_id = schema_msg.stream_id
+        stream_id = schema_spec.stream_id
         endpoint_doc = self._stream_endpoints.get(stream_id)
         if endpoint_doc is None:
             logger.error(
@@ -292,12 +292,12 @@ class ApiDestinationHandler(BaseDestinationHandler):
             )
             return False
 
-        mode_key = _API_WRITE_MODE_KEYS.get(schema_msg.write_mode)
+        mode_key = _API_WRITE_MODE_KEYS.get(schema_spec.write_mode)
         if mode_key is None:
             logger.error(
                 "API destination does not support write_mode=%s for stream %r; "
                 "valid api-endpoint modes are %s",
-                schema_msg.write_mode,
+                schema_spec.write_mode,
                 stream_id,
                 sorted(_API_WRITE_MODE_KEYS.values()),
             )

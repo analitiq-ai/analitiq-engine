@@ -50,15 +50,15 @@ from src.config.connection_loader import (
     load_connector_definition,
 )
 from src.config.utils import load_json_file
-from src.engine.type_map import (
+from cdk.type_map import (
     TypeMapNotFoundError,
     TypeMapper,
     load_connection_type_map,
     load_type_map,
 )
 from src.models.stream import EndpointRef
-from src.secrets import LocalFileSecretsResolver, SecretsResolver
-from src.shared.connection_runtime import ConnectionRuntime
+from cdk.secrets import LocalFileSecretsResolver, SecretsResolver
+from cdk.connection_runtime import ConnectionRuntime
 
 logger = logging.getLogger(__name__)
 

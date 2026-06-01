@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.shared.transport_factory import _materialize_tls_for_driver
+from cdk.transport_factory import _materialize_tls_for_driver
 
 
 def _resolver(mapping: dict | None = None) -> MagicMock:
@@ -48,7 +48,7 @@ class TestMaterializeTlsForDriver:
     def test_postgres_verify_ca_builds_sslcontext(self):
         resolver = _resolver({"verify-ca": "verify-ca", "PEM-REF": "PEM-BUNDLE"})
         with patch(
-            "src.shared.transport_factory._ca_ssl_context", return_value="<ctx>"
+            "cdk.transport_factory._ca_ssl_context", return_value="<ctx>"
         ) as ctx:
             value = _materialize_tls_for_driver(
                 "postgresql+asyncpg",
@@ -82,7 +82,7 @@ class TestMaterializeTlsForDriver:
     def test_unknown_driver_with_ca_builds_sslcontext(self):
         resolver = _resolver({"some-mode": "some-mode", "PEM-REF": "PEM-BUNDLE"})
         with patch(
-            "src.shared.transport_factory._ca_ssl_context", return_value="<ctx>"
+            "cdk.transport_factory._ca_ssl_context", return_value="<ctx>"
         ) as ctx:
             value = _materialize_tls_for_driver(
                 "snowflake",

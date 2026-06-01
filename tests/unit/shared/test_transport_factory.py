@@ -1,4 +1,4 @@
-"""Tests for :mod:`src.shared.transport_factory`.
+"""Tests for :mod:`cdk.transport_factory`.
 
 These cover transport spec resolution (:func:`resolve_transport_spec`)
 and the kind registry (register / unregister / dispatch via
@@ -14,8 +14,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from src.engine.resolver import ResolutionContext
-from src.shared.transport_factory import (
+from cdk.resolver import ResolutionContext
+from cdk.transport_factory import (
     build_transport,
     register_transport_kind,
     registered_transport_kinds,
@@ -118,7 +118,7 @@ class TestTransportKindRegistry:
         # The registry is module-level; a test that fails mid-flight could
         # leave state behind and corrupt sibling tests. Snapshot before,
         # restore after — irrespective of what the test body did.
-        from src.shared.transport_factory import _TRANSPORT_BUILDERS
+        from cdk.transport_factory import _TRANSPORT_BUILDERS
 
         snapshot = dict(_TRANSPORT_BUILDERS)
         try:
