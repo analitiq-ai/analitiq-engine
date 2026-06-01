@@ -33,9 +33,9 @@ from sqlalchemy.dialects.mysql import insert as mysql_insert
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncConnection
 
 from cdk.base_handler import BaseDestinationHandler, BatchWriteResult
-from ..schema_contract import SchemaContract
+from cdk.schema_contract import SchemaContract
 from ...models.stream import EndpointRef
-from ..sql_types import (
+from cdk.sql_types import (
     native_to_bigquery,
     native_to_postgres,
     native_to_snowflake,

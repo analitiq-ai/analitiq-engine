@@ -30,7 +30,7 @@ from typing import Any, AsyncIterator, Dict, List, Optional
 import pyarrow as pa
 
 from .base import BaseConnector, ConnectionError, ReadError
-from ...destination.schema_contract import SchemaContract
+from cdk.schema_contract import SchemaContract
 from ...models.state import CursorField, StreamCursor, StreamStats
 from cdk.connection_runtime import ConnectionRuntime
 from ...shared.expressions import resolve_value_expression

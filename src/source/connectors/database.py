@@ -25,7 +25,7 @@ import pyarrow as pa
 
 from .base import BaseConnector, ConnectionError, ReadError
 from ..drivers.adbc_reader import open_adbc_reader
-from ...destination.schema_contract import SchemaContract
+from cdk.schema_contract import SchemaContract
 from cdk.connection_runtime import (
     ConnectionRuntime,
     DETERMINISTIC_CONNECT_ERRORS,

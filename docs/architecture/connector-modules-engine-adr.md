@@ -505,8 +505,8 @@ per-component as work starts — there is no milestone/board.
 |-------|--------------|--------|--------|
 | 0 | Write-direction type-map: `to_native_type` + `WriteTypeMapRule` (§5) | #564 | **Done** |
 | 1 | CDK extraction — plumbing + contracts, engine consumes it, no behaviour change (§4) | #127 | **Done** — PR #128 (open; merges to close #127) |
-| 2A | `Discoverable` (list_schemas/tables/columns) + standalone `create_table` (§6) | #131 | **In progress** — PR #131 (open). CDK `cdk/cdk/sql/` building blocks; engine not yet a caller. |
-| 2B ("Engine B") | Dynamic `HandlerRegistry` / `analitiq.connectors` entry-point loader (§7) + generic SQL base (§8) + convert postgres to a thin module | — | To do — this is where connectors ship their own `requirements.txt` + `pyproject.toml` and the engine discovers them at startup |
+| 2A | `Discoverable` (list_schemas/tables/columns) + standalone `create_table` (§6) | #131 | **Done** — PR #131 (merged). CDK `cdk/cdk/sql/` building blocks; engine not yet a caller. |
+| 2B ("Engine B") | Dynamic `HandlerRegistry` / `analitiq.connectors` entry-point loader (§7) + generic SQL base (§8) + convert postgres to a thin module | — | **In progress**. Decisions: registry keyed by `kind` and drives **both** source connectors and destination handlers; the generic base is **one** `GenericSQLConnector` implementing Readable+Writable+Discoverable+TableCreator (source read + destination write unified). |
 | 2 (infra) | `S3SecretsResolver` against the CDK `SecretsResolver` protocol (§9) | infra repo | infra-side; startable once Phase 1 lands |
 | 3 | Pilot rebase (postgres) + go/no-go: parity + latency + isolation | infra repo | Gated on 1–2 |
 | 4 | Roll out remaining connectors (incl. MSSQL first-class); wire REST API | infra repo | Gated on 3 |

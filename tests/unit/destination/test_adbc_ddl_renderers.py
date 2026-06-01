@@ -11,7 +11,7 @@ from __future__ import annotations
 import pyarrow as pa
 import pytest
 
-from src.destination.sql_types import (
+from cdk.sql_types import (
     arrow_to_bigquery_native,
     arrow_to_postgres_native,
     arrow_to_snowflake_native,

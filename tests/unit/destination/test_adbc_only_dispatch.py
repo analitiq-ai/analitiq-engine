@@ -111,15 +111,15 @@ class TestPerDriverDispatch:
         return h
 
     def test_native_renderer_snowflake(self):
-        from src.destination.sql_types import native_to_snowflake
+        from cdk.sql_types import native_to_snowflake
         assert self._handler_for("snowflake")._adbc_native_renderer() is native_to_snowflake
 
     def test_native_renderer_bigquery(self):
-        from src.destination.sql_types import native_to_bigquery
+        from cdk.sql_types import native_to_bigquery
         assert self._handler_for("bigquery")._adbc_native_renderer() is native_to_bigquery
 
     def test_native_renderer_postgres(self):
-        from src.destination.sql_types import native_to_postgres
+        from cdk.sql_types import native_to_postgres
         assert self._handler_for("postgresql")._adbc_native_renderer() is native_to_postgres
 
     def test_native_renderer_unknown_raises(self):

@@ -204,7 +204,7 @@ class TestPrepareForSqlAlchemy:
             DatabaseDestinationHandler,
             _StreamState,
         )
-        from src.destination.schema_contract import SchemaContract
+        from cdk.schema_contract import SchemaContract
 
         handler = DatabaseDestinationHandler()
         contract = SchemaContract(
@@ -243,7 +243,7 @@ class TestPrepareForSqlAlchemy:
             DatabaseDestinationHandler,
             _StreamState,
         )
-        from src.destination.schema_contract import SchemaContract
+        from cdk.schema_contract import SchemaContract
 
         handler = DatabaseDestinationHandler()
         contract = SchemaContract(

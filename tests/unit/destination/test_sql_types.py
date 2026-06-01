@@ -24,7 +24,7 @@ from sqlalchemy import (
     Time,
 )
 
-from src.destination.sql_types import arrow_to_sqlalchemy, native_to_sqlalchemy
+from cdk.sql_types import arrow_to_sqlalchemy, native_to_sqlalchemy
 from cdk.type_map import TypeMapper
 from cdk.type_map.rules import parse_rules
 
