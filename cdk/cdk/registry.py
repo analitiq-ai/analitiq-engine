@@ -36,7 +36,13 @@ DESTINATION_GROUP = "analitiq.destination_connectors"
 
 
 class ConnectorNotRegisteredError(KeyError):
-    """No connector class is registered for a requested ``kind``."""
+    """No connector class is registered for a requested ``kind``.
+
+    Subclasses ``KeyError`` (a lookup miss is a missing key). Callers that wrap
+    a registry ``get``/``create`` in a broad ``except (KeyError, ...)`` would
+    therefore swallow it — keep registry lookups out of such handlers so an
+    unregistered kind surfaces loudly.
+    """
 
     def __init__(self, kind: str, *, role: str, available: Iterable[str]) -> None:
         self.kind = kind

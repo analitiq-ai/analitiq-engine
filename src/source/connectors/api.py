@@ -67,7 +67,15 @@ class APIConnector(BaseConnector):
     async def disconnect(self):
         if self._runtime:
             await self._runtime.close()
-            await asyncio.sleep(0.25)
+            # Brief courtesy delay so aiohttp's transports finish closing. It
+            # runs in read_batches' ``finally``, so a cancellation landing here
+            # must not replace a read error already propagating through the
+            # teardown; absorb it rather than let the drain delay become the
+            # surfaced exception.
+            try:
+                await asyncio.sleep(0.25)
+            except asyncio.CancelledError:
+                pass
         self.session = None
         self.is_connected = False
 
@@ -89,12 +97,19 @@ class APIConnector(BaseConnector):
 
         ``runtime`` is the only connection input (the ``Readable`` contract):
         this connector opens the session on entry and closes it on exit, so no
-        prior ``connect()`` is required. Each yielded batch corresponds to one
-        upstream page; the destination realigns to its declared schema via
-        :meth:`SchemaContract.cast_arrow_batch`.
+        prior ``connect()`` is required. ``checkpoint`` is typed as the concrete
+        :class:`StateManager` rather than the bare ``CheckpointStore`` Protocol
+        because the incremental path calls ``save_stream_checkpoint`` (not on
+        the minimal store); the engine always passes its ``StateManager``. Each
+        yielded batch corresponds to one upstream page; the destination realigns
+        to its declared schema via :meth:`SchemaContract.cast_arrow_batch`.
+
+        ``connect()`` runs inside the ``try`` so a connect/materialize failure
+        still reaches ``disconnect()`` in the ``finally`` and releases the
+        runtime reference it acquired — the lifecycle is balanced on every exit.
         """
-        await self.connect(runtime)
         try:
+            await self.connect(runtime)
             async for batch in self._read_batches_impl(
                 config,
                 checkpoint=checkpoint,

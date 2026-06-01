@@ -14,7 +14,6 @@ from ..source.connectors.api import APIConnector
 from cdk.contract import Readable
 from cdk.registry import build_registries
 from cdk.sql.generic import GenericSQLConnector
-from cdk.connection_runtime import ConnectionRuntime
 from ..shared.run_id import get_or_generate_run_id
 from ..state.circuit_breaker import CircuitBreaker
 from ..state.dead_letter_queue import DeadLetterQueue

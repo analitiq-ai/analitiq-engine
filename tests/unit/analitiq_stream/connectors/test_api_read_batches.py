@@ -612,3 +612,70 @@ class TestReadBatchesErrorPaths:
                 stream_name="items",
                 batch_size=10,
             )
+
+
+# ---------------------------------------------------------------------------
+# Connection lifecycle — read_batches owns acquire/release
+# ---------------------------------------------------------------------------
+
+
+class TestReadBatchesLifecycle:
+    @pytest.mark.asyncio
+    async def test_runtime_released_when_consumer_stops_early(self):
+        # The runtime is acquired on entry (ref_count 1) and released in the
+        # generator's finally when the consumer closes it mid-stream.
+        session = _FakeSession(
+            [_FakeResponse(status=200, body={"records": [{"id": 1, "name": "a"}]})]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        agen = connector.read_batches(
+            runtime,
+            config={
+                "endpoint_document": _endpoint_doc_with_records(),
+                "stream_source": _stream_source(),
+            },
+            checkpoint=MagicMock(),
+            stream_name="items",
+            batch_size=10,
+        )
+        first = await agen.__anext__()
+        assert first.num_rows == 1
+        assert runtime._ref_count == 1  # acquired on connect()
+        assert connector.is_connected is True
+
+        await agen.aclose()  # consumer stops early -> finally disconnects
+
+        assert runtime._ref_count == 0
+        assert connector.is_connected is False
+
+    @pytest.mark.asyncio
+    async def test_runtime_released_when_connect_fails(self):
+        # connect() runs inside read_batches' try, so a materialize failure
+        # still reaches disconnect() and releases the acquired ref.
+        from src.source.connectors.base import ConnectionError as ApiConnectionError
+
+        runtime = _runtime_with_session(_FakeSession([]))
+
+        async def _boom(*_args, **_kwargs):
+            raise RuntimeError("materialize boom")
+
+        runtime.materialize = _boom  # type: ignore[method-assign]
+
+        connector = APIConnector("test")
+        with pytest.raises(ApiConnectionError):
+            await _consume(
+                connector,
+                runtime,
+                config={
+                    "endpoint_document": _endpoint_doc_with_records(),
+                    "stream_source": _stream_source(),
+                },
+                state_manager=MagicMock(),
+                stream_name="items",
+                batch_size=10,
+            )
+
+        assert runtime._ref_count == 0  # acquired then released in finally
+        assert connector.is_connected is False
