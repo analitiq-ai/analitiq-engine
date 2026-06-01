@@ -19,16 +19,21 @@ from .conftest import FakeAdbcRuntime
 
 
 def _route(rows_by_view):
-    """Build a responder that returns rows based on the catalog view hit."""
+    """Build a responder that returns rows based on the catalog view hit.
+
+    Case-insensitive so it also routes BigQuery's upper-cased
+    ``INFORMATION_SCHEMA.*`` and dataset-qualified queries.
+    """
 
     def responder(sql, params):
-        if "key_column_usage" in sql:
+        lowered = sql.lower()
+        if "key_column_usage" in lowered:
             return rows_by_view.get("pks", [])
-        if "information_schema.columns" in sql:
+        if "information_schema.columns" in lowered:
             return rows_by_view.get("columns", [])
-        if "information_schema.tables" in sql:
+        if "information_schema.tables" in lowered:
             return rows_by_view.get("tables", [])
-        if "information_schema.schemata" in sql:
+        if "information_schema.schemata" in lowered:
             return rows_by_view.get("schemas", [])
         return []
 
@@ -155,3 +160,95 @@ class TestListColumns:
         assert "geometry" in str(exc.value)
         # The underlying type-map error is chained, not swallowed.
         assert isinstance(exc.value.__cause__, UnmappedTypeError)
+
+    @pytest.mark.asyncio
+    async def test_missing_expected_column_raises(self, pg_mapper):
+        # A row that lacks the expected key (exact + case-insensitive) is a hard
+        # DiscoveryError, not a silent KeyError or wrong-column read.
+        runtime = FakeAdbcRuntime(
+            "postgresql",
+            mapper=pg_mapper,
+            responder=_route({"schemas": [{"unexpected_key": "x"}]}),
+        )
+        with pytest.raises(DiscoveryError, match="expected column 'schema_name'"):
+            await list_schemas(runtime)
+
+
+class TestSnowflakeDiscovery:
+    """The snowflake dialect's normalize + flat-schema queries run end to end."""
+
+    @pytest.mark.asyncio
+    async def test_list_tables_normalizes_public_schema(self, sf_mapper):
+        runtime = FakeAdbcRuntime(
+            "snowflake",
+            mapper=sf_mapper,
+            responder=_route({"tables": [{"TABLE_NAME": "ORDERS"}]}),
+        )
+        assert await list_tables(runtime, "public") == ["ORDERS"]
+        # public -> PUBLIC reached the query as the bind value.
+        _, params = runtime.connections[-1].executed[-1]
+        assert params == ["PUBLIC"]
+
+    @pytest.mark.asyncio
+    async def test_list_columns_maps_native_number(self, sf_mapper):
+        runtime = FakeAdbcRuntime(
+            "snowflake",
+            mapper=sf_mapper,
+            responder=_route(
+                {
+                    "pks": [{"COLUMN_NAME": "ID"}],
+                    "columns": [
+                        {"COLUMN_NAME": "ID", "DATA_TYPE": "NUMBER",
+                         "IS_NULLABLE": "NO"},
+                    ],
+                }
+            ),
+        )
+        columns, pks = await list_columns(runtime, "public", "ORDERS")
+        assert pks == ["ID"]
+        assert columns == [
+            ColumnDef("ID", "Decimal128(38, 0)", nullable=False, primary_key=True)
+        ]
+
+
+class TestBigQueryDiscovery:
+    """The bigquery dialect's dataset-qualified queries run end to end."""
+
+    @pytest.mark.asyncio
+    async def test_list_tables_uses_dataset_qualified_from(self):
+        runtime = FakeAdbcRuntime(
+            "bigquery",
+            responder=_route({"tables": [{"table_name": "orders"}]}),
+        )
+        assert await list_tables(runtime, "ds") == ["orders"]
+        sql, params = runtime.connections[-1].executed[-1]
+        # Dataset is structural (no bind); table list takes no params.
+        assert "`ds`.INFORMATION_SCHEMA.TABLES" in sql
+        assert params == []
+
+    @pytest.mark.asyncio
+    async def test_list_columns_maps_native_and_binds_table(self, bq_mapper):
+        runtime = FakeAdbcRuntime(
+            "bigquery",
+            mapper=bq_mapper,
+            responder=_route(
+                {
+                    "pks": [],
+                    "columns": [
+                        {"column_name": "id", "data_type": "INT64",
+                         "is_nullable": "NO"},
+                        {"column_name": "ok", "data_type": "BOOL",
+                         "is_nullable": "YES"},
+                    ],
+                }
+            ),
+        )
+        columns, pks = await list_columns(runtime, "ds", "orders")
+        assert pks == []
+        assert columns == [
+            ColumnDef("id", "Int64", nullable=False, primary_key=False),
+            ColumnDef("ok", "Boolean", nullable=True, primary_key=False),
+        ]
+        # The table name is bound; the dataset is in the FROM path.
+        col_sql, col_params = runtime.connections[-1].executed[-1]
+        assert col_params == ["orders"]

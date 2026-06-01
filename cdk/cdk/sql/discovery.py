@@ -30,12 +30,14 @@ def _col(row: Row, name: str) -> Any:
 
     Snowflake/BigQuery fold unquoted output column names to upper case, so a
     ``SELECT schema_name`` comes back keyed ``SCHEMA_NAME``; postgres keeps it
-    lower. Look up exact first, then case-insensitively.
+    lower. Look up exact first, then case-insensitively (both sides folded, so
+    the lookup does not silently assume *name* is already lowercase).
     """
     if name in row:
         return row[name]
+    target = name.lower()
     for key, value in row.items():
-        if key.lower() == name:
+        if key.lower() == target:
             return value
     raise DiscoveryError(
         f"expected column {name!r} not in result row (keys: {sorted(row)})"

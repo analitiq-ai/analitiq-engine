@@ -18,14 +18,26 @@ how the streaming ADBC reader/handler already drive their cursors.
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any, Dict, List, Sequence, Tuple, Union
 
 from sqlalchemy import text
 
 from ..database_utils import acquire_connection
-from .exceptions import DiscoveryError
+from .exceptions import CreateTableError, DiscoveryError, SqlIntrospectionError
+
+logger = logging.getLogger(__name__)
 
 Row = Dict[str, Any]
+
+
+def _one_line(sql: str) -> str:
+    """First non-blank line of *sql*, trimmed — for error messages."""
+    for line in sql.splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped[:120]
+    return sql[:120]
 
 
 def _qmark_to_named(sql: str, params: Sequence[Any]) -> Tuple[str, Dict[str, Any]]:
@@ -54,10 +66,24 @@ def _qmark_to_named(sql: str, params: Sequence[Any]) -> Tuple[str, Dict[str, Any
 
 
 async def fetch_rows(runtime: Any, sql: str, params: Sequence[Any]) -> List[Row]:
-    """Run a ``SELECT`` over either transport and return its rows as dicts."""
-    if runtime.is_adbc:
-        return await asyncio.to_thread(_fetch_rows_adbc_sync, runtime, sql, params)
-    return await _fetch_rows_sqlalchemy(runtime, sql, params)
+    """Run a ``SELECT`` over either transport and return its rows as dicts.
+
+    A transport/driver failure (bad credentials, missing catalog view, syntax
+    error, dropped connection) is re-raised as :class:`DiscoveryError` so the
+    control-plane sees one error surface; the original driver exception is
+    chained. A :class:`SqlIntrospectionError` (e.g. a placeholder mismatch from
+    the bind rewrite) passes through unwrapped.
+    """
+    try:
+        if runtime.is_adbc:
+            return await asyncio.to_thread(_fetch_rows_adbc_sync, runtime, sql, params)
+        return await _fetch_rows_sqlalchemy(runtime, sql, params)
+    except SqlIntrospectionError:
+        raise
+    except Exception as err:
+        raise DiscoveryError(
+            f"discovery query failed [{_one_line(sql)}]: {err}"
+        ) from err
 
 
 async def _fetch_rows_sqlalchemy(
@@ -87,27 +113,54 @@ def _fetch_rows_adbc_sync(runtime: Any, sql: str, params: Sequence[Any]) -> List
 
 
 async def execute_ddl(runtime: Any, statements: Union[str, Sequence[str]]) -> None:
-    """Run one DDL string or a sequence of them, committed together."""
+    """Run one DDL string or a sequence of them, committed together (atomically).
+
+    The SQLAlchemy path wraps the batch in ``engine.begin()`` (one transaction);
+    the ADBC path commits once after the last statement and rolls back on
+    failure (see :func:`_execute_ddl_adbc_sync`), so both transports give
+    all-or-nothing semantics. A transport/driver failure is re-raised as
+    :class:`CreateTableError` with the original chained.
+    """
     stmts = [statements] if isinstance(statements, str) else list(statements)
     if not stmts:
         return
-    if runtime.is_adbc:
-        await asyncio.to_thread(_execute_ddl_adbc_sync, runtime, stmts)
-        return
-    async with runtime.engine.begin() as conn:
-        for ddl in stmts:
-            await conn.exec_driver_sql(ddl)
+    try:
+        if runtime.is_adbc:
+            await asyncio.to_thread(_execute_ddl_adbc_sync, runtime, stmts)
+            return
+        async with runtime.engine.begin() as conn:
+            for ddl in stmts:
+                await conn.exec_driver_sql(ddl)
+    except SqlIntrospectionError:
+        raise
+    except Exception as err:
+        raise CreateTableError(f"DDL execution failed: {err}") from err
 
 
 def _execute_ddl_adbc_sync(runtime: Any, statements: Sequence[str]) -> None:
     conn = runtime.open_adbc_connection()
     try:
-        cursor = conn.cursor()
         try:
-            for ddl in statements:
-                cursor.execute(ddl)
-        finally:
-            cursor.close()
-        conn.commit()
+            cursor = conn.cursor()
+            try:
+                for ddl in statements:
+                    cursor.execute(ddl)
+            finally:
+                cursor.close()
+            conn.commit()
+        except Exception:
+            # Roll back the partially-applied batch so "committed together"
+            # holds even on a driver whose default is not autocommit. Best
+            # effort: a rollback failure must not mask the original error, but
+            # is logged so a connection left mid-transaction is diagnosable.
+            try:
+                conn.rollback()
+            except Exception:
+                logger.warning(
+                    "ADBC DDL rollback failed after a batch error; the original "
+                    "error is preserved",
+                    exc_info=True,
+                )
+            raise
     finally:
         conn.close()
