@@ -1,23 +1,17 @@
-"""ADBC-only source reader and connector glue.
+"""ADBC-only source connector branch wiring.
 
-The ADBC reader is now pure execution: it takes a compiled
-``(sql, params)`` pair (produced by ``QueryBuilder`` in qmark mode) and
-returns Arrow batches. The hand-rolled ``_build_select_sql`` is gone --
-SQL rendering, including stream filters and the incremental cursor, is
-shared with the SQLAlchemy transport via ``QueryBuilder``.
-
-These tests freeze:
-
-* :class:`AdbcReader` execution (binds params, materializes Arrow,
-  closes the cursor, surfaces a closed-reader bug as a distinct error).
-* the connector's ADBC branch wiring -- filters + cursor compose into a
-  single quoted, qmark, inline-paged SELECT; the non-empty column guard;
-  and the first-column ORDER BY fallback when no cursor is set.
+The ADBC reader itself (pure ``(sql, params)`` execution) is tested in
+``tests/unit/cdk_tests/sql/test_adbc_reader.py`` now that it lives in the
+CDK. These tests freeze the connector's ADBC branch: filters + cursor
+compose into a single quoted, qmark, inline-paged SELECT; the non-empty
+column guard; and the first-column ORDER BY fallback when no cursor is
+set. SQL rendering is shared with the SQLAlchemy transport via
+``QueryBuilder``.
 """
 
 from __future__ import annotations
 
-from typing import Any, List, Optional, Tuple
+from typing import Any, List, Tuple
 from unittest.mock import AsyncMock, patch
 
 import pyarrow as pa
@@ -25,82 +19,6 @@ import pytest
 
 from src.source.connectors.base import ReadError
 from src.source.connectors.database import DatabaseConnector
-from src.source.drivers.adbc_reader import AdbcReader, AdbcReaderClosedError
-
-
-class _FakeCursor:
-    def __init__(self, table: pa.Table) -> None:
-        self._table = table
-        self.executed: List[Tuple[str, Optional[list]]] = []
-        self.closed = False
-
-    def execute(self, sql: str, params: Optional[list] = None) -> None:
-        self.executed.append((sql, params))
-
-    def fetch_arrow_table(self) -> pa.Table:
-        return self._table
-
-    def close(self) -> None:
-        self.closed = True
-
-
-class _FakeConn:
-    def __init__(self, table: pa.Table) -> None:
-        self._cursor = _FakeCursor(table)
-        self.closed = False
-
-    def cursor(self) -> _FakeCursor:
-        return self._cursor
-
-    def close(self) -> None:
-        self.closed = True
-
-
-class TestAdbcReaderExecution:
-    @pytest.mark.asyncio
-    async def test_fetch_page_binds_params_and_returns_batches(self):
-        table = pa.table({"id": [1, 2], "status": ["a", "b"]})
-        conn = _FakeConn(table)
-        reader = AdbcReader("postgresql", conn)
-
-        batches = await reader.fetch_page('SELECT "id" FROM "t" WHERE "id" >= ?', [1])
-
-        assert sum(b.num_rows for b in batches) == 2
-        # The compiled SQL and positional params are forwarded verbatim.
-        assert conn._cursor.executed == [
-            ('SELECT "id" FROM "t" WHERE "id" >= ?', [1])
-        ]
-        # The per-page cursor is always closed, even on the happy path.
-        assert conn._cursor.closed is True
-
-    @pytest.mark.asyncio
-    async def test_fetch_page_no_params_uses_single_arg_execute(self):
-        conn = _FakeConn(pa.table({"id": [1]}))
-        reader = AdbcReader("postgresql", conn)
-
-        await reader.fetch_page('SELECT "id" FROM "t"')
-
-        # No params -> execute(sql) with no second arg, so a driver that
-        # treats an empty bind list as "expects 0 params" is never tripped.
-        assert conn._cursor.executed == [('SELECT "id" FROM "t"', None)]
-
-    @pytest.mark.asyncio
-    async def test_fetch_page_empty_result_returns_empty_list(self):
-        conn = _FakeConn(pa.table({"id": pa.array([], type=pa.int64())}))
-        reader = AdbcReader("postgresql", conn)
-
-        assert await reader.fetch_page("SELECT 1") == []
-
-    @pytest.mark.asyncio
-    async def test_fetch_after_close_raises_closed_error(self):
-        conn = _FakeConn(pa.table({"id": [1]}))
-        reader = AdbcReader("postgresql", conn)
-
-        await reader.close()
-
-        with pytest.raises(AdbcReaderClosedError):
-            await reader.fetch_page("SELECT 1")
-        assert conn.closed is True
 
 
 class _RecordingReader:

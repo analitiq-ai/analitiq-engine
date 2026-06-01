@@ -24,7 +24,7 @@ from typing import Any, AsyncIterator, Dict, List, Optional
 import pyarrow as pa
 
 from .base import BaseConnector, ConnectionError, ReadError
-from ..drivers.adbc_reader import open_adbc_reader
+from cdk.sql import open_adbc_reader
 from cdk.schema_contract import SchemaContract
 from cdk.connection_runtime import (
     ConnectionRuntime,

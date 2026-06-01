@@ -6,11 +6,10 @@ SQLAlchemy engine, so reads run directly against an ADBC connection
 obtained via :func:`ConnectionRuntime.open_adbc_connection`.
 
 SQL is compiled by the shared :class:`~cdk.query_builder.QueryBuilder`
-in qmark mode (see ``src/source/connectors/database.py``); the reader is
-pure execution -- it takes a ``(sql, params)`` pair and returns Arrow
-batches. Centralizing rendering in QueryBuilder gives the ADBC path the
-same operator coverage (filters) and identifier quoting as the
-SQLAlchemy transport.
+in qmark mode; the reader is pure execution -- it takes a ``(sql,
+params)`` pair and returns Arrow batches. Centralizing rendering in
+QueryBuilder gives the ADBC path the same operator coverage (filters)
+and identifier quoting as the SQLAlchemy transport.
 
 ADBC's DBAPI is synchronous, so each operation runs on a worker thread
 via ``asyncio.to_thread``. Connection lifetime is bound to the

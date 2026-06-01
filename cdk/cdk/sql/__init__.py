@@ -17,6 +17,7 @@ Public surface:
 
 from __future__ import annotations
 
+from .adbc_reader import AdbcReader, AdbcReaderClosedError, open_adbc_reader
 from .ddl import build_create_table_sql, create_table
 from .dialects import SUPPORTED_DIALECTS, SqlDialect, get_dialect
 from .discovery import list_columns, list_schemas, list_tables
@@ -39,6 +40,9 @@ __all__ = [
     "SUPPORTED_DIALECTS",
     "fetch_rows",
     "execute_ddl",
+    "AdbcReader",
+    "AdbcReaderClosedError",
+    "open_adbc_reader",
     "SqlIntrospectionError",
     "UnsupportedDialectError",
     "DiscoveryError",
