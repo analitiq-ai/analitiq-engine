@@ -135,7 +135,7 @@ class TestSqlAlchemyRealDriver:
 
     @pytest.mark.asyncio
     async def test_fetch_and_ddl_round_trip(self):
-        aiosqlite = pytest.importorskip("aiosqlite")  # noqa: F841
+        pytest.importorskip("aiosqlite")
         from sqlalchemy.ext.asyncio import create_async_engine
 
         engine = create_async_engine("sqlite+aiosqlite:///:memory:")
