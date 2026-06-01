@@ -75,6 +75,9 @@ class APIConnector(BaseConnector):
             try:
                 await asyncio.sleep(0.25)
             except asyncio.CancelledError:
+                # Intentionally ignored: the runtime is already closed above, so
+                # the only thing cancelled is the drain delay. Absorbing it keeps
+                # a propagating read error (or task cancellation) intact.
                 pass
         self.session = None
         self.is_connected = False

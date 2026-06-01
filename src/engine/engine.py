@@ -301,10 +301,16 @@ class StreamingEngine:
             status = "failed"
             error_message = str(e)
             logger.exception("Stream %s processing failed: %s", stream_name, e)
-            # Cancel any running tasks for this stream
+            # Cancel any running tasks for this stream, then drive them to
+            # completion. The source reader releases its runtime in its own
+            # ``finally``, so the cancelled extract task must be awaited here —
+            # otherwise the runtime/session could stay open if the run tears
+            # down before the cancelled task runs its cleanup.
             for task in tasks:
                 if not task.done():
                     task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
             raise
 
         finally:

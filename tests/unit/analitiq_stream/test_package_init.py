@@ -83,14 +83,11 @@ class TestSubPackageInits:
         assert src.models is not None
 
     def test_api_connector_importable(self):
-        """The API source connector module is importable."""
+        """The API source connector module and class are importable."""
         import src.source.connectors.api
 
         assert src.source.connectors.api is not None
-
-        from src.source.connectors.api import APIConnector
-
-        assert APIConnector is not None
+        assert src.source.connectors.api.APIConnector is not None
 
 
 class TestImportErrors:

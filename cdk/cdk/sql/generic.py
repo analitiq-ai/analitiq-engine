@@ -459,6 +459,10 @@ class GenericSQLConnector(BaseDestinationHandler):
                 logger.error(
                     "ADBC eager-open failed during connect: %s", e, exc_info=True
                 )
+                # materialize() already acquired the runtime; the caller does
+                # not disconnect a handler whose connect() raised, so release
+                # the ref here to keep the lifecycle balanced.
+                await runtime.close()
                 raise ConnectionError(f"ADBC connection failed: {e}") from e
             logger.info(
                 "GenericSQLConnector connected via ADBC to %s",
