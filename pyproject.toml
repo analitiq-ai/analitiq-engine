@@ -208,6 +208,21 @@ all = [
     "clickhouse-connect", "clickhouse-sqlalchemy",
 ]
 
+# Connector entry points (ADR §7), keyed by connector kind. These advertise the
+# built-in connectors for an installed wheel; the engine and destination service
+# also seed the same classes as registry built-ins, so in-tree / pytest runs work
+# without an editable reinstall.
+[tool.poetry.plugins."analitiq.source_connectors"]
+database = "cdk.sql.generic:GenericSQLConnector"
+api = "src.source.connectors.api:APIConnector"
+
+[tool.poetry.plugins."analitiq.destination_connectors"]
+database = "cdk.sql.generic:GenericSQLConnector"
+api = "src.destination.connectors.api:ApiDestinationHandler"
+file = "src.destination.connectors.file:FileDestinationHandler"
+s3 = "src.destination.connectors.file:FileDestinationHandler"
+stdout = "src.destination.connectors.stream:StreamDestinationHandler"
+
 [tool.poetry.scripts]
 # Scripts removed for Docker deployment - using entrypoint.py directly
 # analitiq-stream = "src.cli:main"

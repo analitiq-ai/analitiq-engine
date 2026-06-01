@@ -178,6 +178,145 @@ class TestReadAdbcBranch:
         assert saved[-1] == "2024-01-09"
 
 
+def _adbc_cm(reader: _RecordingReader):
+    """Wrap a recording reader as the async CM ``open_adbc_reader`` returns."""
+
+    class _CM:
+        async def __aenter__(self):
+            return reader
+
+        async def __aexit__(self, *exc):
+            return False
+
+    return _CM()
+
+
+class TestReadAdbcBranchPaging:
+    """Filter-only, ORDER BY fallback, fixed-WHERE paging, and bind guards."""
+
+    @pytest.mark.asyncio
+    async def test_full_refresh_with_filters_only(self):
+        runtime = _FakeRuntime(is_adbc=True)
+        page = [pa.RecordBatch.from_pydict({"id": [1], "updated_at": ["2024-01-01"]})]
+        reader = _RecordingReader([page, []])
+        connector = GenericSQLConnector()
+        with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()), patch(
+            "cdk.sql.generic.open_adbc_reader", return_value=_adbc_cm(reader)
+        ), patch("cdk.sql.generic.SchemaContract") as sc:
+            sc.return_value.cast_arrow_batch.side_effect = lambda b: b
+            config = _endpoint_config(
+                filters=[{"field": "status", "operator": "eq", "value": "x"}],
+            )
+            await _drain(connector, runtime, config, _checkpoint())
+
+        sql, params = reader.calls[0]
+        assert '"status" = ?' in sql
+        # No cursor -> no cursor predicate, ORDER BY falls back to first column.
+        assert ">=" not in sql
+        assert 'ORDER BY "id"' in sql
+        assert params == ["x"]
+
+    @pytest.mark.asyncio
+    async def test_order_by_fallback_warns_once(self, caplog):
+        from cdk.sql import generic as generic_mod
+
+        generic_mod._order_by_fallback_logged.clear()
+        runtime = _FakeRuntime(is_adbc=True)
+        page = [pa.RecordBatch.from_pydict({"id": [1], "updated_at": ["2024-01-01"]})]
+        reader = _RecordingReader([page, []])
+        connector = GenericSQLConnector()
+        with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()), patch(
+            "cdk.sql.generic.open_adbc_reader", return_value=_adbc_cm(reader)
+        ), patch("cdk.sql.generic.SchemaContract") as sc:
+            sc.return_value.cast_arrow_batch.side_effect = lambda b: b
+            with caplog.at_level("WARNING"):
+                await _drain(connector, runtime, _endpoint_config(), _checkpoint())
+
+        assert any("defaulting ORDER BY" in r.message for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_order_by_fallback_dedupes_across_drains(self, caplog):
+        from cdk.sql import generic as generic_mod
+
+        generic_mod._order_by_fallback_logged.clear()
+        connector = GenericSQLConnector()
+        with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()), patch(
+            "cdk.sql.generic.SchemaContract"
+        ) as sc:
+            sc.return_value.cast_arrow_batch.side_effect = lambda b: b
+            with caplog.at_level("WARNING"):
+                for _ in range(2):
+                    runtime = _FakeRuntime(is_adbc=True)
+                    page = [pa.RecordBatch.from_pydict(
+                        {"id": [1], "updated_at": ["2024-01-01"]}
+                    )]
+                    reader = _RecordingReader([page, []])
+                    with patch(
+                        "cdk.sql.generic.open_adbc_reader",
+                        return_value=_adbc_cm(reader),
+                    ):
+                        await _drain(
+                            connector, runtime, _endpoint_config(), _checkpoint()
+                        )
+
+        # Same (table, column) -> warned only on the first drain.
+        warnings = [r for r in caplog.records if "defaulting ORDER BY" in r.message]
+        assert len(warnings) == 1
+
+    @pytest.mark.asyncio
+    async def test_offset_advances_across_pages_with_fixed_where(self):
+        # Two full pages then drain. The cursor is pinned at the read's initial
+        # value; only OFFSET moves, so the WHERE params must be byte-for-byte
+        # identical across pages.
+        runtime = _FakeRuntime(is_adbc=True)
+        checkpoint = _checkpoint(cursor={"cursor": "2024-01-01"})
+        page1 = [pa.RecordBatch.from_pydict(
+            {"id": [1, 2], "updated_at": ["2024-01-02", "2024-01-03"]}
+        )]
+        page2 = [pa.RecordBatch.from_pydict(
+            {"id": [3, 4], "updated_at": ["2024-01-04", "2024-01-05"]}
+        )]
+        reader = _RecordingReader([page1, page2, []])
+        connector = GenericSQLConnector()
+        with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()), patch(
+            "cdk.sql.generic.open_adbc_reader", return_value=_adbc_cm(reader)
+        ), patch("cdk.sql.generic.SchemaContract") as sc:
+            sc.return_value.cast_arrow_batch.side_effect = lambda b: b
+            config = _endpoint_config(
+                filters=[{"field": "status", "operator": "eq", "value": "active"}],
+                replication={"method": "incremental", "cursor_field": ["updated_at"]},
+            )
+            await _drain(connector, runtime, config, checkpoint, batch_size=2)
+
+        assert len(reader.calls) == 3
+        sql0, params0 = reader.calls[0]
+        sql1, params1 = reader.calls[1]
+        assert "OFFSET 0" in sql0
+        assert "OFFSET 2" in sql1
+        # Same WHERE predicate and identical params on every page.
+        assert params0 == params1 == ["active", "2024-01-01"]
+
+    @pytest.mark.asyncio
+    async def test_named_params_rejected_on_adbc_path(self):
+        # If the dialect ignores the forced qmark paramstyle and yields a dict,
+        # the ADBC execute path would bind parameter names instead of values.
+        # The connector must fail loudly before that happens.
+        runtime = _FakeRuntime(is_adbc=True)
+        connector = GenericSQLConnector()
+        with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()), patch(
+            "cdk.sql.generic.open_adbc_reader", return_value=_adbc_cm(_RecordingReader([]))
+        ), patch("cdk.sql.generic.SchemaContract") as sc, patch(
+            "cdk.sql.generic.QueryBuilder"
+        ) as qb:
+            sc.return_value.cast_arrow_batch.side_effect = lambda b: b
+            qb.return_value.build_select_query.return_value = (
+                "SELECT 1",
+                {"status_1": "active"},
+            )
+            with pytest.raises(ReadError, match="positional qmark parameters"):
+                await _drain(connector, runtime, _endpoint_config(), _checkpoint())
+
+
 class TestReadSqlAlchemyBranch:
     @pytest.mark.asyncio
     async def test_full_refresh_pages_via_acquire_connection(self):

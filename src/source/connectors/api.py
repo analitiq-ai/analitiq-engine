@@ -77,23 +77,46 @@ class APIConnector(BaseConnector):
 
     async def read_batches(
         self,
+        runtime: ConnectionRuntime,
         config: Dict[str, Any],
         *,
-        state_manager: StateManager,
+        checkpoint: StateManager,
         stream_name: str,
         partition: Optional[Dict[str, Any]] = None,
         batch_size: int = 1000,
     ) -> AsyncIterator[pa.RecordBatch]:
         """Read upstream records as Arrow batches.
 
-        Each yielded batch corresponds to one upstream page; the
-        destination realigns to its declared schema via
+        ``runtime`` is the only connection input (the ``Readable`` contract):
+        this connector opens the session on entry and closes it on exit, so no
+        prior ``connect()`` is required. Each yielded batch corresponds to one
+        upstream page; the destination realigns to its declared schema via
         :meth:`SchemaContract.cast_arrow_batch`.
         """
+        await self.connect(runtime)
+        try:
+            async for batch in self._read_batches_impl(
+                config,
+                checkpoint=checkpoint,
+                stream_name=stream_name,
+                partition=partition,
+                batch_size=batch_size,
+            ):
+                yield batch
+        finally:
+            await self.disconnect()
+
+    async def _read_batches_impl(
+        self,
+        config: Dict[str, Any],
+        *,
+        checkpoint: StateManager,
+        stream_name: str,
+        partition: Optional[Dict[str, Any]] = None,
+        batch_size: int = 1000,
+    ) -> AsyncIterator[pa.RecordBatch]:
         if partition is None:
             partition = {}
-        if self._runtime is None or self.session is None:
-            raise ReadError("APIConnector.read_batches() called before connect()")
 
         endpoint_doc = config.get("endpoint_document")
         if not endpoint_doc:
@@ -144,7 +167,7 @@ class APIConnector(BaseConnector):
             await self._apply_incremental_replication(
                 base_params,
                 read_spec,
-                state_manager,
+                checkpoint,
                 stream_name,
                 partition,
                 cursor_field,
@@ -183,7 +206,7 @@ class APIConnector(BaseConnector):
             total_records += len(deduped)
             if cursor_field:
                 self._save_checkpoint(
-                    state_manager=state_manager,
+                    checkpoint=checkpoint,
                     stream_name=stream_name,
                     partition=partition,
                     last_record=deduped[-1],
@@ -289,7 +312,7 @@ class APIConnector(BaseConnector):
         self,
         params: Dict[str, Any],
         read_spec: Dict[str, Any],
-        state_manager: StateManager,
+        checkpoint: StateManager,
         stream_name: str,
         partition: Dict[str, Any],
         cursor_field: Optional[str],
@@ -309,7 +332,7 @@ class APIConnector(BaseConnector):
                 cursor_field,
             )
             return
-        cursor_state = await state_manager.get_cursor(stream_name, partition)
+        cursor_state = await checkpoint.get_cursor(stream_name, partition)
         cursor_value = (cursor_state or {}).get("primary", {}).get("value")
         if not cursor_value:
             logger.info(
@@ -541,7 +564,7 @@ class APIConnector(BaseConnector):
     def _save_checkpoint(
         self,
         *,
-        state_manager: StateManager,
+        checkpoint: StateManager,
         stream_name: str,
         partition: Dict[str, Any],
         last_record: Dict[str, Any],
@@ -572,7 +595,7 @@ class APIConnector(BaseConnector):
             last_checkpoint_at=datetime.now(timezone.utc),
             errors_since_checkpoint=0,
         )
-        state_manager.save_stream_checkpoint(
+        checkpoint.save_stream_checkpoint(
             stream_name=stream_name,
             partition=partition,
             cursor=asdict(cursor),

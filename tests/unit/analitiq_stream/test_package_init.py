@@ -30,7 +30,6 @@ class TestMainPackageInit:
             "CircuitBreaker",
             "DeadLetterQueue",
             "BaseConnector",
-            "DatabaseConnector",
             "APIConnector",
         ]
 
@@ -44,7 +43,6 @@ class TestMainPackageInit:
             APIConnector,
             BaseConnector,
             CircuitBreaker,
-            DatabaseConnector,
             DeadLetterQueue,
             Pipeline,
             RetryHandler,
@@ -58,7 +56,6 @@ class TestMainPackageInit:
             CircuitBreaker,
             DeadLetterQueue,
             BaseConnector,
-            DatabaseConnector,
             APIConnector,
         ):
             assert cls is not None
@@ -85,15 +82,15 @@ class TestSubPackageInits:
 
         assert src.models is not None
 
-    def test_database_init_already_covered(self):
-        """Test database connector module is importable."""
-        import src.source.connectors.database
+    def test_api_connector_importable(self):
+        """The API source connector module is importable."""
+        import src.source.connectors.api
 
-        assert src.source.connectors.database is not None
+        assert src.source.connectors.api is not None
 
-        from src.source.connectors.database import DatabaseConnector
+        from src.source.connectors.api import APIConnector
 
-        assert DatabaseConnector is not None
+        assert APIConnector is not None
 
 
 class TestImportErrors:
@@ -115,7 +112,6 @@ class TestImportErrors:
         import src.engine.pipeline
         import src.engine.engine
         import src.source.connectors.api
-        import src.source.connectors.database
         import src
 
         # All imports should succeed
@@ -123,7 +119,6 @@ class TestImportErrors:
             src.engine.pipeline,
             src.engine.engine,
             src.source.connectors.api,
-            src.source.connectors.database,
             src
         ])
 

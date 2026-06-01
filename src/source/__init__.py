@@ -6,7 +6,6 @@ various sources including APIs and databases.
 
 from .connectors.base import BaseConnector, ConnectionError, ReadError, WriteError
 from .connectors.api import APIConnector
-from .connectors.database import DatabaseConnector
 
 __all__ = [
     "BaseConnector",
@@ -14,5 +13,4 @@ __all__ = [
     "ReadError",
     "WriteError",
     "APIConnector",
-    "DatabaseConnector",
 ]

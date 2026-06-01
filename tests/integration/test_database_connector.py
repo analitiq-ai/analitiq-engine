@@ -1,15 +1,25 @@
-"""Integration tests for DatabaseConnector with real PostgreSQL database."""
+"""Integration tests for the SQL source read path against real PostgreSQL.
+
+The unified :class:`~cdk.sql.generic.GenericSQLConnector` is a pure reader on
+the source side: ``read_batches`` is handed a :class:`ConnectionRuntime`,
+materializes it, pages the table, and releases it on exit — there is no
+persistent ``connect()``/``disconnect()`` lifecycle to introspect. These tests
+build their own short-lived runtimes for table setup/teardown and drive the
+connector with the contract endpoint document.
+"""
 
 import os
 import uuid
+
 import pytest
 from unittest.mock import AsyncMock
 
 from sqlalchemy import text
-from src.source.connectors.database import DatabaseConnector
-from cdk.connection_runtime import ConnectionRuntime
+
+from cdk.connection_runtime import ConnectionRuntime, materialize_runtime
 from cdk.database_utils import acquire_connection
 from cdk.secrets.resolvers.memory import InMemorySecretsResolver
+from cdk.sql.generic import GenericSQLConnector
 
 
 def _postgres_available() -> bool:
@@ -46,16 +56,14 @@ def database_config():
     }
 
 
-@pytest.fixture
-def database_runtime(database_config):
-    """ConnectionRuntime for real database tests."""
-    resolver = InMemorySecretsResolver({})
+def _make_runtime(database_config) -> ConnectionRuntime:
+    """A fresh runtime for one read or one setup/teardown phase."""
     return ConnectionRuntime(
         raw_config=database_config,
         connection_id="test-conn",
         connector_type="database",
         driver="postgresql",
-        resolver=resolver,
+        resolver=InMemorySecretsResolver({}),
     )
 
 
@@ -66,92 +74,94 @@ def unique_table_name():
 
 
 @pytest.fixture
-def mock_state_manager():
-    """Mock state manager for read_batches tests."""
-    state_manager = AsyncMock()
-    state_manager.get_cursor = AsyncMock(return_value=None)
-    state_manager.save_cursor = AsyncMock()
-    return state_manager
+def mock_checkpoint():
+    """Minimal CheckpointStore: no prior cursor, records saves."""
+    checkpoint = AsyncMock()
+    checkpoint.get_cursor = AsyncMock(return_value=None)
+    checkpoint.save_cursor = AsyncMock()
+    return checkpoint
 
 
-class TestDatabaseConnectorRealIntegration:
-    """Integration tests using real PostgreSQL database."""
+def _read_config(table_name: str):
+    """Contract source config the connector reads directly."""
+    return {
+        "endpoint_document": {
+            "database_object": {"name": table_name, "schema": "public"},
+            "columns": [
+                {"name": "id", "arrow_type": "Int64", "nullable": False},
+                {"name": "name", "arrow_type": "Utf8"},
+                {"name": "email", "arrow_type": "Utf8"},
+            ],
+        },
+        "stream_source": {
+            "filters": [],
+            "replication": {"method": "incremental", "cursor_field": ["id"]},
+        },
+    }
 
-    @pytest.mark.asyncio
-    async def test_connect_and_disconnect(self, database_runtime):
-        """Test real database connection and disconnection."""
-        connector = DatabaseConnector("RealTestConnector")
 
-        await connector.connect(database_runtime)
-
-        assert connector.is_connected is True
-        assert connector._initialized is True
-        assert connector._engine is not None
-        assert connector._driver == "postgresql"
-
-        await connector.disconnect()
-
-        assert connector.is_connected is False
-        assert connector._initialized is False
-        assert connector._engine is None
+class TestGenericSQLSourceRealIntegration:
+    """Integration tests using a real PostgreSQL database."""
 
     @pytest.mark.asyncio
     async def test_read_batches_pagination(
-        self, database_runtime, unique_table_name, mock_state_manager
+        self, database_config, unique_table_name, mock_checkpoint
     ):
-        """Test that read_batches correctly paginates through large datasets."""
-        connector = DatabaseConnector("RealPaginationConnector")
-
+        """read_batches paginates through a larger dataset and advances cursor."""
+        # --- Setup: create + populate the table via a short-lived runtime. ---
+        setup_runtime = _make_runtime(database_config)
+        await materialize_runtime(setup_runtime, require_port=True)
         try:
-            await connector.connect(database_runtime)
-
-            # Create table and insert data directly via the engine
-            async with connector._engine.begin() as conn:
-                await conn.execute(text(
+            async with acquire_connection(setup_runtime.engine) as conn:
+                await conn.exec_driver_sql(
                     f"CREATE TABLE public.{unique_table_name} ("
                     f"  id INTEGER PRIMARY KEY,"
                     f"  name VARCHAR(255),"
                     f"  email VARCHAR(255)"
                     f")"
-                ))
-
-            # Insert 25 records
-            async with connector._engine.begin() as conn:
+                )
                 values = ", ".join(
                     f"({i}, 'User{i}', 'user{i}@test.com')" for i in range(1, 26)
                 )
-                await conn.execute(text(
-                    f"INSERT INTO public.{unique_table_name} (id, name, email) VALUES {values}"
-                ))
+                await conn.exec_driver_sql(
+                    f"INSERT INTO public.{unique_table_name} "
+                    f"(id, name, email) VALUES {values}"
+                )
+        finally:
+            await setup_runtime.close()
 
-            # Read with small batch size
-            read_config = {
-                "endpoint": f"public/{unique_table_name}",
-                "columns": ["id", "name", "email"],
-                "cursor_field": "id",
-                "driver": "postgresql",
-            }
+        try:
+            # --- Read: the connector owns its own runtime for the read. ---
+            connector = GenericSQLConnector()
+            read_runtime = _make_runtime(database_config)
 
             all_records = []
             batch_count = 0
-            async for read_batch in connector.read_batches(
-                read_config,
-                state_manager=mock_state_manager,
+            async for batch in connector.read_batches(
+                read_runtime,
+                _read_config(unique_table_name),
+                checkpoint=mock_checkpoint,
                 stream_name="test_stream",
-                batch_size=10
+                batch_size=10,
             ):
-                all_records.extend(read_batch)
+                all_records.extend(batch.to_pylist())
                 batch_count += 1
 
             assert len(all_records) == 25
-            assert batch_count >= 2  # Should have multiple batches
-
-            # Verify all records are present
+            assert batch_count >= 2  # Small batch size -> multiple pages.
             ids = {r["id"] for r in all_records}
             assert ids == set(range(1, 26))
-
+            # The cursor advanced to the last id seen.
+            saved = [c.args[2]["cursor"] for c in mock_checkpoint.save_cursor.call_args_list]
+            assert saved[-1] == 25
         finally:
-            if connector._engine:
-                async with connector._engine.begin() as conn:
-                    await conn.execute(text(f"DROP TABLE IF EXISTS public.{unique_table_name}"))
-            await connector.disconnect()
+            # --- Teardown: drop the table via a fresh runtime. ---
+            teardown_runtime = _make_runtime(database_config)
+            await materialize_runtime(teardown_runtime, require_port=True)
+            try:
+                async with acquire_connection(teardown_runtime.engine) as conn:
+                    await conn.exec_driver_sql(
+                        f"DROP TABLE IF EXISTS public.{unique_table_name}"
+                    )
+            finally:
+                await teardown_runtime.close()

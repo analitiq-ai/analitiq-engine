@@ -10,7 +10,6 @@ __author__ = "Analitiq Core Team"
 
 from .source.connectors.api import APIConnector
 from .source.connectors.base import BaseConnector
-from .source.connectors.database import DatabaseConnector
 from .engine.engine import StreamingEngine
 from .engine.pipeline import Pipeline
 from .state.circuit_breaker import CircuitBreaker
@@ -24,6 +23,5 @@ __all__ = [
     "CircuitBreaker",
     "DeadLetterQueue",
     "BaseConnector",
-    "DatabaseConnector",
     "APIConnector",
 ]

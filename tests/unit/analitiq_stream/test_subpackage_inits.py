@@ -97,15 +97,17 @@ class TestDestinationConnectorsPackageInit:
 
     @pytest.mark.unit
     def test_destination_handler_registry(self):
-        """Test that handler registry is available."""
+        """The destination registry and its factory are available."""
         from src.destination.connectors import (
-            HandlerRegistry, get_handler,
+            destination_registry, get_handler,
             GenericSQLConnector
         )
 
-        assert HandlerRegistry is not None
+        assert destination_registry is not None
         assert get_handler is not None
         assert GenericSQLConnector is not None
+        # The unified SQL connector backs the ``database`` kind.
+        assert destination_registry.get("database") is GenericSQLConnector
 
 
 class TestSharedPackageInit:
