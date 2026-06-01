@@ -100,12 +100,12 @@ class TestDestinationConnectorsPackageInit:
         """Test that handler registry is available."""
         from src.destination.connectors import (
             HandlerRegistry, get_handler,
-            DatabaseDestinationHandler
+            GenericSQLConnector
         )
 
         assert HandlerRegistry is not None
         assert get_handler is not None
-        assert DatabaseDestinationHandler is not None
+        assert GenericSQLConnector is not None
 
 
 class TestSharedPackageInit:

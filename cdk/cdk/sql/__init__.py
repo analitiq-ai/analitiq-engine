@@ -24,6 +24,7 @@ from .discovery import list_columns, list_schemas, list_tables
 from .exceptions import (
     CreateTableError,
     DiscoveryError,
+    ReadError,
     SqlIntrospectionError,
     UnsupportedDialectError,
 )
@@ -47,4 +48,5 @@ __all__ = [
     "UnsupportedDialectError",
     "DiscoveryError",
     "CreateTableError",
+    "ReadError",
 ]

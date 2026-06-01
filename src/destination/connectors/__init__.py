@@ -3,14 +3,14 @@
 from typing import Any, Dict, Type
 
 from cdk.base_handler import BaseDestinationHandler
-from .database import DatabaseDestinationHandler
+from cdk.sql.generic import GenericSQLConnector
 from .stream import StreamDestinationHandler
 from .file import FileDestinationHandler
 from .api import ApiDestinationHandler
 
 
 __all__ = [
-    "DatabaseDestinationHandler",
+    "GenericSQLConnector",
     "StreamDestinationHandler",
     "FileDestinationHandler",
     "ApiDestinationHandler",
@@ -29,9 +29,9 @@ class HandlerRegistry:
 
     # Handler classes mapped by connector_type
     _handlers: Dict[str, Type[BaseDestinationHandler]] = {
-        # SQLAlchemy-based database handler (unified for all SQL databases)
-        # Dialect is selected based on the 'driver' field in connection config
-        "database": DatabaseDestinationHandler,
+        # Unified SQL connector (SQLAlchemy or ADBC) for all SQL databases.
+        # Dialect is selected based on the 'driver' field in connection config.
+        "database": GenericSQLConnector,
         # API handler
         "api": ApiDestinationHandler,
         # Stream handlers

@@ -1,4 +1,4 @@
-"""ADBC-only dispatch helpers on DatabaseDestinationHandler.
+"""ADBC-only dispatch helpers on GenericSQLConnector.
 
 The big-coverage end-to-end paths require a live ADBC connection;
 these tests pin the small pure helpers that gate retry classification
@@ -12,11 +12,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from src.destination.connectors import database as database_module
-from src.destination.connectors.database import (
+from cdk.sql import generic as database_module
+from cdk.sql.generic import (
     AdbcCommitRecordError,
     AdbcConfigurationError,
-    DatabaseDestinationHandler,
+    GenericSQLConnector,
     _FATAL_ADBC_ERROR_NAMES,
     _is_fatal_adbc_error,
     _reclassify_as_fatal,
@@ -105,8 +105,8 @@ class TestAdbcCommitRecordError:
 class TestPerDriverDispatch:
     """Spot-check the per-driver fragment dispatchers don't drift."""
 
-    def _handler_for(self, driver: str) -> DatabaseDestinationHandler:
-        h = DatabaseDestinationHandler()
+    def _handler_for(self, driver: str) -> GenericSQLConnector:
+        h = GenericSQLConnector()
         h._driver = driver
         return h
 
@@ -138,8 +138,8 @@ class TestPerDriverDispatch:
 
 
 class TestSchemaIsImplicitDefault:
-    def _handler_for(self, driver: str) -> DatabaseDestinationHandler:
-        h = DatabaseDestinationHandler()
+    def _handler_for(self, driver: str) -> GenericSQLConnector:
+        h = GenericSQLConnector()
         h._driver = driver
         return h
 
@@ -220,11 +220,11 @@ class TestCommitCollisionHandling:
     upsert / truncate_insert (which are idempotent on re-ingest)."""
 
     def _state(self, write_mode):
-        from src.destination.connectors.database import _StreamState
+        from cdk.sql.generic import _StreamState
         return _StreamState(schema_name="analytics", table_name="t", write_mode=write_mode)
 
     def test_insert_mode_raises(self):
-        h = DatabaseDestinationHandler()
+        h = GenericSQLConnector()
         h._driver = "bigquery"
         cause = RuntimeError("collision")
         with pytest.raises(AdbcCommitRecordError) as exc:
@@ -235,14 +235,14 @@ class TestCommitCollisionHandling:
         assert exc.value.__cause__ is cause
 
     def test_upsert_mode_returns_silently(self):
-        h = DatabaseDestinationHandler()
+        h = GenericSQLConnector()
         h._driver = "bigquery"
         h._handle_commit_collision(
             self._state("upsert"), "r", "s", 1, RuntimeError("collision"),
         )
 
     def test_truncate_insert_mode_returns_silently(self):
-        h = DatabaseDestinationHandler()
+        h = GenericSQLConnector()
         h._driver = "bigquery"
         h._handle_commit_collision(
             self._state("truncate_insert"), "r", "s", 1, RuntimeError("collision"),
@@ -292,7 +292,7 @@ class TestAdbcModeReset:
     slate) doesn't carry the previous mode forward."""
 
     def test_adbc_only_resets_to_false_when_runtime_is_sa(self):
-        h = DatabaseDestinationHandler()
+        h = GenericSQLConnector()
         # Simulate prior ADBC connect leaving _adbc_only=True
         h._adbc_only = True
         h._adbc_conn = object()
@@ -309,7 +309,7 @@ class TestAdbcModeReset:
     def test_adbc_only_set_when_runtime_is_adbc(self):
         # Symmetric: a fresh handler connecting to an ADBC runtime sets
         # _adbc_only=True and leaves _engine None.
-        h = DatabaseDestinationHandler()
+        h = GenericSQLConnector()
         assert h._adbc_only is False
         # Simulate the connect() ADBC branch (we can't actually call
         # connect() without a real runtime, but the field setting is
@@ -348,7 +348,7 @@ class TestAdbcIngestSchemaNormalization:
         return _FakeConn(), captured
 
     def test_snowflake_public_normalized_for_adbc_only_ingest(self):
-        h = DatabaseDestinationHandler()
+        h = GenericSQLConnector()
         h._driver = "snowflake"
         h._adbc_only = True
         h._adbc_conn, captured = self._captured_ingest()
@@ -361,7 +361,7 @@ class TestAdbcIngestSchemaNormalization:
 
     def test_bigquery_schema_not_normalized_for_adbc_only_ingest(self):
         # BigQuery datasets are case-sensitive; never normalize.
-        h = DatabaseDestinationHandler()
+        h = GenericSQLConnector()
         h._driver = "bigquery"
         h._adbc_only = True
         h._adbc_conn, captured = self._captured_ingest()
@@ -373,7 +373,7 @@ class TestAdbcIngestSchemaNormalization:
         assert captured["db_schema_name"] == "analytics"
 
     def test_snowflake_empty_schema_yields_none(self):
-        h = DatabaseDestinationHandler()
+        h = GenericSQLConnector()
         h._driver = "snowflake"
         h._adbc_only = True
         h._adbc_conn, captured = self._captured_ingest()
@@ -389,13 +389,13 @@ class TestPerDriverQuoting:
     """BigQuery uses backticks; everything else uses ANSI double quotes."""
 
     def test_bigquery_quotes_with_backticks(self):
-        h = DatabaseDestinationHandler()
+        h = GenericSQLConnector()
         h._driver = "bigquery"
         assert h._adbc_quote_ident("id") == "`id`"
         assert h._adbc_quote_qualified("ds", "t") == "`ds`.`t`"
 
     def test_snowflake_quotes_with_double_quotes(self):
-        h = DatabaseDestinationHandler()
+        h = GenericSQLConnector()
         h._driver = "snowflake"
         assert h._adbc_quote_ident("id") == '"id"'
         # Snowflake's default schema is unquoted PUBLIC; lower-case
@@ -404,7 +404,7 @@ class TestPerDriverQuoting:
         assert h._adbc_quote_qualified("analytics", "t") == '"analytics"."t"'
 
     def test_snowflake_normalize_public_to_uppercase(self):
-        h = DatabaseDestinationHandler()
+        h = GenericSQLConnector()
         h._driver = "snowflake"
         assert h._normalize_adbc_schema("public") == "PUBLIC"
         assert h._normalize_adbc_schema("PUBLIC") == "PUBLIC"
@@ -412,24 +412,24 @@ class TestPerDriverQuoting:
         assert h._normalize_adbc_schema("analytics") == "analytics"
 
     def test_bigquery_does_not_normalize_schema(self):
-        h = DatabaseDestinationHandler()
+        h = GenericSQLConnector()
         h._driver = "bigquery"
         # BigQuery datasets are case-sensitive; never normalize.
         assert h._normalize_adbc_schema("public") == "public"
         assert h._normalize_adbc_schema("Analytics") == "Analytics"
 
     def test_postgres_quotes_with_double_quotes(self):
-        h = DatabaseDestinationHandler()
+        h = GenericSQLConnector()
         h._driver = "postgresql"
         assert h._adbc_quote_ident("id") == '"id"'
 
     def test_double_quote_escaping_in_ansi_dialect(self):
-        h = DatabaseDestinationHandler()
+        h = GenericSQLConnector()
         h._driver = "snowflake"
         assert h._adbc_quote_ident('we"ird') == '"we""ird"'
 
     def test_bigquery_rejects_backtick_in_identifier(self):
-        h = DatabaseDestinationHandler()
+        h = GenericSQLConnector()
         h._driver = "bigquery"
         with pytest.raises(ValueError, match="backtick"):
             h._adbc_quote_ident("we`ird")
@@ -441,14 +441,14 @@ class TestStageTableSql:
     Per-driver column-copy syntax differs."""
 
     def test_snowflake_uses_like(self):
-        h = DatabaseDestinationHandler()
+        h = GenericSQLConnector()
         h._driver = "snowflake"
         sql = h._build_adbc_stage_table_sql('"a"."stage"', '"a"."target"')
         assert sql == 'CREATE TABLE "a"."stage" LIKE "a"."target"'
 
     def test_bigquery_uses_as_select_false(self):
         # BigQuery has no LIKE syntax — must use AS SELECT * WHERE FALSE.
-        h = DatabaseDestinationHandler()
+        h = GenericSQLConnector()
         h._driver = "bigquery"
         sql = h._build_adbc_stage_table_sql('`a`.`stage`', '`a`.`target`')
         assert sql == (
@@ -456,7 +456,7 @@ class TestStageTableSql:
         )
 
     def test_postgres_uses_like_including_defaults(self):
-        h = DatabaseDestinationHandler()
+        h = GenericSQLConnector()
         h._driver = "postgresql"
         sql = h._build_adbc_stage_table_sql('"a"."stage"', '"a"."target"')
         assert sql == (
@@ -468,25 +468,25 @@ class TestSupportsUpsert:
     """ADBC-only mode adds upsert to dialects that don't have SA upsert."""
 
     def test_sa_mode_postgres_supports(self):
-        h = DatabaseDestinationHandler()
+        h = GenericSQLConnector()
         h._driver = "postgresql"
         h._adbc_only = False
         assert h.supports_upsert is True
 
     def test_sa_mode_sqlite_does_not_support(self):
-        h = DatabaseDestinationHandler()
+        h = GenericSQLConnector()
         h._driver = "sqlite"
         h._adbc_only = False
         assert h.supports_upsert is False
 
     def test_adbc_mode_snowflake_supports(self):
-        h = DatabaseDestinationHandler()
+        h = GenericSQLConnector()
         h._driver = "snowflake"
         h._adbc_only = True
         assert h.supports_upsert is True
 
     def test_adbc_mode_bigquery_supports(self):
-        h = DatabaseDestinationHandler()
+        h = GenericSQLConnector()
         h._driver = "bigquery"
         h._adbc_only = True
         assert h.supports_upsert is True
@@ -505,14 +505,14 @@ class TestAdbcDdlBuilders:
     * ``_batch_commits`` uses the right binary type per driver
     """
 
-    def _make(self, driver: str) -> DatabaseDestinationHandler:
-        from src.destination.connectors.database import _StreamState
-        h = DatabaseDestinationHandler()
+    def _make(self, driver: str) -> GenericSQLConnector:
+        from cdk.sql.generic import _StreamState
+        h = GenericSQLConnector()
         h._driver = driver
         return h
 
     def test_synced_at_appended_when_missing(self):
-        from src.destination.connectors.database import _StreamState
+        from cdk.sql.generic import _StreamState
 
         class _TypeMapperStub:
             def to_arrow_type(self, native: str) -> str:
@@ -539,7 +539,7 @@ class TestAdbcDdlBuilders:
         assert '"status" VARCHAR' in ddl
 
     def test_synced_at_not_double_declared(self):
-        from src.destination.connectors.database import _StreamState
+        from cdk.sql.generic import _StreamState
 
         class _TypeMapperStub:
             def to_arrow_type(self, native: str) -> str:
@@ -615,7 +615,7 @@ class TestDisconnectClosesAdbc:
 
     @pytest.mark.asyncio
     async def test_closes_adbc_connection(self):
-        handler = DatabaseDestinationHandler()
+        handler = GenericSQLConnector()
         handler._connected = True
         adbc_conn = MagicMock()
         handler._adbc_conn = adbc_conn
@@ -633,7 +633,7 @@ class TestDisconnectClosesAdbc:
     async def test_close_failure_logged_at_error_and_runtime_still_released(
         self, caplog
     ):
-        handler = DatabaseDestinationHandler()
+        handler = GenericSQLConnector()
         handler._connected = True
         adbc_conn = MagicMock()
         adbc_conn.close.side_effect = RuntimeError("already closed")
@@ -661,7 +661,7 @@ class TestDisconnectClosesAdbc:
         """If ``runtime.close()`` raises, the handler must still
         transition to ``_connected = False`` so callers can re-acquire
         without observing a half-disconnected state."""
-        handler = DatabaseDestinationHandler()
+        handler = GenericSQLConnector()
         handler._connected = True
         handler._runtime = AsyncMock()
         handler._runtime.close = AsyncMock(

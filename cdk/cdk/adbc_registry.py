@@ -2,7 +2,7 @@
 
 The ADBC-only transport (``transport_type: "adbc"``) opens its DBAPI
 connections through :func:`ConnectionRuntime.open_adbc_connection`. The
-destination handler (:mod:`src.destination.connectors.database`) raises
+generic SQL connector (:mod:`cdk.sql.generic`) raises
 :class:`AdbcConfigurationError` for misconfigurations a retry cannot
 heal (missing driver, unsupported dialect, bad credentials). It lives
 in ``shared`` because the type is part of the engine's fatal-vs-
