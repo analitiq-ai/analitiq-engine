@@ -29,11 +29,13 @@ import logging
 import ssl as _ssl
 import urllib.parse
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Dict, Mapping, Optional
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, Mapping, Optional
 
-import aiohttp
 from sqlalchemy import text as _sa_text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+
+if TYPE_CHECKING:
+    import aiohttp
 
 from cdk.derived_functions import DEFAULT_FUNCTIONS
 from cdk.resolver import ResolutionContext, Resolver
@@ -613,6 +615,10 @@ class HttpTransport:
 async def build_http_transport(
     spec: Mapping[str, Any], *, resolver: Resolver
 ) -> HttpTransport:
+    # aiohttp is the only ``api`` extra dependency the CDK pulls; import it
+    # lazily so a database-only (control-plane / SQL) install never needs it.
+    import aiohttp
+
     raw_base = spec.get("base_url")
     if raw_base is None:
         raise ValueError("http transport `base_url` is required")

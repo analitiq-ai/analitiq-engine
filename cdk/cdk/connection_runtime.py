@@ -27,10 +27,12 @@ from __future__ import annotations
 
 import copy
 import logging
-from typing import Any, Dict, Mapping, Optional
+from typing import TYPE_CHECKING, Any, Dict, Mapping, Optional
 
-import aiohttp
 from sqlalchemy.ext.asyncio import AsyncEngine
+
+if TYPE_CHECKING:
+    import aiohttp
 
 from cdk.resolver import ResolutionContext
 from cdk.type_map import InvalidTypeMapError, TypeMapper, UnmappedTypeError

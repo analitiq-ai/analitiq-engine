@@ -1,9 +1,10 @@
 # analitiq-cdk
 
 The **Connector Development Kit**: a vendor-neutral, transport-neutral toolbox of
-reusable building blocks a connector uses. It is consumed by both the OSS engine
-(bulk streaming) and the cloud control-plane Lambdas (synchronous discover /
-create-table).
+reusable building blocks a connector uses. It is consumed both for bulk streaming
+(the OSS engine reads/writes Arrow batches) and for a synchronous control-plane
+(discover schemas / create tables) that needs neither the columnar nor the HTTP
+weight.
 
 See `docs/architecture/connector-modules-engine-adr.md` (in the engine repo) for
 the design of record.
@@ -32,10 +33,37 @@ seam (Protocol / ABC) the other side implements (`SecretsResolver`,
 - the secrets seam + local/in-memory resolvers (`secrets/`).
 - the abstract destination base (`base_handler.py`).
 
-## Install (control-plane)
+## Dependency tiers (core + extras)
+
+The CDK ships a small required core and opt-in extras, so a consumer installs
+only what its role needs. The split is enforced by **lazy imports**: `cdk.sql`
+and `cdk.type_map` resolve the Arrow helpers (and the HTTP transport its
+`aiohttp` session) only on first use, so importing the core control-plane
+surface never pulls `pyarrow`/`aiohttp`.
+
+| Tier | Pulls | Surface |
+|---|---|---|
+| core (always) | `sqlalchemy`, `pydantic` | SQL control-plane: `cdk.sql` discovery + standalone `create_table`, `ConnectionRuntime`/transport seam, type-map (string surface), secrets |
+| `[arrow]` | `pyarrow` | columnar streaming: `schema_contract`, `sql_types`, `sql.adbc_reader`, `type_map.parse_arrow_type`, `GenericSQLConnector` read/write |
+| `[api]` | `aiohttp` | HTTP transport for API connectors |
+| `[streaming]` | `pyarrow` + `aiohttp` | full connector surface the engine consumes (`[arrow]` + `[api]`) |
+
+Plus the per-driver DB package a given connector needs (asyncpg, adbc-driver-*, …).
+
+## Install
+
+Control-plane only (discover + create-table, no `pyarrow`/`aiohttp`):
 
 ```
-pip install "git+https://github.com/analitiq-ai/analitiq-engine@vX.Y.Z#subdirectory=cdk"
+pip install "analitiq-cdk @ git+https://github.com/analitiq-ai/analitiq-engine@vX.Y.Z#subdirectory=cdk"
 ```
 
-The engine consumes it in-tree (it is on `PYTHONPATH` alongside `src/`).
+Full streaming surface:
+
+```
+pip install "analitiq-cdk[streaming] @ git+https://github.com/analitiq-ai/analitiq-engine@vX.Y.Z#subdirectory=cdk"
+```
+
+The engine consumes it in-tree (it is on `PYTHONPATH` alongside `src/`) and
+declares `pyarrow`/`aiohttp` itself, so the bundled engine image always has the
+full surface regardless of the CDK's own extras.
