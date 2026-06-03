@@ -487,7 +487,7 @@ class TestParserErrorPaths:
                 }
             ]
         }
-        with pytest.raises(ValueError, match="neither 'expression' nor 'constant'"):
+        with pytest.raises(ValueError, match="non-null 'expression' or 'constant'"):
             _parse_mapping_config(raw)
 
     def test_stream_missing_pipeline_id_logs_warning(

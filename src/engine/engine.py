@@ -410,9 +410,7 @@ class StreamingEngine:
         tie_breaker_fields = replication.tie_breaker_fields
         primary_key_fields = list(stream.source.config.primary_keys or [])
 
-        error_strategy = (
-            pipeline.runtime.error_handling.get("strategy", "fail")
-        )
+        error_strategy = pipeline.runtime.error_handling.strategy
 
         logger.info(f"Stream {stream_id}: Starting gRPC load stage")
 

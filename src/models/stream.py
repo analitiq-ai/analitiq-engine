@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 
 class ReplicationMethod(str, Enum):
@@ -273,7 +273,8 @@ class ReplicationConfig:
     """Source replication policy."""
 
     method: ReplicationMethod = ReplicationMethod.FULL_REFRESH
-    cursor_field: Optional[str] = None
+    # Stream contract supplies either a scalar or a list; consumers de-list.
+    cursor_field: Optional[Union[str, List[str]]] = None
     safety_window_seconds: Optional[int] = None
     tie_breaker_fields: Optional[List[str]] = None
 
