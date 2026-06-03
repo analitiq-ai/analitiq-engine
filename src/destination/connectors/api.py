@@ -18,7 +18,7 @@ import pyarrow as pa
 from aiohttp_retry import ExponentialRetry, RetryClient
 
 from cdk.base_handler import BaseDestinationHandler, BatchWriteResult
-from ..utils import decode_json_fields
+from cdk.json_utils import decode_json_fields
 from cdk.types import (
     AckStatus,
     Cursor,

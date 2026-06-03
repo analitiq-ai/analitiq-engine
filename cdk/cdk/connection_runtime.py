@@ -565,6 +565,16 @@ async def materialize_runtime(runtime: "ConnectionRuntime", require_port: bool) 
     Callers are responsible for catching exceptions; use
     ``DETERMINISTIC_CONNECT_ERRORS`` to distinguish configuration errors from
     connectivity failures.
+
+    If ``materialize()`` fails after ``acquire()``, the reference taken here is
+    released before the exception propagates, so a failed connection attempt
+    cannot leave a shared runtime with an elevated ref count (which would keep
+    its transport/session from ever disposing). The original exception type is
+    preserved for the caller's classification.
     """
     runtime.acquire()
-    await runtime.materialize(require_port=require_port)
+    try:
+        await runtime.materialize(require_port=require_port)
+    except BaseException:
+        await runtime.close()
+        raise

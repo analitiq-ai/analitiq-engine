@@ -1,4 +1,4 @@
-"""Tests for DatabaseDestinationHandler per-stream type-mapper dispatch.
+"""Tests for GenericSQLConnector per-stream type-mapper dispatch.
 
 The handler registers a stream_id → endpoint_ref index at startup; each
 incoming SchemaMessage picks its mapper by scope. These tests lock in
@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from src.destination.connectors.database import DatabaseDestinationHandler
+from cdk.sql.generic import GenericSQLConnector
 from cdk.type_map import TypeMapper
 from cdk.type_map.rules import parse_rules
 from cdk.connection_runtime import ConnectionRuntime
@@ -45,20 +45,20 @@ def _runtime(
 
 class TestEndpointRefDispatch:
     def test_pre_connect_raises(self):
-        handler = DatabaseDestinationHandler()
+        handler = GenericSQLConnector()
         handler.set_endpoint_refs({"s1": {"scope": "connector", "connection_id": "pg", "endpoint_id": "transfers"}})
         with pytest.raises(RuntimeError, match="called before connect"):
             handler._type_mapper_for_stream("s1")
 
     def test_unknown_stream_id_raises(self):
-        handler = DatabaseDestinationHandler()
+        handler = GenericSQLConnector()
         handler._runtime = _runtime(connector_mapper=_mapper("pg"))
         handler.set_endpoint_refs({"s1": {"scope": "connector", "connection_id": "pg", "endpoint_id": "transfers"}})
         with pytest.raises(RuntimeError, match="no endpoint_ref registered"):
             handler._type_mapper_for_stream("unregistered-stream")
 
     def test_connector_scoped_uses_connector_mapper(self):
-        handler = DatabaseDestinationHandler()
+        handler = GenericSQLConnector()
         connector_map = _mapper("pg")
         handler._runtime = _runtime(
             connector_mapper=connector_map,
@@ -68,7 +68,7 @@ class TestEndpointRefDispatch:
         assert handler._type_mapper_for_stream("s1") is connector_map
 
     def test_connection_scoped_uses_connection_mapper(self):
-        handler = DatabaseDestinationHandler()
+        handler = GenericSQLConnector()
         connection_map = _mapper("connection:dest-conn")
         handler._runtime = _runtime(
             connector_mapper=_mapper("pg"),
@@ -79,7 +79,7 @@ class TestEndpointRefDispatch:
 
     def test_set_endpoint_refs_copies_mapping(self):
         """External mutations must not leak into the handler's state."""
-        handler = DatabaseDestinationHandler()
+        handler = GenericSQLConnector()
         source = {"s1": {"scope": "connector", "connection_id": "pg", "endpoint_id": "transfers"}}
         handler.set_endpoint_refs(source)
         source["s1"] = {"scope": "connector", "connection_id": "evil", "endpoint_id": "injected"}
@@ -98,7 +98,7 @@ class TestCreateTableFromSchemaStrictness:
     def test_unnamed_column_raises(self):
         from sqlalchemy import MetaData
 
-        handler = DatabaseDestinationHandler()
+        handler = GenericSQLConnector()
         handler._runtime = _runtime(connector_mapper=_mapper("pg"))
 
         schema = {
@@ -121,14 +121,14 @@ class TestWriteBatchFatalOnTypeMapError:
         from contextlib import asynccontextmanager
         from unittest.mock import AsyncMock, MagicMock
 
-        from src.destination.connectors.database import (
-            DatabaseDestinationHandler,
+        from cdk.sql.generic import (
+            GenericSQLConnector,
             _StreamState,
         )
         from cdk.type_map import UnmappedTypeError
         from src.grpc.generated.analitiq.v1 import AckStatus, Cursor
 
-        handler = DatabaseDestinationHandler()
+        handler = GenericSQLConnector()
         # Preconditions: connected, schema configured, idempotency check
         # clean. We don't actually hit the DB because the schema-contract
         # prepare_records call raises before any SQL runs.
@@ -181,13 +181,13 @@ class TestWriteModeDispatch:
     WRITE_MODE_MERGE is added)."""
 
     def test_known_modes(self):
-        handler = DatabaseDestinationHandler()
+        handler = GenericSQLConnector()
         assert handler._get_write_mode(1) == "insert"
         assert handler._get_write_mode(2) == "upsert"
         assert handler._get_write_mode(3) == "truncate_insert"
 
     def test_unknown_mode_raises(self):
-        handler = DatabaseDestinationHandler()
+        handler = GenericSQLConnector()
         with pytest.raises(ValueError, match="Unsupported proto write_mode"):
             handler._get_write_mode(99)
 
@@ -200,13 +200,13 @@ class TestPrepareForSqlAlchemy:
 
     def test_json_column_kept_as_wire_string(self):
         import pyarrow as pa
-        from src.destination.connectors.database import (
-            DatabaseDestinationHandler,
+        from cdk.sql.generic import (
+            GenericSQLConnector,
             _StreamState,
         )
-        from src.destination.schema_contract import SchemaContract
+        from cdk.schema_contract import SchemaContract
 
-        handler = DatabaseDestinationHandler()
+        handler = GenericSQLConnector()
         contract = SchemaContract(
             {
                 "columns": [
@@ -239,13 +239,13 @@ class TestPrepareForSqlAlchemy:
 
     def test_null_json_column_passes_through(self):
         import pyarrow as pa
-        from src.destination.connectors.database import (
-            DatabaseDestinationHandler,
+        from cdk.sql.generic import (
+            GenericSQLConnector,
             _StreamState,
         )
-        from src.destination.schema_contract import SchemaContract
+        from cdk.schema_contract import SchemaContract
 
-        handler = DatabaseDestinationHandler()
+        handler = GenericSQLConnector()
         contract = SchemaContract(
             {
                 "columns": [
@@ -275,12 +275,12 @@ class TestDDLLockSerialization:
     async def test_ddl_lock_serializes_concurrent_table_creation(self):
         import asyncio
 
-        from src.destination.connectors.database import (
-            DatabaseDestinationHandler,
+        from cdk.sql.generic import (
+            GenericSQLConnector,
             _StreamState,
         )
 
-        handler = DatabaseDestinationHandler()
+        handler = GenericSQLConnector()
         # Pretend the engine is connected; we'll intercept create_all
         # before any real SQL is dispatched.
         handler._engine = AsyncMock()

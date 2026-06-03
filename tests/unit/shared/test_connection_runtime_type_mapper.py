@@ -4,7 +4,7 @@
 (the engine maps its ``EndpointRef.scope`` to it at the boundary). Parsing /
 validating the raw ``endpoint_ref`` dict — and rejecting a non-object or an
 unknown scope — is the engine's job now and is covered where that boundary lives
-(``DatabaseDestinationHandler._type_mapper_for_stream`` and the ``EndpointRef``
+(``GenericSQLConnector._type_mapper_for_stream`` and the ``EndpointRef``
 model tests), not here.
 """
 

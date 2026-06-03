@@ -2,7 +2,7 @@
 
 This module provides:
 - BaseDestinationHandler: Abstract interface for destination handlers
-- DatabaseDestinationHandler: Unified SQLAlchemy-based database handler (supports PostgreSQL, MySQL, etc.)
+- GenericSQLConnector: Unified SQL connector (SQLAlchemy or ADBC) for all SQL databases
 - DestinationGRPCServer: gRPC server for receiving streamed data
 """
 

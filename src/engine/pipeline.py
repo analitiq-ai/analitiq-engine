@@ -198,7 +198,7 @@ def _build_destination_config(
 def _translate_database_source(
     source: Dict[str, Any], endpoint: Dict[str, Any]
 ) -> Dict[str, Any]:
-    """Pass the contract documents through to :class:`DatabaseConnector`.
+    """Pass the contract documents through to :class:`GenericSQLConnector`.
 
     The connector consumes ``database_object``, ``columns``,
     ``primary_keys``, plus the stream's ``selected_columns``, ``filters``,

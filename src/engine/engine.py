@@ -10,8 +10,10 @@ from typing import Any, Dict, List, Optional, AsyncIterator, Tuple
 
 import pyarrow as pa
 
-from ..source.connectors.base import BaseConnector
-from cdk.connection_runtime import ConnectionRuntime
+from ..source.connectors.api import APIConnector
+from cdk.contract import Readable
+from cdk.registry import build_registries
+from cdk.sql.generic import GenericSQLConnector
 from ..shared.run_id import get_or_generate_run_id
 from ..state.circuit_breaker import CircuitBreaker
 from ..state.dead_letter_queue import DeadLetterQueue
@@ -91,6 +93,17 @@ class StreamingEngine:
 
         # Stage configurations
         self.stage_configs = PipelineStagesConfig()
+
+        # Source connector registry (ADR §7), keyed by connector kind. Built-ins
+        # are always available (no package metadata needed, so it works in-tree
+        # and under pytest); entry points add externally installed connectors.
+        self._source_registry, _ = build_registries(
+            source_builtins={
+                "database": GenericSQLConnector,
+                "api": APIConnector,
+            },
+            discover=True,
+        )
 
 
     async def stream_data(self, pipeline_config: Dict[str, Any]) -> None:
@@ -220,13 +233,11 @@ class StreamingEngine:
             stream_dlq_path = f"{self.dlq.dlq_path}/{stream_id}"
             stream_dlq = DeadLetterQueue(stream_dlq_path)
 
-            runtime = source_cfg.get("_runtime")
-            if not runtime:
+            if not source_cfg.get("_runtime"):
                 raise StreamConfigurationError(
                     "Missing _runtime in source config",
                     stream_id=stream_id,
                 )
-            await source_connector.connect(runtime)
 
             run_id = self.state_manager.current_run_id or get_or_generate_run_id()
 
@@ -290,18 +301,24 @@ class StreamingEngine:
             status = "failed"
             error_message = str(e)
             logger.exception("Stream %s processing failed: %s", stream_name, e)
-            # Cancel any running tasks for this stream
+            # Cancel any running tasks for this stream, then drive them to
+            # completion. The source reader releases its runtime in its own
+            # ``finally``, so the cancelled extract task must be awaited here —
+            # otherwise the runtime/session could stay open if the run tears
+            # down before the cancelled task runs its cleanup.
             for task in tasks:
                 if not task.done():
                     task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
             raise
 
         finally:
             end_time = datetime.now(timezone.utc)
-            # Clean up connections for this stream
+            # Clean up connections for this stream. The source connector is a
+            # pure reader: ``read_batches`` materializes and releases its own
+            # runtime, so there is nothing to disconnect here.
             try:
-                if source_connector:
-                    await source_connector.disconnect()
                 if grpc_client:
                     await grpc_client.disconnect()
                 logger.debug(f"Stream {stream_name} connectors disconnected successfully")
@@ -339,7 +356,7 @@ class StreamingEngine:
                 )
 
     async def _extract_stage(
-        self, source_connector: BaseConnector, queue: Queue, config: Dict[str, Any]
+        self, source_connector: Readable, queue: Queue, config: Dict[str, Any]
     ):
         """Extract data from source in batches with state management."""
         stream_name = config["stream_name"]
@@ -350,13 +367,15 @@ class StreamingEngine:
             # source config (``endpoint_document``, ``stream_source``).
             # No flattening or replication-field injection is needed.
             source_config = config["source"]
+            runtime = source_config["_runtime"]
             state_stream_name = config["stream_id"]
             partition: Dict[str, Any] = {}
 
             batch_count = 0
             async for batch in source_connector.read_batches(
+                runtime,
                 source_config,
-                state_manager=self.state_manager,
+                checkpoint=self.state_manager,
                 stream_name=state_stream_name,
                 partition=partition,
                 batch_size=self.batch_size,
@@ -728,26 +747,16 @@ class StreamingEngine:
             raise
 
 
-    def _create_source_connector(self, config: Dict[str, Any]) -> BaseConnector:
-        """Create source connector based on configuration."""
+    def _create_source_connector(self, config: Dict[str, Any]) -> Readable:
+        """Create source connector for the connection's kind via the registry."""
         runtime = config.get("_runtime")
         if not runtime:
             raise ValueError("Missing _runtime in source config")
-
-        connector_type = runtime.connector_type
-
-        if connector_type == "api":
-            from ..source.connectors.api import APIConnector
-            return APIConnector()
-        elif connector_type == "database":
-            from ..source.connectors.database import DatabaseConnector
-            return DatabaseConnector()
-        else:
-            raise ValueError(f"Unknown connector_type '{connector_type}'")
+        return self._source_registry.create(runtime.connector_type)
 
     def _create_pipeline_stages(
         self,
-        source_connector: BaseConnector,
+        source_connector: Readable,
         grpc_client: DestinationGRPCClient,
         extract_queue: Queue,
         transform_queue: Queue,

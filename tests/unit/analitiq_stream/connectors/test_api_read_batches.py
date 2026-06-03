@@ -13,8 +13,11 @@ pre-materialized ``ConnectionRuntime`` to verify:
 * incremental replication reads cursor from state manager and applies
   the safety window to the outgoing request params,
 * non-200 responses raise :class:`ReadError`,
-* ``read_batches`` called before ``connect()`` raises :class:`ReadError`,
 * missing ``endpoint_document`` raises :class:`ReadError`.
+
+``read_batches`` now owns the connection lifecycle: it is handed the runtime
+and connects/disconnects internally, so these tests pass the runtime directly
+rather than calling ``connect()`` first.
 
 Tie-breaker dedup is intentionally not exercised here: ``read_batches``
 initialises ``state["bookmarks"]`` empty, so the dedup comparators are
@@ -161,9 +164,31 @@ def _stream_source(
     return block
 
 
-async def _consume(connector: APIConnector, **kwargs) -> List[pa.RecordBatch]:
+async def _consume(
+    connector: APIConnector,
+    runtime: ConnectionRuntime,
+    *,
+    config: Dict[str, Any],
+    state_manager: Any,
+    stream_name: str,
+    partition: Optional[Dict[str, Any]] = None,
+    batch_size: int = 1000,
+) -> List[pa.RecordBatch]:
+    """Drive ``read_batches`` with the runtime it now owns.
+
+    ``read_batches`` connects and disconnects internally, so callers pass the
+    runtime directly (no prior ``connect()``); ``state_manager`` is forwarded as
+    the ``checkpoint`` argument.
+    """
     batches: List[pa.RecordBatch] = []
-    async for batch in connector.read_batches(**kwargs):
+    async for batch in connector.read_batches(
+        runtime,
+        config,
+        checkpoint=state_manager,
+        stream_name=stream_name,
+        partition=partition,
+        batch_size=batch_size,
+    ):
         batches.append(batch)
     return batches
 
@@ -191,10 +216,10 @@ class TestReadBatchesNoPagination:
         )
         runtime = _runtime_with_session(session)
         connector = APIConnector("test")
-        await connector.connect(runtime)
 
         batches = await _consume(
             connector,
+            runtime,
             config={
                 "endpoint_document": _endpoint_doc_with_records(),
                 "stream_source": _stream_source(),
@@ -239,7 +264,6 @@ class TestReadBatchesOffsetPagination:
         )
         runtime = _runtime_with_session(session)
         connector = APIConnector("test")
-        await connector.connect(runtime)
 
         endpoint = _endpoint_doc_with_records(
             pagination={
@@ -250,6 +274,7 @@ class TestReadBatchesOffsetPagination:
         )
         batches = await _consume(
             connector,
+            runtime,
             config={"endpoint_document": endpoint, "stream_source": _stream_source()},
             state_manager=MagicMock(),
             stream_name="items",
@@ -284,7 +309,6 @@ class TestReadBatchesPagePagination:
         )
         runtime = _runtime_with_session(session)
         connector = APIConnector("test")
-        await connector.connect(runtime)
 
         endpoint = _endpoint_doc_with_records(
             pagination={
@@ -295,6 +319,7 @@ class TestReadBatchesPagePagination:
         )
         batches = await _consume(
             connector,
+            runtime,
             config={"endpoint_document": endpoint, "stream_source": _stream_source()},
             state_manager=MagicMock(),
             stream_name="items",
@@ -333,7 +358,6 @@ class TestReadBatchesCursorPagination:
         )
         runtime = _runtime_with_session(session)
         connector = APIConnector("test")
-        await connector.connect(runtime)
 
         endpoint = _endpoint_doc_with_records(
             pagination={
@@ -347,6 +371,7 @@ class TestReadBatchesCursorPagination:
         )
         batches = await _consume(
             connector,
+            runtime,
             config={"endpoint_document": endpoint, "stream_source": _stream_source()},
             state_manager=MagicMock(),
             stream_name="items",
@@ -380,7 +405,6 @@ class TestReadBatchesKeysetPagination:
         )
         runtime = _runtime_with_session(session)
         connector = APIConnector("test")
-        await connector.connect(runtime)
 
         endpoint = _endpoint_doc_with_records(
             pagination={
@@ -391,6 +415,7 @@ class TestReadBatchesKeysetPagination:
         )
         batches = await _consume(
             connector,
+            runtime,
             config={"endpoint_document": endpoint, "stream_source": _stream_source()},
             state_manager=MagicMock(),
             stream_name="items",
@@ -411,7 +436,6 @@ class TestReadBatchesKeysetPagination:
         )
         runtime = _runtime_with_session(session)
         connector = APIConnector("test")
-        await connector.connect(runtime)
 
         endpoint = _endpoint_doc_with_records(
             pagination={"type": "keyset", "keyset": {"param": "after_id"}},
@@ -419,6 +443,7 @@ class TestReadBatchesKeysetPagination:
         with pytest.raises(ReadError, match="keyset.from_record"):
             await _consume(
                 connector,
+                runtime,
                 config={
                     "endpoint_document": endpoint,
                     "stream_source": _stream_source(),
@@ -447,7 +472,6 @@ class TestReadBatchesIncrementalReplication:
         )
         runtime = _runtime_with_session(session)
         connector = APIConnector("test")
-        await connector.connect(runtime)
 
         # Prior cursor: 2024-01-01T12:00:00Z; safety window 60s -> 11:59:00Z
         state_manager = MagicMock()
@@ -464,6 +488,7 @@ class TestReadBatchesIncrementalReplication:
         )
         await _consume(
             connector,
+            runtime,
             config={
                 "endpoint_document": endpoint,
                 "stream_source": _stream_source(
@@ -494,7 +519,6 @@ class TestReadBatchesIncrementalReplication:
         )
         runtime = _runtime_with_session(session)
         connector = APIConnector("test")
-        await connector.connect(runtime)
 
         state_manager = MagicMock()
         state_manager.get_cursor = AsyncMock(return_value=None)
@@ -506,6 +530,7 @@ class TestReadBatchesIncrementalReplication:
         )
         await _consume(
             connector,
+            runtime,
             config={
                 "endpoint_document": endpoint,
                 "stream_source": _stream_source(
@@ -539,26 +564,11 @@ class TestReadBatchesErrorPaths:
         )
         runtime = _runtime_with_session(session)
         connector = APIConnector("test")
-        await connector.connect(runtime)
 
         with pytest.raises(ReadError, match="status 500"):
             await _consume(
                 connector,
-                config={
-                    "endpoint_document": _endpoint_doc_with_records(),
-                    "stream_source": _stream_source(),
-                },
-                state_manager=MagicMock(),
-                stream_name="items",
-                batch_size=10,
-            )
-
-    @pytest.mark.asyncio
-    async def test_read_batches_before_connect_raises(self):
-        connector = APIConnector("test")
-        with pytest.raises(ReadError, match="called before connect"):
-            await _consume(
-                connector,
+                runtime,
                 config={
                     "endpoint_document": _endpoint_doc_with_records(),
                     "stream_source": _stream_source(),
@@ -573,11 +583,11 @@ class TestReadBatchesErrorPaths:
         session = _FakeSession([])
         runtime = _runtime_with_session(session)
         connector = APIConnector("test")
-        await connector.connect(runtime)
 
         with pytest.raises(ReadError, match="missing 'endpoint_document'"):
             await _consume(
                 connector,
+                runtime,
                 config={"stream_source": _stream_source()},
                 state_manager=MagicMock(),
                 stream_name="items",
@@ -589,11 +599,11 @@ class TestReadBatchesErrorPaths:
         session = _FakeSession([])
         runtime = _runtime_with_session(session)
         connector = APIConnector("test")
-        await connector.connect(runtime)
 
         with pytest.raises(ReadError, match="stream_source missing 'endpoint_ref'"):
             await _consume(
                 connector,
+                runtime,
                 config={
                     "endpoint_document": _endpoint_doc_with_records(),
                     "stream_source": {"primary_keys": ["id"]},
@@ -602,3 +612,70 @@ class TestReadBatchesErrorPaths:
                 stream_name="items",
                 batch_size=10,
             )
+
+
+# ---------------------------------------------------------------------------
+# Connection lifecycle — read_batches owns acquire/release
+# ---------------------------------------------------------------------------
+
+
+class TestReadBatchesLifecycle:
+    @pytest.mark.asyncio
+    async def test_runtime_released_when_consumer_stops_early(self):
+        # The runtime is acquired on entry (ref_count 1) and released in the
+        # generator's finally when the consumer closes it mid-stream.
+        session = _FakeSession(
+            [_FakeResponse(status=200, body={"records": [{"id": 1, "name": "a"}]})]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        agen = connector.read_batches(
+            runtime,
+            config={
+                "endpoint_document": _endpoint_doc_with_records(),
+                "stream_source": _stream_source(),
+            },
+            checkpoint=MagicMock(),
+            stream_name="items",
+            batch_size=10,
+        )
+        first = await agen.__anext__()
+        assert first.num_rows == 1
+        assert runtime._ref_count == 1  # acquired on connect()
+        assert connector.is_connected is True
+
+        await agen.aclose()  # consumer stops early -> finally disconnects
+
+        assert runtime._ref_count == 0
+        assert connector.is_connected is False
+
+    @pytest.mark.asyncio
+    async def test_runtime_released_when_connect_fails(self):
+        # connect() runs inside read_batches' try, so a materialize failure
+        # still reaches disconnect() and releases the acquired ref.
+        from src.source.connectors.base import ConnectionError as ApiConnectionError
+
+        runtime = _runtime_with_session(_FakeSession([]))
+
+        async def _boom(*_args, **_kwargs):
+            raise RuntimeError("materialize boom")
+
+        runtime.materialize = _boom  # type: ignore[method-assign]
+
+        connector = APIConnector("test")
+        with pytest.raises(ApiConnectionError):
+            await _consume(
+                connector,
+                runtime,
+                config={
+                    "endpoint_document": _endpoint_doc_with_records(),
+                    "stream_source": _stream_source(),
+                },
+                state_manager=MagicMock(),
+                stream_name="items",
+                batch_size=10,
+            )
+
+        assert runtime._ref_count == 0  # acquired then released in finally
+        assert connector.is_connected is False

@@ -1,4 +1,4 @@
-"""Shared destination utilities."""
+"""JSON helpers shared by the CDK (Json-typed column decoding)."""
 
 import json
 from typing import Any, Dict, List, Set

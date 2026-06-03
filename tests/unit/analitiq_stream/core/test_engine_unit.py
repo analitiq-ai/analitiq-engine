@@ -139,6 +139,30 @@ class TestStreamingEngine:
         with pytest.raises(ValueError, match="Missing _runtime"):
             engine._create_source_connector(config)
 
+    def test_create_source_connector_resolves_builtin_kinds(self, engine):
+        """The source registry maps each builtin kind to its connector class."""
+        from cdk.sql.generic import GenericSQLConnector
+        from src.source.connectors.api import APIConnector
+
+        class _FakeRuntime:
+            def __init__(self, connector_type):
+                self.connector_type = connector_type
+
+        db = engine._create_source_connector({"_runtime": _FakeRuntime("database")})
+        api = engine._create_source_connector({"_runtime": _FakeRuntime("api")})
+        assert isinstance(db, GenericSQLConnector)
+        assert isinstance(api, APIConnector)
+
+    def test_create_source_connector_unknown_kind_raises(self, engine):
+        """An unregistered kind raises ConnectorNotRegisteredError."""
+        from cdk.registry import ConnectorNotRegisteredError
+
+        class _FakeRuntime:
+            connector_type = "redis"
+
+        with pytest.raises(ConnectorNotRegisteredError):
+            engine._create_source_connector({"_runtime": _FakeRuntime()})
+
     def test_get_stream_name(self, engine):
         """Test stream name generation."""
         # With structured endpoint_ref

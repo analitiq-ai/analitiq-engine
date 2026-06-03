@@ -13,7 +13,7 @@ from decimal import Decimal
 import pyarrow as pa
 import pytest
 
-from src.destination.schema_contract import SchemaContract
+from cdk.schema_contract import SchemaContract
 
 
 class TestSchemaContractColumnsFormat:

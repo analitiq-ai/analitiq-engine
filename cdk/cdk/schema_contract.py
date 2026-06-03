@@ -9,9 +9,9 @@ from typing import Any, Dict, List, Optional
 import pyarrow as pa
 import pyarrow.compute as pc
 
-from src.destination.utils import decode_json_fields
-from cdk.type_map import resolve_arrow_type
-from cdk.type_map.exceptions import InvalidTypeMapError
+from .json_utils import decode_json_fields
+from .type_map import resolve_arrow_type
+from .type_map.exceptions import InvalidTypeMapError
 
 logger = logging.getLogger(__name__)
 

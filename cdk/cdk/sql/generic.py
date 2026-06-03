@@ -1,10 +1,20 @@
-"""SQLAlchemy-based database destination handler.
+"""Generic SQL connector — one class serving every SQL role.
 
-This handler provides a unified interface for all SQL databases supported by SQLAlchemy.
-The specific database is determined by the `driver` field in the connection config.
+``GenericSQLConnector`` implements the four CDK capability Protocols
+(:mod:`cdk.contract`) for SQL databases over SQLAlchemy or ADBC:
 
-Type casting is handled by the Arrow-based SchemaContract, which provides
-efficient columnar type conversion for batch operations.
+* **Readable** — ``read_batches`` streams a source table as Arrow batches,
+  paging via ``QueryBuilder`` with the incremental cursor as a filter.
+* **Writable** — ``connect`` / ``configure_schema`` / ``write_batch`` /
+  ``disconnect`` / ``health_check`` load batches with idempotency tracking.
+* **Discoverable** / **TableCreator** — control-plane introspection and
+  standalone DDL, delegated to :mod:`cdk.sql` (``list_*`` / ``create_table``).
+
+The active transport is selected by the connector definition and set on the
+``ConnectionRuntime``: ``transport_type: "sqlalchemy"`` (async SQLAlchemy
+engine — Postgres asyncpg, MySQL aiomysql) or ``transport_type: "adbc"``
+(direct ADBC DBAPI — Snowflake, BigQuery, Postgres-via-ADBC for Redshift).
+Type casting is handled by the Arrow-based ``SchemaContract``.
 """
 
 import asyncio
@@ -13,7 +23,7 @@ import logging
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Literal, Mapping, Optional, Tuple
+from typing import Any, AsyncIterator, Dict, List, Literal, Mapping, Optional, Tuple
 
 import pyarrow as pa
 from sqlalchemy import (
@@ -33,9 +43,8 @@ from sqlalchemy.dialects.mysql import insert as mysql_insert
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncConnection
 
 from cdk.base_handler import BaseDestinationHandler, BatchWriteResult
-from ..schema_contract import SchemaContract
-from ...models.stream import EndpointRef
-from ..sql_types import (
+from cdk.schema_contract import SchemaContract
+from cdk.sql_types import (
     native_to_bigquery,
     native_to_postgres,
     native_to_snowflake,
@@ -49,6 +58,7 @@ from cdk.type_map import (
 from cdk.secrets.exceptions import PlaceholderExpansionError
 from cdk.types import (
     AckStatus,
+    CheckpointStore,
     Cursor,
     EndpointScope,
     SchemaSpec,
@@ -59,10 +69,48 @@ from cdk.connection_runtime import (
     DETERMINISTIC_CONNECT_ERRORS,
     materialize_runtime,
 )
-from cdk.database_utils import normalize_adbc_schema
+from cdk.database_utils import acquire_connection, normalize_adbc_schema
+from cdk.query_builder import Filter, QueryBuilder, QueryConfig
+from .adbc_reader import open_adbc_reader
+from .discovery import list_columns as _sql_list_columns
+from .discovery import list_schemas as _sql_list_schemas
+from .discovery import list_tables as _sql_list_tables
+from .ddl import create_table as _sql_create_table
+from .exceptions import ReadError
+from ..contract import ColumnDef
 
 
 logger = logging.getLogger(__name__)
+
+
+# Tracks (table, column) pairs already warned about ORDER BY fallback so a
+# long-lived source connector warns once per stream, not once per page.
+_order_by_fallback_logged: set = set()
+
+
+def _note_order_by_fallback(table_name: str, column_name: str) -> None:
+    """Warn once per (table, column) that ORDER BY fell back to a column.
+
+    The ADBC-only read path pages with OFFSET, which needs a stable ORDER
+    BY or rows silently skip/duplicate across pages on PG/Snowflake/
+    BigQuery. When a stream has no cursor we order by the first selected
+    column. A WARNING (not INFO) because the operator may need to act: a
+    JSON / STRUCT / VARIANT first column fails at query time with an opaque
+    "ORDER BY does not support this type" error, and the fix is to set
+    ``cursor_field`` on the stream -- not something a stack trace points
+    at directly.
+    """
+    key = (table_name, column_name)
+    if key in _order_by_fallback_logged:
+        return
+    _order_by_fallback_logged.add(key)
+    logger.warning(
+        "ADBC reader: no cursor_field for table %r; defaulting ORDER BY to "
+        "first selected column %r. Set cursor_field on the stream if this "
+        "column is a non-orderable type (JSON / STRUCT / VARIANT) -- the "
+        "warehouse will otherwise reject the query.",
+        table_name, column_name,
+    )
 
 
 # PEP-249 exception class names that indicate the failure cannot heal
@@ -178,8 +226,15 @@ class _StreamState:
     metadata: MetaData = field(default_factory=MetaData)
 
 
-class DatabaseDestinationHandler(BaseDestinationHandler):
-    """Unified database destination handler.
+class GenericSQLConnector(BaseDestinationHandler):
+    """Unified SQL connector implementing all four CDK capability Protocols.
+
+    One class serves source reads (``Readable``), destination writes
+    (``Writable``), and the control-plane operations (``Discoverable`` /
+    ``TableCreator``). A given instance is driven in one role at a time:
+    the engine constructs a source-role instance and calls
+    ``read_batches``; the destination service constructs a write-role
+    instance and calls ``connect`` / ``configure_schema`` / ``write_batch``.
 
     Supports two transports, selected by the connector definition and
     set on the runtime that ``connect()`` consumes:
@@ -281,6 +336,11 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         # the same worker thread within one ``asyncio.to_thread`` call.
         self._adbc_op_lock: threading.RLock = threading.RLock()
 
+        # Read-path (Readable role) counters. Not consumed by the engine's
+        # pipeline metrics — kept for parity with the source connector's
+        # logging and for tests asserting per-stream read volume.
+        self.metrics: Dict[str, int] = {"records_read": 0, "batches_read": 0}
+
     def set_endpoint_refs(self, endpoint_refs: Mapping[str, Any]) -> None:
         """Register stream_id → endpoint_ref for each stream writing to this
         destination. Called once by ``src.main`` before the gRPC server starts;
@@ -310,21 +370,26 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
         """Resolve the type-mapper appropriate for ``stream_id``'s endpoint."""
         if self._runtime is None:
             raise RuntimeError(
-                "DatabaseDestinationHandler._type_mapper_for_stream() called before connect()"
+                "GenericSQLConnector._type_mapper_for_stream() called before connect()"
             )
         endpoint_ref = self._endpoint_refs.get(stream_id)
         if endpoint_ref is None:
             raise RuntimeError(
-                f"DatabaseDestinationHandler has no endpoint_ref registered for "
+                f"GenericSQLConnector has no endpoint_ref registered for "
                 f"stream_id={stream_id!r}; call set_endpoint_refs() before the "
                 f"gRPC server starts"
             )
-        # Parse + validate the endpoint_ref engine-side (the CDK takes only the
-        # resolved scope, never the engine model), then hand the runtime the
-        # CDK-native EndpointScope. EndpointRef.from_dict already rejects an
-        # unknown scope, so the enum construction cannot fail here.
-        ref = EndpointRef.from_dict(endpoint_ref)
-        return self._runtime.type_mapper_for(scope=EndpointScope(ref.scope))
+        # The CDK takes only the resolved scope string, never the engine's
+        # EndpointRef model. ``EndpointScope(scope)`` raises ValueError on an
+        # unknown scope, preserving the validation that lived in
+        # ``EndpointRef.__post_init__`` engine-side.
+        scope = endpoint_ref.get("scope") if isinstance(endpoint_ref, Mapping) else None
+        if not scope:
+            raise RuntimeError(
+                f"endpoint_ref for stream_id={stream_id!r} has no 'scope'; "
+                f"expected one of {[s.value for s in EndpointScope]}"
+            )
+        return self._runtime.type_mapper_for(scope=EndpointScope(scope))
 
     @property
     def connector_type(self) -> str:
@@ -394,15 +459,19 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
                 logger.error(
                     "ADBC eager-open failed during connect: %s", e, exc_info=True
                 )
+                # materialize() already acquired the runtime; the caller does
+                # not disconnect a handler whose connect() raised, so release
+                # the ref here to keep the lifecycle balanced.
+                await runtime.close()
                 raise ConnectionError(f"ADBC connection failed: {e}") from e
             logger.info(
-                "DatabaseDestinationHandler connected via ADBC to %s",
+                "GenericSQLConnector connected via ADBC to %s",
                 self._driver,
             )
         else:
             self._engine = runtime.engine
             logger.info(
-                "DatabaseDestinationHandler connected via SQLAlchemy to %s",
+                "GenericSQLConnector connected via SQLAlchemy to %s",
                 self._driver,
             )
         self._connected = True
@@ -453,7 +522,7 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
                     exc_info=True,
                 )
         self._connected = False
-        logger.info("DatabaseDestinationHandler disconnected")
+        logger.info("GenericSQLConnector disconnected")
         if cancelled is not None:
             raise cancelled
 
@@ -1973,3 +2042,375 @@ class DatabaseDestinationHandler(BaseDestinationHandler):
             except Exception:
                 self._poison_adbc_connection()
                 raise
+
+    # ==================================================================
+    # Readable role (source reads)
+    # ==================================================================
+    #
+    # ``read_batches`` is self-contained: it materializes the runtime it is
+    # handed, pages the table, and releases the runtime on exit. No prior
+    # ``connect()`` is required — ``runtime`` is the only connection input,
+    # matching the ``Readable`` Protocol. The write role's connection state
+    # (``self._engine`` / ``self._adbc_conn``) is untouched; a source-role
+    # instance and a write-role instance are distinct objects.
+
+    async def read_batches(
+        self,
+        runtime: ConnectionRuntime,
+        config: Dict[str, Any],
+        *,
+        checkpoint: CheckpointStore,
+        stream_name: str,
+        partition: Optional[Dict[str, Any]] = None,
+        batch_size: int = 1000,
+    ) -> AsyncIterator[pa.RecordBatch]:
+        """Read upstream rows as Arrow batches typed via the endpoint contract."""
+        endpoint_doc = config.get("endpoint_document")
+        if not endpoint_doc:
+            raise ReadError(
+                "GenericSQLConnector: source config missing 'endpoint_document'"
+            )
+        database_object = endpoint_doc.get("database_object") or {}
+        table_name = database_object.get("name")
+        if not table_name:
+            raise ReadError("endpoint document missing database_object.name")
+        # No default schema: dialects without a schema concept (sqlite,
+        # duckdb) would emit invalid ``public.<table>`` references if we
+        # forced one. When the endpoint omits ``schema``, QueryBuilder emits
+        # an unqualified table name and the driver uses the connection's
+        # current schema/database.
+        schema_name = database_object.get("schema")
+
+        try:
+            await materialize_runtime(runtime, require_port=True)
+        except DETERMINISTIC_CONNECT_ERRORS:
+            raise
+        except Exception as e:
+            logger.error("Failed to connect to source database: %s", e)
+            raise ReadError(f"Database connection failed: {e}") from e
+
+        driver = runtime.driver or ""
+        adbc_only = runtime.is_adbc
+        engine = None if adbc_only else runtime.engine
+        logger.info(
+            "Reading source via %s (%s)",
+            driver, "ADBC" if adbc_only else "SQLAlchemy",
+        )
+
+        try:
+            stream_source = config.get("stream_source") or {}
+            schema_contract = SchemaContract(endpoint_doc)
+            column_names = self._select_columns(endpoint_doc, stream_source)
+            filters = self._build_filters(stream_source.get("filters") or [])
+
+            replication = stream_source.get("replication") or {}
+            cursor_field = replication.get("cursor_field")
+            if isinstance(cursor_field, list):
+                cursor_field = cursor_field[0] if cursor_field else None
+            replication_method = replication.get("method", "full_refresh")
+
+            if (
+                replication_method == "incremental"
+                and cursor_field
+                and cursor_field not in column_names
+            ):
+                # An incremental stream whose projection drops the cursor
+                # column silently reverts to "full-scan + upsert" every run:
+                # no cursor value is observable, so no state advances. Loud
+                # and once.
+                logger.warning(
+                    "stream %r: cursor_field %r not in selected columns %r; "
+                    "cursor will not advance",
+                    stream_name, cursor_field, column_names,
+                )
+
+            partition = partition or {}
+            cursor_state = await checkpoint.get_cursor(stream_name, partition)
+            stored_cursor = cursor_state.get("cursor") if cursor_state else None
+            cursor_value = (
+                stored_cursor if replication_method == "incremental" else None
+            )
+
+            if adbc_only:
+                async for batch in self._read_via_adbc_only(
+                    runtime=runtime,
+                    driver=driver,
+                    schema_contract=schema_contract,
+                    schema_name=schema_name,
+                    table_name=table_name,
+                    columns=column_names,
+                    filters=filters,
+                    cursor_field=(
+                        cursor_field if replication_method == "incremental" else None
+                    ),
+                    cursor_value=cursor_value,
+                    batch_size=batch_size,
+                    checkpoint=checkpoint,
+                    stream_name=stream_name,
+                    partition=partition,
+                ):
+                    yield batch
+                logger.debug("Source read (ADBC-only) completed")
+                return
+
+            builder = QueryBuilder(driver)
+
+            def page_query(offset: int):
+                """Build the per-page SELECT. Limit / offset are pushed into
+                ``QueryConfig`` so SQLAlchemy compiles dialect-correct paging.
+                ``params`` is a list for positional dialects and a dict for
+                named ones."""
+                sql, params = builder.build_select_query(
+                    QueryConfig(
+                        schema_name=schema_name,
+                        table_name=table_name,
+                        columns=column_names,
+                        filters=filters,
+                        cursor_field=(
+                            cursor_field
+                            if replication_method == "incremental"
+                            else None
+                        ),
+                        cursor_value=cursor_value,
+                        cursor_mode="inclusive",
+                        limit=batch_size,
+                        offset=offset,
+                    )
+                )
+                return sql, params
+
+            last_cursor_value = cursor_value
+            offset = 0
+
+            async with acquire_connection(engine) as conn:
+                while True:
+                    paged_query, paged_params = page_query(offset)
+                    if isinstance(paged_params, dict):
+                        # Named-paramstyle dialects (Snowflake pyformat,
+                        # BigQuery named): the driver binds by name and
+                        # expects a dict, not a positional tuple.
+                        if paged_params:
+                            result = await conn.exec_driver_sql(
+                                paged_query, paged_params
+                            )
+                        else:
+                            result = await conn.exec_driver_sql(paged_query)
+                    elif paged_params:
+                        result = await conn.exec_driver_sql(
+                            paged_query, tuple(paged_params)
+                        )
+                    else:
+                        result = await conn.exec_driver_sql(paged_query)
+
+                    rows = [dict(row._mapping) for row in result]
+                    if not rows:
+                        break
+
+                    if cursor_field:
+                        last_cursor_value = rows[-1].get(
+                            cursor_field, last_cursor_value
+                        )
+
+                    self.metrics["records_read"] += len(rows)
+                    self.metrics["batches_read"] += 1
+
+                    yield schema_contract.from_pylist(rows)
+
+                    if last_cursor_value is not None:
+                        await checkpoint.save_cursor(
+                            stream_name, partition, {"cursor": last_cursor_value}
+                        )
+
+                    offset += batch_size
+                    if len(rows) < batch_size:
+                        break
+
+            logger.debug("Source read completed with cursor: %s", last_cursor_value)
+        finally:
+            # ``runtime`` is the only connection input; the source role owns
+            # its lifecycle, so release it (disposes the SA engine pool /
+            # closes the cached ADBC handle) whatever the read's outcome.
+            await runtime.close()
+
+    async def _read_via_adbc_only(
+        self,
+        *,
+        runtime: ConnectionRuntime,
+        driver: str,
+        schema_contract: SchemaContract,
+        schema_name: Optional[str],
+        table_name: str,
+        columns: List[str],
+        filters: List[Filter],
+        cursor_field: Optional[str],
+        cursor_value: Any,
+        batch_size: int,
+        checkpoint: CheckpointStore,
+        stream_name: str,
+        partition: Dict[str, Any],
+    ) -> AsyncIterator[pa.RecordBatch]:
+        """Stream Arrow batches via the ADBC-only path.
+
+        SQL is compiled by the shared :class:`QueryBuilder` in qmark mode
+        (forced ``?`` placeholders, every identifier quoted, inlined
+        LIMIT/OFFSET) so filters and the incremental cursor render through
+        the same WHERE machinery as the SQLAlchemy transport. Holds one
+        DBAPI connection for the lifetime of the read; each page goes
+        ``cursor.execute -> fetch_arrow_table -> cast``.
+
+        The WHERE clause is fixed at the read's initial cursor_value
+        (matching the SA path); paging advances via OFFSET only. Mixing
+        cursor advancement with OFFSET would skip rows on every page after
+        the first.
+        """
+        if not columns:
+            # The first selected column is the ORDER BY fallback and an empty
+            # projection compiles to ``SELECT`` with no columns; fail loudly
+            # rather than emit an invalid statement.
+            raise ReadError(
+                "ADBC-only source requires a non-empty column projection"
+            )
+
+        # The ADBC path quotes every identifier, so normalize the schema the
+        # same way the destination handler does (Snowflake lowercase
+        # ``public`` -> ``PUBLIC``) or the quoted name targets a different
+        # schema.
+        effective_schema = (
+            normalize_adbc_schema(schema_name, driver) if schema_name else None
+        )
+
+        if cursor_field:
+            order_by = cursor_field
+        else:
+            order_by = columns[0]
+            _note_order_by_fallback(table_name, order_by)
+
+        builder = QueryBuilder(
+            driver,
+            paramstyle="qmark",
+            quote_identifiers=True,
+            inline_paging=True,
+        )
+
+        # Initial cursor value is fixed for the duration of the read;
+        # last_cursor_value advances purely for checkpoint state.
+        initial_cursor_value = cursor_value
+        last_cursor_value: Any = cursor_value
+        offset = 0
+        cursor_missing_warned = False
+        async with open_adbc_reader(driver, runtime) as reader:
+            while True:
+                sql, params = builder.build_select_query(
+                    QueryConfig(
+                        schema_name=effective_schema,
+                        table_name=table_name,
+                        columns=columns,
+                        filters=filters,
+                        cursor_field=cursor_field,
+                        cursor_value=initial_cursor_value if cursor_field else None,
+                        cursor_mode="inclusive",
+                        order_by=order_by,
+                        limit=batch_size,
+                        offset=offset,
+                    )
+                )
+                if isinstance(params, dict):
+                    # QueryBuilder is built with paramstyle="qmark", so it
+                    # must return positional params. A dict means the dialect
+                    # ignored the forced paramstyle; the ADBC execute path
+                    # (cursor.execute(sql, list(params))) would then bind
+                    # parameter *names* instead of values. Fail loudly rather
+                    # than corrupt the binds.
+                    raise ReadError(
+                        f"ADBC-only source for driver {driver!r}: expected "
+                        f"positional qmark parameters but QueryBuilder produced "
+                        f"named parameters; the ADBC execute path binds "
+                        f"positionally"
+                    )
+                batches = await reader.fetch_page(sql, params)
+                if not batches:
+                    break
+
+                page_rows = 0
+                for batch in batches:
+                    cast_batch = schema_contract.cast_arrow_batch(batch)
+                    page_rows += cast_batch.num_rows
+                    if cursor_field and cast_batch.num_rows > 0:
+                        if cursor_field in cast_batch.schema.names:
+                            last_cursor_value = cast_batch.column(cursor_field)[-1].as_py()
+                        elif not cursor_missing_warned:
+                            logger.warning(
+                                "stream %r: cursor_field %r not present in "
+                                "result batch; cursor will not advance",
+                                stream_name, cursor_field,
+                            )
+                            cursor_missing_warned = True
+                    self.metrics["records_read"] += cast_batch.num_rows
+                    self.metrics["batches_read"] += 1
+                    yield cast_batch
+
+                if last_cursor_value is not None:
+                    await checkpoint.save_cursor(
+                        stream_name, partition, {"cursor": last_cursor_value}
+                    )
+
+                if page_rows < batch_size:
+                    break
+                offset += page_rows
+
+    @staticmethod
+    def _select_columns(
+        endpoint_doc: Dict[str, Any], stream_source: Dict[str, Any]
+    ) -> List[str]:
+        selected = stream_source.get("selected_columns")
+        if selected:
+            return list(selected)
+        columns = endpoint_doc.get("columns") or []
+        return [c["name"] for c in columns if c.get("name")]
+
+    @staticmethod
+    def _build_filters(stream_filters: List[Dict[str, Any]]) -> List[Filter]:
+        out: List[Filter] = []
+        for f in stream_filters:
+            field_name = f.get("field")
+            if not field_name:
+                continue
+            out.append(
+                Filter(
+                    field=field_name,
+                    op=f.get("operator", "eq"),
+                    value=f.get("value"),
+                )
+            )
+        return out
+
+    # ==================================================================
+    # Discoverable + TableCreator roles (control-plane)
+    # ==================================================================
+    #
+    # Thin delegators to the standalone ``cdk.sql`` helpers (ADR §6). They
+    # take a materialized ``ConnectionRuntime`` directly and run no gRPC
+    # server or engine orchestration — the control-plane calls them.
+
+    async def list_schemas(self, runtime: ConnectionRuntime) -> List[str]:
+        return await _sql_list_schemas(runtime)
+
+    async def list_tables(
+        self, runtime: ConnectionRuntime, schema: str
+    ) -> List[str]:
+        return await _sql_list_tables(runtime, schema)
+
+    async def list_columns(
+        self, runtime: ConnectionRuntime, schema: str, table: str
+    ) -> Tuple[List[ColumnDef], List[str]]:
+        return await _sql_list_columns(runtime, schema, table)
+
+    async def create_table(
+        self,
+        runtime: ConnectionRuntime,
+        schema: str,
+        table: str,
+        columns: List[ColumnDef],
+        primary_keys: List[str],
+    ) -> None:
+        await _sql_create_table(runtime, schema, table, columns, primary_keys)

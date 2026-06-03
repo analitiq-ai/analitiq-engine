@@ -23,13 +23,13 @@ class TestWriteConflictKeysWiring:
 
     @pytest.mark.asyncio
     async def test_explicit_conflict_keys_override_primary_keys(self):
-        from src.destination.connectors.database import (
-            DatabaseDestinationHandler,
+        from cdk.sql.generic import (
+            GenericSQLConnector,
         )
         from cdk.type_map import TypeMapper
         from cdk.type_map.rules import parse_rules
 
-        handler = DatabaseDestinationHandler()
+        handler = GenericSQLConnector()
         handler._connected = True
         handler._engine = MagicMock()
         handler._runtime = MagicMock()
@@ -70,13 +70,13 @@ class TestWriteConflictKeysWiring:
 
     @pytest.mark.asyncio
     async def test_missing_write_conflict_keys_falls_back_to_primary_keys(self):
-        from src.destination.connectors.database import (
-            DatabaseDestinationHandler,
+        from cdk.sql.generic import (
+            GenericSQLConnector,
         )
         from cdk.type_map import TypeMapper
         from cdk.type_map.rules import parse_rules
 
-        handler = DatabaseDestinationHandler()
+        handler = GenericSQLConnector()
         handler._connected = True
         handler._engine = MagicMock()
         handler._runtime = MagicMock()

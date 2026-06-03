@@ -36,3 +36,15 @@ class DiscoveryError(SqlIntrospectionError):
 
 class CreateTableError(SqlIntrospectionError):
     """Standalone ``create_table`` failed to build or execute its DDL."""
+
+
+class ReadError(Exception):
+    """A source read (``read_batches``) could not be set up or executed.
+
+    Raised for caller-actionable read failures: an endpoint document
+    missing its target table, an empty column projection, or a transport
+    returning named parameters on the qmark-only ADBC path. Distinct from
+    the control-plane :class:`SqlIntrospectionError` family — a read is an
+    engine source operation, not a control-plane introspection — so the
+    engine's extract stage can tell the two apart.
+    """

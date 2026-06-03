@@ -1,4 +1,4 @@
-"""Unit tests for DatabaseDestinationHandler connection handling.
+"""Unit tests for GenericSQLConnector connection handling.
 
 The handler now obtains its engine through the connector-driven transport
 factory; these tests patch :func:`build_transport` to substitute a
@@ -10,14 +10,14 @@ import ssl
 import pytest
 from unittest.mock import AsyncMock, patch
 
-from src.destination.connectors.database import DatabaseDestinationHandler
+from cdk.sql.generic import GenericSQLConnector
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.transport_factory import SqlAlchemyTransport
 
 
 @pytest.fixture
 def handler():
-    return DatabaseDestinationHandler()
+    return GenericSQLConnector()
 
 
 @pytest.fixture

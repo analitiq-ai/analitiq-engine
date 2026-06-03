@@ -30,7 +30,7 @@ from typing import Any, AsyncIterator, Dict, List, Optional
 import pyarrow as pa
 
 from .base import BaseConnector, ConnectionError, ReadError
-from ...destination.schema_contract import SchemaContract
+from cdk.schema_contract import SchemaContract
 from ...models.state import CursorField, StreamCursor, StreamStats
 from cdk.connection_runtime import ConnectionRuntime
 from ...shared.expressions import resolve_value_expression
@@ -67,7 +67,18 @@ class APIConnector(BaseConnector):
     async def disconnect(self):
         if self._runtime:
             await self._runtime.close()
-            await asyncio.sleep(0.25)
+            # Brief courtesy delay so aiohttp's transports finish closing. It
+            # runs in read_batches' ``finally``, so a cancellation landing here
+            # must not replace a read error already propagating through the
+            # teardown; absorb it rather than let the drain delay become the
+            # surfaced exception.
+            try:
+                await asyncio.sleep(0.25)
+            except asyncio.CancelledError:
+                # Intentionally ignored: the runtime is already closed above, so
+                # the only thing cancelled is the drain delay. Absorbing it keeps
+                # a propagating read error (or task cancellation) intact.
+                pass
         self.session = None
         self.is_connected = False
 
@@ -77,23 +88,53 @@ class APIConnector(BaseConnector):
 
     async def read_batches(
         self,
+        runtime: ConnectionRuntime,
         config: Dict[str, Any],
         *,
-        state_manager: StateManager,
+        checkpoint: StateManager,
         stream_name: str,
         partition: Optional[Dict[str, Any]] = None,
         batch_size: int = 1000,
     ) -> AsyncIterator[pa.RecordBatch]:
         """Read upstream records as Arrow batches.
 
-        Each yielded batch corresponds to one upstream page; the
-        destination realigns to its declared schema via
-        :meth:`SchemaContract.cast_arrow_batch`.
+        ``runtime`` is the only connection input (the ``Readable`` contract):
+        this connector opens the session on entry and closes it on exit, so no
+        prior ``connect()`` is required. ``checkpoint`` is typed as the concrete
+        :class:`StateManager` rather than the bare ``CheckpointStore`` Protocol
+        because the incremental path calls ``save_stream_checkpoint`` (not on
+        the minimal store); the engine always passes its ``StateManager``. Each
+        yielded batch corresponds to one upstream page; the destination realigns
+        to its declared schema via :meth:`SchemaContract.cast_arrow_batch`.
+
+        ``connect()`` runs inside the ``try`` so a connect/materialize failure
+        still reaches ``disconnect()`` in the ``finally`` and releases the
+        runtime reference it acquired — the lifecycle is balanced on every exit.
         """
+        try:
+            await self.connect(runtime)
+            async for batch in self._read_batches_impl(
+                config,
+                checkpoint=checkpoint,
+                stream_name=stream_name,
+                partition=partition,
+                batch_size=batch_size,
+            ):
+                yield batch
+        finally:
+            await self.disconnect()
+
+    async def _read_batches_impl(
+        self,
+        config: Dict[str, Any],
+        *,
+        checkpoint: StateManager,
+        stream_name: str,
+        partition: Optional[Dict[str, Any]] = None,
+        batch_size: int = 1000,
+    ) -> AsyncIterator[pa.RecordBatch]:
         if partition is None:
             partition = {}
-        if self._runtime is None or self.session is None:
-            raise ReadError("APIConnector.read_batches() called before connect()")
 
         endpoint_doc = config.get("endpoint_document")
         if not endpoint_doc:
@@ -144,7 +185,7 @@ class APIConnector(BaseConnector):
             await self._apply_incremental_replication(
                 base_params,
                 read_spec,
-                state_manager,
+                checkpoint,
                 stream_name,
                 partition,
                 cursor_field,
@@ -183,7 +224,7 @@ class APIConnector(BaseConnector):
             total_records += len(deduped)
             if cursor_field:
                 self._save_checkpoint(
-                    state_manager=state_manager,
+                    checkpoint=checkpoint,
                     stream_name=stream_name,
                     partition=partition,
                     last_record=deduped[-1],
@@ -289,7 +330,7 @@ class APIConnector(BaseConnector):
         self,
         params: Dict[str, Any],
         read_spec: Dict[str, Any],
-        state_manager: StateManager,
+        checkpoint: StateManager,
         stream_name: str,
         partition: Dict[str, Any],
         cursor_field: Optional[str],
@@ -309,7 +350,7 @@ class APIConnector(BaseConnector):
                 cursor_field,
             )
             return
-        cursor_state = await state_manager.get_cursor(stream_name, partition)
+        cursor_state = await checkpoint.get_cursor(stream_name, partition)
         cursor_value = (cursor_state or {}).get("primary", {}).get("value")
         if not cursor_value:
             logger.info(
@@ -541,7 +582,7 @@ class APIConnector(BaseConnector):
     def _save_checkpoint(
         self,
         *,
-        state_manager: StateManager,
+        checkpoint: StateManager,
         stream_name: str,
         partition: Dict[str, Any],
         last_record: Dict[str, Any],
@@ -572,7 +613,7 @@ class APIConnector(BaseConnector):
             last_checkpoint_at=datetime.now(timezone.utc),
             errors_since_checkpoint=0,
         )
-        state_manager.save_stream_checkpoint(
+        checkpoint.save_stream_checkpoint(
             stream_name=stream_name,
             partition=partition,
             cursor=asdict(cursor),
