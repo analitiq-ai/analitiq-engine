@@ -58,6 +58,7 @@ def __getattr__(name: str) -> Any:
         return getattr(adbc_reader, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
+
 __all__ = [
     "list_schemas",
     "list_tables",
