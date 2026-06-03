@@ -16,7 +16,11 @@ from cdk.contract import ColumnDef
 from cdk.sql.ddl import build_create_table_sql, create_table
 from cdk.sql.dialects import get_dialect
 from cdk.sql.exceptions import CreateTableError
-from cdk.type_map.exceptions import InvalidTypeMapError, UnmappedTypeError
+from cdk.type_map.exceptions import (
+    InvalidTypeMapError,
+    TypeMapNotFoundError,
+    UnmappedTypeError,
+)
 from cdk.type_map.loader import load_type_map
 
 from .conftest import FakeAdbcRuntime
@@ -148,7 +152,10 @@ class TestBuildErrors:
     def test_no_write_map_raises_chaining_invalid_type_map(self):
         # The mysql connector ships only a read type-map (no write-type-map.json),
         # so to_native_type cannot render and create_table fails loudly.
-        mysql_mapper = load_type_map(_CONNECTORS_DIR, "mysql")
+        try:
+            mysql_mapper = load_type_map(_CONNECTORS_DIR, "mysql")
+        except TypeMapNotFoundError:
+            pytest.skip("connector 'mysql' not populated in connectors/")
         columns = [ColumnDef("id", "Int64")]
         with pytest.raises(CreateTableError) as exc:
             build_create_table_sql(

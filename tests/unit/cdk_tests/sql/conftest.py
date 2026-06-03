@@ -16,6 +16,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 import pyarrow as pa
 import pytest
 
+from cdk.type_map.exceptions import TypeMapNotFoundError
 from cdk.type_map.loader import load_type_map
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -25,22 +26,29 @@ _CONNECTORS_DIR = _REPO_ROOT / "connectors"
 Responder = Callable[[str, Sequence[Any]], List[Dict[str, Any]]]
 
 
+def _load_or_skip(slug: str):
+    try:
+        return load_type_map(_CONNECTORS_DIR, slug)
+    except TypeMapNotFoundError:
+        pytest.skip(f"connector {slug!r} not populated in {_CONNECTORS_DIR}")
+
+
 @pytest.fixture
 def pg_mapper():
     """Real postgres TypeMapper (read + write rules)."""
-    return load_type_map(_CONNECTORS_DIR, "postgres")
+    return _load_or_skip("postgres")
 
 
 @pytest.fixture
 def sf_mapper():
     """Real snowflake TypeMapper (read + write rules)."""
-    return load_type_map(_CONNECTORS_DIR, "snowflake")
+    return _load_or_skip("snowflake")
 
 
 @pytest.fixture
 def bq_mapper():
     """Real bigquery TypeMapper (read rules only — no write-type-map shipped)."""
-    return load_type_map(_CONNECTORS_DIR, "bigquery")
+    return _load_or_skip("bigquery")
 
 
 class FakeArrowCursor:
