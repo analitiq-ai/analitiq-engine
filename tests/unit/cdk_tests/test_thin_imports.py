@@ -245,6 +245,23 @@ class TestReraiseForMissingExtra:
         assert ei.value is original
         assert not isinstance(ei.value, MissingExtraError)
 
+    def test_broken_install_submodule_failure_is_not_relabelled(self):
+        """A *present but broken* extra (e.g. partial PyArrow build failing on
+        ``pyarrow.lib``) must surface its real cause, not be mislabelled as a
+        missing extra -- the package IS installed."""
+        from cdk._extras import MissingExtraError, reraise_for_missing_extra
+
+        original = ModuleNotFoundError(
+            "No module named 'pyarrow.lib'", name="pyarrow.lib",
+        )
+        with pytest.raises(ModuleNotFoundError) as ei:
+            reraise_for_missing_extra(
+                original, feature="cdk.sql.AdbcReader", extra="arrow",
+                modules=("pyarrow",),
+            )
+        assert ei.value is original
+        assert not isinstance(ei.value, MissingExtraError)
+
 
 @pytest.mark.unit
 @pytest.mark.asyncio

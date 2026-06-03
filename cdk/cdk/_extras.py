@@ -30,20 +30,28 @@ class MissingExtraError(ImportError):
 def reraise_for_missing_extra(
     exc: ImportError, *, feature: str, extra: str, modules: Sequence[str]
 ) -> NoReturn:
-    """Re-raise ``exc`` as a :class:`MissingExtraError` iff it is the extra's
-    own package that is missing; otherwise re-raise ``exc`` unchanged.
+    """Re-raise ``exc`` as a :class:`MissingExtraError` iff the extra's own
+    top-level package is the thing that is absent; otherwise re-raise ``exc``
+    unchanged.
 
     ``feature`` names what the caller was reaching for (e.g.
     ``"cdk.sql.AdbcReader"``); ``extra`` is the extra name (``"arrow"``);
     ``modules`` is the set of top-level package names that extra provides.
+
+    The match is on the *exact* missing module name, not its top-level prefix.
+    A genuinely-absent extra fails as ``import pyarrow`` ->
+    ``ModuleNotFoundError(name="pyarrow")``. A *present but broken* install
+    fails while loading one of its own submodules (e.g.
+    ``ModuleNotFoundError(name="pyarrow.lib")`` from a partial PyArrow build) --
+    that is a real bug, not a missing extra, so it must surface untouched
+    rather than be relabelled "install the extra".
     """
     missing = getattr(exc, "name", None) or ""
-    top = missing.split(".", 1)[0]
-    if top in modules:
+    if missing in modules:
         raise MissingExtraError(
             f"{feature} requires the '{extra}' extra "
             f"(missing dependency: {missing or '?'}). "
             f"Install `analitiq-cdk[{extra}]`."
         ) from exc
-    # Unrelated import failure -- surface the real cause untouched.
+    # Unrelated or broken-install import failure -- surface the real cause.
     raise exc
