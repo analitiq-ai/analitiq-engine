@@ -203,11 +203,11 @@ class TestExtrasPresentSurface:
         assert resolve_arrow_type is not None
 
     def test_arrow_reexport_is_the_real_object(self):
-        import cdk.sql
+        from cdk import sql
         from cdk.sql import adbc_reader as adbc_reader_mod
 
         # The lazy accessor must return the genuine submodule attribute.
-        assert cdk.sql.AdbcReader is adbc_reader_mod.AdbcReader
+        assert sql.AdbcReader is adbc_reader_mod.AdbcReader
 
 
 @pytest.mark.unit
