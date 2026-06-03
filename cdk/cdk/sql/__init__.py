@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from .._extras import reraise_for_missing_extra
 from .ddl import build_create_table_sql, create_table
 from .dialects import SUPPORTED_DIALECTS, SqlDialect, get_dialect
 from .discovery import list_columns, list_schemas, list_tables
@@ -36,9 +37,7 @@ from .execution import execute_ddl, fetch_rows
 # (discovery + standalone ``create_table``) stays importable without the
 # ``arrow`` extra. ``cdk.sql.AdbcReader`` & friends resolve lazily on first
 # access (PEP 562); they require ``analitiq-cdk[arrow]``.
-_LAZY_ARROW = frozenset(
-    {"AdbcReader", "AdbcReaderClosedError", "open_adbc_reader"}
-)
+_LAZY_ARROW = frozenset({"AdbcReader", "AdbcReaderClosedError", "open_adbc_reader"})
 
 if TYPE_CHECKING:
     from .adbc_reader import (  # noqa: F401
@@ -50,8 +49,12 @@ if TYPE_CHECKING:
 
 def __getattr__(name: str) -> Any:
     if name in _LAZY_ARROW:
-        from . import adbc_reader
-
+        try:
+            from . import adbc_reader
+        except ImportError as exc:
+            reraise_for_missing_extra(
+                exc, feature=f"cdk.sql.{name}", extra="arrow", modules=("pyarrow",)
+            )
         return getattr(adbc_reader, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 

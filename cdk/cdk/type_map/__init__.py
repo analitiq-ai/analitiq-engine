@@ -11,6 +11,7 @@ and require the ``analitiq-cdk[arrow]`` extra.
 
 from typing import TYPE_CHECKING, Any
 
+from .._extras import reraise_for_missing_extra
 from .exceptions import (
     InvalidTypeMapError,
     TypeMapError,
@@ -42,8 +43,15 @@ if TYPE_CHECKING:
 
 def __getattr__(name: str) -> Any:
     if name in _LAZY_ARROW:
-        from . import arrow
-
+        try:
+            from . import arrow
+        except ImportError as exc:
+            reraise_for_missing_extra(
+                exc,
+                feature=f"cdk.type_map.{name}",
+                extra="arrow",
+                modules=("pyarrow",),
+            )
         return getattr(arrow, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 

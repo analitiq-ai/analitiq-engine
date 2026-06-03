@@ -50,6 +50,11 @@ surface never pulls `pyarrow`/`aiohttp`.
 
 Plus the per-driver DB package a given connector needs (asyncpg, adbc-driver-*, …).
 
+Touching an extra's surface without that extra installed raises a
+`cdk.MissingExtraError` naming the extra to install (e.g. `analitiq-cdk[arrow]`),
+rather than a bare `No module named 'pyarrow'`. An *unrelated* import failure
+(a broken transitive dep) is re-raised untouched so the real cause survives.
+
 ## Install
 
 Control-plane only (discover + create-table, no `pyarrow`/`aiohttp`):

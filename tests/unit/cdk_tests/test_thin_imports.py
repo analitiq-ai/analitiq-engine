@@ -39,7 +39,9 @@ _BLOCK = textwrap.dedent(
         def find_spec(self, name, path=None, target=None):
             top = name.split(".", 1)[0]
             if top in _BLOCKED:
-                raise ModuleNotFoundError(f"blocked for test: {name}")
+                # Set ``name`` like the real import machinery does, so the
+                # CDK's missing-extra discriminator can identify the package.
+                raise ModuleNotFoundError(f"blocked for test: {name}", name=name)
             return None
 
     sys.meta_path.insert(0, _Blocker())
@@ -74,14 +76,21 @@ class TestThinControlPlaneImports:
             """
             import cdk.sql
 
-            # The control-plane functions must be reachable.
+            # The control-plane functions + published error types must be
+            # reachable without the arrow extra.
             for name in (
                 "list_schemas", "list_tables", "list_columns",
                 "create_table", "build_create_table_sql",
                 "get_dialect", "SqlDialect", "SUPPORTED_DIALECTS",
                 "fetch_rows", "execute_ddl",
+                "SqlIntrospectionError", "UnsupportedDialectError",
+                "DiscoveryError", "CreateTableError", "ReadError",
             ):
                 assert hasattr(cdk.sql, name), name
+
+            # The direct ``from cdk.sql import create_table`` form (the one the
+            # control-plane actually uses) must resolve, not just attr access.
+            from cdk.sql import create_table, list_columns  # noqa: F401
 
             print("OK")
             """
@@ -123,15 +132,18 @@ class TestThinControlPlaneImports:
         assert result.returncode == 0, result.stderr
         assert "OK" in result.stdout
 
-    def test_arrow_helpers_are_lazy_and_raise_when_blocked(self):
-        """Touching the Arrow accessors raises only on access, not at import."""
+    def test_arrow_helpers_are_lazy_and_name_the_extra_when_blocked(self):
+        """Touching an Arrow accessor raises only on access, and the error
+        names the ``arrow`` extra to install."""
         result = _run(
             """
             import cdk.sql
             import cdk.type_map as tm
+            from cdk._extras import MissingExtraError
 
             # Importing succeeded (asserted by reaching here). Now the lazy
-            # Arrow accessors must raise because pyarrow is blocked.
+            # Arrow accessors must raise because pyarrow is blocked, with an
+            # actionable message pointing at analitiq-cdk[arrow].
             for owner, attr in (
                 (cdk.sql, "AdbcReader"),
                 (cdk.sql, "open_adbc_reader"),
@@ -140,8 +152,9 @@ class TestThinControlPlaneImports:
             ):
                 try:
                     getattr(owner, attr)
-                except ModuleNotFoundError:
-                    pass
+                except MissingExtraError as exc:
+                    assert "analitiq-cdk[arrow]" in str(exc), str(exc)
+                    assert "pyarrow" in str(exc), str(exc)
                 else:
                     raise AssertionError(f"{attr} did not raise with pyarrow blocked")
 
@@ -171,3 +184,104 @@ class TestThinControlPlaneImports:
         )
         assert result.returncode == 0, result.stderr
         assert "OK" in result.stdout
+
+
+@pytest.mark.unit
+class TestExtrasPresentSurface:
+    """With the extras installed (the test venv has pyarrow/aiohttp), the lazy
+    re-exports must resolve via the ``from cdk.sql import X`` form the engine
+    uses -- this exercises the PEP-562 success path, which the blocked tests
+    cannot."""
+
+    def test_arrow_reexports_resolve_when_pyarrow_present(self):
+        from cdk.sql import AdbcReader, open_adbc_reader
+        from cdk.type_map import parse_arrow_type, resolve_arrow_type
+
+        assert AdbcReader is not None
+        assert open_adbc_reader is not None
+        assert parse_arrow_type is not None
+        assert resolve_arrow_type is not None
+
+    def test_arrow_reexport_is_the_real_object(self):
+        import cdk.sql
+        from cdk.sql import adbc_reader as adbc_reader_mod
+
+        # The lazy accessor must return the genuine submodule attribute.
+        assert cdk.sql.AdbcReader is adbc_reader_mod.AdbcReader
+
+
+@pytest.mark.unit
+class TestReraiseForMissingExtra:
+    """The discriminator re-labels only the extra's own missing package; any
+    unrelated ImportError is re-raised untouched so a real bug is not masked."""
+
+    def test_missing_extra_package_is_relabelled(self):
+        from cdk._extras import MissingExtraError, reraise_for_missing_extra
+
+        original = ModuleNotFoundError("No module named 'pyarrow'", name="pyarrow")
+        with pytest.raises(MissingExtraError) as ei:
+            reraise_for_missing_extra(
+                original, feature="cdk.sql.AdbcReader", extra="arrow",
+                modules=("pyarrow",),
+            )
+        msg = str(ei.value)
+        assert "analitiq-cdk[arrow]" in msg
+        assert "cdk.sql.AdbcReader" in msg
+        assert ei.value.__cause__ is original
+
+    def test_unrelated_import_error_is_reraised_unchanged(self):
+        from cdk._extras import MissingExtraError, reraise_for_missing_extra
+
+        # pyarrow imported fine, but a transitive dep of it did not.
+        original = ModuleNotFoundError(
+            "No module named 'some_transitive_dep'", name="some_transitive_dep",
+        )
+        with pytest.raises(ModuleNotFoundError) as ei:
+            reraise_for_missing_extra(
+                original, feature="cdk.sql.AdbcReader", extra="arrow",
+                modules=("pyarrow",),
+            )
+        # Same object, NOT re-wrapped as MissingExtraError.
+        assert ei.value is original
+        assert not isinstance(ei.value, MissingExtraError)
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+class TestHttpTransportLazyAiohttp:
+    """The lazy ``import aiohttp`` inside build_http_transport: it must run
+    (success) with aiohttp present and name the ``api`` extra when absent."""
+
+    async def test_build_http_transport_succeeds_with_aiohttp(self):
+        import aiohttp
+        from cdk.resolver import ResolutionContext, Resolver
+        from cdk.transport_factory import HttpTransport, build_http_transport
+
+        resolver = Resolver(ResolutionContext())
+        transport = await build_http_transport(
+            {"base_url": "https://example.test"}, resolver=resolver,
+        )
+        try:
+            assert isinstance(transport, HttpTransport)
+            assert isinstance(transport.session, aiohttp.ClientSession)
+            assert transport.base_url == "https://example.test"
+        finally:
+            await transport.session.close()
+
+    async def test_build_http_transport_names_api_extra_when_aiohttp_absent(
+        self, monkeypatch,
+    ):
+        from cdk._extras import MissingExtraError
+        from cdk.resolver import ResolutionContext, Resolver
+        from cdk.transport_factory import build_http_transport
+
+        # ``sys.modules[name] = None`` makes ``import name`` raise ImportError
+        # with ``name`` set -- the same shape as a genuinely-absent package.
+        monkeypatch.setitem(sys.modules, "aiohttp", None)
+        resolver = Resolver(ResolutionContext())
+
+        with pytest.raises(MissingExtraError) as ei:
+            await build_http_transport(
+                {"base_url": "https://example.test"}, resolver=resolver,
+            )
+        assert "analitiq-cdk[api]" in str(ei.value)
