@@ -11,6 +11,15 @@ sqlalchemy / aiohttp / pyarrow — callers import the specific submodule they ne
 
 The one rule: the dependency points engine -> CDK, never back. No module here
 imports anything engine-side.
+
+``MissingExtraError`` is re-exported here (it lives in the pure, dependency-free
+``cdk._extras``) so a control-plane consumer can ``except cdk.MissingExtraError``
+without reaching into a private module. This keeps ``__init__`` import-light:
+the re-export pulls only ``typing``.
 """
 
+from ._extras import MissingExtraError
+
 __version__ = "0.1.0"
+
+__all__ = ["MissingExtraError"]

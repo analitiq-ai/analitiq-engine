@@ -17,7 +17,9 @@ Public surface:
 
 from __future__ import annotations
 
-from .adbc_reader import AdbcReader, AdbcReaderClosedError, open_adbc_reader
+from typing import TYPE_CHECKING, Any
+
+from .._extras import reraise_for_missing_extra
 from .ddl import build_create_table_sql, create_table
 from .dialects import SUPPORTED_DIALECTS, SqlDialect, get_dialect
 from .discovery import list_columns, list_schemas, list_tables
@@ -29,6 +31,33 @@ from .exceptions import (
     UnsupportedDialectError,
 )
 from .execution import execute_ddl, fetch_rows
+
+# The ADBC reader is the Arrow streaming read path; it imports ``pyarrow``.
+# Keep it out of the eager import graph so the SQL control-plane surface
+# (discovery + standalone ``create_table``) stays importable without the
+# ``arrow`` extra. ``cdk.sql.AdbcReader`` & friends resolve lazily on first
+# access (PEP 562); they require ``analitiq-cdk[arrow]``.
+_LAZY_ARROW = frozenset({"AdbcReader", "AdbcReaderClosedError", "open_adbc_reader"})
+
+if TYPE_CHECKING:
+    from .adbc_reader import (  # noqa: F401
+        AdbcReader,
+        AdbcReaderClosedError,
+        open_adbc_reader,
+    )
+
+
+def __getattr__(name: str) -> Any:
+    if name in _LAZY_ARROW:
+        try:
+            from . import adbc_reader
+        except ImportError as exc:
+            reraise_for_missing_extra(
+                exc, feature=f"cdk.sql.{name}", extra="arrow", modules=("pyarrow",)
+            )
+        return getattr(adbc_reader, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 __all__ = [
     "list_schemas",

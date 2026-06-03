@@ -218,9 +218,26 @@ still points *into* the CDK:
 The connector's type-map **data** (`type-map.json` / `type-map-write.json`) is
 plain data the CDK reads from a path — it is not a seam.
 
-**Allowed external (PyPI) dependencies of the CDK:** `pyarrow`, `sqlalchemy`,
-`aiohttp`, `pydantic`, plus the per-driver DB packages a connector pulls in.
-Explicitly **not** `grpcio` / `protobuf` — gRPC is the engine's transport, not a
+**Allowed external (PyPI) dependencies of the CDK**, split into a small required
+core and opt-in extras so a consumer pulls only what its role needs:
+
+- **Core (required):** `sqlalchemy` + `pydantic`. This is the SQL *control-plane*
+  surface — `cdk.sql` discovery + standalone `create_table` over SQLAlchemy, the
+  `ConnectionRuntime`/transport seam, the type-map (string surface) and secrets
+  machinery. A consumer that only introspects schemas and creates tables installs
+  this and nothing else.
+- **`arrow` extra → `pyarrow`:** the columnar streaming surface
+  (`schema_contract`, `sql_types`, `sql.adbc_reader`, `type_map.parse_arrow_type`,
+  the `GenericSQLConnector` read/write path).
+- **`api` extra → `aiohttp`:** the HTTP transport for API connectors.
+- **`streaming` extra:** convenience alias for `arrow` + `api` — the full
+  connector surface the engine consumes.
+
+Plus the per-driver DB packages a connector pulls in. The split is enforced by
+lazy imports: `cdk.sql` and `cdk.type_map` resolve the Arrow helpers (and the
+HTTP transport its `aiohttp` session) only on first use, so importing the core
+control-plane surface never pulls `pyarrow`/`aiohttp`. Explicitly **not**
+`grpcio` / `protobuf` — gRPC is the engine's transport, not a
 database-connectivity concern (see §4.3 item 1).
 
 ### 4.2 The move

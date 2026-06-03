@@ -13,11 +13,30 @@ packages = [{ include = "cdk" }]
 # never the streaming wire protocol. Explicitly NOT grpcio / protobuf.
 # Per-driver DB packages (asyncpg, adbc-driver-*, ...) are pulled in by the
 # connector that needs them, not by the CDK core.
+#
+# Core surface = the SQL control-plane: ``cdk.sql`` discovery + standalone
+# ``create_table`` over SQLAlchemy, the ConnectionRuntime/transport seam, the
+# type-map and secrets machinery. That surface needs only SQLAlchemy + Pydantic.
+# Arrow columnar streaming (pyarrow) and the HTTP transport (aiohttp) are
+# opt-in extras so a database-only consumer (e.g. a control-plane process that
+# only introspects schemas and creates tables) installs neither.
 python = "^3.11"
-pyarrow = ">=14.0.0"
 sqlalchemy = { version = "^2.0.0", extras = ["asyncio"] }
-aiohttp = "^3.8.0"
 pydantic = "^2.0.0"
+# Optional: Arrow columnar read/write (read_batches / write_batch, schema
+# casting, the ADBC reader, the DDL type renderers).
+pyarrow = { version = ">=14.0.0", optional = true }
+# Optional: HTTP transport for API connectors.
+aiohttp = { version = "^3.8.0", optional = true }
+
+[tool.poetry.extras]
+# Arrow columnar streaming surface (cdk.schema_contract, cdk.sql_types,
+# cdk.sql.adbc_reader, type_map.parse_arrow_type, GenericSQLConnector read/write).
+arrow = ["pyarrow"]
+# HTTP transport for API connectors (cdk.transport_factory http builder).
+api = ["aiohttp"]
+# Full streaming connector surface the engine consumes: both of the above.
+streaming = ["pyarrow", "aiohttp"]
 
 [build-system]
 requires = ["poetry-core"]
