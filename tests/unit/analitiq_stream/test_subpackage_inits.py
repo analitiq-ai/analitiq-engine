@@ -125,29 +125,21 @@ class TestSharedPackageInit:
     def test_shared_utilities(self):
         """Direct imports from the shared package match its current __all__.
 
-        The legacy ``DIALECT_MAP``, ``SSL_DIALECTS``,
-        ``DatabaseConnectionParams``, ``extract_connection_params``, and
-        ``canonical_ssl_to_connect_arg`` exports were removed when
-        connector-driven transports replaced the hard-coded engine
-        factory; what remains are pure SQL helpers and shared lifecycle
-        primitives.
+        The connector plumbing (``ConnectionRuntime``, ``RateLimiter`` and the
+        SQL/identifier helpers) moved into the ``cdk`` package when the CDK was
+        carved out (ADR §4); what remains in ``src.shared`` is the engine-only
+        run-id lifecycle.
         """
         from src.shared import (
-            ConnectionRuntime,
-            RateLimiter,
-            acquire_connection,
-            get_default_clause,
-            get_full_table_name,
-            validate_sql_identifier,
+            get_or_generate_run_id,
+            get_run_id,
+            initialize_run_id,
         )
 
         for obj in (
-            ConnectionRuntime,
-            RateLimiter,
-            acquire_connection,
-            get_default_clause,
-            get_full_table_name,
-            validate_sql_identifier,
+            get_run_id,
+            get_or_generate_run_id,
+            initialize_run_id,
         ):
             assert obj is not None
 

@@ -22,7 +22,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.mysql import DATETIME as MySQLDateTime
 from sqlalchemy.dialects.postgresql import JSONB
 
-from src.engine.type_map import TypeMapper, parse_arrow_type
+from cdk.type_map import TypeMapper, parse_arrow_type
 
 # MySQL fractional-seconds precision (fsp) per Arrow timestamp unit. Generic
 # SQLAlchemy ``DateTime`` compiles to a bare MySQL ``DATETIME`` (fsp 0), which

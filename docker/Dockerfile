@@ -48,7 +48,7 @@ RUN mkdir -p \
 #   - "destination": Runs the gRPC destination server
 ENV RUN_MODE=engine \
     PIPELINE_ID="" \
-    PYTHONPATH=/app \
+    PYTHONPATH=/app:/app/cdk \
     GRPC_PORT=50051 \
     DESTINATION_GRPC_HOST="" \
     DESTINATION_GRPC_PORT=50051

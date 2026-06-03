@@ -34,7 +34,7 @@ from ...destination.schema_contract import SchemaContract
 from ...models.resolved import ResolvedSource
 from ...models.stream import StreamFilter
 from ...models.state import CursorField, StreamCursor, StreamStats
-from ...shared.connection_runtime import ConnectionRuntime
+from cdk.connection_runtime import ConnectionRuntime
 from ...shared.expressions import resolve_value_expression
 from ...shared.http_utils import join_url
 from ...state.state_manager import StateManager

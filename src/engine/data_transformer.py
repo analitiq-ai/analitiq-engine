@@ -15,8 +15,8 @@ import pyarrow as pa
 
 from .exceptions import TransformationError
 from .expression_evaluator import SecureExpressionEvaluator
-from .type_map.arrow import resolve_arrow_type
-from .type_map.exceptions import InvalidTypeMapError
+from cdk.type_map.arrow import resolve_arrow_type
+from cdk.type_map.exceptions import InvalidTypeMapError
 
 logger = logging.getLogger(__name__)
 

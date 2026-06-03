@@ -395,3 +395,7 @@ tests/e2e/reports/
 # Keep test fixtures
 !**/tests/**/fixtures/**
 !**/tests/**/data/**/*.json
+# ...but never compiled bytecode under fixtures (the broad re-include above
+# would otherwise un-ignore __pycache__/*.pyc and let it be committed).
+**/tests/**/fixtures/**/__pycache__/
+**/tests/**/fixtures/**/*.py[cod]

@@ -17,9 +17,9 @@ from __future__ import annotations
 
 import pytest
 
-from src.engine.derived_functions import DEFAULT_FUNCTIONS
-from src.engine.resolver import ResolutionContext, Resolver
-from src.shared.transport_factory import (
+from cdk.derived_functions import DEFAULT_FUNCTIONS
+from cdk.resolver import ResolutionContext, Resolver
+from cdk.transport_factory import (
     _ADBC_DRIVER_MODULES,
     _resolve_db_kwargs,
     build_adbc_transport,

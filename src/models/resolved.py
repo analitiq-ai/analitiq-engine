@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from .stream import DestinationConfig, MappingConfig, SourceConfig
-from ..shared.connection_runtime import ConnectionRuntime
+from cdk.connection_runtime import ConnectionRuntime
 
 
 @dataclass(frozen=True)

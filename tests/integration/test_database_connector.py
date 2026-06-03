@@ -7,9 +7,9 @@ from unittest.mock import AsyncMock
 
 from sqlalchemy import text
 from src.source.connectors.database import DatabaseConnector
-from src.shared.connection_runtime import ConnectionRuntime
-from src.shared.database_utils import acquire_connection
-from src.secrets.resolvers.memory import InMemorySecretsResolver
+from cdk.connection_runtime import ConnectionRuntime
+from cdk.database_utils import acquire_connection
+from cdk.secrets.resolvers.memory import InMemorySecretsResolver
 
 
 def _postgres_available() -> bool:

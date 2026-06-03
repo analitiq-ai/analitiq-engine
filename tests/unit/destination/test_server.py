@@ -9,16 +9,24 @@ or drops the prefix would ship silently without this test.
 
 from __future__ import annotations
 
+import io
 from typing import AsyncIterator
 from unittest.mock import AsyncMock, MagicMock
 
+import pyarrow as pa
 import pytest
 
 from src.destination.connectors.api import ApiDestinationHandler
 from src.destination.server import DestinationServicer
-from src.engine.type_map import InvalidTypeMapError, UnmappedTypeError
+from cdk.base_handler import BatchWriteResult
+from cdk.type_map import InvalidTypeMapError, UnmappedTypeError
+from cdk.types import Cursor as CdkCursor
 from src.grpc.generated.analitiq.v1 import (
+    AckStatus,
+    Cursor,
     GetCapabilitiesRequest,
+    PayloadFormat,
+    RecordBatch,
     SchemaMessage,
     StreamRequest,
     WriteMode,
@@ -29,12 +37,47 @@ async def _iter_once(msg: StreamRequest) -> AsyncIterator[StreamRequest]:
     yield msg
 
 
-def _schema_request(stream_id: str = "s1") -> StreamRequest:
+async def _iter_many(*msgs: StreamRequest) -> AsyncIterator[StreamRequest]:
+    for msg in msgs:
+        yield msg
+
+
+def _schema_request(
+    stream_id: str = "s1",
+    *,
+    version: int = 1,
+    write_mode: int = WriteMode.WRITE_MODE_INSERT,
+) -> StreamRequest:
     return StreamRequest(
         schema=SchemaMessage(
             stream_id=stream_id,
-            version=1,
-            write_mode=WriteMode.WRITE_MODE_INSERT,
+            version=version,
+            write_mode=write_mode,
+        )
+    )
+
+
+def _arrow_ipc(batch: pa.RecordBatch) -> bytes:
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, batch.schema) as writer:
+        writer.write_batch(batch)
+    return sink.getvalue().to_pybytes()
+
+
+def _batch_request(
+    *, stream_id: str = "s1", token: bytes = b""
+) -> StreamRequest:
+    batch = pa.RecordBatch.from_pydict({"id": [1]})
+    return StreamRequest(
+        batch=RecordBatch(
+            run_id="r1",
+            stream_id=stream_id,
+            batch_seq=0,
+            format=PayloadFormat.PAYLOAD_FORMAT_ARROW_IPC,
+            payload=_arrow_ipc(batch),
+            record_count=1,
+            record_ids=["1"],
+            cursor=Cursor(token=token),
         )
     )
 
@@ -197,3 +240,97 @@ class TestGetCapabilitiesApiHandlerIntegration:
         assert WriteMode.WRITE_MODE_UPSERT not in resp.supported_write_modes
         assert WriteMode.WRITE_MODE_INSERT in resp.supported_write_modes
         assert resp.supports_upsert is False
+
+
+class TestWireToCdkTranslation:
+    """The servicer is the one place protobuf <-> CDK-native types are
+    translated (ADR §4.1: the CDK never imports gRPC). These pin that the
+    translation is faithful — a dropped or mistranslated field would let the
+    handler see the wrong schema/cursor, or advance the wrong checkpoint.
+    """
+
+    @pytest.mark.asyncio
+    async def test_schema_message_becomes_cdk_schema_spec(self):
+        from cdk.types import SchemaSpec
+        from cdk.types import WriteMode as CdkWriteMode
+
+        handler = MagicMock()
+        handler.configure_schema = AsyncMock(return_value=True)
+        servicer = DestinationServicer(handler, server=MagicMock())
+
+        async for _ in servicer.StreamRecords(
+            _iter_once(
+                _schema_request(
+                    "s9", version=7, write_mode=WriteMode.WRITE_MODE_UPSERT
+                )
+            ),
+            context=MagicMock(),
+        ):
+            pass
+
+        spec = handler.configure_schema.call_args.args[0]
+        assert isinstance(spec, SchemaSpec)
+        assert spec.stream_id == "s9"
+        assert spec.version == 7
+        assert spec.write_mode is CdkWriteMode.WRITE_MODE_UPSERT
+
+    @pytest.mark.asyncio
+    async def test_batch_cursor_is_translated_in_and_committed_cursor_out(self):
+        handler = MagicMock()
+        handler.configure_schema = AsyncMock(return_value=True)
+        handler.write_batch = AsyncMock(
+            return_value=BatchWriteResult(
+                status=AckStatus.ACK_STATUS_SUCCESS,
+                records_written=1,
+                committed_cursor=CdkCursor(token=b"committed-xyz"),
+            )
+        )
+        servicer = DestinationServicer(handler, server=MagicMock())
+
+        responses = []
+        async for resp in servicer.StreamRecords(
+            _iter_many(
+                _schema_request("s1"),
+                _batch_request(stream_id="s1", token=b"inbound-abc"),
+            ),
+            context=MagicMock(),
+        ):
+            responses.append(resp)
+
+        # Inbound: wire Cursor.token -> CDK-native Cursor on the handler call.
+        passed_cursor = handler.write_batch.call_args.kwargs["cursor"]
+        assert isinstance(passed_cursor, CdkCursor)
+        assert passed_cursor.token == b"inbound-abc"
+
+        # Outbound: handler's CDK Cursor -> wire Cursor on the ack.
+        ack = responses[-1].ack
+        assert ack.status == AckStatus.ACK_STATUS_SUCCESS
+        assert ack.HasField("committed_cursor")
+        assert ack.committed_cursor.token == b"committed-xyz"
+
+    @pytest.mark.asyncio
+    async def test_no_committed_cursor_leaves_wire_field_unset(self):
+        handler = MagicMock()
+        handler.configure_schema = AsyncMock(return_value=True)
+        handler.write_batch = AsyncMock(
+            return_value=BatchWriteResult(
+                status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
+                records_written=0,
+                committed_cursor=None,
+                failure_summary="transient",
+            )
+        )
+        servicer = DestinationServicer(handler, server=MagicMock())
+
+        responses = []
+        async for resp in servicer.StreamRecords(
+            _iter_many(_schema_request("s1"), _batch_request(stream_id="s1")),
+            context=MagicMock(),
+        ):
+            responses.append(resp)
+
+        ack = responses[-1].ack
+        assert ack.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
+        # A None CDK cursor must not materialize a committed_cursor on the wire
+        # (a checkpoint advance on a failed batch).
+        assert not ack.HasField("committed_cursor")

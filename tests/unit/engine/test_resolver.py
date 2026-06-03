@@ -1,4 +1,4 @@
-"""Tests for :mod:`src.engine.resolver`.
+"""Tests for :mod:`cdk.resolver`.
 
 Focuses on edge cases the higher-level transport-factory tests do not
 reach: scope traversal failures, expression-marker discipline, template
@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.engine.resolver import ResolutionContext, Resolver
+from cdk.resolver import ResolutionContext, Resolver
 
 
 # ---------------------------------------------------------------------------

@@ -2,7 +2,7 @@
 
 The hard-coded engine factory, dialect map, and SSL canonicalization
 that used to live here have been replaced by the connector-driven
-transport factory at :mod:`src.shared.transport_factory`. What remains
+transport factory at :mod:`cdk.transport_factory`. What remains
 is pure SQL helpers (identifier validation, fully-qualified names,
 DEFAULT clauses) and connection acquisition — none of them know
 anything provider-specific.

@@ -12,7 +12,7 @@ import pytest
 from unittest.mock import AsyncMock, Mock
 
 from src.engine.pipeline import Pipeline
-from src.shared.connection_runtime import ConnectionRuntime
+from cdk.connection_runtime import ConnectionRuntime
 
 
 # --- Test UUIDs ---

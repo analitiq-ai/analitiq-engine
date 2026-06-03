@@ -50,8 +50,8 @@ from src.config.connection_loader import (
     load_connector_definition,
 )
 from src.config.utils import load_json_file
-from src.engine.type_map import (
-    InvalidTypeMapError,
+from cdk.type_map import (
+    TypeMapNotFoundError,
     TypeMapper,
     load_connection_type_map,
     load_type_map,
@@ -80,8 +80,8 @@ from src.models.resolved import (
     ResolvedStream,
     RuntimeConfig,
 )
-from src.secrets import LocalFileSecretsResolver, SecretsResolver
-from src.shared.connection_runtime import ConnectionRuntime
+from cdk.secrets import LocalFileSecretsResolver, SecretsResolver
+from cdk.connection_runtime import ConnectionRuntime
 
 logger = logging.getLogger(__name__)
 
@@ -349,16 +349,16 @@ class PipelineConfigPrep:
         self._loaded_connectors[connector_id] = document
 
         # Connector type-map is optional from this layer's perspective:
-        # API-only connectors that never expose SQL native types do not
-        # ship one. The loader raises InvalidTypeMapError when the file
-        # is absent; downstream code that actually needs a mapper (e.g.
-        # the database destination) will surface the missing-mapper
-        # condition with a precise error.
+        # API-only connectors that never expose SQL native types do not ship
+        # one. Only a genuinely ABSENT map (TypeMapNotFoundError) is benign and
+        # downgraded to None; a present-but-malformed read or write map is a
+        # real config error and propagates so CI catches it at load instead of
+        # silently dropping the connector's type resolution.
         try:
             self._connector_type_mappers[connector_id] = load_type_map(
                 self._paths["connectors"], connector_id
             )
-        except InvalidTypeMapError as err:
+        except TypeMapNotFoundError as err:
             logger.info(
                 "No connector type-map for %r (%s); native SQL types will not "
                 "be resolvable for this connector",

@@ -5,10 +5,10 @@ connector definition that describes how to use it, and the secret store
 that fills in credential values. It is the single place the engine touches
 provider configuration: everything provider-specific is encoded in the
 connector's ``transports`` block, resolved through the typed
-:class:`~src.engine.resolver.ResolutionContext`, and turned into a
-concrete transport (:class:`~src.shared.transport_factory.SqlAlchemyTransport`,
-:class:`~src.shared.transport_factory.AdbcTransport`, or
-:class:`~src.shared.transport_factory.HttpTransport`) by the transport
+:class:`~cdk.resolver.ResolutionContext`, and turned into a
+concrete transport (:class:`~cdk.transport_factory.SqlAlchemyTransport`,
+:class:`~cdk.transport_factory.AdbcTransport`, or
+:class:`~cdk.transport_factory.HttpTransport`) by the transport
 factory. The runtime never inspects host strings, header dicts, DSN
 formats, or SSL flags directly.
 
@@ -32,16 +32,17 @@ from typing import Any, Dict, Mapping, Optional
 import aiohttp
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from src.engine.resolver import ResolutionContext
-from src.engine.type_map import InvalidTypeMapError, TypeMapper, UnmappedTypeError
-from src.secrets.protocol import SecretsResolver
-from src.secrets.exceptions import (
+from cdk.resolver import ResolutionContext
+from cdk.type_map import InvalidTypeMapError, TypeMapper, UnmappedTypeError
+from cdk.types import EndpointScope
+from cdk.secrets.protocol import SecretsResolver
+from cdk.secrets.exceptions import (
     PlaceholderExpansionError,
     SecretNotFoundError,
     SecretResolutionError,
 )
-from src.shared.rate_limiter import RateLimiter
-from src.shared.transport_factory import (
+from cdk.rate_limiter import RateLimiter
+from cdk.transport_factory import (
     AdbcTransport,
     HttpTransport,
     SqlAlchemyTransport,
@@ -194,25 +195,27 @@ class ConnectionRuntime:
     def connection_type_mapper(self) -> Optional[TypeMapper]:
         return self._connection_type_mapper
 
-    def type_mapper_for(self, endpoint_ref: Any) -> TypeMapper:
-        """Pick the type mapper whose scope matches ``endpoint_ref``.
+    def type_mapper_for(self, *, scope: EndpointScope) -> TypeMapper:
+        """Pick the type mapper for an endpoint of the given ``scope``.
 
-        For ``scope="connection"`` the connection's own ``type-map.json``
+        For ``EndpointScope.CONNECTION`` the connection's own ``type-map.json``
         wins when present; otherwise the connector's mapper is used. The
         connector's native vocabulary is authoritative for the driver
         (e.g. MySQL ``BIGINT`` is the same in every MySQL installation),
         so a connection only needs its own map to override or extend it.
-        """
-        from src.models.stream import EndpointRef
 
-        ref = EndpointRef.from_dict(endpoint_ref)
-        if ref.scope == "connector":
+        The caller passes the already-resolved :class:`~cdk.types.EndpointScope`
+        (the engine maps its ``EndpointRef.scope`` to it at the boundary), so
+        the CDK never imports the engine's endpoint model. Constructing the
+        enum engine-side already rejects an unknown scope.
+        """
+        if scope == EndpointScope.CONNECTOR:
             return self.connector_type_mapper
-        if ref.scope == "connection":
+        if scope == EndpointScope.CONNECTION:
             if self._connection_type_mapper is not None:
                 return self._connection_type_mapper
             return self.connector_type_mapper
-        raise ValueError(f"type_mapper_for: unknown endpoint scope in {ref}")
+        raise ValueError(f"type_mapper_for: unknown endpoint scope {scope!r}")
 
     # ------------------------------------------------------------------
     # Materialization

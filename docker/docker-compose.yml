@@ -28,6 +28,7 @@ services:
     # Convention-based discovery finds pipelines/manifest.json at /app/pipelines/
     volumes:
       - ../src:/app/src
+      - ../cdk:/app/cdk  # CDK package on PYTHONPATH, live like src
       - ../connectors:/app/connectors
       - ../connections:/app/connections
       - ../pipelines:/app/pipelines
@@ -96,6 +97,7 @@ services:
     # Convention-based discovery finds pipelines/manifest.json at /app/pipelines/
     volumes:
       - ../src:/app/src  # Live code changes without rebuild
+      - ../cdk:/app/cdk  # CDK package on PYTHONPATH, live like src
       - ../connectors:/app/connectors
       - ../connections:/app/connections  # includes .secrets/ per connection
       - ../pipelines:/app/pipelines

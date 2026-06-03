@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from src.shared.adbc_registry import AdbcConfigurationError
+from cdk.adbc_registry import AdbcConfigurationError
 
 
 class TestErrorClass:

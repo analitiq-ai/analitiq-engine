@@ -27,8 +27,8 @@ from src.models.resolved import ResolvedSource
 from src.models.stream import (
     EndpointRef, ReplicationConfig, ReplicationMethod, SourceConfig, StreamFilter,
 )
-from src.secrets import InMemorySecretsResolver
-from src.shared.connection_runtime import ConnectionRuntime
+from cdk.secrets import InMemorySecretsResolver
+from cdk.connection_runtime import ConnectionRuntime
 from src.source.connectors.base import ReadError
 from src.source.connectors.database import DatabaseConnector
 from src.source.drivers.adbc_reader import AdbcReader, AdbcReaderClosedError

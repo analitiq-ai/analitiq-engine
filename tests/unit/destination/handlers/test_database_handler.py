@@ -11,8 +11,8 @@ import pytest
 from unittest.mock import AsyncMock, patch
 
 from src.destination.connectors.database import DatabaseDestinationHandler
-from src.shared.connection_runtime import ConnectionRuntime
-from src.shared.transport_factory import SqlAlchemyTransport
+from cdk.connection_runtime import ConnectionRuntime
+from cdk.transport_factory import SqlAlchemyTransport
 
 
 @pytest.fixture
@@ -65,7 +65,7 @@ def _patch_transport(*, engine=None, side_effect=None):
     """Patch build_transport with a mocked SqlAlchemyTransport result."""
     if side_effect is not None:
         return patch(
-            "src.shared.connection_runtime.build_transport",
+            "cdk.connection_runtime.build_transport",
             new=AsyncMock(side_effect=side_effect),
         )
     transport = SqlAlchemyTransport(
@@ -74,7 +74,7 @@ def _patch_transport(*, engine=None, side_effect=None):
         dialect="postgresql",
     )
     return patch(
-        "src.shared.connection_runtime.build_transport",
+        "cdk.connection_runtime.build_transport",
         new=AsyncMock(return_value=transport),
     )
 
@@ -112,19 +112,19 @@ class TestDatabaseHandlerConnect:
         [
             pytest.param(
                 __import__(
-                    "src.engine.type_map", fromlist=["UnmappedTypeError"]
+                    "cdk.type_map", fromlist=["UnmappedTypeError"]
                 ).UnmappedTypeError("pg", "forward", "MONEY"),
                 id="unmapped-type",
             ),
             pytest.param(
                 __import__(
-                    "src.engine.type_map", fromlist=["InvalidTypeMapError"]
+                    "cdk.type_map", fromlist=["InvalidTypeMapError"]
                 ).InvalidTypeMapError("rule 3 invalid"),
                 id="invalid-type-map",
             ),
             pytest.param(
                 __import__(
-                    "src.secrets.exceptions", fromlist=["PlaceholderExpansionError"]
+                    "cdk.secrets.exceptions", fromlist=["PlaceholderExpansionError"]
                 ).PlaceholderExpansionError(
                     placeholder="password", connection_id="x", detail="not found"
                 ),
@@ -176,7 +176,7 @@ class TestDatabaseHandlerConnect:
             engine=AsyncMock(), driver="sqlite+aiosqlite", dialect="sqlite"
         )
         with patch(
-            "src.shared.connection_runtime.build_transport",
+            "cdk.connection_runtime.build_transport",
             new=AsyncMock(return_value=transport),
         ):
             await handler.connect(runtime)

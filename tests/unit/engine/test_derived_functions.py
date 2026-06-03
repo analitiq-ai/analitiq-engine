@@ -1,4 +1,4 @@
-"""Tests for :mod:`src.engine.derived_functions`.
+"""Tests for :mod:`cdk.derived_functions`.
 
 The registered functions are the only escape hatch from the declarative
 connector model. These tests pin down the input/output contract for each
@@ -11,14 +11,14 @@ import base64
 
 import pytest
 
-from src.engine.derived_functions import (
+from cdk.derived_functions import (
     DEFAULT_FUNCTIONS,
     base64_encode_function,
     basic_auth_function,
     lookup_function,
     url_encode_function,
 )
-from src.engine.resolver import ResolutionContext, Resolver
+from cdk.resolver import ResolutionContext, Resolver
 
 
 def _resolver(ctx: ResolutionContext | None = None) -> Resolver:

@@ -11,15 +11,15 @@ from typing import Any, Dict, List
 
 import pyarrow as pa
 
-from ..base_handler import BaseDestinationHandler, BatchWriteResult
+from cdk.base_handler import BaseDestinationHandler, BatchWriteResult
 from ..formatters import get_formatter
 from ..formatters.base import BaseFormatter
-from ...grpc.generated.analitiq.v1 import (
+from cdk.types import (
     AckStatus,
     Cursor,
-    SchemaMessage,
+    SchemaSpec,
 )
-from ...shared.connection_runtime import ConnectionRuntime
+from cdk.connection_runtime import ConnectionRuntime
 
 
 logger = logging.getLogger(__name__)
@@ -110,7 +110,7 @@ class StreamDestinationHandler(BaseDestinationHandler):
         self._connected = False
         logger.info("StreamDestinationHandler disconnected")
 
-    async def configure_schema(self, schema_msg: SchemaMessage) -> bool:
+    async def configure_schema(self, schema_spec: SchemaSpec) -> bool:
         """
         Configure schema for stream output.
 
@@ -118,7 +118,7 @@ class StreamDestinationHandler(BaseDestinationHandler):
         we don't need to create any structures.
 
         Args:
-            schema_msg: Schema configuration (ignored for stdout)
+            schema_spec: Schema configuration (ignored for stdout)
 
         Returns:
             Always True

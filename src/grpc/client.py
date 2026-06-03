@@ -46,7 +46,10 @@ _STREAM_TASK_FAILED = object()  # Sentinel pushed onto the response queue when
 
 
 # Default configuration from environment
-DEFAULT_GRPC_HOST = os.getenv("DESTINATION_GRPC_HOST", "localhost")
+# An empty DESTINATION_GRPC_HOST (the var is set but blank — e.g. baked into the
+# image to mean "gRPC mode not configured") must fall back to localhost rather
+# than yield a hostless ":50051" address. ``or`` covers both unset and blank.
+DEFAULT_GRPC_HOST = os.getenv("DESTINATION_GRPC_HOST") or "localhost"
 DEFAULT_GRPC_PORT = int(os.getenv("DESTINATION_GRPC_PORT", "50051"))
 DEFAULT_GRPC_TIMEOUT = int(os.getenv("GRPC_TIMEOUT_SECONDS", "300"))
 DEFAULT_MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
@@ -85,6 +88,10 @@ class DestinationGRPCClient:
         max_retries: int = DEFAULT_MAX_RETRIES,
         max_message_size: int = DEFAULT_MAX_MESSAGE_SIZE,
     ):
+        # Coalesce a blank host (env baked as ``DESTINATION_GRPC_HOST=""`` or an
+        # explicit ``host=""``) to localhost so the address is never hostless
+        # (``:50051``). Mirrors the engine-side fallback in engine.py.
+        host = host or "localhost"
         self.address = f"{host}:{port}"
         self.timeout = timeout_seconds
         self.max_retries = max_retries

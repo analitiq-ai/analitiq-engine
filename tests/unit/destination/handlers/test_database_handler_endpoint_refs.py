@@ -12,9 +12,9 @@ from unittest.mock import AsyncMock
 import pytest
 
 from src.destination.connectors.database import DatabaseDestinationHandler
-from src.engine.type_map import TypeMapper
-from src.engine.type_map.rules import parse_rules
-from src.shared.connection_runtime import ConnectionRuntime
+from cdk.type_map import TypeMapper
+from cdk.type_map.rules import parse_rules
+from cdk.connection_runtime import ConnectionRuntime
 
 
 def _mapper(label: str) -> TypeMapper:
@@ -125,7 +125,7 @@ class TestWriteBatchFatalOnTypeMapError:
             DatabaseDestinationHandler,
             _StreamState,
         )
-        from src.engine.type_map import UnmappedTypeError
+        from cdk.type_map import UnmappedTypeError
         from src.grpc.generated.analitiq.v1 import AckStatus, Cursor
 
         handler = DatabaseDestinationHandler()

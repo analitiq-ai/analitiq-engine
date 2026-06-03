@@ -1,7 +1,7 @@
 """Database fixtures for integration tests.
 
 The legacy ``create_database_engine`` factory has been replaced by the
-connector-driven :mod:`src.shared.transport_factory`. The integration
+connector-driven :mod:`cdk.transport_factory`. The integration
 fixture now builds a sqlalchemy transport directly from a synthesized
 connector spec, exercising the same code path the engine uses at
 runtime.
@@ -12,8 +12,8 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from src.engine.resolver import ResolutionContext
-from src.shared.transport_factory import build_sqlalchemy_transport, resolve_transport_spec
+from cdk.resolver import ResolutionContext
+from cdk.transport_factory import build_sqlalchemy_transport, resolve_transport_spec
 
 
 def _postgres_connector_spec(driver_string: str) -> dict:
