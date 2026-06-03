@@ -28,8 +28,16 @@ from src.engine.pipeline_config_prep import (
     _parse_stream_filter,
     _parse_write_config,
 )
-from src.models.resolved import ResolvedPipeline, ResolvedStream
-from src.models.stream import ReplicationMethod, WriteMode
+from src.models.resolved import (
+    BatchingConfig,
+    ErrorHandlingConfig,
+    ResolvedDestination,
+    ResolvedPipeline,
+    ResolvedSource,
+    ResolvedStream,
+    RuntimeConfig,
+)
+from src.models.stream import ReplicationMethod, SourceConfig, WriteMode
 
 # ---------------------------------------------------------------------------
 # Schema-mirror infrastructure
@@ -505,3 +513,208 @@ class TestParserErrorPaths:
             pipeline = prep.create_config()
         assert pipeline.streams[0].pipeline_id == ""
         assert any("pipeline_id" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# ResolvedStream method tests
+# ---------------------------------------------------------------------------
+
+
+class TestResolvedStreamMethods:
+    """Direct tests for ResolvedStream helper methods."""
+
+    def _make_runtime(self):
+        from unittest.mock import MagicMock
+        rt = MagicMock()
+        rt.connection_id = "test-conn"
+        return rt
+
+    def _make_destination(self) -> ResolvedDestination:
+        from src.models.stream import DestinationConfig, EndpointRef
+        return ResolvedDestination(
+            config=DestinationConfig(
+                endpoint_ref=EndpointRef(
+                    scope="connector", connection_id="test-conn", endpoint_id="ep"
+                )
+            ),
+            runtime=self._make_runtime(),
+            endpoint={"endpoint_id": "ep"},
+        )
+
+    def _make_stream(self, destinations) -> ResolvedStream:
+        from unittest.mock import MagicMock
+        runtime = self._make_runtime()
+        source = ResolvedSource(
+            config=SourceConfig(),
+            runtime=runtime,
+            endpoint={},
+        )
+        return ResolvedStream(
+            stream_id="s1",
+            pipeline_id="test-pipeline",
+            display_name=None,
+            description=None,
+            status="active",
+            tags=[],
+            source=source,
+            destinations=destinations,
+            mapping=__import__(
+                "src.models.stream", fromlist=["MappingConfig"]
+            ).MappingConfig(),
+        )
+
+    def test_get_primary_destination_returns_first(self) -> None:
+        dest = self._make_destination()
+        stream = self._make_stream([dest])
+        assert stream.get_primary_destination() is dest
+
+    def test_get_primary_destination_multiple_returns_first(self) -> None:
+        dest1 = self._make_destination()
+        dest2 = self._make_destination()
+        stream = self._make_stream([dest1, dest2])
+        assert stream.get_primary_destination() is dest1
+
+    def test_get_primary_destination_empty_raises(self) -> None:
+        stream = self._make_stream([])
+        with pytest.raises(ValueError, match="has no destinations configured"):
+            stream.get_primary_destination()
+
+
+# ---------------------------------------------------------------------------
+# Additional happy-path coverage
+# ---------------------------------------------------------------------------
+
+
+class TestCreateConfigRuntimeNonDefaults:
+    def test_runtime_non_defaults_propagate(
+        self, pipeline_tree: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Explicit runtime block in pipeline.json is parsed into RuntimeConfig."""
+        pipeline_doc = _pipeline_doc()
+        pipeline_doc["runtime"] = {
+            "batching": {"batch_size": 250, "max_concurrent_batches": 5},
+            "error_handling": {"strategy": "dlq", "max_retries": 1},
+            "buffer_size": 8000,
+        }
+        _write_json(
+            pipeline_tree / "pipelines" / PIPELINE_ID / "pipeline.json", pipeline_doc
+        )
+        prep = PipelineConfigPrep()
+        pipeline = prep.create_config()
+
+        assert pipeline.runtime.batching.batch_size == 250
+        assert pipeline.runtime.batching.max_concurrent_batches == 5
+        assert pipeline.runtime.error_handling.strategy == "dlq"
+        assert pipeline.runtime.error_handling.max_retries == 1
+        assert pipeline.runtime.buffer_size == 8000
+
+
+# ---------------------------------------------------------------------------
+# Additional error paths
+# ---------------------------------------------------------------------------
+
+
+class TestCreateConfigAdditionalErrorPaths:
+    def test_no_destinations_in_pipeline_raises(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        schema_mirror: Path,
+    ) -> None:
+        root = tmp_path / "project"
+        root.mkdir()
+        _build_tree(root)
+        pipeline_doc = _pipeline_doc()
+        pipeline_doc["connections"]["destinations"] = []
+        _write_json(root / "pipelines" / PIPELINE_ID / "pipeline.json", pipeline_doc)
+        monkeypatch.chdir(root)
+        monkeypatch.setenv("PIPELINE_ID", PIPELINE_ID)
+        prep = PipelineConfigPrep()
+        with pytest.raises(ValueError, match="at least one destination"):
+            prep.create_config()
+
+    def test_connection_id_mismatch_raises(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        schema_mirror: Path,
+    ) -> None:
+        """connection.json whose connection_id disagrees with its directory name is rejected."""
+        root = tmp_path / "project"
+        root.mkdir()
+        _build_tree(root)
+        # Overwrite src connection doc with a mismatched connection_id.
+        bad_doc = _connection_doc("different-id-entirely")
+        _write_json(
+            root / "connections" / CONNECTION_SRC_ID / "connection.json", bad_doc
+        )
+        monkeypatch.chdir(root)
+        monkeypatch.setenv("PIPELINE_ID", PIPELINE_ID)
+        prep = PipelineConfigPrep()
+        with pytest.raises(ValueError, match="Connection id mismatch"):
+            prep.create_config()
+
+    def test_duplicate_stream_id_raises(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        schema_mirror: Path,
+    ) -> None:
+        """Two stream files in the same directory sharing a stream_id are rejected."""
+        root = tmp_path / "project"
+        root.mkdir()
+        _build_tree(root)
+        # Write a second stream file that declares the same stream_id.
+        _write_json(
+            root / "pipelines" / PIPELINE_ID / "streams" / "duplicate.json",
+            _stream_doc(STREAM_ID),
+        )
+        monkeypatch.chdir(root)
+        monkeypatch.setenv("PIPELINE_ID", PIPELINE_ID)
+        prep = PipelineConfigPrep()
+        with pytest.raises(ValueError, match="Duplicate stream_id"):
+            prep.create_config()
+
+
+# ---------------------------------------------------------------------------
+# BatchingConfig / ErrorHandlingConfig invariant tests
+# ---------------------------------------------------------------------------
+
+
+class TestConfigInvariants:
+    def test_batching_config_zero_batch_size_raises(self) -> None:
+        with pytest.raises(ValueError, match="batch_size must be positive"):
+            BatchingConfig(batch_size=0)
+
+    def test_batching_config_negative_batch_size_raises(self) -> None:
+        with pytest.raises(ValueError, match="batch_size must be positive"):
+            BatchingConfig(batch_size=-1)
+
+    def test_batching_config_zero_concurrent_raises(self) -> None:
+        with pytest.raises(ValueError, match="max_concurrent_batches must be positive"):
+            BatchingConfig(max_concurrent_batches=0)
+
+    def test_error_handling_config_unknown_strategy_raises(self) -> None:
+        with pytest.raises(ValueError, match="Unknown error strategy"):
+            ErrorHandlingConfig(strategy="ignore")
+
+    def test_error_handling_config_valid_strategies(self) -> None:
+        assert ErrorHandlingConfig(strategy="fail").strategy == "fail"
+        assert ErrorHandlingConfig(strategy="dlq").strategy == "dlq"
+
+    def test_resolved_pipeline_empty_pipeline_id_raises(self) -> None:
+        with pytest.raises(ValueError, match="pipeline_id cannot be empty"):
+            ResolvedPipeline(
+                pipeline_id="",
+                display_name=None,
+                description=None,
+                status="active",
+                tags=[],
+                source_connection_id="src",
+                destination_connection_ids=[],
+                streams=[],
+                runtime=RuntimeConfig(),
+                schedule={},
+                engine_config={},
+                connections={},
+            )

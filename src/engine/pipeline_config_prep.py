@@ -461,6 +461,13 @@ class PipelineConfigPrep:
         """
         pipeline_doc = self._load_pipeline_document()
 
+        pipeline_id = pipeline_doc.get("pipeline_id")
+        if not pipeline_id:
+            raise ValueError(
+                f"Pipeline document in {self._pipeline_dir} is missing required "
+                f"field 'pipeline_id'"
+            )
+
         connections = pipeline_doc["connections"]
         source_id = connections["source"]
         dest_ids = list(connections.get("destinations") or [])
@@ -485,13 +492,6 @@ class PipelineConfigPrep:
                     f"known: {sorted(self._stream_records)}"
                 )
             resolved_streams.append(self._build_resolved_stream(record))
-
-        pipeline_id = pipeline_doc.get("pipeline_id")
-        if not pipeline_id:
-            raise ValueError(
-                f"Pipeline document in {self._pipeline_dir} is missing required "
-                f"field 'pipeline_id'"
-            )
         raw_runtime = pipeline_doc.get("runtime") or {}
         runtime_cfg = RuntimeConfig(
             batching=_parse_batching_config(raw_runtime.get("batching") or {}),

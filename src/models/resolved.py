@@ -63,6 +63,17 @@ class BatchingConfig:
     batch_size: int = 1000
     max_concurrent_batches: int = 3
 
+    def __post_init__(self) -> None:
+        if self.batch_size <= 0:
+            raise ValueError(f"batch_size must be positive, got {self.batch_size}")
+        if self.max_concurrent_batches <= 0:
+            raise ValueError(
+                f"max_concurrent_batches must be positive, got {self.max_concurrent_batches}"
+            )
+
+
+_VALID_ERROR_STRATEGIES = frozenset({"fail", "dlq"})
+
 
 @dataclass(frozen=True)
 class ErrorHandlingConfig:
@@ -71,6 +82,15 @@ class ErrorHandlingConfig:
     strategy: str = "fail"
     max_retries: int = 3
     retry_delay_seconds: int = 5
+
+    def __post_init__(self) -> None:
+        if self.strategy not in _VALID_ERROR_STRATEGIES:
+            raise ValueError(
+                f"Unknown error strategy {self.strategy!r}; "
+                f"expected one of {sorted(_VALID_ERROR_STRATEGIES)}"
+            )
+        if self.max_retries < 0:
+            raise ValueError(f"max_retries must be non-negative, got {self.max_retries}")
 
 
 @dataclass(frozen=True)
@@ -103,3 +123,7 @@ class ResolvedPipeline:
     schedule: Dict[str, Any]
     engine_config: Dict[str, Any]
     connections: Dict[str, ConnectionRuntime]
+
+    def __post_init__(self) -> None:
+        if not self.pipeline_id:
+            raise ValueError("ResolvedPipeline.pipeline_id cannot be empty")

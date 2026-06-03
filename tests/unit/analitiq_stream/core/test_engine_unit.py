@@ -193,6 +193,27 @@ class TestStreamingEngine:
         )
         assert engine._get_stream_name(stream) == "test-pipeline"
 
+    def test_get_stream_name_empty_pipeline_id_falls_back_to_unknown(self, engine):
+        """Falls back to 'unknown-stream' when both endpoint_ref and pipeline_id are absent."""
+        runtime = MagicMock()
+        source = ResolvedSource(
+            config=SourceConfig(endpoint_ref=None),
+            runtime=runtime,
+            endpoint={},
+        )
+        stream = ResolvedStream(
+            stream_id="s1",
+            pipeline_id="",
+            display_name=None,
+            description=None,
+            status="active",
+            tags=[],
+            source=source,
+            destinations=[],
+            mapping=MappingConfig(),
+        )
+        assert engine._get_stream_name(stream) == "unknown-stream"
+
     def test_metrics_initialization(self, engine):
         """Test that metrics are properly initialized."""
         assert engine.metrics.records_processed == 0
