@@ -35,6 +35,7 @@ def _runtime(
     return ConnectionRuntime(
         raw_config={},
         connection_id="dest-conn",
+        connector_id="test-connector",
         connector_type="database",
         driver="postgresql",
         resolver=AsyncMock(),

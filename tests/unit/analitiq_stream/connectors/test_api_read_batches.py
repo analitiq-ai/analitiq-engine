@@ -93,6 +93,7 @@ def _runtime_with_session(session: _FakeSession) -> ConnectionRuntime:
     runtime = ConnectionRuntime(
         raw_config={"host": "https://api.example.test", "parameters": {}},
         connection_id="test-conn",
+        connector_id="test-connector",
         connector_type="api",
         driver=None,
         resolver=InMemorySecretsResolver({}),

@@ -22,6 +22,7 @@ def _make_file_runtime(*, raw_config=None):
     return ConnectionRuntime(
         raw_config=config,
         connection_id="conn-file-test",
+        connector_id="test-connector",
         connector_type="file",
         driver=None,
         resolver=AsyncMock(resolve=AsyncMock(return_value={"MY_SECRET": "top-secret"})),
@@ -156,6 +157,7 @@ class TestStreamHandlerSecretRetention:
                 "api_key": "${KEY}",
             },
             connection_id="conn-stream-test",
+            connector_id="test-connector",
             connector_type="stdout",
             driver=None,
             resolver=AsyncMock(resolve=AsyncMock(return_value={"KEY": "secret-key"})),
@@ -170,6 +172,7 @@ class TestStreamHandlerSecretRetention:
         runtime = ConnectionRuntime(
             raw_config={"file_format": "jsonl"},
             connection_id="conn-stream-test",
+            connector_id="test-connector",
             connector_type="stdout",
             driver=None,
             resolver=AsyncMock(resolve=AsyncMock(return_value={})),
@@ -187,6 +190,7 @@ class TestStreamHandlerSecretRetention:
                 "formatter_config": {},
             },
             connection_id="conn-stream-fail",
+            connector_id="test-connector",
             connector_type="stdout",
             driver=None,
             resolver=AsyncMock(resolve=AsyncMock(return_value={})),

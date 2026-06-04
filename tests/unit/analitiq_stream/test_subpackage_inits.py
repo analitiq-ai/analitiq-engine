@@ -106,8 +106,9 @@ class TestDestinationConnectorsPackageInit:
         assert destination_registry is not None
         assert get_handler is not None
         assert GenericSQLConnector is not None
-        # The unified SQL connector backs the ``database`` kind.
-        assert destination_registry.get("database") is GenericSQLConnector
+        # The unified SQL connector is the generic fallback for the
+        # ``database`` kind (two-step resolution: connector_id first).
+        assert destination_registry.resolve("database", "anydb") is GenericSQLConnector
 
     @pytest.mark.unit
     def test_get_handler_instantiates_by_kind(self):
@@ -119,14 +120,14 @@ class TestDestinationConnectorsPackageInit:
         from src.destination.connectors.file import FileDestinationHandler
         from src.destination.connectors.stream import StreamDestinationHandler
 
-        assert isinstance(get_handler("database"), GenericSQLConnector)
-        assert isinstance(get_handler("stdout"), StreamDestinationHandler)
+        assert isinstance(get_handler("database", "anydb"), GenericSQLConnector)
+        assert isinstance(get_handler("stdout", "stdout"), StreamDestinationHandler)
         # file and s3 share the file handler.
-        assert isinstance(get_handler("file"), FileDestinationHandler)
-        assert isinstance(get_handler("s3"), FileDestinationHandler)
+        assert isinstance(get_handler("file", "csvbox"), FileDestinationHandler)
+        assert isinstance(get_handler("s3", "mybucket"), FileDestinationHandler)
 
         with pytest.raises(ConnectorNotRegisteredError):
-            get_handler("redis")
+            get_handler("redis", "redis")
 
 
 class TestSharedPackageInit:

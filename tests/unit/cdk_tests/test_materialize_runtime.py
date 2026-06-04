@@ -18,6 +18,7 @@ def _runtime() -> ConnectionRuntime:
     return ConnectionRuntime(
         raw_config={"host": "h", "parameters": {}},
         connection_id="c",
+        connector_id="test-connector",
         connector_type="api",
         driver=None,
         resolver=InMemorySecretsResolver({}),

@@ -81,9 +81,9 @@ class TestThinControlPlaneImports:
             for name in (
                 "list_schemas", "list_tables", "list_columns",
                 "create_table", "build_create_table_sql",
-                "get_dialect", "SqlDialect", "SUPPORTED_DIALECTS",
+                "SqlDialect",
                 "fetch_rows", "execute_ddl",
-                "SqlIntrospectionError", "UnsupportedDialectError",
+                "SqlIntrospectionError", "UnsupportedDialectOperationError",
                 "DiscoveryError", "CreateTableError", "ReadError",
             ):
                 assert hasattr(cdk.sql, name), name

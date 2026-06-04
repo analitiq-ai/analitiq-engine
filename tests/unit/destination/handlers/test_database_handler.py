@@ -55,6 +55,7 @@ def _make_runtime(config, *, connector_def=None):
     return ConnectionRuntime(
         raw_config=config,
         connection_id="test-conn",
+        connector_id="test-connector",
         connector_type="database",
         resolver=resolver,
         connector_definition=connector_def or _connector_def(),

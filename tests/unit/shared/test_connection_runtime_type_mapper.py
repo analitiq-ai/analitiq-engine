@@ -29,6 +29,7 @@ def _runtime(
     return ConnectionRuntime(
         raw_config={},
         connection_id="test-conn",
+        connector_id="test-connector",
         connector_type="database",
         driver="postgresql",
         resolver=Mock(),

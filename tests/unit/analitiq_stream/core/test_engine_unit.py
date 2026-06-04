@@ -145,11 +145,16 @@ class TestStreamingEngine:
         from src.source.connectors.api import APIConnector
 
         class _FakeRuntime:
-            def __init__(self, connector_type):
+            def __init__(self, connector_type, connector_id):
                 self.connector_type = connector_type
+                self.connector_id = connector_id
 
-        db = engine._create_source_connector({"_runtime": _FakeRuntime("database")})
-        api = engine._create_source_connector({"_runtime": _FakeRuntime("api")})
+        db = engine._create_source_connector(
+            {"_runtime": _FakeRuntime("database", "anydb")}
+        )
+        api = engine._create_source_connector(
+            {"_runtime": _FakeRuntime("api", "anyapi")}
+        )
         assert isinstance(db, GenericSQLConnector)
         assert isinstance(api, APIConnector)
 
@@ -159,6 +164,7 @@ class TestStreamingEngine:
 
         class _FakeRuntime:
             connector_type = "redis"
+            connector_id = "redis"
 
         with pytest.raises(ConnectorNotRegisteredError):
             engine._create_source_connector({"_runtime": _FakeRuntime()})
