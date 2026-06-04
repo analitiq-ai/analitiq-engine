@@ -1,45 +1,40 @@
 name: analitiq-e2e
 
+# Local databases for end-to-end tests. Each container auto-creates and seeds
+# the canonical e2e_seed table on first start via an init script mounted into
+# the image's /docker-entrypoint-initdb.d. No application code involved.
+#
+# The engine itself is NOT defined here — it runs from docker/docker-compose.yml
+# and reaches these containers via host.docker.internal on the published ports
+# (the local connection JSONs use that host). Start the DBs, then run a pipeline.
+# PIPELINE_ID is the manifest pipeline_id (a UUID), not the directory slug — see
+# README.md for the slug->UUID resolver one-liner.
+#
+#   cd tests/e2e_databases && docker compose up -d && cd ../..
+#   cd docker && PIPELINE_ID=<uuid-from-pipelines/manifest.json> \
+#     docker compose run --rm source_engine
+
 services:
 
-  # ---------------------------------------------------------------------------
-  # Database fixtures — one source + one destination per supported local DB.
-  # Tests bring up only the ones they need via ``docker compose up -d <name>``.
-  # ---------------------------------------------------------------------------
-
-  e2e-pg-source:
+  e2e-postgres:
     image: postgres:16-alpine
-    container_name: e2e-pg-source
+    container_name: e2e-postgres
     environment:
       POSTGRES_DB: e2e_db
       POSTGRES_USER: e2e_user
       POSTGRES_PASSWORD: e2e_password
     ports: ["5433:5432"]
+    volumes:
+      - ./seed/postgres_init.sql:/docker-entrypoint-initdb.d/seed.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U e2e_user -d e2e_db"]
       interval: 2s
       timeout: 3s
       retries: 20
-    networks: [e2e-net]
 
-  e2e-pg-dest:
-    image: postgres:16-alpine
-    container_name: e2e-pg-dest
-    environment:
-      POSTGRES_DB: e2e_db
-      POSTGRES_USER: e2e_user
-      POSTGRES_PASSWORD: e2e_password
-    ports: ["5434:5432"]
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U e2e_user -d e2e_db"]
-      interval: 2s
-      timeout: 3s
-      retries: 20
-    networks: [e2e-net]
-
-  e2e-mysql-source:
+  e2e-mysql:
     image: mysql:8.0
-    container_name: e2e-mysql-source
+    container_name: e2e-mysql
     environment:
       MYSQL_ROOT_PASSWORD: e2e_root
       MYSQL_DATABASE: e2e_db
@@ -47,88 +42,27 @@ services:
       MYSQL_PASSWORD: e2e_password
     command: ["--default-authentication-plugin=mysql_native_password"]
     ports: ["13306:3306"]
+    volumes:
+      - ./seed/mysql_init.sql:/docker-entrypoint-initdb.d/seed.sql:ro
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-u", "e2e_user", "-pe2e_password"]
       interval: 3s
       timeout: 5s
       retries: 30
-    networks: [e2e-net]
 
-  e2e-mysql-dest:
-    image: mysql:8.0
-    container_name: e2e-mysql-dest
+  e2e-mariadb:
+    image: mariadb:11
+    container_name: e2e-mariadb
     environment:
-      MYSQL_ROOT_PASSWORD: e2e_root
-      MYSQL_DATABASE: e2e_db
-      MYSQL_USER: e2e_user
-      MYSQL_PASSWORD: e2e_password
-    command: ["--default-authentication-plugin=mysql_native_password"]
+      MARIADB_ROOT_PASSWORD: e2e_root
+      MARIADB_DATABASE: e2e_db
+      MARIADB_USER: e2e_user
+      MARIADB_PASSWORD: e2e_password
     ports: ["13307:3306"]
+    volumes:
+      - ./seed/mysql_init.sql:/docker-entrypoint-initdb.d/seed.sql:ro
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-u", "e2e_user", "-pe2e_password"]
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
       interval: 3s
       timeout: 5s
       retries: 30
-    networks: [e2e-net]
-
-  # ---------------------------------------------------------------------------
-  # Engine services. Reuse the production Dockerfile so we test the same image
-  # that ships to ECS. Workspace volumes carry the per-test configs.
-  # ---------------------------------------------------------------------------
-
-  engine-destination:
-    build:
-      context: ../..
-      dockerfile: docker/Dockerfile
-    image: analitiq-stream:latest
-    container_name: e2e-engine-destination
-    environment:
-      RUN_MODE: destination
-      GRPC_PORT: 50051
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      PIPELINE_ID: ${PIPELINE_ID:-}
-      DESTINATION_INDEX: 0
-      ENV: loc
-    volumes:
-      - ../../connectors:/app/connectors:ro
-      - ./workspace/connections:/app/connections
-      - ./workspace/pipelines:/app/pipelines
-      - ./workspace/state:/app/state
-      - ./workspace/deadletter:/app/deadletter
-    expose: ["50051"]
-    healthcheck:
-      test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('localhost',50051),2); s.close()"]
-      interval: 3s
-      timeout: 5s
-      retries: 20
-      start_period: 8s
-    networks: [e2e-net]
-
-  source_engine:
-    build:
-      context: ../..
-      dockerfile: docker/Dockerfile
-    image: analitiq-stream:latest
-    container_name: e2e-source-engine
-    environment:
-      RUN_MODE: source
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      PIPELINE_ID: ${PIPELINE_ID:-}
-      DESTINATION_GRPC_HOST: engine-destination
-      DESTINATION_GRPC_PORT: 50051
-      ENV: loc
-    volumes:
-      - ../../connectors:/app/connectors:ro
-      - ./workspace/connections:/app/connections
-      - ./workspace/pipelines:/app/pipelines
-      - ./workspace/state:/app/state
-      - ./workspace/deadletter:/app/deadletter
-    depends_on:
-      engine-destination:
-        condition: service_healthy
-    networks: [e2e-net]
-
-networks:
-  e2e-net:
-    name: analitiq-e2e-net
-    driver: bridge
