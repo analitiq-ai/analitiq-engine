@@ -28,7 +28,7 @@ from typing import Any, AsyncIterator, Dict, List, Optional
 
 import pyarrow as pa
 
-from .base import BaseConnector, ConnectionError, ReadError
+from .base import BaseConnector, ConnectionError, ReadError, TransientReadError
 from cdk.schema_contract import SchemaContract
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.types import CheckpointStore
@@ -36,6 +36,10 @@ from ...shared.expressions import resolve_value_expression
 from ...shared.http_utils import join_url
 
 logger = logging.getLogger(__name__)
+
+# HTTP statuses retrying can heal: request timeout, rate limit, upstream
+# outages. Everything else non-200 is a deterministic contract/config error.
+_TRANSIENT_HTTP_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
 
 
 class APIConnector(BaseConnector):
@@ -548,10 +552,15 @@ class APIConnector(BaseConnector):
                 body = await response.text()
                 body_snippet = body[:500]
                 logger.error("API %d %s %s: %s", response.status, method, url, body_snippet)
-                raise ReadError(
+                detail = (
                     f"API request failed: {method} {url} -> status {response.status}; "
                     f"params={params}; body[:500]={body_snippet!r}"
                 )
+                # Rate limits and upstream outages heal on retry; other
+                # statuses (bad request, auth, missing endpoint) do not.
+                if response.status in _TRANSIENT_HTTP_STATUSES:
+                    raise TransientReadError(detail)
+                raise ReadError(detail)
             data = await response.json()
         self.metrics["records_read"] += 0  # incremented below per page
         records = _extract_records(data, records_ref)

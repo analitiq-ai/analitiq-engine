@@ -40,7 +40,7 @@ import pytest
 from cdk.secrets import InMemorySecretsResolver
 from cdk.connection_runtime import ConnectionRuntime
 from src.source.connectors.api import APIConnector
-from src.source.connectors.base import ReadError
+from src.source.connectors.base import ReadError, TransientReadError
 
 # ---------------------------------------------------------------------------
 # Fakes for the aiohttp session + state manager
@@ -564,16 +564,43 @@ class TestReadBatchesIncrementalReplication:
 
 class TestReadBatchesErrorPaths:
     @pytest.mark.asyncio
-    async def test_non_200_response_raises_read_error(self):
+    @pytest.mark.parametrize("status", [429, 500, 503])
+    async def test_transient_status_raises_retryable_error(self, status):
+        # Rate limits and upstream outages heal on retry — they must NOT
+        # raise ReadError, which the worker classifies as fatal.
         session = _FakeSession(
             [
-                _FakeResponse(status=500, body="server exploded"),
+                _FakeResponse(status=status, body="server exploded"),
             ]
         )
         runtime = _runtime_with_session(session)
         connector = APIConnector("test")
 
-        with pytest.raises(ReadError, match="status 500"):
+        with pytest.raises(TransientReadError, match=f"status {status}"):
+            await _consume(
+                connector,
+                runtime,
+                config={
+                    "endpoint_document": _endpoint_doc_with_records(),
+                    "stream_source": _stream_source(),
+                },
+                state_manager=MagicMock(),
+                stream_name="items",
+                batch_size=10,
+            )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("status", [400, 401, 403, 404])
+    async def test_deterministic_status_raises_read_error(self, status):
+        session = _FakeSession(
+            [
+                _FakeResponse(status=status, body="bad request"),
+            ]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        with pytest.raises(ReadError, match=f"status {status}"):
             await _consume(
                 connector,
                 runtime,

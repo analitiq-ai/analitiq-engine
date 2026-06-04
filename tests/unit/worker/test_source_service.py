@@ -17,7 +17,10 @@ import pytest
 
 from cdk.sql.exceptions import ReadError
 from cdk.type_map import UnmappedTypeError
-from src.source.connectors.base import ReadError as ApiReadError
+from src.source.connectors.base import (
+    ReadError as ApiReadError,
+    TransientReadError as ApiTransientReadError,
+)
 from src.state.store import decode_cursor_state
 from src.worker.readable import _decode_arrow_ipc
 from src.worker.source_service import (
@@ -154,14 +157,23 @@ class TestReadStream:
         assert terminal.error.deterministic is True
         assert terminal.error.error_type == type(exc).__name__
 
-    async def test_runtime_errors_marked_retryable(self):
-        readable = _FakeReadable([], error=ConnectionResetError("db went away"))
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            ConnectionResetError("db went away"),
+            # Transient API failures (429/5xx) heal on retry and must not
+            # classify deterministic alongside the contract ReadError.
+            ApiTransientReadError("API request failed: status 503"),
+        ],
+    )
+    async def test_runtime_errors_marked_retryable(self, exc):
+        readable = _FakeReadable([], error=exc)
         servicer = SourceWorkerServicer(readable, MagicMock(), {})
         responses = await _collect(servicer)
         terminal = responses[-1]
         assert terminal.WhichOneof("message") == "error"
         assert terminal.error.deterministic is False
-        assert "db went away" in terminal.error.message
+        assert str(exc) in terminal.error.message
 
     async def test_error_ends_stream_without_complete(self):
         readable = _FakeReadable([_batch([{"id": 1}])], error=ValueError("x"))
