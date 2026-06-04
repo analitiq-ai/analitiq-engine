@@ -31,7 +31,7 @@ record_batch
 
 ### Source side
 
-- `src/source/connectors/api.py:184` -- HTTP returns `List[Dict]`, then
+- `src/source/connectors/api.py:221` -- HTTP returns `List[Dict]`, then
   `schema_contract.from_pylist(deduped)` rebuilds a `pa.RecordBatch`.
 - `GenericSQLConnector.read_batches` (`cdk/cdk/sql/generic.py`) --
   SQLAlchemy returns rows, rows are turned into dicts, then

@@ -8,8 +8,8 @@ Adding a new function requires:
 
 1. Implementing it here with a ``DerivedFunction`` signature.
 2. Registering it in :data:`DEFAULT_FUNCTIONS`.
-3. Documenting it in the spec table at the top of
-   ``docs/connector-connection-parameterization.md``.
+3. Documenting it in this module's docstring (the registered functions are
+   the canonical list).
 """
 
 from __future__ import annotations
