@@ -1,39 +1,53 @@
-"""Per-dialect SQL strategy for control-plane discovery + DDL.
+"""The vendor-neutral SQL dialect base — per-system dialects live in packages.
 
-This module is the **one** place vendor-specific SQL lives in the CDK. The
-generic SQL base (ADR §8) stays vendor-neutral by delegating every dialect
-quirk here: identifier quoting, schema-name normalization, the PRIMARY KEY
-clause form, and the ``INFORMATION_SCHEMA`` query shapes. Adding a database
-("would this change when you add Clickhouse?") is a new ``SqlDialect`` subclass
-plus a registry row — never an edit to the generic base.
+``SqlDialect`` is the **complete extension surface** for everything
+vendor-specific in the SQL path: identifier quoting, schema-name
+normalization, the PRIMARY KEY clause form, the ``INFORMATION_SCHEMA``
+discovery query shapes, the SQLAlchemy upsert statement, the pre-DDL
+statements, and the ADBC-only write machinery (native DDL type names and
+stage-table syntax).
+
+The CDK ships **only this ANSI-neutral base**. Each connector package ships
+its own subclass next to its connector class (``connector.py``), overriding
+exactly the quirks its system has — postgres' ``ON CONFLICT`` and ``CREATE
+SCHEMA``, BigQuery's backtick quoting and ``NOT ENFORCED`` primary keys,
+Snowflake's ``PUBLIC`` folding, and so on. The generic SQL connector never
+selects behavior by driver or connector_id; it delegates to the dialect
+instance its class carries.
+
+Base behavior is deliberately conservative:
+
+* ANSI machinery (quoting, PK clause, INFORMATION_SCHEMA queries) works
+  out of the box, so a thin connector with no package class still reads
+  and plain-INSERTs through SQLAlchemy.
+* Operations that have no portable form — upsert SQL, ADBC DDL type
+  names, stage-table creation — raise
+  :class:`~cdk.sql.exceptions.UnsupportedDialectOperationError` so the
+  failure is loud, deterministic, and names the missing connector package
+  instead of silently degrading.
 
 Discovery queries are emitted with ``?`` (qmark) placeholders and a positional
 parameter list. The transport-agnostic executor (:mod:`cdk.sql.execution`)
 binds them: qmark straight through on the ADBC path, rewritten to SQLAlchemy
-named binds on the SQLAlchemy path. Identifiers that are structural (BigQuery's
-dataset sits in the ``FROM`` path, not in a bind) are quoted here instead.
+named binds on the SQLAlchemy path.
 """
 
 from __future__ import annotations
 
-from typing import List, Tuple
+from typing import Any, Dict, List, Tuple
 
-from ..database_utils import normalize_adbc_schema
-from .exceptions import UnsupportedDialectError
+from .exceptions import UnsupportedDialectOperationError
 
 # A discovery query: SQL text with ``?`` placeholders + its positional params.
 Query = Tuple[str, List[object]]
 
 
 class SqlDialect:
-    """ANSI ``INFORMATION_SCHEMA`` strategy (postgres / mysql / snowflake share
-    the flat-schema shape; BigQuery overrides it wholesale).
+    """ANSI-neutral SQL strategy; per-system subclasses live in connector
+    packages and override exactly the quirks their system has."""
 
-    Subclasses set class attributes for the vendor quirks and, where the query
-    shape itself differs, override the ``*_query`` builders.
-    """
-
-    name: str = ""
+    #: Dialect identifier (the connector package sets its own).
+    name: str = "ansi"
     #: Identifier quote character. ANSI double-quote by default; backtick for
     #: MySQL/MariaDB and BigQuery (where ``"..."`` is a string literal).
     quote_char: str = '"'
@@ -42,6 +56,11 @@ class SqlDialect:
     pk_not_enforced: bool = False
     #: Schemas hidden from ``list_schemas`` (catalog/internal schemas).
     system_schemas: Tuple[str, ...] = ()
+    #: Whether the dialect implements ``build_sqlalchemy_upsert``.
+    supports_upsert_sqlalchemy: bool = False
+    #: Whether the dialect supports the ADBC stage-table + MERGE upsert path
+    #: (requires ``adbc_stage_table_sql`` and the ADBC DDL type hooks).
+    supports_upsert_adbc: bool = False
 
     # ---- identifiers -------------------------------------------------------
     def quote_ident(self, name: str) -> str:
@@ -56,7 +75,13 @@ class SqlDialect:
         return '"' + name.replace('"', '""') + '"'
 
     def normalize_schema(self, schema: str) -> str:
-        """Normalize a schema name before it is quoted (no-op by default)."""
+        """Normalize a schema name before it is quoted (no-op by default).
+
+        Shared by the source reader and the destination handler so read and
+        write resolve the same physical schema (e.g. Snowflake folds
+        unquoted identifiers upper-case, so its dialect maps the
+        conventional lowercase ``public`` to the real ``PUBLIC``).
+        """
         return schema
 
     def quote_qualified(self, schema: str, table: str) -> str:
@@ -73,6 +98,83 @@ class SqlDialect:
         cols = ", ".join(self.quote_ident(c) for c in columns)
         clause = f"PRIMARY KEY ({cols})"
         return f"{clause} NOT ENFORCED" if self.pk_not_enforced else clause
+
+    # ---- SQLAlchemy write path ---------------------------------------------
+    def build_sqlalchemy_upsert(
+        self,
+        table: Any,
+        records: List[Dict[str, Any]],
+        conflict_keys: List[str],
+    ) -> Any:
+        """Build the dialect's INSERT-or-UPDATE statement for *records*.
+
+        No portable ANSI form exists (postgres ``ON CONFLICT``, MySQL
+        ``ON DUPLICATE KEY UPDATE``); the connector package's dialect
+        implements it. The base raises so an upsert against a dialect
+        without one fails loudly instead of silently degrading to INSERT.
+        """
+        raise UnsupportedDialectOperationError(
+            "build_sqlalchemy_upsert", dialect=self.name
+        )
+
+    def sqlalchemy_pre_ddl(self, schema_name: str) -> List[str]:
+        """Statements to run before ``MetaData.create_all`` (e.g. postgres'
+        ``CREATE SCHEMA IF NOT EXISTS`` for a non-default schema). None by
+        default."""
+        return []
+
+    # ---- schema semantics ----------------------------------------------------
+    def schema_is_implicit_default(self, schema_name: str) -> bool:
+        """True when *schema_name* is the dialect's implicit default namespace.
+
+        Used to skip ``CREATE SCHEMA`` for namespaces that always exist
+        (e.g. postgres/snowflake ``public``). The neutral base only treats
+        the empty name as implicit.
+        """
+        return not schema_name
+
+    # ---- ADBC-only write path (native DDL) -----------------------------------
+    def adbc_column_type(self, native_type: str, type_mapper: Any) -> str:
+        """Render *native_type* to the dialect's DDL type string via the
+        connector's type-map. ADBC-only DDL has no portable form; the
+        connector package's dialect implements it."""
+        raise UnsupportedDialectOperationError(
+            "adbc_column_type", dialect=self.name
+        )
+
+    def adbc_synced_at_type(self) -> str:
+        """Native timestamp type for the ``_synced_at`` audit column."""
+        raise UnsupportedDialectOperationError(
+            "adbc_synced_at_type", dialect=self.name
+        )
+
+    def adbc_binary_type(self) -> str:
+        """Native binary type for ``_batch_commits.committed_cursor``."""
+        raise UnsupportedDialectOperationError(
+            "adbc_binary_type", dialect=self.name
+        )
+
+    def adbc_commit_timestamp_type(self) -> str:
+        """Native timestamp type for ``_batch_commits.committed_at``."""
+        raise UnsupportedDialectOperationError(
+            "adbc_commit_timestamp_type", dialect=self.name
+        )
+
+    def adbc_text_type(self) -> str:
+        """Native string type for the ``_batch_commits`` text columns."""
+        raise UnsupportedDialectOperationError(
+            "adbc_text_type", dialect=self.name
+        )
+
+    def adbc_stage_table_sql(
+        self, stage_qualified: str, target_qualified: str
+    ) -> str:
+        """SQL creating an empty staging table shaped like the target (for
+        the ADBC upsert's ingest-to-stage + MERGE). Column-copy syntax is
+        vendor-specific; the connector package's dialect implements it."""
+        raise UnsupportedDialectOperationError(
+            "adbc_stage_table_sql", dialect=self.name
+        )
 
     # ---- discovery queries (qmark placeholders + positional params) --------
     def schemas_query(self) -> Query:
@@ -114,122 +216,3 @@ class SqlDialect:
             "ORDER BY kcu.ordinal_position",
             [self.normalize_schema(schema), table],
         )
-
-
-class PostgresDialect(SqlDialect):
-    """PostgreSQL — also serves Redshift (libpq-compatible, ADBC)."""
-
-    name = "postgresql"
-    system_schemas = ("information_schema", "pg_catalog", "pg_toast")
-
-    def schemas_query(self) -> Query:
-        # Exclude the catalog schemas plus the per-session temp schemas
-        # (``pg_temp_N`` / ``pg_toast_temp_N``) that NOT IN cannot enumerate.
-        placeholders = ", ".join("?" for _ in self.system_schemas)
-        sql = (
-            "SELECT schema_name FROM information_schema.schemata "
-            f"WHERE schema_name NOT IN ({placeholders}) "
-            "AND schema_name NOT LIKE 'pg_temp_%' "
-            "AND schema_name NOT LIKE 'pg_toast_temp_%' "
-            "ORDER BY schema_name"
-        )
-        return sql, list(self.system_schemas)
-
-
-class MySQLDialect(SqlDialect):
-    """MySQL / MariaDB — a schema is a database; identifiers use backticks."""
-
-    name = "mysql"
-    quote_char = "`"
-    system_schemas = ("information_schema", "mysql", "performance_schema", "sys")
-
-
-class SnowflakeDialect(SqlDialect):
-    """Snowflake — flat ``INFORMATION_SCHEMA`` within the current database."""
-
-    name = "snowflake"
-    system_schemas = ("INFORMATION_SCHEMA",)
-
-    def normalize_schema(self, schema: str) -> str:
-        # Match the destination/source convention so read and write resolve the
-        # same physical schema (unquoted ``public`` folds to ``PUBLIC``).
-        return normalize_adbc_schema(schema, "snowflake")
-
-
-class BigQueryDialect(SqlDialect):
-    """BigQuery — ``INFORMATION_SCHEMA`` is dataset-qualified, not flat.
-
-    The dataset is a structural identifier in the ``FROM`` path (backtick
-    quoted here), while the table name stays a bind parameter. ``list_schemas``
-    reads ``INFORMATION_SCHEMA.SCHEMATA`` resolved against the connection's
-    default project; a cross-project/region listing needs an explicit
-    ``region-…`` qualifier the connector would supply.
-    """
-
-    name = "bigquery"
-    quote_char = "`"
-    pk_not_enforced = True
-
-    def schemas_query(self) -> Query:
-        return (
-            "SELECT schema_name FROM INFORMATION_SCHEMA.SCHEMATA "
-            "ORDER BY schema_name",
-            [],
-        )
-
-    def tables_query(self, schema: str) -> Query:
-        dataset = self.quote_ident(schema)
-        return (
-            f"SELECT table_name FROM {dataset}.INFORMATION_SCHEMA.TABLES "
-            "ORDER BY table_name",
-            [],
-        )
-
-    def columns_query(self, schema: str, table: str) -> Query:
-        dataset = self.quote_ident(schema)
-        return (
-            "SELECT column_name, data_type, is_nullable "
-            f"FROM {dataset}.INFORMATION_SCHEMA.COLUMNS "
-            "WHERE table_name = ? ORDER BY ordinal_position",
-            [table],
-        )
-
-    def primary_keys_query(self, schema: str, table: str) -> Query:
-        dataset = self.quote_ident(schema)
-        return (
-            "SELECT kcu.column_name "
-            f"FROM {dataset}.INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc "
-            f"JOIN {dataset}.INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu "
-            "  ON tc.constraint_name = kcu.constraint_name "
-            "WHERE tc.constraint_type = 'PRIMARY KEY' "
-            "  AND tc.table_name = ? "
-            "ORDER BY kcu.ordinal_position",
-            [table],
-        )
-
-
-# Registry: connector ``driver`` string -> dialect strategy. Mirrors the set of
-# SQL transports the engine supports today; Redshift rides the postgres
-# strategy (libpq-compatible), MariaDB rides the MySQL strategy.
-_DIALECTS = {
-    "postgresql": PostgresDialect,
-    "postgres": PostgresDialect,
-    "redshift": PostgresDialect,
-    "mysql": MySQLDialect,
-    "mariadb": MySQLDialect,
-    "snowflake": SnowflakeDialect,
-    "bigquery": BigQueryDialect,
-}
-
-SUPPORTED_DIALECTS: Tuple[str, ...] = tuple(_DIALECTS)
-
-
-def get_dialect(driver: str | None) -> SqlDialect:
-    """Return the dialect strategy for a runtime's ``driver`` string.
-
-    Raises :class:`UnsupportedDialectError` for a driver with no strategy.
-    """
-    strategy = _DIALECTS.get((driver or "").lower())
-    if strategy is None:
-        raise UnsupportedDialectError(driver, supported=SUPPORTED_DIALECTS)
-    return strategy()
