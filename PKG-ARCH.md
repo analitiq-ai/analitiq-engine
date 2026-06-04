@@ -52,6 +52,65 @@ Working note for the connector-brings-its-own-package build. Delete when done.
 - Run tests via `.venv/bin/python -m pytest` (broken pytest shebang).
 - Public docs must stay free of SaaS/competitive framing.
 
+## Phase B design — isolated connector workers (locked)
+
+**Two-channel rule.** Credentials never travel the data plane (engine<->destination
+gRPC, cross-container) — unchanged. Resolved values reach a connector worker once,
+at launch, over the local bootstrap channel (stdin), never as RPC payloads.
+
+**Worker model.** Every connector (all kinds, uniformly) runs as a subprocess of
+its shell process, same image. The shell owns config loading, the secret store,
+secret resolution, and supervision; the worker owns the connector class, the
+driver, and every external connection. Registry seeding/discovery moves into the
+worker (src/worker). The contract is container-ready: in SaaS the same worker
+becomes its own container and the bootstrap becomes a launch-time secret mount.
+
+**Bootstrap (stdin, one-shot JSON, redacted from logs).** Self-contained so the
+worker needs NO config volume and NO secret store:
+  role (source|destination), kind, connector_id, connection_id,
+  resolved transport spec (JSON-safe: dsn, db_kwargs, tls {mode, ca_pem},
+  engine_kwargs, base_url, headers, rate_limit), resolved_config (file/stdout),
+  type-map rules (connector + connection, raw JSON),
+  endpoint_refs + stream_endpoints (destination) / endpoint document + stream
+  source config + initial cursor (source), uds_path.
+
+**Channels.**
+- Destination: worker hosts the EXISTING DestinationService on a UDS
+  (server gains unix: binding). The shell's TCP server wraps WorkerProxyHandler
+  (BaseDestinationHandler) which forwards configure_schema/write_batch/health
+  over per-stream UDS clients and caches GetCapabilities at connect. TCP side
+  byte-compatible with today's engine client.
+- Source: new SourceService.ReadStream(ReadRequest) -> stream ReadResponse over
+  UDS. ReadResponse is oneof {record_batch (Arrow IPC), cursor_save
+  (JSON cursor state), read_error {message, fatal}}. Checkpoint store stays
+  engine-side: WorkerReadable (implements Readable) relays cursor_save into
+  CheckpointStore; initial cursor rides ReadRequest.
+
+**Resolve/build split (CDK).** transport_factory splits per transport into
+resolve_*_spec(spec, resolver) -> JSON-safe dict (engine-side; secrets in
+values) and build_*_from_spec(resolved, dialect) -> transport (worker-side;
+constructs AsyncEngine/SSLContext/ADBC closure/aiohttp session).
+ConnectionRuntime gains resolve_spec() (shell) and from_resolved_spec()
+(worker). TLS connect-args move behind SqlDialect hooks
+(build_tls_connect_args(mode, ca_pem)): postgres/mysql/mariadb packages carry
+their materializers; base raises UnsupportedDialectOperationError when tls is
+declared. _ADBC_DRIVER_MODULES is replaced by the adbc_driver_{driver}.dbapi
+convention (published schema enum remains the validator).
+
+**Supervision (shell).** spawn: python -m src.worker; stdin=bootstrap pipe;
+clean env (PATH/PYTHONPATH/HOME only); cwd /app; own session (setsid);
+preexec rlimits: CORE=0, NOFILE, optional AS via WORKER_RLIMIT_AS_MB;
+stderr piped through a redacting logger; UDS dir 0700 under a per-worker tmp
+dir; readiness = socket connect with deadline; shutdown = rpc then SIGTERM to
+the process group, SIGKILL after grace. Worker crash => stream fails
+retryable; shell survives.
+
+**Honest local-mode limit.** Same-container subprocesses share uid + fs: the
+worker COULD read the mounted .secrets volume. Process isolation here buys
+crash/limits/contract containment; fs/network isolation (per-worker egress,
+no volume) arrives with container placement in SaaS — enforcement point is the
+orchestrator, the contract built here is what makes it possible.
+
 ## Open problems
 
 - (none currently — raise with user as found)
