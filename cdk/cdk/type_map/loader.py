@@ -56,6 +56,35 @@ def _load_write_rules(
     return rules
 
 
+def build_type_mapper(
+    label: str,
+    rules_payload: list,
+    write_rules_payload: Optional[list] = None,
+) -> TypeMapper:
+    """Build a :class:`TypeMapper` from raw rule payloads (no filesystem).
+
+    The worker-bootstrap path: the trusted shell reads the connector's /
+    connection's ``type-map.json`` (+ optional ``write-type-map.json``) and
+    ships the raw arrays in the launch bootstrap; the worker rebuilds the
+    mapper here with the same validation the file loaders apply.
+    """
+    if not isinstance(rules_payload, list):
+        raise InvalidTypeMapError(
+            f"{label}: type-map payload must be a JSON array of rules"
+        )
+    rules = parse_rules(rules_payload, source=f"{label} (bootstrap)")
+    write_rules = None
+    if write_rules_payload is not None:
+        if not isinstance(write_rules_payload, list):
+            raise InvalidTypeMapError(
+                f"{label}: write-type-map payload must be a JSON array of rules"
+            )
+        write_rules = parse_write_rules(
+            write_rules_payload, source=f"{label} (bootstrap)"
+        )
+    return TypeMapper(label, rules, write_rules)
+
+
 def _definition_dir(connectors_dir: Path, slug: str) -> Path:
     """Return the connector's ``definition/`` directory, honoring both
     ``{slug}/`` and ``connector-{slug}/`` layouts used elsewhere in the repo."""

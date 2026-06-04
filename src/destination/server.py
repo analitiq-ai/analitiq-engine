@@ -63,9 +63,13 @@ class DestinationGRPCServer:
         handler: BaseDestinationHandler,
         port: int = DEFAULT_GRPC_PORT,
         max_message_size: int = DEFAULT_MAX_MESSAGE_SIZE,
+        address: Optional[str] = None,
     ):
         self.handler = handler
         self.port = port
+        # Full gRPC bind address; overrides ``port`` when set. Workers bind
+        # ``unix:/path/worker.sock`` so the channel never leaves the host.
+        self.address = address
         self.max_message_size = max_message_size
         self._server: Optional[grpc_aio.Server] = None
         self._servicer: Optional["DestinationServicer"] = None
@@ -83,10 +87,18 @@ class DestinationGRPCServer:
         )
 
         add_DestinationServiceServicer_to_server(self._servicer, self._server)
-        self._server.add_insecure_port(f"[::]:{self.port}")
+        if self.address is not None:
+            # Explicit address (e.g. a worker's ``unix:/path/worker.sock``)
+            # wins over the TCP port. UDS keeps the worker channel local:
+            # no exposed port, filesystem-permission access control.
+            self._server.add_insecure_port(self.address)
+            bound = self.address
+        else:
+            self._server.add_insecure_port(f"[::]:{self.port}")
+            bound = f"[::]:{self.port}"
 
         await self._server.start()
-        logger.info(f"Destination gRPC server started on port {self.port}")
+        logger.info(f"Destination gRPC server started on {bound}")
 
     async def stop(self, grace_period: float = 5.0) -> None:
         """Stop the gRPC server gracefully."""
