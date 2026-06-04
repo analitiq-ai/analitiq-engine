@@ -72,6 +72,16 @@ Working note for the connector-brings-its-own-package build. Delete when done.
 - [x] Task 7: driver-free engine — drivers removed from pyproject + docker/requirements
       (poetry.lock left stale, pre-existing); kind-keyed engine entry points removed;
       docker/entrypoint.sh installs attached connectors at container start
-- [ ] Task 8 (deferred to end per user): tests for the finished architecture
-- [ ] Task 9: docker e2e validation
-- [ ] Task 10 (Phase B): worker isolation
+- [x] Task 9: docker e2e validation — driver-free image, attach-time installs;
+      green: pg->mysql, mysql->pg, pg->pg, pg->mariadb (datetime(6) microseconds
+      verified), mariadb->pg; registry proof: package classes win, sqlite falls
+      back to generic. Cloud paths (snowflake/bigquery/redshift) install cleanly
+      but need credentials to run.
+- [x] Task 8: unit suite migrated (f673e97) — 1046 passed, 3 env skips
+- [ ] Task 10 (Phase B): worker isolation — OPEN DESIGN QUESTION for user:
+      the documented principle says the connector worker receives resolved
+      values over the contract, but the current destination model deliberately
+      loads credentials locally and never sends them over gRPC. Where the
+      isolation boundary sits (subprocess-per-connector inside each container
+      vs connector-process replacing the in-process handler) and what crosses
+      it must be ruled on before building.
