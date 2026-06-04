@@ -1082,7 +1082,10 @@ class GenericSQLConnector(BaseDestinationHandler):
         without per-row coercion.
         """
         if state.schema_contract is None:
-            return record_batch.to_pylist()
+            raise AdbcConfigurationError(
+                f"SQLAlchemy write for {state.schema_name}.{state.table_name} "
+                "requires a configured SchemaContract; schema alignment was skipped"
+            )
         return state.schema_contract.to_db_records(record_batch)
 
     # ------------------------------------------------------------------

@@ -135,6 +135,9 @@ class TestWriteBatchFatalOnTypeMapError:
         # Preconditions: connected, schema configured, idempotency check
         # clean. We don't actually hit the DB because the schema-contract
         # prepare_records call raises before any SQL runs.
+        contract_mock = MagicMock()
+        contract_mock.to_db_records.return_value = [{"id": 1}]
+
         handler._engine = MagicMock()
         handler._connected = True
         handler._streams["s1"] = _StreamState(
@@ -142,6 +145,7 @@ class TestWriteBatchFatalOnTypeMapError:
             batch_commits_table=MagicMock(),
             write_mode="insert",
             primary_keys=[],
+            schema_contract=contract_mock,
         )
 
         @asynccontextmanager
@@ -267,6 +271,19 @@ class TestPrepareForSqlAlchemy:
         )
         records = handler._prepare_for_sqlalchemy(state, batch)
         assert records == [{"metadata": None}]
+
+    def test_raises_when_schema_contract_is_none(self):
+        import pyarrow as pa
+        from cdk.sql.generic import GenericSQLConnector, _StreamState
+        from cdk.adbc_registry import AdbcConfigurationError
+
+        handler = GenericSQLConnector()
+        state = _StreamState(
+            schema_name="public", table_name="events", schema_contract=None
+        )
+        batch = pa.RecordBatch.from_pylist([{"id": 1}])
+        with pytest.raises(AdbcConfigurationError, match="SchemaContract"):
+            handler._prepare_for_sqlalchemy(state, batch)
 
 
 class TestDDLLockSerialization:
