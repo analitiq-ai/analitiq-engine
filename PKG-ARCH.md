@@ -59,12 +59,19 @@ Working note for the connector-brings-its-own-package build. Delete when done.
 ## Progress
 
 - [x] Branch `feature/connector-packages` off docs/connector-architecture-principles
-- [ ] Task 2: CDK registry two-level resolution
-- [ ] Task 3: connector_id plumbing
-- [ ] Task 4: engine/destination resolution call sites
-- [ ] Task 5: hook extraction full sweep
-- [ ] Task 6: connector packages
-- [ ] Task 7: driver-free engine + entrypoint installer
-- [ ] Task 8: fixture + test migration
+- [x] Task 2: CDK registry two-level resolution (65b825d)
+- [x] Task 3: connector_id plumbing (65b825d; postgres/mysql connector.json got connector_id)
+- [x] Task 4: engine/destination resolution call sites (65b825d)
+- [x] Task 5: hook extraction full sweep (fc905af) — SqlDialect is the surface;
+      residual driver-string infra left: query_builder._SQLA_DIALECTS,
+      transport_factory TLS modes + _ADBC_DRIVER_MODULES
+- [x] Task 6: connector packages authored in connectors/{id}/ (gitignored — push to
+      DIP registry repos): postgres, mysql, mariadb (driver fixed -> mariadb+aiomysql),
+      snowflake, bigquery (overrides _record_batch_commit_via_adbc), redshift
+      (definition fixed -> adbc/postgresql). Wheel build verified (postgres).
+- [x] Task 7: driver-free engine — drivers removed from pyproject + docker/requirements
+      (poetry.lock left stale, pre-existing); kind-keyed engine entry points removed;
+      docker/entrypoint.sh installs attached connectors at container start
+- [ ] Task 8 (deferred to end per user): tests for the finished architecture
 - [ ] Task 9: docker e2e validation
 - [ ] Task 10 (Phase B): worker isolation
