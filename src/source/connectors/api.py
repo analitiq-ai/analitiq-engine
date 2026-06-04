@@ -226,6 +226,15 @@ class APIConnector(BaseConnector):
                     await checkpoint.save_cursor(
                         stream_name, partition, {"cursor": cursor_value}
                     )
+                else:
+                    # Safe under at-least-once + upsert (resume re-reads),
+                    # but visible: an author debugging "incremental stream
+                    # keeps re-reading its tail" needs this signal.
+                    logger.debug(
+                        "stream %r: last record has no %r value; "
+                        "cursor not advanced for batch %d",
+                        stream_name, cursor_field, batch_count,
+                    )
 
     @staticmethod
     def _resolve_records_items_schema(
