@@ -12,20 +12,17 @@ write-type-maps, so the canonical->native round-trip is exercised end to end.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 from cdk.contract import ColumnDef
 from cdk.sql.ddl import build_create_table_sql, create_table
 from cdk.sql.dialects import SqlDialect
 from cdk.sql.exceptions import CreateTableError
+from cdk.type_map import TypeMapper
 from cdk.type_map.exceptions import InvalidTypeMapError, UnmappedTypeError
-from cdk.type_map.loader import load_type_map
+from cdk.type_map.rules import parse_rules
 
 from .conftest import FakeAdbcRuntime
-
-_CONNECTORS_DIR = Path(__file__).resolve().parents[4] / "connectors"
 
 
 class _StubMapper:
@@ -142,13 +139,20 @@ class TestBuildErrors:
         assert isinstance(exc.value.__cause__, UnmappedTypeError)
 
     def test_no_write_map_raises_chaining_invalid_type_map(self):
-        # The mysql connector ships only a read type-map (no write-type-map.json),
-        # so to_native_type cannot render and create_table fails loudly.
-        mysql_mapper = load_type_map(_CONNECTORS_DIR, "mysql")
+        # A connector that ships only a read type-map (no type-map-write.json)
+        # cannot render native DDL types, so to_native_type raises through
+        # dialect.render_column_type and create_table fails loudly.
+        read_only_mapper = TypeMapper(
+            "read-only",
+            parse_rules(
+                [{"match": "exact", "native": "BIGINT", "canonical": "Int64"}],
+                source="<test>",
+            ),
+        )
         columns = [ColumnDef("id", "Int64")]
-        with pytest.raises(CreateTableError) as exc:
+        with pytest.raises(CreateTableError, match="type-map-write rule") as exc:
             build_create_table_sql(
-                SqlDialect(), mysql_mapper, "db", "t", columns, []
+                SqlDialect(), read_only_mapper, "db", "t", columns, []
             )
         assert isinstance(exc.value.__cause__, InvalidTypeMapError)
 

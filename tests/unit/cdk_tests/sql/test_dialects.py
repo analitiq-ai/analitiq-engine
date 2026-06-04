@@ -189,6 +189,50 @@ class TestPreDdl:
         assert SqlDialect().sqlalchemy_pre_ddl("analytics") == []
 
 
+# --- column type rendering (the single write surface) ------------------------
+
+
+class _RecordingMapper:
+    """Stub TypeMapper recording the to_native_type call and returning a
+    sentinel, so the delegation (and params pass-through) is observable."""
+
+    def __init__(self, result="SENTINEL"):
+        self.result = result
+        self.calls = []
+
+    def to_native_type(self, canonical, *, params=None):
+        self.calls.append((canonical, params))
+        return self.result
+
+
+class TestRenderColumnType:
+    def test_base_delegates_to_type_mapper(self):
+        mapper = _RecordingMapper("NUMERIC(38, 9)")
+        out = SqlDialect().render_column_type("Decimal128(38, 9)", mapper)
+        assert out == "NUMERIC(38, 9)"
+        assert mapper.calls == [("Decimal128(38, 9)", None)]
+
+    def test_base_passes_params_through(self):
+        mapper = _RecordingMapper("VARCHAR(255)")
+        out = SqlDialect().render_column_type(
+            "Utf8", mapper, params={"length": 255}
+        )
+        assert out == "VARCHAR(255)"
+        assert mapper.calls == [("Utf8", {"length": 255})]
+
+
+class TestBatchCommitsKeyType:
+    def test_base_returns_render_of_utf8(self):
+        # The base keys _batch_commits text columns on the write map's Utf8.
+        class _Utf8Mapper:
+            def to_native_type(self, canonical, *, params=None):
+                assert canonical == "Utf8"
+                assert params is None
+                return "TEXT"
+
+        assert SqlDialect().batch_commits_key_type(_Utf8Mapper()) == "TEXT"
+
+
 # --- unsupported hooks raise loudly ------------------------------------------
 
 
@@ -202,14 +246,10 @@ class TestUnsupportedHooks:
                 "build_sqlalchemy_upsert",
                 lambda d: d.build_sqlalchemy_upsert(object(), [], ["id"]),
             ),
-            ("adbc_column_type", lambda d: d.adbc_column_type("INT", object())),
-            ("adbc_synced_at_type", lambda d: d.adbc_synced_at_type()),
-            ("adbc_binary_type", lambda d: d.adbc_binary_type()),
             (
-                "adbc_commit_timestamp_type",
-                lambda d: d.adbc_commit_timestamp_type(),
+                "build_tls_connect_arg",
+                lambda d: d.build_tls_connect_arg("verify-ca", None),
             ),
-            ("adbc_text_type", lambda d: d.adbc_text_type()),
             (
                 "adbc_stage_table_sql",
                 lambda d: d.adbc_stage_table_sql("stage", "target"),

@@ -2,8 +2,8 @@
 
 ``TypeMapper`` returns the first matching rule's output and raises on a miss —
 no defaults, no coercion. Each direction has its **own** rule file: the read
-map (``type-map.json``, native → Arrow) feeds :meth:`TypeMapper.to_arrow_type`;
-the optional write map (``write-type-map.json``, Arrow → native) feeds
+map (``type-map-read.json``, native → Arrow) feeds :meth:`TypeMapper.to_arrow_type`;
+the optional write map (``type-map-write.json``, Arrow → native) feeds
 :meth:`TypeMapper.to_native_type`. The two are independent rule sets, never one
 inverted at runtime — inverting would be lossy and ambiguous.
 """
@@ -120,7 +120,7 @@ class TypeMapper:
         """Map an Arrow canonical type string to its native DDL type.
 
         The inverse of :meth:`to_arrow_type`, fed by the connector's
-        ``write-type-map.json``. ``params`` supplies per-column hints (e.g.
+        ``type-map-write.json``. ``params`` supplies per-column hints (e.g.
         ``length``) that a rule's ``native`` template may reference via
         ``${name}`` alongside any named captures from the canonical regex;
         named captures take precedence on a name clash. Hint values are rendered

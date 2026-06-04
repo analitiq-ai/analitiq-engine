@@ -33,23 +33,11 @@ from datetime import datetime
 from typing import Any, AsyncIterator, Dict, List, Literal, Mapping, Optional, Tuple
 
 import pyarrow as pa
-from sqlalchemy import (
-    BigInteger,
-    Column,
-    DateTime,
-    Integer,
-    LargeBinary,
-    MetaData,
-    String,
-    Table,
-    func,
-    text,
-)
+from sqlalchemy import MetaData, Table, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncConnection
 
 from cdk.base_handler import BaseDestinationHandler, BatchWriteResult
 from cdk.schema_contract import SchemaContract
-from cdk.sql_types import native_to_sqlalchemy
 from cdk.type_map import (
     InvalidTypeMapError,
     TypeMapper,
@@ -76,6 +64,7 @@ from .dialects import SqlDialect
 from .discovery import list_columns as _sql_list_columns
 from .discovery import list_schemas as _sql_list_schemas
 from .discovery import list_tables as _sql_list_tables
+from .ddl import build_create_table_sql
 from .ddl import create_table as _sql_create_table
 from .exceptions import ReadError, UnsupportedDialectOperationError
 from ..contract import ColumnDef
@@ -224,7 +213,6 @@ class _StreamState:
     write_mode: WriteMode = "upsert"
     endpoint_document: Dict[str, Any] = field(default_factory=dict)
     schema_contract: Optional[SchemaContract] = None
-    metadata: MetaData = field(default_factory=MetaData)
 
 
 class GenericSQLConnector(BaseDestinationHandler):
@@ -660,88 +648,20 @@ class GenericSQLConnector(BaseDestinationHandler):
             )
         return mode_map[proto_write_mode]
 
-    async def _ensure_tables_exist(
+    def _build_column_defs(
         self, state: _StreamState, type_mapper: TypeMapper
-    ) -> None:
-        """Create the target table and batch commits table if they don't exist.
+    ) -> List[ColumnDef]:
+        """Contract endpoint columns -> ColumnDefs for the shared DDL builder.
 
-        ``state`` owns the SQLAlchemy ``MetaData`` for this stream so each
-        ``create_all`` only emits DDL for this stream's tables. The DDL
-        itself is serialized with ``self._ddl_lock`` so concurrent streams
-        do not race the database catalog (e.g. PostgreSQL's
-        ``pg_type_typname_nsp_index``).
+        Each column's native type goes through the READ map to its canonical
+        Arrow string; the builder renders it back through the WRITE map for
+        this destination — the two declarative surfaces are the entire type
+        vocabulary, for every transport. ``_synced_at`` is appended as a
+        server-defaulted audit column when the endpoint doesn't declare it.
         """
-        state.batch_commits_table = Table(
-            self.BATCH_COMMITS_TABLE,
-            state.metadata,
-            Column("run_id", String(255), primary_key=True),
-            Column("stream_id", String(255), primary_key=True),
-            Column("batch_seq", BigInteger, primary_key=True),
-            Column("committed_cursor", LargeBinary),
-            Column("records_written", Integer),
-            Column("committed_at", DateTime, default=datetime.utcnow),
-            schema=state.schema_name,
-        )
-
-        # Build the target table from the contract endpoint document.
-        if state.endpoint_document:
-            state.table = self._create_table_from_schema(
-                state.table_name,
-                state.endpoint_document,
-                state.primary_keys,
-                state.schema_name,
-                state.metadata,
-                type_mapper,
-            )
-        else:
-            logger.warning(
-                "No endpoint document available; table must already exist"
-            )
-
-        if self._adbc_only:
-            await self._ensure_tables_via_adbc(state, type_mapper)
-            return
-
-        if self._engine is None:
-            return
-
-        # Serialize DDL across concurrent streams. ``create_all`` only
-        # adds tables that don't yet exist; pre-existing tables are left
-        # untouched. New tables get ``_synced_at`` because
-        # ``_create_table_from_schema`` appends it when the endpoint
-        # document doesn't declare it.
-        async with self._ddl_lock:
-            async with self._engine.begin() as conn:
-                # Dialect-declared preparation (e.g. postgres' CREATE SCHEMA
-                # IF NOT EXISTS for a non-default schema). The neutral base
-                # declares none.
-                for stmt in self.dialect.sqlalchemy_pre_ddl(state.schema_name):
-                    await conn.execute(text(stmt))
-                await conn.run_sync(state.metadata.create_all)
-
-        logger.debug(f"Ensured tables exist in schema {state.schema_name}")
-
-    def _create_table_from_schema(
-        self,
-        table_name: str,
-        endpoint_document: Dict[str, Any],
-        primary_keys: List[str],
-        schema_name: str,
-        metadata: MetaData,
-        type_mapper: TypeMapper,
-    ) -> Table:
-        """Build a SQLAlchemy :class:`Table` from a database-endpoint document.
-
-        The document is the contract ``database-endpoint`` payload — a
-        ``columns`` array where each entry declares ``name``, ``native_type``,
-        ``nullable``, and (optionally) a SQL-expression ``default``. The
-        connector's ``type-map.json`` resolves ``native_type`` to a
-        SQLAlchemy type.
-        """
-        columns: List[Column] = []
-        declared_names: set[str] = set()
-
-        for index, col_def in enumerate(endpoint_document.get("columns") or []):
+        columns: List[ColumnDef] = []
+        declared: set[str] = set()
+        for index, col_def in enumerate(state.endpoint_document.get("columns") or []):
             col_name = col_def.get("name")
             if not col_name:
                 raise ValueError(
@@ -752,44 +672,132 @@ class GenericSQLConnector(BaseDestinationHandler):
                 raise ValueError(
                     f"column {col_name!r} has no 'native_type' field"
                 )
-            sa_type = native_to_sqlalchemy(native_type, type_mapper)
-            is_pk = col_name in primary_keys
-            nullable = col_def.get("nullable", True) and not is_pk
-
-            column_kwargs: Dict[str, Any] = {
-                "primary_key": is_pk,
-                "nullable": nullable,
-            }
-            # Honour the endpoint's declared ``default`` only when it is a
-            # SQL expression like ``now()`` — passed through as
-            # ``server_default=text(...)``. Non-string defaults are
-            # connector-specific values that do not belong in DDL.
             raw_default = col_def.get("default")
-            if isinstance(raw_default, str) and raw_default.strip():
-                column_kwargs["server_default"] = text(raw_default)
-
-            columns.append(Column(col_name, sa_type, **column_kwargs))
-            declared_names.add(col_name)
-
-        # Every database destination table carries a server-managed
-        # ``_synced_at`` audit column. If the endpoint declares it, it is
-        # already in ``columns``; otherwise append one with a NOW() default.
-        if self.SYNCED_AT_COLUMN not in declared_names:
             columns.append(
-                Column(
-                    self.SYNCED_AT_COLUMN,
-                    DateTime(timezone=True),
-                    nullable=True,
-                    server_default=func.now(),
+                ColumnDef(
+                    name=col_name,
+                    canonical_type=type_mapper.to_arrow_type(native_type),
+                    nullable=bool(col_def.get("nullable", True)),
+                    primary_key=col_name in state.primary_keys,
+                    default=(
+                        raw_default
+                        if isinstance(raw_default, str) and raw_default.strip()
+                        else None
+                    ),
                 )
             )
+            declared.add(col_name)
+        if self.SYNCED_AT_COLUMN not in declared:
+            columns.append(
+                ColumnDef(
+                    name=self.SYNCED_AT_COLUMN,
+                    canonical_type="Timestamp(MICROSECOND, UTC)",
+                    nullable=True,
+                    default=self.dialect.current_timestamp_default(),
+                )
+            )
+        return columns
 
-        return Table(
-            table_name,
-            metadata,
-            *columns,
-            schema=schema_name,
+    def _build_batch_commits_ddl(
+        self, schema_name: str, type_mapper: TypeMapper
+    ) -> str:
+        """``CREATE TABLE IF NOT EXISTS _batch_commits`` for any transport.
+
+        Types derive from the connector's write map through the dialect's
+        ``render_column_type`` (key columns via ``batch_commits_key_type``,
+        bounded where unbounded text cannot key); quoting and the PK clause
+        come from the dialect.
+        """
+        quote = self.dialect.quote_ident
+        render = self.dialect.render_column_type
+        qualified = self.dialect.quote_qualified(schema_name, self.BATCH_COMMITS_TABLE)
+        key_type = self.dialect.batch_commits_key_type(type_mapper)
+        return (
+            f"CREATE TABLE IF NOT EXISTS {qualified} (\n"
+            f"  {quote('run_id')} {key_type} NOT NULL,\n"
+            f"  {quote('stream_id')} {key_type} NOT NULL,\n"
+            f"  {quote('batch_seq')} {render('Int64', type_mapper)} NOT NULL,\n"
+            f"  {quote('committed_cursor')} {render('Binary', type_mapper)},\n"
+            f"  {quote('records_written')} {render('Int32', type_mapper)},\n"
+            f"  {quote('committed_at')} "
+            f"{render('Timestamp(MICROSECOND)', type_mapper)} "
+            f"DEFAULT {self.dialect.current_timestamp_default()},\n"
+            f"  {self.dialect.pk_clause(['run_id', 'stream_id', 'batch_seq'])}\n"
+            f")"
         )
+
+    async def _ensure_tables_exist(
+        self, state: _StreamState, type_mapper: TypeMapper
+    ) -> None:
+        """Create the target and ``_batch_commits`` tables if absent.
+
+        ONE DDL builder serves every transport: column types come from the
+        connector's read+write maps via the dialect, quoting/PK from the
+        dialect, and the rendered statements execute over SQLAlchemy or the
+        ADBC cursor. On the SQLAlchemy path the tables are then REFLECTED so
+        DML binding uses the real column types the database reports.
+        """
+        if not state.endpoint_document:
+            raise ValueError(
+                f"destination stream for {state.schema_name}.{state.table_name} "
+                f"has no endpoint document; cannot build DDL"
+            )
+        target_ddl = build_create_table_sql(
+            self.dialect,
+            type_mapper,
+            state.schema_name,
+            state.table_name,
+            self._build_column_defs(state, type_mapper),
+            list(state.primary_keys),
+            if_not_exists=True,
+        )
+        commits_ddl = self._build_batch_commits_ddl(state.schema_name, type_mapper)
+
+        if self._adbc_only:
+            await self._ensure_tables_via_adbc(state, [target_ddl, commits_ddl])
+            return
+
+        if self._engine is None:
+            return
+
+        # Serialize DDL across concurrent streams so they do not race the
+        # database catalog (e.g. PostgreSQL's pg_type_typname_nsp_index).
+        async with self._ddl_lock:
+            async with self._engine.begin() as conn:
+                # Dialect-declared preparation (e.g. postgres' CREATE SCHEMA
+                # IF NOT EXISTS for a non-default schema). The neutral base
+                # declares none.
+                for stmt in self.dialect.sqlalchemy_pre_ddl(state.schema_name):
+                    await conn.execute(text(stmt))
+                await conn.execute(text(target_ddl))
+                await conn.execute(text(commits_ddl))
+
+                # Reflect both tables for DML binding: SQLAlchemy derives the
+                # column types from what the database actually created, so
+                # inserts/upserts bind correctly without a second hand-kept
+                # type surface.
+                def _reflect(sync_conn):
+                    meta = MetaData()
+                    table = Table(
+                        state.table_name,
+                        meta,
+                        autoload_with=sync_conn,
+                        schema=state.schema_name or None,
+                    )
+                    commits = Table(
+                        self.BATCH_COMMITS_TABLE,
+                        meta,
+                        autoload_with=sync_conn,
+                        schema=state.schema_name or None,
+                    )
+                    return table, commits
+
+                state.table, state.batch_commits_table = await conn.run_sync(
+                    lambda sync_conn: _reflect(sync_conn)
+                )
+
+        logger.debug(f"Ensured tables exist in schema {state.schema_name}")
+
 
     async def write_batch(
         self,
@@ -820,7 +828,12 @@ class GenericSQLConnector(BaseDestinationHandler):
             )
 
         state = self._streams.get(stream_id)
-        if state is None or state.table is None or state.batch_commits_table is None:
+        if state is None or (
+            not self._adbc_only
+            and (state.table is None or state.batch_commits_table is None)
+        ):
+            # ADBC writes never build SQLAlchemy table objects; readiness
+            # there is the configured state + schema contract.
             return BatchWriteResult(
                 status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
                 records_written=0,
@@ -931,12 +944,12 @@ class GenericSQLConnector(BaseDestinationHandler):
         batch_seq: int,
     ) -> Optional[Dict[str, Any]]:
         """Check if batch was already committed."""
-        if state.batch_commits_table is None:
-            return None
         if self._adbc_only:
             return await self._check_batch_committed_via_adbc(
                 state, run_id, stream_id, batch_seq,
             )
+        if state.batch_commits_table is None:
+            return None
         if self._engine is None:
             return None
 
@@ -967,12 +980,12 @@ class GenericSQLConnector(BaseDestinationHandler):
         records_written: int,
     ) -> None:
         """Record batch commit (outside transaction)."""
-        if state.batch_commits_table is None:
-            return
         if self._adbc_only:
             await self._record_batch_commit_via_adbc(
                 state, run_id, stream_id, batch_seq, cursor_bytes, records_written,
             )
+            return
+        if state.batch_commits_table is None:
             return
         if self._engine is None:
             return
@@ -1083,91 +1096,11 @@ class GenericSQLConnector(BaseDestinationHandler):
     # also opt in (e.g. for Redshift via the libpq-compatible driver),
     # but its SA path remains the primary route.
 
-    def _build_adbc_create_table_ddl(
-        self,
-        state: _StreamState,
-        type_mapper: TypeMapper,
-    ) -> str:
-        """Build a ``CREATE TABLE IF NOT EXISTS`` for the active ADBC dialect.
 
-        Mirrors :meth:`_create_table_from_schema` but emits a DDL string
-        instead of a SQLAlchemy ``Table``. Always appends ``_synced_at``
-        as a server-defaulted timestamp when the endpoint document does
-        not declare it. Every vendor-specific piece (type names, quoting,
-        PK clause) comes from the connector package's dialect; the neutral
-        base raises ``UnsupportedDialectOperationError`` here, so ADBC
-        destinations require their connector package installed.
-        """
-        column_defs: List[str] = []
-        declared_names: set[str] = set()
-        for index, col_def in enumerate(state.endpoint_document.get("columns") or []):
-            col_name = col_def.get("name")
-            if not col_name:
-                raise ValueError(
-                    f"endpoint column at index {index} has no 'name' field"
-                )
-            native_type = col_def.get("native_type")
-            if not native_type:
-                raise ValueError(
-                    f"column {col_name!r} has no 'native_type' field"
-                )
-            sql_type = self.dialect.adbc_column_type(native_type, type_mapper)
-            is_pk = col_name in state.primary_keys
-            nullable = col_def.get("nullable", True) and not is_pk
-            parts = [self.dialect.quote_ident(col_name), sql_type]
-            if not nullable:
-                parts.append("NOT NULL")
-            raw_default = col_def.get("default")
-            if isinstance(raw_default, str) and raw_default.strip():
-                parts.append(f"DEFAULT {raw_default}")
-            column_defs.append(" ".join(parts))
-            declared_names.add(col_name)
-
-        if self.SYNCED_AT_COLUMN not in declared_names:
-            column_defs.append(
-                f"{self.dialect.quote_ident(self.SYNCED_AT_COLUMN)} "
-                f"{self.dialect.adbc_synced_at_type()} DEFAULT CURRENT_TIMESTAMP"
-            )
-
-        # PRIMARY KEY clause form is dialect-owned (e.g. BigQuery requires
-        # ``NOT ENFORCED``). Omit the clause entirely when no PKs are
-        # declared.
-        if state.primary_keys:
-            column_defs.append(self.dialect.pk_clause(list(state.primary_keys)))
-
-        qualified = self.dialect.quote_qualified(state.schema_name, state.table_name)
-        return (
-            f"CREATE TABLE IF NOT EXISTS {qualified} (\n  "
-            + ",\n  ".join(column_defs)
-            + "\n)"
-        )
-
-    def _build_adbc_batch_commits_ddl(self, schema_name: str) -> str:
-        qualified = self.dialect.quote_qualified(schema_name, self.BATCH_COMMITS_TABLE)
-        text_type = self.dialect.adbc_text_type()
-        return (
-            f"CREATE TABLE IF NOT EXISTS {qualified} (\n"
-            f"  {self.dialect.quote_ident('run_id')} {text_type} NOT NULL,\n"
-            f"  {self.dialect.quote_ident('stream_id')} {text_type} NOT NULL,\n"
-            f"  {self.dialect.quote_ident('batch_seq')} BIGINT NOT NULL,\n"
-            f"  {self.dialect.quote_ident('committed_cursor')} "
-            f"{self.dialect.adbc_binary_type()},\n"
-            f"  {self.dialect.quote_ident('records_written')} INTEGER,\n"
-            f"  {self.dialect.quote_ident('committed_at')} "
-            f"{self.dialect.adbc_commit_timestamp_type()} DEFAULT CURRENT_TIMESTAMP,\n"
-            f"  {self.dialect.pk_clause(['run_id', 'stream_id', 'batch_seq'])}\n"
-            f")"
-        )
 
     async def _ensure_tables_via_adbc(
-        self, state: _StreamState, type_mapper: TypeMapper
+        self, state: _StreamState, rendered_ddl: List[str]
     ) -> None:
-        if not state.endpoint_document:
-            raise AdbcConfigurationError(
-                "ADBC-only mode requires an endpoint document for DDL"
-            )
-        create_table_sql = self._build_adbc_create_table_ddl(state, type_mapper)
-        create_commits_sql = self._build_adbc_batch_commits_ddl(state.schema_name)
         statements: List[str] = []
         if not self.dialect.schema_is_implicit_default(state.schema_name):
             # BigQuery uses ``CREATE SCHEMA`` for datasets (Standard
@@ -1179,7 +1112,7 @@ class GenericSQLConnector(BaseDestinationHandler):
                 f"CREATE SCHEMA IF NOT EXISTS "
                 f"{self.dialect.quote_ident(self.dialect.normalize_schema(state.schema_name))}"
             )
-        statements.extend([create_table_sql, create_commits_sql])
+        statements.extend(rendered_ddl)
         async with self._ddl_lock:
             await asyncio.to_thread(self._execute_adbc_ddl_sync, statements)
         logger.debug(

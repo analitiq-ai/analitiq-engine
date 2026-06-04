@@ -235,7 +235,7 @@ class ConnectionRuntime:
     def type_mapper_for(self, *, scope: EndpointScope) -> TypeMapper:
         """Pick the type mapper for an endpoint of the given ``scope``.
 
-        For ``EndpointScope.CONNECTION`` the connection's own ``type-map.json``
+        For ``EndpointScope.CONNECTION`` the connection's own ``type-map-read.json``
         wins when present; otherwise the connector's mapper is used. The
         connector's native vocabulary is authoritative for the driver
         (e.g. MySQL ``BIGINT`` is the same in every MySQL installation),

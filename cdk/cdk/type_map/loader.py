@@ -1,10 +1,10 @@
-"""Filesystem loaders for ``type-map.json``.
+"""Filesystem loaders for ``type-map-read.json``.
 
 Two parallel locations are supported:
 
-- ``connectors/{connector_id}/definition/type-map.json`` — required. Covers
+- ``connectors/{connector_id}/definition/type-map-read.json`` — required. Covers
   the connector's public endpoints (API schemas shipped with the connector).
-- ``connections/{connection_id}/definition/type-map.json`` — optional. Covers
+- ``connections/{connection_id}/definition/type-map-read.json`` — optional. Covers
   the connection's private endpoints (e.g. user-specific DB tables). Absent
   when a connection only uses public endpoints from its connector.
 """
@@ -23,14 +23,14 @@ from .rules import WriteTypeMapRule, parse_rules, parse_write_rules
 logger = logging.getLogger(__name__)
 
 
-TYPE_MAP_FILENAME = "type-map.json"
-WRITE_TYPE_MAP_FILENAME = "write-type-map.json"
+TYPE_MAP_FILENAME = "type-map-read.json"
+WRITE_TYPE_MAP_FILENAME = "type-map-write.json"
 
 
 def _load_write_rules(
     definition_dir: Path, label: str
 ) -> Optional[list[WriteTypeMapRule]]:
-    """Load the optional sibling ``write-type-map.json`` from *definition_dir*.
+    """Load the optional sibling ``type-map-write.json`` from *definition_dir*.
 
     Absent file → ``None`` (source-only / API connectors have no write map). A
     present-but-malformed file is a hard ``InvalidTypeMapError`` — the write-map
@@ -64,7 +64,7 @@ def build_type_mapper(
     """Build a :class:`TypeMapper` from raw rule payloads (no filesystem).
 
     The worker-bootstrap path: the trusted shell reads the connector's /
-    connection's ``type-map.json`` (+ optional ``write-type-map.json``) and
+    connection's ``type-map-read.json`` (+ optional ``type-map-write.json``) and
     ships the raw arrays in the launch bootstrap; the worker rebuilds the
     mapper here with the same validation the file loaders apply.
     """
@@ -98,7 +98,7 @@ def _definition_dir(connectors_dir: Path, slug: str) -> Path:
 
 
 def load_type_map(connectors_dir: Path, slug: str) -> TypeMapper:
-    """Load and parse ``type-map.json`` for a connector.
+    """Load and parse ``type-map-read.json`` for a connector.
 
     Raises ``InvalidTypeMapError`` if the file is missing or malformed — the
     engine cannot canonicalize types without it.
@@ -128,9 +128,9 @@ def load_type_map(connectors_dir: Path, slug: str) -> TypeMapper:
 def load_connection_type_map(
     connections_dir: Path, connection_id: str
 ) -> Optional[TypeMapper]:
-    """Load a connection-scoped ``type-map.json`` if present.
+    """Load a connection-scoped ``type-map-read.json`` if present.
 
-    Lives at ``connections/{connection_id}/definition/type-map.json`` and
+    Lives at ``connections/{connection_id}/definition/type-map-read.json`` and
     governs type translation for private endpoints under the same
     ``connections/{connection_id}/definition/endpoints/`` tree. Absent file →
     ``None``; the caller decides whether that's an error (private

@@ -147,38 +147,44 @@ class SqlDialect:
         """
         return not schema_name
 
-    # ---- ADBC-only write path (native DDL) -----------------------------------
-    def adbc_column_type(self, native_type: str, type_mapper: Any) -> str:
-        """Render *native_type* to the dialect's DDL type string via the
-        connector's type-map. ADBC-only DDL has no portable form; the
-        connector package's dialect implements it."""
-        raise UnsupportedDialectOperationError(
-            "adbc_column_type", dialect=self.name
-        )
+    # ---- column type rendering (one write surface: type-map-write.json) -----
+    def render_column_type(
+        self,
+        canonical: str,
+        type_mapper: Any,
+        *,
+        params: Any = None,
+    ) -> str:
+        """Render a canonical Arrow type to this system's native DDL type.
 
-    def adbc_synced_at_type(self) -> str:
-        """Native timestamp type for the ``_synced_at`` audit column."""
-        raise UnsupportedDialectOperationError(
-            "adbc_synced_at_type", dialect=self.name
-        )
+        The default is fully declarative: the connector's
+        ``type-map-write.json`` (via ``TypeMapper.to_native_type``) is the
+        single write-direction surface for every transport — SQLAlchemy,
+        ADBC, and the standalone control-plane ``create_table``. A dialect
+        overrides this ONLY when rules cannot express the logic (e.g.
+        BigQuery's NUMERIC/BIGNUMERIC precision-range arithmetic); the
+        override should handle its special case and delegate the rest here.
+        """
+        return type_mapper.to_native_type(canonical, params=params)
 
-    def adbc_binary_type(self) -> str:
-        """Native binary type for ``_batch_commits.committed_cursor``."""
-        raise UnsupportedDialectOperationError(
-            "adbc_binary_type", dialect=self.name
-        )
+    def current_timestamp_default(self) -> str:
+        """SQL DEFAULT expression for server-stamped timestamp columns.
 
-    def adbc_commit_timestamp_type(self) -> str:
-        """Native timestamp type for ``_batch_commits.committed_at``."""
-        raise UnsupportedDialectOperationError(
-            "adbc_commit_timestamp_type", dialect=self.name
-        )
+        ANSI ``CURRENT_TIMESTAMP`` by default. MySQL/MariaDB require the
+        expression's fractional-seconds precision to match the column's
+        (``CURRENT_TIMESTAMP(6)`` for ``DATETIME(6)``) and reject the bare
+        form with error 1067.
+        """
+        return "CURRENT_TIMESTAMP"
 
-    def adbc_text_type(self) -> str:
-        """Native string type for the ``_batch_commits`` text columns."""
-        raise UnsupportedDialectOperationError(
-            "adbc_text_type", dialect=self.name
-        )
+    def batch_commits_key_type(self, type_mapper: Any) -> str:
+        """Native type for the ``_batch_commits`` primary-key text columns.
+
+        Defaults to the write map's ``Utf8``. Systems whose unbounded text
+        type cannot be a primary key (MySQL/MariaDB: TEXT keys need a
+        prefix length) override with a bounded type.
+        """
+        return self.render_column_type("Utf8", type_mapper)
 
     def adbc_stage_table_sql(
         self, stage_qualified: str, target_qualified: str

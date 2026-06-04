@@ -38,42 +38,38 @@ from cdk.sql.generic import (
 
 
 class _FixtureAdbcDialect(SqlDialect):
-    """A complete ADBC dialect with canned, ANSI-ish hook outputs.
+    """A complete ADBC dialect with canned, ANSI-ish type rendering.
 
-    Stands in for a connector package's dialect: implements every ADBC DDL
-    hook the generic connector calls, supports ADBC upsert, and folds schema
-    names upper-case (the way Snowflake's package dialect would) so the
-    normalize-reaches-the-ingest-site coverage has something to assert.
+    Stands in for a connector package's dialect: renders canonical Arrow types
+    to canned native DDL strings (overriding ``render_column_type`` — the single
+    write surface — rather than the old per-purpose ADBC hooks), keys
+    ``_batch_commits`` text columns on a bounded type, supports ADBC upsert, and
+    folds schema names upper-case (the way Snowflake's package dialect would) so
+    the normalize-reaches-the-ingest-site coverage has something to assert.
     """
 
     name = "fixture"
     supports_upsert_adbc = True
 
-    #: native_type -> arrow string the fixture mapper produces, then the
-    #: arrow string -> canned DDL type the dialect renders.
-    _ARROW_TO_DDL = {
+    #: canonical Arrow string -> canned native DDL type the dialect renders.
+    _CANONICAL_TO_DDL = {
         "Int64": "INTEGER",
+        "Int32": "INTEGER",
         "Utf8": "STRING",
-        "Timestamp(MICROSECOND)": "DATETIME",
+        "Binary": "VARBINARY",
+        "Timestamp(MICROSECOND)": "TIMESTAMP",
+        "Timestamp(MICROSECOND, UTC)": "TIMESTAMPTZ",
     }
 
     def normalize_schema(self, schema: str) -> str:
         return schema.upper()
 
-    def adbc_column_type(self, native_type, type_mapper):
-        arrow = type_mapper.to_arrow_type(native_type)
-        return self._ARROW_TO_DDL[arrow]
+    def render_column_type(self, canonical, type_mapper, *, params=None) -> str:
+        return self._CANONICAL_TO_DDL[canonical]
 
-    def adbc_synced_at_type(self) -> str:
-        return "TIMESTAMPTZ"
-
-    def adbc_binary_type(self) -> str:
-        return "VARBINARY"
-
-    def adbc_commit_timestamp_type(self) -> str:
-        return "TIMESTAMP"
-
-    def adbc_text_type(self) -> str:
+    def batch_commits_key_type(self, type_mapper) -> str:
+        # Bounded text type for the PK text columns (as MySQL/MariaDB would
+        # need, and as the old adbc_text_type hook returned).
         return "VARCHAR(255)"
 
     def adbc_stage_table_sql(self, stage_qualified, target_qualified) -> str:
@@ -183,16 +179,35 @@ class TestAdbcCommitRecordError:
 
 
 class TestUnsupportedHooksAreFatal:
-    """The ANSI base raises ``UnsupportedDialectOperationError`` for the ADBC
-    DDL hooks, so a connector with no package dialect fails loudly rather than
-    emitting wrong SQL. (The fixture dialects below show the override path.)"""
+    """A thin connector that ships only a read type-map (no write rules)
+    cannot render DDL: ``render_column_type`` delegates to the write map, which
+    raises ``InvalidTypeMapError`` — surfaced as ``CreateTableError`` by the
+    shared DDL builder. The stage-table hook still raises
+    ``UnsupportedDialectOperationError``. (The fixture dialects below show the
+    override path.)"""
 
-    def test_base_dialect_lacks_adbc_column_type(self):
-        from cdk.sql.exceptions import UnsupportedDialectOperationError
+    def test_base_dialect_without_write_map_cannot_render_ddl(self):
+        from cdk.contract import ColumnDef
+        from cdk.sql.ddl import build_create_table_sql
+        from cdk.sql.exceptions import CreateTableError
+        from cdk.type_map import InvalidTypeMapError, TypeMapper
+        from cdk.type_map.rules import parse_rules
 
+        # Read rules only — no write rules, so to_native_type cannot render.
+        read_only = TypeMapper(
+            "thin",
+            parse_rules(
+                [{"match": "exact", "native": "BIGINT", "canonical": "Int64"}],
+                source="<test>",
+            ),
+        )
         h = GenericSQLConnector()  # carries the ANSI-neutral base dialect
-        with pytest.raises(UnsupportedDialectOperationError, match="adbc_column_type"):
-            h.dialect.adbc_column_type("INT", object())
+        with pytest.raises(CreateTableError) as exc:
+            build_create_table_sql(
+                h.dialect, read_only, "public", "t",
+                [ColumnDef("id", "Int64")], [],
+            )
+        assert isinstance(exc.value.__cause__, InvalidTypeMapError)
 
     def test_base_dialect_lacks_stage_table_sql(self):
         from cdk.sql.exceptions import UnsupportedDialectOperationError
@@ -633,6 +648,20 @@ class TestAdbcDdlBuilders:
     * the PK clause carries the dialect's NOT ENFORCED variant when set
     """
 
+    @staticmethod
+    def _build_target_ddl(handler, state, mapper):
+        from cdk.sql.ddl import build_create_table_sql
+
+        return build_create_table_sql(
+            handler.dialect,
+            mapper,
+            state.schema_name,
+            state.table_name,
+            handler._build_column_defs(state, mapper),
+            list(state.primary_keys),
+            if_not_exists=True,
+        )
+
     def test_synced_at_appended_when_missing(self):
         from cdk.sql.generic import _StreamState
 
@@ -652,7 +681,7 @@ class TestAdbcDdlBuilders:
             primary_keys=["id"],
         )
         h = _FixtureConnector()
-        ddl = h._build_adbc_create_table_ddl(state, _TypeMapperStub())
+        ddl = self._build_target_ddl(h, state, _TypeMapperStub())
         assert "CREATE TABLE IF NOT EXISTS" in ddl
         # Schema folded by the fixture dialect, table quoted verbatim.
         assert '"ANALYTICS"."orders"' in ddl
@@ -680,17 +709,19 @@ class TestAdbcDdlBuilders:
             primary_keys=["id"],
         )
         h = _FixtureConnector()
-        ddl = h._build_adbc_create_table_ddl(state, _TypeMapperStub())
+        ddl = self._build_target_ddl(h, state, _TypeMapperStub())
         # Exactly one _synced_at declaration
         assert ddl.count('"_synced_at"') == 1
 
     def test_batch_commits_ddl_uses_dialect_types(self):
         h = _FixtureConnector()
-        ddl = h._build_adbc_batch_commits_ddl("analytics")
+        # The fixture dialect renders types from canonical strings, ignoring
+        # the mapper, so any object satisfies the signature here.
+        ddl = h._build_batch_commits_ddl("analytics", object())
         assert '"_batch_commits"' in ddl
-        assert "VARBINARY" in ddl  # adbc_binary_type
-        assert "TIMESTAMP" in ddl  # adbc_commit_timestamp_type
-        assert "VARCHAR(255)" in ddl  # adbc_text_type
+        assert "VARBINARY" in ddl  # render_column_type("Binary")
+        assert "TIMESTAMP" in ddl  # render_column_type("Timestamp(MICROSECOND)")
+        assert "VARCHAR(255)" in ddl  # batch_commits_key_type
         # Folding dialect normalizes the schema in the qualified name.
         assert '"ANALYTICS"."_batch_commits"' in ddl
 
@@ -698,12 +729,12 @@ class TestAdbcDdlBuilders:
         # The backtick fixture sets pk_not_enforced; the bare fixture doesn't.
         bq = _FixtureBacktickConnector()
         assert "NOT ENFORCED" in bq.dialect.pk_clause(["id"])
-        bq_commits = bq._build_adbc_batch_commits_ddl("analytics")
+        bq_commits = bq._build_batch_commits_ddl("analytics", object())
         assert "NOT ENFORCED" in bq_commits
 
         snow = _FixtureConnector()
         assert "NOT ENFORCED" not in snow.dialect.pk_clause(["id"])
-        snow_commits = snow._build_adbc_batch_commits_ddl("analytics")
+        snow_commits = snow._build_batch_commits_ddl("analytics", object())
         assert "NOT ENFORCED" not in snow_commits
 
 

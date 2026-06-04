@@ -12,9 +12,9 @@ Layout (rooted at the project containing ``pipelines/manifest.json``):
     connections/<connection_id>/connection.json
     connections/<connection_id>/.secrets/credentials.json
     connections/<connection_id>/definition/endpoints/<endpoint_id>.json   (private endpoints)
-    connections/<connection_id>/definition/type-map.json                  (optional)
+    connections/<connection_id>/definition/type-map-read.json                  (optional)
     connectors/<connector_id>/definition/connector.json
-    connectors/<connector_id>/definition/type-map.json
+    connectors/<connector_id>/definition/type-map-read.json
     connectors/<connector_id>/definition/endpoints/<endpoint_id>.json   (public endpoints)
 
 Identity is ``*_id`` throughout. Cross-document references carry the id

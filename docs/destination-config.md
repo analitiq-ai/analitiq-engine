@@ -265,7 +265,7 @@ target table:
 ```
 
 `native_type` is mapped to canonical Arrow types via the connection's or
-connector's `type-map.json` (see `cdk/cdk/type_map/`); on the
+connector's `type-map-read.json` (see `cdk/cdk/type_map/`); on the
 SQLAlchemy transport `GenericSQLConnector` uses `arrow_to_sqlalchemy`
 (`cdk/cdk/sql_types.py`) to derive DDL types when `auto_create_table` is
 on, while the ADBC transport renders native DDL per driver. See

@@ -111,6 +111,22 @@ crash/limits/contract containment; fs/network isolation (per-worker egress,
 no volume) arrives with container placement in SaaS — enforcement point is the
 orchestrator, the contract built here is what makes it possible.
 
+## Type-map unification (user decision, shipped)
+
+ONE declarative surface per direction, every transport:
+`definition/type-map-read.json` (native->arrow) + `definition/type-map-write.json`
+(arrow->native, REQUIRED for kind: database). SQLAlchemy DDL, ADBC DDL, and the
+control-plane create_table all render through dialect.render_column_type whose
+base is the write map; SA DML binding comes from post-DDL table REFLECTION.
+Deleted: cdk/sql_types.py (arrow_to_sqlalchemy + per-system renderers), the five
+adbc_* type hooks, _create_table_from_schema, _build_adbc_*_ddl. Remaining code
+overrides (code-when-needed): bigquery render_column_type (NUMERIC/BIGNUMERIC
+ranges), mysql/mariadb batch_commits_key_type (VARCHAR(255); TEXT cannot key) and
+current_timestamp_default (CURRENT_TIMESTAMP(6) precision match — found by
+fresh-DDL e2e). Six write maps authored/extended (postgres+snowflake gained UInt
+rules; mysql, mariadb, redshift, bigquery new). Validated: full local matrix
+green on FRESH DDL through isolated workers; suite 1015 passed.
+
 ## Open problems
 
 - (none currently — raise with user as found)

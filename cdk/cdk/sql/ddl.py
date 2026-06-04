@@ -58,17 +58,21 @@ def build_create_table_sql(
     column_defs: List[str] = []
     for col in columns:
         try:
-            native = type_mapper.to_native_type(col.canonical_type)
+            native = dialect.render_column_type(col.canonical_type, type_mapper)
         except (UnmappedTypeError, InvalidTypeMapError) as err:
             raise CreateTableError(
                 f"create_table for {table!r}: column {col.name!r} canonical "
-                f"type {col.canonical_type!r} has no write-type-map rule"
+                f"type {col.canonical_type!r} has no type-map-write rule"
             ) from err
         parts = [dialect.quote_ident(col.name), native]
         # A PK column is NOT NULL even if the source declared it nullable.
         effective_nullable = col.nullable and col.name not in pk_set
         if not effective_nullable:
             parts.append("NOT NULL")
+        # SQL DEFAULT expressions pass through verbatim (server-side
+        # defaults like now(); never Python values).
+        if col.default:
+            parts.append(f"DEFAULT {col.default}")
         column_defs.append(" ".join(parts))
 
     if primary_keys:

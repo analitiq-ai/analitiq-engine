@@ -30,6 +30,7 @@ from cdk.type_map import (
     normalize_canonical_type,
     normalize_native_type,
 )
+from cdk.type_map.loader import TYPE_MAP_FILENAME, WRITE_TYPE_MAP_FILENAME
 from cdk.type_map.rules import TypeMapRule, parse_rules, parse_write_rules
 
 # Repository root, for loading the real connector write-type-maps.
@@ -434,9 +435,9 @@ def _write_connector(
         json.dumps({"connector_id": "x", "slug": slug, "connector_type": "database"})
     )
     if type_map is not None:
-        (definition / "type-map.json").write_text(json.dumps(type_map))
+        (definition / TYPE_MAP_FILENAME).write_text(json.dumps(type_map))
     if write_type_map is not None:
-        (definition / "write-type-map.json").write_text(json.dumps(write_type_map))
+        (definition / WRITE_TYPE_MAP_FILENAME).write_text(json.dumps(write_type_map))
 
 
 class TestLoaders:
@@ -447,13 +448,13 @@ class TestLoaders:
 
     def test_type_map_wrong_root_type(self, tmp_path: Path):
         _write_connector(tmp_path, "bad")
-        (tmp_path / "bad" / "definition" / "type-map.json").write_text("{}")
+        (tmp_path / "bad" / "definition" / TYPE_MAP_FILENAME).write_text("{}")
         with pytest.raises(InvalidTypeMapError, match="must contain a JSON array"):
             load_type_map(tmp_path, "bad")
 
     def test_type_map_malformed_json(self, tmp_path: Path):
         _write_connector(tmp_path, "busted")
-        (tmp_path / "busted" / "definition" / "type-map.json").write_text("not json")
+        (tmp_path / "busted" / "definition" / TYPE_MAP_FILENAME).write_text("not json")
         with pytest.raises(InvalidTypeMapError, match="not valid JSON"):
             load_type_map(tmp_path, "busted")
 
@@ -472,7 +473,7 @@ class TestLoaders:
         definition = tmp_path / "connector-alt" / "definition"
         definition.mkdir(parents=True)
         (definition / "connector.json").write_text("{}")
-        (definition / "type-map.json").write_text(
+        (definition / TYPE_MAP_FILENAME).write_text(
             json.dumps([{"match": "exact", "native": "TEXT", "canonical": "Utf8"}])
         )
         mapper = load_type_map(tmp_path, "alt")
@@ -489,7 +490,7 @@ class TestLoadConnectionTypeMap:
     def test_happy_path(self, tmp_path: Path):
         definition = tmp_path / "my-pg" / "definition"
         definition.mkdir(parents=True)
-        (definition / "type-map.json").write_text(
+        (definition / TYPE_MAP_FILENAME).write_text(
             json.dumps(
                 [
                     {"match": "exact", "native": "CUSTOM_ENUM", "canonical": "Utf8"},
@@ -504,14 +505,14 @@ class TestLoadConnectionTypeMap:
     def test_malformed_json_raises(self, tmp_path: Path):
         definition = tmp_path / "broken" / "definition"
         definition.mkdir(parents=True)
-        (definition / "type-map.json").write_text("not json")
+        (definition / TYPE_MAP_FILENAME).write_text("not json")
         with pytest.raises(InvalidTypeMapError, match="not valid JSON"):
             load_connection_type_map(tmp_path, "broken")
 
     def test_non_array_root_rejected(self, tmp_path: Path):
         definition = tmp_path / "bad" / "definition"
         definition.mkdir(parents=True)
-        (definition / "type-map.json").write_text("{}")
+        (definition / TYPE_MAP_FILENAME).write_text("{}")
         with pytest.raises(InvalidTypeMapError, match="must contain a JSON array"):
             load_connection_type_map(tmp_path, "bad")
 
@@ -862,7 +863,7 @@ class TestWriteMapLoader:
             "busted",
             type_map=[{"match": "exact", "native": "BIGINT", "canonical": "Int64"}],
         )
-        (tmp_path / "busted" / "definition" / "write-type-map.json").write_text("nope")
+        (tmp_path / "busted" / "definition" / WRITE_TYPE_MAP_FILENAME).write_text("nope")
         with pytest.raises(InvalidTypeMapError, match="not valid JSON") as exc:
             load_type_map(tmp_path, "busted")
         assert not isinstance(exc.value, TypeMapNotFoundError)
@@ -873,7 +874,7 @@ class TestWriteMapLoader:
             "wrong",
             type_map=[{"match": "exact", "native": "BIGINT", "canonical": "Int64"}],
         )
-        (tmp_path / "wrong" / "definition" / "write-type-map.json").write_text("{}")
+        (tmp_path / "wrong" / "definition" / WRITE_TYPE_MAP_FILENAME).write_text("{}")
         with pytest.raises(InvalidTypeMapError, match="must contain a JSON array"):
             load_type_map(tmp_path, "wrong")
 
@@ -886,10 +887,10 @@ class TestWriteMapLoader:
     def test_connection_scoped_write_map_loaded(self, tmp_path: Path):
         definition = tmp_path / "my-pg" / "definition"
         definition.mkdir(parents=True)
-        (definition / "type-map.json").write_text(
+        (definition / TYPE_MAP_FILENAME).write_text(
             json.dumps([{"match": "exact", "native": "BIGINT", "canonical": "Int64"}])
         )
-        (definition / "write-type-map.json").write_text(
+        (definition / WRITE_TYPE_MAP_FILENAME).write_text(
             json.dumps([{"match": "exact", "canonical": "Int64", "native": "BIGINT"}])
         )
         mapper = load_connection_type_map(tmp_path, "my-pg")
@@ -910,7 +911,7 @@ def _require_connector_write_map(slug: str) -> TypeMapper:
     postgres/snowflake write-maps when present (local dev) and skip otherwise.
     """
     definition = _CONNECTORS_DIR / slug / "definition"
-    if not (definition / "type-map.json").is_file():
+    if not (definition / TYPE_MAP_FILENAME).is_file():
         pytest.skip(f"connector {slug!r} not populated in {_CONNECTORS_DIR}")
     mapper = load_type_map(_CONNECTORS_DIR, slug)
     if not mapper.has_write_map:
