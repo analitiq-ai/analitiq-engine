@@ -28,7 +28,7 @@ if [ -d "$CONNECTORS_DIR" ]; then
         name=$(basename "$dir")
         if [ -f "$dir/pyproject.toml" ]; then
             echo "[entrypoint] installing connector package: $name"
-            pip install --user -q "$dir" \
+            pip install --user -q --no-build-isolation "$dir" \
                 || echo "[entrypoint] WARNING: connector package install failed: $name (continuing)"
         elif [ -f "$dir/requirements.txt" ]; then
             echo "[entrypoint] installing connector driver requirements: $name"

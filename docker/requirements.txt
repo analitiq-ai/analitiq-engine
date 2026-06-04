@@ -7,6 +7,10 @@ aiofiles>=23.0.0
 # Database drivers are NOT baked into the engine. Each connector package
 # ships its own driver (requirements.txt / package dependencies) and is
 # installed by docker/entrypoint.sh when the connector is attached.
+# setuptools is the connector packages' build backend; baking it in lets
+# the entrypoint build them with --no-build-isolation (no per-install
+# network fetch of build dependencies).
+setuptools>=69
 
 # API connectors
 aiohttp>=3.8.0

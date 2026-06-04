@@ -65,10 +65,15 @@ def arrow_to_sqlalchemy(dtype: pa.DataType) -> Any:
         column = DateTime(timezone=tz)
         fsp = _MYSQL_FSP_BY_UNIT.get(dtype.unit, 6)
         if fsp:
-            # Generic DATETIME on MySQL truncates fractional seconds; pin the
-            # precision so microseconds survive the round trip. Postgres
-            # TIMESTAMP already stores microseconds and keeps the generic type.
-            column = column.with_variant(MySQLDateTime(fsp=fsp, timezone=tz), "mysql")
+            # Generic DATETIME on MySQL/MariaDB truncates fractional seconds;
+            # pin the precision so microseconds survive the round trip. The
+            # variant must name BOTH dialects — SQLAlchemy's mariadb dialect
+            # does not match a "mysql"-only variant, which silently emitted a
+            # bare DATETIME (fsp 0) on MariaDB. Postgres TIMESTAMP already
+            # stores microseconds and keeps the generic type.
+            column = column.with_variant(
+                MySQLDateTime(fsp=fsp, timezone=tz), "mysql", "mariadb"
+            )
         return column
     if (
         pa.types.is_struct(dtype)
