@@ -40,11 +40,12 @@ from cdk.base_handler import BaseDestinationHandler
 from cdk.types import Cursor as CdkCursor, SchemaSpec, WriteMode as CdkWriteMode
 from cdk.type_map import InvalidTypeMapError, UnmappedTypeError
 
+from ..grpc import DEFAULT_MAX_MESSAGE_SIZE
+
 logger = logging.getLogger(__name__)
 
 # Default configuration from environment
 DEFAULT_GRPC_PORT = int(os.getenv("GRPC_PORT", "50051"))
-DEFAULT_MAX_MESSAGE_SIZE = 16 * 1024 * 1024  # 16MB
 
 
 class DestinationGRPCServer:

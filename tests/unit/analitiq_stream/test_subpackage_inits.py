@@ -96,38 +96,43 @@ class TestDestinationConnectorsPackageInit:
                 assert hasattr(connectors, export)
 
     @pytest.mark.unit
-    def test_destination_handler_registry(self):
-        """The destination registry and its factory are available."""
-        from src.destination.connectors import (
-            destination_registry, get_handler,
-            GenericSQLConnector
-        )
-
-        assert destination_registry is not None
-        assert get_handler is not None
-        assert GenericSQLConnector is not None
-        # The unified SQL connector is the generic fallback for the
-        # ``database`` kind (two-step resolution: connector_id first).
-        assert destination_registry.resolve("database", "anydb") is GenericSQLConnector
-
-    @pytest.mark.unit
-    def test_get_handler_instantiates_by_kind(self):
-        """get_handler returns a handler instance for each builtin kind."""
+    def test_worker_destination_registry_resolves_builtin_kinds(self):
+        """The worker's destination registry serves every builtin kind."""
         from cdk.registry import ConnectorNotRegisteredError
-        from src.destination.connectors import (
-            get_handler, GenericSQLConnector,
-        )
+        from src.destination.connectors import GenericSQLConnector
         from src.destination.connectors.file import FileDestinationHandler
         from src.destination.connectors.stream import StreamDestinationHandler
+        from src.worker import build_worker_registries
 
-        assert isinstance(get_handler("database", "anydb"), GenericSQLConnector)
-        assert isinstance(get_handler("stdout", "stdout"), StreamDestinationHandler)
+        _, registry = build_worker_registries()
+
+        # The unified SQL connector is the generic fallback for the
+        # ``database`` kind (two-step resolution: connector_id first).
+        assert registry.resolve("database", "anydb") is GenericSQLConnector
+        assert isinstance(registry.create("database", "anydb"), GenericSQLConnector)
+        assert isinstance(registry.create("stdout", "stdout"), StreamDestinationHandler)
         # file and s3 share the file handler.
-        assert isinstance(get_handler("file", "csvbox"), FileDestinationHandler)
-        assert isinstance(get_handler("s3", "mybucket"), FileDestinationHandler)
+        assert isinstance(registry.create("file", "csvbox"), FileDestinationHandler)
+        assert isinstance(registry.create("s3", "mybucket"), FileDestinationHandler)
 
         with pytest.raises(ConnectorNotRegisteredError):
-            get_handler("redis", "redis")
+            registry.create("redis", "redis")
+
+    @pytest.mark.unit
+    def test_worker_source_registry_resolves_builtin_kinds(self):
+        """The worker's source registry serves the builtin source kinds."""
+        from cdk.registry import ConnectorNotRegisteredError
+        from src.source.connectors.api import APIConnector
+        from src.destination.connectors import GenericSQLConnector
+        from src.worker import build_worker_registries
+
+        registry, _ = build_worker_registries()
+
+        assert registry.resolve("database", "anydb") is GenericSQLConnector
+        assert registry.resolve("api", "anyapi") is APIConnector
+
+        with pytest.raises(ConnectorNotRegisteredError):
+            registry.resolve("file", "csvbox")
 
 
 class TestSharedPackageInit:

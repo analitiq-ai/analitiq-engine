@@ -25,6 +25,7 @@ from cdk.connection_runtime import ConnectionRuntime
 from cdk.sql.exceptions import ReadError
 from cdk.types import CheckpointStore
 
+from src.grpc import DEFAULT_MAX_MESSAGE_SIZE
 from src.grpc.generated.analitiq.v1.source_service_pb2 import ReadRequest
 from src.grpc.generated.analitiq.v1.source_service_pb2_grpc import SourceServiceStub
 from src.worker.shell import build_bootstrap
@@ -82,7 +83,16 @@ class WorkerReadable:
         )
         handle = await spawn_worker(bootstrap, label=label)
         try:
-            channel = grpc.aio.insecure_channel(handle.target)
+            # Limits must match the worker server's, or batches between the
+            # default 4MB and the server's ceiling die here as
+            # RESOURCE_EXHAUSTED.
+            channel = grpc.aio.insecure_channel(
+                handle.target,
+                options=[
+                    ("grpc.max_send_message_length", DEFAULT_MAX_MESSAGE_SIZE),
+                    ("grpc.max_receive_message_length", DEFAULT_MAX_MESSAGE_SIZE),
+                ],
+            )
             try:
                 stub = SourceServiceStub(channel)
                 request = ReadRequest(

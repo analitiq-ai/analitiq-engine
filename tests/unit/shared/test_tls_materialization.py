@@ -12,6 +12,7 @@ shared ``ca_ssl_context`` helper.
 from __future__ import annotations
 
 import ssl as _ssl
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -163,7 +164,7 @@ class TestBuildWiresTlsThroughDialect:
 class TestCaSslContext:
     def test_flags(self):
         certifi = pytest.importorskip("certifi")
-        pem = open(certifi.where()).read()
+        pem = Path(certifi.where()).read_text()
         ctx = ca_ssl_context(pem, check_hostname=False)
         assert isinstance(ctx, _ssl.SSLContext)
         assert ctx.check_hostname is False

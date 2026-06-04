@@ -13,7 +13,6 @@ def _make_file_runtime(*, raw_config=None):
     config = raw_config or {
         "path": "/tmp/output",
         "prefix": "data/",
-        "connector_type": "file",
         "file_format": "jsonl",
         "formatter_config": {},
         "path_template": None,
@@ -102,6 +101,36 @@ class TestFileHandlerSecretRetention:
 
         # Secrets must be scrubbed even on failure
         assert runtime._resolved_config is None
+
+    @pytest.mark.asyncio
+    async def test_s3_kind_selects_s3_backend(self):
+        """The storage backend follows the runtime's connector kind, not a
+        config key — an s3 connection's JSON carries no "connector_type"."""
+        runtime = ConnectionRuntime(
+            raw_config={"bucket": "my-bucket", "prefix": "data/"},
+            connection_id="conn-s3-test",
+            connector_id="s3",
+            connector_type="s3",
+            driver=None,
+            resolver=AsyncMock(resolve=AsyncMock(return_value={})),
+        )
+        handler = FileDestinationHandler()
+
+        mock_storage = AsyncMock()
+        mock_manifest = AsyncMock()
+        mock_manifest.load = AsyncMock()
+
+        with (
+            patch(
+                "src.destination.connectors.file.get_storage_backend",
+                return_value=mock_storage,
+            ) as get_backend,
+            patch("src.destination.connectors.file.ManifestTracker", return_value=mock_manifest),
+        ):
+            await handler.connect(runtime)
+
+        get_backend.assert_called_once_with("s3")
+        assert handler.connector_type == "s3"
 
     @pytest.mark.asyncio
     async def test_write_batch_uses_reduced_config(self):

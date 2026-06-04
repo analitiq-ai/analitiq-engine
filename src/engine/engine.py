@@ -733,8 +733,8 @@ class StreamingEngine:
                 if batch is None:
                     break
 
-                # Checkpoint is handled by the API connector during read_batches
-                # This stage just tracks completion
+                # Checkpoint is handled by the source connector during
+                # read_batches; this stage just tracks completion
                 batch_count += 1
 
             logger.info(f"Stream {stream_name}: Checkpoint stage completed with {batch_count} batches")

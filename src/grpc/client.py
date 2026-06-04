@@ -17,6 +17,7 @@ import pyarrow as pa
 from grpc import aio as grpc_aio
 
 from .cursor import Cursor, encode_cursor
+from . import DEFAULT_MAX_MESSAGE_SIZE
 from .generated.analitiq.v1 import (
     AckStatus,
     BatchAck,
@@ -53,7 +54,6 @@ DEFAULT_GRPC_HOST = os.getenv("DESTINATION_GRPC_HOST") or "localhost"
 DEFAULT_GRPC_PORT = int(os.getenv("DESTINATION_GRPC_PORT", "50051"))
 DEFAULT_GRPC_TIMEOUT = int(os.getenv("GRPC_TIMEOUT_SECONDS", "300"))
 DEFAULT_MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
-DEFAULT_MAX_MESSAGE_SIZE = 16 * 1024 * 1024  # 16MB
 
 
 @dataclass

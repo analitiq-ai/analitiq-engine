@@ -53,6 +53,7 @@ async def _run_destination(bootstrap: WorkerBootstrap) -> int:
 
 async def _run_source(bootstrap: WorkerBootstrap) -> int:
     import grpc
+    from src.grpc import DEFAULT_MAX_MESSAGE_SIZE
     from src.grpc.generated.analitiq.v1.source_service_pb2_grpc import (
         add_SourceServiceServicer_to_server,
     )
@@ -73,8 +74,8 @@ async def _run_source(bootstrap: WorkerBootstrap) -> int:
 
     server = grpc.aio.server(
         options=[
-            ("grpc.max_send_message_length", 16 * 1024 * 1024),
-            ("grpc.max_receive_message_length", 16 * 1024 * 1024),
+            ("grpc.max_send_message_length", DEFAULT_MAX_MESSAGE_SIZE),
+            ("grpc.max_receive_message_length", DEFAULT_MAX_MESSAGE_SIZE),
         ]
     )
     add_SourceServiceServicer_to_server(servicer, server)

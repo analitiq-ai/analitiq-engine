@@ -477,8 +477,9 @@ class TestReadBatchesIncrementalReplication:
         # Prior cursor: 2024-01-01T12:00:00Z; safety window 60s -> 11:59:00Z
         state_manager = MagicMock()
         state_manager.get_cursor = AsyncMock(
-            return_value={"primary": {"value": "2024-01-01T12:00:00Z"}}
+            return_value={"cursor": "2024-01-01T12:00:00Z"}
         )
+        state_manager.save_cursor = AsyncMock()
 
         endpoint = _endpoint_doc_with_records(
             replication={
@@ -507,6 +508,11 @@ class TestReadBatchesIncrementalReplication:
         assert len(session.calls) == 1
         params = session.calls[0][2]
         assert params["since"] == "2024-01-01T11:59:00Z"
+        # The batch's last record advances the cursor through the minimal
+        # CheckpointStore contract (the same shape the SQL connector saves).
+        state_manager.save_cursor.assert_awaited_once_with(
+            "items", {}, {"cursor": "2024-01-01T12:00:30Z"}
+        )
 
     @pytest.mark.asyncio
     async def test_first_run_with_no_prior_cursor_skips_filter(self):
@@ -523,6 +529,7 @@ class TestReadBatchesIncrementalReplication:
 
         state_manager = MagicMock()
         state_manager.get_cursor = AsyncMock(return_value=None)
+        state_manager.save_cursor = AsyncMock()
 
         endpoint = _endpoint_doc_with_records(
             replication={

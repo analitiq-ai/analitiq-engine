@@ -33,7 +33,6 @@ import shutil
 import signal
 import sys
 import tempfile
-import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
@@ -106,6 +105,8 @@ class WorkerHandle:
             try:
                 os.killpg(proc.pid, signal.SIGTERM)
             except ProcessLookupError:
+                # The group exited between the returncode check and the
+                # signal — already dead is the goal state.
                 pass
             try:
                 await asyncio.wait_for(proc.wait(), timeout=grace)
@@ -116,14 +117,21 @@ class WorkerHandle:
                 try:
                     os.killpg(proc.pid, signal.SIGKILL)
                 except ProcessLookupError:
+                    # Exited during the grace window; nothing left to kill.
                     pass
                 await proc.wait()
         if self._stderr_task is not None:
             self._stderr_task.cancel()
             try:
                 await self._stderr_task
-            except (asyncio.CancelledError, Exception):
-                pass
+            except asyncio.CancelledError:
+                pass  # expected after cancel()
+            except Exception:
+                logger.debug(
+                    "worker %s stderr forwarder failed during close",
+                    self.label,
+                    exc_info=True,
+                )
         shutil.rmtree(self.workdir, ignore_errors=True)
         logger.info("worker %s closed (exit=%s)", self.label, proc.returncode)
 
@@ -150,6 +158,8 @@ async def _wait_ready(uds_path: str, proc: asyncio.subprocess.Process, timeout: 
                 await asyncio.wait_for(channel.channel_ready(), timeout=5)
                 return
             except asyncio.TimeoutError:
+                # Socket exists but isn't accepting yet; keep polling
+                # until the overall deadline expires.
                 pass
             finally:
                 await channel.close()

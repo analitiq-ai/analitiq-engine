@@ -130,6 +130,12 @@ class SourceWorkerServicer(SourceServiceServicer):
                 )
                 total_records += batch.num_rows
                 total_batches += 1
+                # Async generators are pull-based: a connector that calls
+                # save_cursor AFTER its yield for batch N runs that save only
+                # when batch N+1 is requested, so N's cursor_save drains here
+                # one batch late. Safe under the at-least-once upsert
+                # contract (a stale cursor re-reads, never loses data); the
+                # trailing drain below catches the final save.
                 for cursor in relay.pending:
                     yield ReadResponse(
                         cursor_save=CursorSave(cursor_json=json.dumps(cursor))
