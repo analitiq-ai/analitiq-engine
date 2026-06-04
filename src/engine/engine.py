@@ -748,11 +748,18 @@ class StreamingEngine:
 
 
     def _create_source_connector(self, config: Dict[str, Any]) -> Readable:
-        """Create source connector for the connection's kind via the registry."""
+        """Create the source connector via two-step registry resolution.
+
+        The connection's ``connector_id`` selects the connector package's own
+        class when one is installed; otherwise the generic class for the
+        connection's kind serves it (the thin path).
+        """
         runtime = config.get("_runtime")
         if not runtime:
             raise ValueError("Missing _runtime in source config")
-        return self._source_registry.create(runtime.connector_type)
+        return self._source_registry.create(
+            runtime.connector_type, runtime.connector_id
+        )
 
     def _create_pipeline_stages(
         self,

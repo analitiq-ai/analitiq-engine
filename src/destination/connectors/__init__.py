@@ -1,10 +1,14 @@
 """Destination handler implementations and registry.
 
-The destination service resolves a connector ``kind`` (``database`` / ``api`` /
-``file`` / ``s3`` / ``stdout``) to a handler class through the shared CDK
-:class:`~cdk.registry.ConnectorRegistry` (ADR §7). Built-ins are always
-available; externally installed connector packages add themselves via the
-``analitiq.destination_connectors`` entry-point group.
+The destination service resolves a connector in two steps through the shared
+CDK :class:`~cdk.registry.ConnectorRegistry` (ADR §7): the connection's
+``connector_id`` (``postgres``, ``mysql``, ``xero``) selects the connector
+package's own class when one is installed; otherwise the generic handler for
+the connector ``kind`` (``database`` / ``api`` / ``file`` / ``s3`` /
+``stdout``) serves it — the thin path. Built-in kind defaults are always
+available; installed connector packages add themselves via the
+``analitiq.destination_connectors`` entry-point group (entry name =
+connector_id).
 """
 
 from cdk.base_handler import BaseDestinationHandler
@@ -25,9 +29,9 @@ __all__ = [
 ]
 
 
-# Built-in destination handlers, keyed by connector kind. The unified SQL
-# connector serves every SQL dialect (SQLAlchemy or ADBC, selected from the
-# connection's transport); file and s3 share the file handler.
+# Built-in kind defaults. The generic SQL connector serves any SQL database
+# whose connector package ships no class of its own; file and s3 share the
+# file handler.
 _DESTINATION_BUILTINS = {
     "database": GenericSQLConnector,
     "api": ApiDestinationHandler,
@@ -42,10 +46,12 @@ _, destination_registry = build_registries(
 )
 
 
-def get_handler(connector_type: str) -> BaseDestinationHandler:
-    """Instantiate the destination handler for *connector_type* (its kind).
+def get_handler(kind: str, connector_id: str) -> BaseDestinationHandler:
+    """Instantiate the destination handler for (*kind*, *connector_id*).
 
-    Raises :class:`~cdk.registry.ConnectorNotRegisteredError` if no handler is
-    registered for the kind.
+    Two-step resolution: the connector package's own class wins when
+    installed; otherwise the generic handler for the kind serves the
+    connector (the thin path). Raises
+    :class:`~cdk.registry.ConnectorNotRegisteredError` when both miss.
     """
-    return destination_registry.create(connector_type)
+    return destination_registry.create(kind, connector_id)

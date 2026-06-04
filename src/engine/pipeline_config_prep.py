@@ -379,6 +379,7 @@ class PipelineConfigPrep:
         runtime = ConnectionRuntime(
             raw_config=record.raw_config,
             connection_id=connection_id,
+            connector_id=record.connector_id,
             connector_type=kind,
             resolver=self._create_secrets_resolver(connection_id),
             connector_definition=connector,

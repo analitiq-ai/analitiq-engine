@@ -98,6 +98,7 @@ class ConnectionRuntime:
         *,
         raw_config: Mapping[str, Any],
         connection_id: str,
+        connector_id: str,
         connector_type: str,
         resolver: SecretsResolver,
         connector_definition: Optional[Mapping[str, Any]] = None,
@@ -110,9 +111,14 @@ class ConnectionRuntime:
                 f"Invalid connector_type: {connector_type!r}. "
                 f"Expected one of: {sorted(VALID_CONNECTOR_TYPES)}"
             )
+        if not connector_id or not isinstance(connector_id, str):
+            raise ValueError(
+                f"connector_id must be a non-empty string, got {connector_id!r}"
+            )
 
         self._raw_config: Dict[str, Any] = dict(raw_config)
         self._connection_id = connection_id
+        self._connector_id = connector_id
         self._connector_type = connector_type
         self._connector_definition: Optional[Dict[str, Any]] = (
             dict(connector_definition) if connector_definition else None
@@ -146,6 +152,11 @@ class ConnectionRuntime:
     # ------------------------------------------------------------------
     # Read-only metadata
     # ------------------------------------------------------------------
+
+    @property
+    def connector_id(self) -> str:
+        """Canonical connector identifier (``postgres``, ``mysql``, ``xero``)."""
+        return self._connector_id
 
     @property
     def connector_type(self) -> str:

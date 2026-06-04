@@ -235,7 +235,7 @@ async def run_destination_mode() -> None:
     # ``set_stream_endpoints`` are defined on ``BaseDestinationHandler``
     # as no-op defaults, so these calls are safe for every handler type
     # and fail loudly if an override is renamed.
-    handler = get_handler(runtime.connector_type)
+    handler = get_handler(runtime.connector_type, runtime.connector_id)
     handler.set_endpoint_refs(endpoint_refs)
     handler.set_stream_endpoints(stream_endpoints)
     await handler.connect(runtime)
