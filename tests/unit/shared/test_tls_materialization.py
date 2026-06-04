@@ -1,18 +1,28 @@
-"""Tests for SQLAlchemy TLS materialization.
+"""TLS handling across the resolve/build split.
 
-``_materialize_tls_for_driver`` resolves a connector's ``tls`` spec into
-the value placed in the engine's ``connect_args["ssl"]``. Each driver
-speaks its own native SSL vocabulary, so the dispatch is per-driver.
+The trusted side resolves ``tls.mode`` / ``tls.ca_certificate`` to plain
+strings (``_resolve_tls_mode``) — JSON-safe, bootstrap-ready. The build
+side turns them into the driver's connect argument through the connector
+dialect's ``build_tls_connect_arg`` hook; the per-driver SSL vocabularies
+live in the connector packages and are tested there. Here we cover the
+CDK machinery: resolution, hook wiring, the no-dialect failure, and the
+shared ``ca_ssl_context`` helper.
 """
 
 from __future__ import annotations
 
 import ssl as _ssl
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from cdk.transport_factory import _materialize_tls_for_driver
+from cdk.sql.dialects import SqlDialect
+from cdk.sql.exceptions import UnsupportedDialectOperationError
+from cdk.transport_factory import (
+    _resolve_tls_mode,
+    build_sqlalchemy_from_spec,
+    ca_ssl_context,
+)
 
 
 def _resolver(mapping: dict | None = None) -> MagicMock:
@@ -25,75 +35,138 @@ def _resolver(mapping: dict | None = None) -> MagicMock:
     return resolver
 
 
-class TestMaterializeTlsForDriver:
-    def test_no_tls_spec_returns_none(self):
-        assert _materialize_tls_for_driver(
-            "postgresql+asyncpg", None, _resolver()
-        ) is None
+class TestResolveTlsMode:
+    def test_no_spec_resolves_to_none(self):
+        assert _resolve_tls_mode(None, _resolver()) == (None, None)
 
-    def test_spec_without_mode_returns_none(self):
-        assert _materialize_tls_for_driver(
-            "postgresql+asyncpg", {"ca_certificate": "x"}, _resolver()
-        ) is None
-
-    @pytest.mark.parametrize("mode", ["disable", "allow", "prefer", "require"])
-    def test_postgres_non_verify_modes_pass_through_as_string(self, mode):
-        # asyncpg accepts the libpq mode string directly for non-verify
-        # modes.
-        value = _materialize_tls_for_driver(
-            "postgresql+asyncpg", {"mode": mode}, _resolver()
+    def test_spec_without_mode_resolves_to_none(self):
+        assert _resolve_tls_mode({"ca_certificate": "x"}, _resolver()) == (
+            None,
+            None,
         )
-        assert value == mode
 
-    def test_postgres_verify_ca_builds_sslcontext(self):
-        resolver = _resolver({"verify-ca": "verify-ca", "PEM-REF": "PEM-BUNDLE"})
+    def test_mode_and_ca_resolve_to_plain_strings(self):
+        resolver = _resolver({"MODE-REF": "verify-ca", "PEM-REF": "PEM-BUNDLE"})
+        mode, ca = _resolve_tls_mode(
+            {"mode": "MODE-REF", "ca_certificate": "PEM-REF"}, resolver
+        )
+        assert (mode, ca) == ("verify-ca", "PEM-BUNDLE")
+
+    def test_missing_ca_ref_resolves_to_none(self):
+        def raise_keyerror(v):
+            if v == "PEM-REF":
+                raise KeyError(v)
+            return v
+
+        resolver = MagicMock()
+        resolver.resolve = MagicMock(side_effect=raise_keyerror)
+        mode, ca = _resolve_tls_mode(
+            {"mode": "require", "ca_certificate": "PEM-REF"}, resolver
+        )
+        assert (mode, ca) == ("require", None)
+
+    def test_non_mapping_spec_rejected(self):
+        with pytest.raises(TypeError, match="tls"):
+            _resolve_tls_mode("require", _resolver())
+
+
+class _FixtureDialect(SqlDialect):
+    """Dialect with a TLS vocabulary, standing in for a connector package."""
+
+    name = "fixture"
+
+    def build_tls_connect_arg(self, mode, ca_pem):
+        if mode == "off":
+            return None
+        return f"ssl<{mode}:{ca_pem}>"
+
+
+class TestBuildWiresTlsThroughDialect:
+    @pytest.mark.asyncio
+    async def test_tls_value_reaches_connect_args(self):
+        captured = {}
+
+        def fake_create(dsn, connect_args=None, **kw):
+            captured["dsn"] = dsn
+            captured["connect_args"] = connect_args
+            engine = MagicMock()
+            engine.connect = MagicMock(
+                side_effect=RuntimeError("stop before probe")
+            )
+            engine.dispose = AsyncMock()
+            return engine
+
         with patch(
-            "cdk.transport_factory._ca_ssl_context", return_value="<ctx>"
-        ) as ctx:
-            value = _materialize_tls_for_driver(
-                "postgresql+asyncpg",
-                {"mode": "verify-ca", "ca_certificate": "PEM-REF"},
-                resolver,
-            )
-        assert value == "<ctx>"
-        ctx.assert_called_once_with("PEM-BUNDLE", check_hostname=False)
+            "cdk.transport_factory.create_async_engine", side_effect=fake_create
+        ):
+            with pytest.raises(RuntimeError, match="stop before probe"):
+                await build_sqlalchemy_from_spec(
+                    {
+                        "transport_type": "sqlalchemy",
+                        "driver": "postgresql+asyncpg",
+                        "dsn": "postgresql+asyncpg://u:p@h:5432/db",
+                        "tls": {"mode": "require", "ca_pem": None},
+                        "engine_kwargs": {},
+                    },
+                    sql_dialect=_FixtureDialect(),
+                )
+        assert captured["connect_args"] == {"ssl": "ssl<require:None>"}
 
-    def test_postgres_verify_full_requires_ca(self):
-        with pytest.raises(ValueError):
-            _materialize_tls_for_driver(
-                "postgresql+asyncpg", {"mode": "verify-full"}, _resolver()
-            )
+    @pytest.mark.asyncio
+    async def test_hook_returning_none_omits_ssl_arg(self):
+        captured = {}
 
-    def test_mysql_disabled_returns_false(self):
-        value = _materialize_tls_for_driver(
-            "mysql+aiomysql", {"mode": "DISABLED"}, _resolver()
-        )
-        assert value is False
+        def fake_create(dsn, connect_args=None, **kw):
+            captured["connect_args"] = connect_args
+            engine = MagicMock()
+            engine.connect = MagicMock(side_effect=RuntimeError("stop"))
+            engine.dispose = AsyncMock()
+            return engine
 
-    def test_mysql_preferred_returns_sslcontext(self):
-        # aiomysql does not accept native string modes; PREFERRED maps to
-        # a non-verifying SSLContext.
-        value = _materialize_tls_for_driver(
-            "mysql+aiomysql", {"mode": "PREFERRED"}, _resolver()
-        )
-        assert isinstance(value, _ssl.SSLContext)
-        assert value.verify_mode == _ssl.CERT_NONE
-
-    def test_unknown_driver_with_ca_builds_sslcontext(self):
-        resolver = _resolver({"some-mode": "some-mode", "PEM-REF": "PEM-BUNDLE"})
         with patch(
-            "cdk.transport_factory._ca_ssl_context", return_value="<ctx>"
-        ) as ctx:
-            value = _materialize_tls_for_driver(
-                "snowflake",
-                {"mode": "some-mode", "ca_certificate": "PEM-REF"},
-                resolver,
-            )
-        assert value == "<ctx>"
-        ctx.assert_called_once_with("PEM-BUNDLE", check_hostname=False)
+            "cdk.transport_factory.create_async_engine", side_effect=fake_create
+        ):
+            with pytest.raises(RuntimeError, match="stop"):
+                await build_sqlalchemy_from_spec(
+                    {
+                        "transport_type": "sqlalchemy",
+                        "driver": "postgresql+asyncpg",
+                        "dsn": "postgresql+asyncpg://u:p@h:5432/db",
+                        "tls": {"mode": "off", "ca_pem": None},
+                        "engine_kwargs": {},
+                    },
+                    sql_dialect=_FixtureDialect(),
+                )
+        assert captured["connect_args"] == {}
 
-    def test_unknown_driver_without_ca_passes_mode_through(self):
-        value = _materialize_tls_for_driver(
-            "snowflake", {"mode": "require"}, _resolver()
-        )
-        assert value == "require"
+    @pytest.mark.asyncio
+    async def test_tls_without_dialect_fails_loudly(self):
+        with pytest.raises(ValueError, match="no\\s+connector dialect"):
+            await build_sqlalchemy_from_spec(
+                {
+                    "transport_type": "sqlalchemy",
+                    "driver": "postgresql+asyncpg",
+                    "dsn": "postgresql+asyncpg://u:p@h:5432/db",
+                    "tls": {"mode": "require", "ca_pem": None},
+                    "engine_kwargs": {},
+                }
+            )
+
+    def test_base_dialect_hook_is_unsupported(self):
+        with pytest.raises(UnsupportedDialectOperationError, match="build_tls_connect_arg"):
+            SqlDialect().build_tls_connect_arg("require", None)
+
+
+# A throwaway self-signed-style PEM is overkill here: ca_ssl_context only
+# needs to be exercised for flag wiring with a real CA bundle. Use the
+# certifi bundle shipped with the venv if importable; otherwise skip.
+class TestCaSslContext:
+    def test_flags(self):
+        certifi = pytest.importorskip("certifi")
+        pem = open(certifi.where()).read()
+        ctx = ca_ssl_context(pem, check_hostname=False)
+        assert isinstance(ctx, _ssl.SSLContext)
+        assert ctx.check_hostname is False
+        assert ctx.verify_mode == _ssl.CERT_REQUIRED
+        ctx2 = ca_ssl_context(pem, check_hostname=True)
+        assert ctx2.check_hostname is True

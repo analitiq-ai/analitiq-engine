@@ -49,6 +49,8 @@ from cdk.transport_factory import (
     HttpTransport,
     SqlAlchemyTransport,
     build_transport,
+    build_transport_from_spec,
+    resolve_transport_spec,
 )
 
 
@@ -81,6 +83,23 @@ def _derive_dialect(connector_definition: Optional[Mapping[str, Any]]) -> Option
     if not isinstance(driver, str) or not driver:
         return None
     return driver.split("+", 1)[0]
+
+
+class _PreResolvedSecretsResolver(SecretsResolver):
+    """Placeholder resolver for worker-side runtimes built from a resolved
+    payload. The worker never touches the secret store — every value it
+    needs arrived resolved in the launch bootstrap — so any resolution
+    attempt is a contract violation and raises."""
+
+    async def resolve(self, connection_id, *, keys=None):
+        raise RuntimeError(
+            "secret resolution attempted on a pre-resolved worker runtime; "
+            "workers receive resolved values in the bootstrap and never "
+            "access the secret store"
+        )
+
+    async def close(self) -> None:
+        return None
 
 
 class ConnectionRuntime:
@@ -127,6 +146,11 @@ class ConnectionRuntime:
         self._resolver = resolver
         self._connector_type_mapper = connector_type_mapper
         self._connection_type_mapper = connection_type_mapper
+
+        # Worker-side pre-resolved payload (set by from_resolved_payload):
+        # materialize() builds straight from these and never loads secrets.
+        self._pre_resolved_transport: Optional[Dict[str, Any]] = None
+        self._pre_resolved_config: Optional[Dict[str, Any]] = None
 
         # Transport state — set by materialize()
         self._materialized = False
@@ -234,15 +258,38 @@ class ConnectionRuntime:
     # Materialization
     # ------------------------------------------------------------------
 
-    async def materialize(self, *, require_port: bool = True) -> None:
-        """Resolve secrets, build the resolution context, materialize the transport.
+    async def materialize(
+        self, *, require_port: bool = True, sql_dialect: Any = None
+    ) -> None:
+        """Resolve secrets, build the resolution context, build the transport.
 
-        Connectors that declare a ``transports`` block go through the
-        spec-driven transport factory. Connectors without a ``transports``
-        block (file/s3/stdout) expose ``resolved_config`` directly — they
-        have no shared transport to manage.
+        Two ways in:
+
+        * Trusted side (engine shell, control-plane, tests): resolve secrets
+          and the connector's transport spec, then build the live transport.
+        * Worker side (built via :meth:`from_resolved_payload`): the resolved
+          spec arrived in the launch bootstrap; build straight from it. No
+          secret store is ever touched.
+
+        ``sql_dialect`` is the connector's dialect — required whenever the
+        transport declares TLS (the per-driver SSL vocabulary lives in the
+        connector package's dialect).
+
+        Connectors without a ``transports`` block (file/s3/stdout) expose
+        ``resolved_config`` directly — they have no shared transport.
         """
         if self._materialized:
+            return
+
+        if self._pre_resolved_transport is not None or self._pre_resolved_config is not None:
+            if self._pre_resolved_transport is not None:
+                transport = await build_transport_from_spec(
+                    self._pre_resolved_transport, sql_dialect=sql_dialect
+                )
+                self._apply_transport(transport)
+            else:
+                self._resolved_config = copy.deepcopy(self._pre_resolved_config)
+            self._materialized = True
             return
 
         secrets = await self._load_secrets()
@@ -259,28 +306,13 @@ class ConnectionRuntime:
                 transport = await build_transport(
                     self._connector_definition,
                     context=context,
+                    sql_dialect=sql_dialect,
                 )
             except Exception:
                 self._scrub_secrets()
                 raise
 
-            if isinstance(transport, SqlAlchemyTransport):
-                self._engine = transport.engine
-                self._transport_driver = transport.driver
-                self._transport_dialect = transport.dialect
-            elif isinstance(transport, AdbcTransport):
-                self._adbc_transport = transport
-                self._transport_driver = transport.driver
-                self._transport_dialect = transport.driver
-            elif isinstance(transport, HttpTransport):
-                self._session = transport.session
-                self._base_url = transport.base_url
-                self._rate_limiter = transport.rate_limiter
-            else:  # pragma: no cover — defensive
-                raise NotImplementedError(
-                    f"Unhandled transport result type: {type(transport).__name__}"
-                )
-
+            self._apply_transport(transport)
             self._scrub_secrets()
         else:
             # file/s3/stdout connectors: expose ``resolved_config``
@@ -288,6 +320,98 @@ class ConnectionRuntime:
             self._resolved_config = self._merge_secrets_into_config(secrets)
 
         self._materialized = True
+
+    def _apply_transport(self, transport: Any) -> None:
+        """Wire a built transport's objects onto this runtime."""
+        if isinstance(transport, SqlAlchemyTransport):
+            self._engine = transport.engine
+            self._transport_driver = transport.driver
+            self._transport_dialect = transport.dialect
+        elif isinstance(transport, AdbcTransport):
+            self._adbc_transport = transport
+            self._transport_driver = transport.driver
+            self._transport_dialect = transport.driver
+        elif isinstance(transport, HttpTransport):
+            self._session = transport.session
+            self._base_url = transport.base_url
+            self._rate_limiter = transport.rate_limiter
+        else:  # pragma: no cover — defensive
+            raise NotImplementedError(
+                f"Unhandled transport result type: {type(transport).__name__}"
+            )
+
+    # ------------------------------------------------------------------
+    # Worker bootstrap: resolve on the trusted side, build in the worker
+    # ------------------------------------------------------------------
+
+    async def resolve_spec(self) -> Dict[str, Any]:
+        """Resolve this connection into a JSON-safe worker payload.
+
+        Runs on the trusted side. Loads secrets, resolves the connector's
+        transport spec (or the plain config for transport-less kinds), and
+        returns a payload with values only — no constructed objects, no
+        secret-store handle. The payload is what a connector worker receives
+        in its launch bootstrap; rebuild with :meth:`from_resolved_payload`.
+        """
+        secrets = await self._load_secrets()
+        self._validate_secret_refs(secrets)
+
+        has_transports = bool(
+            self._connector_definition
+            and self._connector_definition.get("transports")
+        )
+
+        payload: Dict[str, Any] = {
+            "connection_id": self._connection_id,
+            "connector_id": self._connector_id,
+            "connector_type": self._connector_type,
+            "driver_hint": _derive_dialect(self._connector_definition),
+            "transport_spec": None,
+            "resolved_config": None,
+        }
+        if has_transports:
+            context = self._build_resolution_context(secrets)
+            try:
+                payload["transport_spec"] = resolve_transport_spec(
+                    self._connector_definition, context=context
+                )
+            finally:
+                self._scrub_secrets()
+        else:
+            payload["resolved_config"] = self._merge_secrets_into_config(secrets)
+        return payload
+
+    @classmethod
+    def from_resolved_payload(
+        cls,
+        payload: Mapping[str, Any],
+        *,
+        connector_type_mapper: Optional[TypeMapper] = None,
+        connection_type_mapper: Optional[TypeMapper] = None,
+    ) -> "ConnectionRuntime":
+        """Rebuild a runtime in a connector worker from a resolved payload.
+
+        The worker side of :meth:`resolve_spec`: no raw config, no connector
+        definition, and a resolver that refuses to resolve — every value the
+        worker may use arrived in the payload.
+        """
+        runtime = cls(
+            raw_config={},
+            connection_id=payload["connection_id"],
+            connector_id=payload["connector_id"],
+            connector_type=payload["connector_type"],
+            resolver=_PreResolvedSecretsResolver(),
+            driver=payload.get("driver_hint"),
+            connector_type_mapper=connector_type_mapper,
+            connection_type_mapper=connection_type_mapper,
+        )
+        runtime._pre_resolved_transport = (
+            dict(payload["transport_spec"]) if payload.get("transport_spec") else None
+        )
+        runtime._pre_resolved_config = (
+            dict(payload["resolved_config"]) if payload.get("resolved_config") else None
+        )
+        return runtime
 
     # ------------------------------------------------------------------
     # Transport accessors
@@ -572,7 +696,9 @@ DETERMINISTIC_CONNECT_ERRORS: tuple = (
 )
 
 
-async def materialize_runtime(runtime: "ConnectionRuntime", require_port: bool) -> None:
+async def materialize_runtime(
+    runtime: "ConnectionRuntime", require_port: bool, *, sql_dialect: Any = None
+) -> None:
     """Acquire and materialize a runtime.
 
     Callers are responsible for catching exceptions; use
@@ -587,7 +713,7 @@ async def materialize_runtime(runtime: "ConnectionRuntime", require_port: bool) 
     """
     runtime.acquire()
     try:
-        await runtime.materialize(require_port=require_port)
+        await runtime.materialize(require_port=require_port, sql_dialect=sql_dialect)
     except BaseException:
         await runtime.close()
         raise

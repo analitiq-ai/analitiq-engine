@@ -117,6 +117,20 @@ class SqlDialect:
             "build_sqlalchemy_upsert", dialect=self.name
         )
 
+    def build_tls_connect_arg(self, mode: str, ca_pem: str | None) -> Any:
+        """Turn the connection's stored TLS mode + CA bundle into the
+        driver's connect argument (``connect_args["ssl"]``).
+
+        Each driver speaks its own SSL vocabulary (libpq modes, MySQL
+        modes); the connector package's dialect implements it, typically
+        via :func:`cdk.transport_factory.ca_ssl_context` for the verifying
+        cases. The base raises so a declared TLS mode never silently
+        downgrades to no TLS.
+        """
+        raise UnsupportedDialectOperationError(
+            "build_tls_connect_arg", dialect=self.name
+        )
+
     def sqlalchemy_pre_ddl(self, schema_name: str) -> List[str]:
         """Statements to run before ``MetaData.create_all`` (e.g. postgres'
         ``CREATE SCHEMA IF NOT EXISTS`` for a non-default schema). None by
