@@ -223,15 +223,17 @@ tests.
 ```json
 "destinations": [
   {
-    "connection_ref": "my-postgres",
     "endpoint_ref": {
       "scope": "connection",
-      "identifier": "my-postgres",
-      "endpoint": "public-wise_transfers"
+      "connection_id": "my-postgres",
+      "endpoint_id": "public_wise_transfers"
     },
     "write": {
       "mode": "upsert",
-      "conflict_keys": ["id"]
+      "conflict_keys": [["id"]]
+    },
+    "execution": {
+      "batch_size": 1000
     }
   }
 ]
@@ -239,11 +241,11 @@ tests.
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `connection_ref` | Yes | Connection alias from `pipeline.connections.destinations` |
-| `endpoint_ref` | Yes | String `"connector:slug/name"` / `"connection:alias/name"` or the equivalent object form |
+| `endpoint_ref` | Yes | Object `{scope, connection_id, endpoint_id}` (always an object — there is no string form). `scope` is `connection` or `connector`; `connection_id` is the destination connection; `endpoint_id` the endpoint name |
 | `write.mode` | No | `insert`, `upsert`, or `truncate_insert` (default: `upsert`) |
-| `write.conflict_keys` | When `mode = upsert` | Field paths used for conflict resolution |
-| `batching.size` | No | Per-destination batch size override |
+| `write.conflict_keys` | When `mode = upsert` | List of token-path field references for conflict resolution (e.g. `[["id"]]`) |
+| `execution.batch_size` | No | Per-destination batch-size override |
+| `execution.max_concurrent_batches` | No | Per-destination concurrency override |
 
 Database destination endpoint files live under
 `connections/{alias}/definition/endpoints/{name}.json` and describe the
