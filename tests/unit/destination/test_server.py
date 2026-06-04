@@ -334,3 +334,30 @@ class TestWireToCdkTranslation:
         # A None CDK cursor must not materialize a committed_cursor on the wire
         # (a checkpoint advance on a failed batch).
         assert not ack.HasField("committed_cursor")
+
+
+class TestServerUdsBind:
+    @pytest.mark.asyncio
+    async def test_explicit_address_binds_uds_not_tcp(self):
+        """A worker server bound to ``unix:...`` must not open a TCP port —
+        the UDS path is the isolation mechanism (filesystem permissions as
+        access control)."""
+        import shutil
+        import tempfile
+        from pathlib import Path
+
+        from src.destination.server import DestinationGRPCServer
+
+        # UDS paths are capped at ~104 chars; pytest's tmp_path can exceed
+        # that on macOS, so build a short one the way spawn_worker does.
+        workdir = Path(tempfile.mkdtemp(prefix="uds-test-", dir="/tmp"))
+        sock = workdir / "worker.sock"
+        server = DestinationGRPCServer(
+            handler=MagicMock(), address=f"unix:{sock}"
+        )
+        await server.start()
+        try:
+            assert sock.exists()
+        finally:
+            await server.stop(grace_period=0)
+            shutil.rmtree(workdir, ignore_errors=True)

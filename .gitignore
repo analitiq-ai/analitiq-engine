@@ -396,3 +396,5 @@ tests/e2e/reports/
 # would otherwise un-ignore __pycache__/*.pyc and let it be committed).
 **/tests/**/fixtures/**/__pycache__/
 **/tests/**/fixtures/**/*.py[cod]
+# Cloud/internal handoff documents — never shared on GitHub.
+github-cloud/

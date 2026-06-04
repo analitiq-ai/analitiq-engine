@@ -1,6 +1,6 @@
 """Type-map rule model and normalization primitives.
 
-A rule is one entry in ``type-map.json``:
+A rule is one entry in ``type-map-read.json``:
 
     {"match": "exact", "native": "JSONB", "canonical": "Utf8"}
     {"match": "regex", "native": "^VARCHAR\\((?<n>\\d+)\\)$", "canonical": "Utf8"}
@@ -125,7 +125,7 @@ def _assert_well_formed_placeholders(template: str, *, field: str) -> None:
 
 
 class TypeMapRule(BaseModel):
-    """A single entry in ``type-map.json``."""
+    """A single entry in ``type-map-read.json``."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -227,7 +227,7 @@ def parse_rules(payload: Iterable[object], *, source: str) -> list[TypeMapRule]:
 
 
 class WriteTypeMapRule(BaseModel):
-    """A single entry in ``write-type-map.json`` (canonical -> native).
+    """A single entry in ``type-map-write.json`` (canonical -> native).
 
     The inverse of :class:`TypeMapRule`: it matches on the **canonical** Arrow
     type and renders the **native** DDL type. Two grammar differences follow

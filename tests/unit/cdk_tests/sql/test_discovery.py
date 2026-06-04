@@ -4,6 +4,12 @@ Driven through the fake ADBC runtime with the *real* postgres type-map, so the
 native -> canonical mapping (and its failure mode) is exercised end to end. The
 fake ignores the WHERE filters and just returns canned rows keyed by which
 catalog view the query hits.
+
+The dialect is now an explicit ``dialect=`` keyword. The generic-machinery
+tests pass the ANSI-neutral ``SqlDialect`` base. Dialect-specific mechanisms
+(schema normalization reaching the binds; a structural FROM with no params) are
+exercised with small fixture dialects defined here — vendor-specific dialects
+live in the connector packages, not in the engine repo.
 """
 
 from __future__ import annotations
@@ -11,6 +17,7 @@ from __future__ import annotations
 import pytest
 
 from cdk.contract import ColumnDef
+from cdk.sql.dialects import SqlDialect
 from cdk.sql.discovery import list_columns, list_schemas, list_tables
 from cdk.sql.exceptions import DiscoveryError
 from cdk.type_map.exceptions import UnmappedTypeError
@@ -21,8 +28,8 @@ from .conftest import FakeAdbcRuntime
 def _route(rows_by_view):
     """Build a responder that returns rows based on the catalog view hit.
 
-    Case-insensitive so it also routes BigQuery's upper-cased
-    ``INFORMATION_SCHEMA.*`` and dataset-qualified queries.
+    Case-insensitive so it also routes upper-cased ``INFORMATION_SCHEMA.*``
+    and dataset-qualified queries.
     """
 
     def responder(sql, params):
@@ -40,6 +47,31 @@ def _route(rows_by_view):
     return responder
 
 
+# --- fixture dialects (stand in for connector-package dialects) -------------
+
+
+class _UpperSchemaDialect(SqlDialect):
+    """Folds schema names upper-case before they reach the query binds."""
+
+    name = "upper"
+
+    def normalize_schema(self, schema: str) -> str:
+        return schema.upper()
+
+
+class _StructuralFromDialect(SqlDialect):
+    """Puts the schema in the FROM path (quoted identifier), not in a bind."""
+
+    name = "structural"
+
+    def tables_query(self, schema):
+        return (
+            f"SELECT table_name FROM {self.quote_ident(schema)}"
+            ".information_schema.tables ORDER BY table_name",
+            [],
+        )
+
+
 class TestListSchemas:
     @pytest.mark.asyncio
     async def test_returns_schema_names_in_order(self, pg_mapper):
@@ -50,11 +82,15 @@ class TestListSchemas:
                 {"schemas": [{"schema_name": "public"}, {"schema_name": "sales"}]}
             ),
         )
-        assert await list_schemas(runtime) == ["public", "sales"]
+        assert await list_schemas(runtime, dialect=SqlDialect()) == [
+            "public",
+            "sales",
+        ]
 
     @pytest.mark.asyncio
     async def test_tolerates_uppercased_column_names(self, sf_mapper):
-        # Snowflake folds unquoted output column names to upper case.
+        # A dialect (e.g. Snowflake) folds unquoted output column names to
+        # upper case; ``_col`` resolves them case-insensitively.
         runtime = FakeAdbcRuntime(
             "snowflake",
             mapper=sf_mapper,
@@ -62,7 +98,10 @@ class TestListSchemas:
                 {"schemas": [{"SCHEMA_NAME": "PUBLIC"}, {"SCHEMA_NAME": "RAW"}]}
             ),
         )
-        assert await list_schemas(runtime) == ["PUBLIC", "RAW"]
+        assert await list_schemas(runtime, dialect=SqlDialect()) == [
+            "PUBLIC",
+            "RAW",
+        ]
 
 
 class TestListTables:
@@ -75,10 +114,43 @@ class TestListTables:
                 {"tables": [{"table_name": "orders"}, {"table_name": "customers"}]}
             ),
         )
-        assert await list_tables(runtime, "public") == ["orders", "customers"]
+        assert await list_tables(runtime, "public", dialect=SqlDialect()) == [
+            "orders",
+            "customers",
+        ]
         # The schema reached the query as a bind parameter.
         sql, params = runtime.connections[-1].executed[-1]
         assert params == ["public"]
+
+    @pytest.mark.asyncio
+    async def test_normalized_schema_reaches_the_binds(self, pg_mapper):
+        # A dialect that normalizes schema names: the normalized value is what
+        # the query binds, not the caller's literal.
+        runtime = FakeAdbcRuntime(
+            "postgresql",
+            mapper=pg_mapper,
+            responder=_route({"tables": [{"table_name": "orders"}]}),
+        )
+        assert await list_tables(
+            runtime, "public", dialect=_UpperSchemaDialect()
+        ) == ["orders"]
+        _, params = runtime.connections[-1].executed[-1]
+        assert params == ["PUBLIC"]
+
+    @pytest.mark.asyncio
+    async def test_structural_from_takes_no_params(self):
+        # A dialect that qualifies the schema in the FROM path emits the schema
+        # as a quoted identifier and binds no parameters.
+        runtime = FakeAdbcRuntime(
+            "structural",
+            responder=_route({"tables": [{"table_name": "orders"}]}),
+        )
+        assert await list_tables(
+            runtime, "ds", dialect=_StructuralFromDialect()
+        ) == ["orders"]
+        sql, params = runtime.connections[-1].executed[-1]
+        assert '"ds".information_schema.tables' in sql
+        assert params == []
 
 
 class TestListColumns:
@@ -104,7 +176,9 @@ class TestListColumns:
                 }
             ),
         )
-        columns, primary_keys = await list_columns(runtime, "public", "orders")
+        columns, primary_keys = await list_columns(
+            runtime, "public", "orders", dialect=SqlDialect()
+        )
         assert primary_keys == ["id"]
         assert columns == [
             ColumnDef("id", "Int64", nullable=False, primary_key=True),
@@ -135,7 +209,9 @@ class TestListColumns:
                 }
             ),
         )
-        columns, primary_keys = await list_columns(runtime, "public", "t")
+        columns, primary_keys = await list_columns(
+            runtime, "public", "t", dialect=SqlDialect()
+        )
         assert primary_keys == ["a", "b"]
         assert [c.primary_key for c in columns] == [True, True, False]
 
@@ -155,7 +231,7 @@ class TestListColumns:
             ),
         )
         with pytest.raises(DiscoveryError) as exc:
-            await list_columns(runtime, "public", "spatial")
+            await list_columns(runtime, "public", "spatial", dialect=SqlDialect())
         assert "public.spatial.shape" in str(exc.value)
         assert "geometry" in str(exc.value)
         # The underlying type-map error is chained, not swallowed.
@@ -171,26 +247,14 @@ class TestListColumns:
             responder=_route({"schemas": [{"unexpected_key": "x"}]}),
         )
         with pytest.raises(DiscoveryError, match="expected column 'schema_name'"):
-            await list_schemas(runtime)
+            await list_schemas(runtime, dialect=SqlDialect())
 
 
-class TestSnowflakeDiscovery:
-    """The snowflake dialect's normalize + flat-schema queries run end to end."""
-
-    @pytest.mark.asyncio
-    async def test_list_tables_normalizes_public_schema(self, sf_mapper):
-        runtime = FakeAdbcRuntime(
-            "snowflake",
-            mapper=sf_mapper,
-            responder=_route({"tables": [{"TABLE_NAME": "ORDERS"}]}),
-        )
-        assert await list_tables(runtime, "public") == ["ORDERS"]
-        # public -> PUBLIC reached the query as the bind value.
-        _, params = runtime.connections[-1].executed[-1]
-        assert params == ["PUBLIC"]
+class TestNormalizingDialectDiscovery:
+    """A normalizing dialect's binds propagate through list_columns too."""
 
     @pytest.mark.asyncio
-    async def test_list_columns_maps_native_number(self, sf_mapper):
+    async def test_list_columns_normalizes_schema_in_binds(self, sf_mapper):
         runtime = FakeAdbcRuntime(
             "snowflake",
             mapper=sf_mapper,
@@ -204,51 +268,30 @@ class TestSnowflakeDiscovery:
                 }
             ),
         )
-        columns, pks = await list_columns(runtime, "public", "ORDERS")
+        columns, pks = await list_columns(
+            runtime, "public", "ORDERS", dialect=_UpperSchemaDialect()
+        )
         assert pks == ["ID"]
         assert columns == [
             ColumnDef("ID", "Decimal128(38, 0)", nullable=False, primary_key=True)
         ]
+        # Both the PK query and the column query bound the normalized schema.
+        for sql, params in runtime.connections[-1].executed:
+            assert params[0] == "PUBLIC"
 
 
-class TestBigQueryDiscovery:
-    """The bigquery dialect's dataset-qualified queries run end to end."""
+class TestStructuralFromDiscovery:
+    """A dialect that puts the schema in the FROM path binds no schema param."""
 
     @pytest.mark.asyncio
-    async def test_list_tables_uses_dataset_qualified_from(self):
+    async def test_list_tables_uses_structural_from(self):
         runtime = FakeAdbcRuntime(
-            "bigquery",
+            "structural",
             responder=_route({"tables": [{"table_name": "orders"}]}),
         )
-        assert await list_tables(runtime, "ds") == ["orders"]
+        assert await list_tables(
+            runtime, "ds", dialect=_StructuralFromDialect()
+        ) == ["orders"]
         sql, params = runtime.connections[-1].executed[-1]
-        # Dataset is structural (no bind); table list takes no params.
-        assert "`ds`.INFORMATION_SCHEMA.TABLES" in sql
+        assert '"ds".information_schema.tables' in sql
         assert params == []
-
-    @pytest.mark.asyncio
-    async def test_list_columns_maps_native_and_binds_table(self, bq_mapper):
-        runtime = FakeAdbcRuntime(
-            "bigquery",
-            mapper=bq_mapper,
-            responder=_route(
-                {
-                    "pks": [],
-                    "columns": [
-                        {"column_name": "id", "data_type": "INT64",
-                         "is_nullable": "NO"},
-                        {"column_name": "ok", "data_type": "BOOL",
-                         "is_nullable": "YES"},
-                    ],
-                }
-            ),
-        )
-        columns, pks = await list_columns(runtime, "ds", "orders")
-        assert pks == []
-        assert columns == [
-            ColumnDef("id", "Int64", nullable=False, primary_key=False),
-            ColumnDef("ok", "Boolean", nullable=True, primary_key=False),
-        ]
-        # The table name is bound; the dataset is in the FROM path.
-        col_sql, col_params = runtime.connections[-1].executed[-1]
-        assert col_params == ["orders"]

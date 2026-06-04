@@ -160,6 +160,7 @@ class TestPackageStructure:
         submodules = [
             "config", "destination", "engine", "grpc", "main", "models",
             "runner", "secrets", "shared", "source", "state", "transformations",
+            "worker",
         ]
         for attr in code_attrs:
             if attr not in submodules:

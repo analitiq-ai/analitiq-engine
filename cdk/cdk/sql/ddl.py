@@ -18,7 +18,7 @@ from typing import Any, List, Optional, Sequence
 
 from ..contract import ColumnDef
 from ..type_map.exceptions import InvalidTypeMapError, UnmappedTypeError
-from .dialects import SqlDialect, get_dialect
+from .dialects import SqlDialect
 from .exceptions import CreateTableError
 from .execution import execute_ddl
 
@@ -58,17 +58,21 @@ def build_create_table_sql(
     column_defs: List[str] = []
     for col in columns:
         try:
-            native = type_mapper.to_native_type(col.canonical_type)
+            native = dialect.render_column_type(col.canonical_type, type_mapper)
         except (UnmappedTypeError, InvalidTypeMapError) as err:
             raise CreateTableError(
                 f"create_table for {table!r}: column {col.name!r} canonical "
-                f"type {col.canonical_type!r} has no write-type-map rule"
+                f"type {col.canonical_type!r} has no type-map-write rule"
             ) from err
         parts = [dialect.quote_ident(col.name), native]
         # A PK column is NOT NULL even if the source declared it nullable.
         effective_nullable = col.nullable and col.name not in pk_set
         if not effective_nullable:
             parts.append("NOT NULL")
+        # SQL DEFAULT expressions pass through verbatim (server-side
+        # defaults like now(); never Python values).
+        if col.default:
+            parts.append(f"DEFAULT {col.default}")
         column_defs.append(" ".join(parts))
 
     if primary_keys:
@@ -86,15 +90,17 @@ async def create_table(
     columns: Sequence[ColumnDef],
     primary_keys: Sequence[str],
     *,
+    dialect: SqlDialect,
     if_not_exists: bool = True,
     type_mapper: Optional[Any] = None,
 ) -> None:
     """Build and execute ``CREATE TABLE`` DDL over *runtime*'s transport.
 
-    Uses the connector's write type-map (``runtime.connector_type_mapper``)
-    unless an explicit *type_mapper* is supplied.
+    *dialect* is the connector's dialect strategy (per-system dialects live
+    in the connector packages). Uses the connector's write type-map
+    (``runtime.connector_type_mapper``) unless an explicit *type_mapper* is
+    supplied.
     """
-    dialect = get_dialect(runtime.driver)
     mapper = type_mapper if type_mapper is not None else runtime.connector_type_mapper
     ddl = build_create_table_sql(
         dialect,

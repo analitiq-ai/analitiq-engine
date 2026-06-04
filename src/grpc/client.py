@@ -17,6 +17,7 @@ import pyarrow as pa
 from grpc import aio as grpc_aio
 
 from .cursor import Cursor, encode_cursor
+from . import DEFAULT_MAX_MESSAGE_SIZE
 from .generated.analitiq.v1 import (
     AckStatus,
     BatchAck,
@@ -53,7 +54,6 @@ DEFAULT_GRPC_HOST = os.getenv("DESTINATION_GRPC_HOST") or "localhost"
 DEFAULT_GRPC_PORT = int(os.getenv("DESTINATION_GRPC_PORT", "50051"))
 DEFAULT_GRPC_TIMEOUT = int(os.getenv("GRPC_TIMEOUT_SECONDS", "300"))
 DEFAULT_MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
-DEFAULT_MAX_MESSAGE_SIZE = 16 * 1024 * 1024  # 16MB
 
 
 @dataclass
@@ -66,6 +66,11 @@ class BatchResult:
     committed_cursor: Optional[Cursor]
     failed_record_ids: List[str]
     failure_summary: str
+    # True when the stream/channel died before an ACK arrived — the
+    # destination never rendered a verdict on the batch. Callers that can
+    # restart the peer (the worker proxy) treat this as retryable; the
+    # cross-container engine path keeps its existing fatal handling.
+    transport_failure: bool = False
 
 
 class DestinationGRPCClient:
@@ -87,12 +92,16 @@ class DestinationGRPCClient:
         timeout_seconds: int = DEFAULT_GRPC_TIMEOUT,
         max_retries: int = DEFAULT_MAX_RETRIES,
         max_message_size: int = DEFAULT_MAX_MESSAGE_SIZE,
+        target: Optional[str] = None,
     ):
+        # ``target`` is a full gRPC address and wins over host/port — the
+        # destination shell uses it to reach its connector worker over a
+        # Unix domain socket (``unix:/.../worker.sock``).
         # Coalesce a blank host (env baked as ``DESTINATION_GRPC_HOST=""`` or an
         # explicit ``host=""``) to localhost so the address is never hostless
         # (``:50051``). Mirrors the engine-side fallback in engine.py.
         host = host or "localhost"
-        self.address = f"{host}:{port}"
+        self.address = target or f"{host}:{port}"
         self.timeout = timeout_seconds
         self.max_retries = max_retries
         self.max_message_size = max_message_size
@@ -231,6 +240,19 @@ class DestinationGRPCClient:
                 "Shutdown request failed: code=%s details=%s",
                 e.code(), e.details(), exc_info=True,
             )
+            return False
+
+    async def health_check(self) -> bool:
+        """Probe the destination's HealthCheck rpc (True == SERVING)."""
+        if not self._stub:
+            return False
+        try:
+            response = await self._stub.HealthCheck(
+                HealthCheckRequest(), timeout=10.0
+            )
+            return response.status == HealthCheckResponse.ServingStatus.SERVING
+        except Exception as e:
+            logger.warning("Destination health check failed: %s", e)
             return False
 
     async def get_capabilities(self) -> Optional[GetCapabilitiesResponse]:
@@ -404,6 +426,7 @@ class DestinationGRPCClient:
                     committed_cursor=None,
                     failed_record_ids=[],
                     failure_summary=summary,
+                    transport_failure=True,
                 )
 
             if isinstance(response, BatchAck):

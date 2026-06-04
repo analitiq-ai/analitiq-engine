@@ -247,7 +247,7 @@ def _translate_assignment(assignment: Dict[str, Any]) -> Dict[str, Any]:
     path and a tagged ``value.kind`` (``"expr"`` or ``"const"``); this
     function only reshapes those structural differences. It does NOT map
     Arrow types to anything else — native ↔ Arrow translation is
-    connector/connection-owned (via each artifact's ``type-map.json``)
+    connector/connection-owned (via each artifact's ``type-map-read.json``)
     and is applied by the destination handler at write time.
 
     Contract shape:

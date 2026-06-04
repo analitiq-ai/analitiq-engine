@@ -1,8 +1,18 @@
 """ADBC-only dispatch helpers on GenericSQLConnector.
 
-The big-coverage end-to-end paths require a live ADBC connection;
-these tests pin the small pure helpers that gate retry classification
-and SQL dispatch, where regressions silently change retry semantics.
+The big-coverage end-to-end paths require a live ADBC connection; these tests
+pin the small pure helpers that gate retry classification and SQL dispatch,
+where regressions silently change retry semantics.
+
+The generic connector is now vendor-neutral: every per-system fragment (native
+DDL type names, quoting, schema folding, stage-table syntax, PK clause) comes
+from the :class:`~cdk.sql.dialects.SqlDialect` the connector class carries. The
+CDK base raises ``UnsupportedDialectOperationError`` for those hooks, so the
+driver-specific behaviour these tests exercise is supplied by small *fixture*
+dialects defined here, installed via a ``GenericSQLConnector`` subclass with
+``dialect_class`` set. Vendor-specific SQL text (Snowflake/BigQuery specifics)
+is tested in the connector package repos, not here — here we assert the fixture
+dialect's output reaches the right call site.
 """
 
 from __future__ import annotations
@@ -13,6 +23,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from cdk.sql import generic as database_module
+from cdk.sql.dialects import SqlDialect
 from cdk.sql.generic import (
     AdbcCommitRecordError,
     AdbcConfigurationError,
@@ -21,6 +32,71 @@ from cdk.sql.generic import (
     _is_fatal_adbc_error,
     _reclassify_as_fatal,
 )
+
+
+# --- fixture dialects + connector (stand in for a connector package) --------
+
+
+class _FixtureAdbcDialect(SqlDialect):
+    """A complete ADBC dialect with canned, ANSI-ish type rendering.
+
+    Stands in for a connector package's dialect: renders canonical Arrow types
+    to canned native DDL strings (overriding ``render_column_type`` — the single
+    write surface — rather than the old per-purpose ADBC hooks), keys
+    ``_batch_commits`` text columns on a bounded type, supports ADBC upsert, and
+    folds schema names upper-case (the way Snowflake's package dialect would) so
+    the normalize-reaches-the-ingest-site coverage has something to assert.
+    """
+
+    name = "fixture"
+    supports_upsert_adbc = True
+
+    #: canonical Arrow string -> canned native DDL type the dialect renders.
+    _CANONICAL_TO_DDL = {
+        "Int64": "INTEGER",
+        "Int32": "INTEGER",
+        "Utf8": "STRING",
+        "Binary": "VARBINARY",
+        "Timestamp(MICROSECOND)": "TIMESTAMP",
+        "Timestamp(MICROSECOND, UTC)": "TIMESTAMPTZ",
+    }
+
+    def normalize_schema(self, schema: str) -> str:
+        return schema.upper()
+
+    def render_column_type(self, canonical, type_mapper, *, params=None) -> str:
+        return self._CANONICAL_TO_DDL[canonical]
+
+    def batch_commits_key_type(self, type_mapper) -> str:
+        # Bounded text type for the PK text columns (as MySQL/MariaDB would
+        # need, and as the old adbc_text_type hook returned).
+        return "VARCHAR(255)"
+
+    def adbc_stage_table_sql(self, stage_qualified, target_qualified) -> str:
+        return (
+            f"CREATE TABLE {stage_qualified} AS SELECT * FROM "
+            f"{target_qualified} WHERE FALSE"
+        )
+
+
+class _FixtureBacktickDialect(_FixtureAdbcDialect):
+    """As above but backtick-quoting + NOT ENFORCED PK and no schema folding."""
+
+    name = "fixture_backtick"
+    quote_char = "`"
+    pk_not_enforced = True
+
+    def normalize_schema(self, schema: str) -> str:
+        # Backtick systems (BigQuery) are case-sensitive — identity.
+        return schema
+
+
+class _FixtureConnector(GenericSQLConnector):
+    dialect_class = _FixtureAdbcDialect
+
+
+class _FixtureBacktickConnector(GenericSQLConnector):
+    dialect_class = _FixtureBacktickDialect
 
 
 # Use bare PEP-249 class names so the classifier (which matches on
@@ -102,70 +178,70 @@ class TestAdbcCommitRecordError:
             AdbcCommitRecordError(RuntimeError("x"), "weird_mode")
 
 
-class TestPerDriverDispatch:
-    """Spot-check the per-driver fragment dispatchers don't drift."""
+class TestUnsupportedHooksAreFatal:
+    """A thin connector that ships only a read type-map (no write rules)
+    cannot render DDL: ``render_column_type`` delegates to the write map, which
+    raises ``InvalidTypeMapError`` — surfaced as ``CreateTableError`` by the
+    shared DDL builder. The stage-table hook still raises
+    ``UnsupportedDialectOperationError``. (The fixture dialects below show the
+    override path.)"""
 
-    def _handler_for(self, driver: str) -> GenericSQLConnector:
+    def test_base_dialect_without_write_map_cannot_render_ddl(self):
+        from cdk.contract import ColumnDef
+        from cdk.sql.ddl import build_create_table_sql
+        from cdk.sql.exceptions import CreateTableError
+        from cdk.type_map import InvalidTypeMapError, TypeMapper
+        from cdk.type_map.rules import parse_rules
+
+        # Read rules only — no write rules, so to_native_type cannot render.
+        read_only = TypeMapper(
+            "thin",
+            parse_rules(
+                [{"match": "exact", "native": "BIGINT", "canonical": "Int64"}],
+                source="<test>",
+            ),
+        )
+        h = GenericSQLConnector()  # carries the ANSI-neutral base dialect
+        with pytest.raises(CreateTableError) as exc:
+            build_create_table_sql(
+                h.dialect, read_only, "public", "t",
+                [ColumnDef("id", "Int64")], [],
+            )
+        assert isinstance(exc.value.__cause__, InvalidTypeMapError)
+
+    def test_base_dialect_lacks_stage_table_sql(self):
+        from cdk.sql.exceptions import UnsupportedDialectOperationError
+
         h = GenericSQLConnector()
-        h._driver = driver
-        return h
-
-    def test_native_renderer_snowflake(self):
-        from cdk.sql_types import native_to_snowflake
-        assert self._handler_for("snowflake")._adbc_native_renderer() is native_to_snowflake
-
-    def test_native_renderer_bigquery(self):
-        from cdk.sql_types import native_to_bigquery
-        assert self._handler_for("bigquery")._adbc_native_renderer() is native_to_bigquery
-
-    def test_native_renderer_postgres(self):
-        from cdk.sql_types import native_to_postgres
-        assert self._handler_for("postgresql")._adbc_native_renderer() is native_to_postgres
-
-    def test_native_renderer_unknown_raises(self):
-        with pytest.raises(AdbcConfigurationError, match="no DDL renderer"):
-            self._handler_for("oracle")._adbc_native_renderer()
-
-    def test_timestamp_default_per_driver(self):
-        assert self._handler_for("snowflake")._adbc_timestamp_default_type() == "TIMESTAMP_TZ"
-        assert self._handler_for("bigquery")._adbc_timestamp_default_type() == "TIMESTAMP"
-        assert self._handler_for("postgresql")._adbc_timestamp_default_type() == "TIMESTAMP WITH TIME ZONE"
-
-    def test_binary_type_per_driver(self):
-        assert self._handler_for("snowflake")._adbc_binary_type() == "BINARY"
-        assert self._handler_for("bigquery")._adbc_binary_type() == "BYTES"
-        assert self._handler_for("postgresql")._adbc_binary_type() == "BYTEA"
+        with pytest.raises(
+            UnsupportedDialectOperationError, match="adbc_stage_table_sql"
+        ):
+            h.dialect.adbc_stage_table_sql("stage", "target")
 
 
 class TestSchemaIsImplicitDefault:
-    def _handler_for(self, driver: str) -> GenericSQLConnector:
-        h = GenericSQLConnector()
-        h._driver = driver
-        return h
+    """``schema_is_implicit_default`` is a dialect hook now; the base treats
+    only the empty name as implicit. Connector packages widen it (e.g.
+    Snowflake's PUBLIC) — exercised via a fixture dialect."""
 
-    def test_snowflake_public_is_default(self):
-        h = self._handler_for("snowflake")
-        assert h._schema_is_implicit_default("public")
-        assert h._schema_is_implicit_default("PUBLIC")
-        # Anything else (e.g. an analytics schema) must be created.
-        assert not h._schema_is_implicit_default("analytics")
+    class _PublicImplicitDialect(SqlDialect):
+        name = "public_implicit"
 
-    def test_bigquery_never_implicit_for_named_dataset(self):
-        # BigQuery requires every DML to reference a dataset by name;
-        # the engine must emit CREATE SCHEMA IF NOT EXISTS for any name.
-        h = self._handler_for("bigquery")
-        assert not h._schema_is_implicit_default("public")
-        assert not h._schema_is_implicit_default("analytics")
+        def schema_is_implicit_default(self, schema_name: str) -> bool:
+            return (not schema_name) or schema_name.upper() == "PUBLIC"
 
-    def test_empty_treated_as_implicit_for_all_drivers(self):
-        # When no schema name is given, the dialect's "no DDL" path
-        # fires regardless of driver — the caller's already validated
-        # that a schema is present for ADBC mode (configure_schema
-        # rejects missing schema).
-        for driver in ("snowflake", "bigquery", "postgresql"):
-            h = self._handler_for(driver)
-            assert h._schema_is_implicit_default("")
-            assert h._schema_is_implicit_default(None)
+    def test_base_only_empty_is_implicit(self):
+        d = SqlDialect()
+        assert d.schema_is_implicit_default("")
+        assert not d.schema_is_implicit_default("public")
+        assert not d.schema_is_implicit_default("analytics")
+
+    def test_fixture_public_is_implicit(self):
+        d = self._PublicImplicitDialect()
+        assert d.schema_is_implicit_default("public")
+        assert d.schema_is_implicit_default("PUBLIC")
+        assert not d.schema_is_implicit_default("analytics")
+        assert d.schema_is_implicit_default("")
 
 
 class TestStageTokenUniqueness:
@@ -225,7 +301,6 @@ class TestCommitCollisionHandling:
 
     def test_insert_mode_raises(self):
         h = GenericSQLConnector()
-        h._driver = "bigquery"
         cause = RuntimeError("collision")
         with pytest.raises(AdbcCommitRecordError) as exc:
             h._handle_commit_collision(
@@ -236,17 +311,113 @@ class TestCommitCollisionHandling:
 
     def test_upsert_mode_returns_silently(self):
         h = GenericSQLConnector()
-        h._driver = "bigquery"
         h._handle_commit_collision(
             self._state("upsert"), "r", "s", 1, RuntimeError("collision"),
         )
 
     def test_truncate_insert_mode_returns_silently(self):
         h = GenericSQLConnector()
-        h._driver = "bigquery"
         h._handle_commit_collision(
             self._state("truncate_insert"), "r", "s", 1, RuntimeError("collision"),
         )
+
+
+class TestRecordBatchCommitViaAdbc:
+    """The base ``_record_batch_commit_via_adbc`` emits a plain INSERT and
+    treats an IntegrityError *cause* as a concurrent-retry collision (via
+    ``_handle_commit_collision`` semantics). The MERGE-based commit-record
+    specialization (BigQuery's PK-not-enforced path) lives in that connector
+    package, not here."""
+
+    def _state(self, write_mode="insert"):
+        from cdk.sql.generic import _StreamState
+        return _StreamState(
+            schema_name="analytics", table_name="t", write_mode=write_mode
+        )
+
+    @pytest.mark.asyncio
+    async def test_emits_plain_insert(self, monkeypatch):
+        captured = {}
+
+        def fake_execute(self, sql, params):
+            captured["sql"] = sql
+            captured["params"] = params
+            return -1
+
+        monkeypatch.setattr(
+            GenericSQLConnector, "_execute_adbc_dml_sync", fake_execute
+        )
+        h = GenericSQLConnector()
+        await h._record_batch_commit_via_adbc(
+            self._state(), "r", "s", 3, b"cur", 7,
+        )
+        assert captured["sql"].startswith("INSERT INTO")
+        assert '"_batch_commits"' in captured["sql"]
+        assert captured["params"] == ("r", "s", 3, b"cur", 7)
+
+    @pytest.mark.asyncio
+    async def test_integrity_error_cause_is_collision_not_fatal(self, monkeypatch):
+        # The INSERT raises AdbcConfigurationError whose cause is an
+        # IntegrityError → treated as a concurrent-retry collision. For
+        # truncate_insert (idempotent) the handler returns silently.
+        # The class name must be exactly "IntegrityError" — the collision
+        # branch matches on the MRO class name, not the type identity.
+        class IntegrityError(Exception):
+            pass
+
+        def fake_execute(self, sql, params):
+            wrapped = AdbcConfigurationError("IntegrityError: dup pk")
+            wrapped.__cause__ = IntegrityError("dup pk")
+            raise wrapped
+
+        monkeypatch.setattr(
+            GenericSQLConnector, "_execute_adbc_dml_sync", fake_execute
+        )
+        h = GenericSQLConnector()
+        # truncate_insert collision → idempotent → returns silently.
+        await h._record_batch_commit_via_adbc(
+            self._state("truncate_insert"), "r", "s", 1, b"cur", 1,
+        )
+
+    @pytest.mark.asyncio
+    async def test_integrity_error_cause_insert_mode_raises(self, monkeypatch):
+        class IntegrityError(Exception):
+            pass
+
+        def fake_execute(self, sql, params):
+            wrapped = AdbcConfigurationError("IntegrityError: dup pk")
+            wrapped.__cause__ = IntegrityError("dup pk")
+            raise wrapped
+
+        monkeypatch.setattr(
+            GenericSQLConnector, "_execute_adbc_dml_sync", fake_execute
+        )
+        h = GenericSQLConnector()
+        with pytest.raises(AdbcCommitRecordError) as exc:
+            await h._record_batch_commit_via_adbc(
+                self._state("insert"), "r", "s", 1, b"cur", 1,
+            )
+        assert exc.value.write_mode == "insert"
+
+    @pytest.mark.asyncio
+    async def test_non_integrity_fatal_propagates(self, monkeypatch):
+        # A ProgrammingError cause is genuinely fatal, not a collision.
+        class _ProgrammingError(Exception):
+            pass
+
+        def fake_execute(self, sql, params):
+            wrapped = AdbcConfigurationError("ProgrammingError: bad sql")
+            wrapped.__cause__ = _ProgrammingError("bad sql")
+            raise wrapped
+
+        monkeypatch.setattr(
+            GenericSQLConnector, "_execute_adbc_dml_sync", fake_execute
+        )
+        h = GenericSQLConnector()
+        with pytest.raises(AdbcConfigurationError):
+            await h._record_batch_commit_via_adbc(
+                self._state("insert"), "r", "s", 1, b"cur", 1,
+            )
 
 
 class TestIntegrityErrorMroDetection:
@@ -320,12 +491,13 @@ class TestAdbcModeReset:
 
 
 class TestAdbcIngestSchemaNormalization:
-    """The Snowflake `public` -> `PUBLIC` normalization must reach every
-    `cursor.adbc_ingest(db_schema_name=...)` site: the quoted-DDL path
-    and both ADBC-only ingest sites (`_adbc_only_ingest_sync`,
-    `_merge_ingest_sync`). Regression coverage so a future refactor
-    cannot drop the normalize on the ingest dimension while keeping it
-    on the DDL dimension."""
+    """The dialect's schema normalization must reach every
+    ``cursor.adbc_ingest(db_schema_name=...)`` site: the quoted-DDL path and
+    the ADBC-only ingest site. A fixture dialect that folds schema names
+    upper-case stands in for Snowflake's package dialect; a backtick fixture
+    that does NOT fold stands in for BigQuery. Regression coverage so a future
+    refactor cannot drop the normalize on the ingest dimension while keeping
+    it on the DDL dimension."""
 
     def _captured_ingest(self):
         """Build a fake ADBC connection that captures the kwargs handed
@@ -347,9 +519,8 @@ class TestAdbcIngestSchemaNormalization:
 
         return _FakeConn(), captured
 
-    def test_snowflake_public_normalized_for_adbc_only_ingest(self):
-        h = GenericSQLConnector()
-        h._driver = "snowflake"
+    def test_folding_dialect_normalizes_schema_for_ingest(self):
+        h = _FixtureConnector()
         h._adbc_only = True
         h._adbc_conn, captured = self._captured_ingest()
         import pyarrow as pa
@@ -359,10 +530,9 @@ class TestAdbcIngestSchemaNormalization:
         )
         assert captured["db_schema_name"] == "PUBLIC"
 
-    def test_bigquery_schema_not_normalized_for_adbc_only_ingest(self):
-        # BigQuery datasets are case-sensitive; never normalize.
-        h = GenericSQLConnector()
-        h._driver = "bigquery"
+    def test_non_folding_dialect_keeps_schema_for_ingest(self):
+        # A case-sensitive (backtick) dialect never folds the schema.
+        h = _FixtureBacktickConnector()
         h._adbc_only = True
         h._adbc_conn, captured = self._captured_ingest()
         import pyarrow as pa
@@ -372,9 +542,8 @@ class TestAdbcIngestSchemaNormalization:
         )
         assert captured["db_schema_name"] == "analytics"
 
-    def test_snowflake_empty_schema_yields_none(self):
-        h = GenericSQLConnector()
-        h._driver = "snowflake"
+    def test_empty_schema_yields_none(self):
+        h = _FixtureConnector()
         h._adbc_only = True
         h._adbc_conn, captured = self._captured_ingest()
         import pyarrow as pa
@@ -385,131 +554,113 @@ class TestAdbcIngestSchemaNormalization:
         assert captured["db_schema_name"] is None
 
 
-class TestPerDriverQuoting:
-    """BigQuery uses backticks; everything else uses ANSI double quotes."""
+class TestDialectQuoting:
+    """Quoting is a dialect hook: the ANSI base double-quotes (with escaping);
+    a backtick fixture dialect quotes with backticks and rejects embedded
+    backticks. The connector calls ``self.dialect.quote_*`` — no per-driver
+    branch in the connector itself."""
 
-    def test_bigquery_quotes_with_backticks(self):
-        h = GenericSQLConnector()
-        h._driver = "bigquery"
-        assert h._adbc_quote_ident("id") == "`id`"
-        assert h._adbc_quote_qualified("ds", "t") == "`ds`.`t`"
+    def test_backtick_dialect_quotes_with_backticks(self):
+        h = _FixtureBacktickConnector()
+        assert h.dialect.quote_ident("id") == "`id`"
+        assert h.dialect.quote_qualified("ds", "t") == "`ds`.`t`"
 
-    def test_snowflake_quotes_with_double_quotes(self):
-        h = GenericSQLConnector()
-        h._driver = "snowflake"
-        assert h._adbc_quote_ident("id") == '"id"'
-        # Snowflake's default schema is unquoted PUBLIC; lower-case
-        # ``public`` is normalized to match the real warehouse schema.
-        assert h._adbc_quote_qualified("public", "t") == '"PUBLIC"."t"'
-        assert h._adbc_quote_qualified("analytics", "t") == '"analytics"."t"'
+    def test_ansi_dialect_quotes_with_double_quotes(self):
+        h = GenericSQLConnector()  # ANSI base
+        assert h.dialect.quote_ident("id") == '"id"'
 
-    def test_snowflake_normalize_public_to_uppercase(self):
-        h = GenericSQLConnector()
-        h._driver = "snowflake"
-        assert h._normalize_adbc_schema("public") == "PUBLIC"
-        assert h._normalize_adbc_schema("PUBLIC") == "PUBLIC"
-        assert h._normalize_adbc_schema("Public") == "PUBLIC"
-        assert h._normalize_adbc_schema("analytics") == "analytics"
-
-    def test_bigquery_does_not_normalize_schema(self):
-        h = GenericSQLConnector()
-        h._driver = "bigquery"
-        # BigQuery datasets are case-sensitive; never normalize.
-        assert h._normalize_adbc_schema("public") == "public"
-        assert h._normalize_adbc_schema("Analytics") == "Analytics"
-
-    def test_postgres_quotes_with_double_quotes(self):
-        h = GenericSQLConnector()
-        h._driver = "postgresql"
-        assert h._adbc_quote_ident("id") == '"id"'
+    def test_folding_dialect_qualified_normalizes_schema(self):
+        # The folding fixture upper-cases the schema before quoting it.
+        h = _FixtureConnector()
+        assert h.dialect.quote_qualified("public", "t") == '"PUBLIC"."t"'
+        assert h.dialect.quote_qualified("analytics", "t") == '"ANALYTICS"."t"'
 
     def test_double_quote_escaping_in_ansi_dialect(self):
         h = GenericSQLConnector()
-        h._driver = "snowflake"
-        assert h._adbc_quote_ident('we"ird') == '"we""ird"'
+        assert h.dialect.quote_ident('we"ird') == '"we""ird"'
 
-    def test_bigquery_rejects_backtick_in_identifier(self):
-        h = GenericSQLConnector()
-        h._driver = "bigquery"
+    def test_backtick_dialect_rejects_backtick_in_identifier(self):
+        h = _FixtureBacktickConnector()
         with pytest.raises(ValueError, match="backtick"):
-            h._adbc_quote_ident("we`ird")
+            h.dialect.quote_ident("we`ird")
 
 
 class TestStageTableSql:
-    """Stage table SQL must use regular CREATE TABLE (not TEMP) so the
-    table lives in the target schema and the engine controls cleanup.
-    Per-driver column-copy syntax differs."""
+    """Stage table SQL comes from the dialect hook (``adbc_stage_table_sql``).
+    The base raises; a connector package's dialect supplies the vendor form.
+    Here the fixture dialect's canned output is what the MERGE path will use."""
 
-    def test_snowflake_uses_like(self):
-        h = GenericSQLConnector()
-        h._driver = "snowflake"
-        sql = h._build_adbc_stage_table_sql('"a"."stage"', '"a"."target"')
-        assert sql == 'CREATE TABLE "a"."stage" LIKE "a"."target"'
-
-    def test_bigquery_uses_as_select_false(self):
-        # BigQuery has no LIKE syntax — must use AS SELECT * WHERE FALSE.
-        h = GenericSQLConnector()
-        h._driver = "bigquery"
-        sql = h._build_adbc_stage_table_sql('`a`.`stage`', '`a`.`target`')
+    def test_fixture_dialect_stage_table_sql(self):
+        h = _FixtureConnector()
+        sql = h.dialect.adbc_stage_table_sql('"a"."stage"', '"a"."target"')
         assert sql == (
-            "CREATE TABLE `a`.`stage` AS SELECT * FROM `a`.`target` WHERE FALSE"
+            'CREATE TABLE "a"."stage" AS SELECT * FROM "a"."target" WHERE FALSE'
         )
 
-    def test_postgres_uses_like_including_defaults(self):
+    def test_base_dialect_stage_table_sql_unsupported(self):
+        from cdk.sql.exceptions import UnsupportedDialectOperationError
+
         h = GenericSQLConnector()
-        h._driver = "postgresql"
-        sql = h._build_adbc_stage_table_sql('"a"."stage"', '"a"."target"')
-        assert sql == (
-            'CREATE TABLE "a"."stage" (LIKE "a"."target" INCLUDING DEFAULTS)'
-        )
+        with pytest.raises(UnsupportedDialectOperationError):
+            h.dialect.adbc_stage_table_sql('"a"."stage"', '"a"."target"')
 
 
 class TestSupportsUpsert:
-    """ADBC-only mode adds upsert to dialects that don't have SA upsert."""
+    """``supports_upsert`` reads the dialect's capability flags, gated by the
+    active transport mode. The ANSI base supports neither; a connector
+    package's dialect opts in (the fixture does, for ADBC)."""
 
-    def test_sa_mode_postgres_supports(self):
+    def test_base_sa_mode_does_not_support(self):
         h = GenericSQLConnector()
-        h._driver = "postgresql"
-        h._adbc_only = False
-        assert h.supports_upsert is True
-
-    def test_sa_mode_sqlite_does_not_support(self):
-        h = GenericSQLConnector()
-        h._driver = "sqlite"
         h._adbc_only = False
         assert h.supports_upsert is False
 
-    def test_adbc_mode_snowflake_supports(self):
+    def test_base_adbc_mode_does_not_support(self):
         h = GenericSQLConnector()
-        h._driver = "snowflake"
+        h._adbc_only = True
+        assert h.supports_upsert is False
+
+    def test_fixture_adbc_mode_supports(self):
+        h = _FixtureConnector()
         h._adbc_only = True
         assert h.supports_upsert is True
 
-    def test_adbc_mode_bigquery_supports(self):
-        h = GenericSQLConnector()
-        h._driver = "bigquery"
-        h._adbc_only = True
-        assert h.supports_upsert is True
+    def test_fixture_sa_mode_does_not_support(self):
+        # The fixture dialect declares supports_upsert_adbc but not the SA
+        # flag, so the SA transport path reports no upsert.
+        h = _FixtureConnector()
+        h._adbc_only = False
+        assert h.supports_upsert is False
 
 
 class TestAdbcDdlBuilders:
     """Pin the shape of the auto-generated DDL.
 
-    The DDL strings are what the destination handler executes against
-    the warehouse on schema configure. Behaviour we care about:
+    The DDL strings are what the destination handler executes against the
+    warehouse on schema configure. Every vendor fragment is supplied by the
+    fixture dialect; we assert the assembled DDL wires those fragments
+    correctly:
 
-    * synthetic ``_synced_at`` audit column appears when the contract
-      doesn't declare it (and uses the right per-driver timestamp type)
-    * PRIMARY KEY clause is emitted when the contract declares primary
-      keys
-    * ``_batch_commits`` uses the right binary type per driver
+    * synthetic ``_synced_at`` audit column appears when the contract doesn't
+      declare it (and uses the dialect's timestamp type)
+    * PRIMARY KEY clause is emitted when the contract declares primary keys
+    * ``_batch_commits`` uses the dialect's binary / text / timestamp types
+    * the PK clause carries the dialect's NOT ENFORCED variant when set
     """
 
-    def _make(self, driver: str) -> GenericSQLConnector:
-        from cdk.sql.generic import _StreamState
-        h = GenericSQLConnector()
-        h._driver = driver
-        return h
+    @staticmethod
+    def _build_target_ddl(handler, state, mapper):
+        from cdk.sql.ddl import build_create_table_sql
+
+        return build_create_table_sql(
+            handler.dialect,
+            mapper,
+            state.schema_name,
+            state.table_name,
+            handler._build_column_defs(state, mapper),
+            list(state.primary_keys),
+            if_not_exists=True,
+        )
 
     def test_synced_at_appended_when_missing(self):
         from cdk.sql.generic import _StreamState
@@ -529,14 +680,15 @@ class TestAdbcDdlBuilders:
             },
             primary_keys=["id"],
         )
-        h = self._make("snowflake")
-        ddl = h._build_adbc_create_table_ddl(state, _TypeMapperStub())
+        h = _FixtureConnector()
+        ddl = self._build_target_ddl(h, state, _TypeMapperStub())
         assert "CREATE TABLE IF NOT EXISTS" in ddl
-        assert '"analytics"."orders"' in ddl
-        assert '"_synced_at" TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP' in ddl
-        assert "PRIMARY KEY (\"id\")" in ddl
+        # Schema folded by the fixture dialect, table quoted verbatim.
+        assert '"ANALYTICS"."orders"' in ddl
+        assert '"_synced_at" TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP' in ddl
+        assert 'PRIMARY KEY ("id")' in ddl
         assert '"id" INTEGER NOT NULL' in ddl
-        assert '"status" VARCHAR' in ddl
+        assert '"status" STRING' in ddl
 
     def test_synced_at_not_double_declared(self):
         from cdk.sql.generic import _StreamState
@@ -556,54 +708,34 @@ class TestAdbcDdlBuilders:
             },
             primary_keys=["id"],
         )
-        h = self._make("snowflake")
-        ddl = h._build_adbc_create_table_ddl(state, _TypeMapperStub())
+        h = _FixtureConnector()
+        ddl = self._build_target_ddl(h, state, _TypeMapperStub())
         # Exactly one _synced_at declaration
         assert ddl.count('"_synced_at"') == 1
 
-    def test_batch_commits_ddl_per_driver(self):
-        snow = self._make("snowflake")._build_adbc_batch_commits_ddl("analytics")
-        assert '"_batch_commits"' in snow
-        assert "BINARY" in snow
-        assert "TIMESTAMP_NTZ" in snow
+    def test_batch_commits_ddl_uses_dialect_types(self):
+        h = _FixtureConnector()
+        # The fixture dialect renders types from canonical strings, ignoring
+        # the mapper, so any object satisfies the signature here.
+        ddl = h._build_batch_commits_ddl("analytics", object())
+        assert '"_batch_commits"' in ddl
+        assert "VARBINARY" in ddl  # render_column_type("Binary")
+        assert "TIMESTAMP" in ddl  # render_column_type("Timestamp(MICROSECOND)")
+        assert "VARCHAR(255)" in ddl  # batch_commits_key_type
+        # Folding dialect normalizes the schema in the qualified name.
+        assert '"ANALYTICS"."_batch_commits"' in ddl
 
-        bq = self._make("bigquery")._build_adbc_batch_commits_ddl("analytics")
-        assert "BYTES" in bq
-        assert "DATETIME" in bq
-
-        pg = self._make("postgresql")._build_adbc_batch_commits_ddl("analytics")
-        assert "BYTEA" in pg
-        assert "TIMESTAMP" in pg
-
-    def test_batch_commits_text_type_per_driver(self):
-        # BigQuery's GoogleSQL has only STRING (no VARCHAR(n)).
-        bq = self._make("bigquery")._build_adbc_batch_commits_ddl("analytics")
-        assert "VARCHAR" not in bq
-        assert "STRING" in bq
-
-        snow = self._make("snowflake")._build_adbc_batch_commits_ddl("analytics")
-        assert "VARCHAR(255)" in snow
-
-        pg = self._make("postgresql")._build_adbc_batch_commits_ddl("analytics")
-        assert "VARCHAR(255)" in pg
-
-    def test_pk_clause_bigquery_not_enforced(self):
-        # BigQuery's parser rejects bare PRIMARY KEY (...) — it
-        # requires NOT ENFORCED. Snowflake and Postgres accept the
-        # bare form. The _batch_commits DDL builder hits this path on
-        # every stream, so a regression would block every BQ pipeline.
-        bq = self._make("bigquery")
-        assert "NOT ENFORCED" in bq._build_adbc_pk_clause("`id`")
-        bq_commits = bq._build_adbc_batch_commits_ddl("analytics")
+    def test_pk_clause_not_enforced_variant(self):
+        # The backtick fixture sets pk_not_enforced; the bare fixture doesn't.
+        bq = _FixtureBacktickConnector()
+        assert "NOT ENFORCED" in bq.dialect.pk_clause(["id"])
+        bq_commits = bq._build_batch_commits_ddl("analytics", object())
         assert "NOT ENFORCED" in bq_commits
 
-        snow = self._make("snowflake")
-        assert "NOT ENFORCED" not in snow._build_adbc_pk_clause('"id"')
-        snow_commits = snow._build_adbc_batch_commits_ddl("analytics")
+        snow = _FixtureConnector()
+        assert "NOT ENFORCED" not in snow.dialect.pk_clause(["id"])
+        snow_commits = snow._build_batch_commits_ddl("analytics", object())
         assert "NOT ENFORCED" not in snow_commits
-
-        pg = self._make("postgresql")
-        assert "NOT ENFORCED" not in pg._build_adbc_pk_clause('"id"')
 
 
 class TestDisconnectClosesAdbc:

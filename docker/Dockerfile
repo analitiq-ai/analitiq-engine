@@ -24,6 +24,11 @@ WORKDIR /app
 COPY docker/requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Entrypoint installs attached connector packages (each ships its own
+# database driver — the engine pins none) before starting the engine.
+COPY docker/entrypoint.sh /entrypoint.sh
+RUN chmod 0755 /entrypoint.sh
+
 # Copy application code
 COPY --chown=appuser:appuser . .
 
@@ -61,9 +66,10 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
 # Switch to non-root user
 USER appuser
 
-# Default entrypoint uses unified main module
-# RUN_MODE env var determines whether to run as engine or destination
-ENTRYPOINT ["python", "-m", "src.main"]
+# Entrypoint installs the attached connector packages (pip --user, so the
+# non-root user can write them), then execs the unified main module.
+# RUN_MODE env var determines whether to run as engine or destination.
+ENTRYPOINT ["/entrypoint.sh"]
 
 # Labels for metadata
 LABEL org.opencontainers.image.title="Analitiq Stream" \

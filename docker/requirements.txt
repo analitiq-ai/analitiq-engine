@@ -4,16 +4,13 @@
 # Core async and concurrency
 aiofiles>=23.0.0
 
-# Database connectors
-asyncpg>=0.28.0
-aiomysql>=0.2.0
-# PyMySQL 1.2 changed Connection.ping()'s default from reconnect=True to
-# reconnect=False. SQLAlchemy 2.x's pool_pre_ping path uses that default
-# to decide whether to send `False` to ping(), but the aiomysql adapter
-# (AsyncAdapt_aiomysql_connection.ping) still requires the positional
-# `reconnect` argument — so do_ping() calls ping() with no args and
-# crashes with TypeError. Pin to <1.2 until aiomysql ships a fix.
-PyMySQL>=1.0,<1.2
+# Database drivers are NOT baked into the engine. Each connector package
+# ships its own driver (requirements.txt / package dependencies) and is
+# installed by docker/entrypoint.sh when the connector is attached.
+# setuptools is the connector packages' build backend; baking it in lets
+# the entrypoint build them with --no-build-isolation (no per-install
+# network fetch of build dependencies).
+setuptools>=69
 
 # API connectors
 aiohttp>=3.8.0
@@ -66,28 +63,6 @@ sqlalchemy[asyncio]>=2.0.0
 # pandas>=2.0.0
 # numpy>=1.24.0
 pyarrow>=12.0.0
-
-# ADBC (Arrow Database Connectivity) drivers for the ADBC transport
-# (transport_type='adbc'). Postgres can use it as an alternative to
-# the asyncpg path (e.g. Redshift via the libpq-compatible driver).
-# pip consumers see ADBC as the optional ``adbc`` extra in
-# pyproject.toml — the runtime image bundles it so a connector flip
-# needs no rebuild.
-adbc-driver-manager>=1.1.0
-adbc-driver-postgresql>=1.1.0
-# Snowflake and BigQuery: no async SQLAlchemy driver, so they are
-# only reachable via transport_type='adbc' (see
-# src/shared/transport_factory.py). The wheels are always bundled
-# so a connector flip needs no rebuild.
-adbc-driver-snowflake>=1.1.0
-adbc-driver-bigquery>=1.1.0
-# Compile-only SQLAlchemy dialects for the ADBC source path: the shared
-# QueryBuilder compiles SELECTs (filters, cursor, qmark binds, identifier
-# quoting) against these dialects. They are never used to open a
-# connection -- reads/writes go through the ADBC driver above -- but the
-# dialect package must be importable for QueryBuilder to resolve it.
-snowflake-sqlalchemy>=1.5.0
-sqlalchemy-bigquery>=1.11.0
 
 # For NoSQL databases
 # motor>=3.0.0

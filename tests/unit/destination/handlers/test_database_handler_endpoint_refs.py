@@ -35,6 +35,7 @@ def _runtime(
     return ConnectionRuntime(
         raw_config={},
         connection_id="dest-conn",
+        connector_id="test-connector",
         connector_type="database",
         driver="postgresql",
         resolver=AsyncMock(),
@@ -90,27 +91,29 @@ class TestEndpointRefDispatch:
         }
 
 
-class TestCreateTableFromSchemaStrictness:
-    """``_create_table_from_schema`` must refuse malformed payloads rather
-    than silently dropping columns. Covers the sibling raise of the
-    Arrow-side check in ``schema_contract``."""
+class TestColumnDefStrictness:
+    """``_build_column_defs`` must refuse malformed payloads rather than
+    silently dropping columns. Covers the sibling raise of the Arrow-side
+    check in ``schema_contract``."""
 
     def test_unnamed_column_raises(self):
-        from sqlalchemy import MetaData
+        from cdk.sql.generic import _StreamState
 
         handler = GenericSQLConnector()
         handler._runtime = _runtime(connector_mapper=_mapper("pg"))
 
-        schema = {
-            "columns": [
-                {"native_type": "BIGINT"},  # missing 'name'
-                {"name": "valid", "native_type": "BIGINT"},
-            ]
-        }
+        state = _StreamState(
+            schema_name="public",
+            table_name="t",
+            endpoint_document={
+                "columns": [
+                    {"native_type": "BIGINT"},  # missing 'name'
+                    {"name": "valid", "native_type": "BIGINT"},
+                ]
+            },
+        )
         with pytest.raises(ValueError, match="has no 'name' field"):
-            handler._create_table_from_schema(
-                "t", schema, [], "public", MetaData(), _mapper("pg")
-            )
+            handler._build_column_defs(state, _mapper("pg"))
 
 
 class TestWriteBatchFatalOnTypeMapError:
@@ -272,18 +275,31 @@ class TestDDLLockSerialization:
     (the failure that motivated commit 5bf2e00)."""
 
     @pytest.mark.asyncio
-    async def test_ddl_lock_serializes_concurrent_table_creation(self):
+    async def test_ddl_lock_serializes_concurrent_table_creation(self, monkeypatch):
         import asyncio
 
+        from cdk.sql import generic as generic_module
         from cdk.sql.generic import (
             GenericSQLConnector,
             _StreamState,
         )
 
         handler = GenericSQLConnector()
-        # Pretend the engine is connected; we'll intercept create_all
-        # before any real SQL is dispatched.
+        # Pretend the engine is connected; we intercept the DDL build + the
+        # reflection (run_sync) before any real SQL is dispatched.
         handler._engine = AsyncMock()
+
+        # DDL rendering is irrelevant to the lock; stub it out so the
+        # read-only test mapper (no write rules) doesn't raise before the
+        # lock is even reached.
+        monkeypatch.setattr(
+            generic_module, "build_create_table_sql",
+            lambda *a, **k: "CREATE TABLE t (id BIGINT)",
+        )
+        monkeypatch.setattr(
+            GenericSQLConnector, "_build_batch_commits_ddl",
+            lambda self, schema_name, mapper: "CREATE TABLE _batch_commits (x BIGINT)",
+        )
 
         in_flight = 0
         max_concurrent = 0
@@ -297,6 +313,8 @@ class TestDDLLockSerialization:
             # this critical section if the lock isn't holding.
             await asyncio.sleep(0.01)
             in_flight -= 1
+            # Reflection returns (target_table, batch_commits_table).
+            return object(), object()
 
         # The handler's _ensure_tables_exist uses engine.begin() as an async
         # context manager; bypass with a coroutine returning a prepared ctx.
@@ -305,6 +323,7 @@ class TestDDLLockSerialization:
         @asynccontextmanager
         async def _begin_ctx():
             conn = AsyncMock()
+            conn.execute = AsyncMock()
             conn.run_sync = _fake_run_sync
             yield conn
 

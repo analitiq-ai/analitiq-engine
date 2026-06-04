@@ -120,7 +120,7 @@ Two accuracy notes that matter for this design:
 - The top-level discriminator is **`kind`** (`database` / `api` / `file` /
   `stdout`) — this is the key the registry maps to a connector class.
 - The **type map is NOT referenced inside `connector.json`.** It is a separate,
-  *positional* file at `connectors/{connector_id}/definition/type-map.json`
+  *positional* file at `connectors/{connector_id}/definition/type-map-read.json`
   (see [pyarrow-and-destinations.md](./pyarrow-and-destinations.md)). The connector's
   data (definition + type map) is therefore modular and co-located — consumed
   by both sides.
@@ -195,7 +195,7 @@ reality.
    (`cdk/cdk/sql/ddl.py`) with no engine orchestration.
 4. **The write-direction type map shipped (#564).** `TypeMapper`
    (`cdk/cdk/type_map/mapper.py`) now exposes `to_native_type()` driven by a
-   separate `write-type-map.json` rule set (Arrow canonical → native), the
+   separate `type-map-write.json` rule set (Arrow canonical → native), the
    inverse `create_table` DDL needs. The two directions are independent rule
    sets, never one inverted at runtime.
 5. **There is no capability declaration — by design.** Capability is never a
@@ -384,8 +384,8 @@ definitions, not a connector-wide flag.)
 - **Type translation lives with the connector.** The CDK's `TypeMapper`
   provides both `to_arrow_type(native)` (read direction) and `to_native_type()`
   (write direction, canonical → native), the latter what `create_table` DDL
-  needs (#564, shipped). Read direction is fed by `type-map.json`, write
-  direction by a separate `write-type-map.json` — the *mappings* are the
+  needs (#564, shipped). Read direction is fed by `type-map-read.json`, write
+  direction by a separate `type-map-write.json` — the *mappings* are the
   connector's data, the *mechanism* is the CDK's.
 - **The contract is versioned.** Connectors declare a `cdk_version`; runtimes
   refuse connectors outside their supported range. This is the seam that lets the
@@ -430,7 +430,7 @@ just declares "use the CDK's generic SQL base."
 connectors/postgresql/
   definition/
     connector.json        # kind, transports (no capabilities block — see §4)
-    type-map.json         # native <-> arrow mappings (this DB's data; #564 home)
+    type-map-read.json         # native <-> arrow mappings (this DB's data; #564 home)
   connector.py            # ~10 lines: subclass the CDK SQL base, no overrides
   requirements.txt        # this DB's driver only (asyncpg / adbc-driver-postgresql)
   pyproject.toml          # packaged as `analitiq-connector-postgresql`
@@ -444,14 +444,14 @@ DDL, pagination, type quirks). The overrides live **here**, never in the CDK.
 connectors/clickhouse/
   definition/
     connector.json
-    type-map.json         # Clickhouse native types -> arrow (plugin-researched)
+    type-map-read.json         # Clickhouse native types -> arrow (plugin-researched)
   connector.py            # subclass CDK base + override create_table DDL, etc.
   requirements.txt        # clickhouse-connect / clickhouse driver
   pyproject.toml
 ```
 
-> On-disk, `type-map.json` sits *inside* `definition/`
-> (`connectors/{id}/definition/type-map.json`), co-located with `connector.json`
+> On-disk, `type-map-read.json` sits *inside* `definition/`
+> (`connectors/{id}/definition/type-map-read.json`), co-located with `connector.json`
 > — the engine's existing layout, preserved.
 
 Two complementary distribution forms:
@@ -473,7 +473,7 @@ new database end-to-end without an engineer.
 
 This design turns the plugin from a **JSON author** into a **small-package
 author**. As a plain JSON author it emitted data only —
-`connector.json`, the read-direction `type-map.json`, and (for API connectors)
+`connector.json`, the read-direction `type-map-read.json`, and (for API connectors)
 endpoint files.
 
 Under the CDK, the plugin emits the same data **plus** four things:
@@ -607,7 +607,7 @@ installed packages are discovered additively.
 The design above is implemented. The work landed as these phases:
 
 - **Write-direction type-map (#124).** `TypeMapper.to_native_type()` +
-  `write-type-map.json` rule set — the inverse `create_table` DDL needs (#564).
+  `type-map-write.json` rule set — the inverse `create_table` DDL needs (#564).
 - **CDK extraction (#115 / #117 / #118).** Transports, `ConnectionRuntime`,
   `SecretsResolver`, `TypeMapper`, and the generic SQL machinery factored into
   the `cdk/` package; engine consumes it in-tree.

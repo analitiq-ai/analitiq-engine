@@ -34,12 +34,27 @@ import logging
 import os
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Set
+from typing import Any, Dict, Set
 
 logger = logging.getLogger(__name__)
 
 _TYPE_KEY = "__type__"
 _VALUE_KEY = "value"
+
+
+def encode_cursor_state(cursor: Dict[str, Any]) -> Dict[str, Any]:
+    """JSON-safe form of a cursor-state dict (tags ``datetime``/``date``).
+
+    The worker wire protocol relays cursor saves as JSON; this applies the
+    same tagging the on-disk store uses so a timestamp cursor survives the
+    hop as a ``datetime``, not its ISO text.
+    """
+    return {key: _encode(value) for key, value in cursor.items()}
+
+
+def decode_cursor_state(cursor: Dict[str, Any]) -> Dict[str, Any]:
+    """Inverse of :func:`encode_cursor_state`."""
+    return {key: _decode(value) for key, value in cursor.items()}
 
 
 class CursorStore:

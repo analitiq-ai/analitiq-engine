@@ -12,21 +12,24 @@ class SqlIntrospectionError(Exception):
     """Base class for SQL control-plane (discovery + create_table) failures."""
 
 
-class UnsupportedDialectError(SqlIntrospectionError):
-    """No dialect strategy is registered for a runtime's driver.
+class UnsupportedDialectOperationError(SqlIntrospectionError):
+    """The active dialect has no implementation for a requested operation.
 
-    The CDK ships dialect strategies for the SQL databases the engine's
-    transports support today (postgresql, mysql, snowflake, bigquery; redshift
-    rides the postgres strategy). A runtime whose ``driver`` is outside that set
-    cannot be introspected or have tables created until a strategy is added.
+    The CDK ships only the vendor-neutral ANSI ``SqlDialect`` base; every
+    per-system dialect (quoting rules, upsert SQL, ADBC DDL type names,
+    stage-table syntax) lives in that system's connector package. Hitting
+    this error means the operation needs the connector's own dialect — the
+    connector package is either not installed or does not implement the
+    operation. Deterministic: retrying cannot succeed.
     """
 
-    def __init__(self, driver: str | None, *, supported: tuple[str, ...]) -> None:
-        self.driver = driver
-        self.supported = supported
+    def __init__(self, operation: str, *, dialect: str) -> None:
+        self.operation = operation
+        self.dialect = dialect
         super().__init__(
-            f"no SQL dialect strategy for driver {driver!r}; "
-            f"supported: {', '.join(supported)}"
+            f"dialect {dialect!r} does not implement {operation}; this "
+            f"operation requires the system's connector package (its "
+            f"connector.py ships the dialect that implements it)"
         )
 
 

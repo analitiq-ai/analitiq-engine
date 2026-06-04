@@ -1,16 +1,15 @@
-"""ADBC transport builder.
+"""ADBC transport across the resolve/build split.
 
-The builder is the engine's only entry into ``transport_type: "adbc"``
-connectors. Tests cover:
-
-* the closed driver enum (must match the published connector schema's
-  ``AdbcTransport.driver`` enum exactly — extending one without the
-  other yields connectors that either don't validate or don't run).
-* ``_resolve_db_kwargs`` strips None values (matches schema's optional
+* ``resolve_adbc_spec`` produces the JSON-safe worker payload and enforces
+  the schema's shape constraints (driver required, anyOf(dsn, db_kwargs),
+  structured dsn). The driver *values* are validated by the published
+  connector schema's ``AdbcTransport.driver`` enum — the engine derives the
+  dbapi module by the upstream packaging convention instead of keeping a
+  table.
+* ``_resolve_db_kwargs`` strips None values (matches the schema's optional
   credential treatment) and rejects non-mapping inputs.
-* the anyOf(dsn, db_kwargs) constraint is enforced at build time.
-* ``register_transport_kind("adbc", …)`` survives module re-import
-  (the registration lives at module top-level).
+* ``build_adbc_from_spec`` fails loudly when the connector's driver wheel
+  is not installed.
 """
 
 from __future__ import annotations
@@ -20,9 +19,10 @@ import pytest
 from cdk.derived_functions import DEFAULT_FUNCTIONS
 from cdk.resolver import ResolutionContext, Resolver
 from cdk.transport_factory import (
-    _ADBC_DRIVER_MODULES,
+    _adbc_dbapi_module_path,
     _resolve_db_kwargs,
-    build_adbc_transport,
+    build_adbc_from_spec,
+    resolve_adbc_spec,
     registered_transport_kinds,
 )
 
@@ -34,12 +34,18 @@ def _resolver() -> Resolver:
     return Resolver(ctx, functions=DEFAULT_FUNCTIONS)
 
 
-class TestAdbcDriverRegistry:
-    def test_enum_matches_schema(self):
-        """Closed enum must mirror schemas.analitiq.ai AdbcTransport.driver."""
-        assert set(_ADBC_DRIVER_MODULES) == {
-            "postgresql", "snowflake", "bigquery",
-        }
+class TestModuleConvention:
+    @pytest.mark.parametrize(
+        "driver,module",
+        [
+            ("postgresql", "adbc_driver_postgresql.dbapi"),
+            ("snowflake", "adbc_driver_snowflake.dbapi"),
+            ("bigquery", "adbc_driver_bigquery.dbapi"),
+            ("DuckDB", "adbc_driver_duckdb.dbapi"),  # case-folds
+        ],
+    )
+    def test_dbapi_module_follows_packaging_convention(self, driver, module):
+        assert _adbc_dbapi_module_path(driver) == module
 
     def test_adbc_kind_registered(self):
         assert "adbc" in registered_transport_kinds()
@@ -71,43 +77,61 @@ class TestResolveDbKwargs:
         assert out == {"account": "abc"}
 
 
-class TestBuildAdbcTransportRejections:
-    @pytest.mark.asyncio
-    async def test_missing_driver_raises(self):
-        with pytest.raises(ValueError, match="requires `driver`"):
-            await build_adbc_transport(
+class TestResolveAdbcSpec:
+    def test_missing_driver_raises(self):
+        with pytest.raises(ValueError, match="`driver`"):
+            resolve_adbc_spec(
                 {"transport_type": "adbc", "db_kwargs": {"a": "b"}},
                 resolver=_resolver(),
             )
 
-    @pytest.mark.asyncio
-    async def test_unknown_driver_raises(self):
-        with pytest.raises(ValueError, match="not registered"):
-            await build_adbc_transport(
-                {
-                    "transport_type": "adbc",
-                    "driver": "mysql",  # not in the enum
-                    "db_kwargs": {"a": "b"},
-                },
-                resolver=_resolver(),
-            )
-
-    @pytest.mark.asyncio
-    async def test_neither_dsn_nor_db_kwargs_raises(self):
+    def test_neither_dsn_nor_db_kwargs_raises(self):
         with pytest.raises(ValueError, match="at least one of"):
-            await build_adbc_transport(
+            resolve_adbc_spec(
                 {"transport_type": "adbc", "driver": "snowflake"},
                 resolver=_resolver(),
             )
 
-    @pytest.mark.asyncio
-    async def test_dsn_non_mapping_raises(self):
+    def test_dsn_non_mapping_raises(self):
         with pytest.raises(TypeError, match="dsn"):
-            await build_adbc_transport(
+            resolve_adbc_spec(
                 {
                     "transport_type": "adbc",
                     "driver": "postgresql",
                     "dsn": "postgresql://host/db",  # not the structured shape
                 },
                 resolver=_resolver(),
+            )
+
+    def test_output_is_json_safe_payload(self):
+        import json
+
+        out = resolve_adbc_spec(
+            {
+                "transport_type": "adbc",
+                "driver": "Snowflake",
+                "db_kwargs": {"account": "abc", "port": 443},
+            },
+            resolver=_resolver(),
+        )
+        assert out == {
+            "transport_type": "adbc",
+            "driver": "snowflake",  # folded
+            "uri": None,
+            "db_kwargs": {"account": "abc", "port": 443},
+        }
+        json.dumps(out)  # must round-trip into a worker bootstrap
+
+
+class TestBuildAdbcFromSpec:
+    @pytest.mark.asyncio
+    async def test_uninstalled_driver_wheel_fails_loudly(self):
+        with pytest.raises(RuntimeError, match="not importable"):
+            await build_adbc_from_spec(
+                {
+                    "transport_type": "adbc",
+                    "driver": "no-such-driver",
+                    "uri": None,
+                    "db_kwargs": {"a": "b"},
+                }
             )

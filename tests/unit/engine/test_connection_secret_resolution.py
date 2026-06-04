@@ -67,6 +67,7 @@ class TestConnectionRuntimeMetadata:
         runtime = ConnectionRuntime(
             raw_config={"parameters": {"host": "h"}},
             connection_id="conn-1",
+            connector_id="test-connector",
             connector_type="database",
             driver="postgresql",
             resolver=AsyncMock(),
@@ -81,6 +82,7 @@ class TestConnectionRuntimeMetadata:
         runtime = ConnectionRuntime(
             raw_config={"parameters": {}},
             connection_id="conn-1",
+            connector_id="test-connector",
             connector_type="database",
             resolver=AsyncMock(),
             connector_definition=_db_connector(),
@@ -92,6 +94,7 @@ class TestConnectionRuntimeMetadata:
         runtime = ConnectionRuntime(
             raw_config=config,
             connection_id="conn-1",
+            connector_id="test-connector",
             connector_type="database",
             driver="postgresql",
             resolver=AsyncMock(),
@@ -105,6 +108,7 @@ class TestConnectionRuntimeMetadata:
             ConnectionRuntime(
                 raw_config={},
                 connection_id="conn-1",
+                connector_id="test-connector",
                 connector_type="foobar",
                 resolver=AsyncMock(),
             )
@@ -125,6 +129,7 @@ class TestConnectionRuntimeMaterialize:
         runtime = ConnectionRuntime(
             raw_config={"parameters": {"host": "h", "port": 5432}},
             connection_id="conn-db",
+            connector_id="test-connector",
             connector_type="database",
             resolver=_resolver({"password": "secret"}),
             connector_definition=_db_connector(),
@@ -151,6 +156,7 @@ class TestConnectionRuntimeMaterialize:
         runtime = ConnectionRuntime(
             raw_config={"parameters": {}},
             connection_id="conn-api",
+            connector_id="test-connector",
             connector_type="api",
             resolver=_resolver({"api_key": "t"}),
             connector_definition=_api_connector(),
@@ -168,6 +174,7 @@ class TestConnectionRuntimeMaterialize:
         runtime = ConnectionRuntime(
             raw_config={"file_format": "jsonl"},
             connection_id="conn-1",
+            connector_id="test-connector",
             connector_type="stdout",
             resolver=_resolver(),
         )
@@ -181,6 +188,7 @@ class TestConnectionRuntimeMaterialize:
         runtime = ConnectionRuntime(
             raw_config={},
             connection_id="conn-1",
+            connector_id="test-connector",
             connector_type="database",
             driver="postgresql",
             resolver=AsyncMock(),
@@ -200,6 +208,7 @@ class TestConnectionRuntimeMaterialize:
                 "secret_refs": {"password": "connections/x/password"},
             },
             connection_id="conn-missing",
+            connector_id="test-connector",
             connector_type="database",
             resolver=_resolver({}),  # no `password` key
             connector_definition=_db_connector(),
@@ -223,6 +232,7 @@ class TestConnectionRuntimeClose:
         runtime = ConnectionRuntime(
             raw_config={"parameters": {}},
             connection_id="conn-db",
+            connector_id="test-connector",
             connector_type="database",
             resolver=_resolver(),
             connector_definition=_db_connector(),
@@ -247,6 +257,7 @@ class TestConnectionRuntimeClose:
         runtime = ConnectionRuntime(
             raw_config={"parameters": {}},
             connection_id="conn-api",
+            connector_id="test-connector",
             connector_type="api",
             resolver=_resolver(),
             connector_definition=_api_connector(),
@@ -269,6 +280,7 @@ class TestConnectionRuntimeClose:
         runtime = ConnectionRuntime(
             raw_config={"parameters": {}},
             connection_id="conn-db",
+            connector_id="test-connector",
             connector_type="database",
             resolver=_resolver(),
             connector_definition=_db_connector(),
@@ -293,6 +305,7 @@ class TestScrubResolvedConfig:
         runtime = ConnectionRuntime(
             raw_config={"path": "/tmp/out"},
             connection_id="conn-file",
+            connector_id="test-connector",
             connector_type="file",
             resolver=_resolver({"SECRET": "s3cr3t"}),
         )
@@ -309,6 +322,7 @@ class TestScrubResolvedConfig:
         runtime = ConnectionRuntime(
             raw_config={"path": "/tmp/out"},
             connection_id="conn-shared",
+            connector_id="test-connector",
             connector_type="file",
             resolver=_resolver(),
         )
@@ -325,6 +339,7 @@ class TestScrubResolvedConfig:
         runtime = ConnectionRuntime(
             raw_config={"path": "/data", "file_format": "jsonl"},
             connection_id="conn-stdout",
+            connector_id="test-connector",
             connector_type="stdout",
             resolver=_resolver(),
         )
@@ -339,6 +354,7 @@ class TestScrubResolvedConfig:
         runtime = ConnectionRuntime(
             raw_config={"path": "/tmp"},
             connection_id="conn-reset",
+            connector_id="test-connector",
             connector_type="file",
             resolver=_resolver(),
         )
@@ -352,6 +368,7 @@ class TestScrubResolvedConfig:
         runtime = ConnectionRuntime(
             raw_config={"path": "/tmp"},
             connection_id="conn-early",
+            connector_id="test-connector",
             connector_type="file",
             resolver=_resolver(),
         )
@@ -364,6 +381,7 @@ class TestScrubResolvedConfig:
         runtime = ConnectionRuntime(
             raw_config={"path": "/tmp"},
             connection_id="conn-zero-ref",
+            connector_id="test-connector",
             connector_type="file",
             resolver=_resolver(),
         )
@@ -385,6 +403,7 @@ class TestScrubResolvedConfig:
         runtime = ConnectionRuntime(
             raw_config={"parameters": {}},
             connection_id="conn-db",
+            connector_id="test-connector",
             connector_type="database",
             resolver=_resolver(),
             connector_definition=_db_connector(),
@@ -404,6 +423,7 @@ class TestScrubResolvedConfig:
         runtime = ConnectionRuntime(
             raw_config={"path": "/tmp"},
             connection_id="conn-excess",
+            connector_id="test-connector",
             connector_type="file",
             resolver=_resolver(),
         )
@@ -419,6 +439,7 @@ class TestScrubResolvedConfig:
         runtime = ConnectionRuntime(
             raw_config={"path": "/tmp"},
             connection_id="conn-msg",
+            connector_id="test-connector",
             connector_type="file",
             resolver=_resolver(),
         )

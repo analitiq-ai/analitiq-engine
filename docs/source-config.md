@@ -37,7 +37,7 @@ project_root/
 │       └── streams/
 │           └── {stream_id}.json            # one file per stream
 ├── connectors/
-│   └── {slug}/definition/
+│   └── {connector_id}/definition/
 │       ├── connector.json                  # connector definition
 │       └── endpoints/
 │           └── {endpoint_name}.json        # public endpoint schemas
@@ -283,7 +283,7 @@ connection).
 }
 ```
 
-Private endpoints rely on the connection's `type-map.json` (or the
+Private endpoints rely on the connection's `type-map-read.json` (or the
 connector's) to convert `native_type` into canonical Arrow types for
 vectorized casting.
 

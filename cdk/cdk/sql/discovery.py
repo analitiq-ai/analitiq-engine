@@ -18,7 +18,7 @@ from typing import Any, List, Tuple
 
 from ..contract import ColumnDef
 from ..type_map.exceptions import UnmappedTypeError
-from .dialects import get_dialect
+from .dialects import SqlDialect
 from .exceptions import DiscoveryError
 from .execution import Row, fetch_rows
 
@@ -44,24 +44,29 @@ def _col(row: Row, name: str) -> Any:
     )
 
 
-async def list_schemas(runtime: Any) -> List[str]:
-    """List the non-system schemas visible to *runtime*."""
-    dialect = get_dialect(runtime.driver)
+async def list_schemas(runtime: Any, *, dialect: SqlDialect) -> List[str]:
+    """List the non-system schemas visible to *runtime*.
+
+    *dialect* is the connector's dialect strategy — supplied by the
+    connector class (``GenericSQLConnector`` subclasses carry it), since
+    per-system dialects live in the connector packages.
+    """
     sql, params = dialect.schemas_query()
     rows = await fetch_rows(runtime, sql, params)
     return [_col(row, "schema_name") for row in rows]
 
 
-async def list_tables(runtime: Any, schema: str) -> List[str]:
+async def list_tables(
+    runtime: Any, schema: str, *, dialect: SqlDialect
+) -> List[str]:
     """List the tables (and views) in *schema*."""
-    dialect = get_dialect(runtime.driver)
     sql, params = dialect.tables_query(schema)
     rows = await fetch_rows(runtime, sql, params)
     return [_col(row, "table_name") for row in rows]
 
 
 async def list_columns(
-    runtime: Any, schema: str, table: str
+    runtime: Any, schema: str, table: str, *, dialect: SqlDialect
 ) -> Tuple[List[ColumnDef], List[str]]:
     """Describe *table*: its columns (canonical types) and its primary keys.
 
@@ -70,7 +75,6 @@ async def list_columns(
     unmapped native type raises :class:`DiscoveryError` naming the offending
     column (the underlying ``UnmappedTypeError`` is chained).
     """
-    dialect = get_dialect(runtime.driver)
     type_mapper = runtime.connector_type_mapper
 
     pk_sql, pk_params = dialect.primary_keys_query(schema, table)
