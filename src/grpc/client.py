@@ -87,12 +87,16 @@ class DestinationGRPCClient:
         timeout_seconds: int = DEFAULT_GRPC_TIMEOUT,
         max_retries: int = DEFAULT_MAX_RETRIES,
         max_message_size: int = DEFAULT_MAX_MESSAGE_SIZE,
+        target: Optional[str] = None,
     ):
+        # ``target`` is a full gRPC address and wins over host/port — the
+        # destination shell uses it to reach its connector worker over a
+        # Unix domain socket (``unix:/.../worker.sock``).
         # Coalesce a blank host (env baked as ``DESTINATION_GRPC_HOST=""`` or an
         # explicit ``host=""``) to localhost so the address is never hostless
         # (``:50051``). Mirrors the engine-side fallback in engine.py.
         host = host or "localhost"
-        self.address = f"{host}:{port}"
+        self.address = target or f"{host}:{port}"
         self.timeout = timeout_seconds
         self.max_retries = max_retries
         self.max_message_size = max_message_size
@@ -231,6 +235,19 @@ class DestinationGRPCClient:
                 "Shutdown request failed: code=%s details=%s",
                 e.code(), e.details(), exc_info=True,
             )
+            return False
+
+    async def health_check(self) -> bool:
+        """Probe the destination's HealthCheck rpc (True == SERVING)."""
+        if not self._stub:
+            return False
+        try:
+            response = await self._stub.HealthCheck(
+                HealthCheckRequest(), timeout=10.0
+            )
+            return response.status == HealthCheckResponse.ServingStatus.SERVING
+        except Exception as e:
+            logger.warning("Destination health check failed: %s", e)
             return False
 
     async def get_capabilities(self) -> Optional[GetCapabilitiesResponse]:

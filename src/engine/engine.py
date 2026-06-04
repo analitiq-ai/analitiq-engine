@@ -10,10 +10,7 @@ from typing import Any, Dict, List, Optional, AsyncIterator, Tuple
 
 import pyarrow as pa
 
-from ..source.connectors.api import APIConnector
 from cdk.contract import Readable
-from cdk.registry import build_registries
-from cdk.sql.generic import GenericSQLConnector
 from ..shared.run_id import get_or_generate_run_id
 from ..state.circuit_breaker import CircuitBreaker
 from ..state.dead_letter_queue import DeadLetterQueue
@@ -94,15 +91,17 @@ class StreamingEngine:
         # Stage configurations
         self.stage_configs = PipelineStagesConfig()
 
-        # Source connector registry (ADR §7), keyed by connector kind. Built-ins
-        # are always available (no package metadata needed, so it works in-tree
-        # and under pytest); entry points add externally installed connectors.
-        self._source_registry, _ = build_registries(
-            source_builtins={
-                "database": GenericSQLConnector,
-                "api": APIConnector,
-            },
-            discover=True,
+        # Connector code never runs in the engine process: every source read
+        # goes through an isolated worker subprocess that owns the connector
+        # class, the driver, and the external connection (registry resolution
+        # happens IN the worker). The engine keeps only the worker client.
+        from src.engine.pipeline_config_prep import PipelineConfigPrep
+        from src.worker.readable import WorkerReadable
+
+        paths = PipelineConfigPrep._discover_paths()
+        self._worker_readable = WorkerReadable(
+            connectors_dir=paths["connectors"],
+            connections_dir=paths["connections"],
         )
 
 
@@ -748,18 +747,16 @@ class StreamingEngine:
 
 
     def _create_source_connector(self, config: Dict[str, Any]) -> Readable:
-        """Create the source connector via two-step registry resolution.
+        """Return the worker-backed Readable for this stream's source.
 
-        The connection's ``connector_id`` selects the connector package's own
-        class when one is installed; otherwise the generic class for the
-        connection's kind serves it (the thin path).
+        Two-step registry resolution (connector_id -> package class, else
+        the generic class for the kind) happens inside the spawned worker —
+        the engine process never loads connector code.
         """
         runtime = config.get("_runtime")
         if not runtime:
             raise ValueError("Missing _runtime in source config")
-        return self._source_registry.create(
-            runtime.connector_type, runtime.connector_id
-        )
+        return self._worker_readable
 
     def _create_pipeline_stages(
         self,

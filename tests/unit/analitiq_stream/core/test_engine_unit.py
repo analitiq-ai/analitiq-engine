@@ -139,10 +139,12 @@ class TestStreamingEngine:
         with pytest.raises(ValueError, match="Missing _runtime"):
             engine._create_source_connector(config)
 
-    def test_create_source_connector_resolves_builtin_kinds(self, engine):
-        """The source registry maps each builtin kind to its connector class."""
-        from cdk.sql.generic import GenericSQLConnector
-        from src.source.connectors.api import APIConnector
+    def test_create_source_connector_returns_worker_readable(self, engine):
+        """Connector code never runs in the engine process: every source —
+        regardless of kind — is served by the worker-backed Readable.
+        Registry resolution (connector_id -> package class, else the kind's
+        generic) happens inside the spawned worker."""
+        from src.worker.readable import WorkerReadable
 
         class _FakeRuntime:
             def __init__(self, connector_type, connector_id):
@@ -155,19 +157,15 @@ class TestStreamingEngine:
         api = engine._create_source_connector(
             {"_runtime": _FakeRuntime("api", "anyapi")}
         )
-        assert isinstance(db, GenericSQLConnector)
-        assert isinstance(api, APIConnector)
+        assert isinstance(db, WorkerReadable)
+        assert isinstance(api, WorkerReadable)
+        # One shared client object: per-read state lives in read_batches.
+        assert db is api
 
-    def test_create_source_connector_unknown_kind_raises(self, engine):
-        """An unregistered kind raises ConnectorNotRegisteredError."""
-        from cdk.registry import ConnectorNotRegisteredError
-
-        class _FakeRuntime:
-            connector_type = "redis"
-            connector_id = "redis"
-
-        with pytest.raises(ConnectorNotRegisteredError):
-            engine._create_source_connector({"_runtime": _FakeRuntime()})
+    def test_create_source_connector_requires_runtime(self, engine):
+        """A source config without its runtime is a configuration error."""
+        with pytest.raises(ValueError, match="_runtime"):
+            engine._create_source_connector({})
 
     def test_get_stream_name(self, engine):
         """Test stream name generation."""

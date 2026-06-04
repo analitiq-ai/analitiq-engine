@@ -137,7 +137,14 @@ orchestrator, the contract built here is what makes it possible.
       back to generic. Cloud paths (snowflake/bigquery/redshift) install cleanly
       but need credentials to run.
 - [x] Task 8: unit suite migrated (f673e97) — 1046 passed, 3 env skips
-- [ ] Task 10 (Phase B): worker isolation — OPEN DESIGN QUESTION for user:
+- [x] Task 10 (Phase B): worker isolation SHIPPED — resolve/build transport split
+      (d72b8d5), worker runtime + UDS + supervision (5a0d97b), shells wired
+      (engine WorkerReadable + destination WorkerProxyHandler). Full local matrix
+      green THROUGH isolated workers: pg->mysql, mysql->pg, pg->pg, pg->mariadb,
+      mariadb->pg (5 rows each); no credentials in shell logs (redactor verified);
+      suite 1049 passed. Secrets question resolved: two-channel rule (launch-time
+      stdin injection; never on the data plane).
+      Historical note — the question as originally posed:
       the documented principle says the connector worker receives resolved
       values over the contract, but the current destination model deliberately
       loads credentials locally and never sends them over gRPC. Where the
