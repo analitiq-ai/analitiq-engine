@@ -6,9 +6,6 @@ reusable building blocks a connector uses. It is consumed both for bulk streamin
 (discover schemas / create tables) that needs neither the columnar nor the HTTP
 weight.
 
-See `docs/architecture/connector-modules-engine-adr.md` (in the engine repo) for
-the design of record.
-
 ## The one rule
 
 The dependency points **engine → CDK, never back**. No CDK module may import

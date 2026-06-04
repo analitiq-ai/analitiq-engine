@@ -31,9 +31,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   legacy top-level `connector.driver` field; SSL is now a `lookup` over
   `connection.parameters.ssl_mode` inside the connector's
   `connect_args.ssl`.
-- **Aligned with `docs/connector-connection-parameterization.md`** -
-  spec is committed alongside this PR; module docstrings cite it as the
-  canonical reference.
+- **Aligned with `docs/connector-module-architecture.md`** -
+  the connector/connection resolution model is documented there; module
+  docstrings cite it as the canonical reference.
 
 ### Removed
 
