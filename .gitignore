@@ -213,11 +213,8 @@ sample_data/
 # Claude Code
 .claude/
 TODO.md
-# `docs/*` (rather than `docs/`) so the directory itself is not excluded,
-# allowing the whitelist below to track the canonical connector/connection
-# spec referenced from module docstrings and the PR template.
-docs/*
-!docs/connector-connection-parameterization.md
+# Documentation under docs/ is published with the engine; only Sphinx build
+# output is ignored (see docs/_build/ above).
 scripts/
 docker-cloud/
 
