@@ -37,7 +37,7 @@ class TestMaterializeRuntime:
         assert runtime._ref_count == 0
 
         with pytest.raises(RuntimeError, match="materialize boom"):
-            await materialize_runtime(runtime, require_port=True)
+            await materialize_runtime(runtime)
 
         # acquire() rolled back -> no leaked reference.
         assert runtime._ref_count == 0
@@ -55,7 +55,7 @@ class TestMaterializeRuntime:
         runtime.materialize = _boom  # type: ignore[method-assign]
 
         with pytest.raises(Boom):
-            await materialize_runtime(runtime, require_port=False)
+            await materialize_runtime(runtime)
         assert runtime._ref_count == 0
 
     @pytest.mark.asyncio
@@ -67,7 +67,7 @@ class TestMaterializeRuntime:
 
         runtime.materialize = _ok  # type: ignore[method-assign]
 
-        await materialize_runtime(runtime, require_port=True)
+        await materialize_runtime(runtime)
         assert runtime._ref_count == 1  # held for the caller's read/write
 
         await runtime.close()

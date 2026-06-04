@@ -434,7 +434,7 @@ class GenericSQLConnector(BaseDestinationHandler):
         self._runtime = runtime
         try:
             await materialize_runtime(
-                runtime, require_port=False, sql_dialect=self.dialect
+                runtime, sql_dialect=self.dialect
             )
         except DETERMINISTIC_CONNECT_ERRORS:
             raise
@@ -1806,7 +1806,7 @@ class GenericSQLConnector(BaseDestinationHandler):
 
         try:
             await materialize_runtime(
-                runtime, require_port=True, sql_dialect=self.dialect
+                runtime, sql_dialect=self.dialect
             )
         except DETERMINISTIC_CONNECT_ERRORS:
             raise
