@@ -11,7 +11,6 @@ binding and one that never binds.
 from __future__ import annotations
 
 import asyncio
-import os
 from types import SimpleNamespace
 
 import pytest
