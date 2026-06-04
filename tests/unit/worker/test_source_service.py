@@ -9,6 +9,7 @@ and retrying it.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
 import pyarrow as pa
@@ -16,6 +17,8 @@ import pytest
 
 from cdk.sql.exceptions import ReadError
 from cdk.type_map import UnmappedTypeError
+from src.source.connectors.base import ReadError as ApiReadError
+from src.state.store import decode_cursor_state
 from src.worker.readable import _decode_arrow_ipc
 from src.worker.source_service import (
     SourceWorkerServicer,
@@ -133,6 +136,9 @@ class TestReadStream:
         "exc",
         [
             ReadError("bad endpoint document"),
+            # The API connector raises its own ReadError class for the
+            # same intent — it must classify identically.
+            ApiReadError("source config missing 'endpoint_document'"),
             UnmappedTypeError("demo", "forward", "FANCYTYPE"),
             KeyError("endpoint_document"),
             TypeError("x"),
@@ -176,3 +182,42 @@ class TestReadStream:
         assert json.loads(responses[1].cursor_save.cursor_json) == {
             "cursor": "final"
         }
+
+    async def test_datetime_cursor_survives_the_json_relay(self):
+        # Database timestamp cursors arrive as datetime objects; plain
+        # json.dumps would raise TypeError (and, being in the deterministic
+        # tuple, fail the stream fatally). The relay must tag them instead.
+        ts = datetime(2024, 6, 1, 12, 30, 0, tzinfo=timezone.utc)
+        readable = _FakeReadable([_batch([{"id": 1}])], cursor_values=[ts])
+        servicer = SourceWorkerServicer(readable, MagicMock(), {})
+        responses = await _collect(servicer)
+
+        kinds = [r.WhichOneof("message") for r in responses]
+        assert kinds == ["batch", "cursor_save", "complete"]
+        relayed = decode_cursor_state(
+            json.loads(responses[1].cursor_save.cursor_json)
+        )
+        assert relayed == {"cursor": ts}
+        assert isinstance(relayed["cursor"], datetime)
+
+    async def test_datetime_initial_cursor_decoded_for_the_connector(self):
+        ts = datetime(2024, 6, 1, 12, 30, 0, tzinfo=timezone.utc)
+        captured = {}
+
+        class _CursorProbe(_FakeReadable):
+            async def read_batches(self, runtime, config, *, checkpoint,
+                                   stream_name, partition=None, batch_size=1000):
+                captured["initial"] = await checkpoint.get_cursor(stream_name)
+                return
+                yield  # pragma: no cover — makes this an async generator
+
+        servicer = SourceWorkerServicer(_CursorProbe([]), MagicMock(), {})
+        request = ReadRequest(
+            stream_name="s1",
+            initial_cursor_json=json.dumps(
+                {"cursor": {"__type__": "datetime", "value": ts.isoformat()}}
+            ),
+        )
+        await _collect(servicer, request)
+        assert captured["initial"] == {"cursor": ts}
+        assert isinstance(captured["initial"]["cursor"], datetime)

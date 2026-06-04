@@ -88,6 +88,71 @@ class TestProxyWriteBatch:
         assert result.records_written == 0
         assert "not configured" in result.failure_summary
 
+    async def test_worker_death_before_ack_is_retryable_not_fatal(self):
+        # A worker that dies before answering rendered no verdict on the
+        # batch; the proxy must classify that retryable (idempotency
+        # resolves committed-before-crash on resend), never fatal/DLQ.
+        import pyarrow as pa
+
+        from src.grpc.client import BatchResult
+        from src.grpc.generated.analitiq.v1 import AckStatus as ProtoAckStatus
+
+        proxy = _proxy()
+        stream_client = MagicMock()
+        stream_client.send_batch = AsyncMock(
+            return_value=BatchResult(
+                success=False,
+                status=ProtoAckStatus.ACK_STATUS_FATAL_FAILURE,
+                records_written=0,
+                committed_cursor=None,
+                failed_record_ids=[],
+                failure_summary="Stream reader/writer task exited before ACK",
+                transport_failure=True,
+            )
+        )
+        proxy._streams["s1"] = stream_client
+
+        result = await proxy.write_batch(
+            run_id="r1",
+            stream_id="s1",
+            batch_seq=0,
+            record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
+            record_ids=["a"],
+            cursor=None,
+        )
+        assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
+        assert "before ACK" in result.failure_summary
+
+    async def test_connector_fatal_verdict_stays_fatal(self):
+        import pyarrow as pa
+
+        from src.grpc.client import BatchResult
+        from src.grpc.generated.analitiq.v1 import AckStatus as ProtoAckStatus
+
+        proxy = _proxy()
+        stream_client = MagicMock()
+        stream_client.send_batch = AsyncMock(
+            return_value=BatchResult(
+                success=False,
+                status=ProtoAckStatus.ACK_STATUS_FATAL_FAILURE,
+                records_written=0,
+                committed_cursor=None,
+                failed_record_ids=["a"],
+                failure_summary="type-map: no rule for FANCYTYPE",
+            )
+        )
+        proxy._streams["s1"] = stream_client
+
+        result = await proxy.write_batch(
+            run_id="r1",
+            stream_id="s1",
+            batch_seq=0,
+            record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
+            record_ids=["a"],
+            cursor=None,
+        )
+        assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+
 
 class TestProxyCapabilities:
     def test_capability_passthrough_with_fallbacks(self):

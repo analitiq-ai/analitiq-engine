@@ -66,6 +66,11 @@ class BatchResult:
     committed_cursor: Optional[Cursor]
     failed_record_ids: List[str]
     failure_summary: str
+    # True when the stream/channel died before an ACK arrived — the
+    # destination never rendered a verdict on the batch. Callers that can
+    # restart the peer (the worker proxy) treat this as retryable; the
+    # cross-container engine path keeps its existing fatal handling.
+    transport_failure: bool = False
 
 
 class DestinationGRPCClient:
@@ -421,6 +426,7 @@ class DestinationGRPCClient:
                     committed_cursor=None,
                     failed_record_ids=[],
                     failure_summary=summary,
+                    transport_failure=True,
                 )
 
             if isinstance(response, BatchAck):

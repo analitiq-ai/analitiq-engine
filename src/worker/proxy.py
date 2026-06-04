@@ -180,8 +180,16 @@ class WorkerProxyHandler(BaseDestinationHandler):
             if result.committed_cursor is not None
             else None
         )
+        status = AckStatus(int(result.status))
+        if result.transport_failure:
+            # The worker died (or its UDS stream closed) before an ACK —
+            # the connector never rendered a verdict. A worker crash is
+            # retryable by design: the idempotency table resolves a
+            # committed-before-crash batch on resend. Fatal is reserved
+            # for verdicts the connector actually returned.
+            status = AckStatus.ACK_STATUS_RETRYABLE_FAILURE
         return BatchWriteResult(
-            status=AckStatus(int(result.status)),
+            status=status,
             records_written=result.records_written,
             committed_cursor=committed,
             failed_record_ids=list(result.failed_record_ids),

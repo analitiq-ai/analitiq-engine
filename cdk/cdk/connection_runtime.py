@@ -59,6 +59,13 @@ logger = logging.getLogger(__name__)
 
 VALID_CONNECTOR_TYPES = frozenset({"database", "api", "file", "s3", "stdout"})
 
+# Connection-JSON blocks that must never cross into a worker: secret
+# pointers and auth material. Everything else (parameters, selections,
+# discovered, top-level settings) is non-secret by the connection contract
+# and connector code resolves it at request time (``connection.parameters.*``
+# refs, handler settings such as ``max_retries``).
+_SECRET_BEARING_CONFIG_KEYS = frozenset({"secret_refs", "auth", "auth_state"})
+
 
 def _derive_dialect(connector_definition: Optional[Mapping[str, Any]]) -> Optional[str]:
     """Return the base SQL dialect (e.g. ``postgresql``) from a connector
@@ -366,6 +373,15 @@ class ConnectionRuntime:
             "connector_id": self._connector_id,
             "connector_type": self._connector_type,
             "driver_hint": _derive_dialect(self._connector_definition),
+            # Non-secret connection fields, restored as the worker
+            # runtime's raw_config: connector code resolves
+            # ``connection.parameters.*`` refs and reads handler settings
+            # from it at request time.
+            "connection_config": {
+                key: value
+                for key, value in self._raw_config.items()
+                if key not in _SECRET_BEARING_CONFIG_KEYS
+            },
             "transport_spec": None,
             "resolved_config": None,
         }
@@ -391,12 +407,14 @@ class ConnectionRuntime:
     ) -> "ConnectionRuntime":
         """Rebuild a runtime in a connector worker from a resolved payload.
 
-        The worker side of :meth:`resolve_spec`: no raw config, no connector
-        definition, and a resolver that refuses to resolve — every value the
-        worker may use arrived in the payload.
+        The worker side of :meth:`resolve_spec`: no connector definition and
+        a resolver that refuses to resolve — every value the worker may use
+        arrived in the payload. ``raw_config`` is the payload's sanitized
+        ``connection_config`` (no secret refs, no auth material), so
+        connector code can still resolve ``connection.parameters.*`` refs.
         """
         runtime = cls(
-            raw_config={},
+            raw_config=dict(payload.get("connection_config") or {}),
             connection_id=payload["connection_id"],
             connector_id=payload["connector_id"],
             connector_type=payload["connector_type"],

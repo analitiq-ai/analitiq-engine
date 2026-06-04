@@ -9,6 +9,7 @@ must match the worker server's message-size ceiling.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -40,8 +41,10 @@ class _FakeCheckpoint:
         self.saved.append(cursor)
 
 
-def _responses_to_stream(responses):
+def _responses_to_stream(responses, captured_requests=None):
     async def _iter(request):
+        if captured_requests is not None:
+            captured_requests.append(request)
         for response in responses:
             yield response
 
@@ -55,7 +58,7 @@ def _readable():
     )
 
 
-async def _run(responses, *, checkpoint=None):
+async def _run(responses, *, checkpoint=None, captured_requests=None):
     """Drive read_batches against a canned worker response stream."""
     checkpoint = checkpoint or _FakeCheckpoint()
     runtime = MagicMock()
@@ -67,7 +70,7 @@ async def _run(responses, *, checkpoint=None):
     channel = MagicMock()
     channel.close = AsyncMock()
     stub = MagicMock()
-    stub.ReadStream = _responses_to_stream(responses)
+    stub.ReadStream = _responses_to_stream(responses, captured_requests)
 
     with (
         patch("src.worker.readable.build_bootstrap", AsyncMock(return_value={})),
@@ -115,6 +118,35 @@ class TestWorkerReadable:
         handle.close.assert_awaited_once()
         channel.close.assert_awaited_once()
         runtime.close.assert_awaited_once()
+
+    async def test_datetime_cursor_round_trips_both_directions(self):
+        # Persisted timestamp cursors come back from the store as datetime
+        # objects; both wire hops must round-trip them losslessly.
+        ts = datetime(2024, 6, 1, 12, 30, 0, tzinfo=timezone.utc)
+        captured_requests = []
+        responses = [
+            ReadResponse(
+                cursor_save=CursorSave(
+                    cursor_json=json.dumps(
+                        {"cursor": {"__type__": "datetime", "value": ts.isoformat()}}
+                    )
+                )
+            ),
+            ReadResponse(complete=ReadComplete()),
+        ]
+        checkpoint = _FakeCheckpoint(initial={"cursor": ts})
+        _, checkpoint, *_ = await _run(
+            responses, checkpoint=checkpoint, captured_requests=captured_requests
+        )
+
+        # Outbound: the initial datetime cursor is tagged, not str()-ed.
+        sent = json.loads(captured_requests[0].initial_cursor_json)
+        assert sent == {
+            "cursor": {"__type__": "datetime", "value": ts.isoformat()}
+        }
+        # Inbound: the relayed save lands in the store as a datetime again.
+        assert checkpoint.saved == [{"cursor": ts}]
+        assert isinstance(checkpoint.saved[0]["cursor"], datetime)
 
     async def test_channel_options_match_worker_server_ceiling(self):
         responses = [ReadResponse(complete=ReadComplete())]

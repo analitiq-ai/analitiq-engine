@@ -28,6 +28,7 @@ from cdk.types import CheckpointStore
 from src.grpc import DEFAULT_MAX_MESSAGE_SIZE
 from src.grpc.generated.analitiq.v1.source_service_pb2 import ReadRequest
 from src.grpc.generated.analitiq.v1.source_service_pb2_grpc import SourceServiceStub
+from src.state.store import decode_cursor_state, encode_cursor_state
 from src.worker.shell import build_bootstrap
 from src.worker.spawn import spawn_worker
 
@@ -99,8 +100,15 @@ class WorkerReadable:
                     stream_name=stream_name,
                     partition_json=json.dumps(partition),
                     batch_size=batch_size,
+                    # Tagged encoding: a persisted timestamp cursor comes
+                    # back from the store as a datetime and must survive
+                    # the JSON hop as one.
                     initial_cursor_json=(
-                        json.dumps(initial_cursor) if initial_cursor else ""
+                        json.dumps(
+                            encode_cursor_state(initial_cursor), default=str
+                        )
+                        if initial_cursor
+                        else ""
                     ),
                 )
                 completed = False
@@ -112,7 +120,9 @@ class WorkerReadable:
                         await checkpoint.save_cursor(
                             stream_name,
                             partition,
-                            json.loads(response.cursor_save.cursor_json),
+                            decode_cursor_state(
+                                json.loads(response.cursor_save.cursor_json)
+                            ),
                         )
                     elif kind == "error":
                         err = response.error

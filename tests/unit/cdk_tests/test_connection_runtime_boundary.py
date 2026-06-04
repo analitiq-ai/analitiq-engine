@@ -95,6 +95,35 @@ class TestResolveSpec:
         with pytest.raises(SecretNotFoundError, match="secret_refs"):
             await runtime.resolve_spec()
 
+    async def test_connection_config_crosses_without_secret_bearing_blocks(self):
+        runtime = ConnectionRuntime(
+            raw_config={
+                "parameters": {"account_id": "acc-42"},
+                "selections": {"profile": "main"},
+                "max_retries": 7,
+                "secret_refs": {"API_TOKEN": "connections/x/token"},
+                "auth": {"type": "oauth2"},
+                "auth_state": {"refresh_token": "rt-secret"},
+            },
+            connection_id="my-api",
+            connector_id="demo",
+            connector_type="api",
+            resolver=_resolver({"API_TOKEN": "tok-123"}),
+        )
+        payload = await runtime.resolve_spec()
+
+        config = payload["connection_config"]
+        # Non-secret scopes and top-level settings cross: connector code
+        # resolves connection.parameters.* refs and handler settings from
+        # the worker runtime's raw_config.
+        assert config["parameters"] == {"account_id": "acc-42"}
+        assert config["selections"] == {"profile": "main"}
+        assert config["max_retries"] == 7
+        # Secret pointers and auth material never cross.
+        assert "secret_refs" not in config
+        assert "auth" not in config
+        assert "auth_state" not in config
+
 
 class TestWorkerSideRuntime:
     async def test_rebuilt_runtime_refuses_secret_resolution(self):
@@ -131,6 +160,24 @@ class TestWorkerSideRuntime:
         )
         with pytest.raises(RuntimeError, match="pre-resolved worker runtime"):
             await worker_runtime.materialize()
+
+    async def test_rebuilt_runtime_restores_connection_config_as_raw_config(self):
+        runtime = ConnectionRuntime(
+            raw_config={
+                "parameters": {"account_id": "acc-42"},
+                "secret_refs": {"API_TOKEN": "connections/x/token"},
+            },
+            connection_id="my-api",
+            connector_id="demo",
+            connector_type="api",
+            resolver=_resolver({"API_TOKEN": "tok-123"}),
+        )
+        payload = await runtime.resolve_spec()
+        worker_runtime = ConnectionRuntime.from_resolved_payload(payload)
+
+        # connection.parameters.* refs must resolve inside the worker.
+        assert worker_runtime.raw_config["parameters"] == {"account_id": "acc-42"}
+        assert "secret_refs" not in worker_runtime.raw_config
 
     async def test_driver_hint_survives_the_round_trip(self):
         payload = {

@@ -21,6 +21,9 @@ from cdk.connection_runtime import ConnectionRuntime
 from cdk.sql.exceptions import ReadError, UnsupportedDialectOperationError
 from cdk.type_map import InvalidTypeMapError, UnmappedTypeError
 
+from src.source.connectors.base import ReadError as ApiReadError
+from src.state.store import decode_cursor_state, encode_cursor_state
+
 from src.grpc.generated.analitiq.v1.source_service_pb2 import (
     CursorSave,
     ReadBatchChunk,
@@ -37,9 +40,13 @@ from src.grpc.generated.analitiq.v1.stream_pb2 import PayloadFormat
 logger = logging.getLogger(__name__)
 
 # Errors retrying cannot heal: contract/configuration problems. The engine
-# shell fails the stream fatally on these instead of retrying.
+# shell fails the stream fatally on these instead of retrying. The two
+# ReadError classes are distinct types raised for the same intent — the SQL
+# connectors raise the CDK one, the API connector its base-module one — so
+# both must classify identically here.
 _DETERMINISTIC_READ_ERRORS = (
     ReadError,
+    ApiReadError,
     UnsupportedDialectOperationError,
     UnmappedTypeError,
     InvalidTypeMapError,
@@ -76,6 +83,16 @@ class _RelayCheckpoint:
         self.pending.append(cursor)
 
 
+def _cursor_json(cursor: Dict[str, Any]) -> str:
+    """Serialize a cursor-state dict for the wire.
+
+    Tagged encoding round-trips ``datetime``/``date`` losslessly;
+    ``default=str`` is the same last-resort the on-disk store applies to
+    other non-JSON types (e.g. ``Decimal``).
+    """
+    return json.dumps(encode_cursor_state(cursor), default=str)
+
+
 def _encode_arrow_ipc(batch: pa.RecordBatch) -> bytes:
     sink = io.BytesIO()
     with pa.ipc.new_stream(sink, batch.schema) as writer:
@@ -102,7 +119,7 @@ class SourceWorkerServicer(SourceServiceServicer):
         context: grpc.aio.ServicerContext,
     ) -> AsyncIterator[ReadResponse]:
         initial = (
-            json.loads(request.initial_cursor_json)
+            decode_cursor_state(json.loads(request.initial_cursor_json))
             if request.initial_cursor_json
             else None
         )
@@ -138,7 +155,7 @@ class SourceWorkerServicer(SourceServiceServicer):
                 # trailing drain below catches the final save.
                 for cursor in relay.pending:
                     yield ReadResponse(
-                        cursor_save=CursorSave(cursor_json=json.dumps(cursor))
+                        cursor_save=CursorSave(cursor_json=_cursor_json(cursor))
                     )
                 relay.pending.clear()
         except Exception as exc:  # noqa: BLE001 — every failure crosses as a typed event
@@ -161,7 +178,7 @@ class SourceWorkerServicer(SourceServiceServicer):
         # Trailing saves after the generator finished (e.g. final checkpoint).
         for cursor in relay.pending:
             yield ReadResponse(
-                cursor_save=CursorSave(cursor_json=json.dumps(cursor))
+                cursor_save=CursorSave(cursor_json=_cursor_json(cursor))
             )
         relay.pending.clear()
         yield ReadResponse(
