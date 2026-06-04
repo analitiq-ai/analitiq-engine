@@ -37,7 +37,7 @@ project_root/
 │       └── streams/
 │           └── {stream_id}.json            # one file per stream
 ├── connectors/
-│   └── {slug}/definition/
+│   └── {connector_id}/definition/
 │       ├── connector.json                  # connector definition
 │       └── endpoints/
 │           └── {endpoint_name}.json        # public endpoint schemas

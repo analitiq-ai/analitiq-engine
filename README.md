@@ -141,22 +141,29 @@ The pipeline builder plugin generates all of this automatically. This section is
 ### Directory structure
 
 ```
-connectors/{slug}/definition/
-  connector.json              # Connector metadata and auth config
-  manifest.json               # Lists available endpoints
-  endpoints/{name}.json       # Endpoint schemas
+connectors/{connector_id}/      # One installable connector package per system
+  definition/
+    connector.json              # Connector metadata, transports, auth config
+    type-map-read.json          # native -> arrow type rules
+    type-map-write.json         # arrow -> native type rules (database connectors)
+    manifest.json               # Lists available endpoints
+    endpoints/{name}.json       # Endpoint schemas
+  connector.py                  # Connector class (only when the system is quirky)
+  requirements.txt              # THIS connector's driver only
+  pyproject.toml                # Packaged as analitiq-connector-{connector_id}
 
 connections/{alias}/
-  connection.json             # Host, connector_slug, parameters
-  .secrets/credentials.json   # Secret key-value pairs (never committed)
-  endpoints/{name}.json       # Private endpoint schemas (e.g. DB tables)
+  connection.json               # Host, connector_id, parameters
+  .secrets/credentials.json     # Secret key-value pairs (never committed)
+  definition/
+    endpoints/{name}.json       # Private endpoint schemas (e.g. DB tables)
 
 pipelines/
-  manifest.json               # Central index of all pipelines
+  manifest.json                 # Central index of all pipelines
   {pipeline_id}/
-    pipeline.json             # Pipeline config (connections, runtime settings)
+    pipeline.json               # Pipeline config (connections, runtime settings)
     streams/
-      {stream_id}.json        # Stream config (source, destinations, mapping)
+      {stream_id}.json          # Stream config (source, destinations, mapping)
 ```
 
 ### Secrets
