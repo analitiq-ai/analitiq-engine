@@ -10,7 +10,11 @@ from __future__ import annotations
 
 import pytest
 
-from cdk.connection_runtime import ConnectionRuntime, materialize_runtime
+from cdk.connection_runtime import (
+    DETERMINISTIC_CONNECT_ERRORS,
+    ConnectionRuntime,
+    materialize_runtime,
+)
 from cdk.secrets.resolvers.memory import InMemorySecretsResolver
 
 
@@ -57,6 +61,11 @@ class TestMaterializeRuntime:
         with pytest.raises(Boom):
             await materialize_runtime(runtime, require_port=False)
         assert runtime._ref_count == 0
+
+    def test_value_error_not_in_deterministic_errors(self):
+        # ValueError is too broad — third-party or internal raises must NOT be
+        # silently classified as deterministic config errors.
+        assert ValueError not in DETERMINISTIC_CONNECT_ERRORS
 
     @pytest.mark.asyncio
     async def test_holds_ref_on_success(self):

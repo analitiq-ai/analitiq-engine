@@ -131,10 +131,6 @@ class TestDatabaseHandlerConnect:
                 ),
                 id="placeholder",
             ),
-            pytest.param(
-                ValueError("DSN must resolve to a non-empty string"),
-                id="value-error",
-            ),
         ],
     )
     async def test_connect_propagates_deterministic_errors_unchanged(
@@ -146,6 +142,19 @@ class TestDatabaseHandlerConnect:
         runtime = _make_runtime(base_config)
         with _patch_transport(side_effect=exc):
             with pytest.raises(type(exc)):
+                await handler.connect(runtime)
+        assert handler._connected is False
+
+    @pytest.mark.asyncio
+    async def test_connect_wraps_value_error_in_connection_error(
+        self, handler, base_config
+    ):
+        """ValueError is not a deterministic config error — it must be wrapped
+        in ConnectionError so callers get user-facing context rather than a
+        raw internal exception."""
+        runtime = _make_runtime(base_config)
+        with _patch_transport(side_effect=ValueError("DSN must resolve to a non-empty string")):
+            with pytest.raises(ConnectionError, match="Database connection failed"):
                 await handler.connect(runtime)
         assert handler._connected is False
 
