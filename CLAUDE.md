@@ -4,6 +4,8 @@
 
 Analitiq Data Sync Engine runs pre-built data pipelines. It reads from a source system (API, database, SFTP), transforms the data, and writes to a destination system. Pipelines are built separately using the [Pipeline Builder plugin](https://github.com/analitiq-ai/ai-plugins-official) for Claude Code.
 
+Connectors are pluggable, independently versioned packages. Each targets one system (a database such as `postgres`, or an API such as `xero`) and ships everything that system needs: its definition, its type map, and its own driver. Most connectors are pure declarative config authored against the published schema contract; a connector adds code only when the system is quirky (the thin -> thick gradient). Adding a connector never modifies the engine.
+
 ## Running a Pipeline
 
 Pipelines run in Docker. The only required input is a pipeline ID from `pipelines/manifest.json`.
@@ -110,18 +112,20 @@ The whole point of orjson's default= hook is to avoid an explicit "Arrow-level c
 Configuration is assembled from modular files. The plugin generates all of this automatically.
 
 ```
-connectors/{slug}/definition/    # Connector definitions (from the registry)
+connectors/{connector_id}/       # One installable connector package per system (from the registry)
 connections/{alias}/             # Connection configs and credentials
 pipelines/manifest.json          # Central index of all pipelines
 pipelines/{pipeline_id}/         # Pipeline config and stream definitions
 ```
+
+`connector_id` is the connector's canonical identifier and repo name (`postgres`, `mysql`, `xero`, `pipedrive`).
 
 Only pipelines with `status: "active"` in the manifest can be executed.
 
 ### Endpoint References
 
 Streams reference endpoints using scoped paths:
-- `"connector:{slug}/{name}"` — public endpoint from a connector
+- `"connector:{connector_id}/{name}"` — public endpoint from a connector
 - `"connection:{alias}/{name}"` — private endpoint from a connection
 
 ### Secrets
@@ -143,9 +147,11 @@ Credentials use `${placeholder}` syntax in connection configs, resolved from `co
 
 All runtime data (state, logs, dead letters, metrics) uses local filesystem at project root: `state/`, `logs/`, `deadletter/`, `metrics/`.
 
-## Connector Types
+## Connector Kinds
 
 `api`, `database`, `file`, `stdout`
+
+A connector resolves in two steps: its `kind` (above) selects the family, and its `connector_id` selects the concrete connector. A `connector_id` with no dedicated class falls back to the generic class for its kind (the thin path); per-system quirks live in that connector's own class, never in the generic base.
 
 ## Contributing
 
