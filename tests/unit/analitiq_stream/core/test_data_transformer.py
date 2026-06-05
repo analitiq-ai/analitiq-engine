@@ -216,6 +216,35 @@ class TestDataTransformer:
             await transformer.apply_transformations(batch, config)
 
     @pytest.mark.asyncio
+    async def test_to_int_returns_none_on_unparseable(self, transformer):
+        """_fn_to_int returns None on non-numeric input rather than raising."""
+        batch = [{"val": "abc"}]
+        config = {"mapping": {"assignments": [_assignment("out", expr=_pipe("val", "to_int"))]}}
+        result = await transformer.apply_transformations(batch, config)
+        assert result[0]["out"] is None
+
+    @pytest.mark.asyncio
+    async def test_to_float_returns_none_on_unparseable(self, transformer):
+        """_fn_to_float returns None on non-numeric input rather than raising."""
+        batch = [{"val": "xyz"}]
+        config = {"mapping": {"assignments": [_assignment("out", expr=_pipe("val", "to_float"))]}}
+        result = await transformer.apply_transformations(batch, config)
+        assert result[0]["out"] is None
+
+    @pytest.mark.asyncio
+    async def test_legacy_keys_emit_warning(self, transformer, sample_batch):
+        """apply_transformations warns and returns batch unchanged when legacy keys are present."""
+        from unittest.mock import patch
+        import src.engine.data_transformer as _mod
+
+        config = {"mapping": {"field_mappings": {"id": "transaction_id"}}}
+        with patch.object(_mod.logger, "warning") as mock_warn:
+            result = await transformer.apply_transformations(sample_batch, config)
+        assert result == sample_batch
+        mock_warn.assert_called_once()
+        assert "field_mappings" in mock_warn.call_args[0][1]
+
+    @pytest.mark.asyncio
     async def test_iso_date_function_edge_cases(self, transformer):
         """iso_to_date handles multiple ISO variants and gracefully passes through invalid input."""
         batch = [

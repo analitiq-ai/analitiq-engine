@@ -307,8 +307,7 @@ class AssignmentTransformer:
     async def _fn_iso_to_datetime(self, value: Any) -> datetime:
         """Convert ISO string to datetime object. Raises on unparseable
         input — a ``datetime.now()`` fallback would silently fabricate
-        timestamps and corrupt time-based queries and incremental sync
-        (see ``_parse_iso_timestamp``)."""
+        timestamps and corrupt time-based queries and incremental sync."""
         if value is None:
             return None
         try:
@@ -470,7 +469,7 @@ class DataTransformer:
         config: Dict[str, Any]
     ) -> List[Dict[str, Any]]:
         """
-        Apply field mappings and transformations to batch.
+        Apply assignment-based transformations to batch.
 
         Args:
             batch: List of records to transform
@@ -486,6 +485,13 @@ class DataTransformer:
         assignments = mapping.get("assignments", [])
         if assignments:
             return await self._apply_assignment_transformations(batch, assignments)
+        legacy_keys = {"field_mappings", "computed_fields"} & mapping.keys()
+        if legacy_keys:
+            logger.warning(
+                "mapping contains legacy keys %s which are no longer supported; "
+                "migrate to 'assignments'. Batch returned unchanged.",
+                sorted(legacy_keys),
+            )
         return batch
 
     async def _apply_assignment_transformations(
