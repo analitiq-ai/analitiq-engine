@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import pytest
 
+from cdk.exceptions import TransportSpecError
 from cdk.resolver import ResolutionContext, Resolver
 
 
@@ -49,9 +50,9 @@ class TestResolutionContextLookup:
         with pytest.raises(KeyError, match="cannot index str"):
             ctx.lookup("connection.parameters.host.deeper")
 
-    def test_empty_path_raises_valueerror(self):
+    def test_empty_path_raises_transport_spec_error(self):
         ctx = ResolutionContext()
-        with pytest.raises(ValueError, match="non-empty"):
+        with pytest.raises(TransportSpecError, match="non-empty"):
             ctx.lookup("")
 
     def test_with_runtime_returns_copy(self):
@@ -79,7 +80,7 @@ class TestResolverRefAndLiteral:
 
     def test_ref_must_be_string(self):
         ctx = ResolutionContext()
-        with pytest.raises(TypeError, match="`ref` must be a string"):
+        with pytest.raises(TransportSpecError, match="`ref` must be a string"):
             Resolver(ctx).resolve({"ref": 42})
 
     def test_literal_returns_value_unchanged(self):
@@ -91,7 +92,7 @@ class TestResolverRefAndLiteral:
 
     def test_literal_with_sibling_keys_rejected(self):
         ctx = ResolutionContext()
-        with pytest.raises(ValueError, match="must be the only key"):
+        with pytest.raises(TransportSpecError, match="must be the only key"):
             Resolver(ctx).resolve({"literal": "ok", "extra": 1})
 
 
@@ -111,12 +112,12 @@ class TestResolverTemplate:
 
     def test_template_must_be_string(self):
         ctx = ResolutionContext()
-        with pytest.raises(TypeError, match="`template` must be a string"):
+        with pytest.raises(TransportSpecError, match="`template` must be a string"):
             Resolver(ctx).resolve({"template": 42})
 
     def test_template_unterminated_placeholder_raises(self):
         ctx = ResolutionContext()
-        with pytest.raises(ValueError, match="Unterminated"):
+        with pytest.raises(TransportSpecError, match="Unterminated"):
             Resolver(ctx).resolve({"template": "abc${unterminated"})
 
     def test_template_placeholder_resolving_to_none_raises(self):
@@ -141,7 +142,7 @@ class TestResolverTemplate:
         ctx = ResolutionContext(
             connection={"parameters": {"headers": {"Authorization": "Bearer t"}}}
         )
-        with pytest.raises(TypeError, match="only scalars"):
+        with pytest.raises(TransportSpecError, match="only scalars"):
             Resolver(ctx).resolve(
                 {"template": "${connection.parameters.headers}"}
             )
@@ -177,7 +178,7 @@ class TestResolverFunctions:
         # caught by the conflicting-marker rule) and not in the allow-list.
         ctx = ResolutionContext()
         resolver = Resolver(ctx, functions={"capture": _capture})
-        with pytest.raises(ValueError, match="unexpected sibling keys"):
+        with pytest.raises(TransportSpecError, match="unexpected sibling keys"):
             resolver.resolve({"function": "capture", "input": "x", "bogus": 1})
 
     def test_function_with_allowed_siblings_resolves(self):
@@ -188,6 +189,16 @@ class TestResolverFunctions:
             {"function": "capture", "input": "x", "map": {"x": "y"}, "safe": ""}
         )
         assert out == ("captured", "x")
+
+    def test_empty_function_name_raises_transport_spec_error(self):
+        ctx = ResolutionContext()
+        with pytest.raises(TransportSpecError, match="`function` field must name"):
+            Resolver(ctx).resolve({"function": ""})
+
+    def test_non_string_function_name_raises_transport_spec_error(self):
+        ctx = ResolutionContext()
+        with pytest.raises(TransportSpecError, match="`function` field must name"):
+            Resolver(ctx).resolve({"function": None})
 
     def test_register_existing_function_rejected(self):
         ctx = ResolutionContext()
@@ -203,19 +214,19 @@ class TestResolverMarkerDiscipline:
 
     def test_conflicting_markers_rejected(self):
         ctx = ResolutionContext()
-        with pytest.raises(ValueError, match="conflicting markers"):
+        with pytest.raises(TransportSpecError, match="conflicting markers"):
             Resolver(ctx).resolve({"ref": "scope.x", "template": "literal"})
 
     def test_ref_with_extra_sibling_rejected(self):
         ctx = ResolutionContext(connection={"parameters": {"host": "h"}})
-        with pytest.raises(ValueError, match="must be the only key"):
+        with pytest.raises(TransportSpecError, match="must be the only key"):
             Resolver(ctx).resolve(
                 {"ref": "connection.parameters.host", "extra": 1}
             )
 
     def test_template_with_extra_sibling_rejected(self):
         ctx = ResolutionContext()
-        with pytest.raises(ValueError, match="must be the only key"):
+        with pytest.raises(TransportSpecError, match="must be the only key"):
             Resolver(ctx).resolve({"template": "x", "extra": 1})
 
 

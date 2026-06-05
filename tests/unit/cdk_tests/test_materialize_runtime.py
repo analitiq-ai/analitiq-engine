@@ -15,6 +15,7 @@ from cdk.connection_runtime import (
     ConnectionRuntime,
     materialize_runtime,
 )
+from cdk.exceptions import TransportSpecError
 from cdk.secrets.resolvers.memory import InMemorySecretsResolver
 
 
@@ -66,6 +67,12 @@ class TestMaterializeRuntime:
         # ValueError is too broad — third-party or internal raises must NOT be
         # silently classified as deterministic config errors.
         assert ValueError not in DETERMINISTIC_CONNECT_ERRORS
+
+    def test_transport_spec_error_in_deterministic_errors(self):
+        # TransportSpecError must be classified as deterministic so a defective
+        # connector definition re-raises unchanged rather than being wrapped as
+        # a connectivity failure.
+        assert TransportSpecError in DETERMINISTIC_CONNECT_ERRORS
 
     @pytest.mark.asyncio
     async def test_holds_ref_on_success(self):
