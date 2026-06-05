@@ -3,9 +3,11 @@
 This connector consumes the published API-endpoint contract directly:
 
 * ``operations.read.request.{method, path}`` — URL + HTTP verb.
-* ``operations.read.request.body`` — optional JSON body, deep-resolved
-  through the value-expression grammar once per read; the same resolved
-  body is sent on every page request.
+* ``operations.read.request.body`` — optional JSON body; ``{"from_param":
+  ...}`` nodes bind the resolved param values, then the body is
+  deep-resolved through the value-expression grammar once per read; the
+  same resolved body is sent on every page request. Params declared
+  ``in: body`` stay out of the query string.
 * ``operations.read.params.<name>`` — declared params with optional
   ``default`` value expressions (``literal``/``ref``/``template``/
   ``function``) resolved against the connection scopes
@@ -35,6 +37,7 @@ import pyarrow as pa
 from .base import BaseConnector, ConnectionError, ReadError, TransientReadError
 from cdk.schema_contract import SchemaContract
 from cdk.connection_runtime import ConnectionRuntime
+from cdk.request_binding import bind_param_refs
 from cdk.resolver import Resolver
 from cdk.types import CheckpointStore
 from ...shared.http_utils import join_url
@@ -176,11 +179,6 @@ class APIConnector(BaseConnector):
         resolver = self._runtime.request_resolver(
             runtime_values={"batch_size": batch_size}
         )
-        request_body = (
-            resolver.resolve_for_request(request["body"])
-            if request.get("body") is not None
-            else None
-        )
 
         replication_block = stream_source.get("replication") or {}
         replication_method = replication_block.get("method", "full_refresh")
@@ -190,11 +188,11 @@ class APIConnector(BaseConnector):
         safety_window = replication_block.get("safety_window_seconds")
         tie_breaker_fields = list(replication_block.get("tie_breaker_fields") or [])
 
-        # Build query params from the declared ``params`` block: defaults
-        # via value-expression resolution, then stream-level filter
+        # Build the param value table from the declared ``params`` block:
+        # defaults via value-expression resolution, then stream-level filter
         # overrides. ``controlled_by: pagination|replication`` params are
         # filled by their respective loops.
-        base_params, controlled_params = self._build_base_params(
+        param_values, param_placements, controlled_params = self._build_base_params(
             read_spec, resolver, stream_source.get("filters") or []
         )
 
@@ -203,13 +201,28 @@ class APIConnector(BaseConnector):
         # param.
         if replication_method == "incremental":
             await self._apply_incremental_replication(
-                base_params,
+                param_values,
                 read_spec,
                 checkpoint,
                 stream_name,
                 partition,
                 cursor_field,
                 safety_window,
+            )
+
+        # Body binding sees every param value; the query string carries
+        # only params not declared ``in: body`` (those live in the body,
+        # bound via ``{"from_param": ...}``). The body is resolved once
+        # per read — the same resolved body is sent on every page.
+        base_params = {
+            name: value
+            for name, value in param_values.items()
+            if param_placements.get(name) != "body"
+        }
+        request_body = None
+        if request.get("body") is not None:
+            request_body = resolver.resolve_for_request(
+                bind_param_refs(request["body"], param_values)
             )
 
         records_ref = ((read_spec.get("response") or {}).get("records") or {}).get(
@@ -310,7 +323,7 @@ class APIConnector(BaseConnector):
         read_spec: Dict[str, Any],
         resolver: Resolver,
         stream_filters: List[Dict[str, Any]],
-    ) -> tuple[Dict[str, Any], Dict[str, str]]:
+    ) -> tuple[Dict[str, Any], Dict[str, str], Dict[str, str]]:
         """Resolve declared param defaults and apply stream filter overrides.
 
         Defaults resolve through the full value-expression grammar
@@ -318,18 +331,24 @@ class APIConnector(BaseConnector):
         that does not resolve omits the parameter with a warning rather
         than sending the raw expression structure upstream.
 
-        Returns ``(base_params, controlled_params)`` where
+        Returns ``(param_values, placements, controlled_params)``:
+        ``param_values`` is the single value table (body ``from_param``
+        binding reads it whole; the caller filters ``in: body`` params
+        out of the query string via ``placements``), ``placements`` maps
+        param name to its declared ``in`` location, and
         ``controlled_params`` maps controller name (``pagination`` or
         ``replication``) to the controlled-by group recorded for the
         param. Callers use it to keep pagination/replication loops from
         clobbering each other's values.
         """
-        base_params: Dict[str, Any] = {}
+        param_values: Dict[str, Any] = {}
+        placements: Dict[str, str] = {}
         controlled: Dict[str, str] = {}
         declared = read_spec.get("params") or {}
         for name, decl in declared.items():
             if not isinstance(decl, dict):
                 continue
+            placements[name] = decl.get("in") or "query"
             controlled_by = decl.get("controlled_by")
             if controlled_by:
                 controlled[name] = controlled_by
@@ -342,7 +361,7 @@ class APIConnector(BaseConnector):
                         name,
                     )
                     continue
-                base_params[name] = value
+                param_values[name] = value
 
         for f in stream_filters:
             target = f.get("field")
@@ -350,8 +369,8 @@ class APIConnector(BaseConnector):
                 continue
             value = f.get("value")
             if value is not None:
-                base_params[target] = value
-        return base_params, controlled
+                param_values[target] = value
+        return param_values, placements, controlled
 
     # ------------------------------------------------------------------
     # Incremental replication

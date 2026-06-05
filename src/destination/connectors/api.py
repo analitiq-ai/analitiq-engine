@@ -19,6 +19,7 @@ from aiohttp_retry import ExponentialRetry, RetryClient
 
 from cdk.base_handler import BaseDestinationHandler, BatchWriteResult
 from cdk.json_utils import decode_json_fields
+from cdk.request_binding import bind_param_refs, bind_record_inputs
 from cdk.resolver import Resolver
 from cdk.types import (
     AckStatus,
@@ -109,82 +110,6 @@ def _collect_json_fields(mode_block: Mapping[str, Any]) -> Set[str]:
     return names
 
 
-def _bind_record_inputs(
-    spec: Any,
-    *,
-    record: Optional[Dict[str, Any]] = None,
-    records: Optional[List[Dict[str, Any]]] = None,
-) -> Any:
-    """Replace ``{"from_input": ...}`` nodes in a body spec with the
-    in-flight record data, wrapped as ``{"literal": ...}``.
-
-    ``from_input`` is the contract's record-binding form for write bodies:
-    ``"record"`` binds the single in-flight record, ``"records"`` binds the
-    whole batch, ``"record.<dotted.path>"`` binds one record field. The
-    literal wrapper makes the downstream expression pass return the data
-    verbatim — record *values* are payload, never re-inspected for
-    expression markers.
-
-    A ``from_input`` that does not match the active batching mode (e.g.
-    ``"record"`` in bulk mode) is an authoring error and raises; a dotted
-    path to a missing record field binds ``None``, which the expression
-    pass drops per the contract's omit-unresolved rule.
-    """
-    if isinstance(spec, Mapping):
-        if "from_input" in spec:
-            if len(spec) != 1:
-                raise ValueError(
-                    f"`from_input` must be the only key in the node; "
-                    f"got siblings {sorted(set(spec) - {'from_input'})}"
-                )
-            return {"literal": _record_input_value(spec["from_input"], record, records)}
-        return {
-            key: _bind_record_inputs(value, record=record, records=records)
-            for key, value in spec.items()
-        }
-    if isinstance(spec, list):
-        return [
-            _bind_record_inputs(item, record=record, records=records)
-            for item in spec
-        ]
-    return spec
-
-
-def _record_input_value(
-    selector: Any,
-    record: Optional[Dict[str, Any]],
-    records: Optional[List[Dict[str, Any]]],
-) -> Any:
-    """Resolve one ``from_input`` selector against the in-flight data."""
-    if not isinstance(selector, str) or not selector:
-        raise ValueError(f"`from_input` must be a non-empty string, got {selector!r}")
-    if selector == "records":
-        if records is None:
-            raise ValueError(
-                "`from_input: records` requires batching mode bulk or batch; "
-                "this stream sends one record per request"
-            )
-        return records
-    if selector == "record" or selector.startswith("record."):
-        if record is None:
-            raise ValueError(
-                f"`from_input: {selector}` requires batching mode single; "
-                f"this stream sends multiple records per request"
-            )
-        if selector == "record":
-            return record
-        cursor: Any = record
-        for segment in selector[len("record."):].split("."):
-            if not isinstance(cursor, Mapping) or segment not in cursor:
-                return None
-            cursor = cursor[segment]
-        return cursor
-    raise ValueError(
-        f"Unsupported `from_input` selector {selector!r}; expected "
-        f"'record', 'records', or 'record.<dotted.path>'"
-    )
-
-
 @dataclass
 class _StreamState:
     """Per-stream API destination state.
@@ -208,10 +133,14 @@ class _StreamState:
     json_fields: Set[str] = field(default_factory=set)
     # ``operations.write.<mode>.request.body`` from the endpoint document,
     # or ``None`` when the endpoint declares no body template. When set,
-    # the request body is built by binding ``from_input`` nodes to the
-    # in-flight record(s) and resolving value expressions; when absent the
+    # the request body is built by binding ``from_param`` nodes to the
+    # declared write params and ``from_input`` nodes to the in-flight
+    # record(s), then resolving value expressions; when absent the
     # record(s) are the body, unchanged.
     body_spec: Optional[Any] = None
+    # ``operations.write.<mode>.params`` — declared write params whose
+    # resolved defaults feed body ``{"from_param": ...}`` bindings.
+    params_spec: Dict[str, Any] = field(default_factory=dict)
 
 
 class ApiDestinationHandler(BaseDestinationHandler):
@@ -418,6 +347,7 @@ class ApiDestinationHandler(BaseDestinationHandler):
             method=(request.get("method") or "POST").upper(),
             json_fields=_collect_json_fields(mode_block),
             body_spec=request.get("body"),
+            params_spec=dict(mode_block.get("params") or {}),
         )
 
         batching = mode_block.get("batching") or {}
@@ -536,6 +466,30 @@ class ApiDestinationHandler(BaseDestinationHandler):
                 failure_summary=f"{type(e).__name__}: {e}",
             )
 
+    def _resolve_write_params(self, state: _StreamState) -> Dict[str, Any]:
+        """Resolve declared write-param defaults into a value table for
+        body ``{"from_param": ...}`` bindings.
+
+        Write params are request-construction inputs, not stream filters;
+        defaults resolve through the request-time grammar and an
+        unresolved default simply leaves the param out of the table (its
+        ``from_param`` node then binds ``None`` and is dropped).
+        """
+        values: Dict[str, Any] = {}
+        for name, decl in state.params_spec.items():
+            if not isinstance(decl, dict) or "default" not in decl:
+                continue
+            value = self._request_resolver.resolve_for_request(decl["default"])
+            if value is None:
+                logger.warning(
+                    "write param %r: default did not resolve; omitted from "
+                    "body bindings",
+                    name,
+                )
+                continue
+            values[name] = value
+        return values
+
     def _build_body(
         self,
         state: _StreamState,
@@ -546,18 +500,20 @@ class ApiDestinationHandler(BaseDestinationHandler):
         """Build one request body for the in-flight record(s).
 
         No declared body spec: the record(s) are the body, unchanged.
-        With a spec: bind ``from_input`` nodes to the record data, then
-        resolve value expressions (``literal``/``ref``/``template``/
-        ``function``) per the request-time contract — an unresolved
-        expression omits its field rather than going onto the wire raw.
-        A spec whose entire body resolves away is an authoring error:
-        posting ``null`` per record would silently write nothing.
+        With a spec: bind ``from_param`` nodes to the declared write
+        params and ``from_input`` nodes to the record data, then resolve
+        value expressions (``literal``/``ref``/``template``/``function``)
+        per the request-time contract — an unresolved expression omits
+        its field rather than going onto the wire raw. A spec whose
+        entire body resolves away is an authoring error: posting ``null``
+        per record would silently write nothing.
         """
         if state.body_spec is None:
             return record if record is not None else records
         if self._request_resolver is None:
             raise RuntimeError("Handler not connected: no request resolver")
-        bound = _bind_record_inputs(state.body_spec, record=record, records=records)
+        bound = bind_param_refs(state.body_spec, self._resolve_write_params(state))
+        bound = bind_record_inputs(bound, record=record, records=records)
         body = self._request_resolver.resolve_for_request(bound)
         if body is None:
             raise ValueError(

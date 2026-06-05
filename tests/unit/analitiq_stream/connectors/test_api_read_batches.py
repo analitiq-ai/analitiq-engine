@@ -1104,3 +1104,126 @@ class TestReadBatchesRequestBody:
         )
 
         assert session.bodies == [{"region": "eu"}, {"region": "eu"}]
+
+    @pytest.mark.asyncio
+    async def test_from_param_binds_resolved_param_into_body(self):
+        # Bodies may mix literals with {"from_param": ...} per the contract;
+        # a param declared ``in: body`` lands in the body via its binding
+        # and stays out of the query string.
+        session = _FakeSession(
+            [_FakeResponse(status=200, body={"records": [{"id": 1, "name": "a"}]})]
+        )
+        runtime = _runtime_with_session(session, parameters={"team_id": "t-9"})
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records()
+        endpoint["operations"]["read"]["params"] = {
+            "team": {
+                "in": "body",
+                "type": "string",
+                "required": True,
+                "default": {"ref": "connection.parameters.team_id"},
+            },
+            "verbose": {
+                "in": "query",
+                "type": "boolean",
+                "required": False,
+                "default": {"literal": True},
+            },
+        }
+        endpoint["operations"]["read"]["request"] = {
+            "method": "POST",
+            "path": "/items/search",
+            "body": {"filter": {"team": {"from_param": "team"}}},
+        }
+        await _consume(
+            connector,
+            runtime,
+            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=10,
+        )
+
+        params = session.calls[0][2]
+        assert params == {"verbose": True}  # in: body param not in query
+        assert session.bodies[0] == {"filter": {"team": "t-9"}}
+
+    @pytest.mark.asyncio
+    async def test_from_param_for_missing_param_drops_field(self):
+        # A from_param naming a param with no resolved value binds None,
+        # which the expression pass omits — never the raw binding dict.
+        session = _FakeSession(
+            [_FakeResponse(status=200, body={"records": [{"id": 1, "name": "a"}]})]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records()
+        endpoint["operations"]["read"]["request"] = {
+            "method": "POST",
+            "path": "/items/search",
+            "body": {"q": {"from_param": "undeclared"}, "static": "all"},
+        }
+        await _consume(
+            connector,
+            runtime,
+            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=10,
+        )
+
+        assert session.bodies[0] == {"static": "all"}
+
+    @pytest.mark.asyncio
+    async def test_replication_param_binds_into_body(self):
+        # Incremental POST-search endpoints carry the cursor filter in the
+        # body: the replication-derived param value must reach from_param.
+        session = _FakeSession(
+            [
+                _FakeResponse(
+                    status=200,
+                    body={"records": [{"id": 1, "updated_at": "2024-01-01T12:00:30Z"}]},
+                ),
+            ]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        state_manager = MagicMock()
+        state_manager.get_cursor = AsyncMock(
+            return_value={"cursor": "2024-01-01T12:00:00Z"}
+        )
+        state_manager.save_cursor = AsyncMock()
+
+        endpoint = _endpoint_doc_with_records(
+            replication={
+                "cursor_mappings": [
+                    {"cursor_field": "updated_at", "param": "since"},
+                ],
+            },
+        )
+        endpoint["operations"]["read"]["request"] = {
+            "method": "POST",
+            "path": "/items/search",
+            "body": {"updated_after": {"from_param": "since"}},
+        }
+        await _consume(
+            connector,
+            runtime,
+            config={
+                "endpoint_document": endpoint,
+                "stream_source": _stream_source(
+                    replication_method="incremental",
+                    cursor_field="updated_at",
+                    safety_window=60,
+                ),
+            },
+            state_manager=state_manager,
+            stream_name="items",
+            partition={},
+            batch_size=10,
+        )
+
+        assert session.bodies[0] == {"updated_after": "2024-01-01T11:59:00Z"}

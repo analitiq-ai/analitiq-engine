@@ -1020,6 +1020,42 @@ class TestApiHandlerBodySpec:
         body = handler._build_body(state, record={"id": 3})
         assert body == {"id": 3}
 
+    def test_from_param_binds_declared_write_param(self):
+        # Write bodies may mix {"from_param": ...} with {"from_input": ...};
+        # the param table comes from the mode block's declared params.
+        handler = self._handler_with_resolver(parameters={"account": "acc-1"})
+        state = _StreamState(
+            endpoint="/v1/things",
+            body_spec={
+                "account_id": {"from_param": "account_id"},
+                "data": {"from_input": "record"},
+            },
+            params_spec={
+                "account_id": {
+                    "in": "body",
+                    "type": "string",
+                    "required": True,
+                    "default": {"ref": "connection.parameters.account"},
+                },
+            },
+        )
+        body = handler._build_body(state, record={"id": 1})
+        assert body == {"account_id": "acc-1", "data": {"id": 1}}
+
+    def test_from_param_for_undeclared_write_param_drops_field(self):
+        # Never the raw {"from_param": ...} dict on the wire: a missing
+        # param binds None and the field is omitted.
+        handler = self._handler_with_resolver()
+        state = _StreamState(
+            endpoint="/v1/things",
+            body_spec={
+                "mode": {"from_param": "undeclared"},
+                "data": {"from_input": "record"},
+            },
+        )
+        body = handler._build_body(state, record={"id": 1})
+        assert body == {"data": {"id": 1}}
+
     def test_body_spec_without_resolver_raises(self):
         # configure_schema ran but connect() never did: a body spec with no
         # request resolver must fail loud, not build a broken body.
