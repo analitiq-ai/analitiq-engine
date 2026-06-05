@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from cdk.sql.exceptions import SchemaConfigurationError
 from cdk.sql.generic import GenericSQLConnector
 from cdk.type_map import TypeMapper
 from cdk.type_map.rules import parse_rules
@@ -112,7 +113,7 @@ class TestColumnDefStrictness:
                 ]
             },
         )
-        with pytest.raises(ValueError, match="has no 'name' field"):
+        with pytest.raises(SchemaConfigurationError, match="has no 'name' field"):
             handler._build_column_defs(state, _mapper("pg"))
 
 
@@ -370,7 +371,9 @@ class TestWriteModeDispatch:
 
     def test_unknown_mode_raises(self):
         handler = GenericSQLConnector()
-        with pytest.raises(ValueError, match="Unsupported proto write_mode"):
+        with pytest.raises(
+            SchemaConfigurationError, match="Unsupported proto write_mode"
+        ):
             handler._get_write_mode(99)
 
 
@@ -546,3 +549,72 @@ class TestDDLLockSerialization:
             f"DDL lock did not serialize create_all calls "
             f"(max_concurrent={max_concurrent}, order={order})"
         )
+
+
+class TestConfigureSchemaErrorPropagation:
+    """``configure_schema`` no longer classifies exceptions itself: the
+    deterministic, typed errors and any unexpected defect both propagate
+    to the gRPC layer, which translates the former into a rejected
+    SchemaAck and lets the latter fail the stream with its real type
+    (issues #153 and #140)."""
+
+    def _configured_handler(self) -> GenericSQLConnector:
+        handler = GenericSQLConnector()
+        handler._connected = True
+        handler._runtime = _runtime(connector_mapper=_mapper("pg"))
+        handler.set_endpoint_refs(
+            {
+                "s1": {
+                    "scope": "connector",
+                    "connection_id": "pg",
+                    "endpoint_id": "transfers",
+                }
+            }
+        )
+        handler.set_stream_endpoints(
+            {
+                "s1": {
+                    "database_object": {"name": "events", "schema": "public"},
+                    "columns": [{"name": "id", "native_type": "BIGINT"}],
+                    "primary_keys": ["id"],
+                }
+            }
+        )
+        return handler
+
+    @pytest.mark.asyncio
+    async def test_unexpected_exception_propagates(self):
+        """A defect inside DDL must surface as-is, not degrade into a
+        ``return False`` the engine reads as a schema rejection."""
+        from unittest.mock import patch
+
+        from cdk.types import SchemaSpec, WriteMode
+
+        handler = self._configured_handler()
+        with patch.object(
+            GenericSQLConnector,
+            "_ensure_tables_exist",
+            AsyncMock(side_effect=RuntimeError("DDL transaction deadlocked")),
+        ):
+            with pytest.raises(RuntimeError, match="deadlocked"):
+                await handler.configure_schema(
+                    SchemaSpec(
+                        stream_id="s1",
+                        version=1,
+                        write_mode=WriteMode.WRITE_MODE_INSERT,
+                    )
+                )
+
+    @pytest.mark.asyncio
+    async def test_unknown_write_mode_raises_schema_configuration_error(self):
+        """The intentional config-error signal keeps its typed form all
+        the way out of ``configure_schema``."""
+        from cdk.types import SchemaSpec
+
+        handler = self._configured_handler()
+        with pytest.raises(
+            SchemaConfigurationError, match="Unsupported proto write_mode"
+        ):
+            await handler.configure_schema(
+                SchemaSpec(stream_id="s1", version=1, write_mode=99)
+            )
