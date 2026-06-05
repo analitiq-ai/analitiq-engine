@@ -67,7 +67,9 @@ class TestResolveTlsMode:
         assert (mode, ca) == ("require", None)
 
     def test_non_mapping_spec_rejected(self):
-        with pytest.raises(TypeError, match="tls"):
+        from cdk.exceptions import TransportSpecError
+
+        with pytest.raises(TransportSpecError, match="tls"):
             _resolve_tls_mode("require", _resolver())
 
 
