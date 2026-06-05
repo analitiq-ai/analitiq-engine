@@ -36,8 +36,10 @@ slug — the engine resolves it against `pipelines/manifest.json`. The snippet
 below resolves a slug to its UUID so the commands stay copy-pasteable.
 
 ```bash
-# 1. start the local databases (auto-seeds e2e_seed)
-cd tests/e2e_databases && docker compose up -d && cd ../..
+# 1. start the local databases (auto-seeds e2e_seed). --wait blocks until the
+#    healthchecks pass (init scripts done); --remove-orphans clears containers
+#    left by older service names under the same analitiq-e2e project.
+cd tests/e2e_databases && docker compose up -d --wait --remove-orphans && cd ../..
 
 # 2. run a pipeline (engine in Docker, reaching the DBs via host.docker.internal).
 #    Pick a slug from pipelines/manifest.json, e.g. e2e-local-mysql-to-postgres,
@@ -58,7 +60,7 @@ cd docker && docker compose rm -sf destination; cd ..
 # ... then repeat step 2 with the new slug.
 
 # 5. tear down
-cd tests/e2e_databases && docker compose down -v && cd ../..
+cd tests/e2e_databases && docker compose down -v --remove-orphans && cd ../..
 cd docker && docker compose down && cd ..
 ```
 

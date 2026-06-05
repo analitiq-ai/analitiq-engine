@@ -10,7 +10,7 @@ name: analitiq-e2e
 # PIPELINE_ID is the manifest pipeline_id (a UUID), not the directory slug — see
 # README.md for the slug->UUID resolver one-liner.
 #
-#   cd tests/e2e_databases && docker compose up -d && cd ../..
+#   cd tests/e2e_databases && docker compose up -d --wait --remove-orphans && cd ../..
 #   cd docker && PIPELINE_ID=<uuid-from-pipelines/manifest.json> \
 #     docker compose run --rm source_engine
 
