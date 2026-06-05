@@ -192,7 +192,7 @@ class WorkerProxyHandler(BaseDestinationHandler):
             status=status,
             records_written=result.records_written,
             committed_cursor=committed,
-            failed_record_ids=list(result.failed_record_ids),
+            failed_record_ids=tuple(result.failed_record_ids),
             failure_summary=result.failure_summary,
         )
 

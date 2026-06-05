@@ -10,7 +10,7 @@ Shape::
 
     {
       "role": "source" | "destination",
-      "kind": "database" | "api" | "file" | "s3" | "stdout",
+      "kind": "<connector kind: database, api, ... >",
       "connector_id": "postgres",
       "uds_path": "/.../worker.sock",
       "connection": {<ConnectionRuntime.resolve_spec() payload>},

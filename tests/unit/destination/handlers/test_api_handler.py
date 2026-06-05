@@ -143,6 +143,8 @@ class TestApiHandlerWriteBatchFailures:
         assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
         assert result.records_written == 1
         assert "2/3 records failed" in result.failure_summary
+        # A failure result must not advance the checkpoint (#129)
+        assert result.committed_cursor is None
 
     @pytest.mark.asyncio
     async def test_write_batch_all_records_succeed_returns_success(

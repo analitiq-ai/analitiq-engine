@@ -6,13 +6,17 @@ transport-neutral: it must not import ``src/grpc`` (ADR §4.1). The engine's
 gRPC server (``src/destination/server.py``) translates protobuf <-> these
 types at the wire boundary. The ``AckStatus`` integer values are aligned 1:1
 with ``proto/analitiq/v1/stream.proto`` so that translation is mostly identity.
+Being IntEnums, members compare equal across enums when their values match
+(``AckStatus.ACK_STATUS_SUCCESS == WriteMode.WRITE_MODE_INSERT``) — an
+accepted trade-off of the proto alignment; never compare members of
+different enums.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import IntEnum, StrEnum
-from typing import Any, List, Optional, Protocol, runtime_checkable
+from typing import Any, Optional, Protocol, Tuple, runtime_checkable
 
 
 class AckStatus(IntEnum):
@@ -87,12 +91,17 @@ class BatchWriteResult:
     ``status`` is SUCCESS or ALREADY_COMMITTED. Modeling it as a property
     (instead of a constructor argument) makes status the single source of
     truth — callers cannot construct an inconsistent result.
+
+    A failure result must not carry a ``committed_cursor``: the engine
+    persists the cursor as the stream checkpoint, so a cursor on a failed
+    batch would advance the checkpoint past records that were never
+    written. ``__post_init__`` rejects the combination at construction.
     """
 
     status: AckStatus
     records_written: int
     committed_cursor: Optional[Cursor] = None
-    failed_record_ids: List[str] = field(default_factory=list)
+    failed_record_ids: Tuple[str, ...] = ()
     failure_summary: str = ""
 
     def __post_init__(self) -> None:
@@ -100,6 +109,18 @@ class BatchWriteResult:
             raise ValueError(
                 f"records_written must be non-negative, got {self.records_written}"
             )
+        if self.committed_cursor is not None and not self.success:
+            raise ValueError(
+                f"committed_cursor must be None on a failure result "
+                f"(status={self.status!r}); a failed batch must never "
+                f"advance the checkpoint"
+            )
+        # Accept any iterable but store a tuple, so the frozen result is
+        # immutable all the way down (a list binding would still allow
+        # in-place mutation).
+        object.__setattr__(
+            self, "failed_record_ids", tuple(self.failed_record_ids)
+        )
 
     @property
     def success(self) -> bool:

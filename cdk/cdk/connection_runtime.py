@@ -58,8 +58,6 @@ from cdk.transport_factory import (
 logger = logging.getLogger(__name__)
 
 
-VALID_CONNECTOR_TYPES = frozenset({"database", "api", "file", "s3", "stdout"})
-
 # Connection-JSON blocks that must never cross into a worker: secret
 # pointers and auth material. Everything else (parameters, selections,
 # discovered, top-level settings) is non-secret by the connection contract
@@ -133,10 +131,14 @@ class ConnectionRuntime:
         connector_type_mapper: Optional[TypeMapper] = None,
         connection_type_mapper: Optional[TypeMapper] = None,
     ) -> None:
-        if connector_type not in VALID_CONNECTOR_TYPES:
+        # Shape check only. The set of valid kinds is owned by the published
+        # connector schema and by the worker registry (an unrunnable kind
+        # raises ConnectorNotRegisteredError at resolution); pinning a
+        # parallel frozen set here would block registry-discovered kinds.
+        if not connector_type or not isinstance(connector_type, str):
             raise ValueError(
-                f"Invalid connector_type: {connector_type!r}. "
-                f"Expected one of: {sorted(VALID_CONNECTOR_TYPES)}"
+                f"connector_type must be a non-empty string, "
+                f"got {connector_type!r}"
             )
         if not connector_id or not isinstance(connector_id, str):
             raise ValueError(

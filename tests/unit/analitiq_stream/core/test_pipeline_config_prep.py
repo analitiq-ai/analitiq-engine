@@ -452,3 +452,57 @@ class TestCreateConfigErrorPaths:
             ValueError, match=f"Stream {STREAM_ID} {side} missing 'endpoint_ref'"
         ):
             prep.create_config()
+
+    @pytest.mark.parametrize("kind", ["", None])
+    def test_unusable_connector_kind_rejected(
+        self, pipeline_tree: Path, kind
+    ) -> None:
+        """A connector document whose ``kind`` is missing or empty must
+        fail loudly naming the connector."""
+        connector_doc = _connector_doc()
+        if kind is None:
+            del connector_doc["kind"]
+        else:
+            connector_doc["kind"] = kind
+        _write_json(
+            pipeline_tree
+            / "connectors"
+            / CONNECTOR_ID
+            / "definition"
+            / "connector.json",
+            connector_doc,
+        )
+        prep = PipelineConfigPrep()
+        with pytest.raises(
+            ValueError,
+            match=f"Connector {CONNECTOR_ID!r} declares no usable 'kind'",
+        ):
+            prep.create_config()
+
+
+# ---------------------------------------------------------------------------
+# Registry-discovered kinds (#137)
+# ---------------------------------------------------------------------------
+
+
+class TestRegistryDiscoveredKinds:
+    def test_schema_valid_plugin_kind_assembles(self, pipeline_tree: Path) -> None:
+        """Config prep pins no kind enum: a kind unknown to the built-ins
+        (an entry-point connector package's kind, accepted by the published
+        connector schema) must assemble — the worker registry is the
+        authority on whether the kind is runnable (#137)."""
+        connector_doc = _connector_doc()
+        connector_doc["kind"] = "graphql"
+        _write_json(
+            pipeline_tree
+            / "connectors"
+            / CONNECTOR_ID
+            / "definition"
+            / "connector.json",
+            connector_doc,
+        )
+        prep = PipelineConfigPrep()
+        _, stream_configs, connections, _, _ = prep.create_config()
+
+        assert connections[CONNECTION_SRC_ID].connector_type == "graphql"
+        assert stream_configs[0].source.runtime is connections[CONNECTION_SRC_ID]
