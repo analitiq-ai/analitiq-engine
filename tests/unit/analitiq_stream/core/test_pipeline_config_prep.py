@@ -322,7 +322,6 @@ class TestCreateConfigHappyPath:
         """``ResolvedSource.to_source_config()`` must not contain the
         ``ConnectionRuntime`` object — the result is passed directly to
         ``build_bootstrap`` and must be JSON-serialisable."""
-        import json
         from cdk.connection_runtime import ConnectionRuntime
 
         prep = PipelineConfigPrep()
