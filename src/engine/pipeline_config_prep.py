@@ -69,9 +69,6 @@ from cdk.connection_runtime import ConnectionRuntime
 logger = logging.getLogger(__name__)
 
 
-VALID_CONNECTOR_KINDS = {"api", "database", "file", "s3", "stdout"}
-
-
 # ---------------------------------------------------------------------------
 # Dataclasses for internal state
 # ---------------------------------------------------------------------------
@@ -375,11 +372,16 @@ class PipelineConfigPrep:
             return self._resolved_connections[connection_id]
 
         connector = self._load_connector(record.connector_id)
+        # The kind *value* is owned by the published connector schema
+        # (validated in _load_connector) and, at run time, by the worker
+        # registry (an unrunnable kind raises ConnectorNotRegisteredError
+        # there). Config prep only checks the shape, so registry-discovered
+        # connector kinds are not blocked by a hard-coded engine set.
         kind = connector.get("kind")
-        if kind not in VALID_CONNECTOR_KINDS:
+        if not isinstance(kind, str) or not kind:
             raise ValueError(
-                f"Connector {record.connector_id!r} has invalid kind {kind!r}; "
-                f"expected one of {sorted(VALID_CONNECTOR_KINDS)}"
+                f"Connector {record.connector_id!r} declares no usable "
+                f"'kind': {kind!r}"
             )
 
         runtime = ConnectionRuntime(

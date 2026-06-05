@@ -294,6 +294,58 @@ class TestBatchWriteResultInvariant:
         with pytest.raises(FrozenInstanceError):
             r.records_written = 99  # type: ignore[misc]
 
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "status",
+        ["ACK_STATUS_RETRYABLE_FAILURE", "ACK_STATUS_FATAL_FAILURE"],
+    )
+    def test_cursor_on_failure_raises(self, status):
+        """A failure result must not carry a cursor — the engine persists
+        the cursor as the checkpoint, so accepting one would advance the
+        checkpoint past a failed batch (#129)."""
+        from cdk.base_handler import BatchWriteResult
+        from cdk.types import Cursor
+        from src.grpc.generated.analitiq.v1 import AckStatus
+
+        with pytest.raises(ValueError, match="committed_cursor must be None"):
+            BatchWriteResult(
+                status=getattr(AckStatus, status),
+                records_written=0,
+                committed_cursor=Cursor(token=b"x"),
+            )
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "status",
+        ["ACK_STATUS_SUCCESS", "ACK_STATUS_ALREADY_COMMITTED"],
+    )
+    def test_cursor_on_success_allowed(self, status):
+        from cdk.base_handler import BatchWriteResult
+        from cdk.types import Cursor
+        from src.grpc.generated.analitiq.v1 import AckStatus
+
+        result = BatchWriteResult(
+            status=getattr(AckStatus, status),
+            records_written=1,
+            committed_cursor=Cursor(token=b"x"),
+        )
+        assert result.committed_cursor == Cursor(token=b"x")
+
+    @pytest.mark.unit
+    def test_failed_record_ids_stored_as_tuple(self):
+        """A caller-supplied list is normalized to a tuple, completing the
+        frozen dataclass's immutability (#129)."""
+        from cdk.base_handler import BatchWriteResult
+        from src.grpc.generated.analitiq.v1 import AckStatus
+
+        r = BatchWriteResult(
+            status=AckStatus.ACK_STATUS_FATAL_FAILURE,
+            records_written=0,
+            failed_record_ids=["a", "b"],
+        )
+        assert r.failed_record_ids == ("a", "b")
+        assert isinstance(r.failed_record_ids, tuple)
+
 
 class TestEnumWireAlignment:
     """The CDK-native ``AckStatus`` / ``WriteMode`` integer values mirror the
