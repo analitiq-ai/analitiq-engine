@@ -274,7 +274,7 @@ class SchemaContract:
                 continue
             try:
                 if is_ts:
-                    dt = datetime.fromisoformat(v.replace("Z", "+00:00"))
+                    dt = datetime.fromisoformat(v)
                     if tz and dt.tzinfo is None:
                         raise ValueError(
                             f"value {v!r} is naive but column declares tz={tz!r}"
