@@ -124,9 +124,11 @@ Externally installed connector packages add themselves through the
 `analitiq.destination_connectors` entry-point group (discovered at
 registry build time).
 
-Valid connector types are constrained to the set
-`{api, database, file, s3, stdout}` (see
-`cdk/cdk/connection_runtime.py` `VALID_CONNECTOR_TYPES`).
+The set of runnable connector kinds is owned by the worker registry:
+a kind that is neither a built-in default nor registry-discovered fails
+at worker startup with `ConnectorNotRegisteredError`
+(`cdk/cdk/registry.py`); neither the engine nor the CDK pins a parallel
+kind enum.
 
 ### Handler capabilities
 

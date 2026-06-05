@@ -35,7 +35,8 @@ if TYPE_CHECKING:
     import aiohttp
 
 from cdk.exceptions import TransportSpecError
-from cdk.resolver import ResolutionContext
+from cdk.derived_functions import DEFAULT_FUNCTIONS
+from cdk.resolver import ResolutionContext, Resolver
 from cdk.type_map import InvalidTypeMapError, TypeMapper, UnmappedTypeError
 from cdk.types import EndpointScope
 from cdk.secrets.protocol import SecretsResolver
@@ -57,8 +58,6 @@ from cdk.transport_factory import (
 
 logger = logging.getLogger(__name__)
 
-
-VALID_CONNECTOR_TYPES = frozenset({"database", "api", "file", "s3", "stdout"})
 
 # Connection-JSON blocks that must never cross into a worker: secret
 # pointers and auth material. Everything else (parameters, selections,
@@ -133,10 +132,14 @@ class ConnectionRuntime:
         connector_type_mapper: Optional[TypeMapper] = None,
         connection_type_mapper: Optional[TypeMapper] = None,
     ) -> None:
-        if connector_type not in VALID_CONNECTOR_TYPES:
+        # Shape check only. The set of valid kinds is owned by the published
+        # connector schema and by the worker registry (an unrunnable kind
+        # raises ConnectorNotRegisteredError at resolution); pinning a
+        # parallel frozen set here would block registry-discovered kinds.
+        if not connector_type or not isinstance(connector_type, str):
             raise ValueError(
-                f"Invalid connector_type: {connector_type!r}. "
-                f"Expected one of: {sorted(VALID_CONNECTOR_TYPES)}"
+                f"connector_type must be a non-empty string, "
+                f"got {connector_type!r}"
             )
         if not connector_id or not isinstance(connector_id, str):
             raise ValueError(
@@ -261,6 +264,42 @@ class ConnectionRuntime:
                 return self._connection_type_mapper
             return self.connector_type_mapper
         raise ValueError(f"type_mapper_for: unknown endpoint scope {scope!r}")
+
+    # ------------------------------------------------------------------
+    # Per-request expression resolution
+    # ------------------------------------------------------------------
+
+    def request_resolver(
+        self, *, runtime_values: Optional[Mapping[str, Any]] = None
+    ) -> Resolver:
+        """Resolver for per-request value expressions (param defaults,
+        request bodies), with the default derived functions registered.
+
+        Scopes: ``connection.{parameters,selections,discovered}`` from the
+        connection config, plus ``runtime`` (``connection_id`` and any
+        caller-supplied per-invocation values such as ``batch_size``).
+
+        Secrets are intentionally absent. Per-request resolution runs
+        connector-side, where the secret store is never available — secret
+        resolution happens once, on the trusted side, at transport
+        materialization (which uses the wider context from
+        :meth:`_build_resolution_context`). Keeping this request-time scope
+        set identical across the trusted engine and the sandboxed worker
+        means the same expression behaves the same wherever the connector
+        executes.
+        """
+        runtime_scope: Dict[str, Any] = {"connection_id": self._connection_id}
+        if runtime_values:
+            runtime_scope.update(runtime_values)
+        context = ResolutionContext(
+            connection={
+                "parameters": dict(self._raw_config.get("parameters") or {}),
+                "selections": dict(self._raw_config.get("selections") or {}),
+                "discovered": dict(self._raw_config.get("discovered") or {}),
+            },
+            runtime=runtime_scope,
+        )
+        return Resolver(context, functions=DEFAULT_FUNCTIONS)
 
     # ------------------------------------------------------------------
     # Materialization

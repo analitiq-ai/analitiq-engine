@@ -41,6 +41,19 @@ class CreateTableError(SqlIntrospectionError):
     """Standalone ``create_table`` failed to build or execute its DDL."""
 
 
+class SchemaConfigurationError(Exception):
+    """``configure_schema`` was given input it cannot act on.
+
+    Raised for caller-actionable configuration failures: an unsupported
+    proto write mode, an endpoint column missing its ``name`` or
+    ``native_type``, or a stream state with no endpoint document to build
+    DDL from. Deterministic: the same input always fails, so the gRPC
+    layer surfaces it in the SchemaAck instead of retrying. Replaces the
+    bare ``ValueError`` these paths used to raise (issue #153) so an
+    intentional config-error signal is distinguishable from a defect.
+    """
+
+
 class ReadError(Exception):
     """A source read (``read_batches``) could not be set up or executed.
 

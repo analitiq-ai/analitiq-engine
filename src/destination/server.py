@@ -39,7 +39,10 @@ from ..grpc.generated.analitiq.v1 import (
 from cdk.adbc_registry import AdbcConfigurationError
 from cdk.base_handler import BaseDestinationHandler
 from cdk.secrets.exceptions import PlaceholderExpansionError
-from cdk.sql.exceptions import UnsupportedDialectOperationError
+from cdk.sql.exceptions import (
+    SchemaConfigurationError,
+    UnsupportedDialectOperationError,
+)
 from cdk.types import Cursor as CdkCursor, SchemaSpec, WriteMode as CdkWriteMode
 from cdk.type_map import InvalidTypeMapError, UnmappedTypeError
 
@@ -177,11 +180,15 @@ class DestinationServicer(DestinationServiceServicer):
                     )
 
                     # Configure handler with schema. Deterministic errors
-                    # (type-map, KeyError/ValueError/TypeError on a malformed
-                    # endpoint document) surface in the SchemaAck with the
-                    # exception type and message, so the engine can route
-                    # them to DLQ instead of treating them as a transient
-                    # "schema configuration failed".
+                    # (type-map, SchemaConfigurationError, KeyError/
+                    # ValueError/TypeError on a malformed endpoint document)
+                    # surface in the SchemaAck with the exception type and
+                    # message, so the engine logs a precise rejection
+                    # reason instead of a generic "schema configuration
+                    # failed". Anything else is a defect: it escapes to the
+                    # stream's outer except, which logs the traceback and
+                    # re-raises, failing the RPC with the real error instead
+                    # of a generic schema rejection.
                     try:
                         # Translate the wire message to the CDK-native SchemaSpec
                         # the handler contract now takes (the CDK must not import
@@ -203,6 +210,7 @@ class DestinationServicer(DestinationServiceServicer):
                         ack_message = f"type-map: {e}"
                     except (
                         AdbcConfigurationError,
+                        SchemaConfigurationError,
                         UnsupportedDialectOperationError,
                         PlaceholderExpansionError,
                     ) as e:
@@ -336,23 +344,38 @@ class DestinationServicer(DestinationServiceServicer):
         context: grpc.aio.ServicerContext,
     ) -> GetCapabilitiesResponse:
         """Return destination capabilities."""
-        supported_modes = [WriteMode.WRITE_MODE_INSERT]
-        if self.handler.supports_upsert:
-            supported_modes.append(WriteMode.WRITE_MODE_UPSERT)
-        supported_modes.append(WriteMode.WRITE_MODE_TRUNCATE_INSERT)
+        try:
+            supported_modes = [WriteMode.WRITE_MODE_INSERT]
+            if self.handler.supports_upsert:
+                supported_modes.append(WriteMode.WRITE_MODE_UPSERT)
+            supported_modes.append(WriteMode.WRITE_MODE_TRUNCATE_INSERT)
 
-        return GetCapabilitiesResponse(
-            connector_type=self.handler.connector_type,
-            supported_write_modes=supported_modes,
-            supports_transactions=self.handler.supports_transactions,
-            supports_auto_create=True,
-            supports_upsert=self.handler.supports_upsert,
-            supports_bulk_load=self.handler.supports_bulk_load,
-            max_batch_size=self.handler.max_batch_size,
-            max_batch_bytes=self.handler.max_batch_bytes,
-            supported_formats=[PayloadFormat.PAYLOAD_FORMAT_ARROW_IPC],
-            protocol_version="1.0.0",
-        )
+            return GetCapabilitiesResponse(
+                connector_type=self.handler.connector_type,
+                supported_write_modes=supported_modes,
+                supports_transactions=self.handler.supports_transactions,
+                supports_auto_create=True,
+                supports_upsert=self.handler.supports_upsert,
+                supports_bulk_load=self.handler.supports_bulk_load,
+                max_batch_size=self.handler.max_batch_size,
+                max_batch_bytes=self.handler.max_batch_bytes,
+                supported_formats=[PayloadFormat.PAYLOAD_FORMAT_ARROW_IPC],
+                protocol_version="1.0.0",
+            )
+        except AttributeError as e:
+            # A broken capability surface (attribute missing on the
+            # handler, or an AttributeError from inside a capability
+            # property) would otherwise surface as a bare INTERNAL with
+            # no detail. Name the handler class and carry the original
+            # message — which says what attribute failed and where — so
+            # the defect is actionable.
+            detail = (
+                f"handler {type(self.handler).__name__} failed to provide "
+                f"capabilities: {e}"
+            )
+            logger.exception("GetCapabilities failed: %s", detail)
+            await context.abort(grpc.StatusCode.INTERNAL, detail)
+            raise  # abort always raises; backstop so this cannot return None
 
     async def Shutdown(
         self,

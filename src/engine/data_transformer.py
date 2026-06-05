@@ -21,10 +21,6 @@ from cdk.type_map.exceptions import InvalidTypeMapError
 logger = logging.getLogger(__name__)
 
 
-def _normalize_iso_z(value: str) -> str:
-    return value[:-1] + "+00:00" if value.endswith("Z") else value
-
-
 class AssignmentTransformer:
     """
     Handles assignment-based mapping as per MAPPING_AND_TRANSFORMATIONS.md spec.
@@ -305,8 +301,7 @@ class AssignmentTransformer:
         if value is None:
             return None
         try:
-            iso_str = _normalize_iso_z(str(value))
-            dt = datetime.fromisoformat(iso_str)
+            dt = datetime.fromisoformat(str(value))
             return dt.strftime('%Y-%m-%d')
         except (ValueError, TypeError) as e:
             logger.warning(f"iso_to_date failed for '{value}': {e}")
@@ -320,8 +315,7 @@ class AssignmentTransformer:
         if value is None:
             return None
         try:
-            iso_str = _normalize_iso_z(str(value))
-            return datetime.fromisoformat(iso_str)
+            return datetime.fromisoformat(str(value))
         except (ValueError, TypeError) as e:
             raise TransformationError(
                 f"iso_to_datetime failed for {value!r}: {e}"
@@ -715,7 +709,7 @@ class DataTransformer:
         passing the bad value through to the destination's schema is a
         more localized failure than raising mid-batch."""
         try:
-            dt = datetime.fromisoformat(_normalize_iso_z(value))
+            dt = datetime.fromisoformat(value)
             return dt.strftime('%Y-%m-%d')
         except ValueError as e:
             logger.warning("Failed to parse ISO date '%s': %s", value, e)
@@ -725,7 +719,7 @@ class DataTransformer:
         """Parse ISO datetime string to datetime object. Raises on
         unparseable input — a ``datetime.now()`` fallback would silently
         re-window cursors and corrupt incremental sync."""
-        return datetime.fromisoformat(_normalize_iso_z(value))
+        return datetime.fromisoformat(value)
 
     async def _parse_iso_to_datetime_object(self, value: Any) -> datetime:
         """Convert ISO timestamp string or datetime to datetime object.
@@ -736,7 +730,7 @@ class DataTransformer:
         if isinstance(value, datetime):
             return value
 
-        return datetime.fromisoformat(_normalize_iso_z(str(value)))
+        return datetime.fromisoformat(str(value))
 
 
 def _json_target_names(assignments: List[Dict[str, Any]]) -> set:

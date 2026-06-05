@@ -2,9 +2,15 @@
 
 This connector consumes the published API-endpoint contract directly:
 
-* ``operations.read.request.{method, path, query}`` — URL + HTTP verb.
+* ``operations.read.request.{method, path}`` — URL + HTTP verb.
+* ``operations.read.request.body`` — optional JSON body; built per page
+  request: ``{"from_param": ...}`` nodes bind the page's param values
+  (including pagination-controlled ones), then the body is deep-resolved
+  through the value-expression grammar. Params declared ``in: body``
+  stay out of the query string.
 * ``operations.read.params.<name>`` — declared params with optional
-  ``default`` value expressions resolved against the connection scopes
+  ``default`` value expressions (``literal``/``ref``/``template``/
+  ``function``) resolved against the connection scopes
   (``connection.parameters``/``selections``/``discovered``) and runtime
   scopes (``runtime.batch_size``).
 * ``operations.read.pagination`` — offset / page / cursor / keyset
@@ -24,15 +30,16 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import timezone
-from typing import Any, AsyncIterator, Dict, List, Optional
+from typing import Any, AsyncIterator, Callable, Dict, List, Optional
 
 import pyarrow as pa
 
 from .base import BaseConnector, ConnectionError, ReadError, TransientReadError
 from cdk.schema_contract import SchemaContract
 from cdk.connection_runtime import ConnectionRuntime
+from cdk.request_binding import bind_param_refs
+from cdk.resolver import Resolver
 from cdk.types import CheckpointStore
-from ...shared.expressions import resolve_value_expression
 from ...shared.http_utils import join_url
 
 logger = logging.getLogger(__name__)
@@ -164,6 +171,15 @@ class APIConnector(BaseConnector):
             )
         full_url = join_url(self.base_url, path)
 
+        # One resolver covers everything this read materializes per request:
+        # declared param defaults and the optional request body. Expression
+        # nodes that do not resolve are omitted (with a warning) instead of
+        # being serialized verbatim onto the wire. ``runtime.batch_size`` is
+        # the effective page size driving the pagination loops.
+        resolver = self._runtime.request_resolver(
+            runtime_values={"batch_size": batch_size}
+        )
+
         replication_block = stream_source.get("replication") or {}
         replication_method = replication_block.get("method", "full_refresh")
         cursor_field = replication_block.get("cursor_field")
@@ -172,12 +188,12 @@ class APIConnector(BaseConnector):
         safety_window = replication_block.get("safety_window_seconds")
         tie_breaker_fields = list(replication_block.get("tie_breaker_fields") or [])
 
-        # Build query params from the declared ``params`` block: defaults
-        # via value-expression resolution, then stream-level filter
+        # Build the param value table from the declared ``params`` block:
+        # defaults via value-expression resolution, then stream-level filter
         # overrides. ``controlled_by: pagination|replication`` params are
         # filled by their respective loops.
-        base_params, controlled_params = self._build_base_params(
-            read_spec, config, stream_source.get("filters") or []
+        param_values, param_placements, controlled_params = self._build_base_params(
+            read_spec, resolver, stream_source.get("filters") or []
         )
 
         # Set up incremental replication: subtract safety window from the
@@ -185,7 +201,7 @@ class APIConnector(BaseConnector):
         # param.
         if replication_method == "incremental":
             await self._apply_incremental_replication(
-                base_params,
+                param_values,
                 read_spec,
                 checkpoint,
                 stream_name,
@@ -193,6 +209,31 @@ class APIConnector(BaseConnector):
                 cursor_field,
                 safety_window,
             )
+
+        # Each page request materializes from the full per-page param
+        # table (declared defaults + filters + replication + the values
+        # the pagination loop sets): the query string carries params not
+        # declared ``in: body``; the body binds ``{"from_param": ...}``
+        # nodes against the same table and resolves expressions. Built
+        # per page so controlled params (limit, offset, cursor) reach a
+        # body-paginated endpoint instead of freezing at their initial
+        # values.
+        raw_body = request.get("body")
+
+        def build_request(
+            page_params: Dict[str, Any],
+        ) -> tuple[Dict[str, Any], Any]:
+            query = {
+                name: value
+                for name, value in page_params.items()
+                if param_placements.get(name) != "body"
+            }
+            body = (
+                resolver.resolve_for_request(bind_param_refs(raw_body, page_params))
+                if raw_body is not None
+                else None
+            )
+            return query, body
 
         records_ref = ((read_spec.get("response") or {}).get("records") or {}).get(
             "ref", "response.body"
@@ -209,11 +250,12 @@ class APIConnector(BaseConnector):
         async for batch in self._iterate_pages(
             full_url=full_url,
             method=method,
-            base_params=base_params,
+            base_params=param_values,
             controlled_params=controlled_params,
             pagination=read_spec.get("pagination") or {},
             batch_size=batch_size,
             records_ref=records_ref,
+            build_request=build_request,
         ):
             if not batch:
                 continue
@@ -289,35 +331,47 @@ class APIConnector(BaseConnector):
     def _build_base_params(
         self,
         read_spec: Dict[str, Any],
-        config: Dict[str, Any],
+        resolver: Resolver,
         stream_filters: List[Dict[str, Any]],
-    ) -> tuple[Dict[str, Any], Dict[str, str]]:
+    ) -> tuple[Dict[str, Any], Dict[str, str], Dict[str, str]]:
         """Resolve declared param defaults and apply stream filter overrides.
 
-        Returns ``(base_params, controlled_params)`` where
+        Defaults resolve through the full value-expression grammar
+        (``literal`` / ``ref`` / ``template`` / ``function``); a default
+        that does not resolve omits the parameter with a warning rather
+        than sending the raw expression structure upstream.
+
+        Returns ``(param_values, placements, controlled_params)``:
+        ``param_values`` is the single value table (body ``from_param``
+        binding reads it whole; the caller filters ``in: body`` params
+        out of the query string via ``placements``), ``placements`` maps
+        param name to its declared ``in`` location, and
         ``controlled_params`` maps controller name (``pagination`` or
         ``replication``) to the controlled-by group recorded for the
         param. Callers use it to keep pagination/replication loops from
         clobbering each other's values.
         """
-        base_params: Dict[str, Any] = {}
+        param_values: Dict[str, Any] = {}
+        placements: Dict[str, str] = {}
         controlled: Dict[str, str] = {}
         declared = read_spec.get("params") or {}
         for name, decl in declared.items():
             if not isinstance(decl, dict):
                 continue
+            placements[name] = decl.get("in") or "query"
             controlled_by = decl.get("controlled_by")
             if controlled_by:
                 controlled[name] = controlled_by
                 continue
             if "default" in decl:
-                value = resolve_value_expression(
-                    decl["default"],
-                    self._runtime,
-                    extra_scopes={"runtime": {"batch_size": config.get("batch_size")}},
-                )
-                if value is not None:
-                    base_params[name] = value
+                value = resolver.resolve_for_request(decl["default"])
+                if value is None:
+                    logger.warning(
+                        "param %r: default did not resolve; parameter omitted",
+                        name,
+                    )
+                    continue
+                param_values[name] = value
 
         for f in stream_filters:
             target = f.get("field")
@@ -325,8 +379,8 @@ class APIConnector(BaseConnector):
                 continue
             value = f.get("value")
             if value is not None:
-                base_params[target] = value
-        return base_params, controlled
+                param_values[target] = value
+        return param_values, placements, controlled
 
     # ------------------------------------------------------------------
     # Incremental replication
@@ -417,11 +471,17 @@ class APIConnector(BaseConnector):
         pagination: Dict[str, Any],
         batch_size: int,
         records_ref: str,
+        build_request: Callable[[Dict[str, Any]], tuple[Dict[str, Any], Any]],
     ) -> AsyncIterator[List[Dict[str, Any]]]:
+        """Drive the pagination loop, materializing each page request via
+        ``build_request``: it maps the page's full param table to the
+        ``(query_params, body)`` actually sent, applying declared param
+        placement and per-page body binding."""
         p_type = pagination.get("type")
         if not p_type:
+            query, body = build_request(dict(base_params))
             records = await self._request_records(
-                full_url, method, base_params, records_ref
+                full_url, method, query, records_ref, body=body
             )
             if records:
                 yield records
@@ -441,8 +501,9 @@ class APIConnector(BaseConnector):
             while True:
                 params = dict(base_params)
                 params[offset_param] = offset
+                query, body = build_request(params)
                 records = await self._request_records(
-                    full_url, method, params, records_ref
+                    full_url, method, query, records_ref, body=body
                 )
                 if not records:
                     return
@@ -460,8 +521,9 @@ class APIConnector(BaseConnector):
             while True:
                 params = dict(base_params)
                 params[page_param] = page
+                query, body = build_request(params)
                 records = await self._request_records(
-                    full_url, method, params, records_ref
+                    full_url, method, query, records_ref, body=body
                 )
                 if not records:
                     return
@@ -485,8 +547,9 @@ class APIConnector(BaseConnector):
                 params = dict(base_params)
                 if cursor_token:
                     params[cursor_param] = cursor_token
+                query, body = build_request(params)
                 data, records = await self._request_payload(
-                    full_url, method, params, records_ref
+                    full_url, method, query, records_ref, body=body
                 )
                 if not records:
                     return
@@ -510,8 +573,9 @@ class APIConnector(BaseConnector):
                 params = dict(base_params)
                 if last_key:
                     params[keyset_param] = last_key
+                query, body = build_request(params)
                 records = await self._request_records(
-                    full_url, method, params, records_ref
+                    full_url, method, query, records_ref, body=body
                 )
                 if not records:
                     return
@@ -533,8 +597,12 @@ class APIConnector(BaseConnector):
         method: str,
         params: Dict[str, Any],
         records_ref: str,
+        *,
+        body: Any = None,
     ) -> List[Dict[str, Any]]:
-        _, records = await self._request_payload(url, method, params, records_ref)
+        _, records = await self._request_payload(
+            url, method, params, records_ref, body=body
+        )
         return records
 
     async def _request_payload(
@@ -543,14 +611,21 @@ class APIConnector(BaseConnector):
         method: str,
         params: Dict[str, Any],
         records_ref: str,
+        *,
+        body: Any = None,
     ) -> tuple[Any, List[Dict[str, Any]]]:
         if self.rate_limiter:
             await self.rate_limiter.acquire()
         logger.debug("API %s %s params=%s", method, url, params)
-        async with self.session.request(method, url, params=params) as response:
+        request_kwargs: Dict[str, Any] = {"params": params}
+        if body is not None:
+            # Resolved ``operations.read.request.body``; only sent when the
+            # endpoint declares one, so plain GET reads stay body-less.
+            request_kwargs["json"] = body
+        async with self.session.request(method, url, **request_kwargs) as response:
             if response.status != 200:
-                body = await response.text()
-                body_snippet = body[:500]
+                error_text = await response.text()
+                body_snippet = error_text[:500]
                 logger.error("API %d %s %s: %s", response.status, method, url, body_snippet)
                 detail = (
                     f"API request failed: {method} {url} -> status {response.status}; "

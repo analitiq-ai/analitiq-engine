@@ -13,3 +13,18 @@ class TransportSpecError(Exception):
     in ``GenericSQLConnector`` re-raise it unchanged, letting operators
     distinguish "bad connector definition" from "network unreachable".
     """
+
+
+class UnresolvedValueError(KeyError):
+    """A referenced value is absent at resolution time.
+
+    Raised when a ``ref`` path, template placeholder, or lookup input walks
+    into a value that simply is not there — the well-formed-expression,
+    missing-data case. This is the only failure the per-request resolution
+    policy (:meth:`cdk.resolver.Resolver.resolve_for_request`) converts into
+    an omitted field; authoring defects (:class:`TransportSpecError`, plain
+    ``KeyError`` from elsewhere) propagate in every mode.
+
+    Subclasses ``KeyError`` so strict-mode callers that classify resolution
+    failures by ``KeyError`` keep working unchanged.
+    """
