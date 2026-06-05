@@ -182,62 +182,6 @@ def mock_state_manager():
     return state_manager
 
 
-@pytest.fixture
-def database_cleanup():
-    """Fixture to cleanup test database tables after tests."""
-    cleanup_tables = []
-    
-    def add_table_for_cleanup(schema: str, table: str):
-        """Register a table for cleanup."""
-        cleanup_tables.append((schema, table))
-    
-    yield add_table_for_cleanup
-    
-    # Cleanup after test
-    if cleanup_tables and os.getenv("POSTGRES_PASSWORD"):
-        try:
-            import asyncio
-            from sqlalchemy import text
-            from cdk.database_utils import create_database_engine
-
-            async def cleanup():
-                config = {
-                    "driver": "postgresql",
-                    "host": os.getenv("POSTGRES_HOST", "localhost"),
-                    "parameters": {
-                        "port": int(os.getenv("POSTGRES_PORT", "5432")),
-                        "database": os.getenv("POSTGRES_DB", "analitiq_test"),
-                        "user": os.getenv("POSTGRES_USER", "postgres"),
-                        "password": os.getenv("POSTGRES_PASSWORD"),
-                        "ssl_mode": os.getenv("POSTGRES_SSL_MODE", "prefer"),
-                    },
-                }
-                engine, _ = await create_database_engine(config)
-                try:
-                    async with engine.connect() as conn:
-                        for schema, table in cleanup_tables:
-                            try:
-                                await conn.execute(
-                                    text(f"DROP TABLE IF EXISTS {schema}.{table} CASCADE")
-                                )
-                                await conn.commit()
-                            except Exception:
-                                pass
-                finally:
-                    await engine.dispose()
-
-            try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    asyncio.create_task(cleanup())
-                else:
-                    loop.run_until_complete(cleanup())
-            except RuntimeError:
-                asyncio.run(cleanup())
-        except Exception:
-            pass  # Ignore cleanup errors
-
-
 @pytest.fixture(autouse=True)
 def setup_test_env():
     """Set up test environment variables."""

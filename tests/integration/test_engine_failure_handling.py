@@ -265,6 +265,58 @@ class TestEngineFatalFailureHandling:
         assert mock_grpc_client.send_batch.call_count == 4
 
     @pytest.mark.asyncio
+    async def test_load_stage_retryable_exhaustion_raises_with_fail_strategy(
+        self,
+        engine: StreamingEngine,
+        mock_grpc_client: AsyncMock,
+        sample_stream_config: Dict[str, Any],
+        temp_dir: str,
+    ):
+        """With error_strategy='fail' (the default), exhausting retries must
+        raise StreamProcessingError instead of silently dropping the batch
+        and continuing."""
+        from src.state.dead_letter_queue import DeadLetterQueue
+
+        input_queue = asyncio.Queue()
+        output_queue = asyncio.Queue()
+
+        test_batch = pa.RecordBatch.from_pylist([{"id": 1}])
+        await input_queue.put(test_batch)
+        await input_queue.put(None)
+
+        retryable_result = MockBatchResult(
+            success=False,
+            status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
+            records_written=0,
+            committed_cursor=None,
+            failed_record_ids=[],
+            failure_summary="Connection timeout",
+        )
+        mock_grpc_client.send_batch = AsyncMock(return_value=retryable_result)
+
+        stream_dlq = DeadLetterQueue(f"{temp_dir}/dlq")
+
+        config = dict(sample_stream_config)
+        config["runtime"] = {"error_handling": {"strategy": "fail"}}
+        engine.retry_delay = 0.01
+
+        stream_metrics = {"records_processed": 0, "records_failed": 0, "batches_processed": 0, "batches_failed": 0}
+
+        with pytest.raises(StreamProcessingError, match="failed after"):
+            await engine._load_stage(
+                input_queue=input_queue,
+                output_queue=output_queue,
+                grpc_client=mock_grpc_client,
+                config=config,
+                stream_dlq=stream_dlq,
+                run_id="test-run-001",
+                stream_metrics=stream_metrics,
+            )
+
+        # No record was sent to the DLQ under 'fail'
+        assert await stream_dlq.get_failed_records() == []
+
+    @pytest.mark.asyncio
     async def test_metrics_updated_on_fatal_failure(
         self,
         engine: StreamingEngine,

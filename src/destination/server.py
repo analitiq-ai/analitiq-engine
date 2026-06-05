@@ -36,7 +36,10 @@ from ..grpc.generated.analitiq.v1 import (
     add_DestinationServiceServicer_to_server,
     DestinationServiceServicer,
 )
+from cdk.adbc_registry import AdbcConfigurationError
 from cdk.base_handler import BaseDestinationHandler
+from cdk.secrets.exceptions import PlaceholderExpansionError
+from cdk.sql.exceptions import UnsupportedDialectOperationError
 from cdk.types import Cursor as CdkCursor, SchemaSpec, WriteMode as CdkWriteMode
 from cdk.type_map import InvalidTypeMapError, UnmappedTypeError
 
@@ -198,6 +201,22 @@ class DestinationServicer(DestinationServiceServicer):
                         )
                         accepted = False
                         ack_message = f"type-map: {e}"
+                    except (
+                        AdbcConfigurationError,
+                        UnsupportedDialectOperationError,
+                        PlaceholderExpansionError,
+                    ) as e:
+                        # The handler's configure_schema deliberately
+                        # propagates these deterministic errors so the
+                        # SchemaAck carries the precise reason; translate
+                        # them here instead of crashing the stream.
+                        logger.error(
+                            "configuration error for stream %s: %s",
+                            schema_msg.stream_id,
+                            e,
+                        )
+                        accepted = False
+                        ack_message = f"{type(e).__name__}: {e}"
                     except (KeyError, TypeError, ValueError) as e:
                         logger.exception(
                             "deterministic error configuring stream %s",

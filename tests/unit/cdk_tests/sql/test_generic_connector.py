@@ -97,6 +97,79 @@ class TestReadGuards:
         with pytest.raises(ReadError, match="database_object.name"):
             await _drain(connector, runtime, config, _checkpoint())
 
+    @pytest.mark.asyncio
+    async def test_incremental_cursor_field_not_in_projection_raises(self):
+        # An incremental stream whose projection drops the cursor column
+        # would silently degrade to full-scan + upsert every run; the
+        # misconfiguration must fail before any extraction work.
+        connector = GenericSQLConnector()
+        runtime = _FakeRuntime(is_adbc=True)
+        with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()), patch(
+            "cdk.sql.generic.SchemaContract"
+        ):
+            config = _endpoint_config(
+                replication={"method": "incremental", "cursor_field": ["deleted_at"]},
+            )
+            with pytest.raises(ReadError, match="cursor_field 'deleted_at'"):
+                await _drain(connector, runtime, config, _checkpoint())
+        runtime.close.assert_awaited()
+
+    def test_build_filters_missing_field_raises(self):
+        # A filter dict without 'field' used to be skipped, silently
+        # widening the result set.
+        with pytest.raises(ReadError, match="missing 'field'"):
+            GenericSQLConnector._build_filters([{"operator": "eq", "value": 1}])
+
+    @pytest.mark.asyncio
+    async def test_incremental_wildcard_projection_passes_cursor_check(self):
+        # selected_columns ['*'] compiles to SELECT *, which always carries
+        # the cursor column — the projection guard must not reject it.
+        runtime = _FakeRuntime(is_adbc=True)
+        page = [pa.RecordBatch.from_pydict(
+            {"id": [1], "updated_at": ["2024-01-01"]}
+        )]
+        reader = _RecordingReader([page, []])
+
+        class _CM:
+            async def __aenter__(self):
+                return reader
+
+            async def __aexit__(self, *exc):
+                return False
+
+        connector = GenericSQLConnector()
+        with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()), patch(
+            "cdk.sql.generic.open_adbc_reader", return_value=_CM()
+        ), patch("cdk.sql.generic.SchemaContract") as sc:
+            sc.return_value.cast_arrow_batch.side_effect = lambda b: b
+            config = _endpoint_config(
+                replication={"method": "incremental", "cursor_field": ["updated_at"]},
+            )
+            config["stream_source"]["selected_columns"] = ["*"]
+            batches = await _drain(connector, runtime, config, _checkpoint())
+
+        assert batches
+        sql, _ = reader.calls[0]
+        assert "SELECT *" in sql or "select *" in sql.lower()
+
+    @pytest.mark.asyncio
+    async def test_incremental_wildcard_with_cursor_outside_contract_raises(self):
+        # SELECT * fetches everything, but the batch is cast through
+        # SchemaContract, which keeps only contract columns — a cursor not
+        # declared in the endpoint contract would never advance.
+        connector = GenericSQLConnector()
+        runtime = _FakeRuntime(is_adbc=True)
+        with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()), patch(
+            "cdk.sql.generic.SchemaContract"
+        ):
+            config = _endpoint_config(
+                replication={"method": "incremental", "cursor_field": ["modified_ts"]},
+            )
+            config["stream_source"]["selected_columns"] = ["*"]
+            with pytest.raises(ReadError, match="cursor_field 'modified_ts'"):
+                await _drain(connector, runtime, config, _checkpoint())
+        runtime.close.assert_awaited()
+
 
 class TestReadConnectErrors:
     """read_batches connect-phase error classification mirrors connect()."""

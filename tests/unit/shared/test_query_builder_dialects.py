@@ -540,3 +540,32 @@ class TestAdbcQmarkModeRealDialects:
         assert '"orders"' in sql and '"id"' in sql
         assert "`" not in sql
         assert "LIMIT" in sql.upper()
+
+
+class TestFilterFailLoud:
+    """A declared filter that compiles away silently widens the result
+    set, so an unmapped operator must raise instead of being skipped."""
+
+    def test_unknown_filter_operator_raises(self):
+        builder = QueryBuilder("postgresql")
+        with pytest.raises(ValueError, match="Unknown filter operator 'regex'"):
+            builder.build_select_query(
+                QueryConfig(
+                    table_name="events",
+                    filters=[Filter(field="name", op="regex", value="^a")],
+                )
+            )
+
+    def test_known_operators_still_compile(self):
+        builder = QueryBuilder("postgresql")
+        sql, params = builder.build_select_query(
+            QueryConfig(
+                table_name="events",
+                filters=[
+                    Filter(field="id", op="gte", value=1),
+                    Filter(field="deleted_at", op="is_null"),
+                ],
+            )
+        )
+        assert "WHERE" in sql.upper()
+        assert params == [1]

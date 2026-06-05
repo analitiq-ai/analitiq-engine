@@ -652,7 +652,13 @@ class StreamingEngine:
                             stream_metrics["batches_failed"] += 1
                             if error_strategy == "dlq":
                                 await stream_dlq.send_batch(
-                                    record_dicts, result.failure_summary, self.pipeline_id
+                                    record_dicts, result.failure_summary,
+                                    self.pipeline_id, stream_id=stream_id,
+                                )
+                            elif error_strategy == "fail":
+                                raise StreamProcessingError(
+                                    f"Batch {batch_seq} failed after {max_retries} "
+                                    f"retries: {result.failure_summary}"
                                 )
                             break
 
@@ -679,7 +685,8 @@ class StreamingEngine:
                         # Send entire batch to DLQ with record_ids for correlation
                         if error_strategy == "dlq":
                             await stream_dlq.send_batch(
-                                record_dicts, result.failure_summary, self.pipeline_id
+                                record_dicts, result.failure_summary,
+                                self.pipeline_id, stream_id=stream_id,
                             )
 
                         # Raise exception to mark stream as failed
@@ -699,9 +706,12 @@ class StreamingEngine:
                         stream_metrics["batches_failed"] += 1
                         if error_strategy == "dlq":
                             await stream_dlq.send_batch(
-                                record_dicts, f"Unknown ACK status: {result.status}", self.pipeline_id
+                                record_dicts, f"Unknown ACK status: {result.status}",
+                                self.pipeline_id, stream_id=stream_id,
                             )
-                        break
+                        raise StreamProcessingError(
+                            f"Batch {batch_seq} unknown ACK status: {result.status}"
+                        )
 
             # Signal end of stream
             await output_queue.put(None)

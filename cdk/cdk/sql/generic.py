@@ -624,6 +624,7 @@ class GenericSQLConnector(BaseDestinationHandler):
             InvalidTypeMapError,
             PlaceholderExpansionError,
             UnsupportedDialectOperationError,
+            AdbcConfigurationError,
             KeyError,
             TypeError,
             ValueError,
@@ -631,7 +632,8 @@ class GenericSQLConnector(BaseDestinationHandler):
             # Deterministic, actionable errors propagate with their real
             # type so the schema-ack carries the precise reason (unmapped
             # native type, malformed type-map, missing secret, bad endpoint
-            # document) instead of a generic "configure failed".
+            # document, engine not connected) instead of a generic
+            # "configure failed".
             raise
         except Exception as e:
             logger.error("Failed to configure schema: %s", e, exc_info=True)
@@ -760,7 +762,13 @@ class GenericSQLConnector(BaseDestinationHandler):
             return
 
         if self._engine is None:
-            return
+            # Silently skipping DDL here would leave state.table None and the
+            # write_batch readiness guard returning RETRYABLE_FAILURE forever.
+            raise AdbcConfigurationError(
+                f"SQLAlchemy engine is None during DDL for "
+                f"{state.schema_name}.{state.table_name}; "
+                "connect() must be called before configure_schema()"
+            )
 
         # Serialize DDL across concurrent streams so they do not race the
         # database catalog (e.g. PostgreSQL's pg_type_typname_nsp_index).
@@ -873,9 +881,7 @@ class GenericSQLConnector(BaseDestinationHandler):
                 async with self._engine.begin() as conn:
                     if state.write_mode == "truncate_insert":
                         await self._truncate_and_insert(conn, state, prepared)
-                    elif state.write_mode == "upsert" and (
-                        state.conflict_keys or state.primary_keys
-                    ):
+                    elif state.write_mode == "upsert":
                         await self._upsert_records(conn, state, prepared)
                     else:
                         await self._insert_records(conn, state, prepared)
@@ -1048,9 +1054,19 @@ class GenericSQLConnector(BaseDestinationHandler):
         silent downgrade to INSERT. The engine should not have routed an
         upsert here in the first place: ``supports_upsert`` gates the
         advertised write modes.
+
+        When no conflict keys resolve (neither ``conflict_keys`` nor
+        ``primary_keys``), there is nothing to match conflicts on; the
+        write falls back to plain INSERT with a WARNING, since duplicates
+        are then possible.
         """
         conflict_keys = state.conflict_keys or state.primary_keys
         if state.table is None or not conflict_keys:
+            logger.warning(
+                "upsert requested for %s.%s but no conflict keys resolved; "
+                "falling back to plain INSERT — duplicates are possible",
+                state.schema_name, state.table_name,
+            )
             await self._insert_records(conn, state, records)
             return
         if not records:
@@ -1410,7 +1426,8 @@ class GenericSQLConnector(BaseDestinationHandler):
         """
         if state.schema_contract is None:
             raise AdbcConfigurationError(
-                "ADBC-only write requires a configured SchemaContract"
+                f"ADBC-only write for {state.schema_name}.{state.table_name} "
+                "requires a configured SchemaContract; schema alignment was skipped"
             )
         cast_batch = state.schema_contract.cast_arrow_batch(record_batch)
         conflict_keys = state.conflict_keys or state.primary_keys
@@ -1441,6 +1458,15 @@ class GenericSQLConnector(BaseDestinationHandler):
                 stage_token,
             )
         else:
+            if state.write_mode == "upsert":
+                # Same fallback semantics as the SQLAlchemy path's
+                # _upsert_records: no conflict keys means nothing to match
+                # conflicts on, so the write degrades loudly to plain ingest.
+                logger.warning(
+                    "upsert requested for %s.%s but no conflict keys resolved; "
+                    "falling back to plain ingest — duplicates are possible",
+                    state.schema_name, state.table_name,
+                )
             await asyncio.to_thread(
                 self._adbc_only_ingest_sync,
                 cast_batch, state.schema_name, state.table_name,
@@ -1839,20 +1865,32 @@ class GenericSQLConnector(BaseDestinationHandler):
                 cursor_field = cursor_field[0] if cursor_field else None
             replication_method = replication.get("method", "full_refresh")
 
-            if (
-                replication_method == "incremental"
-                and cursor_field
-                and cursor_field not in column_names
-            ):
-                # An incremental stream whose projection drops the cursor
-                # column silently reverts to "full-scan + upsert" every run:
-                # no cursor value is observable, so no state advances. Loud
-                # and once.
-                logger.warning(
-                    "stream %r: cursor_field %r not in selected columns %r; "
-                    "cursor will not advance",
-                    stream_name, cursor_field, column_names,
-                )
+            if replication_method == "incremental" and cursor_field:
+                # The wildcard projection compiles to SELECT * (see
+                # QueryBuilder.build_select_query), but the fetched batch
+                # is cast through SchemaContract, which keeps only the
+                # endpoint contract's columns — so the cursor column must
+                # be declared there for its value to survive the cast.
+                if column_names == ["*"]:
+                    effective_columns = [
+                        c["name"]
+                        for c in (endpoint_doc.get("columns") or [])
+                        if c.get("name")
+                    ]
+                else:
+                    effective_columns = column_names
+                if cursor_field not in effective_columns:
+                    # An incremental stream whose projection drops the
+                    # cursor column silently reverts to "full-scan +
+                    # upsert" every run: no cursor value is observable, so
+                    # no state advances. The stream is misconfigured —
+                    # fail before any extraction work.
+                    raise ReadError(
+                        f"stream {stream_name!r}: incremental replication "
+                        f"requires cursor_field {cursor_field!r} to be present "
+                        f"in the projection. Effective columns: "
+                        f"{effective_columns!r}"
+                    )
 
             partition = partition or {}
             cursor_state = await checkpoint.get_cursor(stream_name, partition)
@@ -2104,7 +2142,9 @@ class GenericSQLConnector(BaseDestinationHandler):
         for f in stream_filters:
             field_name = f.get("field")
             if not field_name:
-                continue
+                # A declared filter that compiles away silently widens the
+                # result set — a configuration defect retries cannot heal.
+                raise ReadError(f"stream filter missing 'field': {f!r}")
             out.append(
                 Filter(
                     field=field_name,

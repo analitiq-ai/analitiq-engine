@@ -315,9 +315,8 @@ class QueryBuilder:
             condition, filter_params = self._build_filter_condition(
                 filter_def, len(params)
             )
-            if condition is not None:
-                conditions.append(condition)
-                params.extend(filter_params)
+            conditions.append(condition)
+            params.extend(filter_params)
 
         # Apply cursor-based filtering for incremental reads
         if config.cursor_field and config.cursor_value is not None:
@@ -358,7 +357,7 @@ class QueryBuilder:
 
     def _build_filter_condition(
         self, filter_def: Filter, param_offset: int
-    ) -> Tuple[Optional[Any], List[Any]]:
+    ) -> Tuple[Any, List[Any]]:
         """Build a single filter condition.
 
         Args:
@@ -367,6 +366,11 @@ class QueryBuilder:
 
         Returns:
             Tuple of (SQLAlchemy condition, list of parameter values)
+
+        Raises:
+            ValueError: If the filter operator is not supported. A declared
+                filter that compiles away would silently widen the result
+                set, so an unmapped operator fails loudly instead.
         """
         field = filter_def.field
         op_str = filter_def.op.lower() if isinstance(filter_def.op, str) else filter_def.op
@@ -375,8 +379,10 @@ class QueryBuilder:
         # Map string operator to enum
         op = self.OPERATOR_MAP.get(op_str)
         if op is None:
-            logger.warning(f"Unknown filter operator: {op_str}, skipping filter")
-            return None, []
+            raise ValueError(
+                f"Unknown filter operator {op_str!r} for field {field!r}; "
+                f"supported operators: {sorted(self.OPERATOR_MAP)}"
+            )
 
         col = Column(self._ident(field))
 
@@ -415,7 +421,9 @@ class QueryBuilder:
         elif op == FilterOperator.LTE:
             return col <= value, [value]
 
-        return None, []
+        # Unreachable while every FilterOperator member has a branch above;
+        # raising keeps a future enum addition from silently dropping filters.
+        raise ValueError(f"Filter operator {op!r} has no condition builder")
 
     def _build_cursor_condition(
         self,
