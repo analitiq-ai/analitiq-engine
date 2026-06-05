@@ -18,10 +18,6 @@ from ..state.metrics_storage import emit_metrics_log, create_metrics_record
 from ..state.retry_handler import RetryHandler
 from ..state.state_manager import StateManager
 from ..models.metrics import PipelineMetrics
-from ..models.engine import (
-    StreamProcessingConfig, PipelineStagesConfig,
-    StreamStageConfig, PipelineMetricsSnapshot
-)
 from .data_transformer import DataTransformer, build_output_schema
 from .exceptions import (
     ConfigurationError, StreamProcessingError, StreamExecutionError,
@@ -87,9 +83,6 @@ class StreamingEngine:
 
         # Metrics tracking with Pydantic validation
         self.metrics = PipelineMetrics()
-
-        # Stage configurations
-        self.stage_configs = PipelineStagesConfig()
 
         # Connector code never runs in the engine process: every source read
         # goes through an isolated worker subprocess that owns the connector
@@ -232,9 +225,9 @@ class StreamingEngine:
             stream_dlq_path = f"{self.dlq.dlq_path}/{stream_id}"
             stream_dlq = DeadLetterQueue(stream_dlq_path)
 
-            if not source_cfg.get("_runtime"):
+            if not source_cfg.get("_resolved_source"):
                 raise StreamConfigurationError(
-                    "Missing _runtime in source config",
+                    "Missing _resolved_source in source config",
                     stream_id=stream_id,
                 )
 
@@ -366,14 +359,16 @@ class StreamingEngine:
             # source config (``endpoint_document``, ``stream_source``).
             # No flattening or replication-field injection is needed.
             source_config = config["source"]
-            runtime = source_config["_runtime"]
+            resolved_source = source_config["_resolved_source"]
+            runtime = resolved_source.runtime
+            json_safe_config = {k: v for k, v in source_config.items() if k != "_resolved_source"}
             state_stream_name = config["stream_id"]
             partition: Dict[str, Any] = {}
 
             batch_count = 0
             async for batch in source_connector.read_batches(
                 runtime,
-                source_config,
+                json_safe_config,
                 checkpoint=self.state_manager,
                 stream_name=state_stream_name,
                 partition=partition,
@@ -753,9 +748,9 @@ class StreamingEngine:
         the generic class for the kind) happens inside the spawned worker —
         the engine process never loads connector code.
         """
-        runtime = config.get("_runtime")
-        if not runtime:
-            raise ValueError("Missing _runtime in source config")
+        resolved_source = config.get("_resolved_source")
+        if not resolved_source:
+            raise ValueError("Missing _resolved_source in source config")
         return self._worker_readable
 
     def _create_pipeline_stages(

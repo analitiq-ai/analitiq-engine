@@ -9,10 +9,9 @@ from typing import Dict, Any
 from src.engine.orchestrator import PipelineOrchestrator
 from src.engine.exceptions import (
     PipelineOrchestrationError, StreamExecutionError,
-    StreamConfigurationError
 )
 from src.models.engine import (
-    StreamProcessingConfig, PipelineMetricsSnapshot, TaskExecutionInfo
+    PipelineMetricsSnapshot, TaskExecutionInfo
 )
 
 
@@ -85,42 +84,14 @@ class TestStreamProcessingConfig:
             "stream1", stream_config, pipeline_config
         )
 
-        assert isinstance(result, StreamProcessingConfig)
-        assert result.stream_id == "stream1"
-        assert result.stream_name == "Test Stream"
-        assert result.pipeline_id == "test-pipeline"
-        assert result.source["endpoint_ref"] == src_ref
-        assert result.source["connection_id"] == "root-src"
-        assert result.destination["endpoint_ref"] == dst_ref
-        assert result.destination["connection_id"] == "root-dst"
-
-    def test_build_stream_processing_config_failure(self, orchestrator):
-        """Test stream processing config building failure."""
-        invalid_stream_config = {
-            "name": "Test Stream",
-            "source": {"endpoint_ref": {
-                "scope": "connector", "connection_id": "src", "endpoint_id": "transfers",
-            }},
-            "destination": {"endpoint_ref": {
-                "scope": "connection", "connection_id": "dst", "endpoint_id": "transfers",
-            }},
-            "replication_method": "invalid_method"  # Invalid
-        }
-
-        pipeline_config = {
-            "pipeline_id": "test-pipeline",
-            "source": {"connection_id": "root-src"},
-            "destination": {"connection_id": "root-dst"},
-        }
-
-        with pytest.raises(StreamConfigurationError) as exc_info:
-            orchestrator._build_stream_processing_config(
-                "stream1", invalid_stream_config, pipeline_config
-            )
-        
-        error = exc_info.value
-        assert error.stream_id == "stream1"
-        assert "Stream configuration validation failed" in str(error)
+        assert isinstance(result, dict)
+        assert result["stream_id"] == "stream1"
+        assert result["stream_name"] == "Test Stream"
+        assert result["pipeline_id"] == "test-pipeline"
+        assert result["source"]["endpoint_ref"] == src_ref
+        assert result["source"]["connection_id"] == "root-src"
+        assert result["destination"]["endpoint_ref"] == dst_ref
+        assert result["destination"]["connection_id"] == "root-dst"
 
 
 class TestStreamTaskCreation:
@@ -135,8 +106,8 @@ class TestStreamTaskCreation:
         """Mock stream processor factory."""
         async def mock_factory(config):
             await asyncio.sleep(0.01)  # Simulate work
-            return f"processed-{config.stream_id}"
-        
+            return f"processed-{config['stream_id']}"
+
         return mock_factory
     
     def test_task_execution_info_model(self):

@@ -61,16 +61,9 @@ class WorkerReadable:
         batch_size: int = 1000,
     ) -> AsyncIterator[pa.RecordBatch]:
         partition = partition or {}
-        # The bootstrap must be JSON-safe; the runtime object travels as the
-        # resolved payload, not as part of the source config. The engine's
-        # translator injects "_runtime" both at the top level and inside the
-        # stream_source block — strip both.
-        source_config = {k: v for k, v in config.items() if k != "_runtime"}
-        stream_source = source_config.get("stream_source")
-        if isinstance(stream_source, dict) and "_runtime" in stream_source:
-            source_config["stream_source"] = {
-                k: v for k, v in stream_source.items() if k != "_runtime"
-            }
+        # The bootstrap must be JSON-safe; the runtime object is passed
+        # separately to build_bootstrap and never embedded in source_config.
+        source_config = config
         label = f"src-worker:{runtime.connector_id}:{stream_name}"
 
         initial_cursor = await checkpoint.get_cursor(stream_name, partition)

@@ -10,10 +10,8 @@ from .exceptions import (
     PipelineOrchestrationError, StreamExecutionError,
     StreamConfigurationError,
 )
-from pydantic import ValidationError
-
 from ..models.engine import (
-    StreamProcessingConfig, PipelineMetricsSnapshot, TaskExecutionInfo
+    PipelineMetricsSnapshot, TaskExecutionInfo
 )
 from ..shared.run_id import get_or_generate_run_id
 
@@ -205,41 +203,28 @@ class PipelineOrchestrator:
     def _build_stream_processing_config(
         self,
         stream_id: str,
-        stream_config: Dict[str, Any], 
-        pipeline_config: Dict[str, Any]
-    ) -> StreamProcessingConfig:
-        """Build and validate stream processing configuration."""
-        try:
-            # Merge pipeline and stream configurations
-            pipeline_src_config = pipeline_config.get("source") or {}
-            pipeline_dst_config = pipeline_config.get("destination") or {}
+        stream_config: Dict[str, Any],
+        pipeline_config: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Build the per-stream processing config dict."""
+        pipeline_src_config = pipeline_config.get("source") or {}
+        pipeline_dst_config = pipeline_config.get("destination") or {}
 
-            stream_src_config = stream_config.get("source")
-            stream_dst_config = stream_config.get("destination")
+        stream_src_config = stream_config.get("source")
+        stream_dst_config = stream_config.get("destination")
 
-            merged_src = _deep_merge_dicts(pipeline_src_config, stream_src_config or {})
-            merged_dst = _deep_merge_dicts(pipeline_dst_config, stream_dst_config or {})
+        merged_src = _deep_merge_dicts(pipeline_src_config, stream_src_config or {})
+        merged_dst = _deep_merge_dicts(pipeline_dst_config, stream_dst_config or {})
 
-            processing_config = {
-                **pipeline_config,
-                **stream_config,
-                "stream_id": stream_id,
-                "stream_name": stream_config.get("name", stream_id),
-                "pipeline_id": self.pipeline_id,
-                "source": merged_src,
-                "destination": merged_dst,
-            }
-
-            # Validate using Pydantic
-            return StreamProcessingConfig(**processing_config)
-            
-        except ValidationError as e:
-            error_messages = [f"{'.'.join(str(x) for x in err['loc'])}: {err['msg']}" for err in e.errors()]
-            raise StreamConfigurationError(
-                f"Stream configuration validation failed",
-                stream_id,
-                validation_errors=error_messages
-            ) from e
+        return {
+            **pipeline_config,
+            **stream_config,
+            "stream_id": stream_id,
+            "stream_name": stream_config.get("name", stream_id),
+            "pipeline_id": self.pipeline_id,
+            "source": merged_src,
+            "destination": merged_dst,
+        }
     
     async def _execute_streams_concurrently(
         self, 

@@ -29,9 +29,6 @@ from .stream import (
 # Engine models
 from .engine import (
     PipelineMetricsSnapshot,
-    PipelineStagesConfig,
-    StreamProcessingConfig,
-    StreamStageConfig,
     TaskExecutionInfo,
 )
 
@@ -81,9 +78,6 @@ __all__ = [
     "WriteMode",
     # Engine models
     "PipelineMetricsSnapshot",
-    "PipelineStagesConfig",
-    "StreamProcessingConfig",
-    "StreamStageConfig",
     "TaskExecutionInfo",
     # Transformation models
     "TransformationConfig",
