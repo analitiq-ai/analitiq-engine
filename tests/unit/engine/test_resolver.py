@@ -80,7 +80,7 @@ class TestResolverRefAndLiteral:
 
     def test_ref_must_be_string(self):
         ctx = ResolutionContext()
-        with pytest.raises(TypeError, match="`ref` must be a string"):
+        with pytest.raises(TransportSpecError, match="`ref` must be a string"):
             Resolver(ctx).resolve({"ref": 42})
 
     def test_literal_returns_value_unchanged(self):
@@ -112,7 +112,7 @@ class TestResolverTemplate:
 
     def test_template_must_be_string(self):
         ctx = ResolutionContext()
-        with pytest.raises(TypeError, match="`template` must be a string"):
+        with pytest.raises(TransportSpecError, match="`template` must be a string"):
             Resolver(ctx).resolve({"template": 42})
 
     def test_template_unterminated_placeholder_raises(self):
@@ -142,7 +142,7 @@ class TestResolverTemplate:
         ctx = ResolutionContext(
             connection={"parameters": {"headers": {"Authorization": "Bearer t"}}}
         )
-        with pytest.raises(TypeError, match="only scalars"):
+        with pytest.raises(TransportSpecError, match="only scalars"):
             Resolver(ctx).resolve(
                 {"template": "${connection.parameters.headers}"}
             )
@@ -189,6 +189,16 @@ class TestResolverFunctions:
             {"function": "capture", "input": "x", "map": {"x": "y"}, "safe": ""}
         )
         assert out == ("captured", "x")
+
+    def test_empty_function_name_raises_transport_spec_error(self):
+        ctx = ResolutionContext()
+        with pytest.raises(TransportSpecError, match="`function` field must name"):
+            Resolver(ctx).resolve({"function": ""})
+
+    def test_non_string_function_name_raises_transport_spec_error(self):
+        ctx = ResolutionContext()
+        with pytest.raises(TransportSpecError, match="`function` field must name"):
+            Resolver(ctx).resolve({"function": None})
 
     def test_register_existing_function_rejected(self):
         ctx = ResolutionContext()

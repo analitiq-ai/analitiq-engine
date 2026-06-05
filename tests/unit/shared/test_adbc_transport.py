@@ -57,7 +57,7 @@ class TestResolveDbKwargs:
         assert _resolve_db_kwargs(None, _resolver()) == {}
 
     def test_non_mapping_rejected(self):
-        with pytest.raises(TypeError, match="db_kwargs"):
+        with pytest.raises(TransportSpecError, match="db_kwargs"):
             _resolve_db_kwargs(["not", "a", "mapping"], _resolver())
 
     def test_literals_pass_through(self):
@@ -94,7 +94,7 @@ class TestResolveAdbcSpec:
             )
 
     def test_dsn_non_mapping_raises(self):
-        with pytest.raises(TypeError, match="dsn"):
+        with pytest.raises(TransportSpecError, match="dsn"):
             resolve_adbc_spec(
                 {
                     "transport_type": "adbc",

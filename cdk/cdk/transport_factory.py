@@ -109,12 +109,12 @@ def _render_url_template_dsn(
 
     raw_bindings = dsn_spec.get("bindings") or {}
     if not isinstance(raw_bindings, Mapping):
-        raise TypeError("dsn.bindings must be an object")
+        raise TransportSpecError("dsn.bindings must be an object")
 
     rendered: Dict[str, str] = {}
     for name, entry in raw_bindings.items():
         if not isinstance(entry, Mapping):
-            raise TypeError(
+            raise TransportSpecError(
                 f"dsn.bindings.{name} must be an object with 'value' and 'encoding'"
             )
         if "value" not in entry or "encoding" not in entry:
@@ -184,7 +184,7 @@ def _resolve_tls_mode(
     if tls_spec is None:
         return None, None
     if not isinstance(tls_spec, Mapping):
-        raise TypeError("transports.<ref>.tls must be an object")
+        raise TransportSpecError("transports.<ref>.tls must be an object")
 
     raw_mode = tls_spec.get("mode")
     if raw_mode is None:
@@ -193,7 +193,7 @@ def _resolve_tls_mode(
     if mode is None:
         return None, None
     if not isinstance(mode, str):
-        raise TypeError(
+        raise TransportSpecError(
             f"tls.mode must resolve to a string, got {type(mode).__name__}"
         )
 
@@ -295,7 +295,7 @@ def resolve_sqlalchemy_spec(
 
     raw_dsn = spec.get("dsn")
     if not isinstance(raw_dsn, Mapping):
-        raise TypeError(
+        raise TransportSpecError(
             "sqlalchemy transport `dsn` must be the structured "
             "{kind: url_template, template, bindings} object"
         )
@@ -305,7 +305,7 @@ def resolve_sqlalchemy_spec(
 
     options = spec.get("options") or {}
     if not isinstance(options, Mapping):
-        raise TypeError("sqlalchemy transport `options` must be an object")
+        raise TransportSpecError("sqlalchemy transport `options` must be an object")
     engine_kwargs: Dict[str, Any] = {}
     if "pool_size" in options:
         engine_kwargs["pool_size"] = int(options["pool_size"])
@@ -440,7 +440,7 @@ def _resolve_db_kwargs(
     if raw is None:
         return {}
     if not isinstance(raw, Mapping):
-        raise TypeError("adbc transport `db_kwargs` must be an object")
+        raise TransportSpecError("adbc transport `db_kwargs` must be an object")
     out: Dict[str, Any] = {}
     for name, value in raw.items():
         resolved = resolver.resolve(value)
@@ -476,7 +476,7 @@ def resolve_adbc_spec(
     uri: Optional[str] = None
     if raw_dsn is not None:
         if not isinstance(raw_dsn, Mapping):
-            raise TypeError(
+            raise TransportSpecError(
                 "adbc transport `dsn` must be the structured "
                 "{kind: url_template, template, bindings} object"
             )
@@ -584,7 +584,7 @@ def resolve_http_spec(
 
     raw_headers = spec.get("headers") or {}
     if not isinstance(raw_headers, Mapping):
-        raise TypeError("http transport `headers` must be an object")
+        raise TransportSpecError("http transport `headers` must be an object")
     headers: Dict[str, str] = {}
     for name, value in raw_headers.items():
         resolved = resolver.resolve(value)
@@ -600,7 +600,7 @@ def resolve_http_spec(
     rate_limit: Optional[Dict[str, int]] = None
     if raw_rate_limit:
         if not isinstance(raw_rate_limit, Mapping):
-            raise TypeError("http transport `rate_limit` must be an object")
+            raise TransportSpecError("http transport `rate_limit` must be an object")
         max_requests = raw_rate_limit.get("max_requests")
         time_window = raw_rate_limit.get("time_window_seconds")
         if (max_requests is None) != (time_window is None):

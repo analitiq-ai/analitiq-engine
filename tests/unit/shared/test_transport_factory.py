@@ -307,6 +307,26 @@ class TestSQLAlchemySpecValidation:
                 resolver=_resolver(),
             )
 
+    def test_binding_resolved_to_none_raises_transport_spec_error(self):
+        ctx = ResolutionContext(connection={"parameters": {"host": None}})
+        with pytest.raises(TransportSpecError, match="resolved value is None"):
+            resolve_sqlalchemy_spec(
+                {
+                    "driver": "postgresql+asyncpg",
+                    "dsn": {
+                        "kind": "url_template",
+                        "template": "{host}",
+                        "bindings": {
+                            "host": {
+                                "value": {"ref": "connection.parameters.host"},
+                                "encoding": "host",
+                            }
+                        },
+                    },
+                },
+                resolver=_resolver(ctx),
+            )
+
 
 class TestAdbcSpecValidation:
     def test_missing_driver_raises_transport_spec_error(self):

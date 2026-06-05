@@ -203,12 +203,12 @@ class Resolver:
 
     def _resolve_ref(self, path: Any) -> Any:
         if not isinstance(path, str):
-            raise TypeError(f"`ref` must be a string, got {type(path).__name__}")
+            raise TransportSpecError(f"`ref` must be a string, got {type(path).__name__}")
         return self._ctx.lookup(path)
 
     def _resolve_template(self, template: Any) -> str:
         if not isinstance(template, str):
-            raise TypeError(f"`template` must be a string, got {type(template).__name__}")
+            raise TransportSpecError(f"`template` must be a string, got {type(template).__name__}")
         out: list[str] = []
         i = 0
         n = len(template)
@@ -232,7 +232,7 @@ class Resolver:
             # common authoring mistake (referencing an object instead of
             # a leaf field).
             if not isinstance(value, (str, int, float, bool)):
-                raise TypeError(
+                raise TransportSpecError(
                     f"Template substitution {path!r} in {template!r} resolved "
                     f"to {type(value).__name__}; only scalars (str/int/float/"
                     f"bool) are allowed inside ${{...}}"
