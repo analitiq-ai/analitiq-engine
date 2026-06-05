@@ -18,7 +18,6 @@ from ..state.metrics_storage import emit_metrics_log, create_metrics_record
 from ..state.retry_handler import RetryHandler
 from ..state.state_manager import StateManager
 from ..models.metrics import PipelineMetrics
-from ..models.engine import PipelineMetricsSnapshot
 from .data_transformer import DataTransformer, build_output_schema
 from .exceptions import (
     ConfigurationError, StreamProcessingError, StreamExecutionError,
