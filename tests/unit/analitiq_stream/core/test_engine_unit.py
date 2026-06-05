@@ -132,11 +132,11 @@ class TestStreamingEngine:
         with pytest.raises(ConfigurationError, match="No streams configured"):
             await engine.stream_data(config)
 
-    def test_create_source_connector_missing_runtime(self, engine):
-        """Test error handling when _runtime is missing."""
+    def test_create_source_connector_missing_resolved_source(self, engine):
+        """Test error handling when _resolved_source is missing."""
         config = {"type": "unknown"}
 
-        with pytest.raises(ValueError, match="Missing _runtime"):
+        with pytest.raises(ValueError, match="Missing _resolved_source"):
             engine._create_source_connector(config)
 
     def test_create_source_connector_returns_worker_readable(self, engine):
@@ -145,26 +145,19 @@ class TestStreamingEngine:
         Registry resolution (connector_id -> package class, else the kind's
         generic) happens inside the spawned worker."""
         from src.worker.readable import WorkerReadable
+        from unittest.mock import MagicMock
 
-        class _FakeRuntime:
-            def __init__(self, connector_type, connector_id):
-                self.connector_type = connector_type
-                self.connector_id = connector_id
-
-        db = engine._create_source_connector(
-            {"_runtime": _FakeRuntime("database", "anydb")}
-        )
-        api = engine._create_source_connector(
-            {"_runtime": _FakeRuntime("api", "anyapi")}
-        )
+        fake_resolved_source = MagicMock()
+        db = engine._create_source_connector({"_resolved_source": fake_resolved_source})
+        api = engine._create_source_connector({"_resolved_source": fake_resolved_source})
         assert isinstance(db, WorkerReadable)
         assert isinstance(api, WorkerReadable)
         # One shared client object: per-read state lives in read_batches.
         assert db is api
 
-    def test_create_source_connector_requires_runtime(self, engine):
-        """A source config without its runtime is a configuration error."""
-        with pytest.raises(ValueError, match="_runtime"):
+    def test_create_source_connector_requires_resolved_source(self, engine):
+        """A source config without its resolved_source is a configuration error."""
+        with pytest.raises(ValueError, match="_resolved_source"):
             engine._create_source_connector({})
 
     def test_get_stream_name(self, engine):

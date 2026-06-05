@@ -57,6 +57,12 @@ from cdk.type_map import (
     load_type_map,
 )
 from src.models.stream import EndpointRef
+from src.models.resolved import (
+    ResolvedDestination,
+    ResolvedPipeline,
+    ResolvedSource,
+    ResolvedStream,
+)
 from cdk.secrets import LocalFileSecretsResolver, SecretsResolver
 from cdk.connection_runtime import ConnectionRuntime
 
@@ -430,8 +436,8 @@ class PipelineConfigPrep:
     def create_config(
         self,
     ) -> Tuple[
-        Dict[str, Any],
-        List[Dict[str, Any]],
+        ResolvedPipeline,
+        List[ResolvedStream],
         Dict[str, ConnectionRuntime],
         Dict[EndpointRef, Dict[str, Any]],
         List[Dict[str, Any]],
@@ -440,12 +446,10 @@ class PipelineConfigPrep:
 
         Returns a tuple of:
 
-        * ``pipeline_config``: dict with ``pipeline_id``, ``status``,
-          ``connections``, ``streams``, ``runtime``, ``engine``, ``schedule``,
-          plus server-managed identity fields.
-        * ``stream_configs``: list of fully-resolved stream dicts (the new
-          contract shape, with ``_runtime`` and ``_endpoint`` injected on
-          each source/destination for downstream convenience).
+        * ``pipeline``: :class:`ResolvedPipeline` with pipeline-level config.
+        * ``streams``: list of :class:`ResolvedStream` with typed
+          source/destinations — ``ConnectionRuntime`` and the resolved
+          endpoint document live as explicit fields, not dict keys.
         * ``resolved_connections``: dict keyed by ``connection_id`` of
           :class:`ConnectionRuntime` (one per saved connection used by
           the pipeline).
@@ -469,7 +473,7 @@ class PipelineConfigPrep:
 
         # Stream configs
         pipeline_stream_ids = list(pipeline_doc.get("streams") or [])
-        stream_configs: List[Dict[str, Any]] = []
+        stream_configs: List[ResolvedStream] = []
         for stream_id in pipeline_stream_ids:
             record = self._stream_records.get(stream_id)
             if record is None:
@@ -481,21 +485,22 @@ class PipelineConfigPrep:
             stream_configs.append(self._build_stream_config(record))
 
         pipeline_id = pipeline_doc.get("pipeline_id")
-        pipeline_config = {
-            "pipeline_id": pipeline_id,
-            "name": pipeline_doc.get("display_name") or pipeline_id,
-            "display_name": pipeline_doc.get("display_name"),
-            "description": pipeline_doc.get("description"),
-            "status": pipeline_doc.get("status", "draft"),
-            "tags": pipeline_doc.get("tags") or [],
-            "connections": {
+        display_name = pipeline_doc.get("display_name")
+        pipeline = ResolvedPipeline(
+            pipeline_id=pipeline_id,
+            name=display_name or pipeline_id,
+            display_name=display_name,
+            description=pipeline_doc.get("description"),
+            status=pipeline_doc.get("status", "draft"),
+            tags=pipeline_doc.get("tags") or [],
+            connections={
                 "source": source_id,
                 "destinations": dest_ids,
             },
-            "schedule": pipeline_doc.get("schedule") or {"type": "manual"},
-            "engine": pipeline_doc.get("engine") or {"vcpu": 1, "memory": 8192},
-            "runtime": pipeline_doc.get("runtime") or {},
-        }
+            schedule=pipeline_doc.get("schedule") or {"type": "manual"},
+            engine_config=pipeline_doc.get("engine") or {"vcpu": 1, "memory": 8192},
+            runtime=pipeline_doc.get("runtime") or {},
+        )
 
         connectors = list(self._loaded_connectors.values())
         logger.info(
@@ -508,7 +513,7 @@ class PipelineConfigPrep:
             len(connectors),
         )
         return (
-            pipeline_config,
+            pipeline,
             stream_configs,
             dict(self._resolved_connections),
             dict(self._resolved_endpoints),
@@ -519,14 +524,14 @@ class PipelineConfigPrep:
     # Stream config construction
     # ------------------------------------------------------------------
 
-    def _build_stream_config(self, record: _StreamRecord) -> Dict[str, Any]:
-        """Translate a saved stream document into the runtime-facing dict."""
+    def _build_stream_config(self, record: _StreamRecord) -> ResolvedStream:
+        """Translate a saved stream document into a typed :class:`ResolvedStream`."""
         document = record.raw_document
         stream_id = record.stream_id
 
         # ---- source ----
-        source = dict(document["source"])
-        source_endpoint_ref_dict = source.get("endpoint_ref")
+        raw_source = document["source"]
+        source_endpoint_ref_dict = raw_source.get("endpoint_ref")
         if not source_endpoint_ref_dict:
             raise ValueError(
                 f"Stream {stream_id} source missing 'endpoint_ref'"
@@ -537,16 +542,18 @@ class PipelineConfigPrep:
         )
         source_endpoint = self._resolve_endpoint(source_endpoint_ref)
 
-        source["endpoint_ref"] = source_endpoint_ref.to_dict()
-        source["connection_ref"] = source_runtime.connection_id
-        source["_runtime"] = source_runtime
-        source["_endpoint"] = source_endpoint
+        resolved_source = ResolvedSource(
+            endpoint_ref=source_endpoint_ref,
+            connection_ref=source_runtime.connection_id,
+            runtime=source_runtime,
+            endpoint_document=source_endpoint,
+            stream_source=dict(raw_source),
+        )
 
         # ---- destinations ----
-        destinations: List[Dict[str, Any]] = []
+        resolved_destinations: List[ResolvedDestination] = []
         for raw_dest in document.get("destinations") or []:
-            dest = dict(raw_dest)
-            dest_endpoint_ref_dict = dest.get("endpoint_ref")
+            dest_endpoint_ref_dict = raw_dest.get("endpoint_ref")
             if not dest_endpoint_ref_dict:
                 raise ValueError(
                     f"Stream {stream_id} destination missing 'endpoint_ref'"
@@ -557,24 +564,26 @@ class PipelineConfigPrep:
             )
             dest_endpoint = self._resolve_endpoint(dest_endpoint_ref)
 
-            dest["endpoint_ref"] = dest_endpoint_ref.to_dict()
-            dest["connection_ref"] = dest_runtime.connection_id
-            dest["_runtime"] = dest_runtime
-            dest["_endpoint"] = dest_endpoint
-            destinations.append(dest)
+            resolved_destinations.append(ResolvedDestination(
+                endpoint_ref=dest_endpoint_ref,
+                connection_ref=dest_runtime.connection_id,
+                runtime=dest_runtime,
+                endpoint_document=dest_endpoint,
+                write=dict(raw_dest.get("write") or {}),
+            ))
 
-        return {
-            "stream_id": stream_id,
-            "display_name": document.get("display_name"),
-            "description": document.get("description"),
-            "pipeline_id": document.get("pipeline_id"),
-            "status": document.get("status", "draft"),
-            "is_enabled": document.get("status") == "active",
-            "tags": document.get("tags") or [],
-            "source": source,
-            "destinations": destinations,
-            "mapping": document.get("mapping") or {"assignments": []},
-        }
+        return ResolvedStream(
+            stream_id=stream_id,
+            display_name=document.get("display_name"),
+            description=document.get("description"),
+            pipeline_id=document.get("pipeline_id"),
+            status=document.get("status", "draft"),
+            is_enabled=document.get("status") == "active",
+            tags=document.get("tags") or [],
+            source=resolved_source,
+            destinations=resolved_destinations,
+            mapping=document.get("mapping") or {"assignments": []},
+        )
 
     # ------------------------------------------------------------------
     # Convenience accessors

@@ -278,20 +278,20 @@ class TestCreateConfigHappyPath:
             connectors,
         ) = prep.create_config()
 
-        assert pipeline_config["pipeline_id"] == PIPELINE_ID
-        assert pipeline_config["display_name"] == "Demo Pipeline"
-        assert pipeline_config["status"] == "active"
-        assert pipeline_config["connections"]["source"] == CONNECTION_SRC_ID
-        assert pipeline_config["connections"]["destinations"] == [CONNECTION_DST_ID]
+        assert pipeline_config.pipeline_id == PIPELINE_ID
+        assert pipeline_config.display_name == "Demo Pipeline"
+        assert pipeline_config.status == "active"
+        assert pipeline_config.connections["source"] == CONNECTION_SRC_ID
+        assert pipeline_config.connections["destinations"] == [CONNECTION_DST_ID]
 
         assert len(stream_configs) == 1
         stream = stream_configs[0]
-        assert stream["stream_id"] == STREAM_ID
-        assert stream["source"]["connection_ref"] == CONNECTION_SRC_ID
-        assert stream["source"]["_runtime"] is connections[CONNECTION_SRC_ID]
-        assert stream["source"]["_endpoint"]["endpoint_id"] == ENDPOINT_SRC
-        assert stream["destinations"][0]["_runtime"] is connections[CONNECTION_DST_ID]
-        assert stream["destinations"][0]["_endpoint"]["endpoint_id"] == ENDPOINT_DST
+        assert stream.stream_id == STREAM_ID
+        assert stream.source.connection_ref == CONNECTION_SRC_ID
+        assert stream.source.runtime is connections[CONNECTION_SRC_ID]
+        assert stream.source.endpoint_document["endpoint_id"] == ENDPOINT_SRC
+        assert stream.destinations[0].runtime is connections[CONNECTION_DST_ID]
+        assert stream.destinations[0].endpoint_document["endpoint_id"] == ENDPOINT_DST
 
         assert set(connections) == {CONNECTION_SRC_ID, CONNECTION_DST_ID}
         assert len(endpoints) == 2
@@ -310,11 +310,32 @@ class TestCreateConfigHappyPath:
         prep = PipelineConfigPrep()
         _, stream_configs, connections, _, _ = prep.create_config()
 
-        src_runtime = stream_configs[0]["source"]["_runtime"]
-        dst_runtime = stream_configs[0]["destinations"][0]["_runtime"]
+        src_runtime = stream_configs[0].source.runtime
+        dst_runtime = stream_configs[0].destinations[0].runtime
         assert src_runtime is connections[CONNECTION_SRC_ID]
         assert dst_runtime is connections[CONNECTION_DST_ID]
         assert src_runtime is not dst_runtime
+
+    def test_resolved_source_to_source_config_is_json_safe(
+        self, pipeline_tree: Path
+    ) -> None:
+        """``ResolvedSource.to_source_config()`` must not contain the
+        ``ConnectionRuntime`` object — the result is passed directly to
+        ``build_bootstrap`` and must be JSON-serialisable."""
+        from cdk.connection_runtime import ConnectionRuntime
+
+        prep = PipelineConfigPrep()
+        _, stream_configs, _, _, _ = prep.create_config()
+
+        source_config = stream_configs[0].source.to_source_config()
+        assert "_runtime" not in source_config
+        assert "_runtime" not in source_config.get("stream_source", {})
+        # Must be JSON-serialisable (no ConnectionRuntime objects inside)
+        for v in source_config.values():
+            assert not isinstance(v, ConnectionRuntime), (
+                f"to_source_config() must not embed ConnectionRuntime; got {type(v)}"
+            )
+        json.dumps(source_config)  # raises if not serialisable
 
 
 # ---------------------------------------------------------------------------

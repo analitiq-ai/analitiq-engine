@@ -148,7 +148,7 @@ async def run_destination_mode() -> None:
     pipeline_config, stream_configs, resolved_connections, resolved_endpoints, _connectors = config_prep.create_config()
 
     # Get destination connection from pipeline config
-    destinations = pipeline_config["connections"]["destinations"]
+    destinations = pipeline_config.connections["destinations"]
     if not destinations:
         logger.error("Pipeline has no destinations configured")
         sys.exit(1)
@@ -186,27 +186,19 @@ async def run_destination_mode() -> None:
     endpoint_refs: Dict[str, Dict[str, Any]] = {}
     stream_endpoints: Dict[str, Dict[str, Any]] = {}
     for stream in stream_configs:
-        for dest in stream.get("destinations", []):
-            if dest.get("connection_ref") != dest_connection_id:
+        for dest in stream.destinations:
+            if dest.connection_ref != dest_connection_id:
                 continue
-            stream_id = stream["stream_id"]
-            endpoint_refs[stream_id] = dest["endpoint_ref"]
-            endpoint_doc = dest.get("_endpoint")
-            if endpoint_doc is None:
-                logger.error(
-                    "Destination for stream %s has no resolved endpoint document; "
-                    "PipelineConfigPrep should have populated _endpoint",
-                    stream_id,
-                )
-                sys.exit(1)
+            stream_id = stream.stream_id
+            endpoint_refs[stream_id] = dest.endpoint_ref.to_dict()
+            endpoint_doc = dest.endpoint_document
             # Resolve effective conflict keys via WriteConfig. The
             # database handler uses a single flat list, so we flatten
             # the first composite returned by the helper. Errors
             # (unknown mode, UPSERT without keys) propagate so a
             # misconfigured pipeline fails at startup instead of
             # silently downgrading UPSERT to INSERT.
-            write_block = dest.get("write") or {}
-            mode_value = write_block.get("mode") or "upsert"
+            mode_value = dest.write.get("mode") or "upsert"
             primary_keys = list(endpoint_doc.get("primary_keys") or [])
             try:
                 write_mode = WriteMode(mode_value)
@@ -217,7 +209,7 @@ async def run_destination_mode() -> None:
                 ) from e
             wc = WriteConfig(
                 mode=write_mode,
-                conflict_keys=write_block.get("conflict_keys"),
+                conflict_keys=dest.write.get("conflict_keys"),
             )
             composites = wc.effective_conflict_keys(primary_keys) or []
             conflict_keys: list[str] = list(composites[0]) if composites else []
