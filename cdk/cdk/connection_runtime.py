@@ -266,7 +266,7 @@ class ConnectionRuntime:
     # ------------------------------------------------------------------
 
     async def materialize(
-        self, *, require_port: bool = True, sql_dialect: Any = None
+        self, *, sql_dialect: Any = None
     ) -> None:
         """Resolve secrets, build the resolution context, build the transport.
 
@@ -714,7 +714,7 @@ DETERMINISTIC_CONNECT_ERRORS: tuple = (
 
 
 async def materialize_runtime(
-    runtime: "ConnectionRuntime", require_port: bool, *, sql_dialect: Any = None
+    runtime: "ConnectionRuntime", *, sql_dialect: Any = None
 ) -> None:
     """Acquire and materialize a runtime.
 
@@ -730,7 +730,7 @@ async def materialize_runtime(
     """
     runtime.acquire()
     try:
-        await runtime.materialize(require_port=require_port, sql_dialect=sql_dialect)
+        await runtime.materialize(sql_dialect=sql_dialect)
     except BaseException:
         await runtime.close()
         raise
