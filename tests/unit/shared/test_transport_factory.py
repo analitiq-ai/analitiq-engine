@@ -262,6 +262,80 @@ class TestSQLAlchemySpecValidation:
                 resolver=_resolver(),
             )
 
+    @pytest.mark.parametrize(
+        "dsn", [None, "postgresql+asyncpg://user:pw@host/db"]
+    )
+    def test_non_structured_dsn_raises_transport_spec_error(self, dsn):
+        # A missing dsn and a legacy flat-string dsn hit the same branch:
+        # the contract requires the structured object.
+        spec = {"driver": "postgresql+asyncpg"}
+        if dsn is not None:
+            spec["dsn"] = dsn
+        with pytest.raises(TransportSpecError, match="must be the structured"):
+            resolve_sqlalchemy_spec(spec, resolver=_resolver())
+
+    def test_non_object_options_raises_transport_spec_error(self):
+        with pytest.raises(
+            TransportSpecError, match=r"`options` must be an object"
+        ):
+            resolve_sqlalchemy_spec(
+                {
+                    "driver": "postgresql+asyncpg",
+                    "dsn": {
+                        "kind": "url_template",
+                        "template": "postgresql+asyncpg://h/db",
+                        "bindings": {},
+                    },
+                    "options": "pool_size=5",
+                },
+                resolver=_resolver(),
+            )
+
+    def test_resolved_payload_renders_dsn_and_engine_kwargs(self):
+        # Pin the JSON-safe worker payload: bindings rendered through the
+        # resolver with their declared encodings, options translated to
+        # engine kwargs with the pool_pre_ping default applied.
+        ctx = ResolutionContext(
+            connection={
+                "parameters": {"host": "db.example.test", "password": "p@ss/word"}
+            }
+        )
+        resolved = resolve_sqlalchemy_spec(
+            {
+                "driver": "postgresql+asyncpg",
+                "dsn": {
+                    "kind": "url_template",
+                    "template": "postgresql+asyncpg://user:{password}@{host}:5432/app",
+                    "bindings": {
+                        "host": {
+                            "value": {"ref": "connection.parameters.host"},
+                            "encoding": "host",
+                        },
+                        "password": {
+                            "value": {"ref": "connection.parameters.password"},
+                            "encoding": "url_userinfo",
+                        },
+                    },
+                },
+                "options": {"pool_size": 5, "max_overflow": 2},
+            },
+            resolver=_resolver(ctx),
+        )
+        assert resolved == {
+            "transport_type": "sqlalchemy",
+            "driver": "postgresql+asyncpg",
+            "dsn": (
+                "postgresql+asyncpg://user:p%40ss%2Fword"
+                "@db.example.test:5432/app"
+            ),
+            "tls": None,
+            "engine_kwargs": {
+                "pool_size": 5,
+                "max_overflow": 2,
+                "pool_pre_ping": True,
+            },
+        }
+
     def test_unsupported_dsn_kind_raises_transport_spec_error(self):
         with pytest.raises(TransportSpecError, match="Unsupported dsn.kind"):
             resolve_sqlalchemy_spec(
@@ -351,12 +425,77 @@ class TestHttpSpecValidation:
                 resolver=_resolver(ctx),
             )
 
-    def test_rate_limit_missing_one_field_raises_transport_spec_error(self):
+    @pytest.mark.parametrize(
+        "rate_limit",
+        [{"max_requests": 10}, {"time_window_seconds": 60}],
+        ids=["max_requests_only", "time_window_only"],
+    )
+    def test_rate_limit_missing_one_field_raises_transport_spec_error(
+        self, rate_limit
+    ):
         with pytest.raises(TransportSpecError, match="both"):
             resolve_http_spec(
                 {
                     "base_url": "https://api.example.com",
-                    "rate_limit": {"max_requests": 10},
+                    "rate_limit": rate_limit,
                 },
                 resolver=_resolver(),
             )
+
+    def test_non_object_headers_raises_transport_spec_error(self):
+        with pytest.raises(
+            TransportSpecError, match=r"`headers` must be an object"
+        ):
+            resolve_http_spec(
+                {
+                    "base_url": "https://api.example.com",
+                    "headers": ["Authorization: Bearer x"],
+                },
+                resolver=_resolver(),
+            )
+
+    def test_non_object_rate_limit_raises_transport_spec_error(self):
+        with pytest.raises(
+            TransportSpecError, match=r"`rate_limit` must be an object"
+        ):
+            resolve_http_spec(
+                {
+                    "base_url": "https://api.example.com",
+                    "rate_limit": [10, 60],
+                },
+                resolver=_resolver(),
+            )
+
+    def test_resolved_payload_pins_http_contract(self):
+        # Pin the JSON-safe worker payload: base_url resolved through the
+        # resolver and trailing-slash-stripped, header values resolved
+        # with None-valued entries dropped, the timeout default applied,
+        # and rate_limit normalized to ints.
+        ctx = ResolutionContext(
+            connection={
+                "parameters": {
+                    "url": "https://api.example.test/",
+                    "token": "tok-1",
+                    "optional": None,
+                }
+            }
+        )
+        resolved = resolve_http_spec(
+            {
+                "base_url": {"ref": "connection.parameters.url"},
+                "headers": {
+                    "Authorization": {"ref": "connection.parameters.token"},
+                    "X-Optional": {"ref": "connection.parameters.optional"},
+                    "Accept": "application/json",
+                },
+                "rate_limit": {"max_requests": 10, "time_window_seconds": 60},
+            },
+            resolver=_resolver(ctx),
+        )
+        assert resolved == {
+            "transport_type": "http",
+            "base_url": "https://api.example.test",
+            "headers": {"Authorization": "tok-1", "Accept": "application/json"},
+            "timeout_seconds": 30.0,
+            "rate_limit": {"max_requests": 10, "time_window_seconds": 60},
+        }

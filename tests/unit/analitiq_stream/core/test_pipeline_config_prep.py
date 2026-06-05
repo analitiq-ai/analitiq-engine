@@ -20,7 +20,8 @@ from typing import Any, Dict
 
 import pytest
 
-from src.config.schema_validator import _load_schema
+from cdk.types import EndpointScope
+from src.config.schema_validator import ContractValidationError, _load_schema
 from src.engine.pipeline_config_prep import PipelineConfigPrep
 
 # ---------------------------------------------------------------------------
@@ -42,6 +43,10 @@ _ARTIFACT_KINDS = (
     "api-endpoint",
     "database-endpoint",
 )
+
+# Byte-for-byte snapshots of the published schemas.analitiq.ai contracts
+# (see tests/fixtures/schemas/README.md for the refresh procedure).
+_VENDORED_SCHEMAS_DIR = Path(__file__).parents[3] / "fixtures" / "schemas"
 
 
 @pytest.fixture(autouse=True)
@@ -67,16 +72,35 @@ def schema_mirror(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return mirror
 
 
+@pytest.fixture
+def real_schema_mirror(monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Serve the vendored snapshots of the real published schemas.
+
+    Unlike :func:`schema_mirror` this exercises actual contract
+    validation: a fixture document that drifts from the published
+    contracts fails loudly instead of slipping through the permissive
+    ``type: "object"`` mirror (#96).
+    """
+    monkeypatch.setenv(
+        "ANALITIQ_SCHEMA_BASE_URL", _VENDORED_SCHEMAS_DIR.as_uri()
+    )
+    return _VENDORED_SCHEMAS_DIR
+
+
 # ---------------------------------------------------------------------------
 # On-disk fixture builders
+#
+# The documents are kept valid against the real published contracts so
+# the real-schema tests below can run the same tree; ids therefore match
+# the schemas' RFC-4122 pattern (version nibble 4, variant nibble 8).
 # ---------------------------------------------------------------------------
 
 
 CONNECTOR_ID = "demo-api"
-CONNECTION_SRC_ID = "00000000-0000-0000-0000-000000000001"
-CONNECTION_DST_ID = "00000000-0000-0000-0000-000000000002"
-PIPELINE_ID = "00000000-0000-0000-0000-0000000000aa"
-STREAM_ID = "00000000-0000-0000-0000-0000000000bb"
+CONNECTION_SRC_ID = "00000000-0000-4000-8000-000000000001"
+CONNECTION_DST_ID = "00000000-0000-4000-8000-000000000002"
+PIPELINE_ID = "00000000-0000-4000-8000-0000000000aa"
+STREAM_ID = "00000000-0000-4000-8000-0000000000bb"
 ENDPOINT_SRC = "src_endpoint"
 ENDPOINT_DST = "dst_endpoint"
 
@@ -92,7 +116,16 @@ def _connector_doc() -> Dict[str, Any]:
         "kind": "api",
         "connector_id": CONNECTOR_ID,
         "display_name": "Demo API",
+        "version": "1.0.0",
         "auth": {"type": "none"},
+        "connection_contract": {},
+        "default_transport": "api",
+        "transports": {
+            "api": {
+                "transport_type": "http",
+                "base_url": "https://api.example.test",
+            },
+        },
     }
 
 
@@ -102,8 +135,7 @@ def _connection_doc(connection_id: str) -> Dict[str, Any]:
         "connection_id": connection_id,
         "connector_id": CONNECTOR_ID,
         "display_name": f"Connection {connection_id}",
-        "host": "https://api.example.test",
-        "parameters": {},
+        "parameters": {"host": "https://api.example.test"},
     }
 
 
@@ -119,7 +151,11 @@ def _endpoint_doc(endpoint_id: str) -> Dict[str, Any]:
                     "schema": {
                         "type": "object",
                         "properties": {
-                            "id": {"type": "integer", "arrow_type": "Int64"},
+                            "id": {
+                                "type": "integer",
+                                "arrow_type": "Int64",
+                                "native_type": "integer",
+                            },
                         },
                     },
                     "records": {"ref": "response.body"},
@@ -136,7 +172,15 @@ def _type_map_rules() -> list:
     ]
 
 
-def _stream_doc(stream_id: str) -> Dict[str, Any]:
+def _connection_type_map_rules() -> list:
+    """Connection-scoped override map: carries a rule the connector's
+    map does not, so tests can tell which mapper actually resolved."""
+    return [
+        {"match": "exact", "native": "JSONB", "canonical": "Utf8"},
+    ]
+
+
+def _stream_doc(stream_id: str, *, dst_scope: str = "connector") -> Dict[str, Any]:
     return {
         "$schema": "https://schemas.analitiq.ai/stream/latest.json",
         "stream_id": stream_id,
@@ -154,7 +198,7 @@ def _stream_doc(stream_id: str) -> Dict[str, Any]:
         "destinations": [
             {
                 "endpoint_ref": {
-                    "scope": "connector",
+                    "scope": dst_scope,
                     "connection_id": CONNECTION_DST_ID,
                     "endpoint_id": ENDPOINT_DST,
                 },
@@ -201,11 +245,16 @@ def _build_tree(
     include_stream_file: bool = True,
     stream_id_in_file: str = STREAM_ID,
     include_manifest: bool = True,
+    dst_endpoint_scope: str = "connector",
 ) -> Path:
     """Materialize a complete pipeline tree under ``root``. Returns ``root``.
 
     Knobs let individual tests inject specific defects (missing manifest,
     inactive status, stream-id mismatch, missing stream file).
+    ``dst_endpoint_scope="connection"`` places the destination endpoint
+    (plus a connection-scoped type-map) under the destination connection's
+    ``definition/`` tree instead of the connector's, and points the stream's
+    destination ``endpoint_ref`` at it with ``scope: "connection"``.
     """
     if include_manifest:
         _write_json(
@@ -213,7 +262,7 @@ def _build_tree(
         )
     _write_json(root / "pipelines" / PIPELINE_ID / "pipeline.json", _pipeline_doc())
     if include_stream_file:
-        stream_doc = _stream_doc(stream_id_in_file)
+        stream_doc = _stream_doc(stream_id_in_file, dst_scope=dst_endpoint_scope)
         _write_json(
             root / "pipelines" / PIPELINE_ID / "streams" / f"{STREAM_ID}.json",
             stream_doc,
@@ -234,10 +283,21 @@ def _build_tree(
         _connector_doc(),
     )
     _write_json(
-        root / "connectors" / CONNECTOR_ID / "definition" / "type-map.json",
+        root / "connectors" / CONNECTOR_ID / "definition" / "type-map-read.json",
         _type_map_rules(),
     )
-    for endpoint_id in (ENDPOINT_SRC, ENDPOINT_DST):
+    connector_endpoints = [ENDPOINT_SRC]
+    if dst_endpoint_scope == "connector":
+        connector_endpoints.append(ENDPOINT_DST)
+    else:
+        dst_definition = root / "connections" / CONNECTION_DST_ID / "definition"
+        private_doc = _endpoint_doc(ENDPOINT_DST)
+        private_doc["description"] = "connection-scoped private endpoint"
+        _write_json(dst_definition / "endpoints" / f"{ENDPOINT_DST}.json", private_doc)
+        _write_json(
+            dst_definition / "type-map-read.json", _connection_type_map_rules()
+        )
+    for endpoint_id in connector_endpoints:
         _write_json(
             root
             / "connectors"
@@ -506,3 +566,155 @@ class TestRegistryDiscoveredKinds:
 
         assert connections[CONNECTION_SRC_ID].connector_type == "graphql"
         assert stream_configs[0].source.runtime is connections[CONNECTION_SRC_ID]
+
+
+# ---------------------------------------------------------------------------
+# Connection-scoped endpoints (#94)
+# ---------------------------------------------------------------------------
+
+
+class TestConnectionScopedEndpoints:
+    """``scope: "connection"`` endpoint_refs resolve from the connection's
+    own ``definition/`` tree, and the connection-scoped type-map wins over
+    the connector's when present. Runs against the real published schemas
+    so the private-endpoint layout is also contract-checked."""
+
+    @pytest.fixture
+    def connection_scoped_tree(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        real_schema_mirror: Path,
+    ) -> Path:
+        root = tmp_path / "project"
+        root.mkdir()
+        _build_tree(root, dst_endpoint_scope="connection")
+        monkeypatch.chdir(root)
+        monkeypatch.setenv("PIPELINE_ID", PIPELINE_ID)
+        return root
+
+    def test_destination_endpoint_resolves_from_connection_tree(
+        self, connection_scoped_tree: Path
+    ) -> None:
+        prep = PipelineConfigPrep()
+        _, stream_configs, connections, _, _ = prep.create_config()
+
+        dest = stream_configs[0].destinations[0]
+        assert dest.endpoint_ref.scope == "connection"
+        assert dest.endpoint_document["endpoint_id"] == ENDPOINT_DST
+        # The marker proves the connection-scoped file was read, not a
+        # same-named connector endpoint.
+        assert (
+            dest.endpoint_document["description"]
+            == "connection-scoped private endpoint"
+        )
+        # The source side still resolves from the connector tree.
+        source = stream_configs[0].source
+        assert source.endpoint_ref.scope == "connector"
+        assert "description" not in source.endpoint_document
+
+    def test_connection_type_map_preferred_for_connection_scope(
+        self, connection_scoped_tree: Path
+    ) -> None:
+        prep = PipelineConfigPrep()
+        _, _, connections, _, _ = prep.create_config()
+
+        runtime = connections[CONNECTION_DST_ID]
+        assert runtime.connection_type_mapper is not None
+        mapper = runtime.type_mapper_for(scope=EndpointScope.CONNECTION)
+        assert mapper is runtime.connection_type_mapper
+        # JSONB exists only in the connection-scoped map.
+        assert mapper.to_arrow_type("JSONB") == "Utf8"
+
+    def test_connection_scope_falls_back_to_connector_map_when_absent(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        real_schema_mirror: Path,
+    ) -> None:
+        root = tmp_path / "project"
+        root.mkdir()
+        _build_tree(root, dst_endpoint_scope="connection")
+        (
+            root
+            / "connections"
+            / CONNECTION_DST_ID
+            / "definition"
+            / "type-map-read.json"
+        ).unlink()
+        monkeypatch.chdir(root)
+        monkeypatch.setenv("PIPELINE_ID", PIPELINE_ID)
+
+        prep = PipelineConfigPrep()
+        _, _, connections, _, _ = prep.create_config()
+
+        runtime = connections[CONNECTION_DST_ID]
+        assert runtime.connection_type_mapper is None
+        mapper = runtime.type_mapper_for(scope=EndpointScope.CONNECTION)
+        assert mapper is runtime.connector_type_mapper
+        assert mapper.to_arrow_type("BIGINT") == "Int64"
+
+
+# ---------------------------------------------------------------------------
+# Real published schema contracts (#96)
+# ---------------------------------------------------------------------------
+
+
+class TestRealSchemaContract:
+    """Run config prep against vendored snapshots of the real published
+    schemas, so drift between the document shapes these tests author and
+    the schemas.analitiq.ai contracts fails in CI instead of slipping
+    through the permissive mirror (#96)."""
+
+    def test_fixture_tree_assembles_under_real_schemas(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        real_schema_mirror: Path,
+    ) -> None:
+        root = tmp_path / "project"
+        root.mkdir()
+        _build_tree(root)
+        monkeypatch.chdir(root)
+        monkeypatch.setenv("PIPELINE_ID", PIPELINE_ID)
+
+        prep = PipelineConfigPrep()
+        (
+            pipeline_config,
+            stream_configs,
+            connections,
+            endpoints,
+            connectors,
+        ) = prep.create_config()
+
+        assert pipeline_config.pipeline_id == PIPELINE_ID
+        assert [s.stream_id for s in stream_configs] == [STREAM_ID]
+        assert set(connections) == {CONNECTION_SRC_ID, CONNECTION_DST_ID}
+        assert len(endpoints) == 2
+        assert connectors[0]["connector_id"] == CONNECTOR_ID
+
+    def test_real_schema_rejects_contract_violation(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        real_schema_mirror: Path,
+    ) -> None:
+        """The vendored mirror actually validates: a connection document
+        carrying a property the published contract forbids fails loudly.
+        The permissive mirror would have accepted it — this pins that the
+        real-schema tests exercise contract validation at all."""
+        root = tmp_path / "project"
+        root.mkdir()
+        _build_tree(root)
+        bad_connection = _connection_doc(CONNECTION_SRC_ID)
+        bad_connection["host"] = "https://api.example.test"
+        _write_json(
+            root / "connections" / CONNECTION_SRC_ID / "connection.json",
+            bad_connection,
+        )
+        monkeypatch.chdir(root)
+        monkeypatch.setenv("PIPELINE_ID", PIPELINE_ID)
+
+        prep = PipelineConfigPrep()
+        with pytest.raises(ContractValidationError, match="host"):
+            prep.create_config()

@@ -1,0 +1,318 @@
+{
+  "$defs": {
+    "Column": {
+      "additionalProperties": false,
+      "description": "Database column metadata.\n\nSpec: ``docs/endpoints/database-endpoint-schema-parameterization.md``\n\u00a7Native and Arrow Types.",
+      "properties": {
+        "arrow_type": {
+          "description": "Apache Arrow canonical transport type string. PascalCase base name plus parameters when the canonical type requires them \u2014 bare parameterized forms such as 'Timestamp', 'Decimal128', or 'Struct' are rejected. Examples: 'Utf8', 'Int64', 'Timestamp(MICROSECOND)' (zone-naive), 'Timestamp(MICROSECOND, UTC)' (zoned source; prefer UTC unless source-specific), 'Decimal128(38, 9)', 'FixedSizeBinary(16)', 'Struct<id:Int64, name:Utf8>'. Bare markers 'Object' / 'List' / 'Json' declare JSON containers; see spec \u00a7Native and Arrow Types.",
+          "pattern": "^(?:Null|Boolean|Int8|Int16|Int32|Int64|UInt8|UInt16|UInt32|UInt64|Float16|Float32|Float64|Utf8|LargeUtf8|Binary|LargeBinary|Date32|Date64|FixedSizeBinary\\([1-9][0-9]*\\)|Time32\\((?:SECOND|MILLISECOND)\\)|Time64\\((?:MICROSECOND|NANOSECOND)\\)|Timestamp\\((?:SECOND|MILLISECOND|MICROSECOND|NANOSECOND)(?:\\s*,\\s*(?:null|[A-Za-z_][A-Za-z0-9_/\\-]*|Etc/GMT[+\\-][0-9]{1,2}|[+\\-](?:0[0-9]|1[0-4]):[0-5][0-9]))?\\)|Duration\\((?:SECOND|MILLISECOND|MICROSECOND|NANOSECOND)\\)|Interval\\((?:YEAR_MONTH|DAY_TIME|MONTH_DAY_NANO)\\)|Decimal128\\((?:[1-9]|[12][0-9]|3[0-8])\\s*,\\s*-?[0-9]+\\)|Decimal256\\((?:[1-9]|[1-6][0-9]|7[0-6])\\s*,\\s*-?[0-9]+\\)|List<.+>|LargeList<.+>|FixedSizeList<.+>\\[[1-9][0-9]*\\]|Struct<.+>|Map<.+,\\s*.+>|SparseUnion<.+>|DenseUnion<.+>|Dictionary<.+,\\s*.+>|RunEndEncoded<.+,\\s*.+>|Object|List|Json)$",
+          "title": "Arrow Type",
+          "type": "string"
+        },
+        "comment": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Comment"
+        },
+        "default": {
+          "anyOf": [
+            {},
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Default"
+        },
+        "items": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ColumnFieldSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "native_type": {
+          "description": "Provider-native database type label. Use 'unknown' when unavailable.",
+          "minLength": 1,
+          "title": "Native Type",
+          "type": "string"
+        },
+        "nullable": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Nullable"
+        },
+        "ordinal_position": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ordinal Position"
+        },
+        "properties": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "$ref": "#/$defs/ColumnFieldSpec"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Properties"
+        }
+      },
+      "required": [
+        "name",
+        "native_type",
+        "arrow_type"
+      ],
+      "title": "Column",
+      "type": "object"
+    },
+    "ColumnFieldSpec": {
+      "additionalProperties": false,
+      "description": "Recursive child field-shape declaration for declared-shape JSON\ncontainers under database columns.\n\nSpec: ``docs/schema-contracts/endpoints/endpoint-schema-parameterization.md``\n\u00a7Native and Arrow Types.",
+      "properties": {
+        "arrow_type": {
+          "description": "Apache Arrow canonical transport type string. Bare authored-shape markers 'Object', 'List', and 'Json' declare JSON containers.",
+          "pattern": "^(?:Null|Boolean|Int8|Int16|Int32|Int64|UInt8|UInt16|UInt32|UInt64|Float16|Float32|Float64|Utf8|LargeUtf8|Binary|LargeBinary|Date32|Date64|FixedSizeBinary\\([1-9][0-9]*\\)|Time32\\((?:SECOND|MILLISECOND)\\)|Time64\\((?:MICROSECOND|NANOSECOND)\\)|Timestamp\\((?:SECOND|MILLISECOND|MICROSECOND|NANOSECOND)(?:\\s*,\\s*(?:null|[A-Za-z_][A-Za-z0-9_/\\-]*|Etc/GMT[+\\-][0-9]{1,2}|[+\\-](?:0[0-9]|1[0-4]):[0-5][0-9]))?\\)|Duration\\((?:SECOND|MILLISECOND|MICROSECOND|NANOSECOND)\\)|Interval\\((?:YEAR_MONTH|DAY_TIME|MONTH_DAY_NANO)\\)|Decimal128\\((?:[1-9]|[12][0-9]|3[0-8])\\s*,\\s*-?[0-9]+\\)|Decimal256\\((?:[1-9]|[1-6][0-9]|7[0-6])\\s*,\\s*-?[0-9]+\\)|List<.+>|LargeList<.+>|FixedSizeList<.+>\\[[1-9][0-9]*\\]|Struct<.+>|Map<.+,\\s*.+>|SparseUnion<.+>|DenseUnion<.+>|Dictionary<.+,\\s*.+>|RunEndEncoded<.+,\\s*.+>|Object|List|Json)$",
+          "title": "Arrow Type",
+          "type": "string"
+        },
+        "items": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ColumnFieldSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "nullable": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Nullable"
+        },
+        "properties": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "$ref": "#/$defs/ColumnFieldSpec"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Properties"
+        }
+      },
+      "required": [
+        "arrow_type"
+      ],
+      "title": "ColumnFieldSpec",
+      "type": "object"
+    },
+    "DatabaseObject": {
+      "additionalProperties": false,
+      "description": "Provider-native database object identity.\n\nIdentifier strings are stored verbatim from introspection \u2014 no\ncase-folding, quoting, or normalization. Spec:\n``docs/endpoints/database-endpoint-schema-parameterization.md``.",
+      "properties": {
+        "catalog": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Catalog"
+        },
+        "name": {
+          "description": "Provider-native object name.",
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "object_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Open-string descriptive type (table, view, materialized_view, external_table, collection, \u2026). Read execution must not branch on it.",
+          "title": "Object Type"
+        },
+        "schema": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Schema"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "DatabaseObject",
+      "type": "object"
+    }
+  },
+  "$id": "https://schemas.analitiq.ai/database-endpoint/latest.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Public JSON Schema contract for database endpoint documents (owned by connectors with `kind: 'database'`) \u2014 authored shape only. Endpoint documents have no top-level `kind` field; the owning connector's `kind` selects this schema. Reserved server-managed fields are forbidden in the authored shape. Source of truth: k2m.models.endpoints.DatabaseEndpointDoc (Pydantic).",
+  "properties": {
+    "$schema": {
+      "const": "https://schemas.analitiq.ai/database-endpoint/latest.json",
+      "description": "Per-kind schema URL declared by every persisted database endpoint document. Per spec \u00a7Schema URLs.",
+      "title": "$Schema",
+      "type": "string"
+    },
+    "columns": {
+      "items": {
+        "$ref": "#/$defs/Column"
+      },
+      "minItems": 1,
+      "title": "Columns",
+      "type": "array"
+    },
+    "database_object": {
+      "$ref": "#/$defs/DatabaseObject"
+    },
+    "description": {
+      "anyOf": [
+        {
+          "maxLength": 2000,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "User-facing summary (\u22642000 chars).",
+      "title": "Description"
+    },
+    "display_name": {
+      "anyOf": [
+        {
+          "maxLength": 120,
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "User-facing label (1-120 chars trimmed).",
+      "title": "Display Name"
+    },
+    "endpoint_id": {
+      "description": "Stable endpoint identifier within the owner. Matches `^[a-z0-9][a-z0-9_-]*$`.",
+      "minLength": 1,
+      "pattern": "^[a-z0-9][a-z0-9_-]*$",
+      "title": "Endpoint Id",
+      "type": "string"
+    },
+    "primary_keys": {
+      "anyOf": [
+        {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Primary Keys"
+    },
+    "tags": {
+      "anyOf": [
+        {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Grouping/search labels (max 50 unique trimmed strings of 1-64 chars).",
+      "title": "Tags"
+    }
+  },
+  "required": [
+    "endpoint_id",
+    "$schema",
+    "database_object",
+    "columns"
+  ],
+  "title": "Analitiq Database Endpoint",
+  "type": "object",
+  "version": "7.0.0"
+}

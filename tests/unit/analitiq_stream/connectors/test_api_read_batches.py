@@ -246,6 +246,150 @@ class TestReadBatchesNoPagination:
 
 
 # ---------------------------------------------------------------------------
+# Alternate records.ref shapes (#95)
+# ---------------------------------------------------------------------------
+
+
+def _endpoint_doc_with_ref(
+    records_ref: str, response_schema: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Endpoint document with an explicit ``records.ref`` + response schema."""
+    return {
+        "$schema": "https://schemas.analitiq.ai/api-endpoint/latest.json",
+        "endpoint_id": "items",
+        "operations": {
+            "read": {
+                "request": {"method": "GET", "path": "/items"},
+                "response": {
+                    "schema": response_schema,
+                    "records": {"ref": records_ref},
+                },
+            },
+        },
+    }
+
+
+_RECORD_ITEMS_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "id": {"type": "integer", "arrow_type": "Int64"},
+        "name": {"type": "string", "arrow_type": "Utf8"},
+    },
+}
+
+
+class TestReadBatchesRecordsRefShapes:
+    @pytest.mark.asyncio
+    async def test_response_body_ref_reads_bare_array_body(self):
+        # ``records.ref = "response.body"``: the response body IS the
+        # record array, no wrapper field.
+        session = _FakeSession(
+            [
+                _FakeResponse(
+                    status=200,
+                    body=[{"id": 1, "name": "alpha"}, {"id": 2, "name": "beta"}],
+                ),
+            ]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_ref(
+            "response.body",
+            {"type": "array", "items": _RECORD_ITEMS_SCHEMA},
+        )
+        batches = await _consume(
+            connector,
+            runtime,
+            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=100,
+        )
+
+        assert len(batches) == 1
+        assert batches[0].num_rows == 2
+        assert batches[0].schema.field("id").type == pa.int64()
+        assert batches[0].column("name").to_pylist() == ["alpha", "beta"]
+
+    @pytest.mark.asyncio
+    async def test_deep_ref_walks_nested_path(self):
+        # ``records.ref = "response.body.data.items"``: both the schema
+        # walk (data -> items) and the payload walk must follow the path.
+        session = _FakeSession(
+            [
+                _FakeResponse(
+                    status=200,
+                    body={"data": {"items": [{"id": 7, "name": "deep"}]}},
+                ),
+            ]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_ref(
+            "response.body.data.items",
+            {
+                "type": "object",
+                "properties": {
+                    "data": {
+                        "type": "object",
+                        "properties": {
+                            "items": {
+                                "type": "array",
+                                "items": _RECORD_ITEMS_SCHEMA,
+                            },
+                        },
+                    },
+                },
+            },
+        )
+        batches = await _consume(
+            connector,
+            runtime,
+            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=100,
+        )
+
+        assert len(batches) == 1
+        assert batches[0].column("id").to_pylist() == [7]
+        assert batches[0].column("name").to_pylist() == ["deep"]
+
+    @pytest.mark.asyncio
+    async def test_ref_to_undeclared_field_raises_listing_available(self):
+        # The ref points at a field the response schema does not declare:
+        # fail before any HTTP request, naming the bad field and listing
+        # what IS declared so the author can fix the endpoint document.
+        session = _FakeSession([])
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records()
+        endpoint["operations"]["read"]["response"]["records"]["ref"] = (
+            "response.body.does_not_exist"
+        )
+        with pytest.raises(
+            ReadError,
+            match=r"does_not_exist.*not declared under properties.*"
+            r"available: \['records'\]",
+        ):
+            await _consume(
+                connector,
+                runtime,
+                config={
+                    "endpoint_document": endpoint,
+                    "stream_source": _stream_source(),
+                },
+                state_manager=MagicMock(),
+                stream_name="items",
+                batch_size=100,
+            )
+        assert session.calls == []
+
+
+# ---------------------------------------------------------------------------
 # Offset pagination
 # ---------------------------------------------------------------------------
 
