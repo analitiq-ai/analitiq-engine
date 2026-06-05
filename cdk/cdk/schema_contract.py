@@ -2,6 +2,7 @@
 
 import json
 import logging
+import math
 from datetime import date, datetime, time
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
@@ -306,11 +307,14 @@ class SchemaContract:
 
         Triggered when the declared Arrow type is an integer or float family
         and at least one non-null source value is a string (e.g. JSON APIs
-        that encode numbers as ``"0"``, ``"14.5"``). Non-string values are
-        passed through unchanged; None values become typed nulls.
+        that encode numbers as ``"0"``, ``"14.5"``). Non-string values that
+        are already numeric pass through unchanged; None values become typed
+        nulls. Boolean values are rejected — ``bool`` is a Python subclass of
+        ``int`` and would silently coerce to 0/1 otherwise.
 
-        Raises ``ValueError`` naming the column and row on parse failure so
-        the caller has actionable context instead of a generic PyArrow error.
+        Raises ``ValueError`` naming the column and row on parse failure, on
+        a non-parseable string, on an out-of-range value, or when a
+        non-string/non-numeric type (including ``bool``) is encountered.
         """
         is_int = pa.types.is_integer(field.type)
         converted: List[Any] = []
@@ -318,17 +322,34 @@ class SchemaContract:
             if v is None:
                 converted.append(None)
                 continue
+            if isinstance(v, bool):
+                raise ValueError(
+                    f"column {field.name!r} at row {row}: expected numeric or "
+                    f"numeric string, got bool {v!r}; declare arrow_type='Boolean' "
+                    f"or fix the source mapping"
+                )
             if not isinstance(v, str):
                 converted.append(v)
                 continue
             try:
-                converted.append(int(v) if is_int else float(v))
-            except ValueError as exc:
+                parsed = int(v) if is_int else float(v)
+            except (ValueError, OverflowError) as exc:
                 raise ValueError(
                     f"column {field.name!r} at row {row}: cannot parse "
                     f"{v!r} as {field.type}: {exc}"
                 ) from exc
-        return pa.array(converted, type=field.type)
+            if not is_int and not math.isfinite(parsed):
+                raise ValueError(
+                    f"column {field.name!r} at row {row}: string {v!r} "
+                    f"produces non-finite float {parsed!r}; use None for missing values"
+                )
+            converted.append(parsed)
+        try:
+            return pa.array(converted, type=field.type)
+        except OverflowError as exc:
+            raise ValueError(
+                f"column {field.name!r}: value out of range for {field.type}: {exc}"
+            ) from exc
 
     @staticmethod
     def _schema_from_columns(

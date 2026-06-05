@@ -251,6 +251,52 @@ class TestSchemaContractFromPylist:
         with pytest.raises(ValueError, match=r"column 'val' at row 0"):
             contract.from_pylist([{"val": "14.5"}])
 
+    def test_from_pylist_uint_from_strings(self):
+        # UInt32 and UInt64 are integer types; the same coercion path must apply.
+        schema = {
+            "columns": [
+                {"name": "flags", "arrow_type": "UInt32", "nullable": True},
+            ]
+        }
+        contract = SchemaContract(schema)
+
+        batch = contract.from_pylist([{"flags": "0"}, {"flags": "4294967295"}, {"flags": None}])
+        assert batch.to_pylist() == [{"flags": 0}, {"flags": 4294967295}, {"flags": None}]
+        assert pa.types.is_unsigned_integer(batch.schema.field("flags").type)
+
+    def test_from_pylist_bool_mixed_with_string_for_integer_raises(self):
+        # bool is a Python int subclass; when strings are present (triggering
+        # _build_numeric_from_strings), a bool must be rejected, not coerced to 0/1.
+        schema = {"columns": [{"name": "val", "arrow_type": "Int32", "nullable": True}]}
+        contract = SchemaContract(schema)
+
+        with pytest.raises(ValueError, match=r"column 'val' at row 1.*bool"):
+            contract.from_pylist([{"val": "42"}, {"val": True}])
+
+    def test_from_pylist_bool_for_float_raises(self):
+        # bool must be rejected for float columns too — silent coercion to 0.0/1.0 is data corruption.
+        schema = {"columns": [{"name": "rate", "arrow_type": "Float64", "nullable": True}]}
+        contract = SchemaContract(schema)
+
+        with pytest.raises(ValueError, match=r"column 'rate' at row 1.*bool"):
+            contract.from_pylist([{"rate": "3.14"}, {"rate": False}])
+
+    def test_from_pylist_nan_string_for_float_raises(self):
+        # "nan" is valid Python float() input but must not silently produce an IEEE 754 NaN
+        # in the Arrow column — it would pass nullability checks and corrupt downstream queries.
+        schema = {"columns": [{"name": "rate", "arrow_type": "Float64", "nullable": True}]}
+        contract = SchemaContract(schema)
+
+        with pytest.raises(ValueError, match=r"column 'rate' at row 0.*non-finite"):
+            contract.from_pylist([{"rate": "nan"}])
+
+    def test_from_pylist_inf_string_for_float_raises(self):
+        schema = {"columns": [{"name": "rate", "arrow_type": "Float64", "nullable": True}]}
+        contract = SchemaContract(schema)
+
+        with pytest.raises(ValueError, match=r"column 'rate' at row 0.*non-finite"):
+            contract.from_pylist([{"rate": "inf"}])
+
     def test_from_pylist_strptime_via_source_format(self):
         schema = {
             "columns": [
