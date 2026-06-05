@@ -427,3 +427,28 @@ class TestCreateConfigErrorPaths:
             FileNotFoundError, match="Streams directory not found|stream file"
         ):
             prep.create_config()
+
+    @pytest.mark.parametrize("side", ["source", "destination"])
+    def test_missing_endpoint_ref_names_stream_and_side(
+        self, pipeline_tree: Path, side: str
+    ) -> None:
+        """A stream side without ``endpoint_ref`` must fail naming both the
+        stream and which side (source vs destination) is malformed."""
+        stream_doc = _stream_doc(STREAM_ID)
+        if side == "source":
+            del stream_doc["source"]["endpoint_ref"]
+        else:
+            del stream_doc["destinations"][0]["endpoint_ref"]
+        _write_json(
+            pipeline_tree
+            / "pipelines"
+            / PIPELINE_ID
+            / "streams"
+            / f"{STREAM_ID}.json",
+            stream_doc,
+        )
+        prep = PipelineConfigPrep()
+        with pytest.raises(
+            ValueError, match=f"Stream {STREAM_ID} {side} missing 'endpoint_ref'"
+        ):
+            prep.create_config()

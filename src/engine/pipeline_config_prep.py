@@ -524,6 +524,25 @@ class PipelineConfigPrep:
     # Stream config construction
     # ------------------------------------------------------------------
 
+    def _resolve_endpoint_block(
+        self, block: Mapping[str, Any], stream_id: str, side: str
+    ) -> Tuple[EndpointRef, ConnectionRuntime, Dict[str, Any]]:
+        """Resolve one stream side's ``endpoint_ref`` into its parts.
+
+        Validates that the block carries an ``endpoint_ref``, then resolves
+        the connection runtime and the endpoint document it points at.
+        ``side`` ("source" or "destination") only shapes the error message.
+        """
+        endpoint_ref_dict = block.get("endpoint_ref")
+        if not endpoint_ref_dict:
+            raise ValueError(
+                f"Stream {stream_id} {side} missing 'endpoint_ref'"
+            )
+        endpoint_ref = EndpointRef.from_dict(endpoint_ref_dict)
+        runtime = self._resolve_connection_by_id(endpoint_ref.connection_id)
+        endpoint = self._resolve_endpoint(endpoint_ref)
+        return endpoint_ref, runtime, endpoint
+
     def _build_stream_config(self, record: _StreamRecord) -> ResolvedStream:
         """Translate a saved stream document into a typed :class:`ResolvedStream`."""
         document = record.raw_document
@@ -531,16 +550,9 @@ class PipelineConfigPrep:
 
         # ---- source ----
         raw_source = document["source"]
-        source_endpoint_ref_dict = raw_source.get("endpoint_ref")
-        if not source_endpoint_ref_dict:
-            raise ValueError(
-                f"Stream {stream_id} source missing 'endpoint_ref'"
-            )
-        source_endpoint_ref = EndpointRef.from_dict(source_endpoint_ref_dict)
-        source_runtime = self._resolve_connection_by_id(
-            source_endpoint_ref.connection_id
+        source_endpoint_ref, source_runtime, source_endpoint = (
+            self._resolve_endpoint_block(raw_source, stream_id, "source")
         )
-        source_endpoint = self._resolve_endpoint(source_endpoint_ref)
 
         resolved_source = ResolvedSource(
             endpoint_ref=source_endpoint_ref,
@@ -553,16 +565,9 @@ class PipelineConfigPrep:
         # ---- destinations ----
         resolved_destinations: List[ResolvedDestination] = []
         for raw_dest in document.get("destinations") or []:
-            dest_endpoint_ref_dict = raw_dest.get("endpoint_ref")
-            if not dest_endpoint_ref_dict:
-                raise ValueError(
-                    f"Stream {stream_id} destination missing 'endpoint_ref'"
-                )
-            dest_endpoint_ref = EndpointRef.from_dict(dest_endpoint_ref_dict)
-            dest_runtime = self._resolve_connection_by_id(
-                dest_endpoint_ref.connection_id
+            dest_endpoint_ref, dest_runtime, dest_endpoint = (
+                self._resolve_endpoint_block(raw_dest, stream_id, "destination")
             )
-            dest_endpoint = self._resolve_endpoint(dest_endpoint_ref)
 
             resolved_destinations.append(ResolvedDestination(
                 endpoint_ref=dest_endpoint_ref,
