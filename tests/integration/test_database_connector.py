@@ -110,7 +110,7 @@ class TestGenericSQLSourceRealIntegration:
         """read_batches paginates through a larger dataset and advances cursor."""
         # --- Setup: create + populate the table via a short-lived runtime. ---
         setup_runtime = _make_runtime(database_config)
-        await materialize_runtime(setup_runtime, require_port=True)
+        await materialize_runtime(setup_runtime)
         try:
             async with acquire_connection(setup_runtime.engine) as conn:
                 await conn.exec_driver_sql(
@@ -157,7 +157,7 @@ class TestGenericSQLSourceRealIntegration:
         finally:
             # --- Teardown: drop the table via a fresh runtime. ---
             teardown_runtime = _make_runtime(database_config)
-            await materialize_runtime(teardown_runtime, require_port=True)
+            await materialize_runtime(teardown_runtime)
             try:
                 async with acquire_connection(teardown_runtime.engine) as conn:
                     await conn.exec_driver_sql(
