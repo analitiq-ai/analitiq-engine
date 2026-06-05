@@ -710,7 +710,6 @@ DETERMINISTIC_CONNECT_ERRORS: tuple = (
     InvalidTypeMapError,
     UnmappedTypeError,
     PlaceholderExpansionError,
-    ValueError,
 )
 
 
