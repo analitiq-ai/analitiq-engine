@@ -54,7 +54,7 @@ below resolves a slug to its UUID so the commands stay copy-pasteable.
 ```bash
 SLUG=e2e-postgres-to-snowflake
 PIPELINE_ID=$(python3 -c "import json;print(next(p['pipeline_id'] for p in json.load(open('pipelines/manifest.json'))['pipelines'] if p['path'].startswith('$SLUG/')))")
-cd docker && PIPELINE_ID=$PIPELINE_ID docker compose run --rm source_engine; cd ..
+(cd docker && PIPELINE_ID=$PIPELINE_ID docker compose run --rm source_engine)
 ```
 
 Swap `SLUG` for any of the six pipeline slugs above. If you ran a different
@@ -62,7 +62,7 @@ pipeline before, recreate the long-running destination first — it keeps the
 `PIPELINE_ID` it was created with:
 
 ```bash
-cd docker && docker compose rm -sf destination; cd ..
+(cd docker && docker compose rm -sf destination)
 ```
 
 Check the container logs for errors; on success the 5 rows land in the

@@ -43,10 +43,15 @@ cd tests/e2e_databases && docker compose up -d --wait --remove-orphans && cd ../
 
 # 2. run a pipeline (engine in Docker, reaching the DBs via host.docker.internal).
 #    Pick a slug from pipelines/manifest.json, e.g. e2e-local-mysql-to-postgres,
-#    e2e-local-postgres-to-postgres, e2e-local-mariadb-to-postgres, ...
+#    e2e-local-postgres-to-postgres, ...
+#    NOTE: the e2e-local-mariadb-* slugs currently FAIL at startup — the
+#    mariadb connector declares a sync driver (mariadb+pymysql), which the
+#    engine's create_async_engine rejects. Connector-side fix; see the
+#    "Known limitation" section of PR #144.
+#    The subshell keeps the engine's exit status as the command's status.
 SLUG=e2e-local-postgres-to-mysql
 PIPELINE_ID=$(python3 -c "import json;print(next(p['pipeline_id'] for p in json.load(open('pipelines/manifest.json'))['pipelines'] if p['path'].startswith('$SLUG/')))")
-cd docker && PIPELINE_ID=$PIPELINE_ID docker compose run --rm source_engine; cd ..
+(cd docker && PIPELINE_ID=$PIPELINE_ID docker compose run --rm source_engine)
 
 # 3. read back e2e_landing in the destination DB to confirm the 5 rows
 #    psql    postgres://e2e_user:e2e_password@127.0.0.1:5433/e2e_db -c 'select * from e2e_landing order by id;'
@@ -56,12 +61,12 @@ cd docker && PIPELINE_ID=$PIPELINE_ID docker compose run --rm source_engine; cd 
 # 4. before running a DIFFERENT slug: recreate the long-running destination —
 #    it keeps the PIPELINE_ID it was created with, so a reused container would
 #    serve the previous pipeline's config.
-cd docker && docker compose rm -sf destination; cd ..
+(cd docker && docker compose rm -sf destination)
 # ... then repeat step 2 with the new slug.
 
 # 5. tear down
 cd tests/e2e_databases && docker compose down -v --remove-orphans && cd ../..
-cd docker && docker compose down && cd ..
+(cd docker && docker compose down)
 ```
 
 ## Cloud DBs (Snowflake / BigQuery / Redshift <-> Postgres)
@@ -85,7 +90,7 @@ Cloud warehouses are remote — no containers. Connections live at:
    ```bash
    SLUG=e2e-postgres-to-snowflake
    PIPELINE_ID=$(python3 -c "import json;print(next(p['pipeline_id'] for p in json.load(open('pipelines/manifest.json'))['pipelines'] if p['path'].startswith('$SLUG/')))")
-   cd docker && PIPELINE_ID=$PIPELINE_ID docker compose run --rm source_engine; cd ..
+   (cd docker && PIPELINE_ID=$PIPELINE_ID docker compose run --rm source_engine)
    ```
 
    Slugs: `e2e-postgres-to-snowflake`, `e2e-snowflake-to-postgres`,
