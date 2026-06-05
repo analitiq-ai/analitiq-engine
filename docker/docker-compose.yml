@@ -37,13 +37,16 @@ services:
     expose:
       - "50051"
 
-    # Health check - verify gRPC server is accepting connections
+    # Health check - verify gRPC server is accepting connections.
+    # start_period covers the entrypoint's attach-time connector installs
+    # (each connector package brings its own driver; pip runs before the
+    # server binds the port).
     healthcheck:
       test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('localhost',50051),2); s.close()"]
       interval: 5s
       timeout: 3s
-      retries: 5
-      start_period: 10s
+      retries: 60
+      start_period: 300s
 
     # Resource limits
     deploy:

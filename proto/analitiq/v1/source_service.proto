@@ -1,0 +1,73 @@
+// Source worker contract: the engine shell reads a stream's batches from a
+// connector worker over a local (Unix domain socket) channel.
+//
+// The worker receives everything stream-specific in its launch bootstrap
+// (resolved connection payload, endpoint document, stream source config) —
+// this service only carries the per-read runtime knobs and the data/cursor
+// flow back to the engine. The checkpoint store stays engine-side: the
+// worker emits CursorSave events and the engine persists them.
+
+syntax = "proto3";
+
+package analitiq.v1;
+
+import "analitiq/v1/stream.proto";
+
+option java_multiple_files = true;
+option java_package = "com.analitiq.v1";
+
+service SourceService {
+  // Read the bootstrapped stream as an ordered response stream:
+  // zero or more (batch | cursor_save) messages, terminated by exactly one
+  // (complete | error).
+  rpc ReadStream(ReadRequest) returns (stream ReadResponse);
+}
+
+message ReadRequest {
+  // Stream identity used for engine-side checkpointing/logging.
+  string stream_name = 1;
+
+  // JSON object of the partition (engine-defined; usually {}).
+  string partition_json = 2;
+
+  // Page size for the source read.
+  uint32 batch_size = 3;
+
+  // JSON of the persisted cursor state ({"cursor": ...}) or empty when the
+  // stream has no checkpoint yet. The worker cannot call back into the
+  // engine's checkpoint store, so the initial position rides the request.
+  string initial_cursor_json = 4;
+}
+
+message ReadBatchChunk {
+  PayloadFormat format = 1;  // PAYLOAD_FORMAT_ARROW_IPC
+  bytes payload = 2;         // Arrow IPC stream bytes (single record batch)
+  uint32 record_count = 3;
+}
+
+message CursorSave {
+  // JSON of the cursor state to persist engine-side ({"cursor": ...}).
+  string cursor_json = 1;
+}
+
+message ReadError {
+  string message = 1;
+  // True when retrying cannot succeed (configuration / contract error);
+  // the engine fails the stream fatally instead of retrying.
+  bool deterministic = 2;
+  string error_type = 3;
+}
+
+message ReadComplete {
+  uint64 total_records = 1;
+  uint64 total_batches = 2;
+}
+
+message ReadResponse {
+  oneof message {
+    ReadBatchChunk batch = 1;
+    CursorSave cursor_save = 2;
+    ReadError error = 3;
+    ReadComplete complete = 4;
+  }
+}

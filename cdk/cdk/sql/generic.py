@@ -12,9 +12,16 @@
 
 The active transport is selected by the connector definition and set on the
 ``ConnectionRuntime``: ``transport_type: "sqlalchemy"`` (async SQLAlchemy
-engine — Postgres asyncpg, MySQL aiomysql) or ``transport_type: "adbc"``
-(direct ADBC DBAPI — Snowflake, BigQuery, Postgres-via-ADBC for Redshift).
-Type casting is handled by the Arrow-based ``SchemaContract``.
+engine) or ``transport_type: "adbc"`` (direct ADBC DBAPI). Type casting is
+handled by the Arrow-based ``SchemaContract``.
+
+This base is vendor-neutral: every per-system quirk (quoting, upsert SQL,
+pre-DDL, ADBC DDL type names, stage-table syntax, discovery queries) is
+delegated to the :class:`~cdk.sql.dialects.SqlDialect` carried by
+``dialect_class`` — which each connector package overrides with its own
+dialect next to its connector class. The base never branches on a driver
+or connector_id; operations with no portable form raise
+``UnsupportedDialectOperationError`` naming the missing connector package.
 """
 
 import asyncio
@@ -26,30 +33,11 @@ from datetime import datetime
 from typing import Any, AsyncIterator, Dict, List, Literal, Mapping, Optional, Tuple
 
 import pyarrow as pa
-from sqlalchemy import (
-    BigInteger,
-    Column,
-    DateTime,
-    Integer,
-    LargeBinary,
-    MetaData,
-    String,
-    Table,
-    func,
-    text,
-)
-from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.dialects.mysql import insert as mysql_insert
+from sqlalchemy import MetaData, Table, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncConnection
 
 from cdk.base_handler import BaseDestinationHandler, BatchWriteResult
 from cdk.schema_contract import SchemaContract
-from cdk.sql_types import (
-    native_to_bigquery,
-    native_to_postgres,
-    native_to_snowflake,
-    native_to_sqlalchemy,
-)
 from cdk.type_map import (
     InvalidTypeMapError,
     TypeMapper,
@@ -69,14 +57,16 @@ from cdk.connection_runtime import (
     DETERMINISTIC_CONNECT_ERRORS,
     materialize_runtime,
 )
-from cdk.database_utils import acquire_connection, normalize_adbc_schema
+from cdk.database_utils import acquire_connection
 from cdk.query_builder import Filter, QueryBuilder, QueryConfig
 from .adbc_reader import open_adbc_reader
+from .dialects import SqlDialect
 from .discovery import list_columns as _sql_list_columns
 from .discovery import list_schemas as _sql_list_schemas
 from .discovery import list_tables as _sql_list_tables
+from .ddl import build_create_table_sql
 from .ddl import create_table as _sql_create_table
-from .exceptions import ReadError
+from .exceptions import ReadError, UnsupportedDialectOperationError
 from ..contract import ColumnDef
 
 
@@ -223,7 +213,6 @@ class _StreamState:
     write_mode: WriteMode = "upsert"
     endpoint_document: Dict[str, Any] = field(default_factory=dict)
     schema_contract: Optional[SchemaContract] = None
-    metadata: MetaData = field(default_factory=MetaData)
 
 
 class GenericSQLConnector(BaseDestinationHandler):
@@ -267,8 +256,17 @@ class GenericSQLConnector(BaseDestinationHandler):
     # engine never has to ship a per-record timestamp.
     SYNCED_AT_COLUMN = "_synced_at"
 
+    # The dialect strategy carrying every vendor-specific piece of SQL:
+    # quoting, upsert statements, pre-DDL, ADBC DDL type names, stage-table
+    # syntax, discovery queries. The CDK base is ANSI-neutral; a connector
+    # package's class overrides ``dialect_class`` with its own SqlDialect
+    # subclass. This is the ONLY per-system extension point — the generic
+    # connector never branches on driver or connector_id.
+    dialect_class: type[SqlDialect] = SqlDialect
+
     def __init__(self) -> None:
         """Initialize the database handler."""
+        self.dialect: SqlDialect = self.dialect_class()
         self._runtime: ConnectionRuntime | None = None
         self._engine: AsyncEngine | None = None
         self._config: Dict[str, Any] = {}
@@ -403,14 +401,16 @@ class GenericSQLConnector(BaseDestinationHandler):
 
     @property
     def supports_upsert(self) -> bool:
-        """True when the active driver has an upsert path.
+        """True when the active dialect has an upsert path.
 
-        SA-mode dialects use INSERT ON CONFLICT / ON DUPLICATE KEY
-        UPDATE; ADBC-only mode uses stage-table + ``MERGE INTO``.
+        SA-mode dialects implement ``build_sqlalchemy_upsert``; ADBC-only
+        mode uses stage-table + ``MERGE INTO`` (``adbc_stage_table_sql``).
+        Both are declared by the connector package's dialect — the neutral
+        base supports neither.
         """
         if self._adbc_only:
-            return self._driver in ("postgresql", "snowflake", "bigquery")
-        return self._driver in ("postgresql", "postgres", "mysql", "mariadb")
+            return self.dialect.supports_upsert_adbc
+        return self.dialect.supports_upsert_sqlalchemy
 
     @property
     def supports_bulk_load(self) -> bool:
@@ -433,7 +433,9 @@ class GenericSQLConnector(BaseDestinationHandler):
         """
         self._runtime = runtime
         try:
-            await materialize_runtime(runtime, require_port=False)
+            await materialize_runtime(
+                runtime, require_port=False, sql_dialect=self.dialect
+            )
         except DETERMINISTIC_CONNECT_ERRORS:
             raise
         except Exception as e:
@@ -619,6 +621,7 @@ class GenericSQLConnector(BaseDestinationHandler):
             UnmappedTypeError,
             InvalidTypeMapError,
             PlaceholderExpansionError,
+            UnsupportedDialectOperationError,
             KeyError,
             TypeError,
             ValueError,
@@ -645,87 +648,20 @@ class GenericSQLConnector(BaseDestinationHandler):
             )
         return mode_map[proto_write_mode]
 
-    async def _ensure_tables_exist(
+    def _build_column_defs(
         self, state: _StreamState, type_mapper: TypeMapper
-    ) -> None:
-        """Create the target table and batch commits table if they don't exist.
+    ) -> List[ColumnDef]:
+        """Contract endpoint columns -> ColumnDefs for the shared DDL builder.
 
-        ``state`` owns the SQLAlchemy ``MetaData`` for this stream so each
-        ``create_all`` only emits DDL for this stream's tables. The DDL
-        itself is serialized with ``self._ddl_lock`` so concurrent streams
-        do not race the database catalog (e.g. PostgreSQL's
-        ``pg_type_typname_nsp_index``).
+        Each column's native type goes through the READ map to its canonical
+        Arrow string; the builder renders it back through the WRITE map for
+        this destination — the two declarative surfaces are the entire type
+        vocabulary, for every transport. ``_synced_at`` is appended as a
+        server-defaulted audit column when the endpoint doesn't declare it.
         """
-        state.batch_commits_table = Table(
-            self.BATCH_COMMITS_TABLE,
-            state.metadata,
-            Column("run_id", String(255), primary_key=True),
-            Column("stream_id", String(255), primary_key=True),
-            Column("batch_seq", BigInteger, primary_key=True),
-            Column("committed_cursor", LargeBinary),
-            Column("records_written", Integer),
-            Column("committed_at", DateTime, default=datetime.utcnow),
-            schema=state.schema_name,
-        )
-
-        # Build the target table from the contract endpoint document.
-        if state.endpoint_document:
-            state.table = self._create_table_from_schema(
-                state.table_name,
-                state.endpoint_document,
-                state.primary_keys,
-                state.schema_name,
-                state.metadata,
-                type_mapper,
-            )
-        else:
-            logger.warning(
-                "No endpoint document available; table must already exist"
-            )
-
-        if self._adbc_only:
-            await self._ensure_tables_via_adbc(state, type_mapper)
-            return
-
-        if self._engine is None:
-            return
-
-        # Serialize DDL across concurrent streams. ``create_all`` only
-        # adds tables that don't yet exist; pre-existing tables are left
-        # untouched. New tables get ``_synced_at`` because
-        # ``_create_table_from_schema`` appends it when the endpoint
-        # document doesn't declare it.
-        async with self._ddl_lock:
-            async with self._engine.begin() as conn:
-                if self._driver in ("postgresql", "postgres") and state.schema_name != "public":
-                    await conn.execute(
-                        text(f"CREATE SCHEMA IF NOT EXISTS {state.schema_name}")
-                    )
-                await conn.run_sync(state.metadata.create_all)
-
-        logger.debug(f"Ensured tables exist in schema {state.schema_name}")
-
-    def _create_table_from_schema(
-        self,
-        table_name: str,
-        endpoint_document: Dict[str, Any],
-        primary_keys: List[str],
-        schema_name: str,
-        metadata: MetaData,
-        type_mapper: TypeMapper,
-    ) -> Table:
-        """Build a SQLAlchemy :class:`Table` from a database-endpoint document.
-
-        The document is the contract ``database-endpoint`` payload — a
-        ``columns`` array where each entry declares ``name``, ``native_type``,
-        ``nullable``, and (optionally) a SQL-expression ``default``. The
-        connector's ``type-map.json`` resolves ``native_type`` to a
-        SQLAlchemy type.
-        """
-        columns: List[Column] = []
-        declared_names: set[str] = set()
-
-        for index, col_def in enumerate(endpoint_document.get("columns") or []):
+        columns: List[ColumnDef] = []
+        declared: set[str] = set()
+        for index, col_def in enumerate(state.endpoint_document.get("columns") or []):
             col_name = col_def.get("name")
             if not col_name:
                 raise ValueError(
@@ -736,44 +672,132 @@ class GenericSQLConnector(BaseDestinationHandler):
                 raise ValueError(
                     f"column {col_name!r} has no 'native_type' field"
                 )
-            sa_type = native_to_sqlalchemy(native_type, type_mapper)
-            is_pk = col_name in primary_keys
-            nullable = col_def.get("nullable", True) and not is_pk
-
-            column_kwargs: Dict[str, Any] = {
-                "primary_key": is_pk,
-                "nullable": nullable,
-            }
-            # Honour the endpoint's declared ``default`` only when it is a
-            # SQL expression like ``now()`` — passed through as
-            # ``server_default=text(...)``. Non-string defaults are
-            # connector-specific values that do not belong in DDL.
             raw_default = col_def.get("default")
-            if isinstance(raw_default, str) and raw_default.strip():
-                column_kwargs["server_default"] = text(raw_default)
-
-            columns.append(Column(col_name, sa_type, **column_kwargs))
-            declared_names.add(col_name)
-
-        # Every database destination table carries a server-managed
-        # ``_synced_at`` audit column. If the endpoint declares it, it is
-        # already in ``columns``; otherwise append one with a NOW() default.
-        if self.SYNCED_AT_COLUMN not in declared_names:
             columns.append(
-                Column(
-                    self.SYNCED_AT_COLUMN,
-                    DateTime(timezone=True),
-                    nullable=True,
-                    server_default=func.now(),
+                ColumnDef(
+                    name=col_name,
+                    canonical_type=type_mapper.to_arrow_type(native_type),
+                    nullable=bool(col_def.get("nullable", True)),
+                    primary_key=col_name in state.primary_keys,
+                    default=(
+                        raw_default
+                        if isinstance(raw_default, str) and raw_default.strip()
+                        else None
+                    ),
                 )
             )
+            declared.add(col_name)
+        if self.SYNCED_AT_COLUMN not in declared:
+            columns.append(
+                ColumnDef(
+                    name=self.SYNCED_AT_COLUMN,
+                    canonical_type="Timestamp(MICROSECOND, UTC)",
+                    nullable=True,
+                    default=self.dialect.current_timestamp_default(),
+                )
+            )
+        return columns
 
-        return Table(
-            table_name,
-            metadata,
-            *columns,
-            schema=schema_name,
+    def _build_batch_commits_ddl(
+        self, schema_name: str, type_mapper: TypeMapper
+    ) -> str:
+        """``CREATE TABLE IF NOT EXISTS _batch_commits`` for any transport.
+
+        Types derive from the connector's write map through the dialect's
+        ``render_column_type`` (key columns via ``batch_commits_key_type``,
+        bounded where unbounded text cannot key); quoting and the PK clause
+        come from the dialect.
+        """
+        quote = self.dialect.quote_ident
+        render = self.dialect.render_column_type
+        qualified = self.dialect.quote_qualified(schema_name, self.BATCH_COMMITS_TABLE)
+        key_type = self.dialect.batch_commits_key_type(type_mapper)
+        return (
+            f"CREATE TABLE IF NOT EXISTS {qualified} (\n"
+            f"  {quote('run_id')} {key_type} NOT NULL,\n"
+            f"  {quote('stream_id')} {key_type} NOT NULL,\n"
+            f"  {quote('batch_seq')} {render('Int64', type_mapper)} NOT NULL,\n"
+            f"  {quote('committed_cursor')} {render('Binary', type_mapper)},\n"
+            f"  {quote('records_written')} {render('Int32', type_mapper)},\n"
+            f"  {quote('committed_at')} "
+            f"{render('Timestamp(MICROSECOND)', type_mapper)} "
+            f"DEFAULT {self.dialect.current_timestamp_default()},\n"
+            f"  {self.dialect.pk_clause(['run_id', 'stream_id', 'batch_seq'])}\n"
+            f")"
         )
+
+    async def _ensure_tables_exist(
+        self, state: _StreamState, type_mapper: TypeMapper
+    ) -> None:
+        """Create the target and ``_batch_commits`` tables if absent.
+
+        ONE DDL builder serves every transport: column types come from the
+        connector's read+write maps via the dialect, quoting/PK from the
+        dialect, and the rendered statements execute over SQLAlchemy or the
+        ADBC cursor. On the SQLAlchemy path the tables are then REFLECTED so
+        DML binding uses the real column types the database reports.
+        """
+        if not state.endpoint_document:
+            raise ValueError(
+                f"destination stream for {state.schema_name}.{state.table_name} "
+                f"has no endpoint document; cannot build DDL"
+            )
+        target_ddl = build_create_table_sql(
+            self.dialect,
+            type_mapper,
+            state.schema_name,
+            state.table_name,
+            self._build_column_defs(state, type_mapper),
+            list(state.primary_keys),
+            if_not_exists=True,
+        )
+        commits_ddl = self._build_batch_commits_ddl(state.schema_name, type_mapper)
+
+        if self._adbc_only:
+            await self._ensure_tables_via_adbc(state, [target_ddl, commits_ddl])
+            return
+
+        if self._engine is None:
+            return
+
+        # Serialize DDL across concurrent streams so they do not race the
+        # database catalog (e.g. PostgreSQL's pg_type_typname_nsp_index).
+        async with self._ddl_lock:
+            async with self._engine.begin() as conn:
+                # Dialect-declared preparation (e.g. postgres' CREATE SCHEMA
+                # IF NOT EXISTS for a non-default schema). The neutral base
+                # declares none.
+                for stmt in self.dialect.sqlalchemy_pre_ddl(state.schema_name):
+                    await conn.execute(text(stmt))
+                await conn.execute(text(target_ddl))
+                await conn.execute(text(commits_ddl))
+
+                # Reflect both tables for DML binding: SQLAlchemy derives the
+                # column types from what the database actually created, so
+                # inserts/upserts bind correctly without a second hand-kept
+                # type surface.
+                def _reflect(sync_conn):
+                    meta = MetaData()
+                    table = Table(
+                        state.table_name,
+                        meta,
+                        autoload_with=sync_conn,
+                        schema=state.schema_name or None,
+                    )
+                    commits = Table(
+                        self.BATCH_COMMITS_TABLE,
+                        meta,
+                        autoload_with=sync_conn,
+                        schema=state.schema_name or None,
+                    )
+                    return table, commits
+
+                state.table, state.batch_commits_table = await conn.run_sync(
+                    lambda sync_conn: _reflect(sync_conn)
+                )
+
+        logger.debug(f"Ensured tables exist in schema {state.schema_name}")
+
 
     async def write_batch(
         self,
@@ -804,7 +828,12 @@ class GenericSQLConnector(BaseDestinationHandler):
             )
 
         state = self._streams.get(stream_id)
-        if state is None or state.table is None or state.batch_commits_table is None:
+        if state is None or (
+            not self._adbc_only
+            and (state.table is None or state.batch_commits_table is None)
+        ):
+            # ADBC writes never build SQLAlchemy table objects; readiness
+            # there is the configured state + schema contract.
             return BatchWriteResult(
                 status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
                 records_written=0,
@@ -871,6 +900,15 @@ class GenericSQLConnector(BaseDestinationHandler):
                 records_written=0,
                 failure_summary=f"type-map: {e}",
             )
+        except UnsupportedDialectOperationError as e:
+            # The dialect lacks the requested operation (e.g. upsert with
+            # no connector package installed). Deterministic — fail fast.
+            logger.error("Dialect operation unsupported: %s", e, exc_info=True)
+            return BatchWriteResult(
+                status=AckStatus.ACK_STATUS_FATAL_FAILURE,
+                records_written=0,
+                failure_summary=f"dialect: {e}",
+            )
         except AdbcConfigurationError as e:
             # ADBC misconfiguration cannot heal between attempts; bail
             # fatally so the engine does not retry forever.
@@ -906,12 +944,12 @@ class GenericSQLConnector(BaseDestinationHandler):
         batch_seq: int,
     ) -> Optional[Dict[str, Any]]:
         """Check if batch was already committed."""
-        if state.batch_commits_table is None:
-            return None
         if self._adbc_only:
             return await self._check_batch_committed_via_adbc(
                 state, run_id, stream_id, batch_seq,
             )
+        if state.batch_commits_table is None:
+            return None
         if self._engine is None:
             return None
 
@@ -942,12 +980,12 @@ class GenericSQLConnector(BaseDestinationHandler):
         records_written: int,
     ) -> None:
         """Record batch commit (outside transaction)."""
-        if state.batch_commits_table is None:
-            return
         if self._adbc_only:
             await self._record_batch_commit_via_adbc(
                 state, run_id, stream_id, batch_seq, cursor_bytes, records_written,
             )
+            return
+        if state.batch_commits_table is None:
             return
         if self._engine is None:
             return
@@ -999,7 +1037,16 @@ class GenericSQLConnector(BaseDestinationHandler):
         state: _StreamState,
         records: List[Dict[str, Any]],
     ) -> None:
-        """Upsert pre-cast records (INSERT ... ON CONFLICT)."""
+        """Upsert pre-cast records via the dialect's INSERT-or-UPDATE form.
+
+        The statement shape is vendor-specific (postgres ``ON CONFLICT``,
+        MySQL ``ON DUPLICATE KEY UPDATE``) and comes from the connector
+        package's dialect. A dialect without one raises
+        ``UnsupportedDialectOperationError`` — loud and fatal, never a
+        silent downgrade to INSERT. The engine should not have routed an
+        upsert here in the first place: ``supports_upsert`` gates the
+        advertised write modes.
+        """
         conflict_keys = state.conflict_keys or state.primary_keys
         if state.table is None or not conflict_keys:
             await self._insert_records(conn, state, records)
@@ -1007,32 +1054,10 @@ class GenericSQLConnector(BaseDestinationHandler):
         if not records:
             return
 
-        if self._driver in ("postgresql", "postgres"):
-            stmt = pg_insert(state.table).values(records)
-            record_columns = set(records[0].keys())
-            update_cols = {
-                c.name: c for c in stmt.excluded
-                if c.name not in conflict_keys and c.name in record_columns
-            }
-            stmt = stmt.on_conflict_do_update(
-                index_elements=conflict_keys,
-                set_=update_cols,
-            )
-            await conn.execute(stmt)
-
-        elif self._driver in ("mysql", "mariadb"):
-            stmt = mysql_insert(state.table).values(records)
-            record_columns = set(records[0].keys())
-            update_cols = {
-                c.name: c for c in stmt.inserted
-                if c.name not in conflict_keys and c.name in record_columns
-            }
-            stmt = stmt.on_duplicate_key_update(**update_cols)
-            await conn.execute(stmt)
-
-        else:
-            # Fallback to plain insert for other databases
-            await self._insert_records(conn, state, records)
+        stmt = self.dialect.build_sqlalchemy_upsert(
+            state.table, records, conflict_keys
+        )
+        await conn.execute(stmt)
 
     async def _truncate_and_insert(
         self,
@@ -1071,220 +1096,13 @@ class GenericSQLConnector(BaseDestinationHandler):
     # also opt in (e.g. for Redshift via the libpq-compatible driver),
     # but its SA path remains the primary route.
 
-    def _adbc_quote_ident(self, name: str) -> str:
-        """Quote a SQL identifier for the active ADBC driver.
 
-        BigQuery GoogleSQL uses backticks for identifier quoting;
-        double-quoted strings are STRING literals there. Snowflake and
-        Postgres use ANSI double quotes. Per-driver dispatch keeps the
-        engine's lower-case-by-convention names intact across dialects
-        (Snowflake uppercases unquoted identifiers; BigQuery's name
-        rules are case-sensitive; Postgres folds unquoted to lowercase).
-        """
-        if self._driver == "bigquery":
-            # BigQuery does not accept embedded backticks in identifier
-            # names — they are quote-only. Defensively raise so the
-            # failure mode is loud rather than a confusing parse error
-            # from the warehouse.
-            if "`" in name:
-                raise ValueError(
-                    f"BigQuery identifier {name!r} contains a backtick; "
-                    "BigQuery does not support escaped backticks in names"
-                )
-            return f"`{name}`"
-        return '"' + name.replace('"', '""') + '"'
-
-    def _adbc_quote_qualified(self, schema: str, name: str) -> str:
-        if schema:
-            return f"{self._adbc_quote_ident(self._normalize_adbc_schema(schema))}.{self._adbc_quote_ident(name)}"
-        return self._adbc_quote_ident(name)
-
-    def _normalize_adbc_schema(self, schema: str) -> str:
-        """Normalize a schema name for the active ADBC driver.
-
-        Thin wrapper over the shared :func:`normalize_adbc_schema` so the
-        destination handler and the source reader resolve the same
-        physical schema (Snowflake ``public`` -> ``PUBLIC``).
-        """
-        return normalize_adbc_schema(schema, self._driver)
-
-    def _adbc_native_renderer(self):
-        """Return the native-type → DDL renderer for the active ADBC driver."""
-        if self._driver == "snowflake":
-            return native_to_snowflake
-        if self._driver == "bigquery":
-            return native_to_bigquery
-        if self._driver in ("postgresql", "postgres"):
-            return native_to_postgres
-        raise AdbcConfigurationError(
-            f"ADBC-only mode has no DDL renderer for driver={self._driver!r}; "
-            f"supported: snowflake, bigquery, postgresql"
-        )
-
-    def _adbc_timestamp_default_type(self) -> str:
-        """Per-driver native timestamp type for the _synced_at audit column."""
-        if self._driver == "snowflake":
-            return "TIMESTAMP_TZ"
-        if self._driver == "bigquery":
-            return "TIMESTAMP"
-        # PG, Redshift
-        return "TIMESTAMP WITH TIME ZONE"
-
-    def _adbc_binary_type(self) -> str:
-        """Per-driver native binary column type for committed_cursor."""
-        if self._driver == "snowflake":
-            return "BINARY"
-        if self._driver == "bigquery":
-            return "BYTES"
-        return "BYTEA"
-
-    def _adbc_commit_timestamp_type(self) -> str:
-        """Per-driver type used for committed_at in _batch_commits."""
-        if self._driver == "snowflake":
-            return "TIMESTAMP_NTZ"
-        if self._driver == "bigquery":
-            return "DATETIME"
-        return "TIMESTAMP"
-
-    def _build_adbc_create_table_ddl(
-        self,
-        state: _StreamState,
-        type_mapper: TypeMapper,
-    ) -> str:
-        """Build a ``CREATE TABLE IF NOT EXISTS`` for the active ADBC driver.
-
-        Mirrors :meth:`_create_table_from_schema` but emits a DDL string
-        instead of a SQLAlchemy ``Table``. Always appends ``_synced_at``
-        as a server-defaulted timestamp when the endpoint document does
-        not declare it.
-        """
-        renderer = self._adbc_native_renderer()
-        column_defs: List[str] = []
-        declared_names: set[str] = set()
-        for index, col_def in enumerate(state.endpoint_document.get("columns") or []):
-            col_name = col_def.get("name")
-            if not col_name:
-                raise ValueError(
-                    f"endpoint column at index {index} has no 'name' field"
-                )
-            native_type = col_def.get("native_type")
-            if not native_type:
-                raise ValueError(
-                    f"column {col_name!r} has no 'native_type' field"
-                )
-            sql_type = renderer(native_type, type_mapper)
-            is_pk = col_name in state.primary_keys
-            nullable = col_def.get("nullable", True) and not is_pk
-            parts = [self._adbc_quote_ident(col_name), sql_type]
-            if not nullable:
-                parts.append("NOT NULL")
-            raw_default = col_def.get("default")
-            if isinstance(raw_default, str) and raw_default.strip():
-                parts.append(f"DEFAULT {raw_default}")
-            column_defs.append(" ".join(parts))
-            declared_names.add(col_name)
-
-        if self.SYNCED_AT_COLUMN not in declared_names:
-            column_defs.append(
-                f"{self._adbc_quote_ident(self.SYNCED_AT_COLUMN)} "
-                f"{self._adbc_timestamp_default_type()} DEFAULT CURRENT_TIMESTAMP"
-            )
-
-        # PRIMARY KEY clause is per-driver: Snowflake/Postgres accept
-        # bare ``PRIMARY KEY (...)``; BigQuery requires the
-        # ``NOT ENFORCED`` suffix (it does not enforce PK constraints
-        # and the parser rejects them without the qualifier). Omit the
-        # clause entirely when no PKs are declared.
-        if state.primary_keys:
-            pk_cols = ", ".join(self._adbc_quote_ident(k) for k in state.primary_keys)
-            column_defs.append(self._build_adbc_pk_clause(pk_cols))
-
-        qualified = self._adbc_quote_qualified(state.schema_name, state.table_name)
-        return (
-            f"CREATE TABLE IF NOT EXISTS {qualified} (\n  "
-            + ",\n  ".join(column_defs)
-            + "\n)"
-        )
-
-    def _build_adbc_pk_clause(self, pk_cols: str) -> str:
-        """Per-driver PRIMARY KEY clause for inclusion in a CREATE TABLE.
-
-        BigQuery's parser rejects bare ``PRIMARY KEY (...)`` — it
-        requires the ``NOT ENFORCED`` qualifier and does not actually
-        enforce the constraint at runtime (it's a planner hint).
-        Snowflake and Postgres accept and enforce the bare form.
-        """
-        if self._driver == "bigquery":
-            return f"PRIMARY KEY ({pk_cols}) NOT ENFORCED"
-        return f"PRIMARY KEY ({pk_cols})"
-
-    def _adbc_text_type(self) -> str:
-        """Per-driver native string type for the _batch_commits text columns.
-
-        BigQuery's GoogleSQL has only ``STRING`` (with optional length);
-        ``VARCHAR(n)`` is rejected at parse time. Snowflake and Postgres
-        both accept ``VARCHAR(n)``.
-        """
-        if self._driver == "bigquery":
-            return "STRING"
-        return "VARCHAR(255)"
-
-    def _build_adbc_batch_commits_ddl(self, schema_name: str) -> str:
-        qualified = self._adbc_quote_qualified(schema_name, self.BATCH_COMMITS_TABLE)
-        pk_cols = (
-            f"{self._adbc_quote_ident('run_id')}, "
-            f"{self._adbc_quote_ident('stream_id')}, "
-            f"{self._adbc_quote_ident('batch_seq')}"
-        )
-        text_type = self._adbc_text_type()
-        return (
-            f"CREATE TABLE IF NOT EXISTS {qualified} (\n"
-            f"  {self._adbc_quote_ident('run_id')} {text_type} NOT NULL,\n"
-            f"  {self._adbc_quote_ident('stream_id')} {text_type} NOT NULL,\n"
-            f"  {self._adbc_quote_ident('batch_seq')} BIGINT NOT NULL,\n"
-            f"  {self._adbc_quote_ident('committed_cursor')} "
-            f"{self._adbc_binary_type()},\n"
-            f"  {self._adbc_quote_ident('records_written')} INTEGER,\n"
-            f"  {self._adbc_quote_ident('committed_at')} "
-            f"{self._adbc_commit_timestamp_type()} DEFAULT CURRENT_TIMESTAMP,\n"
-            f"  {self._build_adbc_pk_clause(pk_cols)}\n"
-            f")"
-        )
-
-    def _schema_is_implicit_default(self, schema_name: str) -> bool:
-        """True when the schema name is the dialect's implicit default.
-
-        Avoids issuing ``CREATE SCHEMA "public"`` against Snowflake
-        roles that can create tables in PUBLIC but lack CREATE SCHEMA
-        on the database. The connector's case-sensitive declaration
-        is preserved when the user intends a quoted-name namespace.
-        """
-        if not schema_name:
-            return True
-        normalized = schema_name.lower()
-        if self._driver == "snowflake":
-            return normalized == "public"
-        if self._driver == "bigquery":
-            # BigQuery has no implicit default dataset; any named dataset
-            # must be created explicitly. Returning False for any non-
-            # empty name causes _ensure_tables_via_adbc to always emit
-            # CREATE SCHEMA IF NOT EXISTS for it (the empty case is
-            # already short-circuited above).
-            return False
-        # Postgres / Redshift
-        return normalized == "public"
 
     async def _ensure_tables_via_adbc(
-        self, state: _StreamState, type_mapper: TypeMapper
+        self, state: _StreamState, rendered_ddl: List[str]
     ) -> None:
-        if not state.endpoint_document:
-            raise AdbcConfigurationError(
-                "ADBC-only mode requires an endpoint document for DDL"
-            )
-        create_table_sql = self._build_adbc_create_table_ddl(state, type_mapper)
-        create_commits_sql = self._build_adbc_batch_commits_ddl(state.schema_name)
         statements: List[str] = []
-        if not self._schema_is_implicit_default(state.schema_name):
+        if not self.dialect.schema_is_implicit_default(state.schema_name):
             # BigQuery uses ``CREATE SCHEMA`` for datasets (Standard
             # SQL). Snowflake and Postgres both accept the same DDL.
             # Normalize before quoting so a Snowflake ``public`` matches
@@ -1292,9 +1110,9 @@ class GenericSQLConnector(BaseDestinationHandler):
             # a quoted-lowercase sibling.
             statements.append(
                 f"CREATE SCHEMA IF NOT EXISTS "
-                f"{self._adbc_quote_ident(self._normalize_adbc_schema(state.schema_name))}"
+                f"{self.dialect.quote_ident(self.dialect.normalize_schema(state.schema_name))}"
             )
-        statements.extend([create_table_sql, create_commits_sql])
+        statements.extend(rendered_ddl)
         async with self._ddl_lock:
             await asyncio.to_thread(self._execute_adbc_ddl_sync, statements)
         logger.debug(
@@ -1382,16 +1200,16 @@ class GenericSQLConnector(BaseDestinationHandler):
         stream_id: str,
         batch_seq: int,
     ) -> Optional[Dict[str, Any]]:
-        qualified = self._adbc_quote_qualified(
+        qualified = self.dialect.quote_qualified(
             state.schema_name, self.BATCH_COMMITS_TABLE
         )
         sql = (
-            f"SELECT {self._adbc_quote_ident('records_written')}, "
-            f"{self._adbc_quote_ident('committed_cursor')} "
+            f"SELECT {self.dialect.quote_ident('records_written')}, "
+            f"{self.dialect.quote_ident('committed_cursor')} "
             f"FROM {qualified} "
-            f"WHERE {self._adbc_quote_ident('run_id')} = ? "
-            f"AND {self._adbc_quote_ident('stream_id')} = ? "
-            f"AND {self._adbc_quote_ident('batch_seq')} = ?"
+            f"WHERE {self.dialect.quote_ident('run_id')} = ? "
+            f"AND {self.dialect.quote_ident('stream_id')} = ? "
+            f"AND {self.dialect.quote_ident('batch_seq')} = ?"
         )
         row = await asyncio.to_thread(
             self._fetch_one_adbc_sync, sql, (run_id, stream_id, batch_seq),
@@ -1434,52 +1252,30 @@ class GenericSQLConnector(BaseDestinationHandler):
         cursor_bytes: bytes,
         records_written: int,
     ) -> None:
-        qualified = self._adbc_quote_qualified(
+        """Record the commit row over ADBC: plain INSERT against the
+        enforced ``(run_id, stream_id, batch_seq)`` primary key.
+
+        This base implementation relies on the destination *enforcing* that
+        PK: a concurrent retry's duplicate INSERT raises IntegrityError,
+        which is the collision signal. A system whose primary keys are not
+        enforced (e.g. BigQuery) must override this method in its connector
+        package with a collision-safe statement (BigQuery uses ``MERGE …
+        WHEN NOT MATCHED THEN INSERT`` plus a rowcount check).
+        """
+        qualified = self.dialect.quote_qualified(
             state.schema_name, self.BATCH_COMMITS_TABLE
         )
-        if self._driver == "bigquery":
-            # BigQuery PRIMARY KEY is NOT ENFORCED (parser allows it
-            # only as a planner hint), so a plain INSERT racing a
-            # concurrent retry would produce two commit rows instead
-            # of one — no IntegrityError to detect. ``MERGE INTO ...
-            # WHEN NOT MATCHED THEN INSERT`` is atomic per-statement
-            # on BigQuery and gives the same idempotency the enforced
-            # PK provides on Snowflake / Postgres.
-            sql = (
-                f"MERGE INTO {qualified} t USING (\n"
-                f"  SELECT ? AS {self._adbc_quote_ident('run_id')}, "
-                f"? AS {self._adbc_quote_ident('stream_id')}, "
-                f"? AS {self._adbc_quote_ident('batch_seq')}, "
-                f"? AS {self._adbc_quote_ident('committed_cursor')}, "
-                f"? AS {self._adbc_quote_ident('records_written')}\n"
-                f") s\n"
-                f"ON t.{self._adbc_quote_ident('run_id')} = s.{self._adbc_quote_ident('run_id')} "
-                f"AND t.{self._adbc_quote_ident('stream_id')} = s.{self._adbc_quote_ident('stream_id')} "
-                f"AND t.{self._adbc_quote_ident('batch_seq')} = s.{self._adbc_quote_ident('batch_seq')}\n"
-                f"WHEN NOT MATCHED THEN INSERT ("
-                f"{self._adbc_quote_ident('run_id')}, "
-                f"{self._adbc_quote_ident('stream_id')}, "
-                f"{self._adbc_quote_ident('batch_seq')}, "
-                f"{self._adbc_quote_ident('committed_cursor')}, "
-                f"{self._adbc_quote_ident('records_written')}) "
-                f"VALUES (s.{self._adbc_quote_ident('run_id')}, "
-                f"s.{self._adbc_quote_ident('stream_id')}, "
-                f"s.{self._adbc_quote_ident('batch_seq')}, "
-                f"s.{self._adbc_quote_ident('committed_cursor')}, "
-                f"s.{self._adbc_quote_ident('records_written')})"
-            )
-        else:
-            sql = (
-                f"INSERT INTO {qualified} ("
-                f"{self._adbc_quote_ident('run_id')}, "
-                f"{self._adbc_quote_ident('stream_id')}, "
-                f"{self._adbc_quote_ident('batch_seq')}, "
-                f"{self._adbc_quote_ident('committed_cursor')}, "
-                f"{self._adbc_quote_ident('records_written')}) "
-                f"VALUES (?, ?, ?, ?, ?)"
-            )
+        sql = (
+            f"INSERT INTO {qualified} ("
+            f"{self.dialect.quote_ident('run_id')}, "
+            f"{self.dialect.quote_ident('stream_id')}, "
+            f"{self.dialect.quote_ident('batch_seq')}, "
+            f"{self.dialect.quote_ident('committed_cursor')}, "
+            f"{self.dialect.quote_ident('records_written')}) "
+            f"VALUES (?, ?, ?, ?, ?)"
+        )
         try:
-            rowcount = await asyncio.to_thread(
+            await asyncio.to_thread(
                 self._execute_adbc_dml_sync,
                 sql,
                 (run_id, stream_id, batch_seq, cursor_bytes, records_written),
@@ -1512,44 +1308,6 @@ class GenericSQLConnector(BaseDestinationHandler):
                 )
                 return
             raise
-        # BigQuery's MERGE-based commit-record path doesn't raise
-        # IntegrityError on a (run_id, stream_id, batch_seq) collision —
-        # MERGE matches the existing row and the WHEN NOT MATCHED INSERT
-        # silently no-ops with rowcount=0. Without this check, insert-mode
-        # duplication would slip through reported as success.
-        #
-        # This rowcount-as-collision invariant is tightly coupled to the
-        # exact MERGE SQL shape constructed above: a single-row constant
-        # source CTE plus a WHEN NOT MATCHED INSERT clause only. Adding
-        # a WHEN MATCHED UPDATE clause, or replacing the source CTE
-        # with a multi-row SELECT, breaks the invariant — rowcount could
-        # then legitimately be 0 for non-collision reasons. Do not add
-        # either without revisiting this branch.
-        if self._driver == "bigquery":
-            if rowcount == 0:
-                collision_marker = RuntimeError(
-                    "BigQuery _batch_commits MERGE no-op: a row for "
-                    f"({run_id!r}, {stream_id!r}, {batch_seq}) already exists; "
-                    "concurrent retry won"
-                )
-                self._handle_commit_collision(
-                    state, run_id, stream_id, batch_seq, collision_marker,
-                )
-                return
-            if rowcount < 0:
-                # PEP-249 -1 means "unavailable". The BQ ADBC driver
-                # documents non-negative counts on DML, so seeing -1
-                # here is suspicious — we can't distinguish a successful
-                # insert from a collision-no-op. Log loudly because
-                # insert-mode duplication would silently slip through.
-                logger.warning(
-                    "BigQuery _batch_commits MERGE returned rowcount=%r "
-                    "for (%s, %s, %s); cannot verify whether the commit "
-                    "row was inserted or no-op'd on existing PK collision. "
-                    "Insert-mode duplication may be silently masked. "
-                    "Check the adbc-driver-bigquery version.",
-                    rowcount, run_id, stream_id, batch_seq,
-                )
 
     def _handle_commit_collision(
         self,
@@ -1726,7 +1484,7 @@ class GenericSQLConnector(BaseDestinationHandler):
                         cast_batch,
                         mode="append",
                         db_schema_name=(
-                            self._normalize_adbc_schema(schema_name)
+                            self.dialect.normalize_schema(schema_name)
                             if schema_name else None
                         ),
                     )
@@ -1748,7 +1506,7 @@ class GenericSQLConnector(BaseDestinationHandler):
         schema_name: str,
         table_name: str,
     ) -> None:
-        qualified = self._adbc_quote_qualified(schema_name, table_name)
+        qualified = self.dialect.quote_qualified(schema_name, table_name)
         with self._adbc_op_lock:
             conn = self._reopen_adbc_if_needed_sync()
             try:
@@ -1769,41 +1527,6 @@ class GenericSQLConnector(BaseDestinationHandler):
             # RLock is reentrant: this same-thread acquire inside
             # _adbc_only_ingest_sync is safe.
             self._adbc_only_ingest_sync(cast_batch, schema_name, table_name)
-
-    def _build_adbc_stage_table_sql(
-        self,
-        stage_qualified: str,
-        target_qualified: str,
-    ) -> str:
-        """SQL to create an empty staging table shaped like the target.
-
-        Uses ``CREATE TABLE`` (not ``TEMP``) so the table lives in the
-        target schema across all drivers and the engine controls
-        cleanup explicitly via ``DROP TABLE``. Each driver has its own
-        column-copy syntax:
-
-        * Snowflake — ``CREATE TABLE … LIKE`` copies columns only.
-        * BigQuery — ``CREATE TABLE … LIKE`` is not supported in
-          GoogleSQL; use ``AS SELECT * FROM target WHERE FALSE``.
-        * Postgres — ``CREATE TABLE … (LIKE target INCLUDING DEFAULTS)``.
-
-        The previous design used TEMP tables for auto-cleanup, but BQ
-        TEMP tables require an explicit session (which the ADBC driver
-        does not open by default) and the per-driver TEMP+namespace
-        rules diverge enough that explicit DROP is simpler.
-        """
-        if self._driver == "snowflake":
-            return f"CREATE TABLE {stage_qualified} LIKE {target_qualified}"
-        if self._driver == "bigquery":
-            return (
-                f"CREATE TABLE {stage_qualified} AS "
-                f"SELECT * FROM {target_qualified} WHERE FALSE"
-            )
-        # Postgres / Redshift
-        return (
-            f"CREATE TABLE {stage_qualified} "
-            f"(LIKE {target_qualified} INCLUDING DEFAULTS)"
-        )
 
     def _merge_ingest_sync(
         self,
@@ -1836,8 +1559,8 @@ class GenericSQLConnector(BaseDestinationHandler):
         # retries (which may overlap before the previous DROP completes)
         # do not collide on the stage table name.
         stage_name = f"_analitiq_stage_{table_name}_{stage_token}"
-        target_qualified = self._adbc_quote_qualified(schema_name, table_name)
-        stage_qualified = self._adbc_quote_qualified(schema_name, stage_name)
+        target_qualified = self.dialect.quote_qualified(schema_name, table_name)
+        stage_qualified = self.dialect.quote_qualified(schema_name, stage_name)
         update_cols = [c for c in all_columns if c not in conflict_keys]
         if not update_cols:
             logger.warning(
@@ -1888,7 +1611,7 @@ class GenericSQLConnector(BaseDestinationHandler):
                 # extra DROP is one cheap statement per upsert.
                 cursor.execute(f"DROP TABLE IF EXISTS {stage_qualified}")
                 cursor.execute(
-                    self._build_adbc_stage_table_sql(stage_qualified, target_qualified)
+                    self.dialect.adbc_stage_table_sql(stage_qualified, target_qualified)
                 )
                 conn.commit()
                 cursor.adbc_ingest(
@@ -1901,22 +1624,22 @@ class GenericSQLConnector(BaseDestinationHandler):
                     # PUBLIC schema is matched when the connector
                     # declared lowercase ``public``.
                     db_schema_name=(
-                        self._normalize_adbc_schema(schema_name)
+                        self.dialect.normalize_schema(schema_name)
                         if schema_name else None
                     ),
                 )
                 conn.commit()
                 on_clause = " AND ".join(
-                    f"t.{self._adbc_quote_ident(k)} = s.{self._adbc_quote_ident(k)}"
+                    f"t.{self.dialect.quote_ident(k)} = s.{self.dialect.quote_ident(k)}"
                     for k in conflict_keys
                 )
                 set_clause = ", ".join(
-                    f"t.{self._adbc_quote_ident(c)} = s.{self._adbc_quote_ident(c)}"
+                    f"t.{self.dialect.quote_ident(c)} = s.{self.dialect.quote_ident(c)}"
                     for c in update_cols
                 )
-                insert_cols = ", ".join(self._adbc_quote_ident(c) for c in all_columns)
+                insert_cols = ", ".join(self.dialect.quote_ident(c) for c in all_columns)
                 insert_vals = ", ".join(
-                    f"s.{self._adbc_quote_ident(c)}" for c in all_columns
+                    f"s.{self.dialect.quote_ident(c)}" for c in all_columns
                 )
                 merge_sql = (
                     f"MERGE INTO {target_qualified} t USING {stage_qualified} s "
@@ -2082,7 +1805,9 @@ class GenericSQLConnector(BaseDestinationHandler):
         schema_name = database_object.get("schema")
 
         try:
-            await materialize_runtime(runtime, require_port=True)
+            await materialize_runtime(
+                runtime, require_port=True, sql_dialect=self.dialect
+            )
         except DETERMINISTIC_CONNECT_ERRORS:
             raise
         except Exception as e:
@@ -2271,12 +1996,12 @@ class GenericSQLConnector(BaseDestinationHandler):
                 "ADBC-only source requires a non-empty column projection"
             )
 
-        # The ADBC path quotes every identifier, so normalize the schema the
-        # same way the destination handler does (Snowflake lowercase
-        # ``public`` -> ``PUBLIC``) or the quoted name targets a different
-        # schema.
+        # The ADBC path quotes every identifier, so normalize the schema
+        # through the connector's dialect — the same rule the destination
+        # handler applies (e.g. Snowflake folds lowercase ``public`` ->
+        # ``PUBLIC``) — or the quoted name targets a different schema.
         effective_schema = (
-            normalize_adbc_schema(schema_name, driver) if schema_name else None
+            self.dialect.normalize_schema(schema_name) if schema_name else None
         )
 
         if cursor_field:
@@ -2393,17 +2118,19 @@ class GenericSQLConnector(BaseDestinationHandler):
     # server or engine orchestration — the control-plane calls them.
 
     async def list_schemas(self, runtime: ConnectionRuntime) -> List[str]:
-        return await _sql_list_schemas(runtime)
+        return await _sql_list_schemas(runtime, dialect=self.dialect)
 
     async def list_tables(
         self, runtime: ConnectionRuntime, schema: str
     ) -> List[str]:
-        return await _sql_list_tables(runtime, schema)
+        return await _sql_list_tables(runtime, schema, dialect=self.dialect)
 
     async def list_columns(
         self, runtime: ConnectionRuntime, schema: str, table: str
     ) -> Tuple[List[ColumnDef], List[str]]:
-        return await _sql_list_columns(runtime, schema, table)
+        return await _sql_list_columns(
+            runtime, schema, table, dialect=self.dialect
+        )
 
     async def create_table(
         self,
@@ -2413,4 +2140,6 @@ class GenericSQLConnector(BaseDestinationHandler):
         columns: List[ColumnDef],
         primary_keys: List[str],
     ) -> None:
-        await _sql_create_table(runtime, schema, table, columns, primary_keys)
+        await _sql_create_table(
+            runtime, schema, table, columns, primary_keys, dialect=self.dialect
+        )

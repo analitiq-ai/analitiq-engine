@@ -44,7 +44,6 @@ from cdk.rate_limiter import RateLimiter
 
 logger = logging.getLogger(__name__)
 
-TransportBuilder = Callable[[Mapping[str, Any]], Awaitable[Any]]
 
 
 # ---------------------------------------------------------------------------
@@ -159,13 +158,15 @@ def _apply_encoding(encoding: str, value: Any, *, binding: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# TLS materialization (database transports)
+# TLS resolution (database transports)
 #
-# Each driver speaks its own native SSL vocabulary. The engine resolves
-# the ``tls.mode`` and ``tls.ca_certificate`` refs to whatever strings
-# the connection stored and hands them to a driver-specific helper that
-# knows how to apply those strings to that driver's API. No shared
-# canonical set, no implicit translation.
+# Each driver speaks its own native SSL vocabulary. The RESOLUTION step
+# (engine/shell side) only extracts the stored ``tls.mode`` string and the
+# CA bundle PEM — both JSON-safe. The BUILD step (worker side) turns them
+# into the driver's connect argument via the connector dialect's
+# ``build_tls_connect_arg`` hook; the per-driver logic lives in each
+# connector package, never here. ``ca_ssl_context`` is the shared helper
+# those packages call to build a verifying SSLContext from a CA bundle.
 # ---------------------------------------------------------------------------
 
 
@@ -208,114 +209,17 @@ def _resolve_tls_mode(
     return mode, ca_value
 
 
-def _ca_ssl_context(ca_pem: str, *, check_hostname: bool) -> _ssl.SSLContext:
+def ca_ssl_context(ca_pem: str, *, check_hostname: bool) -> _ssl.SSLContext:
+    """Build a verifying SSLContext from a PEM CA bundle.
+
+    Shared helper for connector packages' ``build_tls_connect_arg``
+    implementations (postgres verify-ca/-full, MySQL VERIFY_CA/_IDENTITY).
+    """
     ctx = _ssl.create_default_context(cadata=ca_pem)
     ctx.check_hostname = check_hostname
     ctx.verify_mode = _ssl.CERT_REQUIRED
     return ctx
 
-
-def _materialize_tls_postgres(mode: str, ca_pem: Optional[str]) -> Any:
-    """Apply libpq-native SSL modes to asyncpg.
-
-    asyncpg accepts ``disable``/``allow``/``prefer``/``require`` as
-    strings; ``verify-ca``/``verify-full`` need an explicit SSLContext
-    built from the connection's CA bundle.
-    """
-    if mode in ("disable", "allow", "prefer", "require"):
-        return mode
-    if mode == "verify-ca":
-        if not ca_pem:
-            raise ValueError(
-                "tls.mode='verify-ca' requires tls.ca_certificate to resolve "
-                "to a PEM certificate bundle"
-            )
-        return _ca_ssl_context(ca_pem, check_hostname=False)
-    if mode == "verify-full":
-        if not ca_pem:
-            raise ValueError(
-                "tls.mode='verify-full' requires tls.ca_certificate to resolve "
-                "to a PEM certificate bundle"
-            )
-        return _ca_ssl_context(ca_pem, check_hostname=True)
-    raise ValueError(
-        f"postgresql tls.mode {mode!r} not recognized; expected one of: "
-        "disable, allow, prefer, require, verify-ca, verify-full"
-    )
-
-
-def _materialize_tls_mysql(mode: str, ca_pem: Optional[str]) -> Any:
-    """Apply MySQL-native SSL modes to aiomysql.
-
-    aiomysql accepts ``False`` (no TLS), an SSLContext, or no argument at
-    all — it does not accept native string modes. MySQL's vocabulary is
-    ``DISABLED`` / ``PREFERRED`` / ``REQUIRED`` / ``VERIFY_CA`` /
-    ``VERIFY_IDENTITY``; comparison is case-insensitive on the stored
-    value.
-    """
-    canonical = mode.upper()
-    if canonical == "DISABLED":
-        return False
-    if canonical in ("PREFERRED", "REQUIRED"):
-        # Negotiate TLS without verifying the server certificate (the
-        # connection didn't ship a CA bundle). ``check_hostname`` must be
-        # False whenever ``verify_mode`` is ``CERT_NONE`` or CPython raises.
-        ctx = _ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = _ssl.CERT_NONE
-        return ctx
-    if canonical == "VERIFY_CA":
-        if not ca_pem:
-            raise ValueError(
-                "tls.mode='VERIFY_CA' requires tls.ca_certificate to resolve "
-                "to a PEM certificate bundle"
-            )
-        return _ca_ssl_context(ca_pem, check_hostname=False)
-    if canonical == "VERIFY_IDENTITY":
-        if not ca_pem:
-            raise ValueError(
-                "tls.mode='VERIFY_IDENTITY' requires tls.ca_certificate to resolve "
-                "to a PEM certificate bundle"
-            )
-        return _ca_ssl_context(ca_pem, check_hostname=True)
-    raise ValueError(
-        f"mysql tls.mode {mode!r} not recognized; expected one of: "
-        "DISABLED, PREFERRED, REQUIRED, VERIFY_CA, VERIFY_IDENTITY"
-    )
-
-
-def _materialize_tls_for_driver(
-    driver: str,
-    tls_spec: Optional[Mapping[str, Any]],
-    resolver: Resolver,
-) -> Any:
-    """Dispatch TLS materialization based on the SQLAlchemy driver string.
-
-    Each branch speaks its driver's native SSL vocabulary. Connectors
-    whose driver isn't listed here fall through to a portable default:
-    if a CA bundle was provided, build a verifying SSLContext; otherwise
-    pass the resolved mode through and let the downstream materializer
-    decide.
-
-    Returns the value to place in the engine's ``connect_args["ssl"]``
-    (a mode string, an SSLContext, ``False``, or ``None`` when no TLS
-    is configured).
-    """
-    mode, ca_pem = _resolve_tls_mode(tls_spec, resolver)
-    if mode is None:
-        return None
-
-    base_driver = driver.split("+", 1)[0].lower()
-
-    if base_driver in ("postgresql", "postgres"):
-        return _materialize_tls_postgres(mode, ca_pem)
-
-    if base_driver in ("mysql", "mariadb"):
-        return _materialize_tls_mysql(mode, ca_pem)
-
-    if ca_pem:
-        return _ca_ssl_context(ca_pem, check_hostname=False)
-    return mode
 
 
 # ---------------------------------------------------------------------------
@@ -373,9 +277,15 @@ class SqlAlchemyTransport:
     dialect: str
 
 
-async def build_sqlalchemy_transport(
+def resolve_sqlalchemy_spec(
     spec: Mapping[str, Any], *, resolver: Resolver
-) -> SqlAlchemyTransport:
+) -> Dict[str, Any]:
+    """Resolve a sqlalchemy transport spec to JSON-safe values (no objects).
+
+    Output carries everything the worker-side build needs: the rendered
+    DSN (secrets in place), the resolved TLS inputs as plain strings, and
+    the computed engine kwargs. Safe to serialize into a worker bootstrap.
+    """
     driver = spec.get("driver")
     if not isinstance(driver, str) or not driver:
         raise ValueError(
@@ -390,15 +300,11 @@ async def build_sqlalchemy_transport(
         )
     dsn = _render_url_template_dsn(raw_dsn, resolver)
 
-    connect_args: Dict[str, Any] = {}
-    tls_value = _materialize_tls_for_driver(driver, spec.get("tls"), resolver)
-    if tls_value is not None:
-        connect_args["ssl"] = tls_value
+    mode, ca_pem = _resolve_tls_mode(spec.get("tls"), resolver)
 
     options = spec.get("options") or {}
     if not isinstance(options, Mapping):
         raise TypeError("sqlalchemy transport `options` must be an object")
-
     engine_kwargs: Dict[str, Any] = {}
     if "pool_size" in options:
         engine_kwargs["pool_size"] = int(options["pool_size"])
@@ -408,7 +314,46 @@ async def build_sqlalchemy_transport(
     if "echo" in options:
         engine_kwargs["echo"] = bool(options["echo"])
 
-    engine = create_async_engine(dsn, connect_args=connect_args, **engine_kwargs)
+    return {
+        "transport_type": "sqlalchemy",
+        "driver": driver,
+        "dsn": dsn,
+        "tls": {"mode": mode, "ca_pem": ca_pem} if mode is not None else None,
+        "engine_kwargs": engine_kwargs,
+    }
+
+
+async def build_sqlalchemy_from_spec(
+    resolved: Mapping[str, Any], *, sql_dialect: Any = None
+) -> SqlAlchemyTransport:
+    """Build the SQLAlchemy transport from a resolved spec (worker side).
+
+    TLS connect arguments are produced by the connector dialect's
+    ``build_tls_connect_arg`` hook — the per-driver SSL vocabulary lives in
+    the connector package. A declared TLS mode without a dialect that
+    implements the hook fails loudly.
+    """
+    driver = resolved["driver"]
+    connect_args: Dict[str, Any] = {}
+    tls = resolved.get("tls")
+    if tls is not None and tls.get("mode") is not None:
+        if sql_dialect is None:
+            raise ValueError(
+                f"transport for driver {driver!r} declares tls but no "
+                f"connector dialect was supplied; the connector package's "
+                f"dialect implements build_tls_connect_arg"
+            )
+        ssl_value = sql_dialect.build_tls_connect_arg(
+            tls["mode"], tls.get("ca_pem")
+        )
+        if ssl_value is not None:
+            connect_args["ssl"] = ssl_value
+
+    engine = create_async_engine(
+        resolved["dsn"],
+        connect_args=connect_args,
+        **dict(resolved.get("engine_kwargs") or {}),
+    )
     try:
         async with engine.connect() as conn:
             await conn.execute(_sa_text("SELECT 1"))
@@ -444,13 +389,15 @@ async def build_sqlalchemy_transport(
 # ---------------------------------------------------------------------------
 
 
-# Driver -> dotted ADBC dbapi module path. Closed enum: extending this
-# table requires a matching change in the published connector schema.
-_ADBC_DRIVER_MODULES: Dict[str, str] = {
-    "postgresql": "adbc_driver_postgresql.dbapi",
-    "snowflake": "adbc_driver_snowflake.dbapi",
-    "bigquery": "adbc_driver_bigquery.dbapi",
-}
+# ADBC dbapi modules follow the upstream packaging convention
+# ``adbc_driver_{driver}.dbapi`` (adbc-driver-postgresql ships
+# adbc_driver_postgresql, etc.). The engine derives the module from the
+# driver string instead of keeping a table — the published connector
+# schema's ``AdbcTransport.driver`` enum remains the validator of which
+# drivers connectors may declare, and the connector package ships the
+# matching wheel in its requirements.
+def _adbc_dbapi_module_path(driver: str) -> str:
+    return f"adbc_driver_{driver.lower()}.dbapi"
 
 
 @dataclass(frozen=True)
@@ -508,38 +455,22 @@ def _resolve_db_kwargs(
     return out
 
 
-async def build_adbc_transport(
+def resolve_adbc_spec(
     spec: Mapping[str, Any], *, resolver: Resolver
-) -> AdbcTransport:
-    """Materialize an ADBC transport from a resolved connector spec.
+) -> Dict[str, Any]:
+    """Resolve an adbc transport spec to JSON-safe values (no objects).
 
     The spec shape matches ``AdbcTransport`` in the published connector
-    schema: ``driver`` is required and closed to the registry,
-    ``dsn`` and ``db_kwargs`` are both optional but at least one must
-    be present. Drivers that accept all connection state via
-    ``db_kwargs`` (Snowflake, BigQuery) typically omit ``dsn``.
-
-    The probe ``SELECT 1`` fires at materialize time so a bad DSN,
-    missing credential, or network reachability problem fails before
-    the engine starts a pipeline run, not on the first batch.
+    schema: ``driver`` is required (the schema enum validates its value),
+    ``dsn`` and ``db_kwargs`` are both optional but at least one must be
+    present. Drivers that accept all connection state via ``db_kwargs``
+    (Snowflake, BigQuery) typically omit ``dsn``.
     """
     driver = spec.get("driver")
     if not isinstance(driver, str) or not driver:
-        raise ValueError(
-            "adbc transport requires `driver` (one of "
-            f"{sorted(_ADBC_DRIVER_MODULES)})"
-        )
+        raise ValueError("adbc transport requires a non-empty `driver`")
     driver = driver.lower()
-    driver_module_path = _ADBC_DRIVER_MODULES.get(driver)
-    if driver_module_path is None:
-        raise ValueError(
-            f"adbc transport driver {driver!r} is not registered; "
-            f"known drivers: {sorted(_ADBC_DRIVER_MODULES)}"
-        )
 
-    # Validate the spec shape before touching the driver package so a
-    # schema-violating connector still raises a useful spec error even
-    # in environments where the driver wheel isn't installed.
     raw_dsn = spec.get("dsn")
     uri: Optional[str] = None
     if raw_dsn is not None:
@@ -558,13 +489,36 @@ async def build_adbc_transport(
             "(schema anyOf constraint)"
         )
 
+    return {
+        "transport_type": "adbc",
+        "driver": driver,
+        "uri": uri,
+        "db_kwargs": db_kwargs,
+    }
+
+
+async def build_adbc_from_spec(
+    resolved: Mapping[str, Any], *, sql_dialect: Any = None
+) -> AdbcTransport:
+    """Build the ADBC transport from a resolved spec (worker side).
+
+    The probe ``SELECT 1`` fires at build time so a bad DSN, missing
+    credential, or network reachability problem fails before the engine
+    starts a pipeline run, not on the first batch.
+    """
+    driver = resolved["driver"]
+    uri = resolved.get("uri")
+    db_kwargs = dict(resolved.get("db_kwargs") or {})
+
+    driver_module_path = _adbc_dbapi_module_path(driver)
     try:
         driver_module = importlib.import_module(driver_module_path)
     except ImportError as exc:
         raise RuntimeError(
             f"ADBC driver package not installed for driver={driver!r}: "
-            f"{driver_module_path} is not importable ({exc}). Install the "
-            f"matching `adbc-driver-*` extra."
+            f"{driver_module_path} is not importable ({exc}). The connector "
+            f"package ships the matching adbc-driver-* wheel — install the "
+            f"connector."
         ) from exc
 
     def _open_connection() -> Any:
@@ -613,21 +567,10 @@ class HttpTransport:
     rate_limiter: Optional[RateLimiter] = None
 
 
-async def build_http_transport(
+def resolve_http_spec(
     spec: Mapping[str, Any], *, resolver: Resolver
-) -> HttpTransport:
-    # aiohttp is the only ``api`` extra dependency the CDK pulls; import it
-    # lazily so a database-only (control-plane / SQL) install never needs it.
-    try:
-        import aiohttp
-    except ImportError as exc:
-        reraise_for_missing_extra(
-            exc,
-            feature="the HTTP transport (API connectors)",
-            extra="api",
-            modules=("aiohttp",),
-        )
-
+) -> Dict[str, Any]:
+    """Resolve an http transport spec to JSON-safe values (no objects)."""
     raw_base = spec.get("base_url")
     if raw_base is None:
         raise ValueError("http transport `base_url` is required")
@@ -651,10 +594,9 @@ async def build_http_transport(
     timeout_seconds = spec.get("timeout_seconds")
     if timeout_seconds is None:
         timeout_seconds = 30
-    timeout = aiohttp.ClientTimeout(total=float(timeout_seconds))
 
     raw_rate_limit = spec.get("rate_limit") or {}
-    rate_limiter: Optional[RateLimiter] = None
+    rate_limit: Optional[Dict[str, int]] = None
     if raw_rate_limit:
         if not isinstance(raw_rate_limit, Mapping):
             raise TypeError("http transport `rate_limit` must be an object")
@@ -666,15 +608,52 @@ async def build_http_transport(
                 "and `time_window_seconds` (or neither)"
             )
         if max_requests is not None and time_window is not None:
-            rate_limiter = RateLimiter(
-                max_requests=int(max_requests), time_window=int(time_window),
-            )
+            rate_limit = {
+                "max_requests": int(max_requests),
+                "time_window_seconds": int(time_window),
+            }
+
+    return {
+        "transport_type": "http",
+        "base_url": base_url,
+        "headers": headers,
+        "timeout_seconds": float(timeout_seconds),
+        "rate_limit": rate_limit,
+    }
+
+
+async def build_http_from_spec(
+    resolved: Mapping[str, Any], *, sql_dialect: Any = None
+) -> HttpTransport:
+    """Build the HTTP transport from a resolved spec (worker side)."""
+    # aiohttp is the only ``api`` extra dependency the CDK pulls; import it
+    # lazily so a database-only (control-plane / SQL) install never needs it.
+    try:
+        import aiohttp
+    except ImportError as exc:
+        reraise_for_missing_extra(
+            exc,
+            feature="the HTTP transport (API connectors)",
+            extra="api",
+            modules=("aiohttp",),
+        )
+
+    headers = dict(resolved.get("headers") or {})
+    timeout = aiohttp.ClientTimeout(total=float(resolved["timeout_seconds"]))
+
+    rate_limiter: Optional[RateLimiter] = None
+    rl = resolved.get("rate_limit")
+    if rl:
+        rate_limiter = RateLimiter(
+            max_requests=int(rl["max_requests"]),
+            time_window=int(rl["time_window_seconds"]),
+        )
 
     connector = aiohttp.TCPConnector(limit=100, limit_per_host=10)
     session = aiohttp.ClientSession(timeout=timeout, connector=connector, headers=headers)
     return HttpTransport(
         session=session,
-        base_url=base_url,
+        base_url=resolved["base_url"],
         headers=headers,
         rate_limiter=rate_limiter,
     )
@@ -685,71 +664,74 @@ async def build_http_transport(
 # ---------------------------------------------------------------------------
 
 
-_TRANSPORT_BUILDERS: Dict[str, TransportBuilder] = {}
+@dataclass(frozen=True)
+class TransportKind:
+    """A registered transport type: its resolve and build phases.
+
+    ``resolve_spec(spec, resolver)`` runs on the trusted side and returns a
+    JSON-safe dict (secrets in values, no constructed objects) — safe to
+    hand a connector worker as part of its launch bootstrap.
+    ``build_from_spec(resolved, sql_dialect=...)`` runs wherever the
+    connector executes and constructs the live transport objects.
+    """
+
+    resolve_spec: Any
+    build_from_spec: Any
 
 
-def register_transport_kind(transport_type: str, builder: TransportBuilder) -> None:
-    """Register a builder for a connector ``transport_type``."""
+_TRANSPORT_KINDS: Dict[str, TransportKind] = {}
+
+
+def register_transport_kind(
+    transport_type: str, *, resolve_spec: Any, build_from_spec: Any
+) -> None:
+    """Register the resolve/build pair for a connector ``transport_type``."""
     if not isinstance(transport_type, str) or not transport_type:
         raise ValueError("transport_type must be a non-empty string")
-    if not callable(builder):
+    if not callable(resolve_spec) or not callable(build_from_spec):
         raise TypeError(
-            f"transport builder for {transport_type!r} must be callable; "
-            f"got {type(builder).__name__}"
+            f"transport kind {transport_type!r} requires callable "
+            f"resolve_spec and build_from_spec"
         )
-    if transport_type in _TRANSPORT_BUILDERS:
+    if transport_type in _TRANSPORT_KINDS:
         raise ValueError(
             f"transport_type {transport_type!r} already registered; "
             f"call unregister_transport_kind first"
         )
-    _TRANSPORT_BUILDERS[transport_type] = builder
+    _TRANSPORT_KINDS[transport_type] = TransportKind(
+        resolve_spec=resolve_spec, build_from_spec=build_from_spec
+    )
 
 
 def unregister_transport_kind(transport_type: str) -> None:
-    if transport_type not in _TRANSPORT_BUILDERS:
+    if transport_type not in _TRANSPORT_KINDS:
         raise KeyError(
             f"transport_type {transport_type!r} not registered; "
             f"registered: {registered_transport_kinds()}"
         )
-    del _TRANSPORT_BUILDERS[transport_type]
+    del _TRANSPORT_KINDS[transport_type]
 
 
 def registered_transport_kinds() -> list[str]:
-    return sorted(_TRANSPORT_BUILDERS)
+    return sorted(_TRANSPORT_KINDS)
 
 
-register_transport_kind("sqlalchemy", build_sqlalchemy_transport)
-register_transport_kind("adbc", build_adbc_transport)
-register_transport_kind("http", build_http_transport)
+register_transport_kind(
+    "sqlalchemy",
+    resolve_spec=resolve_sqlalchemy_spec,
+    build_from_spec=build_sqlalchemy_from_spec,
+)
+register_transport_kind(
+    "adbc", resolve_spec=resolve_adbc_spec, build_from_spec=build_adbc_from_spec
+)
+register_transport_kind(
+    "http", resolve_spec=resolve_http_spec, build_from_spec=build_http_from_spec
+)
 
 
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
-
-
-async def build_transport(
-    connector: Mapping[str, Any],
-    *,
-    transport_ref: Optional[str] = None,
-    context: ResolutionContext,
-):
-    """Materialize a transport from a connector definition."""
-    _ref, spec = _select_transport(connector, transport_ref)
-    transport_type = spec.get("transport_type")
-    if not transport_type:
-        raise ValueError(
-            f"Resolved transport spec missing `transport_type`; connector "
-            f"{connector.get('connector_id')!r}, transport {transport_ref!r}"
-        )
-    builder = _TRANSPORT_BUILDERS.get(transport_type)
-    if builder is None:
-        raise NotImplementedError(
-            f"Unsupported transport_type: {transport_type!r}; "
-            f"registered: {registered_transport_kinds()}"
-        )
-    resolver = Resolver(context, functions=DEFAULT_FUNCTIONS)
-    return await builder(spec, resolver=resolver)
 
 
 def resolve_transport_spec(
@@ -758,12 +740,53 @@ def resolve_transport_spec(
     transport_ref: Optional[str] = None,
     context: ResolutionContext,
 ) -> Dict[str, Any]:
-    """Resolve a transport spec into a primitives-only dict.
+    """Resolve a connector's transport into a JSON-safe spec (trusted side).
 
-    Used by introspection callers that need the pre-build dict (e.g.
-    tests asserting DSN rendering). Production code should call
-    :func:`build_transport` instead.
+    The output contains rendered/resolved values only (DSN with secrets in
+    place, db_kwargs, TLS mode + CA PEM, headers, engine kwargs) — no
+    SQLAlchemy engines, sessions, SSLContexts, or driver closures. It is
+    what a connector worker receives in its launch bootstrap.
     """
     _ref, merged = _select_transport(connector, transport_ref)
+    transport_type = merged.get("transport_type")
+    if not transport_type:
+        raise ValueError(
+            f"Resolved transport spec missing `transport_type`; connector "
+            f"{connector.get('connector_id')!r}, transport {transport_ref!r}"
+        )
+    kind = _TRANSPORT_KINDS.get(transport_type)
+    if kind is None:
+        raise NotImplementedError(
+            f"Unsupported transport_type: {transport_type!r}; "
+            f"registered: {registered_transport_kinds()}"
+        )
     resolver = Resolver(context, functions=DEFAULT_FUNCTIONS)
-    return resolver.resolve(merged)
+    return kind.resolve_spec(merged, resolver=resolver)
+
+
+async def build_transport_from_spec(
+    resolved: Mapping[str, Any], *, sql_dialect: Any = None
+):
+    """Build a live transport from a resolved spec (connector side)."""
+    transport_type = resolved.get("transport_type")
+    kind = _TRANSPORT_KINDS.get(transport_type or "")
+    if kind is None:
+        raise NotImplementedError(
+            f"Unsupported transport_type: {transport_type!r}; "
+            f"registered: {registered_transport_kinds()}"
+        )
+    return await kind.build_from_spec(resolved, sql_dialect=sql_dialect)
+
+
+async def build_transport(
+    connector: Mapping[str, Any],
+    *,
+    transport_ref: Optional[str] = None,
+    context: ResolutionContext,
+    sql_dialect: Any = None,
+):
+    """Resolve and build in one step (in-process path: control-plane, tests)."""
+    resolved = resolve_transport_spec(
+        connector, transport_ref=transport_ref, context=context
+    )
+    return await build_transport_from_spec(resolved, sql_dialect=sql_dialect)

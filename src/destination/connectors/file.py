@@ -37,8 +37,8 @@ class FileDestinationHandler(BaseDestinationHandler):
     - Manifest-based idempotency tracking
     - Configurable file paths with partitioning
 
-    Configuration:
-    - connector_type: "file" or "s3"
+    The storage backend follows the runtime's connector kind ("file" or
+    "s3"). Configuration:
     - file_format: Output format (jsonl, csv, parquet). Default: jsonl
     - path: Base path for files (required for local storage)
     - bucket: S3 bucket name (required for S3 storage)
@@ -87,7 +87,10 @@ class FileDestinationHandler(BaseDestinationHandler):
         runtime.acquire()
         await runtime.materialize()
         connection_config = runtime.resolved_config
-        self._connector_type = connection_config.get("connector_type", "file")
+        # The kind lives on the runtime (resolved from the connector
+        # definition), not in the connection config — an s3 connection's
+        # JSON carries no "connector_type" key.
+        self._connector_type = runtime.connector_type
         self._runtime = runtime
 
         try:

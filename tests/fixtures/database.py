@@ -13,53 +13,54 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from cdk.resolver import ResolutionContext
-from cdk.transport_factory import build_sqlalchemy_transport, resolve_transport_spec
+from cdk.transport_factory import build_transport
 
 
 def _postgres_connector_spec(driver_string: str) -> dict:
-    """Build a minimal postgres connector definition for fixtures."""
+    """Build a minimal postgres connector definition for fixtures.
+
+    Matches the current connector schema shape (``transport_type`` +
+    structured ``dsn`` bindings). No ``tls`` block: the TLS connect-arg
+    vocabulary lives in the postgres connector package's dialect, which the
+    engine repo does not depend on; the fixture targets a local test
+    database over plaintext.
+    """
     return {
-        "slug": "postgres-test-fixture",
-        "connector_type": "database",
+        "connector_id": "postgres-test-fixture",
+        "kind": "database",
         "default_transport": "database",
-        "derived": {
-            "dsn_username": {
-                "function": "url_encode",
-                "input": {"ref": "connection.parameters.username"},
-            },
-            "dsn_password": {
-                "function": "url_encode",
-                "input": {"ref": "secrets.password"},
-            },
-        },
         "transports": {
             "database": {
-                "kind": "sqlalchemy",
+                "transport_type": "sqlalchemy",
                 "driver": driver_string,
                 "dsn": {
+                    "kind": "url_template",
                     "template": (
                         f"{driver_string}://"
-                        "${derived.dsn_username}:${derived.dsn_password}"
-                        "@${connection.parameters.host}:${connection.parameters.port}"
-                        "/${connection.parameters.database}"
-                    )
-                },
-                "connect_args": {
-                    "ssl": {
-                        "function": "lookup",
-                        "input": {"ref": "connection.parameters.ssl_mode"},
-                        "map": {
-                            "disable": False,
-                            "prefer": {
-                                "verify_mode": "CERT_NONE",
-                                "check_hostname": False,
-                            },
-                            "require": {
-                                "verify_mode": "CERT_NONE",
-                                "check_hostname": False,
-                            },
+                        "{username}:{password}@{host}:{port}/{database}"
+                    ),
+                    "bindings": {
+                        "username": {
+                            "value": {"ref": "connection.parameters.username"},
+                            "encoding": "url_userinfo",
                         },
-                    }
+                        "password": {
+                            "value": {"ref": "secrets.password"},
+                            "encoding": "url_userinfo",
+                        },
+                        "host": {
+                            "value": {"ref": "connection.parameters.host"},
+                            "encoding": "host",
+                        },
+                        "port": {
+                            "value": {"ref": "connection.parameters.port"},
+                            "encoding": "raw",
+                        },
+                        "database": {
+                            "value": {"ref": "connection.parameters.database"},
+                            "encoding": "url_path_segment",
+                        },
+                    },
                 },
             }
         },
@@ -113,8 +114,7 @@ async def postgres_driver():
         connection={"parameters": parameters, "selections": {}, "discovered": {}},
         secrets=secrets,
     )
-    spec = resolve_transport_spec(connector, context=context)
-    transport = await build_sqlalchemy_transport(spec)
+    transport = await build_transport(connector, context=context)
     try:
         yield transport.engine, transport.dialect
     finally:

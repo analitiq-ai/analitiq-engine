@@ -379,7 +379,12 @@ class TestControlPlaneDelegators:
             assert await connector.list_columns(runtime, "public", "orders") == ([], [])
             await connector.create_table(runtime, "public", "orders", [], [])
 
-        ls.assert_awaited_once_with(runtime)
-        lt.assert_awaited_once_with(runtime, "public")
-        lc.assert_awaited_once_with(runtime, "public", "orders")
-        ct.assert_awaited_once_with(runtime, "public", "orders", [], [])
+        # Each delegator forwards the connector instance's own dialect object
+        # as the required keyword (identity, not ANY).
+        dialect = connector.dialect
+        ls.assert_awaited_once_with(runtime, dialect=dialect)
+        lt.assert_awaited_once_with(runtime, "public", dialect=dialect)
+        lc.assert_awaited_once_with(runtime, "public", "orders", dialect=dialect)
+        ct.assert_awaited_once_with(
+            runtime, "public", "orders", [], [], dialect=dialect
+        )

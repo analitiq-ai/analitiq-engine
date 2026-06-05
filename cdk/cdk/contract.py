@@ -39,6 +39,9 @@ class ColumnDef:
     canonical_type: str
     nullable: bool = True
     primary_key: bool = False
+    #: Optional SQL DEFAULT expression, passed through verbatim into DDL
+    #: (e.g. ``"now()"``, ``"CURRENT_TIMESTAMP"``). Never a Python value.
+    default: str | None = None
 
 
 # ---- DISCOVER (control-plane reads; implemented in a later phase) ----------

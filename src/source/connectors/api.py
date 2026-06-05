@@ -23,21 +23,23 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import asdict
-from datetime import datetime, timezone
+from datetime import timezone
 from typing import Any, AsyncIterator, Dict, List, Optional
 
 import pyarrow as pa
 
-from .base import BaseConnector, ConnectionError, ReadError
+from .base import BaseConnector, ConnectionError, ReadError, TransientReadError
 from cdk.schema_contract import SchemaContract
-from ...models.state import CursorField, StreamCursor, StreamStats
 from cdk.connection_runtime import ConnectionRuntime
+from cdk.types import CheckpointStore
 from ...shared.expressions import resolve_value_expression
 from ...shared.http_utils import join_url
-from ...state.state_manager import StateManager
 
 logger = logging.getLogger(__name__)
+
+# HTTP statuses retrying can heal: request timeout, rate limit, upstream
+# outages. Everything else non-200 is a deterministic contract/config error.
+_TRANSIENT_HTTP_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
 
 
 class APIConnector(BaseConnector):
@@ -91,7 +93,7 @@ class APIConnector(BaseConnector):
         runtime: ConnectionRuntime,
         config: Dict[str, Any],
         *,
-        checkpoint: StateManager,
+        checkpoint: CheckpointStore,
         stream_name: str,
         partition: Optional[Dict[str, Any]] = None,
         batch_size: int = 1000,
@@ -100,12 +102,12 @@ class APIConnector(BaseConnector):
 
         ``runtime`` is the only connection input (the ``Readable`` contract):
         this connector opens the session on entry and closes it on exit, so no
-        prior ``connect()`` is required. ``checkpoint`` is typed as the concrete
-        :class:`StateManager` rather than the bare ``CheckpointStore`` Protocol
-        because the incremental path calls ``save_stream_checkpoint`` (not on
-        the minimal store); the engine always passes its ``StateManager``. Each
-        yielded batch corresponds to one upstream page; the destination realigns
-        to its declared schema via :meth:`SchemaContract.cast_arrow_batch`.
+        prior ``connect()`` is required. ``checkpoint`` is the minimal
+        ``CheckpointStore`` Protocol — the same ``{"cursor": value}`` round
+        trip every source connector uses, so the worker's relay facade and the
+        engine's ``StateManager`` are interchangeable here. Each yielded batch
+        corresponds to one upstream page; the destination realigns to its
+        declared schema via :meth:`SchemaContract.cast_arrow_batch`.
 
         ``connect()`` runs inside the ``try`` so a connect/materialize failure
         still reaches ``disconnect()`` in the ``finally`` and releases the
@@ -128,7 +130,7 @@ class APIConnector(BaseConnector):
         self,
         config: Dict[str, Any],
         *,
-        checkpoint: StateManager,
+        checkpoint: CheckpointStore,
         stream_name: str,
         partition: Optional[Dict[str, Any]] = None,
         batch_size: int = 1000,
@@ -223,16 +225,20 @@ class APIConnector(BaseConnector):
             batch_count += 1
             total_records += len(deduped)
             if cursor_field:
-                self._save_checkpoint(
-                    checkpoint=checkpoint,
-                    stream_name=stream_name,
-                    partition=partition,
-                    last_record=deduped[-1],
-                    cursor_field=cursor_field,
-                    tie_breaker_fields=tie_breaker_fields,
-                    total_records=total_records,
-                    batch_count=batch_count,
-                )
+                cursor_value = deduped[-1].get(cursor_field)
+                if cursor_value is not None:
+                    await checkpoint.save_cursor(
+                        stream_name, partition, {"cursor": cursor_value}
+                    )
+                else:
+                    # Safe under at-least-once + upsert (resume re-reads),
+                    # but visible: an author debugging "incremental stream
+                    # keeps re-reading its tail" needs this signal.
+                    logger.debug(
+                        "stream %r: last record has no %r value; "
+                        "cursor not advanced for batch %d",
+                        stream_name, cursor_field, batch_count,
+                    )
 
     @staticmethod
     def _resolve_records_items_schema(
@@ -330,7 +336,7 @@ class APIConnector(BaseConnector):
         self,
         params: Dict[str, Any],
         read_spec: Dict[str, Any],
-        checkpoint: StateManager,
+        checkpoint: CheckpointStore,
         stream_name: str,
         partition: Dict[str, Any],
         cursor_field: Optional[str],
@@ -351,7 +357,7 @@ class APIConnector(BaseConnector):
             )
             return
         cursor_state = await checkpoint.get_cursor(stream_name, partition)
-        cursor_value = (cursor_state or {}).get("primary", {}).get("value")
+        cursor_value = (cursor_state or {}).get("cursor")
         if not cursor_value:
             logger.info(
                 "No prior cursor for stream %r; first run performs full replication",
@@ -546,10 +552,15 @@ class APIConnector(BaseConnector):
                 body = await response.text()
                 body_snippet = body[:500]
                 logger.error("API %d %s %s: %s", response.status, method, url, body_snippet)
-                raise ReadError(
+                detail = (
                     f"API request failed: {method} {url} -> status {response.status}; "
                     f"params={params}; body[:500]={body_snippet!r}"
                 )
+                # Rate limits and upstream outages heal on retry; other
+                # statuses (bad request, auth, missing endpoint) do not.
+                if response.status in _TRANSIENT_HTTP_STATUSES:
+                    raise TransientReadError(detail)
+                raise ReadError(detail)
             data = await response.json()
         self.metrics["records_read"] += 0  # incremented below per page
         records = _extract_records(data, records_ref)
@@ -578,48 +589,6 @@ class APIConnector(BaseConnector):
             for r in batch
             if _is_record_new(r, bookmark, cursor_field, tie_breaker_fields or [])
         ]
-
-    def _save_checkpoint(
-        self,
-        *,
-        checkpoint: StateManager,
-        stream_name: str,
-        partition: Dict[str, Any],
-        last_record: Dict[str, Any],
-        cursor_field: str,
-        tie_breaker_fields: List[str],
-        total_records: int,
-        batch_count: int,
-    ) -> None:
-        cursor_value = last_record.get(cursor_field)
-        if cursor_value is None:
-            return
-        cursor = StreamCursor(
-            primary=CursorField(field=cursor_field, value=cursor_value, inclusive=True)
-        )
-        if tie_breaker_fields:
-            tiebreakers = []
-            for field_name in tie_breaker_fields:
-                value = _get_nested_field(last_record, field_name)
-                if value is not None:
-                    tiebreakers.append(
-                        CursorField(field=field_name, value=value, inclusive=True)
-                    )
-            if tiebreakers:
-                cursor.tiebreakers = tiebreakers
-        stats = StreamStats(
-            records_synced=total_records,
-            batches_written=batch_count,
-            last_checkpoint_at=datetime.now(timezone.utc),
-            errors_since_checkpoint=0,
-        )
-        checkpoint.save_stream_checkpoint(
-            stream_name=stream_name,
-            partition=partition,
-            cursor=asdict(cursor),
-            hwm=cursor_value,
-            stats=asdict(stats),
-        )
 
     # ------------------------------------------------------------------
     # Base interface stubs

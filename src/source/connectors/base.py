@@ -211,7 +211,22 @@ class SchemaError(ConnectorError):
 
 
 class ReadError(ConnectorError):
-    """Exception raised during read operations."""
+    """Exception raised during read operations.
+
+    Reserved for failures retrying cannot heal: contract/configuration
+    problems and non-transient HTTP statuses. The worker classifies it
+    deterministic (the stream fails fatally instead of retrying).
+    """
+
+    pass
+
+
+class TransientReadError(ConnectorError):
+    """A read failure that retrying can heal (rate limit, upstream outage).
+
+    Deliberately NOT a ``ReadError`` subclass: the worker classifies
+    ``ReadError`` as deterministic/fatal, and this must classify retryable.
+    """
 
     pass
 

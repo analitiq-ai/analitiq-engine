@@ -136,8 +136,8 @@ async def run_destination_mode() -> None:
 
     # Import here to avoid circular imports
     from src.destination.server import DestinationGRPCServer
-    from src.destination.connectors import get_handler
     from src.engine.pipeline_config_prep import PipelineConfigPrep
+    from src.worker.proxy import WorkerProxyHandler
 
     grpc_port = int(os.getenv("GRPC_PORT", "50051"))
     destination_index = int(os.getenv("DESTINATION_INDEX", "0"))
@@ -231,11 +231,17 @@ async def run_destination_mode() -> None:
         dest_connection_id,
     )
 
-    # Create handler and start server. ``set_endpoint_refs`` and
-    # ``set_stream_endpoints`` are defined on ``BaseDestinationHandler``
-    # as no-op defaults, so these calls are safe for every handler type
-    # and fail loudly if an override is renamed.
-    handler = get_handler(runtime.connector_type)
+    # Connector code never runs in this (shell) process: the handler is a
+    # proxy that spawns an isolated worker subprocess at connect() — the
+    # worker resolves the connector class via the registry, owns the driver
+    # and the database connection, and serves the same DestinationService
+    # over a Unix domain socket. The TCP server below stays the engine's
+    # credential-free data plane, unchanged.
+    paths = PipelineConfigPrep._discover_paths()
+    handler = WorkerProxyHandler(
+        connectors_dir=paths["connectors"],
+        connections_dir=paths["connections"],
+    )
     handler.set_endpoint_refs(endpoint_refs)
     handler.set_stream_endpoints(stream_endpoints)
     await handler.connect(runtime)

@@ -81,9 +81,9 @@ class TestThinControlPlaneImports:
             for name in (
                 "list_schemas", "list_tables", "list_columns",
                 "create_table", "build_create_table_sql",
-                "get_dialect", "SqlDialect", "SUPPORTED_DIALECTS",
+                "SqlDialect",
                 "fetch_rows", "execute_ddl",
-                "SqlIntrospectionError", "UnsupportedDialectError",
+                "SqlIntrospectionError", "UnsupportedDialectOperationError",
                 "DiscoveryError", "CreateTableError", "ReadError",
             ):
                 assert hasattr(cdk.sql, name), name
@@ -271,12 +271,16 @@ class TestHttpTransportLazyAiohttp:
 
     async def test_build_http_transport_succeeds_with_aiohttp(self):
         import aiohttp
-        from cdk.resolver import ResolutionContext, Resolver
-        from cdk.transport_factory import HttpTransport, build_http_transport
+        from cdk.transport_factory import HttpTransport, build_http_from_spec
 
-        resolver = Resolver(ResolutionContext())
-        transport = await build_http_transport(
-            {"base_url": "https://example.test"}, resolver=resolver,
+        transport = await build_http_from_spec(
+            {
+                "transport_type": "http",
+                "base_url": "https://example.test",
+                "headers": {},
+                "timeout_seconds": 30.0,
+                "rate_limit": None,
+            }
         )
         try:
             assert isinstance(transport, HttpTransport)
@@ -289,16 +293,20 @@ class TestHttpTransportLazyAiohttp:
         self, monkeypatch,
     ):
         from cdk._extras import MissingExtraError
-        from cdk.resolver import ResolutionContext, Resolver
-        from cdk.transport_factory import build_http_transport
+        from cdk.transport_factory import build_http_from_spec
 
         # ``sys.modules[name] = None`` makes ``import name`` raise ImportError
         # with ``name`` set -- the same shape as a genuinely-absent package.
         monkeypatch.setitem(sys.modules, "aiohttp", None)
-        resolver = Resolver(ResolutionContext())
 
         with pytest.raises(MissingExtraError) as ei:
-            await build_http_transport(
-                {"base_url": "https://example.test"}, resolver=resolver,
+            await build_http_from_spec(
+                {
+                    "transport_type": "http",
+                    "base_url": "https://example.test",
+                    "headers": {},
+                    "timeout_seconds": 30.0,
+                    "rate_limit": None,
+                }
             )
         assert "analitiq-cdk[api]" in str(ei.value)
