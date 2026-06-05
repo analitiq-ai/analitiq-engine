@@ -187,9 +187,10 @@ Each connection loaded by `PipelineConfigPrep` becomes a
 
 - Holds the resolved connector definition and the user's connection
   document.
-- Validates `connector_type` against `VALID_CONNECTOR_TYPES =
-  {"database", "api", "file", "s3", "stdout"}` (defined in
-  `cdk/cdk/connection_runtime.py`).
+- Requires `connector_type` to be a non-empty string. Which kinds are
+  runnable is decided by the worker registry (`cdk/cdk/registry.py`),
+  not by a hard-coded set, so registry-discovered connector kinds are
+  not blocked at config time.
 - When the connector declares a `transports` block, builds the actual
   transport (SQLAlchemy async engine, aiohttp ClientSession, etc.) via
   `cdk/cdk/transport_factory.py`. The factory drives:

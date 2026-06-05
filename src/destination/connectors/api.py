@@ -411,13 +411,14 @@ class ApiDestinationHandler(BaseDestinationHandler):
                 )
             elif written < len(records):
                 # Partial success - some records failed
-                # Use FATAL_FAILURE since retrying would duplicate successful records
+                # Use FATAL_FAILURE since retrying would duplicate successful
+                # records. No cursor: a failure result must not advance the
+                # checkpoint (the engine DLQs the batch and stops the stream).
                 failed_count = len(records) - written
                 return BatchWriteResult(
                     status=AckStatus.ACK_STATUS_FATAL_FAILURE,
                     records_written=written,
                     failure_summary=f"{failed_count}/{len(records)} records failed to write to API",
-                    committed_cursor=cursor,
                 )
             else:
                 # All records succeeded

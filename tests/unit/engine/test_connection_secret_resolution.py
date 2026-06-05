@@ -103,15 +103,30 @@ class TestConnectionRuntimeMetadata:
         assert result == config
         assert result is not config
 
-    def test_invalid_connector_type_raises(self):
-        with pytest.raises(ValueError, match="Invalid connector_type"):
+    @pytest.mark.parametrize("connector_type", ["", None, 42])
+    def test_non_string_connector_type_raises(self, connector_type):
+        with pytest.raises(ValueError, match="connector_type must be a non-empty string"):
             ConnectionRuntime(
                 raw_config={},
                 connection_id="conn-1",
                 connector_id="test-connector",
-                connector_type="foobar",
+                connector_type=connector_type,
                 resolver=AsyncMock(),
             )
+
+    def test_registry_discovered_kind_accepted(self):
+        """The CDK pins no kind enum: the published connector schema and
+        the worker registry own the set of valid kinds, so a kind unknown
+        to the built-ins (e.g. from an entry-point connector package) must
+        construct (#137)."""
+        runtime = ConnectionRuntime(
+            raw_config={},
+            connection_id="conn-1",
+            connector_id="test-connector",
+            connector_type="graphql",
+            resolver=AsyncMock(),
+        )
+        assert runtime.connector_type == "graphql"
 
 
 # ---------------------------------------------------------------------------

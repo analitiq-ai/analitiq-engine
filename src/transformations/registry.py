@@ -181,16 +181,14 @@ class TransformationRegistry:
             raise TransformationError("Empty string is not a valid ISO date")
         
         try:
-            # Remove timezone info and parse
-            iso_clean = iso_string.replace("Z", "+00:00")
-            if "T" in iso_clean:
+            if "T" in iso_string:
                 # Full datetime format
-                dt = datetime.fromisoformat(iso_clean)
+                dt = datetime.fromisoformat(iso_string)
                 return dt.strftime("%Y-%m-%d")
             else:
                 # Already just date format - validate it's a proper date
-                datetime.strptime(iso_clean[:10], "%Y-%m-%d")
-                return iso_clean[:10]  # Take first 10 chars (YYYY-MM-DD)
+                datetime.strptime(iso_string[:10], "%Y-%m-%d")
+                return iso_string[:10]  # Take first 10 chars (YYYY-MM-DD)
         except (ValueError, TypeError) as e:
             raise TransformationError(f"Invalid ISO date format '{value}': {str(e)}")
     
@@ -205,9 +203,7 @@ class TransformationRegistry:
         
         try:
             # Handle string ISO format
-            iso_string = str(value)
-            iso_clean = iso_string.replace("Z", "+00:00")
-            dt = datetime.fromisoformat(iso_clean)
+            dt = datetime.fromisoformat(str(value))
             return dt.strftime("%Y-%m-%d %H:%M:%S")
         except (ValueError, TypeError) as e:
             raise TransformationError(f"Invalid ISO datetime format '{value}': {str(e)}")
@@ -223,10 +219,7 @@ class TransformationRegistry:
         
         try:
             # Handle string ISO format
-            iso_string = str(value)
-            iso_clean = iso_string.replace("Z", "+00:00")
-            dt = datetime.fromisoformat(iso_clean)
-            return dt
+            return datetime.fromisoformat(str(value))
         except (ValueError, TypeError) as e:
             raise TransformationError(f"Invalid ISO timestamp format '{value}': {str(e)}")
     
