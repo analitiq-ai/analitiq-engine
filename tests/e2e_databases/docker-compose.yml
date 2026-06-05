@@ -27,7 +27,10 @@ services:
     volumes:
       - ./seed/postgres_init.sql:/docker-entrypoint-initdb.d/seed.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U e2e_user -d e2e_db"]
+      # -h 127.0.0.1 forces TCP: the image's temporary init-time server is
+      # socket-only, so this only passes once init scripts finished and the
+      # final server is listening on the published port.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U e2e_user -d e2e_db"]
       interval: 2s
       timeout: 3s
       retries: 20
