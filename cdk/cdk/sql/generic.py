@@ -1863,24 +1863,32 @@ class GenericSQLConnector(BaseDestinationHandler):
                 cursor_field = cursor_field[0] if cursor_field else None
             replication_method = replication.get("method", "full_refresh")
 
-            if (
-                replication_method == "incremental"
-                and cursor_field
+            if replication_method == "incremental" and cursor_field:
                 # The wildcard projection compiles to SELECT * (see
-                # QueryBuilder.build_select_query), which always carries
-                # the cursor column.
-                and column_names != ["*"]
-                and cursor_field not in column_names
-            ):
-                # An incremental stream whose projection drops the cursor
-                # column silently reverts to "full-scan + upsert" every run:
-                # no cursor value is observable, so no state advances. The
-                # stream is misconfigured — fail before any extraction work.
-                raise ReadError(
-                    f"stream {stream_name!r}: incremental replication requires "
-                    f"cursor_field {cursor_field!r} to be present in "
-                    f"selected_columns. Selected: {column_names!r}"
-                )
+                # QueryBuilder.build_select_query), but the fetched batch
+                # is cast through SchemaContract, which keeps only the
+                # endpoint contract's columns — so the cursor column must
+                # be declared there for its value to survive the cast.
+                if column_names == ["*"]:
+                    effective_columns = [
+                        c["name"]
+                        for c in (endpoint_doc.get("columns") or [])
+                        if c.get("name")
+                    ]
+                else:
+                    effective_columns = column_names
+                if cursor_field not in effective_columns:
+                    # An incremental stream whose projection drops the
+                    # cursor column silently reverts to "full-scan +
+                    # upsert" every run: no cursor value is observable, so
+                    # no state advances. The stream is misconfigured —
+                    # fail before any extraction work.
+                    raise ReadError(
+                        f"stream {stream_name!r}: incremental replication "
+                        f"requires cursor_field {cursor_field!r} to be present "
+                        f"in the projection. Effective columns: "
+                        f"{effective_columns!r}"
+                    )
 
             partition = partition or {}
             cursor_state = await checkpoint.get_cursor(stream_name, partition)

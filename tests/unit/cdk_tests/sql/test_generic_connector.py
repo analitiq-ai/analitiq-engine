@@ -152,6 +152,24 @@ class TestReadGuards:
         sql, _ = reader.calls[0]
         assert "SELECT *" in sql or "select *" in sql.lower()
 
+    @pytest.mark.asyncio
+    async def test_incremental_wildcard_with_cursor_outside_contract_raises(self):
+        # SELECT * fetches everything, but the batch is cast through
+        # SchemaContract, which keeps only contract columns — a cursor not
+        # declared in the endpoint contract would never advance.
+        connector = GenericSQLConnector()
+        runtime = _FakeRuntime(is_adbc=True)
+        with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()), patch(
+            "cdk.sql.generic.SchemaContract"
+        ):
+            config = _endpoint_config(
+                replication={"method": "incremental", "cursor_field": ["modified_ts"]},
+            )
+            config["stream_source"]["selected_columns"] = ["*"]
+            with pytest.raises(ReadError, match="cursor_field 'modified_ts'"):
+                await _drain(connector, runtime, config, _checkpoint())
+        runtime.close.assert_awaited()
+
 
 class TestReadConnectErrors:
     """read_batches connect-phase error classification mirrors connect()."""
