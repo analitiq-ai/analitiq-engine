@@ -187,6 +187,34 @@ class TestSchemaAckTypeMapError:
         assert "public.events" in ack.message
 
     @pytest.mark.asyncio
+    async def test_schema_configuration_error_is_surfaced_in_schema_ack(self):
+        """SchemaConfigurationError is the typed signal for intentional
+        config errors in configure_schema (unsupported write mode, column
+        without name/native_type); the servicer must translate it to a
+        rejected SchemaAck instead of crashing the stream."""
+        from cdk.sql.exceptions import SchemaConfigurationError
+
+        handler = MagicMock()
+        handler.configure_schema = AsyncMock(
+            side_effect=SchemaConfigurationError(
+                "Unsupported proto write_mode=99; expected one of [1, 2, 3]"
+            )
+        )
+
+        servicer = DestinationServicer(handler, server=MagicMock())
+        responses = []
+        async for resp in servicer.StreamRecords(
+            _iter_once(_schema_request("s7")), context=MagicMock()
+        ):
+            responses.append(resp)
+
+        assert len(responses) == 1
+        ack = responses[0].schema_ack
+        assert ack.accepted is False
+        assert ack.message.startswith("SchemaConfigurationError: ")
+        assert "write_mode=99" in ack.message
+
+    @pytest.mark.asyncio
     async def test_unsupported_dialect_error_is_surfaced_in_schema_ack(self):
         """UnsupportedDialectOperationError is in configure_schema's
         propagate tuple; it must land in the SchemaAck as well."""
@@ -258,6 +286,29 @@ class TestGetCapabilities:
         )
         resp = await servicer.GetCapabilities(GetCapabilitiesRequest(), MagicMock())
         assert WriteMode.WRITE_MODE_TRUNCATE_INSERT in resp.supported_write_modes
+
+    @pytest.mark.asyncio
+    async def test_missing_capability_attribute_aborts_with_detail(self):
+        """A handler that omits a capability attribute must abort the RPC
+        with INTERNAL and a message naming the handler and the missing
+        attribute, not surface as a bare AttributeError (issue #73)."""
+        import grpc
+
+        handler = MagicMock(spec=[])  # every attribute access raises
+        context = MagicMock()
+        # Real grpc.aio abort raises and never returns; mirror that so
+        # the servicer cannot fall through to an implicit return.
+        context.abort = AsyncMock(side_effect=RuntimeError("aborted"))
+
+        servicer = DestinationServicer(handler, server=MagicMock())
+        with pytest.raises(RuntimeError, match="aborted"):
+            await servicer.GetCapabilities(GetCapabilitiesRequest(), context)
+
+        context.abort.assert_awaited_once()
+        code, detail = context.abort.await_args.args
+        assert code == grpc.StatusCode.INTERNAL
+        assert "MagicMock" in detail
+        assert "supports_upsert" in detail
 
 
 class TestGetCapabilitiesApiHandlerIntegration:

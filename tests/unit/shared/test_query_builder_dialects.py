@@ -57,8 +57,12 @@ class TestLazyDialectLoading:
         # installed even when it actually is (or vice versa).
         with patch("cdk.query_builder.importlib.import_module") as imp:
             imp.side_effect = ImportError("not installed")
-            with pytest.raises(ImportError, match="snowflake"):
+            with pytest.raises(ImportError, match="snowflake") as exc_info:
                 _get_sqlalchemy_dialect("snowflake")
+        # The message names the missing package but does not suggest a
+        # poetry extra — extras naming lives in pyproject and would rot
+        # here silently (issue #90).
+        assert "poetry install -E" not in str(exc_info.value)
 
 
 class TestPaging:

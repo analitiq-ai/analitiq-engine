@@ -28,6 +28,7 @@ from .exceptions import (
     CreateTableError,
     DiscoveryError,
     ReadError,
+    SchemaConfigurationError,
     SqlIntrospectionError,
     UnsupportedDialectOperationError,
 )
@@ -77,4 +78,5 @@ __all__ = [
     "DiscoveryError",
     "CreateTableError",
     "ReadError",
+    "SchemaConfigurationError",
 ]
