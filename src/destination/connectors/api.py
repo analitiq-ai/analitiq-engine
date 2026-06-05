@@ -19,7 +19,11 @@ from aiohttp_retry import ExponentialRetry, RetryClient
 
 from cdk.base_handler import BaseDestinationHandler, BatchWriteResult
 from cdk.json_utils import decode_json_fields
-from cdk.request_binding import bind_param_refs, bind_record_inputs
+from cdk.request_binding import (
+    bind_param_refs,
+    bind_record_inputs,
+    collect_from_input_selectors,
+)
 from cdk.resolver import Resolver
 from cdk.types import (
     AckStatus,
@@ -360,6 +364,27 @@ class ApiDestinationHandler(BaseDestinationHandler):
             state.batch_mode = self.BATCH_MODE_SINGLE
         state.batch_size = int(batching.get("size") or 100)
 
+        # A body spec whose from_input selectors contradict the batching
+        # mode can never build a valid request — reject the stream now
+        # rather than failing every record at write time.
+        if state.body_spec is not None:
+            selectors = collect_from_input_selectors(state.body_spec)
+            is_single = state.batch_mode == self.BATCH_MODE_SINGLE
+            wants_batch = "records" in selectors
+            wants_single = any(
+                s == "record" or s.startswith("record.") for s in selectors
+            )
+            if (wants_batch and is_single) or (wants_single and not is_single):
+                logger.error(
+                    "API endpoint document for stream %r: request.body "
+                    "from_input selectors %s do not match batching mode %r "
+                    "('records' needs bulk/batch; 'record' needs single)",
+                    stream_id,
+                    sorted(selectors),
+                    state.batch_mode,
+                )
+                return False
+
         self._streams[stream_id] = state
         logger.info(
             "API schema configured for stream %r: %s %s, batch_mode=%s",
@@ -534,7 +559,21 @@ class ApiDestinationHandler(BaseDestinationHandler):
 
         for i, record in enumerate(records):
             try:
-                await self._send_request(state, self._build_body(state, record=record))
+                body = self._build_body(state, record=record)
+            except (TypeError, ValueError) as e:
+                # Body construction is data-dependent (a record field can
+                # feed a derived function); a bad record must not discard
+                # the write counts of records already sent. Authoring and
+                # programming errors (TransportSpecError, RuntimeError,
+                # KeyError) propagate to write_batch and become FATAL.
+                logger.warning(
+                    "Failed to build body for record %s: %s: %s",
+                    record_ids[i], type(e).__name__, e,
+                )
+                failed_ids.append(record_ids[i])
+                continue
+            try:
+                await self._send_request(state, body)
                 written += 1
             except (aiohttp.ClientError, asyncio.TimeoutError) as e:
                 # Transport-level errors are per-record data issues; log

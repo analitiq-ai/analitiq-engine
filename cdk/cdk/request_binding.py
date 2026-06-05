@@ -12,9 +12,13 @@ does not know:
 Binding replaces each node with ``{"literal": <value>}`` so the
 downstream expression pass (:meth:`cdk.resolver.Resolver.resolve_for_request`)
 returns the data verbatim — bound *values* are payload, never
-re-inspected for expression or binding markers. For the same reason the
-binders never walk into expression nodes: what is inside a ``literal``
-(or any other marker node) belongs to the resolution pass.
+re-inspected for expression or binding markers. The opaqueness boundary
+is exactly ``literal`` nodes: what sits inside one is data (whether
+authored or produced by an earlier binding pass). Every other node —
+including a ``function`` node's ``input`` — is authored structure, so
+the binders recurse into it; ``{"function": "base64_encode", "input":
+{"from_input": "record.id"}}`` binds the record field before the
+function evaluates.
 
 A binding whose data is missing (an undeclared param name, a dotted
 path to an absent record field) binds ``None``, which the expression
@@ -26,8 +30,6 @@ sibling keys next to the marker) is an authoring error and raises.
 from __future__ import annotations
 
 from typing import Any, Dict, List, Mapping, Optional
-
-from .resolver import Resolver
 
 
 def bind_param_refs(spec: Any, params: Mapping[str, Any]) -> Any:
@@ -45,12 +47,36 @@ def bind_param_refs(spec: Any, params: Mapping[str, Any]) -> Any:
                     f"`from_param` must be a non-empty string, got {name!r}"
                 )
             return {"literal": params.get(name)}
-        if Resolver.is_expression_node(spec):
+        if "literal" in spec:
             return spec
         return {key: bind_param_refs(value, params) for key, value in spec.items()}
     if isinstance(spec, list):
         return [bind_param_refs(item, params) for item in spec]
     return spec
+
+
+def collect_from_input_selectors(spec: Any) -> set:
+    """All ``from_input`` selector strings authored in a body spec.
+
+    Walks the same structure as :func:`bind_record_inputs` (``literal``
+    nodes are opaque) without binding anything — used to validate a body
+    spec against its batching mode before any record is in flight.
+    """
+    selectors: set = set()
+    if isinstance(spec, Mapping):
+        if "from_input" in spec:
+            selector = spec["from_input"]
+            if isinstance(selector, str):
+                selectors.add(selector)
+            return selectors
+        if "literal" in spec:
+            return selectors
+        for value in spec.values():
+            selectors |= collect_from_input_selectors(value)
+    elif isinstance(spec, list):
+        for item in spec:
+            selectors |= collect_from_input_selectors(item)
+    return selectors
 
 
 def bind_record_inputs(
@@ -74,7 +100,7 @@ def bind_record_inputs(
                     f"got siblings {sorted(set(spec) - {'from_input'})}"
                 )
             return {"literal": _record_input_value(spec["from_input"], record, records)}
-        if Resolver.is_expression_node(spec):
+        if "literal" in spec:
             return spec
         return {
             key: bind_record_inputs(value, record=record, records=records)

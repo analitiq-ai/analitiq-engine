@@ -1206,9 +1206,45 @@ class TestApiHandlerBodySpec:
         ]
 
     @pytest.mark.asyncio
-    async def test_body_spec_mode_mismatch_surfaces_as_fatal(self):
-        # An authoring error in the body spec must classify the batch
-        # FATAL through write_batch, not retry forever.
+    async def test_configure_schema_rejects_records_selector_in_single_mode(self):
+        # The mismatch is statically knowable: reject the stream up front
+        # instead of failing every record at write time.
+        handler = self._handler_with_resolver()
+        handler.set_stream_endpoints(
+            {
+                "s1": self._doc_with_body(
+                    {"items": {"from_input": "records"}},
+                    batching={"mode": "single"},
+                )
+            }
+        )
+        ok = await handler.configure_schema(
+            SchemaMessage(stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT)
+        )
+        assert ok is False
+        assert "s1" not in handler._streams
+
+    @pytest.mark.asyncio
+    async def test_configure_schema_rejects_record_selector_in_bulk_mode(self):
+        handler = self._handler_with_resolver()
+        handler.set_stream_endpoints(
+            {
+                "s1": self._doc_with_body(
+                    {"data": {"from_input": "record"}},
+                    batching={"mode": "bulk"},
+                )
+            }
+        )
+        ok = await handler.configure_schema(
+            SchemaMessage(stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT)
+        )
+        assert ok is False
+
+    @pytest.mark.asyncio
+    async def test_body_spec_mode_mismatch_backstop_is_fatal(self):
+        # Runtime backstop for a state that bypassed configure_schema:
+        # every record fails body construction (with a per-record warning
+        # carrying the cause) and the batch classifies FATAL.
         handler = self._handler_with_resolver()
         handler._streams["s1"] = _StreamState(
             endpoint="/v1/things",
@@ -1223,4 +1259,47 @@ class TestApiHandlerBodySpec:
             cursor=MagicMock(),
         )
         assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
-        assert "bulk or batch" in result.failure_summary
+        assert "All 1 records failed" in result.failure_summary
+
+    @pytest.mark.asyncio
+    async def test_bad_record_body_build_keeps_partial_write_counts(self):
+        # A record whose data breaks body construction (non-string into
+        # base64_encode) must not discard the counts of records already
+        # sent: partial success, accurate records_written.
+        handler = self._handler_with_resolver()
+        handler._streams["s1"] = _StreamState(
+            endpoint="/v1/things",
+            body_spec={
+                "token": {
+                    "function": "base64_encode",
+                    "input": {"from_input": "record.id"},
+                },
+            },
+        )
+
+        sent = []
+
+        async def _capture(state_arg, data):
+            sent.append(data)
+            return {}
+
+        handler._send_request = _capture  # type: ignore[assignment]
+        result = await handler.write_batch(
+            run_id="run",
+            stream_id="s1",
+            batch_seq=0,
+            record_batch=_to_record_batch(
+                [{"id": "ok-1"}, {"id": None}, {"id": "ok-2"}]  # null breaks base64
+            ),
+            record_ids=["r1", "r2", "r3"],
+            cursor=MagicMock(),
+        )
+        assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+        assert result.records_written == 2
+        assert "1/3 records failed" in result.failure_summary
+        import base64 as b64
+
+        assert sent == [
+            {"token": b64.b64encode(b"ok-1").decode("ascii")},
+            {"token": b64.b64encode(b"ok-2").decode("ascii")},
+        ]

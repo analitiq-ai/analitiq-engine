@@ -1227,3 +1227,68 @@ class TestReadBatchesRequestBody:
         )
 
         assert session.bodies[0] == {"updated_after": "2024-01-01T11:59:00Z"}
+
+    @pytest.mark.asyncio
+    async def test_body_paginated_endpoint_advances_offset_in_body(self):
+        # Pagination params declared ``in: body`` ride inside the body via
+        # from_param — rebuilt per page so the offset actually advances —
+        # and never appear in the query string.
+        session = _FakeSession(
+            [
+                _FakeResponse(
+                    status=200,
+                    body={"records": [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]},
+                ),
+                _FakeResponse(status=200, body={"records": [{"id": 3, "name": "c"}]}),
+            ]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(
+            pagination={
+                "type": "offset",
+                "offset": {"param": "offset", "initial": 0},
+                "limit": {"param": "limit"},
+            },
+        )
+        endpoint["operations"]["read"]["params"] = {
+            "offset": {
+                "in": "body",
+                "type": "integer",
+                "required": True,
+                "controlled_by": "pagination",
+            },
+            "limit": {
+                "in": "body",
+                "type": "integer",
+                "required": True,
+                "controlled_by": "pagination",
+            },
+        }
+        endpoint["operations"]["read"]["request"] = {
+            "method": "POST",
+            "path": "/items/search",
+            "body": {
+                "paging": {
+                    "offset": {"from_param": "offset"},
+                    "limit": {"from_param": "limit"},
+                },
+            },
+        }
+        await _consume(
+            connector,
+            runtime,
+            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=2,
+        )
+
+        # Query strings carry neither pagination param.
+        assert [c[2] for c in session.calls] == [{}, {}]
+        # The body advances per page.
+        assert session.bodies == [
+            {"paging": {"offset": 0, "limit": 2}},
+            {"paging": {"offset": 2, "limit": 2}},
+        ]

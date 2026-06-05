@@ -3,11 +3,11 @@
 This connector consumes the published API-endpoint contract directly:
 
 * ``operations.read.request.{method, path}`` — URL + HTTP verb.
-* ``operations.read.request.body`` — optional JSON body; ``{"from_param":
-  ...}`` nodes bind the resolved param values, then the body is
-  deep-resolved through the value-expression grammar once per read; the
-  same resolved body is sent on every page request. Params declared
-  ``in: body`` stay out of the query string.
+* ``operations.read.request.body`` — optional JSON body; built per page
+  request: ``{"from_param": ...}`` nodes bind the page's param values
+  (including pagination-controlled ones), then the body is deep-resolved
+  through the value-expression grammar. Params declared ``in: body``
+  stay out of the query string.
 * ``operations.read.params.<name>`` — declared params with optional
   ``default`` value expressions (``literal``/``ref``/``template``/
   ``function``) resolved against the connection scopes
@@ -30,7 +30,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import timezone
-from typing import Any, AsyncIterator, Dict, List, Optional
+from typing import Any, AsyncIterator, Callable, Dict, List, Optional
 
 import pyarrow as pa
 
@@ -210,20 +210,30 @@ class APIConnector(BaseConnector):
                 safety_window,
             )
 
-        # Body binding sees every param value; the query string carries
-        # only params not declared ``in: body`` (those live in the body,
-        # bound via ``{"from_param": ...}``). The body is resolved once
-        # per read — the same resolved body is sent on every page.
-        base_params = {
-            name: value
-            for name, value in param_values.items()
-            if param_placements.get(name) != "body"
-        }
-        request_body = None
-        if request.get("body") is not None:
-            request_body = resolver.resolve_for_request(
-                bind_param_refs(request["body"], param_values)
+        # Each page request materializes from the full per-page param
+        # table (declared defaults + filters + replication + the values
+        # the pagination loop sets): the query string carries params not
+        # declared ``in: body``; the body binds ``{"from_param": ...}``
+        # nodes against the same table and resolves expressions. Built
+        # per page so controlled params (limit, offset, cursor) reach a
+        # body-paginated endpoint instead of freezing at their initial
+        # values.
+        raw_body = request.get("body")
+
+        def build_request(
+            page_params: Dict[str, Any],
+        ) -> tuple[Dict[str, Any], Any]:
+            query = {
+                name: value
+                for name, value in page_params.items()
+                if param_placements.get(name) != "body"
+            }
+            body = (
+                resolver.resolve_for_request(bind_param_refs(raw_body, page_params))
+                if raw_body is not None
+                else None
             )
+            return query, body
 
         records_ref = ((read_spec.get("response") or {}).get("records") or {}).get(
             "ref", "response.body"
@@ -240,12 +250,12 @@ class APIConnector(BaseConnector):
         async for batch in self._iterate_pages(
             full_url=full_url,
             method=method,
-            base_params=base_params,
+            base_params=param_values,
             controlled_params=controlled_params,
             pagination=read_spec.get("pagination") or {},
             batch_size=batch_size,
             records_ref=records_ref,
-            body=request_body,
+            build_request=build_request,
         ):
             if not batch:
                 continue
@@ -461,12 +471,17 @@ class APIConnector(BaseConnector):
         pagination: Dict[str, Any],
         batch_size: int,
         records_ref: str,
-        body: Any = None,
+        build_request: Callable[[Dict[str, Any]], tuple[Dict[str, Any], Any]],
     ) -> AsyncIterator[List[Dict[str, Any]]]:
+        """Drive the pagination loop, materializing each page request via
+        ``build_request``: it maps the page's full param table to the
+        ``(query_params, body)`` actually sent, applying declared param
+        placement and per-page body binding."""
         p_type = pagination.get("type")
         if not p_type:
+            query, body = build_request(dict(base_params))
             records = await self._request_records(
-                full_url, method, base_params, records_ref, body=body
+                full_url, method, query, records_ref, body=body
             )
             if records:
                 yield records
@@ -486,8 +501,9 @@ class APIConnector(BaseConnector):
             while True:
                 params = dict(base_params)
                 params[offset_param] = offset
+                query, body = build_request(params)
                 records = await self._request_records(
-                    full_url, method, params, records_ref, body=body
+                    full_url, method, query, records_ref, body=body
                 )
                 if not records:
                     return
@@ -505,8 +521,9 @@ class APIConnector(BaseConnector):
             while True:
                 params = dict(base_params)
                 params[page_param] = page
+                query, body = build_request(params)
                 records = await self._request_records(
-                    full_url, method, params, records_ref, body=body
+                    full_url, method, query, records_ref, body=body
                 )
                 if not records:
                     return
@@ -530,8 +547,9 @@ class APIConnector(BaseConnector):
                 params = dict(base_params)
                 if cursor_token:
                     params[cursor_param] = cursor_token
+                query, body = build_request(params)
                 data, records = await self._request_payload(
-                    full_url, method, params, records_ref, body=body
+                    full_url, method, query, records_ref, body=body
                 )
                 if not records:
                     return
@@ -555,8 +573,9 @@ class APIConnector(BaseConnector):
                 params = dict(base_params)
                 if last_key:
                     params[keyset_param] = last_key
+                query, body = build_request(params)
                 records = await self._request_records(
-                    full_url, method, params, records_ref, body=body
+                    full_url, method, query, records_ref, body=body
                 )
                 if not records:
                     return

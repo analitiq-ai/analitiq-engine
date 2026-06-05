@@ -45,6 +45,18 @@ class TestBindParamRefs:
         with pytest.raises(ValueError, match="non-empty string"):
             bind_param_refs({"x": {"from_param": 7}}, {})
 
+    def test_binds_inside_function_inputs(self):
+        # A function node's input is authored structure, not data: the
+        # binding must reach into it so the derived function receives the
+        # bound value, never the raw {"from_param": ...} dict.
+        out = bind_param_refs(
+            {"auth": {"function": "base64_encode", "input": {"from_param": "token"}}},
+            {"token": "t-1"},
+        )
+        assert out == {
+            "auth": {"function": "base64_encode", "input": {"literal": "t-1"}}
+        }
+
 
 class TestBindRecordInputs:
     def test_expression_nodes_are_opaque(self):
@@ -61,3 +73,29 @@ class TestBindRecordInputs:
         record = {"id": 1, "payload": {"ref": "user text"}}
         out = bind_record_inputs({"data": {"from_input": "record"}}, record=record)
         assert out == {"data": {"literal": record}}
+
+    def test_binds_inside_function_inputs(self):
+        out = bind_record_inputs(
+            {"token": {"function": "base64_encode", "input": {"from_input": "record.id"}}},
+            record={"id": "abc"},
+        )
+        assert out == {
+            "token": {"function": "base64_encode", "input": {"literal": "abc"}}
+        }
+
+
+class TestCollectFromInputSelectors:
+    def test_collects_nested_selectors_skipping_literals(self):
+        from cdk.request_binding import collect_from_input_selectors
+
+        spec = {
+            "a": {"from_input": "record.id"},
+            "b": {"items": [{"from_input": "records"}]},
+            "c": {"literal": {"from_input": "record"}},  # data, not a binding
+            "d": {"function": "base64_encode", "input": {"from_input": "record.key"}},
+        }
+        assert collect_from_input_selectors(spec) == {
+            "record.id",
+            "records",
+            "record.key",
+        }
