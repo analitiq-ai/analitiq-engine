@@ -49,9 +49,10 @@ _FORBIDDEN_CONSTRUCTS: Final[tuple[tuple[str, str], ...]] = (
 )
 _BACKREFERENCE_DIGIT: Final[Pattern[str]] = re.compile(r"\\[1-9]")
 
-# Canonical long-form vocabulary for temporal unit arguments.  parse_arrow_type
-# accepts both short codes (us, ms, …) and these long names; normalize_canonical_type
-# folds the short codes into long form so the two spellings match the same rule.
+# Short-code → long-form mapping for temporal unit arguments.  parse_arrow_type
+# accepts both spellings; normalize_canonical_type expands short codes in both
+# the stored write-rule key and every lookup input, so either spelling in a
+# write rule's canonical field matches either spelling at lookup time.
 _UNIT_SHORT_TO_LONG: Final[dict[str, str]] = {
     "s": "SECOND",
     "ms": "MILLISECOND",
@@ -59,9 +60,14 @@ _UNIT_SHORT_TO_LONG: Final[dict[str, str]] = {
     "ns": "NANOSECOND",
 }
 
+# Long-form names matched by _TEMPORAL_UNIT_RE that pass through unchanged.
+_UNIT_LONG_FORMS: Final[frozenset[str]] = frozenset(_UNIT_SHORT_TO_LONG.values())
+
 # Matches the opening of a temporal-type parameter list, capturing the type name
-# and its first argument (the unit).  Long-form names are listed before short
-# codes to avoid spurious prefix matches in the alternation.
+# and its first argument (the unit).  The trailing \b ensures that short codes
+# (e.g. "s") do not partially match inside long-form names (e.g. "SECOND") —
+# the word-boundary assertion fails when the matched unit is followed by another
+# word character.
 _TEMPORAL_UNIT_RE: Final[Pattern[str]] = re.compile(
     r"\b(Timestamp|Time32|Time64|Duration)"
     r"\((NANOSECOND|MILLISECOND|MICROSECOND|SECOND|ns|us|ms|s)\b"
@@ -72,6 +78,27 @@ _TEMPORAL_UNIT_RE: Final[Pattern[str]] = re.compile(
 _NULL_TZ_RE: Final[Pattern[str]] = re.compile(
     r"\bTimestamp\(([^,)]+),\s*null\)"
 )
+
+
+def _expand_temporal_unit(m: re.Match[str]) -> str:
+    """Substitution callback for :data:`_TEMPORAL_UNIT_RE`.
+
+    Expands a short unit code to its long-form canonical spelling.  Long-form
+    names matched by the regex pass through unchanged.  An unrecognized token
+    (neither a known short code nor a known long form) means the regex and the
+    dict have drifted out of sync — raised as ``AssertionError`` immediately
+    rather than silently producing an un-expanded string that would later fail
+    with a misleading ``UnmappedTypeError``.
+    """
+    type_name, unit = m.group(1), m.group(2)
+    if unit in _UNIT_SHORT_TO_LONG:
+        return f"{type_name}({_UNIT_SHORT_TO_LONG[unit]}"
+    if unit in _UNIT_LONG_FORMS:
+        return f"{type_name}({unit}"
+    raise AssertionError(
+        f"temporal-unit regex matched unexpected unit {unit!r}; "
+        f"update _UNIT_SHORT_TO_LONG or _UNIT_LONG_FORMS to include it"
+    )
 
 
 def normalize_native_type(value: str) -> str:
@@ -106,7 +133,9 @@ def normalize_canonical_type(value: str) -> str:
        to ``", "``.
     2. Short temporal unit codes (``s``, ``ms``, ``us``, ``ns``) are expanded to
        their long-form equivalents (``SECOND``, ``MILLISECOND``, ``MICROSECOND``,
-       ``NANOSECOND``), matching what database connectors emit in their read maps.
+       ``NANOSECOND``).  Because both the write-rule's ``canonical`` field and
+       every lookup input pass through this function, either spelling resolves to
+       the same key regardless of which form the rule author used.
     3. ``Timestamp(unit, null)`` is folded into ``Timestamp(unit)`` — both are
        timezone-naïve; ``parse_arrow_type`` already treats them identically.
     """
@@ -118,10 +147,7 @@ def normalize_canonical_type(value: str) -> str:
     compact = re.sub(r"\s*([(),])\s*", r"\1", value.strip())
     compact = compact.replace(",", ", ")
     # Step 2: fold short unit codes into long-form canonical vocabulary.
-    compact = _TEMPORAL_UNIT_RE.sub(
-        lambda m: f"{m.group(1)}({_UNIT_SHORT_TO_LONG.get(m.group(2), m.group(2))}",
-        compact,
-    )
+    compact = _TEMPORAL_UNIT_RE.sub(_expand_temporal_unit, compact)
     # Step 3: Timestamp(unit, null) → Timestamp(unit).
     compact = _NULL_TZ_RE.sub(r"Timestamp(\1)", compact)
     return compact

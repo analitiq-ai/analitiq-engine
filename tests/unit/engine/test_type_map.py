@@ -565,6 +565,8 @@ class TestNormalizeCanonicalType:
             ("Time32(ms)", "Time32(MILLISECOND)"),
             ("Time64(us)", "Time64(MICROSECOND)"),
             ("Time64(ns)", "Time64(NANOSECOND)"),
+            ("Duration(s)", "Duration(SECOND)"),
+            ("Duration(ms)", "Duration(MILLISECOND)"),
             ("Duration(us)", "Duration(MICROSECOND)"),
             ("Duration(ns)", "Duration(NANOSECOND)"),
         ],
@@ -607,6 +609,14 @@ class TestNormalizeCanonicalType:
             "Timestamp(MICROSECOND)"
         )
         assert normalize_canonical_type("Timestamp(us, null)") == "Timestamp(MICROSECOND)"
+        assert normalize_canonical_type("Timestamp(ns, null)") == "Timestamp(NANOSECOND)"
+        assert normalize_canonical_type("Timestamp(ms, null)") == "Timestamp(MILLISECOND)"
+
+    def test_three_way_composition(self):
+        # All three normalization steps must compose: whitespace strip (step 1),
+        # short-code expansion (step 2), and null-tz fold (step 3).
+        assert normalize_canonical_type("Timestamp( ns , null )") == "Timestamp(NANOSECOND)"
+        assert normalize_canonical_type("Timestamp( us , null )") == "Timestamp(MICROSECOND)"
 
     def test_non_null_tz_is_preserved(self):
         assert normalize_canonical_type("Timestamp(MICROSECOND, UTC)") == (
@@ -834,10 +844,14 @@ class TestToNativeTypeUnitAliasNormalization:
         m = _write_mapper([
             {"match": "exact", "canonical": "Time32(SECOND)", "native": "T32S"},
             {"match": "exact", "canonical": "Time32(MILLISECOND)", "native": "T32MS"},
+            {"match": "exact", "canonical": "Duration(SECOND)", "native": "DUR_S"},
+            {"match": "exact", "canonical": "Duration(MILLISECOND)", "native": "DUR_MS"},
             {"match": "exact", "canonical": "Duration(NANOSECOND)", "native": "DUR_NS"},
         ])
         assert m.to_native_type("Time32(s)") == "T32S"
         assert m.to_native_type("Time32(ms)") == "T32MS"
+        assert m.to_native_type("Duration(s)") == "DUR_S"
+        assert m.to_native_type("Duration(ms)") == "DUR_MS"
         assert m.to_native_type("Duration(ns)") == "DUR_NS"
 
 
