@@ -33,6 +33,11 @@ services:
       - ../connections:/app/connections
       - ../pipelines:/app/pipelines
 
+    # Reach host-published DB ports by name on native Linux Docker Engine;
+    # Docker Desktop provides host.docker.internal automatically.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
     # Expose gRPC port to other containers
     expose:
       - "50051"
@@ -107,6 +112,11 @@ services:
       # Mount state, logs, and deadletter directories for persistence
       - ../state:/app/state
       - ../deadletter:/app/deadletter
+
+    # Reach host-published DB ports by name on native Linux Docker Engine;
+    # Docker Desktop provides host.docker.internal automatically.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
     # Resource limits (similar to ECS task definition)
     deploy:
