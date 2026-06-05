@@ -21,7 +21,6 @@ from unittest.mock import AsyncMock, patch
 import pyarrow as pa
 import pytest
 
-from cdk.connection_runtime import DETERMINISTIC_CONNECT_ERRORS
 from cdk.secrets.exceptions import PlaceholderExpansionError
 from cdk.sql.exceptions import ReadError
 from cdk.sql.generic import GenericSQLConnector
