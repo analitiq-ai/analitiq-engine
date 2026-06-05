@@ -129,8 +129,9 @@ class SchemaContract:
                 array = self._build_column(field, values, field_def)
             except ValueError:
                 # _build_column already names the offending row; passing
-                # it through preserves that precision instead of pinning
-                # the blame on the first-non-null heuristic below.
+                # it through preserves that precision instead of wrapping
+                # it in the coarser "first non-null at row N" message
+                # produced by the ArrowTypeError/ArrowInvalid handler below.
                 raise
             except (pa.ArrowTypeError, pa.ArrowInvalid) as e:
                 bad_index = next(
