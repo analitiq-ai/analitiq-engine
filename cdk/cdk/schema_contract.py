@@ -246,6 +246,11 @@ class SchemaContract:
         ) and any(isinstance(v, str) for v in values if v is not None):
             return SchemaContract._build_temporal_from_strings(field, values)
 
+        if (
+            pa.types.is_integer(field.type) or pa.types.is_floating(field.type)
+        ) and any(isinstance(v, str) for v in values if v is not None):
+            return SchemaContract._build_numeric_from_strings(field, values)
+
         return pa.array(values, type=field.type)
 
     @staticmethod
@@ -292,6 +297,38 @@ class SchemaContract:
                     f"{v!r} as {field.type}: {exc}"
                 ) from exc
         return pa.array(parsed, type=field.type)
+
+    @staticmethod
+    def _build_numeric_from_strings(
+        field: pa.Field, values: List[Any]
+    ) -> pa.Array:
+        """Coerce string representations of numbers into an integer or float column.
+
+        Triggered when the declared Arrow type is an integer or float family
+        and at least one non-null source value is a string (e.g. JSON APIs
+        that encode numbers as ``"0"``, ``"14.5"``). Non-string values are
+        passed through unchanged; None values become typed nulls.
+
+        Raises ``ValueError`` naming the column and row on parse failure so
+        the caller has actionable context instead of a generic PyArrow error.
+        """
+        is_int = pa.types.is_integer(field.type)
+        converted: List[Any] = []
+        for row, v in enumerate(values):
+            if v is None:
+                converted.append(None)
+                continue
+            if not isinstance(v, str):
+                converted.append(v)
+                continue
+            try:
+                converted.append(int(v) if is_int else float(v))
+            except ValueError as exc:
+                raise ValueError(
+                    f"column {field.name!r} at row {row}: cannot parse "
+                    f"{v!r} as {field.type}: {exc}"
+                ) from exc
+        return pa.array(converted, type=field.type)
 
     @staticmethod
     def _schema_from_columns(

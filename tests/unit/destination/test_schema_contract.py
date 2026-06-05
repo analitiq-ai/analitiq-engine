@@ -192,6 +192,65 @@ class TestSchemaContractFromPylist:
         assert batch.num_rows == 2
         assert pa.types.is_decimal(batch.schema.field("amount").type)
 
+    def test_from_pylist_integer_from_strings(self):
+        # sevdesk (and many JSON APIs) return integer fields as strings;
+        # the contract must coerce them rather than raising ArrowInvalid.
+        schema = {
+            "columns": [
+                {"name": "id", "arrow_type": "Int32", "nullable": True},
+                {"name": "count", "arrow_type": "Int64", "nullable": True},
+            ]
+        }
+        contract = SchemaContract(schema)
+
+        batch = contract.from_pylist(
+            [{"id": "0", "count": "14"}, {"id": "32", "count": None}]
+        )
+
+        assert batch.to_pylist() == [
+            {"id": 0, "count": 14},
+            {"id": 32, "count": None},
+        ]
+        assert pa.types.is_int32(batch.schema.field("id").type)
+        assert pa.types.is_int64(batch.schema.field("count").type)
+
+    def test_from_pylist_float_from_strings(self):
+        schema = {
+            "columns": [
+                {"name": "rate", "arrow_type": "Float64", "nullable": True},
+            ]
+        }
+        contract = SchemaContract(schema)
+
+        batch = contract.from_pylist([{"rate": "3.14"}, {"rate": None}])
+
+        result = batch.to_pylist()
+        assert abs(result[0]["rate"] - 3.14) < 1e-9
+        assert result[1]["rate"] is None
+
+    def test_from_pylist_integer_from_mixed_types(self):
+        # Some rows carry native ints; some carry strings. Both are accepted.
+        schema = {"columns": [{"name": "n", "arrow_type": "Int32", "nullable": True}]}
+        contract = SchemaContract(schema)
+
+        batch = contract.from_pylist([{"n": 5}, {"n": "10"}, {"n": None}])
+        assert batch.to_pylist() == [{"n": 5}, {"n": 10}, {"n": None}]
+
+    def test_from_pylist_unparseable_integer_string_raises(self):
+        schema = {"columns": [{"name": "val", "arrow_type": "Int32", "nullable": True}]}
+        contract = SchemaContract(schema)
+
+        with pytest.raises(ValueError, match=r"column 'val' at row 1"):
+            contract.from_pylist([{"val": "42"}, {"val": "abc"}])
+
+    def test_from_pylist_float_string_for_integer_raises(self):
+        # "14.5" cannot be losslessly parsed as int — must fail, not silently truncate.
+        schema = {"columns": [{"name": "val", "arrow_type": "Int32", "nullable": True}]}
+        contract = SchemaContract(schema)
+
+        with pytest.raises(ValueError, match=r"column 'val' at row 0"):
+            contract.from_pylist([{"val": "14.5"}])
+
     def test_from_pylist_strptime_via_source_format(self):
         schema = {
             "columns": [
