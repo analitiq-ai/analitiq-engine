@@ -297,6 +297,89 @@ class TestSchemaContractFromPylist:
         with pytest.raises(ValueError, match=r"column 'rate' at row 0.*non-finite"):
             contract.from_pylist([{"rate": "inf"}])
 
+    def test_from_pylist_native_nonfinite_float_mixed_with_string_raises(self):
+        # A native float('nan')/float('inf') next to a numeric string must be
+        # rejected exactly like the strings "nan"/"inf" — same intent, same
+        # semantics — not pass through into the Arrow column unchecked.
+        schema = {"columns": [{"name": "rate", "arrow_type": "Float64", "nullable": True}]}
+        contract = SchemaContract(schema)
+
+        with pytest.raises(ValueError, match=r"column 'rate' at row 1.*non-finite"):
+            contract.from_pylist([{"rate": "3.14"}, {"rate": float("nan")}])
+        with pytest.raises(ValueError, match=r"column 'rate' at row 1.*non-finite"):
+            contract.from_pylist([{"rate": "3.14"}, {"rate": float("inf")}])
+
+    def test_from_pylist_float32_string_overflow_raises(self):
+        # "1e40" parses to a finite float64 but overflows to inf when stored
+        # in a Float32 array — must fail loudly, not corrupt the destination.
+        schema = {"columns": [{"name": "rate", "arrow_type": "Float32", "nullable": True}]}
+        contract = SchemaContract(schema)
+
+        with pytest.raises(ValueError, match=r"column 'rate' at row 0.*overflows float"):
+            contract.from_pylist([{"rate": "1e40"}])
+
+    def test_from_pylist_float32_native_overflow_mixed_with_string_raises(self):
+        # The same overflow guard applies to native floats in a mixed column.
+        schema = {"columns": [{"name": "rate", "arrow_type": "Float32", "nullable": True}]}
+        contract = SchemaContract(schema)
+
+        with pytest.raises(ValueError, match=r"column 'rate' at row 1.*overflows float"):
+            contract.from_pylist([{"rate": "3.14"}, {"rate": 1e40}])
+
+    def test_from_pylist_float32_in_range_strings_pass(self):
+        schema = {"columns": [{"name": "rate", "arrow_type": "Float32", "nullable": True}]}
+        contract = SchemaContract(schema)
+
+        batch = contract.from_pylist([{"rate": "3.14"}, {"rate": -2.5}, {"rate": None}])
+        result = batch.to_pylist()
+        assert abs(result[0]["rate"] - 3.14) < 1e-6
+        assert result[1]["rate"] == -2.5
+        assert result[2]["rate"] is None
+
+    def test_from_pylist_integer_string_out_of_range_raises_with_row(self):
+        # "2147483648" parses cleanly with int() but exceeds Int32; the error
+        # must name the offending row, not blame the first non-null value.
+        schema = {"columns": [{"name": "val", "arrow_type": "Int32", "nullable": True}]}
+        contract = SchemaContract(schema)
+
+        with pytest.raises(ValueError, match=r"column 'val' at row 1.*out of range"):
+            contract.from_pylist([{"val": "1"}, {"val": "2147483648"}])
+
+    def test_from_pylist_native_integer_out_of_range_raises_with_row(self):
+        # Native out-of-range ints in a mixed column previously surfaced as
+        # ArrowInvalid blaming row 0; they get the same per-row range check.
+        schema = {"columns": [{"name": "val", "arrow_type": "Int32", "nullable": True}]}
+        contract = SchemaContract(schema)
+
+        with pytest.raises(ValueError, match=r"column 'val' at row 1.*out of range"):
+            contract.from_pylist([{"val": "1"}, {"val": 2147483648}])
+
+    def test_from_pylist_uint_negative_string_raises(self):
+        schema = {"columns": [{"name": "flags", "arrow_type": "UInt32", "nullable": True}]}
+        contract = SchemaContract(schema)
+
+        with pytest.raises(ValueError, match=r"column 'flags' at row 0.*out of range"):
+            contract.from_pylist([{"flags": "-1"}])
+
+    def test_from_pylist_native_float_for_integer_raises(self):
+        # pa.array silently truncates 1.5 -> 1 for integer types; a native
+        # float must be rejected like the string "1.5", not silently floored.
+        schema = {"columns": [{"name": "val", "arrow_type": "Int32", "nullable": True}]}
+        contract = SchemaContract(schema)
+
+        with pytest.raises(ValueError, match=r"column 'val' at row 1.*got float"):
+            contract.from_pylist([{"val": "1"}, {"val": 1.5}])
+
+    def test_from_pylist_non_numeric_object_mixed_with_string_raises(self):
+        # Anything outside int/float/numeric-string (here a dict) is rejected
+        # with row context instead of falling through to an ArrowInvalid that
+        # blames the first non-null row.
+        schema = {"columns": [{"name": "val", "arrow_type": "Float64", "nullable": True}]}
+        contract = SchemaContract(schema)
+
+        with pytest.raises(ValueError, match=r"column 'val' at row 1.*got dict"):
+            contract.from_pylist([{"val": "1.5"}, {"val": {"x": 1}}])
+
     def test_from_pylist_strptime_via_source_format(self):
         schema = {
             "columns": [

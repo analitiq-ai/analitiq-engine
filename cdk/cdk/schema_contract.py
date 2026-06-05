@@ -21,6 +21,15 @@ logger = logging.getLogger(__name__)
 # encode/decode happens at the source and handler boundaries.
 _JSON_ARROW_TYPE: str = "Json"
 
+# Largest finite magnitude per narrow float width. A finite Python float
+# (float64) above these silently overflows to +/-inf when stored in the
+# narrower Arrow array, so it must be rejected per-row instead. float64
+# needs no entry: math.isfinite already covers it.
+_FLOAT_MAX_BY_BIT_WIDTH: Dict[int, float] = {
+    16: 65504.0,
+    32: math.ldexp(2 - 2**-23, 127),  # 3.4028234663852886e+38
+}
+
 
 def _is_json_field(field_def: Dict[str, Any]) -> bool:
     return field_def.get("arrow_type") == _JSON_ARROW_TYPE
@@ -307,16 +316,35 @@ class SchemaContract:
 
         Triggered when the declared Arrow type is an integer or float family
         and at least one non-null source value is a string (e.g. JSON APIs
-        that encode numbers as ``"0"``, ``"14.5"``). Non-string values that
-        are already numeric pass through unchanged; None values become typed
-        nulls. Boolean values are rejected — ``bool`` is a Python subclass of
-        ``int`` and would silently coerce to 0/1 otherwise.
+        that encode numbers as ``"0"``, ``"14.5"``). None values become typed
+        nulls.
 
-        Raises ``ValueError`` naming the column and row on parse failure, on
-        a non-parseable string, on an out-of-range value, or when a
-        non-string/non-numeric type (including ``bool``) is encountered.
+        Every non-null value — parsed string or native numeric — passes the
+        same per-row checks, so identical author intent behaves identically
+        regardless of input shape:
+
+        - integer columns accept only ``int`` (or an integer string) within
+          the declared width; a native float would silently truncate inside
+          ``pa.array`` (1.5 -> 1) and is rejected like the string ``"1.5"``
+        - float columns reject non-finite values and values whose magnitude
+          exceeds the declared width's largest finite float, which would
+          silently overflow to +/-inf inside the narrower Arrow array
+          (e.g. ``"1e40"`` in a Float32 column)
+        - ``bool`` is rejected — it is a Python subclass of ``int`` and
+          would silently coerce to 0/1 otherwise
+
+        Raises ``ValueError`` naming the column and row on every rejection.
         """
         is_int = pa.types.is_integer(field.type)
+        if is_int:
+            bits = field.type.bit_width
+            if pa.types.is_signed_integer(field.type):
+                lo, hi = -(1 << (bits - 1)), (1 << (bits - 1)) - 1
+            else:
+                lo, hi = 0, (1 << bits) - 1
+        else:
+            float_max = _FLOAT_MAX_BY_BIT_WIDTH.get(field.type.bit_width)
+
         converted: List[Any] = []
         for row, v in enumerate(values):
             if v is None:
@@ -328,28 +356,49 @@ class SchemaContract:
                     f"numeric string, got bool {v!r}; declare arrow_type='Boolean' "
                     f"or fix the source mapping"
                 )
-            if not isinstance(v, str):
-                converted.append(v)
-                continue
-            try:
-                parsed = int(v) if is_int else float(v)
-            except (ValueError, OverflowError) as exc:
+            if isinstance(v, str):
+                try:
+                    parsed = int(v) if is_int else float(v)
+                except (ValueError, OverflowError) as exc:
+                    raise ValueError(
+                        f"column {field.name!r} at row {row}: cannot parse "
+                        f"{v!r} as {field.type}: {exc}"
+                    ) from exc
+            elif isinstance(v, int) or (not is_int and isinstance(v, float)):
+                parsed = v
+            else:
                 raise ValueError(
-                    f"column {field.name!r} at row {row}: cannot parse "
-                    f"{v!r} as {field.type}: {exc}"
-                ) from exc
-            if not is_int and not math.isfinite(parsed):
-                raise ValueError(
-                    f"column {field.name!r} at row {row}: string {v!r} "
-                    f"produces non-finite float {parsed!r}; use None for missing values"
+                    f"column {field.name!r} at row {row}: expected numeric or "
+                    f"numeric string for {field.type}, got "
+                    f"{type(v).__name__} {v!r}"
                 )
+            if is_int:
+                if not lo <= parsed <= hi:
+                    raise ValueError(
+                        f"column {field.name!r} at row {row}: value {v!r} "
+                        f"out of range for {field.type}"
+                    )
+            else:
+                try:
+                    parsed = float(parsed)
+                except OverflowError as exc:
+                    raise ValueError(
+                        f"column {field.name!r} at row {row}: value {v!r} "
+                        f"out of range for {field.type}: {exc}"
+                    ) from exc
+                if not math.isfinite(parsed):
+                    raise ValueError(
+                        f"column {field.name!r} at row {row}: value {v!r} "
+                        f"is non-finite; use None for missing values"
+                    )
+                if float_max is not None and abs(parsed) > float_max:
+                    raise ValueError(
+                        f"column {field.name!r} at row {row}: value {v!r} "
+                        f"overflows {field.type} (largest finite magnitude "
+                        f"{float_max!r})"
+                    )
             converted.append(parsed)
-        try:
-            return pa.array(converted, type=field.type)
-        except OverflowError as exc:
-            raise ValueError(
-                f"column {field.name!r}: value out of range for {field.type}: {exc}"
-            ) from exc
+        return pa.array(converted, type=field.type)
 
     @staticmethod
     def _schema_from_columns(
