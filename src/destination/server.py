@@ -183,8 +183,8 @@ class DestinationServicer(DestinationServiceServicer):
                     # (type-map, SchemaConfigurationError, KeyError/
                     # ValueError/TypeError on a malformed endpoint document)
                     # surface in the SchemaAck with the exception type and
-                    # message, so the engine can route them to DLQ instead
-                    # of treating them as a transient "schema configuration
+                    # message, so the engine logs a precise rejection
+                    # reason instead of a generic "schema configuration
                     # failed". Anything else is a defect: it escapes to the
                     # stream's outer except, which logs the traceback and
                     # re-raises, failing the RPC with the real error instead
@@ -363,15 +363,19 @@ class DestinationServicer(DestinationServiceServicer):
                 protocol_version="1.0.0",
             )
         except AttributeError as e:
-            # A handler missing a capability attribute would otherwise
-            # surface as a bare INTERNAL with no detail. Name the handler
-            # class and the missing attribute so the defect is actionable.
+            # A broken capability surface (attribute missing on the
+            # handler, or an AttributeError from inside a capability
+            # property) would otherwise surface as a bare INTERNAL with
+            # no detail. Name the handler class and carry the original
+            # message — which says what attribute failed and where — so
+            # the defect is actionable.
             detail = (
-                f"handler {type(self.handler).__name__} does not expose a "
-                f"required capability attribute: {e}"
+                f"handler {type(self.handler).__name__} failed to provide "
+                f"capabilities: {e}"
             )
             logger.exception("GetCapabilities failed: %s", detail)
             await context.abort(grpc.StatusCode.INTERNAL, detail)
+            raise  # abort always raises; backstop so this cannot return None
 
     async def Shutdown(
         self,

@@ -557,10 +557,12 @@ class GenericSQLConnector(BaseDestinationHandler):
         # Every exception propagates to the gRPC layer. Deterministic,
         # actionable errors (SchemaConfigurationError, type-map errors,
         # missing secret, malformed endpoint document, engine not
-        # connected) are translated into the SchemaAck there with their
-        # real type and message; anything else is a defect that must
-        # surface as-is rather than degrade into a generic schema
-        # rejection the engine treats as a configuration problem.
+        # connected at DDL time via AdbcConfigurationError) are
+        # translated into the SchemaAck there with their real type and
+        # message; anything else — wiring-defect RuntimeErrors from
+        # _type_mapper_for_stream, raw driver errors during DDL — is a
+        # defect that must fail the RPC as-is rather than degrade into
+        # a generic schema rejection.
         database_object = endpoint_doc.get("database_object") or {}
         table_name = database_object.get("name") or ""
         if not table_name:
