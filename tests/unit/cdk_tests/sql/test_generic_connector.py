@@ -21,8 +21,9 @@ from unittest.mock import AsyncMock, patch
 import pyarrow as pa
 import pytest
 
-from cdk.sql.generic import GenericSQLConnector
+from cdk.secrets.exceptions import PlaceholderExpansionError
 from cdk.sql.exceptions import ReadError
+from cdk.sql.generic import GenericSQLConnector
 
 
 class _FakeRuntime:
@@ -95,6 +96,41 @@ class TestReadGuards:
         config = {"endpoint_document": {"database_object": {}, "columns": []}}
         with pytest.raises(ReadError, match="database_object.name"):
             await _drain(connector, runtime, config, _checkpoint())
+
+
+class TestReadConnectErrors:
+    """read_batches connect-phase error classification mirrors connect()."""
+
+    @pytest.mark.asyncio
+    async def test_value_error_wrapped_in_read_error(self):
+        # ValueError is not a deterministic config error — it must be wrapped
+        # in ReadError so callers get user-facing context rather than a raw
+        # internal exception.
+        connector = GenericSQLConnector()
+        runtime = _FakeRuntime(is_adbc=False)
+        with patch(
+            "cdk.sql.generic.materialize_runtime",
+            new=AsyncMock(side_effect=ValueError("bad DSN")),
+        ):
+            with pytest.raises(ReadError, match="Database connection failed"):
+                await _drain(connector, runtime, _endpoint_config(), _checkpoint())
+
+    @pytest.mark.asyncio
+    async def test_deterministic_error_propagates_unchanged(self):
+        # Typed config errors (PlaceholderExpansionError, InvalidTypeMapError,
+        # UnmappedTypeError) must still surface unchanged so the worker can
+        # classify them without unwrapping.
+        connector = GenericSQLConnector()
+        runtime = _FakeRuntime(is_adbc=False)
+        exc = PlaceholderExpansionError(
+            placeholder="password", connection_id="db", detail="not found"
+        )
+        with patch(
+            "cdk.sql.generic.materialize_runtime",
+            new=AsyncMock(side_effect=exc),
+        ):
+            with pytest.raises(PlaceholderExpansionError):
+                await _drain(connector, runtime, _endpoint_config(), _checkpoint())
 
 
 class TestReadAdbcBranch:
