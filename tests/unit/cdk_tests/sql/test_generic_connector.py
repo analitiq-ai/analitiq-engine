@@ -120,6 +120,38 @@ class TestReadGuards:
         with pytest.raises(ReadError, match="missing 'field'"):
             GenericSQLConnector._build_filters([{"operator": "eq", "value": 1}])
 
+    @pytest.mark.asyncio
+    async def test_incremental_wildcard_projection_passes_cursor_check(self):
+        # selected_columns ['*'] compiles to SELECT *, which always carries
+        # the cursor column — the projection guard must not reject it.
+        runtime = _FakeRuntime(is_adbc=True)
+        page = [pa.RecordBatch.from_pydict(
+            {"id": [1], "updated_at": ["2024-01-01"]}
+        )]
+        reader = _RecordingReader([page, []])
+
+        class _CM:
+            async def __aenter__(self):
+                return reader
+
+            async def __aexit__(self, *exc):
+                return False
+
+        connector = GenericSQLConnector()
+        with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()), patch(
+            "cdk.sql.generic.open_adbc_reader", return_value=_CM()
+        ), patch("cdk.sql.generic.SchemaContract") as sc:
+            sc.return_value.cast_arrow_batch.side_effect = lambda b: b
+            config = _endpoint_config(
+                replication={"method": "incremental", "cursor_field": ["updated_at"]},
+            )
+            config["stream_source"]["selected_columns"] = ["*"]
+            batches = await _drain(connector, runtime, config, _checkpoint())
+
+        assert batches
+        sql, _ = reader.calls[0]
+        assert "SELECT *" in sql or "select *" in sql.lower()
+
 
 class TestReadConnectErrors:
     """read_batches connect-phase error classification mirrors connect()."""

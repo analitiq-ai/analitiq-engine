@@ -1866,6 +1866,10 @@ class GenericSQLConnector(BaseDestinationHandler):
             if (
                 replication_method == "incremental"
                 and cursor_field
+                # The wildcard projection compiles to SELECT * (see
+                # QueryBuilder.build_select_query), which always carries
+                # the cursor column.
+                and column_names != ["*"]
                 and cursor_field not in column_names
             ):
                 # An incremental stream whose projection drops the cursor
