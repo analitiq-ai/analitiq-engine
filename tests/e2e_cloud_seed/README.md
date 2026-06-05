@@ -47,12 +47,24 @@ each warehouse you intend to use as a source:
 
 ## Run a pipeline
 
+`PIPELINE_ID` is the manifest `pipeline_id` (a UUID), **not** the directory
+slug — the engine resolves it against `pipelines/manifest.json`. The snippet
+below resolves a slug to its UUID so the commands stay copy-pasteable.
+
 ```bash
-cd docker && \
-  PIPELINE_ID=e2e-postgres-to-snowflake \
-  docker compose run --rm source_engine
+SLUG=e2e-postgres-to-snowflake
+PIPELINE_ID=$(python3 -c "import json;print(next(p['pipeline_id'] for p in json.load(open('pipelines/manifest.json'))['pipelines'] if p['path'].startswith('$SLUG/')))")
+cd docker && PIPELINE_ID=$PIPELINE_ID docker compose run --rm source_engine; cd ..
 ```
 
-Swap `PIPELINE_ID` for any of the six pipeline IDs above. Check the container
-logs for errors; on success the 5 rows land in the destination's `e2e_landing`
-table, which you can read back to confirm row-for-row equality with the seed.
+Swap `SLUG` for any of the six pipeline slugs above. If you ran a different
+pipeline before, recreate the long-running destination first — it keeps the
+`PIPELINE_ID` it was created with:
+
+```bash
+cd docker && docker compose rm -sf destination; cd ..
+```
+
+Check the container logs for errors; on success the 5 rows land in the
+destination's `e2e_landing` table, which you can read back to confirm
+row-for-row equality with the seed.

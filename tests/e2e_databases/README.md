@@ -51,8 +51,15 @@ cd docker && PIPELINE_ID=$PIPELINE_ID docker compose run --rm source_engine; cd 
 #    mysql   -h127.0.0.1 -P13306 -ue2e_user -pe2e_password e2e_db -e 'select * from e2e_landing order by id;'
 #    mariadb -h127.0.0.1 -P13307 -ue2e_user -pe2e_password e2e_db -e 'select * from e2e_landing order by id;'
 
-# 4. tear down
+# 4. before running a DIFFERENT slug: recreate the long-running destination —
+#    it keeps the PIPELINE_ID it was created with, so a reused container would
+#    serve the previous pipeline's config.
+cd docker && docker compose rm -sf destination; cd ..
+# ... then repeat step 2 with the new slug.
+
+# 5. tear down
 cd tests/e2e_databases && docker compose down -v && cd ../..
+cd docker && docker compose down && cd ..
 ```
 
 ## Cloud DBs (Snowflake / BigQuery / Redshift <-> Postgres)
