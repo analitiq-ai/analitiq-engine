@@ -136,13 +136,18 @@ class LocalDLQStorage:
                     e,
                     exc_info=True,
                 )
+                # The fallback file keeps the dlq_*.jsonl name shape and
+                # single-line JSONL format so get_records / get_stats /
+                # clear / cleanup (which glob dlq_*.jsonl) still see the
+                # record — a counted record must stay visible to the DLQ
+                # read APIs.
                 fallback_file = (
                     self.dlq_path
-                    / f"dlq_fallback_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}.json"
+                    / f"dlq_fallback_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}.jsonl"
                 )
                 try:
                     with open(fallback_file, "w", encoding="utf-8") as f:
-                        json.dump(record, f, indent=2, cls=DLQRecordEncoder)
+                        f.write(json.dumps(record, cls=DLQRecordEncoder) + "\n")
                     return True
                 except (OSError, TypeError, ValueError) as fallback_error:
                     logger.critical(

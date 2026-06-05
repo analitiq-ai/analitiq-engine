@@ -455,17 +455,22 @@ class TestDeadLetterQueueEdgeCases:
         with patch('builtins.open', side_effect=mock_open):
             # Should not raise exception but use fallback
             await dlq.send_to_dlq(record, error, "test-pipeline")
-        
-        # Should have created fallback files
-        fallback_files = list(dlq.dlq_path.glob("dlq_fallback_*.json"))
+
+        # Should have created fallback files within the dlq_*.jsonl set
+        fallback_files = list(dlq.dlq_path.glob("dlq_fallback_*.jsonl"))
         assert len(fallback_files) > 0
-        
-        # Verify fallback file contents
+
+        # Verify fallback file contents (single JSONL line)
         with open(fallback_files[0], 'r', encoding='utf-8') as f:
-            fallback_record = json.load(f)
-        
+            fallback_record = json.loads(f.readline())
+
         assert fallback_record["original_record"]["id"] == 123
         assert fallback_record["pipeline_id"] == "test-pipeline"
+
+        # The counted fallback record stays visible to the DLQ read APIs
+        failed_records = await dlq.get_failed_records("test-pipeline")
+        assert len(failed_records) == 1
+        assert failed_records[0]["original_record"]["id"] == 123
     
     @pytest.mark.asyncio
     async def test_write_to_dlq_fallback_also_fails(self):
