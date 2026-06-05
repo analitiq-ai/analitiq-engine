@@ -265,8 +265,7 @@ class TestSchemaContractFromPylist:
         assert pa.types.is_unsigned_integer(batch.schema.field("flags").type)
 
     def test_from_pylist_bool_mixed_with_string_for_integer_raises(self):
-        # bool is a Python int subclass; when strings are present (triggering
-        # _build_numeric_from_strings), a bool must be rejected, not coerced to 0/1.
+        # bool is a Python int subclass; it must be rejected, not coerced to 0/1.
         schema = {"columns": [{"name": "val", "arrow_type": "Int32", "nullable": True}]}
         contract = SchemaContract(schema)
 
@@ -325,6 +324,48 @@ class TestSchemaContractFromPylist:
 
         with pytest.raises(ValueError, match=r"column 'rate' at row 1.*overflows float"):
             contract.from_pylist([{"rate": "3.14"}, {"rate": 1e40}])
+
+    def test_from_pylist_float32_native_only_overflow_raises(self):
+        # JSON 1e40 decodes to a native float; a batch with no strings at all
+        # must hit the same overflow guard, not bypass validation entirely.
+        schema = {"columns": [{"name": "rate", "arrow_type": "Float32", "nullable": True}]}
+        contract = SchemaContract(schema)
+
+        with pytest.raises(ValueError, match=r"column 'rate' at row 0.*overflows float"):
+            contract.from_pylist([{"rate": 1e40}])
+
+    def test_from_pylist_native_only_nonfinite_float_raises(self):
+        schema = {"columns": [{"name": "rate", "arrow_type": "Float64", "nullable": True}]}
+        contract = SchemaContract(schema)
+
+        with pytest.raises(ValueError, match=r"column 'rate' at row 0.*non-finite"):
+            contract.from_pylist([{"rate": float("nan")}])
+
+    def test_from_pylist_native_only_integer_out_of_range_raises(self):
+        schema = {"columns": [{"name": "val", "arrow_type": "Int32", "nullable": True}]}
+        contract = SchemaContract(schema)
+
+        with pytest.raises(ValueError, match=r"column 'val' at row 1.*out of range"):
+            contract.from_pylist([{"val": 1}, {"val": 2147483648}])
+
+    def test_from_pylist_native_only_numerics_pass(self):
+        # Pure-native numeric batches go through the same validated path.
+        schema = {
+            "columns": [
+                {"name": "n", "arrow_type": "Int32", "nullable": True},
+                {"name": "rate", "arrow_type": "Float32", "nullable": True},
+            ]
+        }
+        contract = SchemaContract(schema)
+
+        batch = contract.from_pylist(
+            [{"n": 5, "rate": 1.5}, {"n": -7, "rate": None}, {"n": None, "rate": 0.25}]
+        )
+        assert batch.to_pylist() == [
+            {"n": 5, "rate": 1.5},
+            {"n": -7, "rate": None},
+            {"n": None, "rate": 0.25},
+        ]
 
     def test_from_pylist_float32_in_range_strings_pass(self):
         schema = {"columns": [{"name": "rate", "arrow_type": "Float32", "nullable": True}]}

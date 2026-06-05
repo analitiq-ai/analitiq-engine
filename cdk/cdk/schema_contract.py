@@ -256,10 +256,8 @@ class SchemaContract:
         ) and any(isinstance(v, str) for v in values if v is not None):
             return SchemaContract._build_temporal_from_strings(field, values)
 
-        if (
-            pa.types.is_integer(field.type) or pa.types.is_floating(field.type)
-        ) and any(isinstance(v, str) for v in values if v is not None):
-            return SchemaContract._build_numeric_from_strings(field, values)
+        if pa.types.is_integer(field.type) or pa.types.is_floating(field.type):
+            return SchemaContract._build_numeric_column(field, values)
 
         return pa.array(values, type=field.type)
 
@@ -309,14 +307,14 @@ class SchemaContract:
         return pa.array(parsed, type=field.type)
 
     @staticmethod
-    def _build_numeric_from_strings(
+    def _build_numeric_column(
         field: pa.Field, values: List[Any]
     ) -> pa.Array:
-        """Coerce string representations of numbers into an integer or float column.
+        """Build an integer or float column, validating every value per row.
 
-        Triggered when the declared Arrow type is an integer or float family
-        and at least one non-null source value is a string (e.g. JSON APIs
-        that encode numbers as ``"0"``, ``"14.5"``). None values become typed
+        Handles every integer/float column, whether the source carries
+        native numbers or string representations (e.g. JSON APIs that
+        encode numbers as ``"0"``, ``"14.5"``). None values become typed
         nulls.
 
         Every non-null value — parsed string or native numeric — passes the
