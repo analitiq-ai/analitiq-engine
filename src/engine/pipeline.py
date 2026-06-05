@@ -17,18 +17,19 @@ from dotenv import load_dotenv
 
 from .engine import StreamingEngine
 from ..models.stream import EndpointRef
+from ..models.resolved import ResolvedPipeline, ResolvedStream
 from cdk.connection_runtime import ConnectionRuntime
 
 logger = logging.getLogger(__name__)
 
 
 class Pipeline:
-    """Compose the runtime config dict and start the streaming engine."""
+    """Compose the typed resolved config and start the streaming engine."""
 
     def __init__(
         self,
-        pipeline_config: Dict[str, Any],
-        stream_configs: Optional[List[Dict[str, Any]]] = None,
+        pipeline_config: ResolvedPipeline,
+        stream_configs: Optional[List[ResolvedStream]] = None,
         resolved_connections: Optional[Dict[str, ConnectionRuntime]] = None,
         resolved_endpoints: Optional[Dict[Any, Dict[str, Any]]] = None,
         connectors: Optional[List[Dict[str, Any]]] = None,
@@ -42,13 +43,13 @@ class Pipeline:
         self.resolved_endpoints = resolved_endpoints or {}
         self.connectors = connectors or []
 
-        pipeline_id = pipeline_config["pipeline_id"]
+        pipeline_id = pipeline_config.pipeline_id
         project_root = Path(__file__).parent.parent.parent
         self.state_dir = state_dir or str(project_root / "state")
         self.dlq_dir = str(project_root / "deadletter" / pipeline_id)
         self._ensure_directories()
 
-        runtime = pipeline_config.get("runtime") or {}
+        runtime = pipeline_config.runtime
         batching = runtime.get("batching") or {"batch_size": 1000, "max_concurrent_batches": 3}
         error_handling = runtime.get("error_handling") or {
             "max_retries": 3,
@@ -76,31 +77,26 @@ class Pipeline:
         streams: Dict[str, Dict[str, Any]] = {}
 
         for stream in self.stream_configs:
-            source = stream["source"]
-            destinations = stream.get("destinations") or []
-            if not destinations:
+            if not stream.destinations:
                 raise ValueError(
-                    f"Stream {stream['stream_id']!r} has no destinations"
+                    f"Stream {stream.stream_id!r} has no destinations"
                 )
-            dest = destinations[0]
+            dest = stream.primary_destination()
 
             # Source connectors run in this process and need the runtime
             # handle + resolved endpoint document. Destination handlers
             # run in the destination container and load both for
             # themselves via PipelineConfigPrep + set_stream_endpoints, so
             # only the engine-facing summary (write mode) is built here.
-            source_runtime: ConnectionRuntime = source["_runtime"]
-            source_endpoint = source["_endpoint"]
-
             source_config = _translate_source_config(
                 stream=stream,
-                source=source,
-                endpoint=source_endpoint,
-                runtime=source_runtime,
+                source=stream.source,
+                endpoint=stream.source.endpoint_document,
+                runtime=stream.source.runtime,
             )
             dest_config = _build_destination_config(dest)
 
-            mapping = stream.get("mapping") or {}
+            mapping = stream.mapping or {}
             mapping_config = {
                 "assignments": [
                     _translate_assignment(a)
@@ -108,19 +104,18 @@ class Pipeline:
                 ]
             }
 
-            streams[stream["stream_id"]] = {
-                "name": stream["stream_id"],
+            streams[stream.stream_id] = {
+                "name": stream.stream_id,
                 "source": source_config,
                 "destination": dest_config,
                 "mapping": mapping_config,
             }
 
         return {
-            "pipeline_id": self.pipeline_config["pipeline_id"],
-            "name": self.pipeline_config.get("display_name")
-            or self.pipeline_config["pipeline_id"],
+            "pipeline_id": self.pipeline_config.pipeline_id,
+            "name": self.pipeline_config.display_name or self.pipeline_config.pipeline_id,
             "streams": streams,
-            "runtime": self.pipeline_config.get("runtime") or {},
+            "runtime": self.pipeline_config.runtime,
         }
 
     async def run(self) -> None:
@@ -129,11 +124,11 @@ class Pipeline:
             await self.engine.stream_data(config_dict)
             logger.info(
                 "Pipeline %s completed successfully",
-                self.pipeline_config["pipeline_id"],
+                self.pipeline_config.pipeline_id,
             )
         except Exception:
             logger.exception(
-                "Pipeline %s failed", self.pipeline_config["pipeline_id"]
+                "Pipeline %s failed", self.pipeline_config.pipeline_id
             )
             raise
 
@@ -148,8 +143,8 @@ class Pipeline:
 
 def _translate_source_config(
     *,
-    stream: Dict[str, Any],
-    source: Dict[str, Any],
+    stream: ResolvedStream,
+    source: "ResolvedSource",
     endpoint: Dict[str, Any],
     runtime: ConnectionRuntime,
 ) -> Dict[str, Any]:
@@ -165,9 +160,9 @@ def _translate_source_config(
     kind = runtime.connector_type
     base: Dict[str, Any] = {
         "connector_type": kind,
-        "_runtime": runtime,
-        "endpoint_ref": source["endpoint_ref"],
-        "connection_ref": source["connection_ref"],
+        "_resolved_source": source,
+        "endpoint_ref": source.endpoint_ref.to_dict(),
+        "connection_ref": source.connection_ref,
     }
     if kind == "database":
         base.update(_translate_database_source(source, endpoint))
@@ -181,7 +176,7 @@ def _translate_source_config(
 
 
 def _build_destination_config(
-    destination: Dict[str, Any],
+    destination: "ResolvedDestination",
 ) -> Dict[str, Any]:
     """Engine-facing destination dict.
 
@@ -191,12 +186,11 @@ def _build_destination_config(
     by the destination container, which loads the contract endpoint
     document via :class:`PipelineConfigPrep`.
     """
-    write = destination.get("write") or {}
-    return {"write_mode": write.get("mode", "upsert")}
+    return {"write_mode": destination.write.get("mode", "upsert")}
 
 
 def _translate_database_source(
-    source: Dict[str, Any], endpoint: Dict[str, Any]
+    source: "ResolvedSource", endpoint: Dict[str, Any]
 ) -> Dict[str, Any]:
     """Pass the contract documents through to :class:`GenericSQLConnector`.
 
@@ -207,12 +201,12 @@ def _translate_database_source(
     """
     return {
         "endpoint_document": endpoint,
-        "stream_source": source,
+        "stream_source": source.stream_source,
     }
 
 
 def _translate_api_source(
-    source: Dict[str, Any],
+    source: "ResolvedSource",
     endpoint: Dict[str, Any],
     runtime: ConnectionRuntime,
 ) -> Dict[str, Any]:
@@ -226,8 +220,8 @@ def _translate_api_source(
     _ = runtime  # signature parity with the database path
     return {
         "endpoint_document": endpoint,
-        "stream_source": source,
-        "stream_filters": list(source.get("filters") or []),
+        "stream_source": source.stream_source,
+        "stream_filters": list(source.stream_source.get("filters") or []),
     }
 
 
