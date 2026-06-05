@@ -1,0 +1,994 @@
+{
+  "$defs": {
+    "ArrowFieldSpec": {
+      "additionalProperties": false,
+      "description": "Recursive field-shape declaration.\n\nUsed to describe authored-shape JSON containers under `arrow_type` =\n`Object` / `List` / `Json`. Scalar and parameterized Arrow types reuse the\nsame model with `properties` and `items` absent.\n\nSpec: `docs/schema-contracts/streams/stream-schema.md` \u00a7Assignment and\n`docs/schema-contracts/endpoints/endpoint-schema-parameterization.md`\n\u00a7Native and Arrow Types.",
+      "properties": {
+        "arrow_type": {
+          "description": "Arrow canonical type string from the shared type vocabulary. Parameterized canonical types must preserve the full string, e.g. 'Decimal128(38, 9)' \u2014 not 'Decimal128'. Bare authored-shape markers 'Object', 'List', and 'Json' declare JSON containers.",
+          "pattern": "^(?:Null|Boolean|Int8|Int16|Int32|Int64|UInt8|UInt16|UInt32|UInt64|Float16|Float32|Float64|Utf8|LargeUtf8|Binary|LargeBinary|Date32|Date64|FixedSizeBinary\\([1-9][0-9]*\\)|Time32\\((?:SECOND|MILLISECOND)\\)|Time64\\((?:MICROSECOND|NANOSECOND)\\)|Timestamp\\((?:SECOND|MILLISECOND|MICROSECOND|NANOSECOND)(?:\\s*,\\s*(?:null|[A-Za-z_][A-Za-z0-9_/\\-]*|Etc/GMT[+\\-][0-9]{1,2}|[+\\-](?:0[0-9]|1[0-4]):[0-5][0-9]))?\\)|Duration\\((?:SECOND|MILLISECOND|MICROSECOND|NANOSECOND)\\)|Interval\\((?:YEAR_MONTH|DAY_TIME|MONTH_DAY_NANO)\\)|Decimal128\\((?:[1-9]|[12][0-9]|3[0-8])\\s*,\\s*-?[0-9]+\\)|Decimal256\\((?:[1-9]|[1-6][0-9]|7[0-6])\\s*,\\s*-?[0-9]+\\)|List<.+>|LargeList<.+>|FixedSizeList<.+>\\[[1-9][0-9]*\\]|Struct<.+>|Map<.+,\\s*.+>|SparseUnion<.+>|DenseUnion<.+>|Dictionary<.+,\\s*.+>|RunEndEncoded<.+,\\s*.+>|Object|List|Json)$",
+          "title": "Arrow Type",
+          "type": "string"
+        },
+        "items": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArrowFieldSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "nullable": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Nullable"
+        },
+        "properties": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "$ref": "#/$defs/ArrowFieldSpec"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Properties"
+        }
+      },
+      "required": [
+        "arrow_type"
+      ],
+      "title": "ArrowFieldSpec",
+      "type": "object"
+    },
+    "Assignment": {
+      "additionalProperties": false,
+      "description": "Single field assignment \u2014 writes one target field from expression or constant.",
+      "properties": {
+        "target": {
+          "$ref": "#/$defs/AssignmentTarget"
+        },
+        "validate": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ValidationConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Assignment validation rules."
+        },
+        "value": {
+          "$ref": "#/$defs/AssignmentValue"
+        }
+      },
+      "required": [
+        "target",
+        "value"
+      ],
+      "title": "Assignment",
+      "type": "object"
+    },
+    "AssignmentTarget": {
+      "additionalProperties": false,
+      "description": "Destination field specification.",
+      "properties": {
+        "arrow_type": {
+          "description": "Arrow canonical type string from the shared type vocabulary. Parameterized canonical types must preserve the full string, e.g. 'Decimal128(38, 9)' \u2014 not 'Decimal128'. Bare authored-shape markers 'Object', 'List', and 'Json' declare JSON containers.",
+          "pattern": "^(?:Null|Boolean|Int8|Int16|Int32|Int64|UInt8|UInt16|UInt32|UInt64|Float16|Float32|Float64|Utf8|LargeUtf8|Binary|LargeBinary|Date32|Date64|FixedSizeBinary\\([1-9][0-9]*\\)|Time32\\((?:SECOND|MILLISECOND)\\)|Time64\\((?:MICROSECOND|NANOSECOND)\\)|Timestamp\\((?:SECOND|MILLISECOND|MICROSECOND|NANOSECOND)(?:\\s*,\\s*(?:null|[A-Za-z_][A-Za-z0-9_/\\-]*|Etc/GMT[+\\-][0-9]{1,2}|[+\\-](?:0[0-9]|1[0-4]):[0-5][0-9]))?\\)|Duration\\((?:SECOND|MILLISECOND|MICROSECOND|NANOSECOND)\\)|Interval\\((?:YEAR_MONTH|DAY_TIME|MONTH_DAY_NANO)\\)|Decimal128\\((?:[1-9]|[12][0-9]|3[0-8])\\s*,\\s*-?[0-9]+\\)|Decimal256\\((?:[1-9]|[1-6][0-9]|7[0-6])\\s*,\\s*-?[0-9]+\\)|List<.+>|LargeList<.+>|FixedSizeList<.+>\\[[1-9][0-9]*\\]|Struct<.+>|Map<.+,\\s*.+>|SparseUnion<.+>|DenseUnion<.+>|Dictionary<.+,\\s*.+>|RunEndEncoded<.+,\\s*.+>|Object|List|Json)$",
+          "title": "Arrow Type",
+          "type": "string"
+        },
+        "items": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArrowFieldSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "native_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Destination-native type override (e.g., 'NUMERIC(12,2)').",
+          "title": "Native Type"
+        },
+        "nullable": {
+          "default": true,
+          "title": "Nullable",
+          "type": "boolean"
+        },
+        "path": {
+          "description": "Destination field reference.",
+          "minLength": 1,
+          "title": "Path",
+          "type": "string"
+        },
+        "properties": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "$ref": "#/$defs/ArrowFieldSpec"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Properties"
+        }
+      },
+      "required": [
+        "path",
+        "arrow_type"
+      ],
+      "title": "AssignmentTarget",
+      "type": "object"
+    },
+    "AssignmentValue": {
+      "additionalProperties": false,
+      "description": "Exactly one of `expression` or `constant` per spec \u00a7Assignment.",
+      "properties": {
+        "constant": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ConstantValue"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "expression": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GetExpression"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "title": "AssignmentValue",
+      "type": "object"
+    },
+    "ConstantValue": {
+      "additionalProperties": false,
+      "description": "Typed constant \u2014 alternative to expression.",
+      "properties": {
+        "arrow_type": {
+          "description": "Arrow canonical type string from the shared type vocabulary. Parameterized canonical types must preserve the full string, e.g. 'Decimal128(38, 9)' \u2014 not 'Decimal128'. Bare authored-shape markers 'Object', 'List', and 'Json' declare JSON containers.",
+          "pattern": "^(?:Null|Boolean|Int8|Int16|Int32|Int64|UInt8|UInt16|UInt32|UInt64|Float16|Float32|Float64|Utf8|LargeUtf8|Binary|LargeBinary|Date32|Date64|FixedSizeBinary\\([1-9][0-9]*\\)|Time32\\((?:SECOND|MILLISECOND)\\)|Time64\\((?:MICROSECOND|NANOSECOND)\\)|Timestamp\\((?:SECOND|MILLISECOND|MICROSECOND|NANOSECOND)(?:\\s*,\\s*(?:null|[A-Za-z_][A-Za-z0-9_/\\-]*|Etc/GMT[+\\-][0-9]{1,2}|[+\\-](?:0[0-9]|1[0-4]):[0-5][0-9]))?\\)|Duration\\((?:SECOND|MILLISECOND|MICROSECOND|NANOSECOND)\\)|Interval\\((?:YEAR_MONTH|DAY_TIME|MONTH_DAY_NANO)\\)|Decimal128\\((?:[1-9]|[12][0-9]|3[0-8])\\s*,\\s*-?[0-9]+\\)|Decimal256\\((?:[1-9]|[1-6][0-9]|7[0-6])\\s*,\\s*-?[0-9]+\\)|List<.+>|LargeList<.+>|FixedSizeList<.+>\\[[1-9][0-9]*\\]|Struct<.+>|Map<.+,\\s*.+>|SparseUnion<.+>|DenseUnion<.+>|Dictionary<.+,\\s*.+>|RunEndEncoded<.+,\\s*.+>|Object|List|Json)$",
+          "title": "Arrow Type",
+          "type": "string"
+        },
+        "items": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArrowFieldSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "properties": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "$ref": "#/$defs/ArrowFieldSpec"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Properties"
+        },
+        "value": {
+          "description": "JSON literal value to assign. May be a JSON object when arrow_type is 'Object' or 'Json', a JSON array when arrow_type is 'List' or 'Json', or a JSON scalar for scalar Arrow types.",
+          "title": "Value"
+        }
+      },
+      "required": [
+        "arrow_type",
+        "value"
+      ],
+      "title": "ConstantValue",
+      "type": "object"
+    },
+    "DatabasePagination": {
+      "additionalProperties": false,
+      "description": "Database read-page configuration. API pagination is endpoint-owned.",
+      "properties": {
+        "order_by_field": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Source field reference for page ordering; required for keyset, omitted for offset.",
+          "title": "Order By Field"
+        },
+        "page_size": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Positive integer read page size; pipeline batch-size default applies when omitted.",
+          "title": "Page Size"
+        },
+        "type": {
+          "description": "Database pagination strategy.",
+          "enum": [
+            "offset",
+            "keyset"
+          ],
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "DatabasePagination",
+      "type": "object"
+    },
+    "EndpointRef": {
+      "additionalProperties": false,
+      "description": "Structured endpoint reference shared by source + destination sides.\n\nPer spec \u00a7Endpoint References:\n- `scope: \"connector\"` \u2014 public connector endpoint pinned by the\n  connection's connector_version.\n- `scope: \"connection\"` \u2014 private connection-scoped endpoint. Only\n  allowed when the data source is a private endpoint.",
+      "properties": {
+        "connection_id": {
+          "description": "Connection reference selected in the parent pipeline. Typically a versioned connection ID (e.g. 'uuid_v1'); the schema accepts any non-empty string \u2014 engines resolve the reference at runtime.",
+          "examples": [
+            "00000000-0000-4000-8000-000000000001_v1"
+          ],
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Connection Id",
+          "type": "string"
+        },
+        "endpoint_id": {
+          "description": "Stable endpoint ID selected from endpoint discovery.",
+          "minLength": 1,
+          "title": "Endpoint Id",
+          "type": "string"
+        },
+        "scope": {
+          "description": "Endpoint reference scope (connector | connection).",
+          "enum": [
+            "connector",
+            "connection"
+          ],
+          "title": "Scope",
+          "type": "string"
+        }
+      },
+      "required": [
+        "scope",
+        "connection_id",
+        "endpoint_id"
+      ],
+      "title": "EndpointRef",
+      "type": "object"
+    },
+    "ExecutionConfig": {
+      "additionalProperties": false,
+      "description": "Per-stream destination execution override for pipeline runtime batching defaults.",
+      "properties": {
+        "batch_size": {
+          "anyOf": [
+            {
+              "maximum": 100000,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Override pipeline.runtime.batching.batch_size for this binding.",
+          "title": "Batch Size"
+        },
+        "max_concurrent_batches": {
+          "anyOf": [
+            {
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Override pipeline.runtime.batching.max_concurrent_batches for this binding.",
+          "title": "Max Concurrent Batches"
+        }
+      },
+      "title": "ExecutionConfig",
+      "type": "object"
+    },
+    "Filter": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "else": {
+            "required": [
+              "value"
+            ]
+          },
+          "if": {
+            "properties": {
+              "operator": {
+                "enum": [
+                  "is_null",
+                  "is_not_null"
+                ]
+              }
+            },
+            "required": [
+              "operator"
+            ]
+          },
+          "then": {
+            "not": {
+              "required": [
+                "value"
+              ]
+            }
+          }
+        }
+      ],
+      "description": "Stream-owned read predicate.\n\nEndpoint contracts own which fields/params are filterable and which\noperators are allowed. Per spec \u00a7Filters, `value` is required except\nwhen `operator` is a unary operator (`is_null` / `is_not_null`).",
+      "properties": {
+        "field": {
+          "description": "Database field reference or API endpoint read parameter key.",
+          "minLength": 1,
+          "title": "Field",
+          "type": "string"
+        },
+        "operator": {
+          "description": "Operator selected from the applicable source capability.",
+          "minLength": 1,
+          "title": "Operator",
+          "type": "string"
+        },
+        "value": {
+          "default": null,
+          "description": "JSON value for the predicate; omit for unary operators.",
+          "title": "Value"
+        }
+      },
+      "required": [
+        "field",
+        "operator"
+      ],
+      "title": "Filter",
+      "type": "object"
+    },
+    "GetExpression": {
+      "additionalProperties": false,
+      "description": "`{\"op\": \"get\", \"path\": \"<source field reference>\"}` \u2014 the only stream\nmapping expression operation in v1.",
+      "properties": {
+        "op": {
+          "const": "get",
+          "title": "Op",
+          "type": "string"
+        },
+        "path": {
+          "description": "Source field reference.",
+          "minLength": 1,
+          "title": "Path",
+          "type": "string"
+        }
+      },
+      "required": [
+        "op",
+        "path"
+      ],
+      "title": "GetExpression",
+      "type": "object"
+    },
+    "ReplicationConfig": {
+      "additionalProperties": false,
+      "description": "Replication policy. Cursor mapping is endpoint-owned.",
+      "properties": {
+        "cursor_field": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Source field reference; required for incremental, omitted for full_refresh.",
+          "title": "Cursor Field"
+        },
+        "method": {
+          "description": "Stream-selected replication method.",
+          "enum": [
+            "full_refresh",
+            "incremental"
+          ],
+          "title": "Method",
+          "type": "string"
+        },
+        "safety_window_seconds": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Non-negative late-arrival overlap window.",
+          "title": "Safety Window Seconds"
+        },
+        "tie_breaker_fields": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Database-only deterministic cursor tie-breaker fields.",
+          "title": "Tie Breaker Fields"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "title": "ReplicationConfig",
+      "type": "object"
+    },
+    "StreamDestination": {
+      "additionalProperties": false,
+      "description": "Destination endpoint binding and stream-owned destination options.",
+      "properties": {
+        "endpoint_ref": {
+          "$ref": "#/$defs/EndpointRef",
+          "description": "Structured endpoint reference."
+        },
+        "execution": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExecutionConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Stream-level destination execution override."
+        },
+        "schema_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Server-assigned schema snapshot hash for `scope=connection` refs. Clients must not author this field.",
+          "readOnly": true,
+          "title": "Schema Hash"
+        },
+        "write": {
+          "$ref": "#/$defs/WriteConfig",
+          "description": "Stream-selected write behavior for this destination."
+        }
+      },
+      "required": [
+        "endpoint_ref",
+        "write"
+      ],
+      "title": "StreamDestination",
+      "type": "object"
+    },
+    "StreamMapping": {
+      "additionalProperties": false,
+      "description": "Source-to-destination assignment rules. Optional \u2014 omit for default mapping.",
+      "properties": {
+        "assignments": {
+          "description": "Ordered list of field assignments. Order is significant.",
+          "items": {
+            "$ref": "#/$defs/Assignment"
+          },
+          "title": "Assignments",
+          "type": "array"
+        },
+        "assignments_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Server-computed content hash over `assignments`. Clients must not author this field.",
+          "readOnly": true,
+          "title": "Assignments Hash"
+        }
+      },
+      "title": "StreamMapping",
+      "type": "object"
+    },
+    "StreamSource": {
+      "additionalProperties": false,
+      "description": "Source endpoint binding and stream-owned read options.",
+      "properties": {
+        "database_pagination": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DatabasePagination"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Database source read-page configuration. Defaults to offset pagination with page size from pipeline.runtime.batching.batch_size when omitted for database sources."
+        },
+        "endpoint_ref": {
+          "$ref": "#/$defs/EndpointRef",
+          "description": "Structured endpoint reference."
+        },
+        "filters": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/Filter"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Stream-supplied read predicates.",
+          "title": "Filters"
+        },
+        "primary_keys": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Stream-owned source identity hint when the endpoint does not provide primary-key metadata.",
+          "title": "Primary Keys"
+        },
+        "replication": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReplicationConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Stream-selected replication policy. Omission allowed only when the source supports full_refresh."
+        },
+        "schema_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Server-assigned schema snapshot hash for `scope=connection` refs. Clients must not author this field.",
+          "readOnly": true,
+          "title": "Schema Hash"
+        },
+        "selected_columns": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Ordered source field references; database sources only.",
+          "title": "Selected Columns"
+        }
+      },
+      "required": [
+        "endpoint_ref"
+      ],
+      "title": "StreamSource",
+      "type": "object"
+    },
+    "StreamValidationErrorHandling": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "max_retries": {
+                "const": 0
+              }
+            },
+            "required": [
+              "max_retries"
+            ]
+          },
+          "then": {
+            "properties": {
+              "retry_delay_seconds": {
+                "oneOf": [
+                  {
+                    "const": 0
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "description": "Mirror of `pipeline.ErrorHandlingConfig`. See pipeline-schema \u00a7Error Handling.",
+      "properties": {
+        "max_retries": {
+          "default": 3,
+          "maximum": 5,
+          "minimum": 0,
+          "title": "Max Retries",
+          "type": "integer"
+        },
+        "retry_delay_seconds": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Retry Delay Seconds"
+        },
+        "strategy": {
+          "default": "dlq",
+          "enum": [
+            "fail",
+            "dlq",
+            "skip"
+          ],
+          "title": "Strategy",
+          "type": "string"
+        }
+      },
+      "title": "StreamValidationErrorHandling",
+      "type": "object"
+    },
+    "ValidationConfig": {
+      "additionalProperties": false,
+      "description": "Per-assignment validation block.",
+      "properties": {
+        "error_handling": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StreamValidationErrorHandling"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Validation failure handling override. When omitted, the pipeline runtime.error_handling default applies."
+        },
+        "rules": {
+          "items": {
+            "$ref": "#/$defs/ValidationRule"
+          },
+          "title": "Rules",
+          "type": "array"
+        }
+      },
+      "title": "ValidationConfig",
+      "type": "object"
+    },
+    "ValidationRule": {
+      "additionalProperties": false,
+      "description": "Stream record validation rule \u2014 see \u00a7Assignment Validation.",
+      "properties": {
+        "field": {
+          "description": "Mapped output field path validated by this rule.",
+          "minLength": 1,
+          "title": "Field",
+          "type": "string"
+        },
+        "message": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Custom validation error message.",
+          "title": "Message"
+        },
+        "type": {
+          "enum": [
+            "required",
+            "not_null",
+            "min_length",
+            "max_length",
+            "pattern",
+            "range",
+            "in_list"
+          ],
+          "title": "Type",
+          "type": "string"
+        },
+        "value": {
+          "default": null,
+          "description": "Rule parameter. Required for min_length/max_length/pattern/range/in_list; must be omitted for required/not_null.",
+          "title": "Value"
+        }
+      },
+      "required": [
+        "type",
+        "field"
+      ],
+      "title": "ValidationRule",
+      "type": "object"
+    },
+    "WriteConfig": {
+      "additionalProperties": false,
+      "description": "Stream-selected write behavior for one destination.",
+      "properties": {
+        "conflict_keys": {
+          "anyOf": [
+            {
+              "items": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Required when the selected write mode requires conflict targets. Non-empty array of non-empty destination key sets.",
+          "title": "Conflict Keys"
+        },
+        "mode": {
+          "description": "Write mode. API: selected endpoint operations.write key. Database: 'insert' or 'upsert'.",
+          "minLength": 1,
+          "title": "Mode",
+          "type": "string"
+        }
+      },
+      "required": [
+        "mode"
+      ],
+      "title": "WriteConfig",
+      "type": "object"
+    }
+  },
+  "$id": "https://schemas.analitiq.ai/stream/latest.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Public JSON Schema contract for Analitiq stream documents \u2014 the authored shape used in source control, PR review, and author-time tooling. Server-managed fields (stream_id, version, org_id, created_at, updated_at) are forbidden in the authored shape and assigned by the stream service on ingest. The persisted-record shape is internal and not published. Source of truth: k2m.models.stream.StreamInput (Pydantic).",
+  "properties": {
+    "$schema": {
+      "anyOf": [
+        {
+          "const": "https://schemas.analitiq.ai/stream/latest.json",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Stream schema URL (optional in API payloads).",
+      "title": "$Schema"
+    },
+    "description": {
+      "anyOf": [
+        {
+          "maxLength": 2000,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "User-facing summary.",
+      "title": "Description"
+    },
+    "destinations": {
+      "description": "Non-empty array of destination bindings.",
+      "items": {
+        "$ref": "#/$defs/StreamDestination"
+      },
+      "minItems": 1,
+      "title": "Destinations",
+      "type": "array"
+    },
+    "display_name": {
+      "anyOf": [
+        {
+          "maxLength": 120,
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "User-facing stream label.",
+      "title": "Display Name"
+    },
+    "mapping": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/StreamMapping"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Explicit source-to-destination field mapping. Omit for runtime default mapping."
+    },
+    "pipeline_id": {
+      "description": "Parent pipeline reference. Typically the base pipeline UUID; the schema accepts any non-empty string \u2014 engines resolve the reference at runtime. Immutable after creation.",
+      "examples": [
+        "b4904c77-0a4a-4a8d-a768-4a8b5f2f2414"
+      ],
+      "minLength": 1,
+      "pattern": "\\S",
+      "title": "Pipeline Id",
+      "type": "string"
+    },
+    "source": {
+      "$ref": "#/$defs/StreamSource"
+    },
+    "status": {
+      "default": "draft",
+      "description": "Lifecycle status authored by clients. The terminal `error` state is backend-managed and surfaces only on the read-side model.",
+      "enum": [
+        "draft",
+        "active",
+        "inactive"
+      ],
+      "title": "Status",
+      "type": "string"
+    },
+    "stream_id": {
+      "anyOf": [
+        {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Stream UUID (RFC-4122). Optional in authored definitions so external publishers can assign their own identifier; service-assigned on ingest when omitted.",
+      "title": "Stream Id"
+    },
+    "tags": {
+      "anyOf": [
+        {
+          "items": {
+            "maxLength": 64,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 50,
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Grouping/search labels (max 50, each 1-64 chars, unique, trimmed).",
+      "title": "Tags"
+    }
+  },
+  "required": [
+    "pipeline_id",
+    "source",
+    "destinations"
+  ],
+  "title": "Analitiq Stream",
+  "type": "object",
+  "version": "8.0.0"
+}

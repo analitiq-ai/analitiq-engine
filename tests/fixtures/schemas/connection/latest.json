@@ -1,0 +1,123 @@
+{
+  "$id": "https://schemas.analitiq.ai/connection/latest.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Public JSON Schema contract for Analitiq connection documents \u2014 the authored shape used in source control, PR review, and author-time tooling. Server-managed fields (connection_id, version, org_id, connector_id, connector_version, auth_state, created_at, updated_at) are forbidden in the authored shape and assigned by the connection service on ingest. The persisted-record shape is internal and not published. Source of truth: k2m.models.connection.ConnectionInput (Pydantic).",
+  "properties": {
+    "$schema": {
+      "anyOf": [
+        {
+          "const": "https://schemas.analitiq.ai/connection/latest.json",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Connection schema URL (optional in API payloads, required for standalone files).",
+      "title": "$Schema"
+    },
+    "connection_id": {
+      "anyOf": [
+        {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Connection UUID (RFC-4122). Optional in authored definitions so external publishers can assign their own identifier; service-assigned on ingest when omitted.",
+      "title": "Connection Id"
+    },
+    "connector_id": {
+      "description": "Identifier of the connector this connection configures. Non-empty string; the registry assigns connector identifiers (UUID or slug \u2014 not constrained at the schema level).",
+      "minLength": 1,
+      "title": "Connector Id",
+      "type": "string"
+    },
+    "description": {
+      "anyOf": [
+        {
+          "maxLength": 2000,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "User-facing summary.",
+      "title": "Description"
+    },
+    "discovered": {
+      "additionalProperties": true,
+      "description": "Durable provider-discovered non-secret values keyed by post-auth output key. Spec: \u00a7Post-Auth Outputs.",
+      "title": "Discovered",
+      "type": "object"
+    },
+    "display_name": {
+      "anyOf": [
+        {
+          "maxLength": 120,
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "User-facing connection label (1-120 chars, no leading/trailing whitespace).",
+      "title": "Display Name"
+    },
+    "parameters": {
+      "additionalProperties": true,
+      "description": "Non-secret submitted values keyed by connection-contract input key. Per-key value vocabularies (enums, formats, etc.) are authored on the owning connector's `connection_contract.inputs.<key>` and enforced by the connections Lambda on save.",
+      "title": "Parameters",
+      "type": "object"
+    },
+    "secret_refs": {
+      "additionalProperties": {
+        "pattern": "^(?:(?:connections|secrets)/[A-Za-z0-9_./\\-]+|ssm:/[A-Za-z0-9_./\\-]+|arn:aws:secretsmanager:[A-Za-z0-9\\-]+:\\d+:secret:[A-Za-z0-9/_\\-+=.@]+|arn:aws:ssm:[A-Za-z0-9\\-]+:\\d+:parameter/[A-Za-z0-9_./\\-]+|s3://[A-Za-z0-9._\\-]+/[A-Za-z0-9_./\\-]+)$",
+        "type": "string"
+      },
+      "description": "Opaque secret-store pointers keyed by connection-contract input or post-auth output key. Values must match a known reference scheme: `connections/<path>`, `secrets/<path>`, `ssm:/<path>`, `arn:aws:secretsmanager:<region>:<acct>:secret:<id>`, `arn:aws:ssm:<region>:<acct>:parameter/<id>`, or `s3://<bucket>/<key>`. Spec: \u00a7Secret Storage Materialization.",
+      "title": "Secret Refs",
+      "type": "object"
+    },
+    "selections": {
+      "additionalProperties": true,
+      "description": "Durable user-selected post-auth values keyed by post-auth output key. Spec: \u00a7Post-Auth Outputs.",
+      "title": "Selections",
+      "type": "object"
+    },
+    "tags": {
+      "anyOf": [
+        {
+          "items": {
+            "maxLength": 64,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 50,
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Grouping/search labels (max 50, each 1-64 chars, unique, trimmed).",
+      "title": "Tags"
+    }
+  },
+  "required": [
+    "connector_id"
+  ],
+  "title": "Analitiq Connection",
+  "type": "object",
+  "version": "8.0.1"
+}
