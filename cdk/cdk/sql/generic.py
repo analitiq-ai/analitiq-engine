@@ -43,8 +43,6 @@ from cdk.type_map import (
     TypeMapper,
     UnmappedTypeError,
 )
-from cdk.exceptions import TransportSpecError
-from cdk.secrets.exceptions import PlaceholderExpansionError
 from cdk.types import (
     AckStatus,
     CheckpointStore,
@@ -67,7 +65,11 @@ from .discovery import list_schemas as _sql_list_schemas
 from .discovery import list_tables as _sql_list_tables
 from .ddl import build_create_table_sql
 from .ddl import create_table as _sql_create_table
-from .exceptions import ReadError, UnsupportedDialectOperationError
+from .exceptions import (
+    ReadError,
+    SchemaConfigurationError,
+    UnsupportedDialectOperationError,
+)
 from ..contract import ColumnDef
 
 
@@ -552,92 +554,79 @@ class GenericSQLConnector(BaseDestinationHandler):
             )
             return False
 
-        try:
-            database_object = endpoint_doc.get("database_object") or {}
-            table_name = database_object.get("name") or ""
-            if not table_name:
+        # Every exception propagates to the gRPC layer. Deterministic,
+        # actionable errors (SchemaConfigurationError, type-map errors,
+        # missing secret, malformed endpoint document, engine not
+        # connected at DDL time via AdbcConfigurationError) are
+        # translated into the SchemaAck there with their real type and
+        # message; anything else — wiring-defect RuntimeErrors from
+        # _type_mapper_for_stream, raw driver errors during DDL — is a
+        # defect that must fail the RPC as-is rather than degrade into
+        # a generic schema rejection.
+        database_object = endpoint_doc.get("database_object") or {}
+        table_name = database_object.get("name") or ""
+        if not table_name:
+            logger.error(
+                "Endpoint document for stream %r has no database_object.name",
+                stream_id,
+            )
+            return False
+
+        primary_keys = list(endpoint_doc.get("primary_keys") or [])
+        # ``_write_conflict_keys`` is populated at startup by main.py
+        # from the stream's WriteConfig (already resolved against the
+        # endpoint's primary keys). A missing key means INSERT mode
+        # — main.py always sets the field for UPSERT streams. An
+        # explicit empty list also means "no conflict target", so we
+        # only fall back to primary_keys when the key is absent.
+        if "_write_conflict_keys" in endpoint_doc:
+            conflict_keys = list(endpoint_doc["_write_conflict_keys"] or [])
+        else:
+            conflict_keys = list(primary_keys)
+        raw_schema = database_object.get("schema")
+        if self._adbc_only:
+            # Snowflake's default schema is account-/role-dependent;
+            # BigQuery requires an explicit dataset. Falling back to
+            # "public" silently writes into a Postgres-shaped
+            # namespace that may not exist. Require the endpoint
+            # document to declare the schema explicitly.
+            if not raw_schema:
                 logger.error(
-                    "Endpoint document for stream %r has no database_object.name",
+                    "ADBC destination requires database_object.schema "
+                    "for stream %r (no implicit default)",
                     stream_id,
                 )
                 return False
+            schema_name = raw_schema
+        else:
+            schema_name = raw_schema or "public"
+        state = _StreamState(
+            schema_name=schema_name,
+            table_name=table_name,
+            endpoint_document=dict(endpoint_doc),
+            write_mode=self._get_write_mode(schema_spec.write_mode),
+            primary_keys=primary_keys,
+            conflict_keys=conflict_keys,
+        )
 
-            primary_keys = list(endpoint_doc.get("primary_keys") or [])
-            # ``_write_conflict_keys`` is populated at startup by main.py
-            # from the stream's WriteConfig (already resolved against the
-            # endpoint's primary keys). A missing key means INSERT mode
-            # — main.py always sets the field for UPSERT streams. An
-            # explicit empty list also means "no conflict target", so we
-            # only fall back to primary_keys when the key is absent.
-            if "_write_conflict_keys" in endpoint_doc:
-                conflict_keys = list(endpoint_doc["_write_conflict_keys"] or [])
-            else:
-                conflict_keys = list(primary_keys)
-            raw_schema = database_object.get("schema")
-            if self._adbc_only:
-                # Snowflake's default schema is account-/role-dependent;
-                # BigQuery requires an explicit dataset. Falling back to
-                # "public" silently writes into a Postgres-shaped
-                # namespace that may not exist. Require the endpoint
-                # document to declare the schema explicitly.
-                if not raw_schema:
-                    logger.error(
-                        "ADBC destination requires database_object.schema "
-                        "for stream %r (no implicit default)",
-                        stream_id,
-                    )
-                    return False
-                schema_name = raw_schema
-            else:
-                schema_name = raw_schema or "public"
-            state = _StreamState(
-                schema_name=schema_name,
-                table_name=table_name,
-                endpoint_document=dict(endpoint_doc),
-                write_mode=self._get_write_mode(schema_spec.write_mode),
-                primary_keys=primary_keys,
-                conflict_keys=conflict_keys,
-            )
+        # Resolve the type-mapper for this stream's endpoint once —
+        # both DDL generation and the schema contract use it.
+        type_mapper = self._type_mapper_for_stream(stream_id)
 
-            # Resolve the type-mapper for this stream's endpoint once —
-            # both DDL generation and the schema contract use it.
-            type_mapper = self._type_mapper_for_stream(stream_id)
+        await self._ensure_tables_exist(state, type_mapper)
 
-            await self._ensure_tables_exist(state, type_mapper)
+        state.schema_contract = SchemaContract(state.endpoint_document)
 
-            state.schema_contract = SchemaContract(state.endpoint_document)
-
-            self._streams[stream_id] = state
-            logger.info(
-                "Schema configured for stream %r: %s.%s, mode=%s, pk=%s",
-                stream_id,
-                state.schema_name,
-                state.table_name,
-                state.write_mode,
-                state.primary_keys,
-            )
-            return True
-
-        except (
-            TransportSpecError,
-            UnmappedTypeError,
-            InvalidTypeMapError,
-            PlaceholderExpansionError,
-            UnsupportedDialectOperationError,
-            AdbcConfigurationError,
-            KeyError,
-            TypeError,
-            ValueError,
-        ):
-            # Deterministic, actionable errors propagate with their real
-            # type so the schema-ack carries the precise reason (unmapped
-            # native type, malformed type-map, missing secret, bad endpoint
-            # document, engine not connected) instead of a generic
-            # "configure failed".
-            raise
-        except Exception as e:
-            logger.error("Failed to configure schema: %s", e, exc_info=True)
-            return False
+        self._streams[stream_id] = state
+        logger.info(
+            "Schema configured for stream %r: %s.%s, mode=%s, pk=%s",
+            stream_id,
+            state.schema_name,
+            state.table_name,
+            state.write_mode,
+            state.primary_keys,
+        )
+        return True
 
     def _get_write_mode(self, proto_write_mode: int) -> str:
         mode_map = {
@@ -646,7 +635,7 @@ class GenericSQLConnector(BaseDestinationHandler):
             3: "truncate_insert",
         }
         if proto_write_mode not in mode_map:
-            raise ValueError(
+            raise SchemaConfigurationError(
                 f"Unsupported proto write_mode={proto_write_mode}; expected one "
                 f"of {sorted(mode_map)} (WRITE_MODE_INSERT/UPSERT/TRUNCATE_INSERT)"
             )
@@ -668,12 +657,12 @@ class GenericSQLConnector(BaseDestinationHandler):
         for index, col_def in enumerate(state.endpoint_document.get("columns") or []):
             col_name = col_def.get("name")
             if not col_name:
-                raise ValueError(
+                raise SchemaConfigurationError(
                     f"endpoint column at index {index} has no 'name' field"
                 )
             native_type = col_def.get("native_type")
             if not native_type:
-                raise ValueError(
+                raise SchemaConfigurationError(
                     f"column {col_name!r} has no 'native_type' field"
                 )
             raw_default = col_def.get("default")
@@ -742,7 +731,7 @@ class GenericSQLConnector(BaseDestinationHandler):
         DML binding uses the real column types the database reports.
         """
         if not state.endpoint_document:
-            raise ValueError(
+            raise SchemaConfigurationError(
                 f"destination stream for {state.schema_name}.{state.table_name} "
                 f"has no endpoint document; cannot build DDL"
             )

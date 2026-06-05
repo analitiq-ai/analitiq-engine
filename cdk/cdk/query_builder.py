@@ -187,8 +187,8 @@ def _get_sqlalchemy_dialect(
     except ImportError as exc:
         raise ImportError(
             f"SQLAlchemy dialect for {dialect!r} requires the "
-            f"{package!r} package. Install the matching extra "
-            f"(e.g. `poetry install -E {dialect_lower}`)."
+            f"{package!r} package, which is not installed in this "
+            f"environment."
         ) from exc
 
     # The package's import side effect registers the dialect; resolve

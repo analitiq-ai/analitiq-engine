@@ -69,9 +69,6 @@ from cdk.connection_runtime import ConnectionRuntime
 logger = logging.getLogger(__name__)
 
 
-VALID_CONNECTOR_KINDS = {"api", "database", "file", "s3", "stdout"}
-
-
 # ---------------------------------------------------------------------------
 # Dataclasses for internal state
 # ---------------------------------------------------------------------------
@@ -375,11 +372,16 @@ class PipelineConfigPrep:
             return self._resolved_connections[connection_id]
 
         connector = self._load_connector(record.connector_id)
+        # The kind *value* is owned by the published connector schema
+        # (validated in _load_connector) and, at run time, by the worker
+        # registry (an unrunnable kind raises ConnectorNotRegisteredError
+        # there). Config prep only checks the shape, so registry-discovered
+        # connector kinds are not blocked by a hard-coded engine set.
         kind = connector.get("kind")
-        if kind not in VALID_CONNECTOR_KINDS:
+        if not isinstance(kind, str) or not kind:
             raise ValueError(
-                f"Connector {record.connector_id!r} has invalid kind {kind!r}; "
-                f"expected one of {sorted(VALID_CONNECTOR_KINDS)}"
+                f"Connector {record.connector_id!r} declares no usable "
+                f"'kind': {kind!r}"
             )
 
         runtime = ConnectionRuntime(
@@ -524,6 +526,25 @@ class PipelineConfigPrep:
     # Stream config construction
     # ------------------------------------------------------------------
 
+    def _resolve_endpoint_block(
+        self, block: Mapping[str, Any], stream_id: str, side: str
+    ) -> Tuple[EndpointRef, ConnectionRuntime, Dict[str, Any]]:
+        """Resolve one stream side's ``endpoint_ref`` into its parts.
+
+        Validates that the block carries an ``endpoint_ref``, then resolves
+        the connection runtime and the endpoint document it points at.
+        ``side`` ("source" or "destination") only shapes the error message.
+        """
+        endpoint_ref_dict = block.get("endpoint_ref")
+        if not endpoint_ref_dict:
+            raise ValueError(
+                f"Stream {stream_id} {side} missing 'endpoint_ref'"
+            )
+        endpoint_ref = EndpointRef.from_dict(endpoint_ref_dict)
+        runtime = self._resolve_connection_by_id(endpoint_ref.connection_id)
+        endpoint = self._resolve_endpoint(endpoint_ref)
+        return endpoint_ref, runtime, endpoint
+
     def _build_stream_config(self, record: _StreamRecord) -> ResolvedStream:
         """Translate a saved stream document into a typed :class:`ResolvedStream`."""
         document = record.raw_document
@@ -531,16 +552,9 @@ class PipelineConfigPrep:
 
         # ---- source ----
         raw_source = document["source"]
-        source_endpoint_ref_dict = raw_source.get("endpoint_ref")
-        if not source_endpoint_ref_dict:
-            raise ValueError(
-                f"Stream {stream_id} source missing 'endpoint_ref'"
-            )
-        source_endpoint_ref = EndpointRef.from_dict(source_endpoint_ref_dict)
-        source_runtime = self._resolve_connection_by_id(
-            source_endpoint_ref.connection_id
+        source_endpoint_ref, source_runtime, source_endpoint = (
+            self._resolve_endpoint_block(raw_source, stream_id, "source")
         )
-        source_endpoint = self._resolve_endpoint(source_endpoint_ref)
 
         resolved_source = ResolvedSource(
             endpoint_ref=source_endpoint_ref,
@@ -553,16 +567,9 @@ class PipelineConfigPrep:
         # ---- destinations ----
         resolved_destinations: List[ResolvedDestination] = []
         for raw_dest in document.get("destinations") or []:
-            dest_endpoint_ref_dict = raw_dest.get("endpoint_ref")
-            if not dest_endpoint_ref_dict:
-                raise ValueError(
-                    f"Stream {stream_id} destination missing 'endpoint_ref'"
-                )
-            dest_endpoint_ref = EndpointRef.from_dict(dest_endpoint_ref_dict)
-            dest_runtime = self._resolve_connection_by_id(
-                dest_endpoint_ref.connection_id
+            dest_endpoint_ref, dest_runtime, dest_endpoint = (
+                self._resolve_endpoint_block(raw_dest, stream_id, "destination")
             )
-            dest_endpoint = self._resolve_endpoint(dest_endpoint_ref)
 
             resolved_destinations.append(ResolvedDestination(
                 endpoint_ref=dest_endpoint_ref,

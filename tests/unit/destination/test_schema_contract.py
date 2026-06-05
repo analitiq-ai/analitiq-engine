@@ -398,6 +398,27 @@ class TestSchemaContractFromPylist:
         assert batch.num_rows == 1
         assert pa.types.is_timestamp(batch.schema.field("created").type)
 
+    def test_from_pylist_iso_z_suffix(self):
+        # ISO-8601 'Z' suffix is parsed natively by fromisoformat on
+        # Python 3.11+ and must land as a UTC-aware timestamp.
+        schema = {
+            "columns": [
+                {
+                    "name": "created",
+                    "arrow_type": "Timestamp(MICROSECOND, UTC)",
+                    "nullable": True,
+                },
+            ]
+        }
+        contract = SchemaContract(schema)
+
+        batch = contract.from_pylist([{"created": "2026-05-12T12:30:45Z"}])
+
+        assert batch.num_rows == 1
+        value = batch.to_pylist()[0]["created"]
+        assert value.utcoffset().total_seconds() == 0
+        assert (value.year, value.hour, value.second) == (2026, 12, 45)
+
 
 class TestSchemaContractJsonSchema:
     """JSON-Schema payloads use ``properties`` and still require arrow_type."""
