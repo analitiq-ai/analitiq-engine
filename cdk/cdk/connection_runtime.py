@@ -35,7 +35,8 @@ if TYPE_CHECKING:
     import aiohttp
 
 from cdk.exceptions import TransportSpecError
-from cdk.resolver import ResolutionContext
+from cdk.derived_functions import DEFAULT_FUNCTIONS
+from cdk.resolver import ResolutionContext, Resolver
 from cdk.type_map import InvalidTypeMapError, TypeMapper, UnmappedTypeError
 from cdk.types import EndpointScope
 from cdk.secrets.protocol import SecretsResolver
@@ -263,6 +264,39 @@ class ConnectionRuntime:
                 return self._connection_type_mapper
             return self.connector_type_mapper
         raise ValueError(f"type_mapper_for: unknown endpoint scope {scope!r}")
+
+    # ------------------------------------------------------------------
+    # Per-request expression resolution
+    # ------------------------------------------------------------------
+
+    def request_resolver(
+        self, *, runtime_values: Optional[Mapping[str, Any]] = None
+    ) -> Resolver:
+        """Resolver for per-request value expressions (param defaults,
+        request bodies), with the default derived functions registered.
+
+        Scopes: ``connection.{parameters,selections,discovered}`` from the
+        connection config, plus ``runtime`` (``connection_id`` and any
+        caller-supplied per-invocation values such as ``batch_size``).
+
+        Secrets are intentionally absent. Per-request resolution runs
+        connector-side, where the secret store is never available — secret
+        resolution happens once, on the trusted side, at transport
+        materialization. Keeping the scope set identical on both sides means
+        the same expression behaves the same wherever the connector runs.
+        """
+        runtime_scope: Dict[str, Any] = {"connection_id": self._connection_id}
+        if runtime_values:
+            runtime_scope.update(runtime_values)
+        context = ResolutionContext(
+            connection={
+                "parameters": dict(self._raw_config.get("parameters") or {}),
+                "selections": dict(self._raw_config.get("selections") or {}),
+                "discovered": dict(self._raw_config.get("discovered") or {}),
+            },
+            runtime=runtime_scope,
+        )
+        return Resolver(context, functions=DEFAULT_FUNCTIONS)
 
     # ------------------------------------------------------------------
     # Materialization

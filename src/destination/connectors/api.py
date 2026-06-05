@@ -19,6 +19,7 @@ from aiohttp_retry import ExponentialRetry, RetryClient
 
 from cdk.base_handler import BaseDestinationHandler, BatchWriteResult
 from cdk.json_utils import decode_json_fields
+from cdk.resolver import Resolver
 from cdk.types import (
     AckStatus,
     Cursor,
@@ -108,6 +109,82 @@ def _collect_json_fields(mode_block: Mapping[str, Any]) -> Set[str]:
     return names
 
 
+def _bind_record_inputs(
+    spec: Any,
+    *,
+    record: Optional[Dict[str, Any]] = None,
+    records: Optional[List[Dict[str, Any]]] = None,
+) -> Any:
+    """Replace ``{"from_input": ...}`` nodes in a body spec with the
+    in-flight record data, wrapped as ``{"literal": ...}``.
+
+    ``from_input`` is the contract's record-binding form for write bodies:
+    ``"record"`` binds the single in-flight record, ``"records"`` binds the
+    whole batch, ``"record.<dotted.path>"`` binds one record field. The
+    literal wrapper makes the downstream expression pass return the data
+    verbatim — record *values* are payload, never re-inspected for
+    expression markers.
+
+    A ``from_input`` that does not match the active batching mode (e.g.
+    ``"record"`` in bulk mode) is an authoring error and raises; a dotted
+    path to a missing record field binds ``None``, which the expression
+    pass drops per the contract's omit-unresolved rule.
+    """
+    if isinstance(spec, Mapping):
+        if "from_input" in spec:
+            if len(spec) != 1:
+                raise ValueError(
+                    f"`from_input` must be the only key in the node; "
+                    f"got siblings {sorted(set(spec) - {'from_input'})}"
+                )
+            return {"literal": _record_input_value(spec["from_input"], record, records)}
+        return {
+            key: _bind_record_inputs(value, record=record, records=records)
+            for key, value in spec.items()
+        }
+    if isinstance(spec, list):
+        return [
+            _bind_record_inputs(item, record=record, records=records)
+            for item in spec
+        ]
+    return spec
+
+
+def _record_input_value(
+    selector: Any,
+    record: Optional[Dict[str, Any]],
+    records: Optional[List[Dict[str, Any]]],
+) -> Any:
+    """Resolve one ``from_input`` selector against the in-flight data."""
+    if not isinstance(selector, str) or not selector:
+        raise ValueError(f"`from_input` must be a non-empty string, got {selector!r}")
+    if selector == "records":
+        if records is None:
+            raise ValueError(
+                "`from_input: records` requires batching mode bulk or batch; "
+                "this stream sends one record per request"
+            )
+        return records
+    if selector == "record" or selector.startswith("record."):
+        if record is None:
+            raise ValueError(
+                f"`from_input: {selector}` requires batching mode single; "
+                f"this stream sends multiple records per request"
+            )
+        if selector == "record":
+            return record
+        cursor: Any = record
+        for segment in selector[len("record."):].split("."):
+            if not isinstance(cursor, Mapping) or segment not in cursor:
+                return None
+            cursor = cursor[segment]
+        return cursor
+    raise ValueError(
+        f"Unsupported `from_input` selector {selector!r}; expected "
+        f"'record', 'records', or 'record.<dotted.path>'"
+    )
+
+
 @dataclass
 class _StreamState:
     """Per-stream API destination state.
@@ -129,6 +206,12 @@ class _StreamState:
     # body, otherwise the API receives a quoted string instead of a
     # nested object.
     json_fields: Set[str] = field(default_factory=set)
+    # ``operations.write.<mode>.request.body`` from the endpoint document,
+    # or ``None`` when the endpoint declares no body template. When set,
+    # the request body is built by binding ``from_input`` nodes to the
+    # in-flight record(s) and resolving value expressions; when absent the
+    # record(s) are the body, unchanged.
+    body_spec: Optional[Any] = None
 
 
 class ApiDestinationHandler(BaseDestinationHandler):
@@ -149,11 +232,11 @@ class ApiDestinationHandler(BaseDestinationHandler):
       - max_requests: Max requests per time window
       - time_window: Time window in seconds
 
-    Per-stream endpoint settings (path, method, batch mode, batch size)
-    are read from the preloaded contract API endpoint document at
-    ``configure_schema`` time, keyed by ``operations.write.<mode>``. The
-    SchemaSpec off the wire only carries ``stream_id``, ``version``,
-    and ``write_mode``.
+    Per-stream endpoint settings (path, method, batch mode, batch size,
+    optional body template) are read from the preloaded contract API
+    endpoint document at ``configure_schema`` time, keyed by
+    ``operations.write.<mode>``. The SchemaSpec off the wire only carries
+    ``stream_id``, ``version``, and ``write_mode``.
     """
 
     # Batch modes
@@ -174,6 +257,11 @@ class ApiDestinationHandler(BaseDestinationHandler):
 
         # Rate limiter
         self._rate_limiter: RateLimiter | None = None
+
+        # Per-request value-expression resolver, built from the connection
+        # runtime at connect() time. Used only when a stream declares a
+        # request body spec.
+        self._request_resolver: Resolver | None = None
 
         # Per-stream endpoint settings derived from the contract document
         # at configure_schema() time. Keyed by stream_id so concurrent
@@ -250,6 +338,10 @@ class ApiDestinationHandler(BaseDestinationHandler):
         self._base_url = runtime.base_url
         self._rate_limiter = runtime.rate_limiter
         self._max_retries = runtime.raw_config.get("max_retries", 3)
+        # Resolves value expressions in declared body specs at write time
+        # (connection parameters/selections/discovered; no secrets — those
+        # are consumed engine-side at transport materialization).
+        self._request_resolver = runtime.request_resolver()
 
         # Wrap plain session with retry (destination-specific)
         retry_options = ExponentialRetry(
@@ -325,6 +417,7 @@ class ApiDestinationHandler(BaseDestinationHandler):
             endpoint=request["path"],
             method=(request.get("method") or "POST").upper(),
             json_fields=_collect_json_fields(mode_block),
+            body_spec=request.get("body"),
         )
 
         batching = mode_block.get("batching") or {}
@@ -443,6 +536,36 @@ class ApiDestinationHandler(BaseDestinationHandler):
                 failure_summary=f"{type(e).__name__}: {e}",
             )
 
+    def _build_body(
+        self,
+        state: _StreamState,
+        *,
+        record: Optional[Dict[str, Any]] = None,
+        records: Optional[List[Dict[str, Any]]] = None,
+    ) -> Any:
+        """Build one request body for the in-flight record(s).
+
+        No declared body spec: the record(s) are the body, unchanged.
+        With a spec: bind ``from_input`` nodes to the record data, then
+        resolve value expressions (``literal``/``ref``/``template``/
+        ``function``) per the request-time contract — an unresolved
+        expression omits its field rather than going onto the wire raw.
+        A spec whose entire body resolves away is an authoring error:
+        posting ``null`` per record would silently write nothing.
+        """
+        if state.body_spec is None:
+            return record if record is not None else records
+        if self._request_resolver is None:
+            raise RuntimeError("Handler not connected: no request resolver")
+        bound = _bind_record_inputs(state.body_spec, record=record, records=records)
+        body = self._request_resolver.resolve_for_request(bound)
+        if body is None:
+            raise ValueError(
+                f"request body spec for endpoint {state.endpoint!r} resolved "
+                f"to nothing; check the endpoint's request.body expressions"
+            )
+        return body
+
     async def _write_single_mode(
         self,
         state: _StreamState,
@@ -455,7 +578,7 @@ class ApiDestinationHandler(BaseDestinationHandler):
 
         for i, record in enumerate(records):
             try:
-                await self._send_request(state, record)
+                await self._send_request(state, self._build_body(state, record=record))
                 written += 1
             except (aiohttp.ClientError, asyncio.TimeoutError) as e:
                 # Transport-level errors are per-record data issues; log
@@ -477,7 +600,7 @@ class ApiDestinationHandler(BaseDestinationHandler):
         self, state: _StreamState, records: List[Dict[str, Any]]
     ) -> int:
         """Write all records in a single request."""
-        await self._send_request(state, records)
+        await self._send_request(state, self._build_body(state, records=records))
         return len(records)
 
     async def _write_batch_mode(
@@ -488,7 +611,7 @@ class ApiDestinationHandler(BaseDestinationHandler):
 
         for i in range(0, len(records), state.batch_size):
             batch = records[i : i + state.batch_size]
-            await self._send_request(state, batch)
+            await self._send_request(state, self._build_body(state, records=batch))
             written += len(batch)
 
         return written

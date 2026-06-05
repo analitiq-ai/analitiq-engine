@@ -915,3 +915,248 @@ class TestOrjsonDefault:
         assert '"price":"9.99"' in encoded
         assert '"price":"12.50"' in encoded
         assert '"created":"2026-05-12T10:00:00+00:00"' in encoded
+
+
+@pytest.mark.unit
+class TestApiHandlerBodySpec:
+    """``operations.write.<mode>.request.body`` is the optional body
+    template (#166): ``from_input`` nodes bind the in-flight record(s),
+    value expressions resolve against the connection scopes, and
+    unresolved expressions omit their field instead of going onto the
+    wire raw. Without a declared body the record(s) remain the body."""
+
+    def _handler_with_resolver(self, parameters=None) -> ApiDestinationHandler:
+        from cdk.connection_runtime import ConnectionRuntime
+        from cdk.secrets import InMemorySecretsResolver
+
+        handler = ApiDestinationHandler()
+        handler._connected = True
+        handler._session = MagicMock()
+        runtime = ConnectionRuntime(
+            raw_config={"parameters": parameters or {}},
+            connection_id="conn-1",
+            connector_id="testapi",
+            connector_type="api",
+            resolver=InMemorySecretsResolver({}),
+        )
+        # connect() builds this from the runtime; tests wire it directly.
+        handler._request_resolver = runtime.request_resolver()
+        return handler
+
+    def _doc_with_body(self, body, *, batching=None):
+        block = {
+            "request": {"method": "POST", "path": "/v1/things", "body": body},
+        }
+        if batching:
+            block["batching"] = batching
+        return {"operations": {"write": {"insert": block}}}
+
+    @pytest.mark.asyncio
+    async def test_configure_schema_captures_body_spec(self):
+        handler = self._handler_with_resolver()
+        body = {"data": {"from_input": "record"}}
+        handler.set_stream_endpoints({"s1": self._doc_with_body(body)})
+        ok = await handler.configure_schema(
+            SchemaMessage(stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT)
+        )
+        assert ok is True
+        assert handler._streams["s1"].body_spec == body
+
+    def test_no_body_spec_keeps_record_as_body(self):
+        handler = self._handler_with_resolver()
+        state = _StreamState(endpoint="/v1/things")
+        record = {"id": 1, "name": "a"}
+        assert handler._build_body(state, record=record) is record
+        records = [record]
+        assert handler._build_body(state, records=records) is records
+
+    def test_body_spec_binds_single_record(self):
+        handler = self._handler_with_resolver(parameters={"source_tag": "crm"})
+        state = _StreamState(
+            endpoint="/v1/things",
+            body_spec={
+                "data": {"from_input": "record"},
+                "external_id": {"from_input": "record.id"},
+                "source": {"ref": "connection.parameters.source_tag"},
+                "missing": {"ref": "connection.parameters.not_there"},
+            },
+        )
+        body = handler._build_body(state, record={"id": 7, "name": "a"})
+        assert body == {
+            "data": {"id": 7, "name": "a"},
+            "external_id": 7,
+            "source": "crm",
+            # "missing" omitted per the contract's drop-unresolved rule
+        }
+
+    def test_body_spec_binds_record_batch(self):
+        handler = self._handler_with_resolver()
+        state = _StreamState(
+            endpoint="/v1/things",
+            body_spec={"items": {"from_input": "records"}, "mode": "bulk"},
+        )
+        records = [{"id": 1}, {"id": 2}]
+        body = handler._build_body(state, records=records)
+        assert body == {"items": [{"id": 1}, {"id": 2}], "mode": "bulk"}
+
+    def test_record_data_is_never_re_resolved(self):
+        # Record values are payload: a record field that *looks* like an
+        # expression node must pass through verbatim.
+        handler = self._handler_with_resolver()
+        state = _StreamState(
+            endpoint="/v1/things",
+            body_spec={"data": {"from_input": "record"}},
+        )
+        record = {"id": 1, "payload": {"ref": "user supplied text"}}
+        body = handler._build_body(state, record=record)
+        assert body == {"data": record}
+
+    def test_missing_record_field_is_dropped(self):
+        handler = self._handler_with_resolver()
+        state = _StreamState(
+            endpoint="/v1/things",
+            body_spec={"id": {"from_input": "record.id"}, "x": {"from_input": "record.nope"}},
+        )
+        body = handler._build_body(state, record={"id": 3})
+        assert body == {"id": 3}
+
+    def test_from_input_record_in_bulk_mode_raises(self):
+        handler = self._handler_with_resolver()
+        state = _StreamState(
+            endpoint="/v1/things",
+            body_spec={"data": {"from_input": "record"}},
+        )
+        with pytest.raises(ValueError, match="requires batching mode single"):
+            handler._build_body(state, records=[{"id": 1}])
+
+    def test_from_input_records_in_single_mode_raises(self):
+        handler = self._handler_with_resolver()
+        state = _StreamState(
+            endpoint="/v1/things",
+            body_spec={"items": {"from_input": "records"}},
+        )
+        with pytest.raises(ValueError, match="bulk or batch"):
+            handler._build_body(state, record={"id": 1})
+
+    def test_unknown_from_input_selector_raises(self):
+        handler = self._handler_with_resolver()
+        state = _StreamState(
+            endpoint="/v1/things",
+            body_spec={"x": {"from_input": "response.id"}},
+        )
+        with pytest.raises(ValueError, match="Unsupported `from_input`"):
+            handler._build_body(state, record={"id": 1})
+
+    def test_from_input_with_siblings_raises(self):
+        handler = self._handler_with_resolver()
+        state = _StreamState(
+            endpoint="/v1/things",
+            body_spec={"x": {"from_input": "record", "extra": 1}},
+        )
+        with pytest.raises(ValueError, match="only key"):
+            handler._build_body(state, record={"id": 1})
+
+    def test_body_resolving_to_nothing_raises(self):
+        # Posting "null" per record would silently write nothing — an
+        # entire body resolving away is an authoring error, not a drop.
+        handler = self._handler_with_resolver()
+        state = _StreamState(
+            endpoint="/v1/things",
+            body_spec={"ref": "connection.parameters.not_there"},
+        )
+        with pytest.raises(ValueError, match="resolved to nothing"):
+            handler._build_body(state, record={"id": 1})
+
+    @pytest.mark.asyncio
+    async def test_single_mode_sends_built_body_per_record(self):
+        handler = self._handler_with_resolver(parameters={"source_tag": "crm"})
+        state = _StreamState(
+            endpoint="/v1/things",
+            body_spec={
+                "data": {"from_input": "record"},
+                "source": {"ref": "connection.parameters.source_tag"},
+            },
+        )
+        handler._streams["s1"] = state
+
+        sent = []
+
+        async def _capture(state_arg, data):
+            sent.append(data)
+            return {}
+
+        handler._send_request = _capture  # type: ignore[assignment]
+        written = await handler._write_single_mode(
+            state, [{"id": 1}, {"id": 2}], ["r1", "r2"]
+        )
+        assert written == 2
+        assert sent == [
+            {"data": {"id": 1}, "source": "crm"},
+            {"data": {"id": 2}, "source": "crm"},
+        ]
+
+    @pytest.mark.asyncio
+    async def test_bulk_mode_sends_built_body_once(self):
+        handler = self._handler_with_resolver()
+        state = _StreamState(
+            endpoint="/v1/things",
+            batch_mode=ApiDestinationHandler.BATCH_MODE_BULK,
+            body_spec={"items": {"from_input": "records"}},
+        )
+
+        sent = []
+
+        async def _capture(state_arg, data):
+            sent.append(data)
+            return {}
+
+        handler._send_request = _capture  # type: ignore[assignment]
+        written = await handler._write_bulk_mode(state, [{"id": 1}, {"id": 2}])
+        assert written == 2
+        assert sent == [{"items": [{"id": 1}, {"id": 2}]}]
+
+    @pytest.mark.asyncio
+    async def test_batch_mode_sends_built_body_per_chunk(self):
+        handler = self._handler_with_resolver()
+        state = _StreamState(
+            endpoint="/v1/things",
+            batch_mode=ApiDestinationHandler.BATCH_MODE_BATCH,
+            batch_size=2,
+            body_spec={"items": {"from_input": "records"}},
+        )
+
+        sent = []
+
+        async def _capture(state_arg, data):
+            sent.append(data)
+            return {}
+
+        handler._send_request = _capture  # type: ignore[assignment]
+        written = await handler._write_batch_mode(
+            state, [{"id": 1}, {"id": 2}, {"id": 3}]
+        )
+        assert written == 3
+        assert sent == [
+            {"items": [{"id": 1}, {"id": 2}]},
+            {"items": [{"id": 3}]},
+        ]
+
+    @pytest.mark.asyncio
+    async def test_body_spec_mode_mismatch_surfaces_as_fatal(self):
+        # An authoring error in the body spec must classify the batch
+        # FATAL through write_batch, not retry forever.
+        handler = self._handler_with_resolver()
+        handler._streams["s1"] = _StreamState(
+            endpoint="/v1/things",
+            body_spec={"items": {"from_input": "records"}},  # single mode sends one record
+        )
+        result = await handler.write_batch(
+            run_id="run",
+            stream_id="s1",
+            batch_seq=0,
+            record_batch=_to_record_batch([{"id": 1}]),
+            record_ids=["r1"],
+            cursor=MagicMock(),
+        )
+        assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+        assert "bulk or batch" in result.failure_summary

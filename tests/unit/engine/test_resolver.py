@@ -268,3 +268,212 @@ class TestResolverStructuralRecursion:
         ctx = ResolutionContext()
         for value in (42, 3.14, True, False, None):
             assert Resolver(ctx).resolve(value) == value
+
+
+# ---------------------------------------------------------------------------
+# Resolver.resolve_for_request: per-request drop-unresolved policy
+# ---------------------------------------------------------------------------
+
+
+def _request_resolver(**scopes) -> Resolver:
+    """Resolver wired with the default derived functions, as the
+    per-request paths (param defaults, request bodies) use it."""
+    from cdk.derived_functions import DEFAULT_FUNCTIONS
+
+    return Resolver(ResolutionContext(**scopes), functions=DEFAULT_FUNCTIONS)
+
+
+class TestResolveForRequestExpressionForms:
+    """All four contract forms resolve through the per-request entry point."""
+
+    def test_literal_resolves(self):
+        assert _request_resolver().resolve_for_request({"literal": 42}) == 42
+
+    def test_ref_resolves_preserving_type(self):
+        r = _request_resolver(connection={"parameters": {"page_size": 50}})
+        assert r.resolve_for_request({"ref": "connection.parameters.page_size"}) == 50
+
+    def test_template_resolves(self):
+        r = _request_resolver(connection={"selections": {"org": "acme"}})
+        assert (
+            r.resolve_for_request({"template": "orgs/${connection.selections.org}"})
+            == "orgs/acme"
+        )
+
+    def test_function_resolves(self):
+        # The gap behind #166: the lightweight resolver passed function
+        # nodes through verbatim. The full grammar must evaluate them.
+        r = _request_resolver(connection={"parameters": {"token": "secret"}})
+        out = r.resolve_for_request(
+            {
+                "function": "base64_encode",
+                "input": {"ref": "connection.parameters.token"},
+            }
+        )
+        import base64
+
+        assert out == base64.b64encode(b"secret").decode("ascii")
+
+    def test_nested_structure_resolves_recursively(self):
+        r = _request_resolver(connection={"parameters": {"region": "eu"}})
+        out = r.resolve_for_request(
+            {
+                "filters": [
+                    {"field": "region", "value": {"ref": "connection.parameters.region"}},
+                ],
+                "page": 1,
+            }
+        )
+        assert out == {"filters": [{"field": "region", "value": "eu"}], "page": 1}
+
+    def test_bare_strings_stay_literal(self):
+        # Bare strings are literals per the spec; ${...} expansion only
+        # happens inside explicit template nodes.
+        r = _request_resolver()
+        assert r.resolve_for_request("${connection.parameters.x}") == (
+            "${connection.parameters.x}"
+        )
+
+
+class TestResolveForRequestDropsUnresolved:
+    """Contract rule 7: an unresolved expression omits its field or
+    parameter (with a warning) instead of going onto the wire raw."""
+
+    def test_top_level_unresolved_ref_returns_none(self, caplog):
+        r = _request_resolver()
+        with caplog.at_level("WARNING"):
+            out = r.resolve_for_request({"ref": "connection.parameters.missing"})
+        assert out is None
+        assert "value-expression" in caplog.text
+
+    def test_dict_field_with_unresolved_ref_is_dropped(self, caplog):
+        r = _request_resolver(connection={"parameters": {"kept": "v"}})
+        with caplog.at_level("WARNING"):
+            out = r.resolve_for_request(
+                {
+                    "kept": {"ref": "connection.parameters.kept"},
+                    "gone": {"ref": "connection.parameters.missing"},
+                }
+            )
+        assert out == {"kept": "v"}
+        assert "dropping field 'gone'" in caplog.text
+
+    def test_list_item_with_unresolved_ref_is_dropped(self, caplog):
+        r = _request_resolver(connection={"parameters": {"kept": "v"}})
+        with caplog.at_level("WARNING"):
+            out = r.resolve_for_request(
+                [
+                    {"ref": "connection.parameters.kept"},
+                    {"ref": "connection.parameters.missing"},
+                ]
+            )
+        assert out == ["v"]
+        assert "dropping list item" in caplog.text
+
+    def test_literal_none_is_dropped(self):
+        # {"literal": null} resolves to None, which per-request means
+        # "omit the field" — same as the Lambda runtime.
+        r = _request_resolver()
+        out = r.resolve_for_request({"a": {"literal": None}, "b": {"literal": 1}})
+        assert out == {"b": 1}
+
+    def test_structural_none_passes_through(self):
+        # A plain JSON null is data, not an unresolved expression.
+        r = _request_resolver()
+        assert r.resolve_for_request({"a": None}) == {"a": None}
+
+    def test_unknown_function_is_dropped_not_raised(self, caplog):
+        r = _request_resolver()
+        with caplog.at_level("WARNING"):
+            out = r.resolve_for_request({"f": {"function": "no_such_fn"}})
+        assert out == {}
+        assert "no_such_fn" in caplog.text
+
+    def test_unknown_lookup_key_is_dropped(self):
+        r = _request_resolver(connection={"parameters": {"env": "staging"}})
+        out = r.resolve_for_request(
+            {
+                "url": {
+                    "function": "lookup",
+                    "input": {"ref": "connection.parameters.env"},
+                    "map": {"sandbox": "s", "production": "p"},
+                }
+            }
+        )
+        assert out == {}
+
+    def test_nested_dict_fields_are_dropped_too(self):
+        r = _request_resolver(connection={"parameters": {"kept": "v"}})
+        out = r.resolve_for_request(
+            {
+                "outer": {
+                    "kept": {"ref": "connection.parameters.kept"},
+                    "gone": {"ref": "connection.parameters.missing"},
+                }
+            }
+        )
+        assert out == {"outer": {"kept": "v"}}
+
+
+class TestResolveForRequestTemplateLeniency:
+    """Plain template nodes resolve leniently per request: a missing
+    placeholder renders empty (with a warning) and the field is kept.
+    Function inputs stay strict — a partial input drops the whole node."""
+
+    def test_missing_placeholder_renders_empty(self, caplog):
+        r = _request_resolver(connection={"parameters": {"org": "acme"}})
+        with caplog.at_level("WARNING"):
+            out = r.resolve_for_request(
+                {"template": "${connection.parameters.org}/${connection.parameters.gone}"}
+            )
+        assert out == "acme/"
+        assert "unresolved placeholder" in caplog.text
+
+    def test_template_field_with_missing_placeholder_is_kept(self):
+        r = _request_resolver()
+        out = r.resolve_for_request(
+            {"path": {"template": "v1/${connection.parameters.gone}/x"}}
+        )
+        assert out == {"path": "v1//x"}
+
+    def test_template_inside_function_input_stays_strict(self):
+        # base64("user:") style garbage must not reach the wire: an
+        # unresolved placeholder inside a function input drops the node.
+        r = _request_resolver(connection={"parameters": {"user": "u"}})
+        out = r.resolve_for_request(
+            {
+                "auth": {
+                    "function": "base64_encode",
+                    "input": {
+                        "template": "${connection.parameters.user}:${connection.parameters.gone}"
+                    },
+                }
+            }
+        )
+        assert out == {}
+
+    def test_strict_resolve_still_raises_on_missing_placeholder(self):
+        # The materialization entry point keeps its loud failure mode.
+        r = _request_resolver()
+        with pytest.raises(KeyError):
+            r.resolve({"template": "v1/${connection.parameters.gone}"})
+
+
+class TestResolveForRequestAuthoringErrorsRaise:
+    """Authoring defects are configuration errors in both failure
+    policies — rule 7's omission applies to missing values only."""
+
+    def test_conflicting_markers_raise(self):
+        r = _request_resolver()
+        with pytest.raises(TransportSpecError, match="conflicting markers"):
+            r.resolve_for_request({"x": {"ref": "a.b", "template": "c"}})
+
+    def test_unterminated_template_raises(self):
+        r = _request_resolver()
+        with pytest.raises(TransportSpecError, match="Unterminated"):
+            r.resolve_for_request({"template": "v1/${connection.parameters.x"})
+
+    def test_non_scalar_template_substitution_raises(self):
+        r = _request_resolver(connection={"parameters": {"obj": {"k": "v"}}})
+        with pytest.raises(TransportSpecError, match="only scalars"):
+            r.resolve_for_request({"template": "x${connection.parameters.obj}"})

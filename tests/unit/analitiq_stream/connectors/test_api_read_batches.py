@@ -78,20 +78,26 @@ class _FakeSession:
     def __init__(self, responses: List[_FakeResponse]):
         self._responses = list(responses)
         self.calls: List[Tuple[str, str, Dict[str, Any]]] = []
+        # JSON body per request (None when the connector sent none),
+        # parallel to ``calls``.
+        self.bodies: List[Any] = []
 
-    def request(self, method: str, url: str, *, params: Dict[str, Any]):
+    def request(self, method: str, url: str, *, params: Dict[str, Any], json: Any = None):
         self.calls.append((method, url, dict(params)))
+        self.bodies.append(json)
         if not self._responses:
             raise AssertionError(f"unexpected extra request: {method} {url} {params}")
         return self._responses.pop(0)
 
 
-def _runtime_with_session(session: _FakeSession) -> ConnectionRuntime:
+def _runtime_with_session(
+    session: _FakeSession, *, parameters: Optional[Dict[str, Any]] = None
+) -> ConnectionRuntime:
     """Build a ``ConnectionRuntime`` whose transport is already
     materialized with ``session`` so ``connect()`` adopts it.
     """
     runtime = ConnectionRuntime(
-        raw_config={"host": "https://api.example.test", "parameters": {}},
+        raw_config={"host": "https://api.example.test", "parameters": parameters or {}},
         connection_id="test-conn",
         connector_id="test-connector",
         connector_type="api",
@@ -858,3 +864,181 @@ class TestReadBatchesLifecycle:
 
         assert runtime._ref_count == 0  # acquired then released in finally
         assert connector.is_connected is False
+
+
+# ---------------------------------------------------------------------------
+# Declared params: value-expression defaults (#166)
+# ---------------------------------------------------------------------------
+
+
+class TestReadBatchesParamDefaults:
+    @pytest.mark.asyncio
+    async def test_function_form_default_resolves(self):
+        # The pre-#166 lightweight resolver only knew literal/ref/template;
+        # a function-form default fell through as the raw expression dict.
+        import base64
+
+        session = _FakeSession(
+            [_FakeResponse(status=200, body={"records": [{"id": 1, "name": "a"}]})]
+        )
+        runtime = _runtime_with_session(
+            session, parameters={"api_token": "tok-123"}
+        )
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records()
+        endpoint["operations"]["read"]["params"] = {
+            "auth": {
+                "in": "query",
+                "type": "string",
+                "required": True,
+                "default": {
+                    "function": "base64_encode",
+                    "input": {"ref": "connection.parameters.api_token"},
+                },
+            },
+        }
+        await _consume(
+            connector,
+            runtime,
+            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=10,
+        )
+
+        params = session.calls[0][2]
+        assert params["auth"] == base64.b64encode(b"tok-123").decode("ascii")
+
+    @pytest.mark.asyncio
+    async def test_unresolved_default_omits_param(self):
+        # Contract rule 7: a default that cannot resolve omits the
+        # parameter instead of sending the raw expression structure.
+        session = _FakeSession(
+            [_FakeResponse(status=200, body={"records": [{"id": 1, "name": "a"}]})]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records()
+        endpoint["operations"]["read"]["params"] = {
+            "team": {
+                "in": "query",
+                "type": "string",
+                "required": False,
+                "default": {"ref": "connection.parameters.missing_team"},
+            },
+        }
+        await _consume(
+            connector,
+            runtime,
+            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=10,
+        )
+
+        assert "team" not in session.calls[0][2]
+
+
+# ---------------------------------------------------------------------------
+# Declared read request body (#166)
+# ---------------------------------------------------------------------------
+
+
+class TestReadBatchesRequestBody:
+    @pytest.mark.asyncio
+    async def test_declared_body_is_resolved_and_sent(self):
+        # POST-read endpoints declare ``request.body``; expression nodes
+        # inside it resolve against the connection scopes, unresolved
+        # fields are omitted, and the result rides as the JSON body.
+        session = _FakeSession(
+            [_FakeResponse(status=200, body={"records": [{"id": 1, "name": "a"}]})]
+        )
+        runtime = _runtime_with_session(session, parameters={"region": "eu"})
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records()
+        endpoint["operations"]["read"]["request"] = {
+            "method": "POST",
+            "path": "/items/search",
+            "body": {
+                "region": {"ref": "connection.parameters.region"},
+                "missing": {"ref": "connection.parameters.not_there"},
+                "static": "all",
+            },
+        }
+        await _consume(
+            connector,
+            runtime,
+            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=10,
+        )
+
+        method, url, _ = session.calls[0]
+        assert method == "POST"
+        assert url == "https://api.example.test/items/search"
+        assert session.bodies[0] == {"region": "eu", "static": "all"}
+
+    @pytest.mark.asyncio
+    async def test_no_declared_body_sends_none(self):
+        session = _FakeSession(
+            [_FakeResponse(status=200, body={"records": [{"id": 1, "name": "a"}]})]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        await _consume(
+            connector,
+            runtime,
+            config={
+                "endpoint_document": _endpoint_doc_with_records(),
+                "stream_source": _stream_source(),
+            },
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=10,
+        )
+
+        assert session.bodies == [None]
+
+    @pytest.mark.asyncio
+    async def test_body_is_sent_on_every_page(self):
+        # Pagination loops must carry the body on each page request, not
+        # just the first.
+        session = _FakeSession(
+            [
+                _FakeResponse(
+                    status=200,
+                    body={"records": [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]},
+                ),
+                _FakeResponse(status=200, body={"records": [{"id": 3, "name": "c"}]}),
+            ]
+        )
+        runtime = _runtime_with_session(session, parameters={"region": "eu"})
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(
+            pagination={
+                "type": "offset",
+                "offset": {"param": "offset", "initial": 0},
+                "limit": {"param": "limit"},
+            },
+        )
+        endpoint["operations"]["read"]["request"] = {
+            "method": "POST",
+            "path": "/items/search",
+            "body": {"region": {"ref": "connection.parameters.region"}},
+        }
+        await _consume(
+            connector,
+            runtime,
+            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=2,
+        )
+
+        assert session.bodies == [{"region": "eu"}, {"region": "eu"}]
