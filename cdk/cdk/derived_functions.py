@@ -18,6 +18,7 @@ import base64 as _base64
 from typing import Any, Mapping
 from urllib.parse import quote as _url_quote
 
+from .exceptions import UnresolvedValueError
 from .resolver import DerivedFunction, Resolver
 
 
@@ -34,8 +35,10 @@ def lookup_function(node: Mapping[str, Any], resolver: Resolver) -> Any:
     (``bool``, ``int``, ``float``, or ``str``). Non-scalar inputs are
     rejected with :class:`TypeError` rather than stringified — a dict or
     list silently coerced to ``"{'k': 'v'}"`` produces extremely confusing
-    "not present in map" errors. Unknown scalar inputs raise
-    :class:`KeyError`.
+    "not present in map" errors. An input that resolves to ``None`` or a
+    scalar absent from the map raises :class:`UnresolvedValueError`
+    (missing data: fails loud at materialization, drops the field per
+    request).
     """
     raw_input = _require(node, "input")
     table = _require(node, "map")
@@ -43,7 +46,7 @@ def lookup_function(node: Mapping[str, Any], resolver: Resolver) -> Any:
         raise TypeError("`lookup` `map` must be an object")
     key = resolver.resolve(raw_input)
     if key is None:
-        raise KeyError(
+        raise UnresolvedValueError(
             f"`lookup` input resolved to None; known keys: {sorted(table)}"
         )
     if not isinstance(key, (bool, int, float, str)):
@@ -58,7 +61,7 @@ def lookup_function(node: Mapping[str, Any], resolver: Resolver) -> Any:
     else:
         lookup_key = str(key)
     if lookup_key not in table:
-        raise KeyError(
+        raise UnresolvedValueError(
             f"`lookup` input {key!r} not present in map; known keys: "
             f"{sorted(table)}"
         )
