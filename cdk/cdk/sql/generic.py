@@ -43,6 +43,7 @@ from cdk.type_map import (
     TypeMapper,
     UnmappedTypeError,
 )
+from cdk.exceptions import TransportSpecError
 from cdk.secrets.exceptions import PlaceholderExpansionError
 from cdk.types import (
     AckStatus,
@@ -618,6 +619,7 @@ class GenericSQLConnector(BaseDestinationHandler):
             return True
 
         except (
+            TransportSpecError,
             UnmappedTypeError,
             InvalidTypeMapError,
             PlaceholderExpansionError,

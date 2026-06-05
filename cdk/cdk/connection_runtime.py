@@ -34,6 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 if TYPE_CHECKING:
     import aiohttp
 
+from cdk.exceptions import TransportSpecError
 from cdk.resolver import ResolutionContext
 from cdk.type_map import InvalidTypeMapError, TypeMapper, UnmappedTypeError
 from cdk.types import EndpointScope
@@ -710,6 +711,7 @@ DETERMINISTIC_CONNECT_ERRORS: tuple = (
     InvalidTypeMapError,
     UnmappedTypeError,
     PlaceholderExpansionError,
+    TransportSpecError,
 )
 
 

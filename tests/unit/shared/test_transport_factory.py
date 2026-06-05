@@ -14,11 +14,15 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from cdk.exceptions import TransportSpecError
 from cdk.resolver import ResolutionContext
 from cdk.transport_factory import (
     build_transport,
     register_transport_kind,
     registered_transport_kinds,
+    resolve_adbc_spec,
+    resolve_http_spec,
+    resolve_sqlalchemy_spec,
     resolve_transport_spec,
     unregister_transport_kind,
 )
@@ -101,7 +105,7 @@ class TestResolveTransportSpec:
 
     def test_no_transports_block_rejected(self):
         ctx = ResolutionContext()
-        with pytest.raises(ValueError, match="has no `transports` block"):
+        with pytest.raises(TransportSpecError, match="has no `transports` block"):
             resolve_transport_spec({"connector_id": "demo"}, context=ctx)
 
     def test_no_default_transport_rejected(self):
@@ -112,7 +116,7 @@ class TestResolveTransportSpec:
             },
         }
         ctx = ResolutionContext(connector=connector)
-        with pytest.raises(ValueError, match="default_transport not declared"):
+        with pytest.raises(TransportSpecError, match="default_transport not declared"):
             resolve_transport_spec(connector, context=ctx)
 
     def test_missing_transport_type_rejected(self):
@@ -122,7 +126,7 @@ class TestResolveTransportSpec:
             "transports": {"api": {"base_url": "https://x"}},
         }
         ctx = ResolutionContext(connector=connector)
-        with pytest.raises(ValueError, match="transport_type"):
+        with pytest.raises(TransportSpecError, match="transport_type"):
             resolve_transport_spec(connector, context=ctx)
 
 
@@ -236,3 +240,123 @@ class TestTransportKindRegistry:
         ctx = ResolutionContext(connector=connector)
         with pytest.raises(NotImplementedError, match="Unsupported transport_type"):
             await build_transport(connector, context=ctx)
+
+
+# ---------------------------------------------------------------------------
+# TransportSpecError raised by per-kind resolve phases
+# ---------------------------------------------------------------------------
+
+
+def _resolver(ctx: ResolutionContext = None):
+    from cdk.derived_functions import DEFAULT_FUNCTIONS
+    from cdk.resolver import Resolver
+
+    return Resolver(ctx or ResolutionContext(), functions=DEFAULT_FUNCTIONS)
+
+
+class TestSQLAlchemySpecValidation:
+    def test_missing_driver_raises_transport_spec_error(self):
+        with pytest.raises(TransportSpecError, match="driver"):
+            resolve_sqlalchemy_spec(
+                {"dsn": {"kind": "url_template", "template": "x://h", "bindings": {}}},
+                resolver=_resolver(),
+            )
+
+    def test_unsupported_dsn_kind_raises_transport_spec_error(self):
+        with pytest.raises(TransportSpecError, match="Unsupported dsn.kind"):
+            resolve_sqlalchemy_spec(
+                {"driver": "postgresql+asyncpg", "dsn": {"kind": "unknown"}},
+                resolver=_resolver(),
+            )
+
+    def test_empty_dsn_template_raises_transport_spec_error(self):
+        with pytest.raises(TransportSpecError, match="dsn.template"):
+            resolve_sqlalchemy_spec(
+                {
+                    "driver": "postgresql+asyncpg",
+                    "dsn": {"kind": "url_template", "template": ""},
+                },
+                resolver=_resolver(),
+            )
+
+    def test_binding_missing_encoding_raises_transport_spec_error(self):
+        with pytest.raises(TransportSpecError, match="requires both"):
+            resolve_sqlalchemy_spec(
+                {
+                    "driver": "postgresql+asyncpg",
+                    "dsn": {
+                        "kind": "url_template",
+                        "template": "{host}",
+                        "bindings": {"host": {"value": "localhost"}},
+                    },
+                },
+                resolver=_resolver(),
+            )
+
+    def test_unknown_binding_encoding_raises_transport_spec_error(self):
+        with pytest.raises(TransportSpecError, match="unknown encoding"):
+            resolve_sqlalchemy_spec(
+                {
+                    "driver": "postgresql+asyncpg",
+                    "dsn": {
+                        "kind": "url_template",
+                        "template": "{host}",
+                        "bindings": {"host": {"value": "localhost", "encoding": "bad"}},
+                    },
+                },
+                resolver=_resolver(),
+            )
+
+    def test_binding_resolved_to_none_raises_transport_spec_error(self):
+        ctx = ResolutionContext(connection={"parameters": {"host": None}})
+        with pytest.raises(TransportSpecError, match="resolved value is None"):
+            resolve_sqlalchemy_spec(
+                {
+                    "driver": "postgresql+asyncpg",
+                    "dsn": {
+                        "kind": "url_template",
+                        "template": "{host}",
+                        "bindings": {
+                            "host": {
+                                "value": {"ref": "connection.parameters.host"},
+                                "encoding": "host",
+                            }
+                        },
+                    },
+                },
+                resolver=_resolver(ctx),
+            )
+
+
+class TestAdbcSpecValidation:
+    def test_missing_driver_raises_transport_spec_error(self):
+        with pytest.raises(TransportSpecError, match="driver"):
+            resolve_adbc_spec({}, resolver=_resolver())
+
+    def test_no_dsn_or_db_kwargs_raises_transport_spec_error(self):
+        with pytest.raises(TransportSpecError, match="at least one"):
+            resolve_adbc_spec({"driver": "postgresql"}, resolver=_resolver())
+
+
+class TestHttpSpecValidation:
+    def test_missing_base_url_raises_transport_spec_error(self):
+        with pytest.raises(TransportSpecError, match="base_url"):
+            resolve_http_spec({}, resolver=_resolver())
+
+    def test_empty_base_url_raises_transport_spec_error(self):
+        ctx = ResolutionContext(connection={"parameters": {"url": ""}})
+        with pytest.raises(TransportSpecError, match="non-empty string"):
+            resolve_http_spec(
+                {"base_url": {"ref": "connection.parameters.url"}},
+                resolver=_resolver(ctx),
+            )
+
+    def test_rate_limit_missing_one_field_raises_transport_spec_error(self):
+        with pytest.raises(TransportSpecError, match="both"):
+            resolve_http_spec(
+                {
+                    "base_url": "https://api.example.com",
+                    "rate_limit": {"max_requests": 10},
+                },
+                resolver=_resolver(),
+            )
