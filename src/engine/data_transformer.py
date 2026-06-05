@@ -313,15 +313,19 @@ class AssignmentTransformer:
             return str(value)
 
     async def _fn_iso_to_datetime(self, value: Any) -> datetime:
-        """Convert ISO string to datetime object."""
+        """Convert ISO string to datetime object. Raises on unparseable
+        input — a ``datetime.now()`` fallback would silently fabricate
+        timestamps and corrupt time-based queries and incremental sync
+        (see ``_parse_iso_timestamp``)."""
         if value is None:
             return None
         try:
             iso_str = _normalize_iso_z(str(value))
             return datetime.fromisoformat(iso_str)
         except (ValueError, TypeError) as e:
-            logger.warning(f"iso_to_datetime failed for '{value}': {e}")
-            return datetime.now()
+            raise TransformationError(
+                f"iso_to_datetime failed for {value!r}: {e}"
+            ) from e
 
     async def _fn_iso_to_timestamp(self, value: Any) -> datetime:
         """Alias for iso_to_datetime."""

@@ -281,20 +281,38 @@ class TestDeadLetterQueue:
     async def test_get_failed_records_filtered(self):
         """Test getting failed records filtered by pipeline."""
         dlq = DeadLetterQueue(dlq_path=str(self.dlq_path))
-        
+
         # Add records for different pipelines
         await dlq.send_to_dlq({"id": 1}, Exception("Error 1"), "pipeline1")
         await dlq.send_to_dlq({"id": 2}, Exception("Error 2"), "pipeline1")
         await dlq.send_to_dlq({"id": 3}, Exception("Error 3"), "pipeline2")
-        
+
         # Get records for specific pipeline
         pipeline1_records = await dlq.get_failed_records("pipeline1")
         pipeline2_records = await dlq.get_failed_records("pipeline2")
-        
+
         assert len(pipeline1_records) == 2
         assert len(pipeline2_records) == 1
         assert all(r["pipeline_id"] == "pipeline1" for r in pipeline1_records)
         assert all(r["pipeline_id"] == "pipeline2" for r in pipeline2_records)
+
+    @pytest.mark.asyncio
+    async def test_get_failed_records_filtered_by_stream(self):
+        """stream_id filters records instead of being silently ignored."""
+        dlq = DeadLetterQueue(dlq_path=str(self.dlq_path))
+
+        await dlq.send_to_dlq({"id": 1}, Exception("e"), "pipeline1", stream_id="stream-a")
+        await dlq.send_to_dlq({"id": 2}, Exception("e"), "pipeline1", stream_id="stream-b")
+        await dlq.send_to_dlq({"id": 3}, Exception("e"), "pipeline2", stream_id="stream-a")
+
+        stream_a = await dlq.get_failed_records(stream_id="stream-a")
+        assert len(stream_a) == 2
+        assert all(r["stream_id"] == "stream-a" for r in stream_a)
+
+        # Both filters compose
+        both = await dlq.get_failed_records("pipeline1", stream_id="stream-a")
+        assert len(both) == 1
+        assert both[0]["original_record"]["id"] == 1
     
     @pytest.mark.asyncio
     async def test_get_failed_records_invalid_json(self):
@@ -317,16 +335,12 @@ class TestDeadLetterQueue:
         assert failed_records[1]["valid"] == "record2"
     
     @pytest.mark.asyncio
-    async def test_retry_failed_record(self):
-        """Test retry failed record functionality."""
+    async def test_retry_failed_record_not_implemented(self):
+        """Retry is an honest stub: it raises instead of pretending success."""
         dlq = DeadLetterQueue(dlq_path=str(self.dlq_path))
-        
-        # Basic test - should return True and log
-        with patch('src.state.dead_letter_queue.logger') as mock_logger:
-            result = await dlq.retry_failed_record("test-record-id")
-            
-            assert result is True
-            mock_logger.info.assert_called_once_with("Retry requested for DLQ record: test-record-id")
+
+        with pytest.raises(NotImplementedError, match="test-record-id"):
+            await dlq.retry_failed_record("test-record-id")
     
     @pytest.mark.asyncio
     async def test_get_dlq_stats_empty(self):
@@ -461,8 +475,11 @@ class TestDeadLetterQueueEdgeCases:
         with patch("builtins.open", side_effect=OSError("disk full")):
             with patch("src.state.dead_letter_queue.logger") as mock_logger:
                 # Must not raise even though both writes fail
-                await dlq.send_to_dlq({"id": 999}, Exception("write error"), "test-pipeline")
+                written = await dlq.send_to_dlq(
+                    {"id": 999}, Exception("write error"), "test-pipeline"
+                )
 
+                assert written is False
                 mock_logger.error.assert_called_once()
                 mock_logger.critical.assert_called_once()
                 critical_msg, critical_kwargs = (
@@ -471,6 +488,69 @@ class TestDeadLetterQueueEdgeCases:
                 )
                 assert "record lost permanently" in critical_msg
                 assert critical_kwargs.get("exc_info") is True
+
+    @pytest.mark.asyncio
+    async def test_record_count_not_inflated_on_lost_record(self):
+        """A record lost by both writes must not inflate the DLQ total."""
+        dlq = DeadLetterQueue(dlq_path=str(self.dlq_path))
+
+        with patch("builtins.open", side_effect=OSError("disk full")):
+            await dlq.send_to_dlq({"id": 1}, Exception("e"), "test-pipeline")
+        assert dlq._record_count == 0
+
+        # A successful write still counts
+        written = await dlq.send_to_dlq({"id": 2}, Exception("e"), "test-pipeline")
+        assert written is True
+        assert dlq._record_count == 1
+
+    @pytest.mark.asyncio
+    async def test_send_batch_emits_actual_written_count(self):
+        """emit_dlq_log receives the count of records that reached disk,
+        not the batch size, when some writes fail permanently."""
+        dlq = DeadLetterQueue(dlq_path=str(self.dlq_path))
+
+        with patch("builtins.open", side_effect=OSError("disk full")):
+            with patch("src.state.dead_letter_queue.emit_dlq_log") as mock_emit:
+                await dlq.send_batch(
+                    [{"id": 1}, {"id": 2}], "boom", "test-pipeline"
+                )
+
+        mock_emit.assert_called_once()
+        assert mock_emit.call_args[1]["added"] == 0
+        assert mock_emit.call_args[1]["total"] == 0
+
+    @pytest.mark.asyncio
+    async def test_encoder_handles_engine_value_types(self):
+        """Decimal/date/time/UUID/bytes round-trip through the DLQ writer
+        instead of raising TypeError and losing the record."""
+        from datetime import date, time
+        from decimal import Decimal
+        from uuid import uuid4
+
+        dlq = DeadLetterQueue(dlq_path=str(self.dlq_path))
+
+        record_uuid = uuid4()
+        record = {
+            "amount": Decimal("1.23"),
+            "created": datetime(2026, 1, 2, 3, 4, 5),
+            "day": date(2026, 1, 2),
+            "at": time(3, 4, 5),
+            "uid": record_uuid,
+            "blob": b"\xffraw",
+        }
+
+        written = await dlq.send_to_dlq(record, Exception("cast failed"), "test-pipeline")
+        assert written is True
+
+        failed_records = await dlq.get_failed_records()
+        assert len(failed_records) == 1
+        original = failed_records[0]["original_record"]
+        assert original["amount"] == "1.23"
+        assert original["created"] == "2026-01-02T03:04:05"
+        assert original["day"] == "2026-01-02"
+        assert original["at"] == "03:04:05"
+        assert original["uid"] == str(record_uuid)
+        assert original["blob"] == b"\xffraw".decode("utf-8", errors="replace")
 
     @pytest.mark.asyncio
     async def test_traceback_extraction(self):

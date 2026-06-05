@@ -97,6 +97,29 @@ class TestReadGuards:
         with pytest.raises(ReadError, match="database_object.name"):
             await _drain(connector, runtime, config, _checkpoint())
 
+    @pytest.mark.asyncio
+    async def test_incremental_cursor_field_not_in_projection_raises(self):
+        # An incremental stream whose projection drops the cursor column
+        # would silently degrade to full-scan + upsert every run; the
+        # misconfiguration must fail before any extraction work.
+        connector = GenericSQLConnector()
+        runtime = _FakeRuntime(is_adbc=True)
+        with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()), patch(
+            "cdk.sql.generic.SchemaContract"
+        ):
+            config = _endpoint_config(
+                replication={"method": "incremental", "cursor_field": ["deleted_at"]},
+            )
+            with pytest.raises(ReadError, match="cursor_field 'deleted_at'"):
+                await _drain(connector, runtime, config, _checkpoint())
+        runtime.close.assert_awaited()
+
+    def test_build_filters_missing_field_raises(self):
+        # A filter dict without 'field' used to be skipped, silently
+        # widening the result set.
+        with pytest.raises(ReadError, match="missing 'field'"):
+            GenericSQLConnector._build_filters([{"operator": "eq", "value": 1}])
+
 
 class TestReadConnectErrors:
     """read_batches connect-phase error classification mirrors connect()."""

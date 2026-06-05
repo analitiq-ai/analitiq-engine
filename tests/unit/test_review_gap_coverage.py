@@ -287,6 +287,28 @@ class TestIsoTimestampStrictRaise:
             await t._parse_iso_to_datetime_object("garbage")
 
     @pytest.mark.asyncio
+    async def test_fn_iso_to_datetime_raises_on_unparseable(self):
+        # A datetime.now() fallback would fabricate timestamps that are
+        # indistinguishable from valid data (issue #138).
+        from src.engine.data_transformer import AssignmentTransformer
+        from src.engine.exceptions import TransformationError
+
+        t = AssignmentTransformer()
+        with pytest.raises(TransformationError, match="iso_to_datetime"):
+            await t._fn_iso_to_datetime("not-a-timestamp")
+
+    @pytest.mark.asyncio
+    async def test_fn_iso_to_datetime_parses_valid_input(self):
+        from datetime import datetime
+        from src.engine.data_transformer import AssignmentTransformer
+
+        t = AssignmentTransformer()
+        result = await t._fn_iso_to_datetime("2026-05-12T10:30:00Z")
+        assert isinstance(result, datetime)
+        assert result.tzinfo is not None
+        assert await t._fn_iso_to_datetime(None) is None
+
+    @pytest.mark.asyncio
     async def test_to_int_raises_on_unparseable(self):
         from src.engine.data_transformer import DataTransformer
         from src.engine.exceptions import TransformationError

@@ -227,6 +227,134 @@ class TestWriteBatchFatalOnTypeMapError:
         assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
         assert "type-map" in result.failure_summary
 
+    @pytest.mark.asyncio
+    async def test_adbc_only_missing_schema_contract_names_table(self):
+        # The ADBC-only guard message must carry schema.table context so
+        # the failure_summary is actionable in monitoring (issue #149).
+        from unittest.mock import MagicMock
+
+        from cdk.sql.generic import GenericSQLConnector, _StreamState
+        from src.grpc.generated.analitiq.v1 import AckStatus, Cursor
+
+        handler = GenericSQLConnector()
+        handler._connected = True
+        handler._adbc_only = True
+        handler._streams["s1"] = _StreamState(
+            schema_name="myschema",
+            table_name="events",
+            write_mode="insert",
+            primary_keys=[],
+            schema_contract=None,
+        )
+
+        async def _not_committed(*_args, **_kwargs):
+            return False
+
+        handler._check_batch_committed = _not_committed  # type: ignore[method-assign]
+
+        import pyarrow as pa
+        result = await handler.write_batch(
+            run_id="run-1",
+            stream_id="s1",
+            batch_seq=1,
+            record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
+            record_ids=["1"],
+            cursor=Cursor(token=b""),
+        )
+
+        assert result.success is False
+        assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+        assert "myschema.events" in result.failure_summary
+
+
+class TestUpsertDowngradeWarns:
+    """Upsert with no resolvable conflict keys falls back to plain INSERT,
+    but never silently (issue #151)."""
+
+    @pytest.mark.asyncio
+    async def test_upsert_without_conflict_keys_warns_and_inserts(self, caplog):
+        import logging
+        from unittest.mock import AsyncMock, MagicMock
+
+        from cdk.sql.generic import GenericSQLConnector, _StreamState
+
+        handler = GenericSQLConnector()
+        handler._insert_records = AsyncMock()  # type: ignore[method-assign]
+        state = _StreamState(
+            table=MagicMock(),
+            schema_name="public",
+            table_name="events",
+            write_mode="upsert",
+            primary_keys=[],
+            conflict_keys=[],
+        )
+
+        with caplog.at_level(logging.WARNING, logger="cdk.sql.generic"):
+            await handler._upsert_records(AsyncMock(), state, [{"id": 1}])
+
+        handler._insert_records.assert_awaited_once()
+        assert any(
+            "duplicates are possible" in r.getMessage() for r in caplog.records
+        )
+
+    @pytest.mark.asyncio
+    async def test_upsert_with_conflict_keys_does_not_warn(self, caplog):
+        import logging
+        from unittest.mock import AsyncMock, MagicMock
+
+        from cdk.sql.generic import GenericSQLConnector, _StreamState
+
+        handler = GenericSQLConnector()
+        handler.dialect = MagicMock()
+        handler.dialect.build_sqlalchemy_upsert.return_value = MagicMock()
+        state = _StreamState(
+            table=MagicMock(),
+            schema_name="public",
+            table_name="events",
+            write_mode="upsert",
+            primary_keys=["id"],
+        )
+
+        conn = AsyncMock()
+        with caplog.at_level(logging.WARNING, logger="cdk.sql.generic"):
+            await handler._upsert_records(conn, state, [{"id": 1}])
+
+        conn.execute.assert_awaited_once()
+        assert not caplog.records
+
+
+class TestEnsureTablesEngineNoneRaises:
+    """A None engine during DDL is a violated invariant; silently skipping
+    DDL would leave write_batch returning RETRYABLE_FAILURE forever
+    (issue #150)."""
+
+    @pytest.mark.asyncio
+    async def test_engine_none_raises_adbc_configuration_error(self):
+        from unittest.mock import MagicMock, patch as mock_patch
+
+        from cdk.adbc_registry import AdbcConfigurationError
+        from cdk.sql.generic import GenericSQLConnector, _StreamState
+
+        handler = GenericSQLConnector()
+        assert handler._engine is None
+        state = _StreamState(
+            schema_name="public",
+            table_name="events",
+            endpoint_document={"columns": [{"name": "id"}]},
+        )
+
+        with mock_patch.object(
+            GenericSQLConnector, "_build_column_defs", return_value=[]
+        ), mock_patch(
+            "cdk.sql.generic.build_create_table_sql", return_value="CREATE ..."
+        ), mock_patch.object(
+            GenericSQLConnector, "_build_batch_commits_ddl", return_value="CREATE ..."
+        ):
+            with pytest.raises(
+                AdbcConfigurationError, match=r"connect\(\) must be called"
+            ):
+                await handler._ensure_tables_exist(state, MagicMock())
+
 
 class TestWriteModeDispatch:
     """Mirror of ``test_build_schema_message_rejects_unknown_mode`` on

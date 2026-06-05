@@ -11,10 +11,11 @@ for observability (CloudWatch, log shippers). Payloads never go to stdout.
 import asyncio
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from src.shared.run_id import get_run_id
 from src.state.log_emitter import emit_log
@@ -47,12 +48,24 @@ def emit_dlq_log(
     emit_log("dlq", data)
 
 
-class DateTimeEncoder(json.JSONEncoder):
-    """JSON encoder that handles datetime objects."""
+class DLQRecordEncoder(json.JSONEncoder):
+    """JSON encoder for the non-stdlib types DLQ records actually carry.
+
+    Decimal and UUID become strings, datetime/date/time become ISO-8601,
+    bytes are decoded with replacement — lossless enough for forensics.
+    A type stdlib ``json`` cannot serialize would otherwise raise
+    ``TypeError`` and lose the record the DLQ exists to preserve.
+    """
 
     def default(self, obj):
-        if isinstance(obj, datetime):
+        if isinstance(obj, Decimal):
+            return str(obj)
+        if isinstance(obj, (datetime, date, time)):
             return obj.isoformat()
+        if isinstance(obj, UUID):
+            return str(obj)
+        if isinstance(obj, bytes):
+            return obj.decode("utf-8", errors="replace")
         return super().default(obj)
 
 
@@ -94,20 +107,26 @@ class LocalDLQStorage:
         self.current_file.touch()
         logger.debug(f"Created new DLQ file: {self.current_file}")
 
-    async def write_record(self, record: Dict[str, Any], stream_id: Optional[str] = None) -> None:
-        """Write a DLQ record to local file."""
+    async def write_record(self, record: Dict[str, Any], stream_id: Optional[str] = None) -> bool:
+        """Write a DLQ record to local file.
+
+        Returns True when the record reached disk (primary or fallback
+        file), False when both writes failed and the record is lost —
+        callers must not count a False return as a stored record.
+        """
         async with self.lock:
             try:
                 if self._need_new_file():
                     await self._create_new_file()
 
-                record_json = json.dumps(record, cls=DateTimeEncoder) + "\n"
+                record_json = json.dumps(record, cls=DLQRecordEncoder) + "\n"
                 record_bytes = record_json.encode("utf-8")
 
                 with open(self.current_file, "a", encoding="utf-8") as f:
                     f.write(record_json)
 
                 self.current_file_size += len(record_bytes)
+                return True
 
             except Exception as e:
                 logger.error(
@@ -123,18 +142,21 @@ class LocalDLQStorage:
                 )
                 try:
                     with open(fallback_file, "w", encoding="utf-8") as f:
-                        json.dump(record, f, indent=2, cls=DateTimeEncoder)
+                        json.dump(record, f, indent=2, cls=DLQRecordEncoder)
+                    return True
                 except (OSError, TypeError, ValueError) as fallback_error:
                     logger.critical(
                         "DLQ fallback write failed — record lost permanently: %s",
                         fallback_error,
                         exc_info=True,
                     )
+                    return False
 
     async def get_records(
         self, pipeline_id: Optional[str] = None, stream_id: Optional[str] = None
     ) -> List[Dict[str, Any]]:
-        """Get DLQ records from local files."""
+        """Get DLQ records from local files, optionally filtered by
+        ``pipeline_id`` and/or ``stream_id``."""
         records = []
 
         try:
@@ -146,8 +168,11 @@ class LocalDLQStorage:
                         if line.strip():
                             try:
                                 record = json.loads(line.strip())
-                                if pipeline_id is None or record.get("pipeline_id") == pipeline_id:
-                                    records.append(record)
+                                if pipeline_id is not None and record.get("pipeline_id") != pipeline_id:
+                                    continue
+                                if stream_id is not None and record.get("stream_id") != stream_id:
+                                    continue
+                                records.append(record)
                             except json.JSONDecodeError:
                                 logger.warning(f"Invalid JSON in DLQ file {dlq_file}")
 
@@ -282,11 +307,18 @@ class DeadLetterQueue:
         pipeline_id: str,
         stream_id: Optional[str] = None,
         additional_context: Optional[Dict[str, Any]] = None,
-    ):
-        """Send a failed record to the Dead Letter Queue."""
+    ) -> bool:
+        """Send a failed record to the Dead Letter Queue.
+
+        Returns True when the record reached disk, False when the write
+        failed and the record is lost. The record count only includes
+        records that actually reached disk, so the DLQ totals emitted to
+        monitoring never report phantom records.
+        """
         dlq_record = {
             "id": str(uuid4()),
             "pipeline_id": pipeline_id,
+            "stream_id": stream_id,
             "original_record": record,
             "error": {
                 "type": type(error).__name__,
@@ -298,8 +330,10 @@ class DeadLetterQueue:
             "additional_context": additional_context or {},
         }
 
-        await self.storage.write_record(dlq_record, stream_id)
-        self._record_count += 1
+        written = await self.storage.write_record(dlq_record, stream_id)
+        if written:
+            self._record_count += 1
+        return written
 
     async def send_batch(
         self,
@@ -310,21 +344,32 @@ class DeadLetterQueue:
         additional_context: Optional[Dict[str, Any]] = None,
     ):
         """Send a batch of failed records to the Dead Letter Queue."""
+        written_count = 0
         for record in batch:
             error = Exception(error_message)
-            await self.send_to_dlq(
+            written = await self.send_to_dlq(
                 record=record,
                 error=error,
                 pipeline_id=pipeline_id,
                 stream_id=stream_id,
                 additional_context=additional_context,
             )
+            if written:
+                written_count += 1
 
-        logger.warning(f"Sent batch of {len(batch)} records to DLQ for pipeline {pipeline_id}")
+        if written_count < len(batch):
+            logger.critical(
+                "DLQ batch for pipeline %s: %d of %d records lost permanently",
+                pipeline_id, len(batch) - written_count, len(batch),
+            )
+        logger.warning(
+            f"Sent batch of {written_count}/{len(batch)} records to DLQ "
+            f"for pipeline {pipeline_id}"
+        )
         emit_dlq_log(
             pipeline_id=pipeline_id,
             stream_id=stream_id,
-            added=len(batch),
+            added=written_count,
             total=self._record_count,
         )
 
@@ -344,9 +389,14 @@ class DeadLetterQueue:
         return await self.storage.get_records(pipeline_id, stream_id)
 
     async def retry_failed_record(self, dlq_record_id: str) -> bool:
-        """Mark a failed record for retry."""
-        logger.info(f"Retry requested for DLQ record: {dlq_record_id}")
-        return True
+        """Stub: DLQ record retry is not implemented.
+
+        Raises instead of pretending success — a True return here would
+        let callers believe a retry was scheduled when nothing happened.
+        """
+        raise NotImplementedError(
+            f"DLQ record retry is not implemented (requested: {dlq_record_id})"
+        )
 
     async def get_dlq_stats(self) -> Dict[str, Any]:
         """Get DLQ statistics."""
