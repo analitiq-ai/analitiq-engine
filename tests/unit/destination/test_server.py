@@ -158,6 +158,59 @@ class TestSchemaAckTypeMapError:
             ):
                 pass
 
+    @pytest.mark.asyncio
+    async def test_adbc_configuration_error_is_surfaced_in_schema_ack(self):
+        """configure_schema deliberately propagates AdbcConfigurationError
+        (e.g. _engine None during DDL); the servicer must translate it to a
+        rejected SchemaAck instead of crashing the stream."""
+        from cdk.adbc_registry import AdbcConfigurationError
+
+        handler = MagicMock()
+        handler.configure_schema = AsyncMock(
+            side_effect=AdbcConfigurationError(
+                "SQLAlchemy engine is None during DDL for public.events; "
+                "connect() must be called before configure_schema()"
+            )
+        )
+
+        servicer = DestinationServicer(handler, server=MagicMock())
+        responses = []
+        async for resp in servicer.StreamRecords(
+            _iter_once(_schema_request("s5")), context=MagicMock()
+        ):
+            responses.append(resp)
+
+        assert len(responses) == 1
+        ack = responses[0].schema_ack
+        assert ack.accepted is False
+        assert ack.message.startswith("AdbcConfigurationError: ")
+        assert "public.events" in ack.message
+
+    @pytest.mark.asyncio
+    async def test_unsupported_dialect_error_is_surfaced_in_schema_ack(self):
+        """UnsupportedDialectOperationError is in configure_schema's
+        propagate tuple; it must land in the SchemaAck as well."""
+        from cdk.sql.exceptions import UnsupportedDialectOperationError
+
+        handler = MagicMock()
+        handler.configure_schema = AsyncMock(
+            side_effect=UnsupportedDialectOperationError(
+                "build_sqlalchemy_upsert", dialect="ansi"
+            )
+        )
+
+        servicer = DestinationServicer(handler, server=MagicMock())
+        responses = []
+        async for resp in servicer.StreamRecords(
+            _iter_once(_schema_request("s6")), context=MagicMock()
+        ):
+            responses.append(resp)
+
+        assert len(responses) == 1
+        ack = responses[0].schema_ack
+        assert ack.accepted is False
+        assert ack.message.startswith("UnsupportedDialectOperationError: ")
+
 
 class TestGetCapabilities:
     def _make_handler(self, *, supports_upsert: bool) -> MagicMock:
