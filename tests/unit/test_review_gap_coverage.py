@@ -243,48 +243,14 @@ class TestStartStreamStateReset:
 
 
 # --------------------------------------------------------------------------- #
-# Gap #16: _parse_iso_timestamp / _parse_iso_to_datetime_object raise         #
+# Gap #16: AssignmentTransformer iso_to_datetime must raise on bad input      #
 # --------------------------------------------------------------------------- #
 
 
 class TestIsoTimestampStrictRaise:
     """Returning ``datetime.now()`` on unparseable cursor input would
-    silently re-window incremental replication. These parsers must
-    raise so the engine routes via error_strategy."""
-
-    @pytest.mark.asyncio
-    async def test_parse_iso_timestamp_raises_on_unparseable(self):
-        from src.engine.data_transformer import DataTransformer
-
-        t = DataTransformer()
-        with pytest.raises(ValueError):
-            await t._parse_iso_timestamp("not-a-timestamp")
-
-    @pytest.mark.asyncio
-    async def test_parse_iso_timestamp_handles_zulu(self):
-        from datetime import datetime
-        from src.engine.data_transformer import DataTransformer
-
-        t = DataTransformer()
-        result = await t._parse_iso_timestamp("2026-05-12T10:30:00Z")
-        assert isinstance(result, datetime)
-        assert result.tzinfo is not None
-
-    @pytest.mark.asyncio
-    async def test_parse_iso_to_datetime_object_raises_on_none(self):
-        from src.engine.data_transformer import DataTransformer
-
-        t = DataTransformer()
-        with pytest.raises(ValueError):
-            await t._parse_iso_to_datetime_object(None)
-
-    @pytest.mark.asyncio
-    async def test_parse_iso_to_datetime_object_raises_on_unparseable(self):
-        from src.engine.data_transformer import DataTransformer
-
-        t = DataTransformer()
-        with pytest.raises(ValueError):
-            await t._parse_iso_to_datetime_object("garbage")
+    silently re-window incremental replication. The assignment-transformer
+    function must raise so the engine routes via error_strategy."""
 
     @pytest.mark.asyncio
     async def test_fn_iso_to_datetime_raises_on_unparseable(self):
@@ -308,20 +274,3 @@ class TestIsoTimestampStrictRaise:
         assert result.tzinfo is not None
         assert await t._fn_iso_to_datetime(None) is None
 
-    @pytest.mark.asyncio
-    async def test_to_int_raises_on_unparseable(self):
-        from src.engine.data_transformer import DataTransformer
-        from src.engine.exceptions import TransformationError
-
-        t = DataTransformer()
-        with pytest.raises(TransformationError, match="to_int"):
-            await t._apply_field_transformations("abc", ["to_int"])
-
-    @pytest.mark.asyncio
-    async def test_to_float_raises_on_unparseable(self):
-        from src.engine.data_transformer import DataTransformer
-        from src.engine.exceptions import TransformationError
-
-        t = DataTransformer()
-        with pytest.raises(TransformationError, match="to_float"):
-            await t._apply_field_transformations("xyz", ["to_float"])

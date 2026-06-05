@@ -1,4 +1,4 @@
-"""Unit tests for DataTransformer - NO MOCKING, real functionality only."""
+"""Unit tests for DataTransformer - assignments format only."""
 
 import pytest
 
@@ -6,17 +6,41 @@ from src.engine.data_transformer import DataTransformer
 from src.engine.exceptions import TransformationError
 
 
+def _assignment(target_path, expr=None, const=None, nullable=True):
+    """Build an assignment dict in transformer shape."""
+    target = {"path": target_path if isinstance(target_path, list) else [target_path], "nullable": nullable}
+    if const is not None:
+        value = {"kind": "const", "const": {"value": const}}
+    else:
+        value = {"kind": "expr", "expr": expr}
+    return {"target": target, "value": value}
+
+
+def _get(path):
+    """Build a get-expression for the given field path."""
+    return {"op": "get", "path": path if isinstance(path, list) else [path]}
+
+
+def _pipe(source_path, fn_name):
+    """Build a pipe expression: get source_path, apply fn_name."""
+    return {
+        "op": "pipe",
+        "args": [
+            _get(source_path),
+            {"op": "fn", "name": fn_name, "version": 1, "args": []},
+        ],
+    }
+
+
 class TestDataTransformer:
-    """Test suite for DataTransformer functionality."""
+    """Test suite for DataTransformer."""
 
     @pytest.fixture
     def transformer(self):
-        """Create a DataTransformer instance."""
         return DataTransformer()
 
     @pytest.fixture
     def sample_batch(self):
-        """Sample batch of records for testing."""
         return [
             {
                 "id": 123456,
@@ -25,10 +49,8 @@ class TestDataTransformer:
                 "targetCurrency": "EUR",
                 "details": {
                     "reference": "Payment for services",
-                    "merchant": {
-                        "name": "Test Merchant"
-                    }
-                }
+                    "merchant": {"name": "Test Merchant"},
+                },
             },
             {
                 "id": 789012,
@@ -37,36 +59,31 @@ class TestDataTransformer:
                 "targetCurrency": "USD",
                 "details": {
                     "reference": "Invoice payment",
-                    "merchant": {
-                        "name": "Another Merchant"
-                    }
-                }
-            }
+                    "merchant": {"name": "Another Merchant"},
+                },
+            },
         ]
 
     @pytest.mark.asyncio
     async def test_no_transformations(self, transformer, sample_batch):
-        """Test batch passes through unchanged when no transformations configured."""
-        config = {"mapping": {}}
-        
-        result = await transformer.apply_transformations(sample_batch, config)
+        """Batch passes through unchanged when no assignments configured."""
+        result = await transformer.apply_transformations(sample_batch, {"mapping": {}})
         assert result == sample_batch
 
     @pytest.mark.asyncio
-    async def test_field_mappings_simple(self, transformer, sample_batch):
-        """Test simple field mappings without transformations."""
+    async def test_field_rename(self, transformer, sample_batch):
+        """Simple field rename: source key appears under target name."""
         config = {
             "mapping": {
-                "field_mappings": {
-                    "id": {"target": "transaction_id"},
-                    "targetValue": {"target": "amount"},
-                    "targetCurrency": {"target": "currency"}
-                }
+                "assignments": [
+                    _assignment("transaction_id", expr=_get("id")),
+                    _assignment("amount", expr=_get("targetValue")),
+                    _assignment("currency", expr=_get("targetCurrency")),
+                ]
             }
         }
-        
         result = await transformer.apply_transformations(sample_batch, config)
-        
+
         assert len(result) == 2
         assert result[0]["transaction_id"] == 123456
         assert result[0]["amount"] == 100.50
@@ -76,241 +93,155 @@ class TestDataTransformer:
         assert result[1]["currency"] == "USD"
 
     @pytest.mark.asyncio
-    async def test_field_mappings_with_transformations(self, transformer, sample_batch):
-        """Test field mappings with transformations."""
+    async def test_field_with_function_transform(self, transformer, sample_batch):
+        """Pipe expression applies a named function to the source value."""
         config = {
             "mapping": {
-                "field_mappings": {
-                    "created": {
-                        "target": "date",
-                        "transformations": ["iso_to_date"]
-                    },
-                    "targetValue": {
-                        "target": "amount",
-                        "transformations": ["abs"]
-                    },
-                    "targetCurrency": {
-                        "target": "currency_code",
-                        "transformations": ["lowercase"]
-                    }
-                }
+                "assignments": [
+                    _assignment("date", expr=_pipe("created", "iso_to_date")),
+                    _assignment("amount", expr=_get("targetValue")),
+                    _assignment("currency_code", expr=_pipe("targetCurrency", "lower")),
+                ]
             }
         }
-        
         result = await transformer.apply_transformations(sample_batch, config)
-        
+
         assert result[0]["date"] == "2025-08-16"
         assert result[0]["amount"] == 100.50
         assert result[0]["currency_code"] == "eur"
 
     @pytest.mark.asyncio
-    async def test_nested_field_access(self, transformer, sample_batch):
-        """Test accessing nested fields with dot notation."""
+    async def test_nested_source_field_access(self, transformer, sample_batch):
+        """Multi-element path descends into nested dicts."""
         config = {
             "mapping": {
-                "field_mappings": {
-                    "details.reference": {"target": "payment_reference"},
-                    "details.merchant.name": {"target": "merchant_name"}
-                }
+                "assignments": [
+                    _assignment("payment_reference", expr=_get(["details", "reference"])),
+                    _assignment("merchant_name", expr=_get(["details", "merchant", "name"])),
+                ]
             }
         }
-        
         result = await transformer.apply_transformations(sample_batch, config)
-        
+
         assert result[0]["payment_reference"] == "Payment for services"
         assert result[0]["merchant_name"] == "Test Merchant"
         assert result[1]["payment_reference"] == "Invoice payment"
         assert result[1]["merchant_name"] == "Another Merchant"
 
     @pytest.mark.asyncio
-    async def test_computed_fields(self, transformer, sample_batch):
-        """Test computed fields with secure expressions."""
+    async def test_const_value_assignment(self, transformer, sample_batch):
+        """Const assignment writes the same literal value for every record."""
         config = {
             "mapping": {
-                "computed_fields": {
-                    "object_name": {"expression": "Transaction"},
-                    "account_info": {"expression": '{"id": "5936402", "type": "CheckAccount"}'},
-                    "timestamp": {"expression": "now()"},
-                    "static_status": {"expression": "active"}
-                }
+                "assignments": [
+                    _assignment("object_name", const="Transaction"),
+                    _assignment("status_code", const=42),
+                ]
             }
         }
-        
         result = await transformer.apply_transformations(sample_batch, config)
-        
+
         assert result[0]["object_name"] == "Transaction"
-        assert result[0]["account_info"] == {"id": "5936402", "type": "CheckAccount"}
-        assert "T" in result[0]["timestamp"]  # ISO timestamp format
-        assert result[0]["static_status"] == "active"
+        assert result[0]["status_code"] == 42
+        assert result[1]["object_name"] == "Transaction"
+        assert result[1]["status_code"] == 42
 
     @pytest.mark.asyncio
-    async def test_string_field_mappings(self, transformer, sample_batch):
-        """Test simple string field mappings (legacy format)."""
-        config = {
-            "mapping": {
-                "field_mappings": {
-                    "id": "transaction_id",
-                    "targetValue": "amount"
-                }
-            }
-        }
-        
-        result = await transformer.apply_transformations(sample_batch, config)
-        
-        assert result[0]["transaction_id"] == 123456
-        assert result[0]["amount"] == 100.50
-
-    @pytest.mark.asyncio
-    async def test_all_transformation_types(self, transformer):
-        """Test all supported transformation types."""
+    async def test_all_function_types(self, transformer):
+        """Exercise every function in the AssignmentTransformer catalog."""
         batch = [
             {
-                "text_field": "  Hello World  ",
-                "number_field": -42.5,
-                "date_field": "2025-08-16T10:30:00Z",
-                "string_number": "123.45",
-                "float_number": 67.89
+                "text": "  Hello World  ",
+                "neg": -42.5,
+                "date_str": "2025-08-16T10:30:00Z",
+                "str_num": "123.45",
+                "float_num": 67.89,
             }
         ]
-        
         config = {
             "mapping": {
-                "field_mappings": {
-                    "text_field": {
-                        "target": "clean_text",
-                        "transformations": ["strip", "lowercase"]
-                    },
-                    "number_field": {
-                        "target": "positive_number", 
-                        "transformations": ["abs"]
-                    },
-                    "date_field": {
-                        "target": "formatted_date",
-                        "transformations": ["iso_to_date"]
-                    },
-                    "string_number": {
-                        "target": "as_float",
-                        "transformations": ["to_float"]
-                    },
-                    "float_number": {
-                        "target": "as_int",
-                        "transformations": ["to_int"]
-                    }
-                }
+                "assignments": [
+                    _assignment("trimmed", expr=_pipe("text", "trim")),
+                    _assignment("lowered", expr=_pipe("text", "lower")),
+                    _assignment("uppered", expr=_pipe("text", "upper")),
+                    _assignment("positive", expr=_pipe("neg", "abs")),
+                    _assignment("as_date", expr=_pipe("date_str", "iso_to_date")),
+                    _assignment("as_float", expr=_pipe("str_num", "to_float")),
+                    _assignment("as_int", expr=_pipe("float_num", "to_int")),
+                    _assignment("as_str", expr=_pipe("neg", "to_string")),
+                ]
             }
         }
-        
         result = await transformer.apply_transformations(batch, config)
-        
-        assert result[0]["clean_text"] == "hello world"
-        assert result[0]["positive_number"] == 42.5
-        assert result[0]["formatted_date"] == "2025-08-16"
+
+        assert result[0]["trimmed"] == "Hello World"
+        assert result[0]["lowered"] == "  hello world  "
+        assert result[0]["uppered"] == "  HELLO WORLD  "
+        assert result[0]["positive"] == 42.5
+        assert result[0]["as_date"] == "2025-08-16"
         assert result[0]["as_float"] == 123.45
         assert result[0]["as_int"] == 67
+        assert result[0]["as_str"] == "-42.5"
 
     @pytest.mark.asyncio
-    async def test_missing_nested_field(self, transformer, sample_batch):
-        """Test handling of missing nested fields."""
+    async def test_missing_source_field_returns_none(self, transformer, sample_batch):
+        """A get on an absent path produces None; nullable target keeps it."""
         config = {
             "mapping": {
-                "field_mappings": {
-                    "missing.nested.field": {"target": "should_be_none"},
-                    "details.missing_field": {"target": "also_none"}
-                }
+                "assignments": [
+                    _assignment("should_be_none", nullable=True,
+                                expr=_get(["missing", "nested", "field"])),
+                    _assignment("also_none", nullable=True,
+                                expr=_get(["details", "missing_field"])),
+                ]
             }
         }
-        
         result = await transformer.apply_transformations(sample_batch, config)
-        
+
         assert result[0]["should_be_none"] is None
         assert result[0]["also_none"] is None
 
     @pytest.mark.asyncio
-    async def test_transformation_error_handling(self, transformer):
-        """Test error handling in transformations using real expression evaluator."""
-        # Use a record that will cause real errors during transformation
-        batch = [{"field": "test_value"}]
-
-        # Create a custom transformer with a broken expression evaluator
-        class BrokenExpressionEvaluator:
-            async def evaluate(self, expression, record, context):
-                raise ValueError("Evaluation failed")
-
-        broken_transformer = DataTransformer()
-        broken_transformer.expression_evaluator = BrokenExpressionEvaluator()
-
+    async def test_nonnullable_field_raises_on_null(self, transformer):
+        """A null value on a non-nullable target raises TransformationError."""
+        batch = [{"id": None}]
         config = {
             "mapping": {
-                "computed_fields": {
-                    "bad_field": {"expression": "any_expression"}
-                }
+                "assignments": [
+                    _assignment("id", nullable=False, expr=_get("id")),
+                ]
             }
         }
-
-        with pytest.raises(TransformationError, match="Data transformation failed"):
-            await broken_transformer.apply_transformations(batch, config)
+        with pytest.raises(TransformationError):
+            await transformer.apply_transformations(batch, config)
 
     @pytest.mark.asyncio
-    async def test_iso_date_transformation_edge_cases(self, transformer):
-        """Test ISO date transformation with various input formats."""
+    async def test_iso_date_function_edge_cases(self, transformer):
+        """iso_to_date handles multiple ISO variants and gracefully passes through invalid input."""
         batch = [
             {
-                "date1": "2025-08-16T10:30:00Z",       # UTC with Z
-                "date2": "2025-08-16T10:30:00+00:00",  # UTC with offset
-                "date3": "2025-08-16T10:30:00+02:00",  # Timezone offset
-                "date4": "invalid-date",               # Invalid format
-                "date5": None                          # None value
+                "d_utc_z": "2025-08-16T10:30:00Z",
+                "d_utc_off": "2025-08-16T10:30:00+00:00",
+                "d_tz_off": "2025-08-16T10:30:00+02:00",
+                "d_bad": "invalid-date",
+                "d_none": None,
             }
         ]
-        
         config = {
             "mapping": {
-                "field_mappings": {
-                    "date1": {"target": "d1", "transformations": ["iso_to_date"]},
-                    "date2": {"target": "d2", "transformations": ["iso_to_date"]},
-                    "date3": {"target": "d3", "transformations": ["iso_to_date"]},
-                    "date4": {"target": "d4", "transformations": ["iso_to_date"]},
-                    "date5": {"target": "d5", "transformations": ["iso_to_date"]}
-                }
+                "assignments": [
+                    _assignment("r_utc_z", expr=_pipe("d_utc_z", "iso_to_date")),
+                    _assignment("r_utc_off", expr=_pipe("d_utc_off", "iso_to_date")),
+                    _assignment("r_tz_off", expr=_pipe("d_tz_off", "iso_to_date")),
+                    _assignment("r_bad", expr=_pipe("d_bad", "iso_to_date")),
+                    _assignment("r_none", expr=_pipe("d_none", "iso_to_date")),
+                ]
             }
         }
-        
         result = await transformer.apply_transformations(batch, config)
-        
-        assert result[0]["d1"] == "2025-08-16"
-        assert result[0]["d2"] == "2025-08-16"
-        assert result[0]["d3"] == "2025-08-16"
-        assert result[0]["d4"] == "invalid-date"  # Should keep original on error
-        assert result[0]["d5"] is None  # Should handle None values
 
-    @pytest.mark.asyncio
-    async def test_transformation_type_safety(self, transformer):
-        """Test that transformations are applied safely with type checking."""
-        batch = [
-            {
-                "string_field": "test",
-                "number_field": 42,
-                "none_field": None,
-                "bool_field": True
-            }
-        ]
-        
-        config = {
-            "mapping": {
-                "field_mappings": {
-                    # These should only apply if type matches
-                    "string_field": {"target": "s1", "transformations": ["abs"]},      # Wrong type
-                    "number_field": {"target": "n1", "transformations": ["strip"]},    # Wrong type
-                    "none_field": {"target": "null1", "transformations": ["upper"]},   # None value
-                    "bool_field": {"target": "b1", "transformations": ["to_int"]}      # Type conversion
-                }
-            }
-        }
-        
-        result = await transformer.apply_transformations(batch, config)
-        
-        # Should gracefully handle type mismatches
-        assert result[0]["s1"] == "test"  # Unchanged due to type mismatch
-        assert result[0]["n1"] == 42      # Unchanged due to type mismatch  
-        assert result[0]["null1"] is None  # None should be preserved
-        assert result[0]["b1"] == 1       # Bool to int conversion
+        assert result[0]["r_utc_z"] == "2025-08-16"
+        assert result[0]["r_utc_off"] == "2025-08-16"
+        assert result[0]["r_tz_off"] == "2025-08-16"
+        assert result[0]["r_bad"] == "invalid-date"
+        assert result[0]["r_none"] is None
