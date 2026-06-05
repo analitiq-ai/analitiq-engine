@@ -126,7 +126,7 @@ class SchemaContract:
             values = [r.get(field.name) for r in records]
             field_def = self._field_defs.get(field.name) or {}
             try:
-                arrays.append(self._build_column(field, values, field_def))
+                array = self._build_column(field, values, field_def)
             except ValueError:
                 # _build_column already names the offending row; passing
                 # it through preserves that precision instead of pinning
@@ -141,6 +141,13 @@ class SchemaContract:
                     f"{field.type} from source values "
                     f"(first non-null at row {bad_index}): {e}"
                 ) from e
+            if not field.nullable and array.null_count:
+                null_indices = [i for i, v in enumerate(values) if v is None]
+                raise ValueError(
+                    f"column {field.name!r} is non-nullable but rows "
+                    f"{null_indices} carry None"
+                )
+            arrays.append(array)
         return pa.RecordBatch.from_arrays(arrays, schema=self._arrow_schema)
 
     def cast_arrow_batch(self, record_batch: pa.RecordBatch) -> pa.RecordBatch:
