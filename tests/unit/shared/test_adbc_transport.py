@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import pytest
 
+from cdk.exceptions import TransportSpecError
 from cdk.derived_functions import DEFAULT_FUNCTIONS
 from cdk.resolver import ResolutionContext, Resolver
 from cdk.transport_factory import (
@@ -79,14 +80,14 @@ class TestResolveDbKwargs:
 
 class TestResolveAdbcSpec:
     def test_missing_driver_raises(self):
-        with pytest.raises(ValueError, match="`driver`"):
+        with pytest.raises(TransportSpecError, match="`driver`"):
             resolve_adbc_spec(
                 {"transport_type": "adbc", "db_kwargs": {"a": "b"}},
                 resolver=_resolver(),
             )
 
     def test_neither_dsn_nor_db_kwargs_raises(self):
-        with pytest.raises(ValueError, match="at least one of"):
+        with pytest.raises(TransportSpecError, match="at least one of"):
             resolve_adbc_spec(
                 {"transport_type": "adbc", "driver": "snowflake"},
                 resolver=_resolver(),

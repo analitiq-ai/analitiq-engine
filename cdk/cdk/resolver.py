@@ -17,6 +17,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Mapping, Optional
 
+from cdk.exceptions import TransportSpecError
+
 
 @dataclass
 class ResolutionContext:
@@ -59,7 +61,7 @@ class ResolutionContext:
         ``None`` so unresolved required references surface immediately.
         """
         if not dotted_path or not isinstance(dotted_path, str):
-            raise ValueError(f"Resolution path must be a non-empty string, got {dotted_path!r}")
+            raise TransportSpecError(f"Resolution path must be a non-empty string, got {dotted_path!r}")
         parts = dotted_path.split(".")
         head, *rest = parts
         if head not in self._SCOPES:
@@ -167,14 +169,14 @@ class Resolver:
         keys = set(node.keys())
         marker = keys & self._EXPR_KEYS
         if len(marker) > 1:
-            raise ValueError(
+            raise TransportSpecError(
                 f"Expression node has conflicting markers {sorted(marker)}; "
                 f"use exactly one of {sorted(self._EXPR_KEYS)} per node"
             )
         if "function" in marker:
             extra = keys - self._FUNCTION_ALLOWED_SIBLINGS
             if extra:
-                raise ValueError(
+                raise TransportSpecError(
                     f"`function` expression has unexpected sibling keys "
                     f"{sorted(extra)}; allowed: "
                     f"{sorted(self._FUNCTION_ALLOWED_SIBLINGS)}"
@@ -185,7 +187,7 @@ class Resolver:
             # stray sibling does not get silently dropped.
             if len(keys) != 1:
                 (only,) = marker
-                raise ValueError(
+                raise TransportSpecError(
                     f"`{only}` expression must be the only key in the node; "
                     f"got siblings {sorted(keys - {only})}"
                 )
@@ -218,7 +220,7 @@ class Resolver:
             out.append(template[i:j])
             k = template.find("}", j + 2)
             if k < 0:
-                raise ValueError(f"Unterminated ${{...}} placeholder in template: {template!r}")
+                raise TransportSpecError(f"Unterminated ${{...}} placeholder in template: {template!r}")
             path = template[j + 2 : k]
             value = self._ctx.lookup(path)
             if value is None:
@@ -242,7 +244,7 @@ class Resolver:
     def _resolve_function(self, node: Mapping[str, Any]) -> Any:
         name = node.get("function")
         if not isinstance(name, str) or not name:
-            raise ValueError(f"`function` field must name a registered function: {node!r}")
+            raise TransportSpecError(f"`function` field must name a registered function: {node!r}")
         fn = self._functions.get(name)
         if fn is None:
             raise KeyError(

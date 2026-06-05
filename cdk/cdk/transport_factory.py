@@ -39,6 +39,7 @@ if TYPE_CHECKING:
 
 from cdk._extras import reraise_for_missing_extra
 from cdk.derived_functions import DEFAULT_FUNCTIONS
+from cdk.exceptions import TransportSpecError
 from cdk.resolver import ResolutionContext, Resolver
 from cdk.rate_limiter import RateLimiter
 
@@ -98,13 +99,13 @@ def _render_url_template_dsn(
     """
     kind = dsn_spec.get("kind")
     if kind != "url_template":
-        raise ValueError(
+        raise TransportSpecError(
             f"Unsupported dsn.kind {kind!r}; the connector contract currently "
             f"defines only 'url_template'"
         )
     template = dsn_spec.get("template")
     if not isinstance(template, str) or not template:
-        raise ValueError("dsn.template must be a non-empty string")
+        raise TransportSpecError("dsn.template must be a non-empty string")
 
     raw_bindings = dsn_spec.get("bindings") or {}
     if not isinstance(raw_bindings, Mapping):
@@ -117,12 +118,12 @@ def _render_url_template_dsn(
                 f"dsn.bindings.{name} must be an object with 'value' and 'encoding'"
             )
         if "value" not in entry or "encoding" not in entry:
-            raise ValueError(
+            raise TransportSpecError(
                 f"dsn.bindings.{name} requires both 'value' and 'encoding'"
             )
         encoding = entry["encoding"]
         if encoding not in _ENCODING_QUOTES:
-            raise ValueError(
+            raise TransportSpecError(
                 f"dsn.bindings.{name}: unknown encoding {encoding!r}; "
                 f"allowed: {sorted(_ENCODING_QUOTES)}"
             )
@@ -141,7 +142,7 @@ def _render_url_template_dsn(
 def _apply_encoding(encoding: str, value: Any, *, binding: str) -> str:
     """Convert a resolved value to its DSN-segment string form."""
     if value is None:
-        raise ValueError(
+        raise TransportSpecError(
             f"dsn.bindings.{binding}: resolved value is None; required for "
             f"DSN rendering"
         )
@@ -243,13 +244,13 @@ def _select_transport(
     """Pick the ``transports[ref]`` block, applying ``transport_defaults``."""
     transports = connector.get("transports") or {}
     if not transports:
-        raise ValueError(
+        raise TransportSpecError(
             f"Connector {connector.get('connector_id')!r} has no `transports` block; "
             f"cannot materialize transport"
         )
     ref = transport_ref or connector.get("default_transport")
     if not ref:
-        raise ValueError(
+        raise TransportSpecError(
             f"Connector {connector.get('connector_id')!r}: transport_ref not given "
             f"and default_transport not declared"
         )
@@ -288,7 +289,7 @@ def resolve_sqlalchemy_spec(
     """
     driver = spec.get("driver")
     if not isinstance(driver, str) or not driver:
-        raise ValueError(
+        raise TransportSpecError(
             "sqlalchemy transport requires `driver` (e.g. 'postgresql+asyncpg')"
         )
 
@@ -468,7 +469,7 @@ def resolve_adbc_spec(
     """
     driver = spec.get("driver")
     if not isinstance(driver, str) or not driver:
-        raise ValueError("adbc transport requires a non-empty `driver`")
+        raise TransportSpecError("adbc transport requires a non-empty `driver`")
     driver = driver.lower()
 
     raw_dsn = spec.get("dsn")
@@ -484,7 +485,7 @@ def resolve_adbc_spec(
     db_kwargs = _resolve_db_kwargs(spec.get("db_kwargs"), resolver)
 
     if uri is None and not db_kwargs:
-        raise ValueError(
+        raise TransportSpecError(
             "adbc transport requires at least one of `dsn` or `db_kwargs` "
             "(schema anyOf constraint)"
         )
@@ -573,10 +574,10 @@ def resolve_http_spec(
     """Resolve an http transport spec to JSON-safe values (no objects)."""
     raw_base = spec.get("base_url")
     if raw_base is None:
-        raise ValueError("http transport `base_url` is required")
+        raise TransportSpecError("http transport `base_url` is required")
     base_url = resolver.resolve(raw_base)
     if not isinstance(base_url, str) or not base_url:
-        raise ValueError(
+        raise TransportSpecError(
             "http transport `base_url` must resolve to a non-empty string"
         )
     base_url = base_url.rstrip("/")
@@ -603,7 +604,7 @@ def resolve_http_spec(
         max_requests = raw_rate_limit.get("max_requests")
         time_window = raw_rate_limit.get("time_window_seconds")
         if (max_requests is None) != (time_window is None):
-            raise ValueError(
+            raise TransportSpecError(
                 "http transport `rate_limit` requires both `max_requests` "
                 "and `time_window_seconds` (or neither)"
             )
@@ -750,7 +751,7 @@ def resolve_transport_spec(
     _ref, merged = _select_transport(connector, transport_ref)
     transport_type = merged.get("transport_type")
     if not transport_type:
-        raise ValueError(
+        raise TransportSpecError(
             f"Resolved transport spec missing `transport_type`; connector "
             f"{connector.get('connector_id')!r}, transport {transport_ref!r}"
         )
