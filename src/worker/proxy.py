@@ -21,7 +21,7 @@ import pyarrow as pa
 
 from cdk.base_handler import BaseDestinationHandler, BatchWriteResult
 from cdk.connection_runtime import ConnectionRuntime
-from cdk.types import AckStatus, Cursor, SchemaSpec, WriteMode
+from cdk.types import SUCCESS_STATUSES, AckStatus, Cursor, SchemaSpec, WriteMode
 
 from src.grpc.client import DestinationGRPCClient
 from src.grpc.generated.analitiq.v1 import Cursor as ProtoCursor
@@ -188,6 +188,23 @@ class WorkerProxyHandler(BaseDestinationHandler):
             # committed-before-crash batch on resend. Fatal is reserved
             # for verdicts the connector actually returned.
             status = AckStatus.ACK_STATUS_RETRYABLE_FAILURE
+        if committed is not None and status not in SUCCESS_STATUSES:
+            # The ack crossed an untrusted process boundary: a connector
+            # that pairs a failure status with a cursor violates the
+            # BatchWriteResult contract. Drop the cursor (a failed batch
+            # must never advance the checkpoint) but keep the connector's
+            # verdict and failure_summary — letting the constructor raise
+            # here would abort the whole stream and lose both.
+            logger.error(
+                "%s: worker sent committed_cursor on a failure ack "
+                "(stream_id=%s, batch_seq=%s, status=%r); dropping the "
+                "cursor to protect the checkpoint",
+                self._label,
+                stream_id,
+                batch_seq,
+                status,
+            )
+            committed = None
         return BatchWriteResult(
             status=status,
             records_written=result.records_written,

@@ -153,6 +153,46 @@ class TestProxyWriteBatch:
         )
         assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
 
+    async def test_cursor_on_failure_ack_is_dropped_not_fatal_to_stream(self):
+        # The ack crosses an untrusted process boundary: a worker pairing
+        # a failure status with a cursor violates the BatchWriteResult
+        # contract. The proxy must drop the cursor (a failed batch never
+        # advances the checkpoint) while preserving the connector's
+        # verdict and failure_summary — not let the constructor's
+        # invariant abort the whole stream (#129).
+        import pyarrow as pa
+
+        from src.grpc.client import BatchResult
+        from src.grpc.generated.analitiq.v1 import AckStatus as ProtoAckStatus
+        from src.grpc.generated.analitiq.v1 import Cursor as ProtoCursor
+
+        proxy = _proxy()
+        stream_client = MagicMock()
+        stream_client.send_batch = AsyncMock(
+            return_value=BatchResult(
+                success=False,
+                status=ProtoAckStatus.ACK_STATUS_FATAL_FAILURE,
+                records_written=0,
+                committed_cursor=ProtoCursor(token=b"stale"),
+                failed_record_ids=["a"],
+                failure_summary="connector verdict: bad record",
+            )
+        )
+        proxy._streams["s1"] = stream_client
+
+        result = await proxy.write_batch(
+            run_id="r1",
+            stream_id="s1",
+            batch_seq=0,
+            record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
+            record_ids=["a"],
+            cursor=None,
+        )
+        assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+        assert result.committed_cursor is None
+        assert result.failure_summary == "connector verdict: bad record"
+        assert result.failed_record_ids == ("a",)
+
 
 class TestProxyCapabilities:
     def test_capability_passthrough_with_fallbacks(self):

@@ -76,9 +76,11 @@ class SchemaSpec:
     write_mode: WriteMode
 
 
-# Statuses that count as a successful (committed) batch. Module-level so the
-# ``BatchWriteResult.success`` property is a cheap membership test.
-_SUCCESS_STATUSES = frozenset(
+# Statuses that count as a successful (committed) batch. Public: the
+# worker proxy uses it to police the same invariant on acks crossing the
+# process boundary, so ``BatchWriteResult.success`` and the proxy cannot
+# drift.
+SUCCESS_STATUSES = frozenset(
     {AckStatus.ACK_STATUS_SUCCESS, AckStatus.ACK_STATUS_ALREADY_COMMITTED}
 )
 
@@ -124,7 +126,7 @@ class BatchWriteResult:
 
     @property
     def success(self) -> bool:
-        return self.status in _SUCCESS_STATUSES
+        return self.status in SUCCESS_STATUSES
 
 
 class EndpointScope(StrEnum):
