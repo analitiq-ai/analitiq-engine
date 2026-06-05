@@ -1020,6 +1020,34 @@ class TestApiHandlerBodySpec:
         body = handler._build_body(state, record={"id": 3})
         assert body == {"id": 3}
 
+    def test_body_spec_without_resolver_raises(self):
+        # configure_schema ran but connect() never did: a body spec with no
+        # request resolver must fail loud, not build a broken body.
+        handler = ApiDestinationHandler()
+        handler._connected = True
+        handler._session = MagicMock()
+        state = _StreamState(
+            endpoint="/v1/things",
+            body_spec={"data": {"from_input": "record"}},
+        )
+        with pytest.raises(RuntimeError, match="no request resolver"):
+            handler._build_body(state, record={"id": 1})
+
+    def test_batch_record_data_is_never_re_resolved(self):
+        # The literal wrapper covers the whole batch list: a record inside
+        # a bulk body that looks like an expression node stays verbatim.
+        handler = self._handler_with_resolver()
+        state = _StreamState(
+            endpoint="/v1/things",
+            body_spec={"items": {"from_input": "records"}},
+        )
+        records = [
+            {"id": 1, "payload": {"template": "x${y}"}},
+            {"id": 2, "payload": {"ref": "user text"}},
+        ]
+        body = handler._build_body(state, records=records)
+        assert body == {"items": records}
+
     def test_from_input_record_in_bulk_mode_raises(self):
         handler = self._handler_with_resolver()
         state = _StreamState(

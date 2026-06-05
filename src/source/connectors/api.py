@@ -4,7 +4,8 @@ This connector consumes the published API-endpoint contract directly:
 
 * ``operations.read.request.{method, path}`` — URL + HTTP verb.
 * ``operations.read.request.body`` — optional JSON body, deep-resolved
-  through the value-expression grammar before each page request.
+  through the value-expression grammar once per read; the same resolved
+  body is sent on every page request.
 * ``operations.read.params.<name>`` — declared params with optional
   ``default`` value expressions (``literal``/``ref``/``template``/
   ``function``) resolved against the connection scopes
@@ -170,9 +171,10 @@ class APIConnector(BaseConnector):
         # One resolver covers everything this read materializes per request:
         # declared param defaults and the optional request body. Expression
         # nodes that do not resolve are omitted (with a warning) instead of
-        # being serialized verbatim onto the wire.
+        # being serialized verbatim onto the wire. ``runtime.batch_size`` is
+        # the effective page size driving the pagination loops.
         resolver = self._runtime.request_resolver(
-            runtime_values={"batch_size": config.get("batch_size")}
+            runtime_values={"batch_size": batch_size}
         )
         request_body = (
             resolver.resolve_for_request(request["body"])
@@ -584,8 +586,8 @@ class APIConnector(BaseConnector):
             request_kwargs["json"] = body
         async with self.session.request(method, url, **request_kwargs) as response:
             if response.status != 200:
-                body = await response.text()
-                body_snippet = body[:500]
+                error_text = await response.text()
+                body_snippet = error_text[:500]
                 logger.error("API %d %s %s: %s", response.status, method, url, body_snippet)
                 detail = (
                     f"API request failed: {method} {url} -> status {response.status}; "

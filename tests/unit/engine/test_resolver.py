@@ -166,9 +166,12 @@ class TestResolverFunctions:
             "value",
         )
 
-    def test_unknown_function_raises_keyerror(self):
+    def test_unknown_function_raises_transport_spec_error(self):
+        # A typo'd function name is an authoring defect against the closed
+        # registry — the deterministic-config error type, never KeyError,
+        # which the per-request drop policy would absorb as missing data.
         ctx = ResolutionContext()
-        with pytest.raises(KeyError, match="Unknown derived function"):
+        with pytest.raises(TransportSpecError, match="Unknown derived function"):
             Resolver(ctx, functions={}).resolve(
                 {"function": "no_such", "input": "x"}
             )
@@ -382,12 +385,30 @@ class TestResolveForRequestDropsUnresolved:
         r = _request_resolver()
         assert r.resolve_for_request({"a": None}) == {"a": None}
 
-    def test_unknown_function_is_dropped_not_raised(self, caplog):
+    def test_unknown_function_raises_even_per_request(self):
+        # A typo'd function name is an authoring defect, never missing
+        # data — the drop policy must not absorb it.
         r = _request_resolver()
-        with caplog.at_level("WARNING"):
-            out = r.resolve_for_request({"f": {"function": "no_such_fn"}})
-        assert out == {}
-        assert "no_such_fn" in caplog.text
+        with pytest.raises(TransportSpecError, match="no_such_fn"):
+            r.resolve_for_request({"f": {"function": "no_such_fn"}})
+
+    def test_unknown_scope_raises_even_per_request(self):
+        # Same boundary for a typo'd scope name: the scope vocabulary is
+        # closed, so this is a defect, not an absent optional value.
+        r = _request_resolver()
+        with pytest.raises(KeyError, match="Unknown resolution scope"):
+            r.resolve_for_request({"x": {"ref": "connecton.parameters.a"}})
+
+    def test_derived_function_internal_keyerror_propagates(self):
+        # The drop policy absorbs UnresolvedValueError only; a KeyError
+        # raised by a function's own internals is a programming bug and
+        # must surface, not silently drop the field.
+        def _buggy(node, resolver):
+            raise KeyError("internal bug")
+
+        r = Resolver(ResolutionContext(), functions={"buggy": _buggy})
+        with pytest.raises(KeyError, match="internal bug"):
+            r.resolve_for_request({"f": {"function": "buggy"}})
 
     def test_unknown_lookup_key_is_dropped(self):
         r = _request_resolver(connection={"parameters": {"env": "staging"}})

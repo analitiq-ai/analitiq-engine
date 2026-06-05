@@ -940,6 +940,68 @@ class TestReadBatchesParamDefaults:
 
         assert "team" not in session.calls[0][2]
 
+    @pytest.mark.asyncio
+    async def test_runtime_batch_size_ref_resolves_to_effective_page_size(self):
+        # ``runtime.batch_size`` is the effective page size driving the
+        # pagination loops — the ``batch_size`` argument, not a config key.
+        session = _FakeSession(
+            [_FakeResponse(status=200, body={"records": [{"id": 1, "name": "a"}]})]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records()
+        endpoint["operations"]["read"]["params"] = {
+            "page_size": {
+                "in": "query",
+                "type": "integer",
+                "required": False,
+                "default": {"ref": "runtime.batch_size"},
+            },
+        }
+        await _consume(
+            connector,
+            runtime,
+            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=250,
+        )
+
+        assert session.calls[0][2]["page_size"] == 250
+
+    @pytest.mark.asyncio
+    async def test_template_default_with_missing_placeholder_is_kept_partial(self):
+        # Plain template defaults resolve leniently: the missing placeholder
+        # renders empty and the partially-resolved param still goes out.
+        session = _FakeSession(
+            [_FakeResponse(status=200, body={"records": [{"id": 1, "name": "a"}]})]
+        )
+        runtime = _runtime_with_session(session, parameters={"org": "acme"})
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records()
+        endpoint["operations"]["read"]["params"] = {
+            "scope": {
+                "in": "query",
+                "type": "string",
+                "required": False,
+                "default": {
+                    "template": "${connection.parameters.org}/${connection.parameters.gone}"
+                },
+            },
+        }
+        await _consume(
+            connector,
+            runtime,
+            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=10,
+        )
+
+        assert session.calls[0][2]["scope"] == "acme/"
+
 
 # ---------------------------------------------------------------------------
 # Declared read request body (#166)

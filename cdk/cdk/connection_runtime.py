@@ -282,8 +282,11 @@ class ConnectionRuntime:
         Secrets are intentionally absent. Per-request resolution runs
         connector-side, where the secret store is never available — secret
         resolution happens once, on the trusted side, at transport
-        materialization. Keeping the scope set identical on both sides means
-        the same expression behaves the same wherever the connector runs.
+        materialization (which uses the wider context from
+        :meth:`_build_resolution_context`). Keeping this request-time scope
+        set identical across the trusted engine and the sandboxed worker
+        means the same expression behaves the same wherever the connector
+        executes.
         """
         runtime_scope: Dict[str, Any] = {"connection_id": self._connection_id}
         if runtime_values:

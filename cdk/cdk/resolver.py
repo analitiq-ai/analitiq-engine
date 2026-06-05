@@ -18,7 +18,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Mapping, Optional
 
-from cdk.exceptions import TransportSpecError
+from cdk.exceptions import TransportSpecError, UnresolvedValueError
 
 logger = logging.getLogger(__name__)
 
@@ -59,9 +59,13 @@ class ResolutionContext:
     def lookup(self, dotted_path: str) -> Any:
         """Resolve a dotted reference such as ``connection.parameters.host``.
 
-        Raises :class:`KeyError` if any path segment is missing. Walking
-        through ``None`` raises :class:`KeyError` rather than returning
-        ``None`` so unresolved required references surface immediately.
+        Walking into a value that is not there — a missing segment, a
+        ``None``, a scalar where a mapping is needed — raises
+        :class:`UnresolvedValueError` (a ``KeyError``) rather than returning
+        ``None`` so unresolved required references surface immediately. An
+        unknown scope name is an authoring defect, not missing data, and
+        raises plain :class:`KeyError`: the per-request drop policy must
+        never absorb a typo'd scope.
         """
         if not dotted_path or not isinstance(dotted_path, str):
             raise TransportSpecError(f"Resolution path must be a non-empty string, got {dotted_path!r}")
@@ -77,18 +81,18 @@ class ResolutionContext:
         for segment in rest:
             traversed.append(segment)
             if cursor is None:
-                raise KeyError(
+                raise UnresolvedValueError(
                     f"Resolution path {dotted_path!r}: encountered None at "
                     f"{'.'.join(traversed[:-1])!r}"
                 )
             if not isinstance(cursor, Mapping):
-                raise KeyError(
+                raise UnresolvedValueError(
                     f"Resolution path {dotted_path!r}: cannot index "
                     f"{type(cursor).__name__} at {'.'.join(traversed[:-1])!r}"
                 )
             if segment not in cursor:
                 available = sorted(cursor.keys()) if isinstance(cursor, Mapping) else []
-                raise KeyError(
+                raise UnresolvedValueError(
                     f"Resolution path {dotted_path!r}: missing key "
                     f"{segment!r} (available: {available})"
                 )
@@ -184,17 +188,20 @@ class Resolver:
 
         Concretely:
 
-        * An expression node that resolves to ``None`` (missing ref, unknown
-          lookup key, ``{"literal": null}``) is dropped: its dict field or
-          list item is omitted; at top level ``None`` is returned.
+        * An expression node whose data is missing (an absent ref path, a
+          ``lookup`` input not in its map, ``{"literal": null}``) is
+          dropped: its dict field or list item is omitted; at top level
+          ``None`` is returned. Missing data raises
+          :class:`UnresolvedValueError` internally — the only failure this
+          policy absorbs.
         * A plain ``template`` node resolves leniently — an unresolvable
           placeholder renders as the empty string, the field is kept.
         * Function inputs stay strict: any unresolved value inside a
           ``function`` node drops the whole node (encoding a partial input
           would put garbage like ``base64("user:")`` on the wire).
         * Authoring errors (conflicting markers, wrong types, unterminated
-          placeholders) still raise — those are configuration defects, not
-          missing optional values.
+          placeholders, an unknown scope or function name) still raise —
+          those are configuration defects, not missing optional values.
 
         Non-expression structure (plain dicts, lists, scalars) passes through
         with its children resolved recursively.
@@ -243,15 +250,18 @@ class Resolver:
         """Resolve one expression node under the per-request policy.
 
         Plain ``template`` nodes get lenient placeholder substitution;
-        everything else goes through the strict grammar with resolution
-        failures (``KeyError``) converted to ``None`` so the caller drops
-        the field. ``TransportSpecError`` (authoring errors) propagates.
+        everything else goes through the strict grammar with only
+        :class:`UnresolvedValueError` — the missing-data case — converted
+        to ``None`` so the caller drops the field. Everything else
+        (``TransportSpecError``, an unknown scope or function name, a
+        ``KeyError`` from a derived function's own internals) is an
+        authoring or programming defect and propagates.
         """
         if set(node.keys()) == {"template"}:
             return self._resolve_template(node["template"], lenient=True)
         try:
             return self.resolve(node)
-        except KeyError as err:
+        except UnresolvedValueError as err:
             logger.warning("value-expression: unresolved expression: %s", err)
             return None
 
@@ -326,13 +336,13 @@ class Resolver:
             path = template[j + 2 : k]
             try:
                 value = self._ctx.lookup(path)
-            except KeyError:
+            except UnresolvedValueError:
                 if not lenient:
                     raise
                 value = None
             if value is None:
                 if not lenient:
-                    raise KeyError(
+                    raise UnresolvedValueError(
                         f"Template substitution {path!r} resolved to None in {template!r}"
                     )
                 logger.warning("value-expression: unresolved placeholder ${%s}", path)
@@ -358,7 +368,10 @@ class Resolver:
             raise TransportSpecError(f"`function` field must name a registered function: {node!r}")
         fn = self._functions.get(name)
         if fn is None:
-            raise KeyError(
+            # A typo'd function name is an authoring defect against the
+            # closed engine-owned registry — never a missing optional value,
+            # so the per-request drop policy must not absorb it.
+            raise TransportSpecError(
                 f"Unknown derived function {name!r}; "
                 f"registered: {sorted(self._functions)}"
             )
