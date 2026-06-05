@@ -212,7 +212,7 @@ def database_cleanup():
                         "ssl_mode": os.getenv("POSTGRES_SSL_MODE", "prefer"),
                     },
                 }
-                engine, _ = await create_database_engine(config, require_port=True)
+                engine, _ = await create_database_engine(config)
                 try:
                     async with engine.connect() as conn:
                         for schema, table in cleanup_tables:

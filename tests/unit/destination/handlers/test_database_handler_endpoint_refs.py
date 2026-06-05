@@ -117,7 +117,54 @@ class TestColumnDefStrictness:
 
 
 class TestWriteBatchFatalOnTypeMapError:
-    """Deterministic type-map errors in write_batch must not be retried."""
+    """Deterministic configuration and type-map errors in write_batch must not be retried."""
+
+    @pytest.mark.asyncio
+    async def test_missing_schema_contract_classified_as_fatal(self):
+        from contextlib import asynccontextmanager
+        from unittest.mock import AsyncMock, MagicMock
+
+        from cdk.sql.generic import GenericSQLConnector, _StreamState
+        from src.grpc.generated.analitiq.v1 import AckStatus, Cursor
+
+        handler = GenericSQLConnector()
+        handler._engine = MagicMock()
+        handler._connected = True
+        handler._streams["s1"] = _StreamState(
+            table=MagicMock(),
+            batch_commits_table=MagicMock(),
+            schema_name="myschema",
+            table_name="events",
+            write_mode="insert",
+            primary_keys=[],
+            schema_contract=None,
+        )
+
+        @asynccontextmanager
+        async def _fake_begin():
+            yield AsyncMock()
+
+        handler._engine.begin = _fake_begin
+
+        async def _not_committed(*_args, **_kwargs):
+            return False
+
+        handler._check_batch_committed = _not_committed  # type: ignore[method-assign]
+
+        import pyarrow as pa
+        result = await handler.write_batch(
+            run_id="run-1",
+            stream_id="s1",
+            batch_seq=1,
+            record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
+            record_ids=["1"],
+            cursor=Cursor(token=b""),
+        )
+
+        assert result.success is False
+        assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+        assert "adbc" in result.failure_summary
+        assert "SchemaContract" in result.failure_summary
 
     @pytest.mark.asyncio
     async def test_type_map_error_classified_as_fatal(self):
@@ -135,6 +182,9 @@ class TestWriteBatchFatalOnTypeMapError:
         # Preconditions: connected, schema configured, idempotency check
         # clean. We don't actually hit the DB because the schema-contract
         # prepare_records call raises before any SQL runs.
+        contract_mock = MagicMock()
+        contract_mock.to_db_records.return_value = [{"id": 1}]
+
         handler._engine = MagicMock()
         handler._connected = True
         handler._streams["s1"] = _StreamState(
@@ -142,6 +192,7 @@ class TestWriteBatchFatalOnTypeMapError:
             batch_commits_table=MagicMock(),
             write_mode="insert",
             primary_keys=[],
+            schema_contract=contract_mock,
         )
 
         @asynccontextmanager
@@ -267,6 +318,19 @@ class TestPrepareForSqlAlchemy:
         )
         records = handler._prepare_for_sqlalchemy(state, batch)
         assert records == [{"metadata": None}]
+
+    def test_raises_when_schema_contract_is_none(self):
+        import pyarrow as pa
+        from cdk.sql.generic import GenericSQLConnector, _StreamState
+        from cdk.adbc_registry import AdbcConfigurationError
+
+        handler = GenericSQLConnector()
+        state = _StreamState(
+            schema_name="public", table_name="events", schema_contract=None
+        )
+        batch = pa.RecordBatch.from_pylist([{"id": 1}])
+        with pytest.raises(AdbcConfigurationError, match=r"public\.events.*SchemaContract"):
+            handler._prepare_for_sqlalchemy(state, batch)
 
 
 class TestDDLLockSerialization:
