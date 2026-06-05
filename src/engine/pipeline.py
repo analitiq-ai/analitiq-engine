@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 
 from .engine import StreamingEngine
 from ..models.stream import EndpointRef
-from ..models.resolved import ResolvedPipeline, ResolvedStream
+from ..models.resolved import ResolvedPipeline, ResolvedStream, ResolvedSource, ResolvedDestination
 from cdk.connection_runtime import ConnectionRuntime
 
 logger = logging.getLogger(__name__)
@@ -144,7 +144,7 @@ class Pipeline:
 def _translate_source_config(
     *,
     stream: ResolvedStream,
-    source: "ResolvedSource",
+    source: ResolvedSource,
     endpoint: Dict[str, Any],
     runtime: ConnectionRuntime,
 ) -> Dict[str, Any]:
@@ -176,7 +176,7 @@ def _translate_source_config(
 
 
 def _build_destination_config(
-    destination: "ResolvedDestination",
+    destination: ResolvedDestination,
 ) -> Dict[str, Any]:
     """Engine-facing destination dict.
 
@@ -190,7 +190,7 @@ def _build_destination_config(
 
 
 def _translate_database_source(
-    source: "ResolvedSource", endpoint: Dict[str, Any]
+    source: ResolvedSource, endpoint: Dict[str, Any]
 ) -> Dict[str, Any]:
     """Pass the contract documents through to :class:`GenericSQLConnector`.
 
@@ -206,7 +206,7 @@ def _translate_database_source(
 
 
 def _translate_api_source(
-    source: "ResolvedSource",
+    source: ResolvedSource,
     endpoint: Dict[str, Any],
     runtime: ConnectionRuntime,
 ) -> Dict[str, Any]:

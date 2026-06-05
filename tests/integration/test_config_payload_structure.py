@@ -11,7 +11,6 @@ These tests verify that:
 import pytest
 from unittest.mock import AsyncMock, Mock
 
-from src.engine.pipeline import Pipeline
 from cdk.connection_runtime import ConnectionRuntime
 
 
@@ -193,23 +192,6 @@ def _make_stream_config(source_alias, source_endpoint_id, dest_alias, dest_endpo
     }
 
 
-def _inject_runtime_and_endpoint(
-    stream_configs, source_connection_id, source_endpoint_id,
-    dest_connection_id, dest_endpoint_id,
-    resolved_connections, resolved_endpoints,
-):
-    """Mirror the ``PipelineConfigPrep`` injection: each stream's source
-    and destination dicts must carry ``_runtime`` (ConnectionRuntime) and
-    ``_endpoint`` (resolved endpoint document) before ``Pipeline._build_config_dict``
-    runs."""
-    for stream in stream_configs:
-        stream["source"]["_runtime"] = resolved_connections[source_connection_id]
-        stream["source"]["_endpoint"] = resolved_endpoints[source_endpoint_id]
-        for dest in stream["destinations"]:
-            dest["_runtime"] = resolved_connections[dest_connection_id]
-            dest["_endpoint"] = resolved_endpoints[dest_endpoint_id]
-    return stream_configs
-
 
 def _make_runtime(connection_id, connector_type, config, driver=None):
     """Create a ConnectionRuntime for testing."""
@@ -298,12 +280,6 @@ class TestAPIToAPIConfigStructure:
         )]
         resolved_connections = _api_to_api_resolved_connections()
         resolved_endpoints = _api_to_api_resolved_endpoints()
-        _inject_runtime_and_endpoint(
-            stream_configs,
-            WISE_CONNECTION_ID, WISE_ENDPOINT_ID,
-            SEVDESK_CONNECTION_ID, SEVDESK_ENDPOINT_ID,
-            resolved_connections, resolved_endpoints,
-        )
         return pipeline_config, stream_configs, resolved_connections, resolved_endpoints
 
     def test_source_connection_has_api_fields(self, api_to_api_config):
