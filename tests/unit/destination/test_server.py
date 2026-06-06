@@ -473,9 +473,9 @@ class TestServerPingProtection:
              patch("src.destination.server.add_DestinationServiceServicer_to_server"):
             await server.start()
 
-        option_keys = {k for k, _ in captured_options}
-        assert "grpc.http2.min_ping_interval_without_data_ms" in option_keys
-        assert "grpc.max_pings_without_data" in option_keys
+        option_map = dict(captured_options)
+        assert option_map.get("grpc.http2.min_ping_interval_without_data_ms") == 300_000
+        assert option_map.get("grpc.max_pings_without_data") == 0
 
 
 class TestServerUdsBind:

@@ -440,14 +440,14 @@ class DestinationGRPCClient:
             )
 
         except asyncio.TimeoutError:
-            # Give the reader task a brief window to land its own error —
-            # the real RPC cause (e.g. "Too many pings") races with the timeout.
+            # Give the reader task up to 2s to record its own RPC error —
+            # the real cause (e.g. "Too many pings") races with the ACK timeout.
             if self._reader_task and not self._reader_task.done():
                 try:
                     await asyncio.wait_for(
                         asyncio.shield(self._reader_task), timeout=2.0
                     )
-                except (asyncio.TimeoutError, Exception):
+                except (asyncio.TimeoutError, asyncio.CancelledError):
                     pass
 
             if self._task_failure is not None:
@@ -463,11 +463,12 @@ class DestinationGRPCClient:
             await self._teardown_stream()
             return BatchResult(
                 success=False,
-                status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
+                status=AckStatus.ACK_STATUS_FATAL_FAILURE,
                 records_written=0,
                 committed_cursor=None,
                 failed_record_ids=[],
                 failure_summary=summary,
+                transport_failure=True,
             )
 
     async def end_stream(self) -> None:
@@ -507,29 +508,42 @@ class DestinationGRPCClient:
 
         Unlike end_stream(), skips the graceful writer shutdown and cancels
         immediately — appropriate after a timeout or transport error where the
-        stream is already in an unknown state.
+        stream is already in an unknown state. Resets _task_failure and
+        _peer_closed_stream so stale diagnostics don't bleed into the next run.
         """
         if self._writer_task and not self._writer_task.done():
             self._writer_task.cancel()
             try:
                 await self._writer_task
-            except (asyncio.CancelledError, Exception):
+            except asyncio.CancelledError:
                 pass
+            except Exception as e:
+                logger.warning("Writer task raised during teardown: %s", e)
         if self._reader_task and not self._reader_task.done():
             self._reader_task.cancel()
             try:
                 await self._reader_task
-            except (asyncio.CancelledError, Exception):
+            except asyncio.CancelledError:
                 pass
+            except Exception as e:
+                logger.warning("Reader task raised during teardown: %s", e)
         self._stream_active = False
         self._stream = None
         self._request_queue = None
         self._response_queue = None
         self._reader_task = None
         self._writer_task = None
+        self._task_failure = None
+        self._peer_closed_stream = False
+        logger.warning("Stream torn down after non-clean exit; channel retained for reconnect")
 
     async def _wait_with_heartbeat(self, batch_seq: int) -> Any:
-        """Wait for an item from the response queue, logging every 10s.
+        """Wait for an item from the response queue, logging progress every 10s.
+
+        Logs an INFO line after each 10-second slice that passes without a
+        response. The log is suppressed on the final slice that triggers the
+        timeout, so a hang lasting exactly self.timeout may produce one fewer
+        log line than expected.
 
         Raises asyncio.TimeoutError after self.timeout seconds.
         """
@@ -564,7 +578,7 @@ class DestinationGRPCClient:
                 get_task.cancel()
                 try:
                     await get_task
-                except (asyncio.CancelledError, Exception):
+                except asyncio.CancelledError:
                     pass
 
     async def _write_requests(self) -> None:

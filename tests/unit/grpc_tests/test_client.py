@@ -502,6 +502,8 @@ class TestAckTimeoutAndTeardown:
         )
 
         assert result.success is False
+        assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+        assert result.transport_failure is True
         assert "Timeout" in result.failure_summary
         assert client._stream_active is False
         assert client._reader_task is None
@@ -550,6 +552,8 @@ class TestAckTimeoutAndTeardown:
         )
 
         assert result.success is False
+        assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+        assert result.transport_failure is True
         assert "Too many pings" in result.failure_summary
         assert client._stream_active is False
 
@@ -585,7 +589,7 @@ class TestAckTimeoutAndTeardown:
     @pytest.mark.asyncio
     async def test_wait_with_heartbeat_logs_info_while_waiting(self):
         """_wait_with_heartbeat logs an INFO line each time the heartbeat interval
-        expires without a response — batch_seq and elapsed time must be present."""
+        expires without a response — batch_seq must be present in the log args."""
         import asyncio
 
         client = DestinationGRPCClient()
@@ -654,3 +658,101 @@ class TestAckTimeoutAndTeardown:
         assert not keepalive_keys, (
             f"Channel must not use keepalive options; found: {keepalive_keys}"
         )
+
+    @pytest.mark.asyncio
+    async def test_ack_timeout_surfaces_task_failure_set_during_grace(self):
+        """When the reader task is still live at timeout time and sets
+        _task_failure during the 2-second grace window, that real error must
+        appear in failure_summary — not the generic 'Timeout waiting for ACK'.
+
+        This is the core race the grace window exists to handle: the real RPC
+        cause (e.g. 'Too many pings') finishes just after the ACK timeout fires.
+        """
+        import asyncio
+        import pyarrow as pa
+
+        from src.grpc.generated.analitiq.v1 import Cursor
+
+        client = DestinationGRPCClient()
+        client.timeout = 0.05
+        client._stream_active = True
+        client._request_queue = asyncio.Queue()
+        client._response_queue = asyncio.Queue()
+
+        rpc_error = grpc.aio.AioRpcError(
+            code=grpc.StatusCode.UNAVAILABLE,
+            initial_metadata=grpc.aio.Metadata(),
+            trailing_metadata=grpc.aio.Metadata(),
+            details="Too many pings — live race",
+        )
+
+        async def _reader_sets_failure():
+            # Sleeps slightly longer than the ACK timeout so _reader_task is
+            # still alive when the TimeoutError handler checks .done(), then
+            # completes within the 2-second grace window.
+            await asyncio.sleep(0.08)
+            client._task_failure = rpc_error
+
+        reader = asyncio.create_task(_reader_sets_failure())
+        client._reader_task = reader
+        client._writer_task = asyncio.create_task(asyncio.sleep(60))
+
+        result = await client.send_batch(
+            run_id="r",
+            stream_id="s",
+            batch_seq=9,
+            record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
+            record_ids=["9"],
+            cursor=Cursor(token=b""),
+        )
+
+        assert result.success is False
+        assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+        assert result.transport_failure is True
+        assert "Too many pings — live race" in result.failure_summary
+        assert client._stream_active is False
+
+    @pytest.mark.asyncio
+    async def test_teardown_stream_resets_all_state(self):
+        """_teardown_stream cancels live tasks and clears all stream-lifetime
+        state, including _task_failure and _peer_closed_stream.
+
+        Calling it with None tasks (no stream was started) must also be safe.
+        """
+        import asyncio
+
+        client = DestinationGRPCClient()
+        client._stream_active = True
+        client._request_queue = asyncio.Queue()
+        client._response_queue = asyncio.Queue()
+        client._task_failure = RuntimeError("prior error")
+        client._peer_closed_stream = True
+
+        async def _noop():
+            await asyncio.sleep(60)
+
+        reader = asyncio.create_task(_noop())
+        writer = asyncio.create_task(_noop())
+        client._reader_task = reader
+        client._writer_task = writer
+
+        await client._teardown_stream()
+
+        assert client._stream_active is False
+        assert client._stream is None
+        assert client._request_queue is None
+        assert client._response_queue is None
+        assert client._reader_task is None
+        assert client._writer_task is None
+        assert client._task_failure is None
+        assert client._peer_closed_stream is False
+        assert reader.cancelled()
+        assert writer.cancelled()
+
+    @pytest.mark.asyncio
+    async def test_teardown_stream_safe_with_none_tasks(self):
+        """_teardown_stream must not raise when called before any stream is started."""
+        client = DestinationGRPCClient()
+        # All task/queue references are None by default
+        await client._teardown_stream()  # must not raise
+        assert client._stream_active is False
