@@ -52,7 +52,7 @@ _STREAM_TASK_FAILED = object()  # Sentinel pushed onto the response queue when
 # than yield a hostless ":50051" address. ``or`` covers both unset and blank.
 DEFAULT_GRPC_HOST = os.getenv("DESTINATION_GRPC_HOST") or "localhost"
 DEFAULT_GRPC_PORT = int(os.getenv("DESTINATION_GRPC_PORT", "50051"))
-DEFAULT_GRPC_TIMEOUT = int(os.getenv("GRPC_TIMEOUT_SECONDS", "300"))
+DEFAULT_GRPC_TIMEOUT = int(os.getenv("GRPC_TIMEOUT_SECONDS", "30"))
 DEFAULT_MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
 
 
@@ -394,12 +394,9 @@ class DestinationGRPCClient:
         # Send batch
         await self._request_queue.put(StreamRequest(batch=batch_msg))
 
-        # Wait for ACK (strict in-order)
+        # Wait for ACK with periodic heartbeat logging (strict in-order)
         try:
-            response = await asyncio.wait_for(
-                self._response_queue.get(),
-                timeout=self.timeout,
-            )
+            response = await self._wait_with_heartbeat(batch_seq)
 
             if response is _STREAM_TASK_FAILED:
                 cause = self._task_failure
@@ -443,14 +440,34 @@ class DestinationGRPCClient:
             )
 
         except asyncio.TimeoutError:
-            logger.error(f"Timeout waiting for ACK on batch {batch_seq}")
+            # Give the reader task a brief window to land its own error —
+            # the real RPC cause (e.g. "Too many pings") races with the timeout.
+            if self._reader_task and not self._reader_task.done():
+                try:
+                    await asyncio.wait_for(
+                        asyncio.shield(self._reader_task), timeout=2.0
+                    )
+                except (asyncio.TimeoutError, Exception):
+                    pass
+
+            if self._task_failure is not None:
+                summary = (
+                    f"Stream task failed (surfaced on ACK timeout for batch "
+                    f"{batch_seq}): {type(self._task_failure).__name__}: "
+                    f"{self._task_failure}"
+                )
+            else:
+                summary = f"Timeout waiting for ACK on batch {batch_seq}"
+
+            logger.error(summary)
+            await self._teardown_stream()
             return BatchResult(
                 success=False,
                 status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
                 records_written=0,
                 committed_cursor=None,
                 failed_record_ids=[],
-                failure_summary="Timeout waiting for ACK",
+                failure_summary=summary,
             )
 
     async def end_stream(self) -> None:
@@ -484,6 +501,71 @@ class DestinationGRPCClient:
         self._reader_task = None
         self._writer_task = None
         logger.info("Stream ended")
+
+    async def _teardown_stream(self) -> None:
+        """Force-cancel stream tasks and reset state after a non-clean exit.
+
+        Unlike end_stream(), skips the graceful writer shutdown and cancels
+        immediately — appropriate after a timeout or transport error where the
+        stream is already in an unknown state.
+        """
+        if self._writer_task and not self._writer_task.done():
+            self._writer_task.cancel()
+            try:
+                await self._writer_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        if self._reader_task and not self._reader_task.done():
+            self._reader_task.cancel()
+            try:
+                await self._reader_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        self._stream_active = False
+        self._stream = None
+        self._request_queue = None
+        self._response_queue = None
+        self._reader_task = None
+        self._writer_task = None
+
+    async def _wait_with_heartbeat(self, batch_seq: int) -> Any:
+        """Wait for an item from the response queue, logging every 10s.
+
+        Raises asyncio.TimeoutError after self.timeout seconds.
+        """
+        get_task = asyncio.ensure_future(self._response_queue.get())
+        heartbeat_interval = 10.0
+        elapsed = 0.0
+        try:
+            while True:
+                remaining = self.timeout - elapsed
+                if remaining <= 0:
+                    raise asyncio.TimeoutError()
+                wait_time = min(heartbeat_interval, remaining)
+                done, _ = await asyncio.wait({get_task}, timeout=wait_time)
+                if done:
+                    return get_task.result()
+                elapsed += wait_time
+                if elapsed >= self.timeout:
+                    raise asyncio.TimeoutError()
+                reader_alive = (
+                    self._reader_task is not None
+                    and not self._reader_task.done()
+                )
+                logger.info(
+                    "Still waiting for ACK batch=%d elapsed=%.0fs "
+                    "reader_task_alive=%s",
+                    batch_seq,
+                    elapsed,
+                    reader_alive,
+                )
+        finally:
+            if not get_task.done():
+                get_task.cancel()
+                try:
+                    await get_task
+                except (asyncio.CancelledError, Exception):
+                    pass
 
     async def _write_requests(self) -> None:
         """Write requests from queue to gRPC stream."""

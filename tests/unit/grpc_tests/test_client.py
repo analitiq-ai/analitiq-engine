@@ -110,7 +110,7 @@ class TestDestinationGRPCClient:
         client = DestinationGRPCClient()
 
         assert client.address == "localhost:50051"
-        assert client.timeout == 300
+        assert client.timeout == 30
         assert client.max_retries == 3
 
     def test_client_initialization_custom(self):
@@ -454,3 +454,203 @@ class TestStreamTaskFailurePropagation:
         assert client._response_queue.get_nowait() is _STREAM_TASK_FAILED
         assert client._task_failure is None
         assert client._peer_closed_stream is True
+
+
+class TestAckTimeoutAndTeardown:
+    """Cover the ACK-timeout path: stream teardown, real-cause surfacing,
+    heartbeat logging, and the no-keepalive channel-options invariant.
+
+    Acceptance: a destination that goes silent after accepting the schema
+    causes send_batch to fail loudly within self.timeout seconds, tear down
+    the stream, and surface a real RPC error when the reader task set one.
+    """
+
+    @pytest.mark.asyncio
+    async def test_ack_timeout_tears_down_stream(self):
+        """A silent destination triggers timeout and leaves the stream inactive.
+
+        After the call returns, _stream_active must be False and the reader/writer
+        tasks must be cancelled — so a retry gets a clean channel rather than
+        pushing onto a zombie stream.
+        """
+        import asyncio
+        import pyarrow as pa
+
+        from src.grpc.generated.analitiq.v1 import Cursor
+
+        client = DestinationGRPCClient()
+        client.timeout = 0.05  # fast for test
+        client._stream_active = True
+        client._request_queue = asyncio.Queue()
+        client._response_queue = asyncio.Queue()
+
+        async def _noop():
+            await asyncio.sleep(60)
+
+        reader = asyncio.create_task(_noop())
+        writer = asyncio.create_task(_noop())
+        client._reader_task = reader
+        client._writer_task = writer
+
+        result = await client.send_batch(
+            run_id="r",
+            stream_id="s",
+            batch_seq=1,
+            record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
+            record_ids=["1"],
+            cursor=Cursor(token=b""),
+        )
+
+        assert result.success is False
+        assert "Timeout" in result.failure_summary
+        assert client._stream_active is False
+        assert client._reader_task is None
+        assert client._writer_task is None
+        assert reader.cancelled()
+
+    @pytest.mark.asyncio
+    async def test_ack_timeout_surfaces_task_failure_when_set(self):
+        """When _task_failure is populated at timeout-handling time the real
+        error (not the generic 'Timeout waiting for ACK') must appear in the
+        failure_summary — this is how the 'Too many pings' RPC error surfaces.
+        """
+        import asyncio
+        import pyarrow as pa
+
+        from src.grpc.generated.analitiq.v1 import Cursor
+
+        client = DestinationGRPCClient()
+        client.timeout = 0.05
+        client._stream_active = True
+        client._request_queue = asyncio.Queue()
+        client._response_queue = asyncio.Queue()
+        client._task_failure = grpc.aio.AioRpcError(
+            code=grpc.StatusCode.UNAVAILABLE,
+            initial_metadata=grpc.aio.Metadata(),
+            trailing_metadata=grpc.aio.Metadata(),
+            details="Too many pings",
+        )
+
+        async def _already_done():
+            pass
+
+        reader = asyncio.create_task(_already_done())
+        writer = asyncio.create_task(_already_done())
+        await asyncio.sleep(0)  # let tasks finish
+        client._reader_task = reader
+        client._writer_task = writer
+
+        result = await client.send_batch(
+            run_id="r",
+            stream_id="s",
+            batch_seq=2,
+            record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
+            record_ids=["2"],
+            cursor=Cursor(token=b""),
+        )
+
+        assert result.success is False
+        assert "Too many pings" in result.failure_summary
+        assert client._stream_active is False
+
+    @pytest.mark.asyncio
+    async def test_wait_with_heartbeat_returns_queued_item(self):
+        """_wait_with_heartbeat returns the item immediately when the queue is ready."""
+        import asyncio
+
+        client = DestinationGRPCClient()
+        client.timeout = 5.0
+        client._reader_task = None
+        client._response_queue = asyncio.Queue()
+
+        sentinel = object()
+        client._response_queue.put_nowait(sentinel)
+
+        result = await client._wait_with_heartbeat(batch_seq=1)
+        assert result is sentinel
+
+    @pytest.mark.asyncio
+    async def test_wait_with_heartbeat_raises_timeout_on_empty_queue(self):
+        """_wait_with_heartbeat raises asyncio.TimeoutError when self.timeout expires."""
+        import asyncio
+
+        client = DestinationGRPCClient()
+        client.timeout = 0.05
+        client._reader_task = None
+        client._response_queue = asyncio.Queue()
+
+        with pytest.raises(asyncio.TimeoutError):
+            await client._wait_with_heartbeat(batch_seq=3)
+
+    @pytest.mark.asyncio
+    async def test_wait_with_heartbeat_logs_info_while_waiting(self):
+        """_wait_with_heartbeat logs an INFO line each time the heartbeat interval
+        expires without a response — batch_seq and elapsed time must be present."""
+        import asyncio
+
+        client = DestinationGRPCClient()
+        # timeout must exceed one heartbeat interval (10s) so the log fires
+        # before the overall deadline.
+        client.timeout = 25.0
+        client._reader_task = None
+        client._response_queue = asyncio.Queue()
+
+        sentinel = object()
+        call_count = 0
+        original_wait = asyncio.wait
+
+        async def patched_wait(fs, timeout=None):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                # First call: simulate interval expiry with no response
+                return set(), set(fs)
+            # Second call: deliver the item and let the real wait complete
+            client._response_queue.put_nowait(sentinel)
+            return await original_wait(fs, timeout=1.0)
+
+        with patch("src.grpc.client.asyncio.wait", patched_wait), \
+             patch("src.grpc.client.logger") as mock_logger:
+            result = await client._wait_with_heartbeat(batch_seq=7)
+
+        assert result is sentinel
+        # logger.info("Still waiting for ACK batch=%d ...", batch_seq, ...)
+        # The format string and numeric args are separate positional args.
+        heartbeat_calls = [
+            c for c in mock_logger.info.call_args_list
+            if c.args and "Still waiting" in c.args[0]
+        ]
+        assert heartbeat_calls, "Expected at least one heartbeat INFO log"
+        assert any(c.args[1] == 7 for c in heartbeat_calls)
+
+    @pytest.mark.asyncio
+    async def test_connect_channel_has_no_keepalive_options(self):
+        """The gRPC channel must not include any keepalive options.
+
+        PR #85 removed client-side keepalives that tripped the destination's
+        HTTP/2 ping-flood policy. This test pins the absence so they cannot be
+        quietly re-added.
+        """
+        from src.grpc.generated.analitiq.v1 import HealthCheckResponse
+
+        client = DestinationGRPCClient()
+        captured_options = []
+
+        def fake_channel(address, options=None):
+            captured_options.extend(options or [])
+            return MagicMock()
+
+        serving = HealthCheckResponse(
+            status=HealthCheckResponse.ServingStatus.SERVING, message="ok"
+        )
+        mock_stub = MagicMock()
+        mock_stub.HealthCheck = AsyncMock(return_value=serving)
+
+        with patch("src.grpc.client.grpc_aio.insecure_channel", side_effect=fake_channel), \
+             patch("src.grpc.client.DestinationServiceStub", return_value=mock_stub):
+            await client.connect(max_connect_retries=1)
+
+        keepalive_keys = {k for k, _ in captured_options if "keepalive" in k.lower()}
+        assert not keepalive_keys, (
+            f"Channel must not use keepalive options; found: {keepalive_keys}"
+        )

@@ -90,6 +90,10 @@ class DestinationGRPCServer:
             options=[
                 ("grpc.max_send_message_length", self.max_message_size),
                 ("grpc.max_receive_message_length", self.max_message_size),
+                # Reject excessively aggressive client pings so that a client
+                # which re-adds keepalive options cannot flood us (incident: PR #85).
+                ("grpc.http2.min_ping_interval_without_data_ms", 300_000),
+                ("grpc.max_pings_without_data", 0),
             ]
         )
 

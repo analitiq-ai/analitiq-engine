@@ -440,6 +440,44 @@ class TestWireToCdkTranslation:
         assert not ack.HasField("committed_cursor")
 
 
+class TestServerPingProtection:
+    """The gRPC server must advertise ping-flood protection options.
+
+    If a client re-adds keepalive settings (incident: PR #85), these server-side
+    limits apply regardless, preventing ``GOAWAY: Too many pings`` loops.
+    """
+
+    @pytest.mark.asyncio
+    async def test_server_options_include_ping_protection(self):
+        """grpc.http2.min_ping_interval_without_data_ms and
+        grpc.max_pings_without_data must be present in the server options."""
+        from unittest.mock import patch, MagicMock
+        from src.destination.server import DestinationGRPCServer
+
+        captured_options = []
+
+        class _FakeServer:
+            def add_insecure_port(self, addr):
+                pass
+            async def start(self):
+                pass
+
+        def fake_grpc_server(options=None, **kwargs):
+            captured_options.extend(options or [])
+            return _FakeServer()
+
+        handler = MagicMock()
+        server = DestinationGRPCServer(handler, port=9999)
+
+        with patch("src.destination.server.grpc_aio.server", side_effect=fake_grpc_server), \
+             patch("src.destination.server.add_DestinationServiceServicer_to_server"):
+            await server.start()
+
+        option_keys = {k for k, _ in captured_options}
+        assert "grpc.http2.min_ping_interval_without_data_ms" in option_keys
+        assert "grpc.max_pings_without_data" in option_keys
+
+
 class TestServerUdsBind:
     @pytest.mark.asyncio
     async def test_explicit_address_binds_uds_not_tcp(self):
