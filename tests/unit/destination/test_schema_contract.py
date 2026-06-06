@@ -768,6 +768,138 @@ class TestSchemaContractNestedObject:
         assert pa.types.is_struct(contract.arrow_schema.field("payload").type)
 
 
+class TestFromPylistNullabilityEnforcement:
+    """from_pylist must reject None values in non-nullable columns for every
+    column family — numeric, string, temporal, decimal, JSON, and source_format.
+
+    A single post-build check in from_pylist covers all mixed-None paths
+    uniformly (some values present, some None). A separate earlier guard inside
+    _build_column handles the all-None case. This class verifies both paths
+    and that the coverage is truly global, not family-specific.
+    """
+
+    # --- helpers -------------------------------------------------------
+
+    @staticmethod
+    def _contract(arrow_type: str, nullable: bool) -> "SchemaContract":
+        return SchemaContract(
+            {"columns": [{"name": "v", "arrow_type": arrow_type, "nullable": nullable}]}
+        )
+
+    # --- mixed-None (some values present, some None) -------------------
+
+    def test_string_non_nullable_mixed_raises(self):
+        c = self._contract("Utf8", nullable=False)
+        with pytest.raises(ValueError, match=r"'v' is non-nullable.*\[1\]"):
+            c.from_pylist([{"v": "a"}, {"v": None}])
+
+    def test_integer_non_nullable_mixed_raises(self):
+        c = self._contract("Int64", nullable=False)
+        with pytest.raises(ValueError, match=r"'v' is non-nullable.*\[0\]"):
+            c.from_pylist([{"v": None}, {"v": 1}])
+
+    def test_float_non_nullable_mixed_raises(self):
+        c = self._contract("Float64", nullable=False)
+        with pytest.raises(ValueError, match=r"'v' is non-nullable.*\[2\]"):
+            c.from_pylist([{"v": 1.0}, {"v": 2.0}, {"v": None}])
+
+    def test_decimal_non_nullable_mixed_raises(self):
+        c = self._contract("Decimal128(18, 2)", nullable=False)
+        with pytest.raises(ValueError, match=r"'v' is non-nullable.*\[1\]"):
+            c.from_pylist([{"v": 1.5}, {"v": None}])
+
+    def test_timestamp_non_nullable_mixed_raises(self):
+        c = self._contract("Timestamp(MICROSECOND, UTC)", nullable=False)
+        with pytest.raises(ValueError, match=r"'v' is non-nullable.*\[0\]"):
+            c.from_pylist([{"v": None}, {"v": "2026-01-01T00:00:00Z"}])
+
+    def test_date_non_nullable_mixed_raises(self):
+        c = self._contract("Date32", nullable=False)
+        with pytest.raises(ValueError, match=r"'v' is non-nullable.*\[1\]"):
+            c.from_pylist([{"v": "2026-01-01"}, {"v": None}])
+
+    def test_json_non_nullable_mixed_raises(self):
+        c = self._contract("Json", nullable=False)
+        with pytest.raises(ValueError, match=r"'v' is non-nullable.*\[1\]"):
+            c.from_pylist([{"v": {"k": 1}}, {"v": None}])
+
+    def test_time_non_nullable_mixed_raises(self):
+        from datetime import time as _time
+        c = self._contract("Time32(SECOND)", nullable=False)
+        with pytest.raises(ValueError, match=r"'v' is non-nullable.*\[1\]"):
+            c.from_pylist([{"v": _time(10, 0, 0)}, {"v": None}])
+
+    def test_uint_non_nullable_mixed_raises(self):
+        c = self._contract("UInt32", nullable=False)
+        with pytest.raises(ValueError, match=r"'v' is non-nullable.*\[1\]"):
+            c.from_pylist([{"v": 0}, {"v": None}])
+
+    def test_source_format_non_nullable_mixed_raises(self):
+        contract = SchemaContract(
+            {
+                "columns": [
+                    {
+                        "name": "ts",
+                        "arrow_type": "Timestamp(MICROSECOND, UTC)",
+                        "nullable": False,
+                        "source_format": "%Y-%m-%d %H:%M:%S",
+                    }
+                ]
+            }
+        )
+        with pytest.raises(ValueError, match=r"'ts' is non-nullable.*\[1\]"):
+            contract.from_pylist(
+                [{"ts": "2026-01-01 00:00:00"}, {"ts": None}]
+            )
+
+    def test_source_format_date_non_nullable_mixed_raises(self):
+        contract = SchemaContract(
+            {
+                "columns": [
+                    {
+                        "name": "d",
+                        "arrow_type": "Date32",
+                        "nullable": False,
+                        "source_format": "%Y/%m/%d",
+                    }
+                ]
+            }
+        )
+        with pytest.raises(ValueError, match=r"'d' is non-nullable.*\[1\]"):
+            contract.from_pylist([{"d": "2026/01/01"}, {"d": None}])
+
+    def test_missing_key_treated_as_none_raises(self):
+        # r.get(field.name) returns None for a missing key, so an absent
+        # field is indistinguishable from an explicit None in a non-nullable column.
+        c = self._contract("Int64", nullable=False)
+        with pytest.raises(ValueError, match=r"'v' is non-nullable.*\[1\]"):
+            c.from_pylist([{"v": 1}, {}])
+
+    def test_error_lists_multiple_null_rows(self):
+        c = self._contract("Int64", nullable=False)
+        with pytest.raises(ValueError, match=r"'v' is non-nullable.*\[0, 2\]"):
+            c.from_pylist([{"v": None}, {"v": 1}, {"v": None}])
+
+    # --- all-None guard still fires (pre-existing behaviour) -----------
+
+    def test_all_none_non_nullable_raises(self):
+        c = self._contract("Int64", nullable=False)
+        with pytest.raises(ValueError, match=r"'v'.*every source value is None"):
+            c.from_pylist([{"v": None}, {"v": None}])
+
+    # --- nullable columns with None pass through unaffected -----------
+
+    def test_nullable_with_none_passes(self):
+        c = self._contract("Int64", nullable=True)
+        batch = c.from_pylist([{"v": 1}, {"v": None}])
+        assert batch.to_pylist() == [{"v": 1}, {"v": None}]
+
+    def test_non_nullable_fully_populated_passes(self):
+        c = self._contract("Int64", nullable=False)
+        batch = c.from_pylist([{"v": 1}, {"v": 2}])
+        assert batch.to_pylist() == [{"v": 1}, {"v": 2}]
+
+
 class TestToDbRecords:
     """One materialisation entry point for SA destinations: alignment +
     ``to_pylist`` + ``decode_json_columns``. The API destination uses the

@@ -49,6 +49,57 @@ _FORBIDDEN_CONSTRUCTS: Final[tuple[tuple[str, str], ...]] = (
 )
 _BACKREFERENCE_DIGIT: Final[Pattern[str]] = re.compile(r"\\[1-9]")
 
+# Short-code → long-form mapping for temporal unit arguments.  parse_arrow_type
+# accepts both spellings; normalize_canonical_type expands short codes in both
+# the stored write-rule key and every lookup input, so either spelling in a
+# write rule's canonical field matches either spelling at lookup time.
+_UNIT_SHORT_TO_LONG: Final[dict[str, str]] = {
+    "s": "SECOND",
+    "ms": "MILLISECOND",
+    "us": "MICROSECOND",
+    "ns": "NANOSECOND",
+}
+
+# Long-form names matched by _TEMPORAL_UNIT_RE that pass through unchanged.
+_UNIT_LONG_FORMS: Final[frozenset[str]] = frozenset(_UNIT_SHORT_TO_LONG.values())
+
+# Matches the opening of a temporal-type parameter list, capturing the type name
+# and its first argument (the unit).  The trailing \b ensures that short codes
+# (e.g. "s") do not partially match inside long-form names (e.g. "SECOND") —
+# the word-boundary assertion fails when the matched unit is followed by another
+# word character.
+_TEMPORAL_UNIT_RE: Final[Pattern[str]] = re.compile(
+    r"\b(Timestamp|Time32|Time64|Duration)"
+    r"\((NANOSECOND|MILLISECOND|MICROSECOND|SECOND|ns|us|ms|s)\b"
+)
+
+# Timestamp(unit, null) is semantically identical to Timestamp(unit) — both
+# produce a timezone-naïve type.  Fold the explicit null into the no-tz form.
+_NULL_TZ_RE: Final[Pattern[str]] = re.compile(
+    r"\bTimestamp\(([^,)]+),\s*null\)"
+)
+
+
+def _expand_temporal_unit(m: re.Match[str]) -> str:
+    """Substitution callback for :data:`_TEMPORAL_UNIT_RE`.
+
+    Expands a short unit code to its long-form canonical spelling.  Long-form
+    names matched by the regex pass through unchanged.  An unrecognized token
+    (neither a known short code nor a known long form) means the regex and the
+    dict have drifted out of sync — raised as ``AssertionError`` immediately
+    rather than silently producing an un-expanded string that would later fail
+    with a misleading ``UnmappedTypeError``.
+    """
+    type_name, unit = m.group(1), m.group(2)
+    if unit in _UNIT_SHORT_TO_LONG:
+        return f"{type_name}({_UNIT_SHORT_TO_LONG[unit]}"
+    if unit in _UNIT_LONG_FORMS:
+        return f"{type_name}({unit}"
+    raise AssertionError(
+        f"temporal-unit regex matched unexpected unit {unit!r}; "
+        f"update _UNIT_SHORT_TO_LONG or _UNIT_LONG_FORMS to include it"
+    )
+
 
 def normalize_native_type(value: str) -> str:
     """Normalize a native type string for matching.
@@ -73,20 +124,33 @@ def normalize_canonical_type(value: str) -> str:
     Unlike :func:`normalize_native_type` this is **case-preserving**: the Arrow
     vocabulary is mixed-case (``Int64``, ``Decimal128(38, 9)``,
     ``Timestamp(MICROSECOND, UTC)``) and matching it case-insensitively would
-    collapse distinct types. Whitespace around the structural punctuation
-    ``(`` ``)`` ``,`` is removed and commas are re-spaced to ``", "``, so every
-    spacing-only variant that ``parse_arrow_type`` accepts (``Decimal128(38,9)``,
-    ``Decimal128( 38, 9 )``, ``Time64( MICROSECOND )``) normalizes to the single
-    canonical spelling and an exact write rule matches any of them.
+    collapse distinct types.
+
+    Three normalizations are applied so that every spelling accepted by
+    :func:`~cdk.type_map.arrow.parse_arrow_type` maps to one canonical string:
+
+    1. Whitespace around ``(`` ``)`` ``,`` is removed and commas are re-spaced
+       to ``", "``.
+    2. Short temporal unit codes (``s``, ``ms``, ``us``, ``ns``) are expanded to
+       their long-form equivalents (``SECOND``, ``MILLISECOND``, ``MICROSECOND``,
+       ``NANOSECOND``).  Because both the write-rule's ``canonical`` field and
+       every lookup input pass through this function, either spelling resolves to
+       the same key regardless of which form the rule author used.
+    3. ``Timestamp(unit, null)`` is folded into ``Timestamp(unit)`` — both are
+       timezone-naïve; ``parse_arrow_type`` already treats them identically.
     """
     if not isinstance(value, str):
         raise TypeError(
             f"canonical type must be a string, got {type(value).__name__}"
         )
-    # Drop whitespace adjacent to parentheses/commas, then standardize ", ".
-    # Identifiers themselves never contain spaces, so this is lossless.
+    # Step 1: whitespace normalization.
     compact = re.sub(r"\s*([(),])\s*", r"\1", value.strip())
-    return compact.replace(",", ", ")
+    compact = compact.replace(",", ", ")
+    # Step 2: fold short unit codes into long-form canonical vocabulary.
+    compact = _TEMPORAL_UNIT_RE.sub(_expand_temporal_unit, compact)
+    # Step 3: Timestamp(unit, null) → Timestamp(unit).
+    compact = _NULL_TZ_RE.sub(r"Timestamp(\1)", compact)
+    return compact
 
 
 def _assert_re2_subset(pattern: str) -> None:
