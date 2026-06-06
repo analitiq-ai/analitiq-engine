@@ -235,7 +235,8 @@ class TestDataTransformer:
     async def test_legacy_keys_emit_warning(self, transformer, sample_batch):
         """apply_transformations warns and returns batch unchanged when legacy keys are present."""
         from unittest.mock import patch
-        import src.engine.data_transformer as _mod
+        import sys
+        _mod = sys.modules[DataTransformer.__module__]
 
         config = {"mapping": {"field_mappings": {"id": "transaction_id"}}}
         with patch.object(_mod.logger, "warning") as mock_warn:
