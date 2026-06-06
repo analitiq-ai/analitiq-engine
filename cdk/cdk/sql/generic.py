@@ -86,12 +86,12 @@ def _note_order_by_fallback(table_name: str, column_name: str) -> None:
 
     The ADBC-only read path pages with OFFSET, which needs a stable ORDER
     BY or rows silently skip/duplicate across pages on PG/Snowflake/
-    BigQuery. When a stream has no cursor we order by the first selected
-    column. A WARNING (not INFO) because the operator may need to act: a
-    JSON / STRUCT / VARIANT first column fails at query time with an opaque
-    "ORDER BY does not support this type" error, and the fix is to set
-    ``cursor_field`` on the stream -- not something a stack trace points
-    at directly.
+    BigQuery. When a stream has no cursor or order_by_field we order by the
+    first selected column. A WARNING (not INFO) because the operator may
+    need to act: a JSON / STRUCT / VARIANT first column fails at query time
+    with an opaque "ORDER BY does not support this type" error. Fix by
+    setting ``cursor_field`` (incremental) or
+    ``database_pagination.order_by_field`` (full-refresh) on the stream.
     """
     key = (table_name, column_name)
     if key in _order_by_fallback_logged:
@@ -1944,7 +1944,10 @@ class GenericSQLConnector(BaseDestinationHandler):
                         ),
                         cursor_value=cursor_value,
                         cursor_mode="inclusive",
-                        order_by=order_by_field,
+                        order_by=(
+                            cursor_field if replication_method == "incremental"
+                            else order_by_field
+                        ),
                         limit=batch_size,
                         offset=offset,
                     )
@@ -2035,11 +2038,14 @@ class GenericSQLConnector(BaseDestinationHandler):
         (matching the SA path); paging advances via OFFSET only. Mixing
         cursor advancement with OFFSET would skip rows on every page after
         the first.
+
+        ORDER BY priority: ``cursor_field`` (incremental), then
+        ``order_by_field`` (from ``database_pagination``), then
+        ``columns[0]`` with a logged warning.
         """
         if not columns:
-            # An empty projection compiles to ``SELECT`` with no columns
-            # and the columns[0] ORDER BY fallback would IndexError; fail
-            # loudly rather than emit an invalid statement.
+            # An empty projection compiles to ``SELECT`` with no columns —
+            # an invalid statement regardless of ordering. Fail loudly.
             raise ReadError(
                 "ADBC-only source requires a non-empty column projection"
             )

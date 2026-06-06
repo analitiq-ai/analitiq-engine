@@ -137,9 +137,9 @@ class TestPaging:
         assert "(SELECT NULL)" not in upper
 
     def test_postgres_paging_without_cursor_omits_order_by(self):
-        """The synthetic ``ORDER BY (SELECT NULL)`` is MSSQL-only.
-        Non-MSSQL dialects accept OFFSET without ORDER BY and shouldn't
-        get the no-op order silently appended.
+        """Non-MSSQL dialects accept OFFSET without ORDER BY; no ORDER BY
+        should appear in the compiled SQL when neither ``order_by`` nor
+        ``cursor_field`` is set.
         """
         builder = QueryBuilder("postgresql")
         sql, _ = builder.build_select_query(

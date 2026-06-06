@@ -521,6 +521,55 @@ class TestReadSqlAlchemyBranch:
         assert out == [[{"id": 1, "updated_at": "2024-01-01"}]]
         runtime.close.assert_awaited()
 
+    @pytest.mark.asyncio
+    async def test_mssql_full_refresh_sa_path_without_order_by_field_raises(self):
+        # The MSSQL validation fires before the transport branch, so the SA
+        # path is also protected.
+        connector = GenericSQLConnector()
+        runtime = _FakeRuntime(is_adbc=False, driver="mssql", engine=object())
+        with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()), patch(
+            "cdk.sql.generic.SchemaContract"
+        ):
+            config = _endpoint_config()
+            with pytest.raises(ReadError, match="order_by_field"):
+                await _drain(connector, runtime, config, _checkpoint())
+        runtime.close.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_order_by_field_appears_in_sa_path_sql(self):
+        # database_pagination.order_by_field is wired into QueryConfig.order_by
+        # on the SA path; verify it reaches the compiled SQL.
+        sql_seen = []
+
+        class _Row:
+            def __init__(self, mapping):
+                self._mapping = mapping
+
+        class _FakeConn:
+            async def exec_driver_sql(self, sql, params=None):
+                sql_seen.append(sql)
+                return []
+
+        class _AcquireCM:
+            async def __aenter__(self):
+                return _FakeConn()
+
+            async def __aexit__(self, *exc):
+                return False
+
+        connector = GenericSQLConnector()
+        runtime = _FakeRuntime(is_adbc=False, engine=object())
+        with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()), patch(
+            "cdk.sql.generic.acquire_connection", return_value=_AcquireCM()
+        ), patch("cdk.sql.generic.SchemaContract") as sc:
+            sc.return_value.from_pylist.side_effect = lambda rows: rows
+            config = _endpoint_config()
+            config["stream_source"]["database_pagination"] = {"order_by_field": "updated_at"}
+            await _drain(connector, runtime, config, _checkpoint())
+
+        assert sql_seen, "no SQL was executed"
+        assert "updated_at" in sql_seen[0].lower()
+
 
 class TestControlPlaneDelegators:
     @pytest.mark.asyncio
