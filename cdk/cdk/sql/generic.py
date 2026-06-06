@@ -1854,6 +1854,9 @@ class GenericSQLConnector(BaseDestinationHandler):
                 cursor_field = cursor_field[0] if cursor_field else None
             replication_method = replication.get("method", "full_refresh")
 
+            database_pagination = stream_source.get("database_pagination") or {}
+            order_by_field = database_pagination.get("order_by_field") or None
+
             if replication_method == "incremental" and cursor_field:
                 # The wildcard projection compiles to SELECT * (see
                 # QueryBuilder.build_select_query), but the fetched batch
@@ -1881,6 +1884,16 @@ class GenericSQLConnector(BaseDestinationHandler):
                         f"{effective_columns!r}"
                     )
 
+            effective_order = (
+                cursor_field if replication_method == "incremental" else order_by_field
+            )
+            if driver.lower() == "mssql" and effective_order is None:
+                raise ReadError(
+                    f"stream {stream_name!r}: MSSQL full-refresh paging requires "
+                    f"database_pagination.order_by_field — T-SQL refuses OFFSET "
+                    f"without ORDER BY and no cursor_field is available"
+                )
+
             partition = partition or {}
             cursor_state = await checkpoint.get_cursor(stream_name, partition)
             stored_cursor = cursor_state.get("cursor") if cursor_state else None
@@ -1900,6 +1913,7 @@ class GenericSQLConnector(BaseDestinationHandler):
                     cursor_field=(
                         cursor_field if replication_method == "incremental" else None
                     ),
+                    order_by_field=order_by_field,
                     cursor_value=cursor_value,
                     batch_size=batch_size,
                     checkpoint=checkpoint,
@@ -1930,6 +1944,7 @@ class GenericSQLConnector(BaseDestinationHandler):
                         ),
                         cursor_value=cursor_value,
                         cursor_mode="inclusive",
+                        order_by=order_by_field,
                         limit=batch_size,
                         offset=offset,
                     )
@@ -2000,6 +2015,7 @@ class GenericSQLConnector(BaseDestinationHandler):
         columns: List[str],
         filters: List[Filter],
         cursor_field: Optional[str],
+        order_by_field: Optional[str],
         cursor_value: Any,
         batch_size: int,
         checkpoint: CheckpointStore,
@@ -2021,9 +2037,9 @@ class GenericSQLConnector(BaseDestinationHandler):
         the first.
         """
         if not columns:
-            # The first selected column is the ORDER BY fallback and an empty
-            # projection compiles to ``SELECT`` with no columns; fail loudly
-            # rather than emit an invalid statement.
+            # An empty projection compiles to ``SELECT`` with no columns
+            # and the columns[0] ORDER BY fallback would IndexError; fail
+            # loudly rather than emit an invalid statement.
             raise ReadError(
                 "ADBC-only source requires a non-empty column projection"
             )
@@ -2038,6 +2054,8 @@ class GenericSQLConnector(BaseDestinationHandler):
 
         if cursor_field:
             order_by = cursor_field
+        elif order_by_field:
+            order_by = order_by_field
         else:
             order_by = columns[0]
             _note_order_by_fallback(table_name, order_by)

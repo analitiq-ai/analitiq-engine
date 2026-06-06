@@ -171,6 +171,59 @@ class TestReadGuards:
         runtime.close.assert_awaited()
 
 
+    @pytest.mark.asyncio
+    async def test_mssql_full_refresh_without_order_by_field_raises(self):
+        # MSSQL refuses OFFSET without ORDER BY; the engine must reject a
+        # full-refresh MSSQL stream that has no order_by_field before sending
+        # any SQL to the database.
+        connector = GenericSQLConnector()
+        runtime = _FakeRuntime(is_adbc=True, driver="mssql")
+        with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()), patch(
+            "cdk.sql.generic.SchemaContract"
+        ):
+            config = _endpoint_config()
+            with pytest.raises(ReadError, match="order_by_field"):
+                await _drain(connector, runtime, config, _checkpoint())
+        runtime.close.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_mssql_incremental_without_order_by_field_passes(self):
+        # Incremental MSSQL reads use cursor_field as ORDER BY, so no
+        # order_by_field is required in database_pagination.
+        runtime = _FakeRuntime(is_adbc=True, driver="mssql")
+        page = [pa.RecordBatch.from_pydict({"id": [1], "updated_at": ["2024-01-01"]})]
+        reader = _RecordingReader([page, []])
+        connector = GenericSQLConnector()
+        with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()), patch(
+            "cdk.sql.generic.open_adbc_reader", return_value=_adbc_cm(reader)
+        ), patch("cdk.sql.generic.SchemaContract") as sc:
+            sc.return_value.cast_arrow_batch.side_effect = lambda b: b
+            config = _endpoint_config(
+                replication={"method": "incremental", "cursor_field": ["updated_at"]},
+            )
+            batches = await _drain(connector, runtime, config, _checkpoint())
+        assert batches
+
+    @pytest.mark.asyncio
+    async def test_order_by_field_from_database_pagination_used_in_query(self):
+        # When database_pagination.order_by_field is set, it is used as the
+        # ORDER BY column in place of the columns[0] fallback.
+        runtime = _FakeRuntime(is_adbc=True)
+        page = [pa.RecordBatch.from_pydict({"id": [1], "updated_at": ["2024-01-01"]})]
+        reader = _RecordingReader([page, []])
+        connector = GenericSQLConnector()
+        with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()), patch(
+            "cdk.sql.generic.open_adbc_reader", return_value=_adbc_cm(reader)
+        ), patch("cdk.sql.generic.SchemaContract") as sc:
+            sc.return_value.cast_arrow_batch.side_effect = lambda b: b
+            config = _endpoint_config()
+            config["stream_source"]["database_pagination"] = {"order_by_field": "updated_at"}
+            await _drain(connector, runtime, config, _checkpoint())
+
+        sql, _ = reader.calls[0]
+        assert 'ORDER BY "updated_at"' in sql
+
+
 class TestReadConnectErrors:
     """read_batches connect-phase error classification mirrors connect()."""
 

@@ -114,11 +114,12 @@ class TestPaging:
         assert "LIMIT 50" not in upper
         assert "LIMIT :" not in upper
 
-    def test_mssql_paging_without_cursor_injects_order_by(self):
-        """Full-refresh on MSSQL has no cursor / order_by, but T-SQL
-        refuses OFFSET without ORDER BY. The builder must inject
-        ``ORDER BY (SELECT NULL)`` (the documented no-op order) so the
-        compile succeeds.
+    def test_mssql_paging_with_order_by_field_uses_it(self):
+        """When order_by is provided, MSSQL paging uses it as ORDER BY.
+        The synthetic (SELECT NULL) escape hatch is gone; the engine
+        validates that an ordering field is declared before calling the
+        builder, so the builder only ever receives MSSQL+offset with a
+        real order_by column.
         """
         builder = QueryBuilder("mssql")
         sql, _ = builder.build_select_query(
@@ -126,14 +127,14 @@ class TestPaging:
                 schema_name="dbo",
                 table_name="events",
                 columns=["id"],
+                order_by="id",
                 limit=50,
                 offset=100,
             )
         )
         upper = sql.upper()
-        # Either OFFSET/FETCH or ROW_NUMBER, plus the synthetic ORDER BY.
         assert "ORDER BY" in upper
-        assert "(SELECT NULL)" in upper or "SELECT NULL" in upper
+        assert "(SELECT NULL)" not in upper
 
     def test_postgres_paging_without_cursor_omits_order_by(self):
         """The synthetic ``ORDER BY (SELECT NULL)`` is MSSQL-only.
@@ -223,6 +224,7 @@ class TestMssqlParamstyle:
                 schema_name="dbo",
                 table_name="events",
                 columns=["id"],
+                order_by="id",
                 limit=100,
                 offset=200,
             )
