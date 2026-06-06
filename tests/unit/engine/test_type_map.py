@@ -552,6 +552,80 @@ class TestNormalizeCanonicalType:
         with pytest.raises(TypeError):
             normalize_canonical_type(None)  # type: ignore[arg-type]
 
+    # --- unit alias normalization (issue #125) --------------------------------
+
+    @pytest.mark.parametrize(
+        "short, long",
+        [
+            ("Timestamp(us, UTC)", "Timestamp(MICROSECOND, UTC)"),
+            ("Timestamp(ms)", "Timestamp(MILLISECOND)"),
+            ("Timestamp(s)", "Timestamp(SECOND)"),
+            ("Timestamp(ns)", "Timestamp(NANOSECOND)"),
+            ("Time32(s)", "Time32(SECOND)"),
+            ("Time32(ms)", "Time32(MILLISECOND)"),
+            ("Time64(us)", "Time64(MICROSECOND)"),
+            ("Time64(ns)", "Time64(NANOSECOND)"),
+            ("Duration(s)", "Duration(SECOND)"),
+            ("Duration(ms)", "Duration(MILLISECOND)"),
+            ("Duration(us)", "Duration(MICROSECOND)"),
+            ("Duration(ns)", "Duration(NANOSECOND)"),
+        ],
+    )
+    def test_short_unit_codes_expand_to_long_form(self, short, long):
+        # parse_arrow_type accepts both spellings; normalize_canonical_type must
+        # map the short code to the same long-form canonical so an exact write
+        # rule authored with the long name matches a lookup using the short name.
+        assert normalize_canonical_type(short) == long
+
+    @pytest.mark.parametrize(
+        "long_form",
+        [
+            "Timestamp(MICROSECOND, UTC)",
+            "Timestamp(MILLISECOND)",
+            "Time32(SECOND)",
+            "Time64(NANOSECOND)",
+            "Duration(MICROSECOND)",
+        ],
+    )
+    def test_long_form_units_are_idempotent(self, long_form):
+        # Long-form spellings must survive normalization unchanged.
+        assert normalize_canonical_type(long_form) == long_form
+
+    def test_short_unit_with_paren_whitespace(self):
+        # Whitespace normalization and alias expansion compose correctly.
+        assert normalize_canonical_type("Time64( us )") == "Time64(MICROSECOND)"
+        assert normalize_canonical_type("Timestamp( us , UTC )") == (
+            "Timestamp(MICROSECOND, UTC)"
+        )
+
+    # --- null timezone normalization (issue #125) -----------------------------
+
+    def test_timestamp_null_tz_folded_to_no_tz(self):
+        # Timestamp(unit, null) is timezone-naïve; parse_arrow_type treats it
+        # the same as Timestamp(unit).  normalize_canonical_type must fold both
+        # into the same string so a write rule for Timestamp(MICROSECOND) also
+        # matches Timestamp(MICROSECOND, null).
+        assert normalize_canonical_type("Timestamp(MICROSECOND, null)") == (
+            "Timestamp(MICROSECOND)"
+        )
+        assert normalize_canonical_type("Timestamp(us, null)") == "Timestamp(MICROSECOND)"
+        assert normalize_canonical_type("Timestamp(ns, null)") == "Timestamp(NANOSECOND)"
+        assert normalize_canonical_type("Timestamp(ms, null)") == "Timestamp(MILLISECOND)"
+
+    def test_three_way_composition(self):
+        # All three normalization steps must compose: whitespace strip (step 1),
+        # short-code expansion (step 2), and null-tz fold (step 3).
+        assert normalize_canonical_type("Timestamp( ns , null )") == "Timestamp(NANOSECOND)"
+        assert normalize_canonical_type("Timestamp( us , null )") == "Timestamp(MICROSECOND)"
+
+    def test_non_null_tz_is_preserved(self):
+        assert normalize_canonical_type("Timestamp(MICROSECOND, UTC)") == (
+            "Timestamp(MICROSECOND, UTC)"
+        )
+        assert normalize_canonical_type("Timestamp(MICROSECOND, America/New_York)") == (
+            "Timestamp(MICROSECOND, America/New_York)"
+        )
+
 
 # ---------------------------------------------------------------------------
 # WriteTypeMapRule validation
@@ -736,6 +810,49 @@ class TestToNativeTypeExact:
         assert m.has_write_map is False
         with pytest.raises(InvalidTypeMapError, match="no write-type-map loaded"):
             m.to_native_type("Int64")
+
+
+class TestToNativeTypeUnitAliasNormalization:
+    """Write-direction lookup tolerates short unit codes and null tz (issue #125)."""
+
+    def test_exact_rule_long_form_matches_short_code_lookup(self):
+        # A connector write map authored with MICROSECOND must match a lookup
+        # that arrives with the short code us (e.g. from a hand-built ColumnDef).
+        m = _write_mapper([
+            {"match": "exact", "canonical": "Timestamp(MICROSECOND, UTC)", "native": "TIMESTAMPTZ"},
+        ])
+        assert m.to_native_type("Timestamp(us, UTC)") == "TIMESTAMPTZ"
+        assert m.to_native_type("Timestamp(MICROSECOND, UTC)") == "TIMESTAMPTZ"
+
+    def test_exact_rule_short_code_matches_long_form_lookup(self):
+        # A rule authored with the short code also matches the long-form lookup.
+        m = _write_mapper([
+            {"match": "exact", "canonical": "Time64(us)", "native": "TIME"},
+        ])
+        assert m.to_native_type("Time64(MICROSECOND)") == "TIME"
+        assert m.to_native_type("Time64(us)") == "TIME"
+
+    def test_null_tz_matches_no_tz_rule(self):
+        # Timestamp(unit, null) must match a rule authored for Timestamp(unit).
+        m = _write_mapper([
+            {"match": "exact", "canonical": "Timestamp(MICROSECOND)", "native": "TIMESTAMP"},
+        ])
+        assert m.to_native_type("Timestamp(MICROSECOND, null)") == "TIMESTAMP"
+        assert m.to_native_type("Timestamp(us, null)") == "TIMESTAMP"
+
+    def test_all_short_codes_normalized(self):
+        m = _write_mapper([
+            {"match": "exact", "canonical": "Time32(SECOND)", "native": "T32S"},
+            {"match": "exact", "canonical": "Time32(MILLISECOND)", "native": "T32MS"},
+            {"match": "exact", "canonical": "Duration(SECOND)", "native": "DUR_S"},
+            {"match": "exact", "canonical": "Duration(MILLISECOND)", "native": "DUR_MS"},
+            {"match": "exact", "canonical": "Duration(NANOSECOND)", "native": "DUR_NS"},
+        ])
+        assert m.to_native_type("Time32(s)") == "T32S"
+        assert m.to_native_type("Time32(ms)") == "T32MS"
+        assert m.to_native_type("Duration(s)") == "DUR_S"
+        assert m.to_native_type("Duration(ms)") == "DUR_MS"
+        assert m.to_native_type("Duration(ns)") == "DUR_NS"
 
 
 class TestToNativeTypeRegex:
