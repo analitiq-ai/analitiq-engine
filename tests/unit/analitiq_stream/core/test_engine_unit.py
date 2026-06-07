@@ -6,7 +6,6 @@ from typing import Any, Dict, List
 import pytest
 
 from src.engine.engine import StreamingEngine
-from src.engine.orchestrator import _deep_merge_dicts
 from src.engine.exceptions import ConfigurationError, StreamProcessingError
 from src.source.connectors.base import BaseConnector
 
@@ -194,108 +193,6 @@ class TestStreamingEngine:
         assert engine.metrics.streams_processed == 0
         assert engine.metrics.streams_failed == 0
 
-
-@pytest.mark.unit
-class TestDeepMergeDicts:
-    """Test _deep_merge_dicts utility function."""
-
-    def test_simple_merge(self):
-        """Test merging two simple dicts."""
-        base = {"a": 1, "b": 2}
-        override = {"b": 3, "c": 4}
-
-        result = _deep_merge_dicts(base, override)
-
-        assert result == {"a": 1, "b": 3, "c": 4}
-
-    def test_nested_merge(self):
-        """Test merging nested dicts."""
-        base = {
-            "level1": {
-                "level2a": {"key": "base_value"},
-                "level2b": "keep_this"
-            }
-        }
-        override = {
-            "level1": {
-                "level2a": {"key": "override_value", "new_key": "new_value"}
-            }
-        }
-
-        result = _deep_merge_dicts(base, override)
-
-        assert result["level1"]["level2a"]["key"] == "override_value"
-        assert result["level1"]["level2a"]["new_key"] == "new_value"
-        assert result["level1"]["level2b"] == "keep_this"
-
-    def test_override_with_non_dict(self):
-        """Test that non-dict values override correctly."""
-        base = {"a": {"nested": "value"}}
-        override = {"a": "simple_value"}
-
-        result = _deep_merge_dicts(base, override)
-
-        assert result["a"] == "simple_value"
-
-    def test_empty_base(self):
-        """Test merging with empty base."""
-        base = {}
-        override = {"a": 1, "b": {"c": 2}}
-
-        result = _deep_merge_dicts(base, override)
-
-        assert result == override
-
-    def test_empty_override(self):
-        """Test merging with empty override."""
-        base = {"a": 1, "b": {"c": 2}}
-        override = {}
-
-        result = _deep_merge_dicts(base, override)
-
-        assert result == base
-
-    def test_credentials_merge_pattern(self):
-        """Test the actual credential merging pattern used in pipelines."""
-        pipeline_source = {
-            "type": "api",
-            "host": "https://root.example.com",
-            "headers": {
-                "Authorization": "Bearer root-token",
-                "User-Agent": "root-agent",
-                "nested": {"base": True},
-            },
-            "auth": {"token": "root-token"},
-        }
-
-        stream_source = {
-            "endpoint_id": "endpoint-123",
-            "headers": {
-                "User-Agent": "stream-agent",
-                "X-Stream": "value",
-                "nested": {"override": True},
-            },
-            "pagination": {"type": "page"},
-        }
-
-        result = _deep_merge_dicts(pipeline_source, stream_source)
-
-        # Base values preserved
-        assert result["type"] == "api"
-        assert result["host"] == "https://root.example.com"
-        assert result["auth"]["token"] == "root-token"
-
-        # Overrides applied
-        assert result["headers"]["User-Agent"] == "stream-agent"
-        assert result["headers"]["X-Stream"] == "value"
-
-        # Deep merge of nested
-        assert result["headers"]["nested"]["base"] is True
-        assert result["headers"]["nested"]["override"] is True
-
-        # New values added
-        assert result["endpoint_id"] == "endpoint-123"
-        assert result["pagination"]["type"] == "page"
 
 
 @pytest.mark.unit
