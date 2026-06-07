@@ -104,3 +104,15 @@ class TestTranslateSourceConfig:
         assert result["connector_type"] == "database"
         assert result["endpoint_ref"] == source.endpoint_ref.to_dict()
         assert result["connection_ref"] == "conn-1"
+        assert result["_resolved_source"] is source
+
+    def test_non_built_in_kind_logs_warning(self, caplog: pytest.LogCaptureFixture) -> None:
+        import logging
+        with caplog.at_level(logging.WARNING, logger="src.engine.pipeline"):
+            _translate_source_config(
+                stream=MagicMock(),
+                source=_make_source(),
+                endpoint=_make_endpoint(),
+                runtime=_make_runtime("nosql"),
+            )
+        assert any("nosql" in r.message for r in caplog.records)

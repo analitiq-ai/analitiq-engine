@@ -69,9 +69,11 @@ from cdk.connection_runtime import ConnectionRuntime
 
 logger = logging.getLogger(__name__)
 
-# Matches the endpoint variant name in a $schema URL, e.g.
-# "https://schemas.analitiq.ai/api-endpoint/latest.json" → "api-endpoint".
-_ENDPOINT_KIND_RE = re.compile(r"/([A-Za-z][\w-]*-endpoint)/")
+# Matches the endpoint variant name in a $schema URL.
+# The trailing boundary is either "/" or end-of-string so that both
+# "https://schemas.analitiq.ai/api-endpoint/latest.json" and
+# "https://schemas.analitiq.ai/api-endpoint" extract "api-endpoint".
+_ENDPOINT_KIND_RE = re.compile(r"/([A-Za-z][\w-]*-endpoint)(?:/|$)")
 
 
 # ---------------------------------------------------------------------------
@@ -431,7 +433,14 @@ class PipelineConfigPrep:
                 f"(e.g. api-endpoint, database-endpoint)"
             )
         endpoint_kind = match.group(1)
-        validate_artifact(endpoint_kind, document, source=str(ref))
+        try:
+            validate_artifact(endpoint_kind, document, source=str(ref))
+        except ValueError as exc:
+            # Re-raise with endpoint context; _load_schema's ValueError for an
+            # unknown artifact kind does not include the ref or $schema URL.
+            raise ValueError(
+                f"Endpoint {ref!s} ($schema={schema_url!r}, kind={endpoint_kind!r}): {exc}"
+            ) from exc
         self._resolved_endpoints[ref] = document
         logger.info("Resolved endpoint: %s", ref)
         return document

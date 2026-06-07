@@ -664,6 +664,30 @@ class TestEndpointSchemaDispatch:
         with pytest.raises(ValueError, match=r"\*-endpoint path segment"):
             prep.create_config()
 
+    def test_schema_url_without_trailing_slash_still_extracts_kind(
+        self, pipeline_tree: Path
+    ) -> None:
+        """A $schema URL where the variant is the final path component (no
+        trailing slash) must still have its kind extracted correctly."""
+        bad_endpoint = _endpoint_doc(ENDPOINT_SRC)
+        # No trailing slash — regex must still match via the (?:/|$) boundary.
+        bad_endpoint["$schema"] = (
+            "https://schemas.analitiq.ai/nosql-endpoint"
+        )
+        _write_json(
+            pipeline_tree
+            / "connectors"
+            / CONNECTOR_ID
+            / "definition"
+            / "endpoints"
+            / f"{ENDPOINT_SRC}.json",
+            bad_endpoint,
+        )
+        prep = PipelineConfigPrep()
+        # The kind is extracted; failure comes from schema validation, not URL parsing.
+        with pytest.raises(ValueError, match="nosql-endpoint"):
+            prep.create_config()
+
 
 # ---------------------------------------------------------------------------
 # Connection-scoped endpoints (#94)
