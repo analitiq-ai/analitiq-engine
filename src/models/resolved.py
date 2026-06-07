@@ -1,9 +1,9 @@
 """Typed resolved-runtime boundary between PipelineConfigPrep and the engine.
 
 These dataclasses own all raw-JSON access.  ``PipelineConfigPrep`` builds
-them once; ``StreamingEngine`` and ``Pipeline`` consume typed attributes
-throughout, and only at the ``WorkerReadable`` boundary are the contract
-documents serialised back to JSON-safe dicts.
+them once; ``StreamingEngine`` consumes typed attributes throughout (via the
+translation helpers in ``src.runner``), and only at the ``WorkerReadable``
+boundary are the contract documents serialised back to JSON-safe dicts.
 
 ``ConnectionRuntime`` and the resolved endpoint document live as explicit
 typed fields rather than ``_runtime`` / ``_endpoint`` magic dict keys.

@@ -189,6 +189,26 @@ class TestPreDdl:
         assert SqlDialect().sqlalchemy_pre_ddl("analytics") == []
 
 
+# --- paged reads --------------------------------------------------------------
+
+
+class TestPagingOrderFallback:
+    def test_base_declares_no_fallback(self):
+        """ANSI SQL accepts OFFSET without ORDER BY, so the neutral base
+        injects no ordering; systems that refuse it (T-SQL) override in
+        their connector package."""
+        assert SqlDialect().paging_order_fallback() is None
+
+    def test_subclass_hook_applies(self):
+        class _NoOpOrderDialect(SqlDialect):
+            name = "tsqlish"
+
+            def paging_order_fallback(self):
+                return "(SELECT NULL)"
+
+        assert _NoOpOrderDialect().paging_order_fallback() == "(SELECT NULL)"
+
+
 # --- column type rendering (the single write surface) ------------------------
 
 

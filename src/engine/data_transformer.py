@@ -140,7 +140,7 @@ class AssignmentTransformer:
             expr = value_spec.get("expr", {})
             return await self._evaluate_expression(record, partial_result, expr)
 
-        return None
+        raise TransformationError(f"Unknown value kind: {kind!r}")
 
     async def _evaluate_expression(
         self,
@@ -258,8 +258,7 @@ class AssignmentTransformer:
                 return None
 
             case _:
-                logger.warning(f"Unknown expression op: {op}")
-                return None
+                raise TransformationError(f"Unknown expression op: {op!r}")
 
     async def _apply_function_expression(self, value: Any, fn_expr: Dict[str, Any]) -> Any:
         """Apply a function expression to a value (used in pipe)."""
@@ -273,8 +272,7 @@ class AssignmentTransformer:
                 fn_expr.get("args", [])
             )
         else:
-            logger.warning(f"Expected fn op in pipe, got: {op}")
-            return value
+            raise TransformationError(f"Expected fn op in pipe stage, got: {op!r}")
 
     async def _apply_function(
         self,
@@ -286,26 +284,32 @@ class AssignmentTransformer:
         """Apply a catalog function to a value."""
         catalog_entry = self.FUNCTION_CATALOG.get(name)
         if not catalog_entry:
-            logger.warning(f"Unknown function: {name}")
-            return value
+            raise TransformationError(f"Unknown function: {name!r}")
 
         fn_name = catalog_entry["fn"]
         method = getattr(self, fn_name, None)
-        if method:
-            return await method(value, *args)
-        return value
+        if method is None:
+            raise TransformationError(
+                f"FUNCTION_CATALOG entry for {name!r} references missing method {fn_name!r}"
+            )
+        return await method(value, *args)
 
     # Function implementations
     async def _fn_iso_to_date(self, value: Any) -> str:
-        """Convert ISO datetime to date string."""
+        """Convert ISO string to date string (YYYY-MM-DD). Raises on
+        unparseable input — previously returned the raw string unchanged,
+        which passed a non-date value into typed date columns and surfaced
+        as a destination connector write error rather than a transformation
+        error."""
         if value is None:
             return None
         try:
             dt = datetime.fromisoformat(str(value))
             return dt.strftime('%Y-%m-%d')
         except (ValueError, TypeError) as e:
-            logger.warning(f"iso_to_date failed for '{value}': {e}")
-            return str(value)
+            raise TransformationError(
+                f"iso_to_date failed for {value!r}: {e}"
+            ) from e
 
     async def _fn_iso_to_datetime(self, value: Any) -> datetime:
         """Convert ISO string to datetime object. Raises on unparseable
@@ -343,23 +347,34 @@ class AssignmentTransformer:
             return None
         return str(value).upper()
 
-    async def _fn_to_int(self, value: Any) -> int:
-        """Convert to integer."""
+    async def _fn_to_int(self, value: Any) -> Optional[int]:
+        """Convert to integer via int(float(value)). None passes through.
+
+        Decimal strings and floats are truncated toward zero ("3.9" → 3).
+        Raises TransformationError on unparseable input — silently returning
+        None would mask mis-configured pipelines with no DLQ entry."""
         if value is None:
             return None
         try:
             return int(float(value))
-        except (ValueError, TypeError):
-            return None
+        except (ValueError, TypeError, OverflowError) as e:
+            raise TransformationError(
+                f"to_int: cannot convert {value!r} ({type(value).__name__}) to int: {e}"
+            ) from e
 
-    async def _fn_to_float(self, value: Any) -> float:
-        """Convert to float."""
+    async def _fn_to_float(self, value: Any) -> Optional[float]:
+        """Convert to float. None passes through.
+
+        Raises TransformationError on unparseable input — same rationale as
+        _fn_to_int; silently returning None masks mis-configured pipelines."""
         if value is None:
             return None
         try:
             return float(value)
-        except (ValueError, TypeError):
-            return None
+        except (ValueError, TypeError, OverflowError) as e:
+            raise TransformationError(
+                f"to_float: cannot convert {value!r} ({type(value).__name__}) to float: {e}"
+            ) from e
 
     async def _fn_to_string(self, value: Any) -> str:
         """Convert to string."""

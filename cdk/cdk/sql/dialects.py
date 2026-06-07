@@ -99,6 +99,23 @@ class SqlDialect:
         clause = f"PRIMARY KEY ({cols})"
         return f"{clause} NOT ENFORCED" if self.pk_not_enforced else clause
 
+    # ---- paged reads -------------------------------------------------------
+    def paging_order_fallback(self) -> str | None:
+        """Raw SQL ordering expression for paged reads that declare no
+        ordering (no cursor field, no ``order_by``).
+
+        ANSI SQL accepts ``OFFSET`` without ``ORDER BY``, so the base
+        returns ``None`` and no ordering is injected. Systems that refuse
+        ``OFFSET`` without ``ORDER BY`` (T-SQL) override this in their
+        connector package — returning a no-op expression such as
+        ``(SELECT NULL)``, or raising to demand an explicit ordering.
+
+        ``QueryBuilder`` consults the hook lazily, only when a paged query
+        actually lacks an ordering, so a raising override never affects
+        cursor-ordered reads.
+        """
+        return None
+
     # ---- SQLAlchemy write path ---------------------------------------------
     def build_sqlalchemy_upsert(
         self,
