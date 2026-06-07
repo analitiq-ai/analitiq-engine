@@ -793,6 +793,88 @@ class TestParseWriteRules:
 
 
 # ---------------------------------------------------------------------------
+# TypeMapper.compose — per-type fallback (issue #126)
+# ---------------------------------------------------------------------------
+
+
+def _read_mapper(slug: str, native: str, canonical: str) -> TypeMapper:
+    return TypeMapper(slug, parse_rules([{"match": "exact", "native": native, "canonical": canonical}], source="<r>"))
+
+
+def _full_mapper(slug: str, native: str, canonical: str) -> TypeMapper:
+    return TypeMapper(
+        slug,
+        parse_rules([{"match": "exact", "native": native, "canonical": canonical}], source="<r>"),
+        parse_write_rules([{"match": "exact", "canonical": canonical, "native": native}], source="<w>"),
+    )
+
+
+class TestTypeMapperCompose:
+    def test_primary_read_rule_wins(self):
+        primary = _read_mapper("conn", "CUSTOM", "Utf8")
+        fallback = _read_mapper("pg", "CUSTOM", "Int64")
+        composed = TypeMapper.compose(primary, fallback)
+        assert composed.to_arrow_type("CUSTOM") == "Utf8"
+
+    def test_fallback_read_rule_used_on_miss(self):
+        primary = _read_mapper("conn", "CUSTOM", "Utf8")
+        fallback = _read_mapper("pg", "BIGINT", "Int64")
+        composed = TypeMapper.compose(primary, fallback)
+        assert composed.to_arrow_type("BIGINT") == "Int64"
+
+    def test_both_miss_raises_unmapped(self):
+        primary = _read_mapper("conn", "CUSTOM", "Utf8")
+        fallback = _read_mapper("pg", "BIGINT", "Int64")
+        composed = TypeMapper.compose(primary, fallback)
+        with pytest.raises(UnmappedTypeError):
+            composed.to_arrow_type("MONEY")
+
+    def test_primary_write_rule_wins(self):
+        primary = _full_mapper("conn", "CUSTOM", "Utf8")
+        fallback = _full_mapper("pg", "CUSTOM", "Int64")
+        composed = TypeMapper.compose(primary, fallback)
+        assert composed.to_native_type("Utf8") == "CUSTOM"
+
+    def test_fallback_write_rule_used_on_miss(self):
+        primary = _full_mapper("conn", "CUSTOM", "Utf8")
+        fallback = _full_mapper("pg", "BIGINT", "Int64")
+        composed = TypeMapper.compose(primary, fallback)
+        assert composed.to_native_type("Int64") == "BIGINT"
+
+    def test_primary_read_only_inherits_fallback_write_map(self):
+        # Primary has read rules only; fallback has both. Composed mapper
+        # must expose write rules from the fallback.
+        primary = _read_mapper("conn", "CUSTOM", "Utf8")
+        fallback = _full_mapper("pg", "BIGINT", "Int64")
+        composed = TypeMapper.compose(primary, fallback)
+        assert composed.has_write_map is True
+        assert composed.to_native_type("Int64") == "BIGINT"
+
+    def test_neither_has_write_map_gives_no_write_map(self):
+        primary = _read_mapper("conn", "CUSTOM", "Utf8")
+        fallback = _read_mapper("pg", "BIGINT", "Int64")
+        composed = TypeMapper.compose(primary, fallback)
+        assert composed.has_write_map is False
+
+    def test_composed_slug_is_primary_slug(self):
+        primary = _read_mapper("conn:my-pg", "X", "Utf8")
+        fallback = _read_mapper("pg", "Y", "Int64")
+        composed = TypeMapper.compose(primary, fallback)
+        assert composed.connector_slug == "conn:my-pg"
+
+    def test_compose_preserves_regex_rules(self):
+        primary = TypeMapper("conn", parse_rules([
+            {"match": "regex", "native": r"^CUSTOM_(?<n>\d+)$", "canonical": "Utf8"},
+        ], source="<r>"))
+        fallback = TypeMapper("pg", parse_rules([
+            {"match": "regex", "native": r"^VARCHAR\((?<n>\d+)\)$", "canonical": "Utf8"},
+        ], source="<r>"))
+        composed = TypeMapper.compose(primary, fallback)
+        assert composed.to_arrow_type("CUSTOM_42") == "Utf8"
+        assert composed.to_arrow_type("VARCHAR(100)") == "Utf8"
+
+
+# ---------------------------------------------------------------------------
 # TypeMapper — reverse lookup (to_native_type)
 # ---------------------------------------------------------------------------
 

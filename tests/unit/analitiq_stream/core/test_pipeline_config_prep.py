@@ -622,8 +622,8 @@ class TestConnectionScopedEndpoints:
         runtime = connections[CONNECTION_DST_ID]
         assert runtime.connection_type_mapper is not None
         mapper = runtime.type_mapper_for(scope=EndpointScope.CONNECTION)
-        assert mapper is runtime.connection_type_mapper
-        # JSONB exists only in the connection-scoped map.
+        # JSONB exists only in the connection-scoped map; composition means it
+        # still resolves correctly (connection rules take precedence).
         assert mapper.to_arrow_type("JSONB") == "Utf8"
 
     def test_connection_scope_falls_back_to_connector_map_when_absent(
