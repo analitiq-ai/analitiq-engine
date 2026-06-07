@@ -315,3 +315,32 @@ class TestDictConstantsEndToEnd:
             {"id": "r1", "checkAccount": {"id": "42", "objectName": "CheckAccount"}},
             {"id": "r2", "checkAccount": {"id": "42", "objectName": "CheckAccount"}},
         ]
+
+
+class TestComparisonOpArgCount:
+    """Comparison ops must raise TransformationError (not silently return False) on wrong arg count."""
+
+    @staticmethod
+    def _assignment(op, args):
+        return {
+            "target": {"path": ["result"], "arrow_type": "Bool", "nullable": True},
+            "value": {"kind": "expr", "expr": {"op": op, "args": args}},
+        }
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("op", ["eq", "neq", "gt", "gte", "lt", "lte"])
+    async def test_zero_args_produces_error_entry(self, op):
+        _, errors = await AssignmentTransformer().transform_record(
+            {}, [self._assignment(op, [])]
+        )
+        assert len(errors) == 1
+        assert f"{op} expression requires 2 args, got 0" in errors[0]["error"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("op", ["eq", "neq", "gt", "gte", "lt", "lte"])
+    async def test_one_arg_produces_error_entry(self, op):
+        _, errors = await AssignmentTransformer().transform_record(
+            {}, [self._assignment(op, [{"op": "const", "value": 1}])]
+        )
+        assert len(errors) == 1
+        assert f"{op} expression requires 2 args, got 1" in errors[0]["error"]
