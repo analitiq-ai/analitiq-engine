@@ -344,3 +344,27 @@ class TestComparisonOpArgCount:
         )
         assert len(errors) == 1
         assert f"{op} expression requires 2 args, got 1" in errors[0]["error"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("op,a,b,expected", [
+        ("eq",  1, 1, True),
+        ("eq",  1, 2, False),
+        ("neq", 1, 2, True),
+        ("neq", 1, 1, False),
+        ("gt",  2, 1, True),
+        ("gt",  1, 2, False),
+        ("gte", 1, 1, True),
+        ("gte", 0, 1, False),
+        ("lt",  1, 2, True),
+        ("lt",  2, 1, False),
+        ("lte", 1, 1, True),
+        ("lte", 2, 1, False),
+    ])
+    async def test_two_args_returns_correct_boolean(self, op, a, b, expected):
+        assignment = self._assignment(op, [
+            {"op": "const", "value": a},
+            {"op": "const", "value": b},
+        ])
+        result, errors = await AssignmentTransformer().transform_record({}, [assignment])
+        assert errors == []
+        assert result == {"result": expected}
