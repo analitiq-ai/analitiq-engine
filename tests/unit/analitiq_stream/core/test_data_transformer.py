@@ -246,6 +246,26 @@ class TestDataTransformer:
         assert "field_mappings" in mock_warn.call_args[0][1]
 
     @pytest.mark.asyncio
+    async def test_legacy_keys_warn_even_with_assignments_present(self, transformer):
+        """The legacy-key warning fires even when valid assignments accompany the stray keys."""
+        from unittest.mock import patch
+        import sys
+        _mod = sys.modules[DataTransformer.__module__]
+
+        batch = [{"id": 1}]
+        config = {
+            "mapping": {
+                "assignments": [_assignment("out", expr=_get("id"))],
+                "computed_fields": {"x": "1 + 1"},
+            }
+        }
+        with patch.object(_mod.logger, "warning") as mock_warn:
+            result = await transformer.apply_transformations(batch, config)
+        assert result[0]["out"] == 1
+        mock_warn.assert_called_once()
+        assert "computed_fields" in mock_warn.call_args[0][1]
+
+    @pytest.mark.asyncio
     async def test_iso_date_function_edge_cases(self, transformer):
         """iso_to_date handles multiple ISO variants and gracefully passes through invalid input."""
         batch = [

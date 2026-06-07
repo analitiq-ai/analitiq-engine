@@ -482,16 +482,18 @@ class DataTransformer:
             TransformationError: If transformation fails
         """
         mapping = config.get("mapping", {})
-        assignments = mapping.get("assignments", [])
-        if assignments:
-            return await self._apply_assignment_transformations(batch, assignments)
+        # Warn before the assignments early-return so stray legacy keys are
+        # flagged even when valid assignments are present alongside them.
         legacy_keys = {"field_mappings", "computed_fields"} & mapping.keys()
         if legacy_keys:
             logger.warning(
-                "mapping contains legacy keys %s which are no longer supported; "
-                "migrate to 'assignments'. Batch returned unchanged.",
+                "mapping contains legacy keys %s which are no longer supported "
+                "and are ignored; migrate to 'assignments'.",
                 sorted(legacy_keys),
             )
+        assignments = mapping.get("assignments", [])
+        if assignments:
+            return await self._apply_assignment_transformations(batch, assignments)
         return batch
 
     async def _apply_assignment_transformations(
