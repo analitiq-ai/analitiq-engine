@@ -545,6 +545,20 @@ class TestFnAbs:
         assert await t._fn_abs(1.0) == pytest.approx(1.0)
 
     @pytest.mark.asyncio
+    async def test_abs_valid_decimal(self):
+        from decimal import Decimal
+
+        t = AssignmentTransformer()
+        assert await t._fn_abs(Decimal("-3.5")) == Decimal("3.5")
+
+    @pytest.mark.asyncio
+    async def test_abs_bool_treated_as_int(self):
+        # bool is a subclass of int; abs(True)==1, abs(False)==0 — intentional.
+        t = AssignmentTransformer()
+        assert await t._fn_abs(True) == 1
+        assert await t._fn_abs(False) == 0
+
+    @pytest.mark.asyncio
     async def test_abs_raises_on_string(self):
         from src.engine.exceptions import TransformationError
 
@@ -562,8 +576,9 @@ class TestFnAbs:
 
     @pytest.mark.asyncio
     async def test_abs_failure_propagates_to_dlq_via_apply_transformations(self):
-        """TransformationError from _fn_abs must reach the batch error list
-        through transform_record so DLQ routing fires."""
+        """TransformationError from _fn_abs must propagate through transform_record
+        and be re-raised by apply_transformations so the caller's error-strategy
+        layer can route the record to the DLQ."""
         from src.engine.exceptions import TransformationError
 
         assignment = {
