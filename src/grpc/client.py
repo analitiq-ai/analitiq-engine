@@ -448,6 +448,15 @@ class DestinationGRPCClient:
                         asyncio.shield(self._reader_task), timeout=2.0
                     )
                 except (asyncio.TimeoutError, asyncio.CancelledError):
+                    # Grace window elapsed or the task was cancelled: the
+                    # _task_failure check below picks up whatever the reader
+                    # recorded, so no diagnostic is lost by swallowing here.
+                    pass
+                except Exception:
+                    # The reader raised inside the grace window. Its exception
+                    # was already stored in _task_failure by _read_responses,
+                    # so let the recorded-failure path below surface it and run
+                    # teardown — never propagate the raw error out of send_batch.
                     pass
 
             if self._task_failure is not None:
@@ -516,6 +525,7 @@ class DestinationGRPCClient:
             try:
                 await self._writer_task
             except asyncio.CancelledError:
+                # Expected: we just cancelled the task ourselves.
                 pass
             except Exception as e:
                 logger.warning("Writer task raised during teardown: %s", e)
@@ -524,6 +534,7 @@ class DestinationGRPCClient:
             try:
                 await self._reader_task
             except asyncio.CancelledError:
+                # Expected: we just cancelled the task ourselves.
                 pass
             except Exception as e:
                 logger.warning("Reader task raised during teardown: %s", e)
@@ -579,6 +590,8 @@ class DestinationGRPCClient:
                 try:
                     await get_task
                 except asyncio.CancelledError:
+                    # Expected: we cancel the pending queue.get() ourselves
+                    # when leaving on timeout or after a response arrived.
                     pass
 
     async def _write_requests(self) -> None:

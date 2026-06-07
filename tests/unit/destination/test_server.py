@@ -450,7 +450,7 @@ class TestServerPingProtection:
     @pytest.mark.asyncio
     async def test_server_options_include_ping_protection(self):
         """grpc.http2.min_ping_interval_without_data_ms and
-        grpc.max_pings_without_data must be present in the server options."""
+        grpc.http2.max_ping_strikes must be present in the server options."""
         from unittest.mock import patch, MagicMock
         from src.destination.server import DestinationGRPCServer
 
@@ -475,7 +475,7 @@ class TestServerPingProtection:
 
         option_map = dict(captured_options)
         assert option_map.get("grpc.http2.min_ping_interval_without_data_ms") == 300_000
-        assert option_map.get("grpc.max_pings_without_data") == 0
+        assert option_map.get("grpc.http2.max_ping_strikes") == 2
 
 
 class TestServerUdsBind:

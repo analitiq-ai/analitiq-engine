@@ -713,6 +713,63 @@ class TestAckTimeoutAndTeardown:
         assert client._stream_active is False
 
     @pytest.mark.asyncio
+    async def test_ack_timeout_grace_window_swallows_reader_exception(self):
+        """A reader task that *raises* during the grace window must not
+        propagate its exception out of send_batch.
+
+        The grace block awaits asyncio.shield(reader); a raising reader
+        re-raises through the shield. send_batch must catch it so the
+        recorded _task_failure path runs and teardown still fires — never
+        leak the raw error past the BatchResult contract.
+        """
+        import asyncio
+        import pyarrow as pa
+
+        from src.grpc.generated.analitiq.v1 import Cursor
+
+        client = DestinationGRPCClient()
+        client.timeout = 0.05
+        client._stream_active = True
+        client._request_queue = asyncio.Queue()
+        client._response_queue = asyncio.Queue()
+
+        rpc_error = grpc.aio.AioRpcError(
+            code=grpc.StatusCode.UNAVAILABLE,
+            initial_metadata=grpc.aio.Metadata(),
+            trailing_metadata=grpc.aio.Metadata(),
+            details="reader raised in grace window",
+        )
+
+        async def _reader_raises():
+            # Still alive when the timeout handler checks .done(); records its
+            # failure like _read_responses would, then raises within the grace
+            # window so shield(reader) re-raises into send_batch.
+            await asyncio.sleep(0.08)
+            client._task_failure = rpc_error
+            raise rpc_error
+
+        reader = asyncio.create_task(_reader_raises())
+        client._reader_task = reader
+        client._writer_task = asyncio.create_task(asyncio.sleep(60))
+
+        # Must return a BatchResult, not raise rpc_error.
+        result = await client.send_batch(
+            run_id="r",
+            stream_id="s",
+            batch_seq=11,
+            record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
+            record_ids=["11"],
+            cursor=Cursor(token=b""),
+        )
+
+        assert result.success is False
+        assert result.transport_failure is True
+        assert "reader raised in grace window" in result.failure_summary
+        assert client._stream_active is False
+        # Grace-window reader exception is consumed; no task left dangling.
+        assert client._reader_task is None
+
+    @pytest.mark.asyncio
     async def test_teardown_stream_resets_all_state(self):
         """_teardown_stream cancels live tasks and clears all stream-lifetime
         state, including _task_failure and _peer_closed_stream.

@@ -49,6 +49,10 @@ class WorkerProxyHandler(BaseDestinationHandler):
         self._control: Optional[DestinationGRPCClient] = None
         # One forwarded StreamRecords stream per stream_id.
         self._streams: Dict[str, DestinationGRPCClient] = {}
+        # Schema config per stream_id, captured at configure_schema time so a
+        # stream torn down by a transport failure can be rebuilt in place for
+        # the engine's retry without re-driving configure_schema.
+        self._stream_schema_config: Dict[str, Dict[str, Any]] = {}
         self._capabilities: Optional[Any] = None
         self._label = "dest-worker"
 
@@ -113,6 +117,7 @@ class WorkerProxyHandler(BaseDestinationHandler):
                     exc_info=True,
                 )
         self._streams.clear()
+        self._stream_schema_config.clear()
         if self._control is not None:
             try:
                 await self._control.send_shutdown(reason="shell_disconnect")
@@ -136,22 +141,40 @@ class WorkerProxyHandler(BaseDestinationHandler):
             logger.error("%s: configure_schema before connect", self._label)
             return False
         stream_id = schema_spec.stream_id
+        schema_config = {
+            "write_mode": _WRITE_MODE_NAMES[schema_spec.write_mode],
+            "schema_version": schema_spec.version,
+        }
+        client = await self._open_stream(stream_id, schema_config)
+        if client is None:
+            return False
+        self._stream_schema_config[stream_id] = schema_config
+        self._streams[stream_id] = client
+        return True
+
+    async def _open_stream(
+        self, stream_id: str, schema_config: Dict[str, Any]
+    ) -> Optional[DestinationGRPCClient]:
+        """Open a fresh forwarded StreamRecords stream and send its schema.
+
+        Returns the connected client, or None if the worker channel did not
+        connect or rejected the schema. The caller owns caching the result.
+        """
+        if self._handle is None:
+            logger.error("%s: open_stream before connect", self._label)
+            return None
         client = DestinationGRPCClient(target=self._handle.target)
         if not await client.connect(max_connect_retries=3):
-            return False
+            return None
         accepted = await client.start_stream(
             run_id="",  # idempotency keys ride each forwarded batch
             stream_id=stream_id,
-            schema_config={
-                "write_mode": _WRITE_MODE_NAMES[schema_spec.write_mode],
-                "schema_version": schema_spec.version,
-            },
+            schema_config=schema_config,
         )
         if not accepted:
             await client.disconnect()
-            return False
-        self._streams[stream_id] = client
-        return True
+            return None
+        return client
 
     async def write_batch(
         self,
@@ -188,6 +211,11 @@ class WorkerProxyHandler(BaseDestinationHandler):
             # committed-before-crash batch on resend. Fatal is reserved
             # for verdicts the connector actually returned.
             status = AckStatus.ACK_STATUS_RETRYABLE_FAILURE
+            # send_batch already tore the stream down (_stream_active=False),
+            # so the cached client can no longer send. Rebuild it now so the
+            # engine's retry of this batch lands on a live stream instead of
+            # raising RuntimeError("Stream not active").
+            await self._rebuild_stream(stream_id)
         if committed is not None and status not in SUCCESS_STATUSES:
             # The ack crossed an untrusted process boundary: a connector
             # that pairs a failure status with a cursor violates the
@@ -212,6 +240,44 @@ class WorkerProxyHandler(BaseDestinationHandler):
             failed_record_ids=tuple(result.failed_record_ids),
             failure_summary=result.failure_summary,
         )
+
+    async def _rebuild_stream(self, stream_id: str) -> None:
+        """Replace a torn-down forwarded stream with a fresh one.
+
+        Called after a transport failure so the engine's retry of the same
+        batch finds a live stream. The old client is dropped and a new one is
+        opened with the schema captured at configure_schema time. If the
+        rebuild fails the cached stream is evicted, so the next write returns
+        the 'not configured' retryable result rather than reusing a dead client.
+        """
+        schema_config = self._stream_schema_config.get(stream_id)
+        old_client = self._streams.pop(stream_id, None)
+        if old_client is not None:
+            try:
+                await old_client.disconnect()
+            except Exception:
+                logger.debug(
+                    "%s: discarding torn-down stream client %s failed",
+                    self._label, stream_id, exc_info=True,
+                )
+        if schema_config is None:
+            # No captured schema means the stream was never configured through
+            # the normal path; nothing to rebuild against.
+            logger.error(
+                "%s: cannot rebuild stream %s — no captured schema config",
+                self._label, stream_id,
+            )
+            return
+        client = await self._open_stream(stream_id, schema_config)
+        if client is None:
+            logger.warning(
+                "%s: failed to rebuild stream %s after transport failure; "
+                "next write will report it unconfigured",
+                self._label, stream_id,
+            )
+            return
+        self._streams[stream_id] = client
+        logger.info("%s: rebuilt stream %s after transport failure", self._label, stream_id)
 
     async def health_check(self) -> bool:
         if self._control is None:

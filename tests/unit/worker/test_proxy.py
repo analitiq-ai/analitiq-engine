@@ -193,6 +193,84 @@ class TestProxyWriteBatch:
         assert result.failure_summary == "connector verdict: bad record"
         assert result.failed_record_ids == ("a",)
 
+    async def test_transport_failure_rebuilds_stream_for_retry(self):
+        # A timeout teardown sets transport_failure and leaves the cached
+        # client unusable (send_batch would raise "Stream not active"). The
+        # proxy must rebuild the forwarded stream so the engine's retry of the
+        # same batch lands on a live stream and succeeds.
+        import pyarrow as pa
+
+        from src.grpc.client import BatchResult
+        from src.grpc.generated.analitiq.v1 import AckStatus as ProtoAckStatus
+        from src.grpc.generated.analitiq.v1 import Cursor as ProtoCursor
+
+        proxy = _proxy()
+        proxy._handle = _handle()
+
+        # First client: timeout teardown -> transport_failure.
+        dead_client = MagicMock()
+        dead_client.send_batch = AsyncMock(
+            return_value=BatchResult(
+                success=False,
+                status=ProtoAckStatus.ACK_STATUS_FATAL_FAILURE,
+                records_written=0,
+                committed_cursor=None,
+                failed_record_ids=[],
+                failure_summary="Timeout waiting for ACK on batch 0",
+                transport_failure=True,
+            )
+        )
+        dead_client.disconnect = AsyncMock()
+        proxy._streams["s1"] = dead_client
+        proxy._stream_schema_config["s1"] = {
+            "write_mode": "upsert",
+            "schema_version": 1,
+        }
+
+        # Rebuilt client: a clean ACK on the retry.
+        fresh_client = MagicMock()
+        fresh_client.send_batch = AsyncMock(
+            return_value=BatchResult(
+                success=True,
+                status=ProtoAckStatus.ACK_STATUS_SUCCESS,
+                records_written=1,
+                committed_cursor=ProtoCursor(token=b"c1"),
+                failed_record_ids=[],
+                failure_summary="",
+            )
+        )
+
+        open_stream = AsyncMock(return_value=fresh_client)
+        batch = pa.RecordBatch.from_pylist([{"id": 1}])
+
+        with patch.object(proxy, "_open_stream", open_stream):
+            first = await proxy.write_batch(
+                run_id="r1",
+                stream_id="s1",
+                batch_seq=0,
+                record_batch=batch,
+                record_ids=["a"],
+                cursor=None,
+            )
+            # First attempt: retryable, dead client dropped, stream rebuilt.
+            assert first.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
+            dead_client.disconnect.assert_awaited_once()
+            open_stream.assert_awaited_once()
+            assert proxy._streams["s1"] is fresh_client
+
+            # Retry: lands on the rebuilt stream and succeeds.
+            retry = await proxy.write_batch(
+                run_id="r1",
+                stream_id="s1",
+                batch_seq=0,
+                record_batch=batch,
+                record_ids=["a"],
+                cursor=None,
+            )
+        assert retry.status == AckStatus.ACK_STATUS_SUCCESS
+        assert retry.records_written == 1
+        fresh_client.send_batch.assert_awaited_once()
+
 
 class TestProxyCapabilities:
     def test_capability_passthrough_with_fallbacks(self):
