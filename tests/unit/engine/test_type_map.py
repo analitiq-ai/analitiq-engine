@@ -677,6 +677,7 @@ class TestNormalizeCanonicalType:
             normalize_canonical_type(f"Timestamp({unit})")
 
     def test_duration_accepts_all_units(self):
+        # Duration is unconstrained; all four units must normalize without error.
         for unit in ("s", "ms", "us", "ns", "SECOND", "MILLISECOND", "MICROSECOND", "NANOSECOND"):
             normalize_canonical_type(f"Duration({unit})")
 
@@ -907,6 +908,20 @@ class TestToNativeTypeUnitAliasNormalization:
         assert m.to_native_type("Duration(s)") == "DUR_S"
         assert m.to_native_type("Duration(ms)") == "DUR_MS"
         assert m.to_native_type("Duration(ns)") == "DUR_NS"
+
+    def test_write_mapper_construction_rejects_bad_time_unit_in_canonical(self):
+        # TypeMapper.__init__ pre-computes the normalized key for every exact
+        # write rule; a bad cross-type unit (Time32 + us) must raise here rather
+        # than surfacing as a confusing UnmappedTypeError at lookup time.
+        with pytest.raises(InvalidTypeMapError, match="Time32 accepts"):
+            _write_mapper([{"match": "exact", "canonical": "Time32(us)", "native": "TIME"}])
+
+    def test_to_native_type_rejects_cross_type_time_unit(self):
+        # Bad canonical supplied at lookup time must raise InvalidTypeMapError,
+        # not silently fall through to UnmappedTypeError.
+        m = _write_mapper([{"match": "exact", "canonical": "Time32(SECOND)", "native": "T32S"}])
+        with pytest.raises(InvalidTypeMapError, match="Time32 accepts"):
+            m.to_native_type("Time32(MICROSECOND)")
 
 
 class TestToNativeTypeRegex:

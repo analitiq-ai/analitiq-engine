@@ -65,8 +65,9 @@ _UNIT_LONG_FORMS: Final[frozenset[str]] = frozenset(_UNIT_SHORT_TO_LONG.values()
 
 # Arrow constrains which units are legal per temporal type:
 # Time32 accepts only SECOND/MILLISECOND; Time64 accepts only MICROSECOND/NANOSECOND.
-# Timestamp and Duration accept all four.  This table is checked after unit expansion
-# so the error fires on both short (us) and long (MICROSECOND) inputs.
+# Timestamp and Duration are unconstrained — every unit in _UNIT_SHORT_TO_LONG is legal.
+# This table is checked after unit expansion so the error fires on both short (us)
+# and long (MICROSECOND) inputs.
 _VALID_UNITS_BY_TYPE: Final[dict[str, frozenset[str]]] = {
     "Time32": frozenset({"SECOND", "MILLISECOND"}),
     "Time64": frozenset({"MICROSECOND", "NANOSECOND"}),
