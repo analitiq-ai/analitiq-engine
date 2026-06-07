@@ -155,6 +155,11 @@ def _translate_source_config(
     ``stream_source`` dicts. The translator only injects the runtime
     handle and the connector type discriminator so the engine knows which
     connector class to instantiate.
+
+    Non-built-in connector kinds receive the same contract-document
+    pass-through as the ``database`` kind. The worker registry raises
+    ``ConnectorNotRegisteredError`` at instantiation time if no connector
+    class is registered for the given kind.
     """
     _ = stream  # signature parity with the destination translator
     kind = runtime.connector_type
@@ -164,14 +169,12 @@ def _translate_source_config(
         "endpoint_ref": source.endpoint_ref.to_dict(),
         "connection_ref": source.connection_ref,
     }
-    if kind == "database":
-        base.update(_translate_database_source(source, endpoint))
-    elif kind == "api":
+    if kind == "api":
         base.update(_translate_api_source(source, endpoint, runtime))
     else:
-        raise ValueError(
-            f"Unsupported source connector kind: {kind!r}; expected 'api' or 'database'"
-        )
+        # Built-in "database" kind and all non-built-in kinds use the same
+        # contract-document pass-through: endpoint_document + stream_source.
+        base.update(_translate_database_source(source, endpoint))
     return base
 
 

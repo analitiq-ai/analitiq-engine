@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
@@ -67,6 +68,10 @@ from cdk.secrets import LocalFileSecretsResolver, SecretsResolver
 from cdk.connection_runtime import ConnectionRuntime
 
 logger = logging.getLogger(__name__)
+
+# Matches the endpoint variant name in a $schema URL, e.g.
+# "https://schemas.analitiq.ai/api-endpoint/latest.json" → "api-endpoint".
+_ENDPOINT_KIND_RE = re.compile(r"/([A-Za-z][\w-]*-endpoint)/")
 
 
 # ---------------------------------------------------------------------------
@@ -411,21 +416,21 @@ class PipelineConfigPrep:
         if ref in self._resolved_endpoints:
             return self._resolved_endpoints[ref]
         document = resolve_endpoint_ref(ref, self._paths, self._connection_lookup())
-        # Dispatch to the variant endpoint schema (``api-endpoint`` or
-        # ``database-endpoint``) by the document's declared ``$schema``
-        # URL. The umbrella ``endpoint`` schema is not currently
-        # published, and the variant schemas pin the expected URL anyway,
-        # so this also catches mislabelled documents at validation time.
+        # Extract the endpoint variant name from the document's declared
+        # ``$schema`` URL. The variant name is the path segment ending in
+        # ``-endpoint`` (e.g. ``api-endpoint``, ``database-endpoint``).
+        # ``validate_artifact`` then fetches and validates against that
+        # variant's published schema; an unrecognised variant name fails
+        # loudly there rather than here.
         schema_url = document.get("$schema") or ""
-        if "api-endpoint" in schema_url:
-            endpoint_kind = "api-endpoint"
-        elif "database-endpoint" in schema_url:
-            endpoint_kind = "database-endpoint"
-        else:
+        match = _ENDPOINT_KIND_RE.search(schema_url)
+        if not match:
             raise ValueError(
-                f"Endpoint {ref!s} has no recognized $schema URL "
-                f"({schema_url!r}); expected api-endpoint or database-endpoint"
+                f"Endpoint {ref!s} has no recognizable endpoint $schema URL "
+                f"({schema_url!r}); $schema must contain an *-endpoint path segment "
+                f"(e.g. api-endpoint, database-endpoint)"
             )
+        endpoint_kind = match.group(1)
         validate_artifact(endpoint_kind, document, source=str(ref))
         self._resolved_endpoints[ref] = document
         logger.info("Resolved endpoint: %s", ref)
