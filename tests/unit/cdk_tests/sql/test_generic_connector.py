@@ -468,6 +468,39 @@ class TestReadSqlAlchemyBranch:
         assert out == [[{"id": 1, "updated_at": "2024-01-01"}]]
         runtime.close.assert_awaited()
 
+    @pytest.mark.asyncio
+    async def test_query_builder_receives_dialect_paging_order_fallback(self):
+        # The SQLAlchemy paging path hands the connector dialect's
+        # paging_order_fallback hook to QueryBuilder, so per-system
+        # OFFSET-without-ORDER-BY behavior comes from the connector
+        # package, never from a dialect branch in shared code.
+        runtime = _FakeRuntime(is_adbc=False, engine=object())
+
+        class _EmptyConn:
+            async def exec_driver_sql(self, sql, params=None):
+                return []
+
+        class _AcquireCM:
+            async def __aenter__(self):
+                return _EmptyConn()
+
+            async def __aexit__(self, *exc):
+                return False
+
+        connector = GenericSQLConnector()
+        with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()), patch(
+            "cdk.sql.generic.acquire_connection", return_value=_AcquireCM()
+        ), patch("cdk.sql.generic.SchemaContract"), patch(
+            "cdk.sql.generic.QueryBuilder"
+        ) as qb:
+            qb.return_value.build_select_query.return_value = ("SELECT 1", [])
+            await _drain(connector, runtime, _endpoint_config(), _checkpoint(cursor=None))
+
+        assert (
+            qb.call_args.kwargs["paging_order_fallback"]
+            == connector.dialect.paging_order_fallback
+        )
+
 
 class TestControlPlaneDelegators:
     @pytest.mark.asyncio

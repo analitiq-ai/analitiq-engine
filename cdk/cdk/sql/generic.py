@@ -1910,7 +1910,10 @@ class GenericSQLConnector(BaseDestinationHandler):
                 logger.debug("Source read (ADBC-only) completed")
                 return
 
-            builder = QueryBuilder(driver)
+            builder = QueryBuilder(
+                driver,
+                paging_order_fallback=self.dialect.paging_order_fallback,
+            )
 
             def page_query(offset: int):
                 """Build the per-page SELECT. Limit / offset are pushed into
