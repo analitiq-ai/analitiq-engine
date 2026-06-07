@@ -521,3 +521,56 @@ class TestAssignmentTransformerBadInputs:
         assert len(errors) == 1
         assert errors[0]["field"] == "out"
         assert result.get("name") == "alice"
+
+
+class TestPipeExpressionArgCount:
+    """pipe with empty args must error rather than silently return None."""
+
+    def _assignment(self, value_spec: dict) -> dict:
+        return {
+            "target": {"path": ["out"], "type": "string", "nullable": True},
+            "value": value_spec,
+        }
+
+    @pytest.mark.asyncio
+    async def test_empty_args_produces_error_entry(self):
+        assignment = self._assignment(
+            {"kind": "expr", "expr": {"op": "pipe", "args": []}}
+        )
+        _, errors = await AssignmentTransformer().transform_record(
+            record={}, assignments=[assignment]
+        )
+        assert errors, "expected an error for empty pipe args"
+        assert "pipe" in errors[0]["error"]
+        assert "got 0" in errors[0]["error"]
+
+    @pytest.mark.asyncio
+    async def test_single_arg_returns_value(self):
+        assignment = self._assignment(
+            {"kind": "expr", "expr": {"op": "pipe", "args": [{"op": "const", "value": "hello"}]}}
+        )
+        result, errors = await AssignmentTransformer().transform_record(
+            record={}, assignments=[assignment]
+        )
+        assert not errors
+        assert result["out"] == "hello"
+
+    @pytest.mark.asyncio
+    async def test_multi_arg_pipe_applies_functions(self):
+        assignment = self._assignment(
+            {
+                "kind": "expr",
+                "expr": {
+                    "op": "pipe",
+                    "args": [
+                        {"op": "const", "value": -5},
+                        {"op": "fn", "name": "abs", "version": 1, "args": []},
+                    ],
+                },
+            }
+        )
+        result, errors = await AssignmentTransformer().transform_record(
+            record={}, assignments=[assignment]
+        )
+        assert not errors
+        assert result["out"] == 5
