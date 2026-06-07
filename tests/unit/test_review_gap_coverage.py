@@ -309,6 +309,33 @@ class TestIsoTimestampStrictRaise:
         assert await t._fn_iso_to_datetime(None) is None
 
     @pytest.mark.asyncio
+    async def test_fn_iso_to_date_raises_on_unparseable(self):
+        from src.engine.data_transformer import AssignmentTransformer
+        from src.engine.exceptions import TransformationError
+
+        t = AssignmentTransformer()
+        with pytest.raises(TransformationError, match="iso_to_date"):
+            await t._fn_iso_to_date("not-a-date")
+
+    @pytest.mark.asyncio
+    async def test_fn_iso_to_date_raises_on_type_error(self):
+        from src.engine.data_transformer import AssignmentTransformer
+        from src.engine.exceptions import TransformationError
+
+        t = AssignmentTransformer()
+        with pytest.raises(TransformationError, match="iso_to_date"):
+            await t._fn_iso_to_date([1, 2, 3])
+
+    @pytest.mark.asyncio
+    async def test_fn_iso_to_date_parses_valid_input(self):
+        from src.engine.data_transformer import AssignmentTransformer
+
+        t = AssignmentTransformer()
+        assert await t._fn_iso_to_date("2026-05-12T10:30:00") == "2026-05-12"
+        assert await t._fn_iso_to_date("2026-05-12") == "2026-05-12"
+        assert await t._fn_iso_to_date(None) is None
+
+    @pytest.mark.asyncio
     async def test_to_int_raises_on_unparseable(self):
         from src.engine.data_transformer import DataTransformer
         from src.engine.exceptions import TransformationError
