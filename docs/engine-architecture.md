@@ -62,8 +62,6 @@ src/
 │
 ├── engine/                  # Core engine
 │   ├── engine.py                # StreamingEngine (extract -> transform -> load -> checkpoint)
-│   ├── orchestrator.py          # PipelineOrchestrator (multi-stream coordination)
-│   ├── pipeline.py              # Pipeline (config + lifecycle)
 │   ├── pipeline_config_prep.py  # Loads manifest/pipelines/streams/connections/connectors
 │   ├── data_transformer.py      # AssignmentTransformer (mapping AST execution)
 │   ├── expression_evaluator.py  # SecureExpressionEvaluator (string-form expressions)
@@ -106,14 +104,16 @@ external log/metrics shipper is a deployment concern, not an engine concern.
    - builds a `ConnectionRuntime` per connection (with a per-connection
      secrets resolver),
    - resolves every `endpoint_ref` to its endpoint JSON.
-3. `Pipeline` (`src/engine/pipeline.py`) wraps the loaded config,
-   creates a `StreamingEngine`, and calls `engine.stream_data(...)`.
-4. `StreamingEngine` delegates multi-stream coordination to
-   `PipelineOrchestrator`. Each stream runs four async stages —
+3. `PipelineRunner` (`src/runner.py`) translates the resolved contract
+   objects into a flat config dict via `_build_config_dict` (and its
+   source/destination translation helpers), then constructs a
+   `StreamingEngine` with runtime tuning parameters from the pipeline
+   config and calls `engine.stream_data(config_dict)`.
+4. `StreamingEngine` orchestrates multi-stream execution directly in
+   `stream_data`. Each stream runs four async stages —
    `_extract_stage -> _transform_stage -> _load_stage ->
    _checkpoint_stage` — wired together with async queues. The transform
-   stage uses `AssignmentTransformer` for the assignment AST and
-   `SecureExpressionEvaluator` for legacy string expressions.
+   stage uses `AssignmentTransformer` for the assignment AST.
 5. `_load_stage` streams batches over gRPC to the destination service
    with batch-level idempotency (protocol in
    [`grpc-streaming-architecture.md`](grpc-streaming-architecture.md)).
@@ -245,14 +245,13 @@ is no `HandlerRegistry`.
 
 ## Structured Logging
 
-`PipelineOrchestrator` and `StreamingEngine` use structured logging with
-correlation IDs. The orchestrator stamps each log with the `run_id` so
-batches and stream events are joinable downstream.
+`StreamingEngine` uses structured logging with correlation IDs. The engine
+stamps each log with the `run_id` so batches and stream events are joinable
+downstream.
 
 ```text
-... INFO  src.engine.orchestrator.wise-to-postgresql - Starting pipeline orchestration
-       {"pipeline_id": "wise-to-postgresql", "run_id": "...", "stream_count": 1}
-... INFO  src.engine.engine.wise-to-postgresql - Processing stream
+... INFO  src.engine.engine.wise-to-postgresql - Starting pipeline: wise-to-postgresql
+... INFO  src.engine.engine.wise-to-postgresql - Processing stream: wise-transfers
        {"stream_id": "wise-transfers", "correlation_id": "..."}
 ```
 

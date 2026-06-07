@@ -1,7 +1,10 @@
 """
-Pipeline runner for executing Analitiq Stream pipelines.
+Pipeline runner and contract translation for Analitiq Stream pipelines.
 
-Configuration paths are defined in manifest.json (single source of truth).
+This module contains ``PipelineRunner``, which executes a pipeline end-to-end,
+and the translation helpers that convert ``ResolvedPipeline``/``ResolvedStream``
+contract documents into the flat config dicts consumed by ``StreamingEngine``
+and its connectors. Configuration paths are defined in manifest.json.
 Requires PIPELINE_ID environment variable.
 """
 
@@ -9,7 +12,7 @@ import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from dotenv import load_dotenv
 
@@ -17,7 +20,7 @@ from src.engine.engine import StreamingEngine
 from src.models.resolved import ResolvedPipeline, ResolvedStream, ResolvedSource, ResolvedDestination
 from cdk.connection_runtime import ConnectionRuntime
 from .engine.pipeline_config_prep import PipelineConfigPrep
-from .shared.run_id import get_run_id
+from .shared.run_id import get_or_generate_run_id
 from .state.metrics_storage import save_pipeline_metrics
 
 
@@ -78,7 +81,15 @@ def _translate_source_config(
     endpoint: Dict[str, Any],
     runtime: ConnectionRuntime,
 ) -> Dict[str, Any]:
-    _ = stream  # signature parity with the destination translator
+    """Attach the contract documents to the source-side runtime payload.
+
+    The connectors (API + database) read replication, filters, columns,
+    pagination, etc. directly off the contract ``endpoint_document`` and
+    ``stream_source`` dicts. The translator only injects the runtime
+    handle and the connector type discriminator so the engine knows which
+    connector class to instantiate.
+    """
+    _ = stream  # received from _build_config_dict but not needed at this layer
     kind = runtime.connector_type
     base: Dict[str, Any] = {
         "connector_type": kind,
@@ -98,12 +109,27 @@ def _translate_source_config(
 
 
 def _build_destination_config(destination: ResolvedDestination) -> Dict[str, Any]:
+    """Engine-facing destination dict.
+
+    The engine only needs the write mode (forwarded to the gRPC
+    ``SchemaMessage``). Everything else about the destination — table name,
+    columns, primary keys, conflict keys, batching — is consumed by the
+    destination container, which loads the contract endpoint document via
+    ``PipelineConfigPrep``.
+    """
     return {"write_mode": destination.write.get("mode", "upsert")}
 
 
 def _translate_database_source(
     source: ResolvedSource, endpoint: Dict[str, Any]
 ) -> Dict[str, Any]:
+    """Pass the contract documents through to ``GenericSQLConnector``.
+
+    The connector consumes ``database_object``, ``columns``,
+    ``primary_keys``, plus the stream's ``selected_columns``, ``filters``,
+    and ``replication`` block directly. This seam only attaches the
+    documents to the source config dict.
+    """
     return {
         "endpoint_document": endpoint,
         "stream_source": source.stream_source,
@@ -115,7 +141,18 @@ def _translate_api_source(
     endpoint: Dict[str, Any],
     runtime: ConnectionRuntime,
 ) -> Dict[str, Any]:
-    _ = runtime  # signature parity with the database path
+    """Pass the contract documents through to ``APIConnector``.
+
+    The connector consumes ``operations.read.{request,params,pagination,
+    response,replication}`` directly and resolves value expressions
+    against the connection runtime; this seam only attaches the
+    documents to the source config dict.
+
+    ``stream_filters`` is materialised separately from the nested filters
+    inside ``stream_source`` so the connector can iterate it as a flat list
+    without re-reading the document structure.
+    """
+    _ = runtime  # passed for call-site symmetry with _translate_database_source
     return {
         "endpoint_document": endpoint,
         "stream_source": source.stream_source,
@@ -126,11 +163,19 @@ def _translate_api_source(
 def _translate_assignment(assignment: Dict[str, Any]) -> Dict[str, Any]:
     """Translate a contract-shaped assignment to the transformer's shape.
 
-    Contract shape:
+    Contract shape (expression):
         {"target": {"path": "id", "arrow_type": "Int64"}, "value": {"expression": {"op": "get", "path": "id"}}}
 
-    Transformer shape:
+    Transformer shape (expression):
         {"target": {"path": ["id"], "arrow_type": "Int64"}, "value": {"kind": "expr", "expr": {"op": "get", "path": ["id"]}}}
+
+    Contract shape (constant):
+        {"target": {"path": "x"}, "value": {"constant": {"value": 42, "arrow_type": "Int32"}}}
+
+    Transformer shape (constant):
+        {"target": {"path": ["x"]}, "value": {"kind": "const", "const": {"value": 42, "arrow_type": "Int32"}}}
+
+    Any other ``value`` shape is passed through unchanged.
     """
     raw_target = assignment.get("target") or {}
     raw_value = assignment.get("value") or {}
@@ -170,25 +215,19 @@ def _translate_assignment(assignment: Dict[str, Any]) -> Dict[str, Any]:
 class PipelineRunner:
     """Executes Analitiq Stream pipelines with proper error handling and metrics.
 
-    Configuration paths are defined in manifest.json (single source of truth).
-    Requires PIPELINE_ID environment variable to be set.
+    Configuration paths are defined in manifest.json. Requires PIPELINE_ID
+    environment variable (may be supplied via a .env file).
     """
 
     def __init__(self):
+        load_dotenv()  # must precede os.getenv so .env-based configs work
         self.pipeline_id = os.getenv("PIPELINE_ID")
         if not self.pipeline_id:
             raise ValueError("PIPELINE_ID environment variable is required")
 
     async def run(self) -> bool:
-        """
-        Execute the pipeline.
-
-        Returns:
-            True if successful, False if failed.
-        """
-        load_dotenv()
-
-        run_id = get_run_id()
+        """Execute the pipeline. Returns True on success, False on failure."""
+        run_id = get_or_generate_run_id()
         start_time = datetime.now(timezone.utc)
 
         pipeline_config = None
@@ -209,8 +248,10 @@ class PipelineRunner:
 
             # Set up runtime directories
             project_root = Path(__file__).parent.parent
-            dlq_dir = str(project_root / "deadletter" / pipeline_config.pipeline_id)
-            Path(dlq_dir).mkdir(parents=True, exist_ok=True)
+            state_dir = project_root / "state"
+            dlq_dir = project_root / "deadletter" / pipeline_config.pipeline_id
+            state_dir.mkdir(parents=True, exist_ok=True)
+            dlq_dir.mkdir(parents=True, exist_ok=True)
 
             # Extract runtime tuning parameters
             runtime = pipeline_config.runtime
@@ -225,7 +266,7 @@ class PipelineRunner:
                 batch_size=batching.get("batch_size", 1000),
                 max_concurrent_batches=batching.get("max_concurrent_batches", 3),
                 buffer_size=runtime.get("buffer_size", 5000),
-                dlq_path=dlq_dir,
+                dlq_path=str(dlq_dir),
                 max_retries=error_handling.get("max_retries", 3),
                 retry_delay=error_handling.get("retry_delay_seconds", 5),
             )
