@@ -157,6 +157,7 @@ class ConnectionRuntime:
         self._resolver = resolver
         self._connector_type_mapper = connector_type_mapper
         self._connection_type_mapper = connection_type_mapper
+        self._composed_connection_mapper: Optional[TypeMapper] = None
 
         # Worker-side pre-resolved payload (set by from_resolved_payload):
         # materialize() builds straight from these and never loads secrets.
@@ -257,6 +258,12 @@ class ConnectionRuntime:
         no ``type-map-write.json`` still supports DDL generation: its read
         overrides take effect and the connector's write rules cover the rest.
 
+        For ``EndpointScope.CONNECTOR`` the connector mapper is returned
+        directly; no composition takes place.
+
+        The composed mapper is cached after the first call — both source mappers
+        are immutable, so the composed result is deterministic.
+
         The caller passes the already-resolved :class:`~cdk.types.EndpointScope`
         (the engine maps its ``EndpointRef.scope`` to it at the boundary), so
         the CDK never imports the engine's endpoint model. Constructing the
@@ -266,9 +273,14 @@ class ConnectionRuntime:
             return self.connector_type_mapper
         if scope == EndpointScope.CONNECTION:
             if self._connection_type_mapper is not None:
-                return TypeMapper.compose(
-                    self._connection_type_mapper, self.connector_type_mapper
-                )
+                if self._connector_type_mapper is None:
+                    # No connector map to compose with — return connection map alone.
+                    return self._connection_type_mapper
+                if self._composed_connection_mapper is None:
+                    self._composed_connection_mapper = TypeMapper.compose(
+                        self._connection_type_mapper, self._connector_type_mapper
+                    )
+                return self._composed_connection_mapper
             return self.connector_type_mapper
         raise ValueError(f"type_mapper_for: unknown endpoint scope {scope!r}")
 

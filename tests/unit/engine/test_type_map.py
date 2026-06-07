@@ -807,6 +807,17 @@ class TestTypeMapperCompose:
         composed = TypeMapper.compose(primary, fallback)
         assert composed.connector_slug == "conn:my-pg"
 
+    def test_compose_preserves_regex_rules(self):
+        primary = TypeMapper("conn", parse_rules([
+            {"match": "regex", "native": r"^CUSTOM_(?<n>\d+)$", "canonical": "Utf8"},
+        ], source="<r>"))
+        fallback = TypeMapper("pg", parse_rules([
+            {"match": "regex", "native": r"^VARCHAR\((?<n>\d+)\)$", "canonical": "Utf8"},
+        ], source="<r>"))
+        composed = TypeMapper.compose(primary, fallback)
+        assert composed.to_arrow_type("CUSTOM_42") == "Utf8"
+        assert composed.to_arrow_type("VARCHAR(100)") == "Utf8"
+
 
 # ---------------------------------------------------------------------------
 # TypeMapper — reverse lookup (to_native_type)

@@ -76,6 +76,23 @@ class TestTypeMapperFor:
         with pytest.raises(RuntimeError, match="connector_type_mapper not available"):
             _ = rt.connector_type_mapper
 
+    def test_connection_scope_with_mapper_but_no_connector_returns_connection_mapper(self):
+        # When no connector map is available, the connection map is returned as-is
+        # (no composition possible). This covers API-only connectors that have no
+        # type-map.json but whose connection adds one.
+        nmapper = _connection_mapper()
+        rt = _runtime(connector_mapper=None, connection_mapper=nmapper)
+        assert rt.type_mapper_for(scope=EndpointScope.CONNECTION) is nmapper
+
+    def test_composed_mapper_is_memoized(self):
+        rt = _runtime(
+            connector_mapper=_connector_mapper(),
+            connection_mapper=_connection_mapper(),
+        )
+        first = rt.type_mapper_for(scope=EndpointScope.CONNECTION)
+        second = rt.type_mapper_for(scope=EndpointScope.CONNECTION)
+        assert first is second
+
 
 class TestConnectionScopeComposition:
     """Connection maps compose with the connector map per-type (issue #126)."""

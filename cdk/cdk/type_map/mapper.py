@@ -97,8 +97,13 @@ class TypeMapper:
     def compose(cls, primary: "TypeMapper", fallback: "TypeMapper") -> "TypeMapper":
         """Return a new mapper where *primary* rules take precedence per-type.
 
-        On a miss in *primary* the *fallback* rules are consulted, for both the
-        read direction (``to_arrow_type``) and the write direction
+        Implemented by concatenating *primary*'s rules before *fallback*'s
+        rules in a single new :class:`TypeMapper`; the existing first-match
+        semantics then make primary rules authoritative and fallback rules fill
+        the gaps. The resulting mapper carries no record of which rules
+        originated where.
+
+        This applies to both directions: read (``to_arrow_type``) and write
         (``to_native_type``). A connection mapper that only declares override
         types therefore inherits the connector mapper's rules for everything
         else — including write rules the connection map never needs to repeat.
