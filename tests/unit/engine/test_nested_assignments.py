@@ -315,3 +315,105 @@ class TestDictConstantsEndToEnd:
             {"id": "r1", "checkAccount": {"id": "42", "objectName": "CheckAccount"}},
             {"id": "r2", "checkAccount": {"id": "42", "objectName": "CheckAccount"}},
         ]
+
+
+class TestAssignmentTransformerBadInputs:
+    """Verify that unknown ops, function names, and value kinds raise errors
+    instead of silently returning None or passing values through."""
+
+    def _assignment(self, value_spec: dict) -> dict:
+        return {
+            "target": {"path": ["out"], "type": "string", "nullable": True},
+            "value": value_spec,
+        }
+
+    @pytest.mark.asyncio
+    async def test_unknown_expression_op_errors(self):
+        assignment = self._assignment(
+            {"kind": "expr", "expr": {"op": "frobnicate", "args": []}}
+        )
+        _, errors = await AssignmentTransformer().transform_record(
+            record={}, assignments=[assignment]
+        )
+        assert errors, "expected an error for unknown op"
+        assert "frobnicate" in errors[0]["error"]
+
+    @pytest.mark.asyncio
+    async def test_unknown_function_name_errors(self):
+        assignment = self._assignment(
+            {"kind": "expr", "expr": {"op": "fn", "name": "iso_to_dat", "version": 1, "args": []}}
+        )
+        _, errors = await AssignmentTransformer().transform_record(
+            record={}, assignments=[assignment]
+        )
+        assert errors, "expected an error for unknown function name"
+        assert "iso_to_dat" in errors[0]["error"]
+
+    @pytest.mark.asyncio
+    async def test_non_fn_op_in_pipe_stage_errors(self):
+        assignment = self._assignment(
+            {
+                "kind": "expr",
+                "expr": {
+                    "op": "pipe",
+                    "args": [
+                        {"op": "const", "value": "hello"},
+                        {"op": "get", "path": ["x"]},
+                    ],
+                },
+            }
+        )
+        _, errors = await AssignmentTransformer().transform_record(
+            record={}, assignments=[assignment]
+        )
+        assert errors, "expected an error for non-fn op in pipe stage"
+        assert "get" in errors[0]["error"]
+
+    @pytest.mark.asyncio
+    async def test_unknown_value_kind_errors(self):
+        assignment = self._assignment({"kind": "literal", "literal": {"value": "x"}})
+        _, errors = await AssignmentTransformer().transform_record(
+            record={}, assignments=[assignment]
+        )
+        assert errors, "expected an error for unknown value kind"
+        assert "literal" in errors[0]["error"]
+
+    @pytest.mark.asyncio
+    async def test_missing_op_key_errors(self):
+        """An expr dict with no 'op' key at all should error (op defaults to None)."""
+        assignment = self._assignment({"kind": "expr", "expr": {"args": []}})
+        _, errors = await AssignmentTransformer().transform_record(
+            record={}, assignments=[assignment]
+        )
+        assert errors, "expected an error for missing op key"
+        assert "None" in errors[0]["error"]
+
+    @pytest.mark.asyncio
+    async def test_none_function_name_errors(self):
+        """A fn expression with no 'name' key should error (name defaults to None)."""
+        assignment = self._assignment(
+            {"kind": "expr", "expr": {"op": "fn", "version": 1, "args": []}}
+        )
+        _, errors = await AssignmentTransformer().transform_record(
+            record={}, assignments=[assignment]
+        )
+        assert errors, "expected an error for missing function name"
+        assert "None" in errors[0]["error"]
+
+    @pytest.mark.asyncio
+    async def test_error_isolated_per_assignment(self):
+        """A bad first assignment produces an error entry but the second assignment
+        still runs — transform_record continues accumulating rather than short-circuiting."""
+        assignments = [
+            self._assignment({"kind": "expr", "expr": {"op": "frobnicate"}}),
+            {
+                "target": {"path": ["name"], "type": "string", "nullable": True},
+                "value": {"kind": "const", "const": {"value": "alice"}},
+            },
+        ]
+        result, errors = await AssignmentTransformer().transform_record(
+            record={}, assignments=assignments
+        )
+        assert len(errors) == 1
+        assert errors[0]["field"] == "out"
+        assert result.get("name") == "alice"
