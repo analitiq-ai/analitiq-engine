@@ -132,6 +132,13 @@ class DestinationGRPCClient:
         self._connected = False
         self._stream_active = False
 
+        # Parameters of the active stream, cached at start_stream so a later
+        # send_batch can rebuild the stream in place after a transport teardown
+        # without the caller re-driving start_stream. Survives _teardown_stream
+        # (the rebuild needs them); cleared only on deliberate shutdown
+        # (end_stream / disconnect). None means no stream was ever started.
+        self._stream_params: Optional[Dict[str, Any]] = None
+
     async def connect(
         self,
         max_connect_retries: int = DEFAULT_MAX_RETRIES,
@@ -206,6 +213,10 @@ class DestinationGRPCClient:
             self._stub = None
 
         self._connected = False
+        # Deliberate shutdown: drop cached params even if the stream was already
+        # torn down (inactive) so end_stream's clear was skipped. A reconnect
+        # must re-drive start_stream rather than self-heal an ended stream.
+        self._stream_params = None
         logger.info("Disconnected from destination")
 
     async def send_shutdown(self, reason: str = "pipeline_completed") -> bool:
@@ -297,6 +308,16 @@ class DestinationGRPCClient:
         if not self._connected:
             raise RuntimeError("Not connected to destination")
 
+        # Cache the stream parameters so send_batch can rebuild the stream in
+        # place after a transport teardown without the caller re-driving
+        # start_stream. Set before the stream starts so even a start that later
+        # fails leaves enough to retry against.
+        self._stream_params = {
+            "run_id": run_id,
+            "stream_id": stream_id,
+            "schema_config": schema_config,
+        }
+
         # Reset stream-lifetime state so a previous failed run cannot
         # poison the diagnostic surfaced by this run's send_batch.
         self._task_failure = None
@@ -378,7 +399,30 @@ class DestinationGRPCClient:
         Arrow IPC; the engine ships ``pa.RecordBatch`` straight through.
         """
         if not self._stream_active:
-            raise RuntimeError("Stream not active")
+            # A prior batch's transport teardown left the stream inactive but
+            # the cached params let us self-heal: rebuild the stream before
+            # sending so the engine's retry of this batch lands on a live
+            # stream instead of failing. No cached params means send_batch was
+            # called before any start_stream — a programming error, raised.
+            if self._stream_params is None:
+                raise RuntimeError("Stream not active")
+            rebuilt = await self._rebuild_stream()
+            if not rebuilt:
+                summary = (
+                    f"Failed to rebuild stream before sending batch "
+                    f"{batch_seq}; reporting retryable so the engine can "
+                    f"back off and retry"
+                )
+                logger.error(summary)
+                return BatchResult(
+                    success=False,
+                    status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
+                    records_written=0,
+                    committed_cursor=None,
+                    failed_record_ids=[],
+                    failure_summary=summary,
+                    transport_failure=True,
+                )
 
         batch_msg = RecordBatch(
             run_id=run_id,
@@ -470,9 +514,12 @@ class DestinationGRPCClient:
 
             logger.error(summary)
             await self._teardown_stream()
+            # An ACK timeout means the destination rendered no verdict on the
+            # batch — retryable, not fatal. The teardown above leaves the stream
+            # inactive; the next send_batch self-heals via the cached params.
             return BatchResult(
                 success=False,
-                status=AckStatus.ACK_STATUS_FATAL_FAILURE,
+                status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
                 records_written=0,
                 committed_cursor=None,
                 failed_record_ids=[],
@@ -510,6 +557,9 @@ class DestinationGRPCClient:
         self._response_queue = None
         self._reader_task = None
         self._writer_task = None
+        # Deliberate shutdown: drop the cached params so a later send_batch
+        # raises rather than silently resurrecting a stream the caller ended.
+        self._stream_params = None
         logger.info("Stream ended")
 
     async def _teardown_stream(self) -> None:
@@ -547,6 +597,48 @@ class DestinationGRPCClient:
         self._task_failure = None
         self._peer_closed_stream = False
         logger.warning("Stream torn down after non-clean exit; channel retained for reconnect")
+
+    async def _rebuild_stream(self) -> bool:
+        """Rebuild the stream after a transport teardown using cached params.
+
+        Self-heal path shared by both deployments: tear down any remnants,
+        reconnect the channel if it dropped, then re-run start_stream with the
+        parameters cached at the original start_stream. Returns True on a clean
+        rebuild; False (fail loud in logs) so the caller surfaces a retryable
+        result. Requires _stream_params — the caller guards the no-params case.
+        """
+        params = self._stream_params
+        if params is None:
+            # Guarded by the caller; defensive so a future caller can't silently
+            # rebuild against nothing.
+            raise RuntimeError("Cannot rebuild stream without cached params")
+
+        if self._stream_active:
+            await self._teardown_stream()
+
+        if not self._connected:
+            if not await self.connect():
+                logger.error("Stream rebuild: reconnect to destination failed")
+                return False
+
+        try:
+            accepted = await self.start_stream(
+                run_id=params["run_id"],
+                stream_id=params["stream_id"],
+                schema_config=params["schema_config"],
+            )
+        except Exception as e:
+            logger.error("Stream rebuild: start_stream raised: %s", e, exc_info=True)
+            return False
+
+        if not accepted:
+            logger.error("Stream rebuild: destination rejected schema on restart")
+            return False
+
+        logger.info(
+            "Rebuilt stream %s after transport teardown", params["stream_id"]
+        )
+        return True
 
     async def _wait_with_heartbeat(self, batch_seq: int) -> Any:
         """Wait for an item from the response queue, logging progress every 10s.

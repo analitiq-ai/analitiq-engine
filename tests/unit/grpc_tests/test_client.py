@@ -502,7 +502,9 @@ class TestAckTimeoutAndTeardown:
         )
 
         assert result.success is False
-        assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+        # An ACK timeout rendered no verdict — retryable, not fatal. The
+        # teardown still fires; the next send_batch self-heals via cached params.
+        assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
         assert result.transport_failure is True
         assert "Timeout" in result.failure_summary
         assert client._stream_active is False
@@ -552,7 +554,7 @@ class TestAckTimeoutAndTeardown:
         )
 
         assert result.success is False
-        assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+        assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
         assert result.transport_failure is True
         assert "Too many pings" in result.failure_summary
         assert client._stream_active is False
@@ -707,7 +709,7 @@ class TestAckTimeoutAndTeardown:
         )
 
         assert result.success is False
-        assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+        assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
         assert result.transport_failure is True
         assert "Too many pings — live race" in result.failure_summary
         assert client._stream_active is False
@@ -813,3 +815,172 @@ class TestAckTimeoutAndTeardown:
         # All task/queue references are None by default
         await client._teardown_stream()  # must not raise
         assert client._stream_active is False
+
+
+class TestSendBatchSelfHeal:
+    """send_batch rebuilds a torn-down stream from the params cached at
+    start_stream, so the engine's retry of the same batch lands on a live
+    stream — the direct engine->destination path has no proxy to rebuild it.
+    """
+
+    @pytest.mark.asyncio
+    async def test_send_batch_without_start_stream_raises(self):
+        """send_batch before any start_stream is a programming error: no cached
+        params means there is nothing to rebuild, so it must raise."""
+        import pyarrow as pa
+
+        from src.grpc.generated.analitiq.v1 import Cursor
+
+        client = DestinationGRPCClient()
+        # _stream_active is False and _stream_params is None by default.
+        with pytest.raises(RuntimeError, match="Stream not active"):
+            await client.send_batch(
+                run_id="r",
+                stream_id="s",
+                batch_seq=0,
+                record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
+                record_ids=["1"],
+                cursor=Cursor(token=b""),
+            )
+
+    @pytest.mark.asyncio
+    async def test_send_batch_rebuilds_after_teardown_and_succeeds(self):
+        """After a teardown left the stream inactive, the next send_batch
+        reconnects and re-runs start_stream with the cached params, then
+        sends successfully."""
+        import asyncio
+        import pyarrow as pa
+
+        from src.grpc.client import BatchResult
+        from src.grpc.generated.analitiq.v1 import AckStatus, Cursor
+
+        client = DestinationGRPCClient()
+        # Simulate a stream that was started then torn down by a prior timeout:
+        # params cached, but stream inactive and channel dropped.
+        client._stream_params = {
+            "run_id": "run-1",
+            "stream_id": "s1",
+            "schema_config": {"write_mode": "upsert", "schema_version": 1},
+        }
+        client._stream_active = False
+        client._connected = False
+
+        connect_mock = AsyncMock(return_value=True)
+        start_calls = []
+
+        async def fake_start_stream(run_id, stream_id, schema_config):
+            start_calls.append((run_id, stream_id, schema_config))
+            client._stream_active = True
+            client._connected = True
+            return True
+
+        success = BatchResult(
+            success=True,
+            status=AckStatus.ACK_STATUS_SUCCESS,
+            records_written=1,
+            committed_cursor=None,
+            failed_record_ids=[],
+            failure_summary="",
+        )
+
+        with patch.object(client, "connect", connect_mock), \
+             patch.object(client, "start_stream", side_effect=fake_start_stream), \
+             patch.object(
+                 client, "_request_queue", new=asyncio.Queue()
+             ), \
+             patch.object(
+                 client, "_wait_with_heartbeat",
+                 AsyncMock(return_value=_batch_ack(AckStatus.ACK_STATUS_SUCCESS)),
+             ):
+            result = await client.send_batch(
+                run_id="run-1",
+                stream_id="s1",
+                batch_seq=0,
+                record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
+                record_ids=["1"],
+                cursor=Cursor(token=b""),
+            )
+
+        connect_mock.assert_awaited_once()
+        assert start_calls == [
+            ("run-1", "s1", {"write_mode": "upsert", "schema_version": 1})
+        ]
+        assert result.success is True
+        assert result.status == AckStatus.ACK_STATUS_SUCCESS
+
+    @pytest.mark.asyncio
+    async def test_send_batch_rebuild_failure_returns_retryable_not_exception(self):
+        """If the rebuild fails (reconnect or restart fails), send_batch returns
+        a RETRYABLE transport_failure result — never raises — so the engine's
+        bounded retry loop handles backoff and DLQ."""
+        import pyarrow as pa
+
+        from src.grpc.generated.analitiq.v1 import AckStatus, Cursor
+
+        client = DestinationGRPCClient()
+        client._stream_params = {
+            "run_id": "run-1",
+            "stream_id": "s1",
+            "schema_config": {"write_mode": "upsert", "schema_version": 1},
+        }
+        client._stream_active = False
+        client._connected = False
+
+        with patch.object(client, "connect", AsyncMock(return_value=False)):
+            result = await client.send_batch(
+                run_id="run-1",
+                stream_id="s1",
+                batch_seq=0,
+                record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
+                record_ids=["1"],
+                cursor=Cursor(token=b""),
+            )
+
+        assert result.success is False
+        assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
+        assert result.transport_failure is True
+        assert "rebuild" in result.failure_summary.lower()
+
+    @pytest.mark.asyncio
+    async def test_end_stream_clears_cached_params(self):
+        """A deliberate end_stream drops cached params so a later send_batch
+        raises rather than resurrecting an ended stream."""
+        import asyncio
+        import pyarrow as pa
+
+        from src.grpc.generated.analitiq.v1 import Cursor
+
+        client = DestinationGRPCClient()
+        client._stream_params = {
+            "run_id": "r",
+            "stream_id": "s",
+            "schema_config": {"write_mode": "upsert", "schema_version": 1},
+        }
+        client._stream_active = True
+        client._request_queue = asyncio.Queue()
+
+        async def _noop():
+            await asyncio.sleep(0)
+
+        client._writer_task = asyncio.create_task(_noop())
+        client._reader_task = asyncio.create_task(_noop())
+
+        await client.end_stream()
+        assert client._stream_params is None
+
+        with pytest.raises(RuntimeError, match="Stream not active"):
+            await client.send_batch(
+                run_id="r",
+                stream_id="s",
+                batch_seq=0,
+                record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
+                record_ids=["1"],
+                cursor=Cursor(token=b""),
+            )
+
+
+def _batch_ack(status):
+    """Build a BatchAck stand-in for _wait_with_heartbeat return values."""
+    from src.grpc.generated.analitiq.v1 import BatchAck
+
+    return BatchAck(status=status, records_written=1)
