@@ -359,10 +359,29 @@ class TestReadAdbcBranchPaging:
         assert not any("defaulting ORDER BY" in r.message for r in caplog.records)
 
     @pytest.mark.asyncio
-    async def test_declared_order_by_field_wins_over_cursor(self):
-        # An incremental stream may declare a page ordering distinct from
-        # its cursor; the declared ordering wins while the cursor stays
-        # the WHERE predicate.
+    async def test_order_by_field_conflicting_with_cursor_rejected(self):
+        # Checkpoint advancement takes the cursor value of the page's last
+        # row — the maximum only when pages are ordered by the cursor. A
+        # declared ordering that diverges from the cursor would save
+        # arbitrary cursor values and silently skip rows on later runs,
+        # so the stream is rejected before any extraction work.
+        runtime = _FakeRuntime(is_adbc=True)
+        connector = GenericSQLConnector()
+        with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()), patch(
+            "cdk.sql.generic.SchemaContract"
+        ):
+            config = _endpoint_config(
+                replication={"method": "incremental", "cursor_field": ["updated_at"]},
+                database_pagination={"type": "offset", "order_by_field": "id"},
+            )
+            with pytest.raises(ReadError, match="conflicts with"):
+                await _drain(connector, runtime, config, _checkpoint())
+        runtime.close.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_order_by_field_matching_cursor_allowed(self):
+        # Declaring the cursor itself as the page ordering is redundant
+        # but harmless — same order the cursor would impose.
         runtime = _FakeRuntime(is_adbc=True)
         checkpoint = _checkpoint(cursor={"cursor": "2024-01-02"})
         page = [pa.RecordBatch.from_pydict({"id": [3], "updated_at": ["2024-01-03"]})]
@@ -374,12 +393,15 @@ class TestReadAdbcBranchPaging:
             sc.return_value.cast_arrow_batch.side_effect = lambda b: b
             config = _endpoint_config(
                 replication={"method": "incremental", "cursor_field": ["updated_at"]},
-                database_pagination={"type": "offset", "order_by_field": "id"},
+                database_pagination={
+                    "type": "offset",
+                    "order_by_field": "updated_at",
+                },
             )
             await _drain(connector, runtime, config, checkpoint)
 
         sql, params = reader.calls[0]
-        assert 'ORDER BY "id"' in sql
+        assert 'ORDER BY "updated_at"' in sql
         assert '"updated_at" >= ?' in sql
         assert params == ["2024-01-02"]
 

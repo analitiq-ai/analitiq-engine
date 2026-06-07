@@ -147,7 +147,7 @@ pipelines with `status: "active"` are executable.
 | `source.replication.cursor_field` | When `incremental` | Name of the cursor field, a single string (e.g. `"created"`) |
 | `source.replication.safety_window_seconds` | No | Subtracted from cursor for late-arriving data |
 | `source.replication.tie_breaker_fields` | No | Used for deterministic ordering when cursor values tie |
-| `source.database_pagination.order_by_field` | No | Declared page ordering for database reads. Takes precedence over the cursor field; systems that require an ordering for paged reads (e.g. MSSQL) need this on full-refresh streams |
+| `source.database_pagination.order_by_field` | No | Declared page ordering for database reads; systems that require an ordering for paged reads (e.g. MSSQL) need this on full-refresh streams. On incremental streams it must equal `cursor_field` (cursor checkpointing requires cursor-ordered pages); any other value is rejected |
 
 > `is_enabled` and `source.connection_ref` are runtime convenience keys
 > added by `pipeline_config_prep` (it computes `is_enabled` from `status`

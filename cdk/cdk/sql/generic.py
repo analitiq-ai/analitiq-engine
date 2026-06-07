@@ -1856,11 +1856,30 @@ class GenericSQLConnector(BaseDestinationHandler):
 
             # Stream-declared page ordering (the contract's
             # ``source.database_pagination.order_by_field``). Takes
-            # precedence over the cursor field and the ADBC first-column
-            # fallback; a full-refresh stream uses it to declare the
-            # ordering its paged read needs.
+            # precedence over the ADBC first-column fallback; a
+            # full-refresh stream uses it to declare the ordering its
+            # paged read needs.
             database_pagination = stream_source.get("database_pagination") or {}
             order_by_field = database_pagination.get("order_by_field")
+            if (
+                order_by_field
+                and replication_method == "incremental"
+                and cursor_field
+                and order_by_field != cursor_field
+            ):
+                # Checkpoint advancement takes the cursor value of the
+                # page's last row, which is the maximum only when pages
+                # are ordered by the cursor. An ordering that diverges
+                # from the cursor would save arbitrary cursor values and
+                # silently skip rows on later runs — fail before any
+                # extraction work.
+                raise ReadError(
+                    f"stream {stream_name!r}: database_pagination."
+                    f"order_by_field {order_by_field!r} conflicts with "
+                    f"incremental cursor_field {cursor_field!r}; cursor "
+                    f"checkpointing requires pages ordered by the cursor. "
+                    f"Drop order_by_field or make it the cursor field."
+                )
 
             if replication_method == "incremental" and cursor_field:
                 # The wildcard projection compiles to SELECT * (see
@@ -2050,9 +2069,11 @@ class GenericSQLConnector(BaseDestinationHandler):
             self.dialect.normalize_schema(schema_name) if schema_name else None
         )
 
-        # Page ordering: the stream's declared order_by_field wins, then
-        # the incremental cursor, then the first projected column (warned
-        # once — an undeclared order makes OFFSET paging best-effort).
+        # Page ordering: the stream's declared order_by_field wins (a
+        # conflict with the incremental cursor is rejected in
+        # read_batches), then the cursor, then the first projected column
+        # (warned once — an undeclared order makes OFFSET paging
+        # best-effort).
         if order_by_field:
             order_by = order_by_field
         elif cursor_field:
