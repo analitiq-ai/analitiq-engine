@@ -179,9 +179,10 @@ def _translate_source_config(
         # contract-document pass-through: endpoint_document + stream_source.
         if kind not in ("database", "file", "stdout"):
             logger.warning(
-                "Connector kind %r is not a built-in kind; routing through "
-                "the database contract-document path. "
-                "The worker registry will raise if no connector is registered.",
+                "Connector kind %r is not a recognised built-in kind; passing "
+                "contract documents through as endpoint_document + stream_source. "
+                "The worker registry will raise ConnectorNotRegisteredError if "
+                "no connector is registered for this kind.",
                 kind,
             )
         base.update(_translate_database_source(source, endpoint))

@@ -40,7 +40,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
-from src.config.schema_validator import validate as validate_artifact
+from src.config.schema_validator import ContractValidationError, validate as validate_artifact
 from src.config.endpoint_resolver import (
     ConnectionLookup,
     resolve_endpoint_ref,
@@ -435,9 +435,13 @@ class PipelineConfigPrep:
         endpoint_kind = match.group(1)
         try:
             validate_artifact(endpoint_kind, document, source=str(ref))
+        except ContractValidationError:
+            # ContractValidationError already embeds str(ref) as its source and
+            # carries structured per-field errors; re-raise as-is to preserve type.
+            raise
         except ValueError as exc:
-            # Re-raise with endpoint context; _load_schema's ValueError for an
-            # unknown artifact kind does not include the ref or $schema URL.
+            # _load_schema raises plain ValueError for unknown artifact kinds;
+            # add ref and $schema URL context which that error omits.
             raise ValueError(
                 f"Endpoint {ref!s} ($schema={schema_url!r}, kind={endpoint_kind!r}): {exc}"
             ) from exc
