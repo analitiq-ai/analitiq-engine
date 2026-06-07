@@ -315,3 +315,61 @@ class TestDictConstantsEndToEnd:
             {"id": "r1", "checkAccount": {"id": "42", "objectName": "CheckAccount"}},
             {"id": "r2", "checkAccount": {"id": "42", "objectName": "CheckAccount"}},
         ]
+
+
+class TestFnToIntFnToFloat:
+    """_fn_to_int/_fn_to_float raise TransformationError on failure (issue #183)."""
+
+    @pytest.mark.asyncio
+    async def test_to_int_raises_on_unparseable(self):
+        from src.engine.exceptions import TransformationError
+
+        t = AssignmentTransformer()
+        with pytest.raises(TransformationError, match="to_int.*abc.*str"):
+            await t._fn_to_int("abc")
+
+    @pytest.mark.asyncio
+    async def test_to_float_raises_on_unparseable(self):
+        from src.engine.exceptions import TransformationError
+
+        t = AssignmentTransformer()
+        with pytest.raises(TransformationError, match="to_float.*xyz.*str"):
+            await t._fn_to_float("xyz")
+
+    @pytest.mark.asyncio
+    async def test_to_int_raises_on_dict_input(self):
+        from src.engine.exceptions import TransformationError
+
+        t = AssignmentTransformer()
+        with pytest.raises(TransformationError, match="to_int.*dict"):
+            await t._fn_to_int({"a": 1})
+
+    @pytest.mark.asyncio
+    async def test_to_float_raises_on_list_input(self):
+        from src.engine.exceptions import TransformationError
+
+        t = AssignmentTransformer()
+        with pytest.raises(TransformationError, match="to_float.*list"):
+            await t._fn_to_float([1, 2])
+
+    @pytest.mark.asyncio
+    async def test_to_int_returns_none_for_none(self):
+        assert await AssignmentTransformer()._fn_to_int(None) is None
+
+    @pytest.mark.asyncio
+    async def test_to_float_returns_none_for_none(self):
+        assert await AssignmentTransformer()._fn_to_float(None) is None
+
+    @pytest.mark.asyncio
+    async def test_to_int_converts_valid_inputs(self):
+        t = AssignmentTransformer()
+        assert await t._fn_to_int("42") == 42
+        assert await t._fn_to_int(3.9) == 3
+        assert await t._fn_to_int(0) == 0
+
+    @pytest.mark.asyncio
+    async def test_to_float_converts_valid_inputs(self):
+        t = AssignmentTransformer()
+        assert await t._fn_to_float("3.14") == pytest.approx(3.14)
+        assert await t._fn_to_float(2) == pytest.approx(2.0)
+        assert await t._fn_to_float("0") == pytest.approx(0.0)

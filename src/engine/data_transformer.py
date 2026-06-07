@@ -349,8 +349,10 @@ class AssignmentTransformer:
             return None
         try:
             return int(float(value))
-        except (ValueError, TypeError):
-            return None
+        except (ValueError, TypeError) as e:
+            raise TransformationError(
+                f"to_int: cannot convert {value!r} ({type(value).__name__}) to int: {e}"
+            ) from e
 
     async def _fn_to_float(self, value: Any) -> float:
         """Convert to float."""
@@ -358,8 +360,10 @@ class AssignmentTransformer:
             return None
         try:
             return float(value)
-        except (ValueError, TypeError):
-            return None
+        except (ValueError, TypeError) as e:
+            raise TransformationError(
+                f"to_float: cannot convert {value!r} ({type(value).__name__}) to float: {e}"
+            ) from e
 
     async def _fn_to_string(self, value: Any) -> str:
         """Convert to string."""
