@@ -93,6 +93,23 @@ class TypeMapper:
     def has_write_map(self) -> bool:
         return bool(self._write_rules)
 
+    @classmethod
+    def compose(cls, primary: "TypeMapper", fallback: "TypeMapper") -> "TypeMapper":
+        """Return a new mapper where *primary* rules take precedence per-type.
+
+        On a miss in *primary* the *fallback* rules are consulted, for both the
+        read direction (``to_arrow_type``) and the write direction
+        (``to_native_type``). A connection mapper that only declares override
+        types therefore inherits the connector mapper's rules for everything
+        else — including write rules the connection map never needs to repeat.
+        """
+        combined_write = list(primary.write_rules) + list(fallback.write_rules)
+        return cls(
+            primary.connector_slug,
+            list(primary.rules) + list(fallback.rules),
+            combined_write or None,
+        )
+
     def to_arrow_type(self, native: str) -> str:
         """Map a native type string to its Arrow-type-string form.
 

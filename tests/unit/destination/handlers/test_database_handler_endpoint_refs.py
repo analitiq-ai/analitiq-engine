@@ -70,14 +70,15 @@ class TestEndpointRefDispatch:
         assert handler._type_mapper_for_stream("s1") is connector_map
 
     def test_connection_scoped_uses_connection_mapper(self):
+        # Connection scope returns a composed mapper with the connection's slug.
+        # The connection map is the primary (its rules take precedence).
         handler = GenericSQLConnector()
-        connection_map = _mapper("connection:dest-conn")
         handler._runtime = _runtime(
             connector_mapper=_mapper("pg"),
-            connection_mapper=connection_map,
+            connection_mapper=_mapper("connection:dest-conn"),
         )
         handler.set_endpoint_refs({"s1": {"scope": "connection", "connection_id": "dest-conn", "endpoint_id": "orders"}})
-        assert handler._type_mapper_for_stream("s1") is connection_map
+        assert handler._type_mapper_for_stream("s1").connector_slug == "connection:dest-conn"
 
     def test_set_endpoint_refs_copies_mapping(self):
         """External mutations must not leak into the handler's state."""

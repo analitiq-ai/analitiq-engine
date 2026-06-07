@@ -246,11 +246,16 @@ class ConnectionRuntime:
     def type_mapper_for(self, *, scope: EndpointScope) -> TypeMapper:
         """Pick the type mapper for an endpoint of the given ``scope``.
 
-        For ``EndpointScope.CONNECTION`` the connection's own ``type-map-read.json``
-        wins when present; otherwise the connector's mapper is used. The
-        connector's native vocabulary is authoritative for the driver
-        (e.g. MySQL ``BIGINT`` is the same in every MySQL installation),
-        so a connection only needs its own map to override or extend it.
+        **Composition semantics (decision for issue #126):** connection maps
+        compose with the connector map per-type. The connection's rules are
+        tried first; on a miss the connector's rules are consulted — for both
+        the read direction (``to_arrow_type``) and the write direction
+        (``to_native_type``). A connection only needs to declare the types it
+        overrides; the connector map supplies everything else.
+
+        This means a connection endpoint that has a ``type-map-read.json`` but
+        no ``type-map-write.json`` still supports DDL generation: its read
+        overrides take effect and the connector's write rules cover the rest.
 
         The caller passes the already-resolved :class:`~cdk.types.EndpointScope`
         (the engine maps its ``EndpointRef.scope`` to it at the boundary), so
@@ -261,7 +266,9 @@ class ConnectionRuntime:
             return self.connector_type_mapper
         if scope == EndpointScope.CONNECTION:
             if self._connection_type_mapper is not None:
-                return self._connection_type_mapper
+                return TypeMapper.compose(
+                    self._connection_type_mapper, self.connector_type_mapper
+                )
             return self.connector_type_mapper
         raise ValueError(f"type_mapper_for: unknown endpoint scope {scope!r}")
 
