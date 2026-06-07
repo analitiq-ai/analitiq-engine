@@ -298,9 +298,10 @@ class AssignmentTransformer:
     # Function implementations
     async def _fn_iso_to_date(self, value: Any) -> str:
         """Convert ISO string to date string (YYYY-MM-DD). Raises on
-        unparseable input — a silent passthrough would corrupt date columns
-        and make the error appear to originate from the destination connector
-        (compare ``_fn_iso_to_datetime``)."""
+        unparseable input — previously returned the raw string unchanged,
+        which passed a non-date value into typed date columns and surfaced
+        as a destination connector write error rather than a transformation
+        error."""
         if value is None:
             return None
         try:
@@ -308,7 +309,7 @@ class AssignmentTransformer:
             return dt.strftime('%Y-%m-%d')
         except (ValueError, TypeError) as e:
             raise TransformationError(
-                f"iso_to_date: cannot parse {value!r}: {e}"
+                f"iso_to_date failed for {value!r}: {e}"
             ) from e
 
     async def _fn_iso_to_datetime(self, value: Any) -> datetime:
