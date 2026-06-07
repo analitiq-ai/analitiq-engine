@@ -288,9 +288,11 @@ class AssignmentTransformer:
 
         fn_name = catalog_entry["fn"]
         method = getattr(self, fn_name, None)
-        if method:
-            return await method(value, *args)
-        return value
+        if method is None:
+            raise TransformationError(
+                f"FUNCTION_CATALOG entry for {name!r} references missing method {fn_name!r}"
+            )
+        return await method(value, *args)
 
     # Function implementations
     async def _fn_iso_to_date(self, value: Any) -> str:

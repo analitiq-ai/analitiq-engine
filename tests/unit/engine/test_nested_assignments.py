@@ -377,3 +377,43 @@ class TestAssignmentTransformerBadInputs:
         )
         assert errors, "expected an error for unknown value kind"
         assert "literal" in errors[0]["error"]
+
+    @pytest.mark.asyncio
+    async def test_missing_op_key_errors(self):
+        """An expr dict with no 'op' key at all should error (op defaults to None)."""
+        assignment = self._assignment({"kind": "expr", "expr": {"args": []}})
+        _, errors = await AssignmentTransformer().transform_record(
+            record={}, assignments=[assignment]
+        )
+        assert errors, "expected an error for missing op key"
+        assert "None" in errors[0]["error"]
+
+    @pytest.mark.asyncio
+    async def test_none_function_name_errors(self):
+        """A fn expression with no 'name' key should error (name defaults to None)."""
+        assignment = self._assignment(
+            {"kind": "expr", "expr": {"op": "fn", "version": 1, "args": []}}
+        )
+        _, errors = await AssignmentTransformer().transform_record(
+            record={}, assignments=[assignment]
+        )
+        assert errors, "expected an error for missing function name"
+        assert "None" in errors[0]["error"]
+
+    @pytest.mark.asyncio
+    async def test_error_isolated_per_assignment(self):
+        """A bad first assignment produces an error entry but the second assignment
+        still runs — transform_record continues accumulating rather than short-circuiting."""
+        assignments = [
+            self._assignment({"kind": "expr", "expr": {"op": "frobnicate"}}),
+            {
+                "target": {"path": ["name"], "type": "string", "nullable": True},
+                "value": {"kind": "const", "const": {"value": "alice"}},
+            },
+        ]
+        result, errors = await AssignmentTransformer().transform_record(
+            record={}, assignments=assignments
+        )
+        assert len(errors) == 1
+        assert errors[0]["field"] == "out"
+        assert result.get("name") == "alice"
