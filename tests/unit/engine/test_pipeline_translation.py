@@ -180,17 +180,46 @@ class TestTranslateSourceConfig:
         assert result["connector_type"] == "api"
         assert result["stream_filters"] == [{"field": "x"}]
 
-    def test_unsupported_kind_raises(self):
-        source = _make_source(connector_type="file")
+    def test_non_built_in_kind_passes_through_database_shape(self):
+        """Non-built-in connector kinds pass through the same contract-document
+        shape as database without raising (#165)."""
+        source = _make_source(connector_type="nosql")
         stream = _make_stream()
+        endpoint = source.endpoint_document
 
-        with pytest.raises(ValueError, match="Unsupported source connector kind"):
+        result = _translate_source_config(
+            stream=stream, source=source, endpoint=endpoint, runtime=source.runtime
+        )
+
+        assert result["connector_type"] == "nosql"
+        assert result["endpoint_document"] is endpoint
+        assert result["stream_source"] is source.stream_source
+        assert "stream_filters" not in result
+
+    @pytest.mark.parametrize("kind", ["nosql", "graphql", "file", "sftp", "custom-db"])
+    def test_non_built_in_kind_never_raises(self, kind):
+        """Regression guard: _translate_source_config must not raise for unknown kinds."""
+        source = _make_source(connector_type=kind)
+        result = _translate_source_config(
+            stream=_make_stream(),
+            source=source,
+            endpoint=source.endpoint_document,
+            runtime=source.runtime,
+        )
+        assert result["connector_type"] == kind
+
+    def test_non_built_in_kind_logs_warning(self, caplog):
+        import logging
+
+        source = _make_source(connector_type="nosql")
+        with caplog.at_level(logging.WARNING, logger="src.runner"):
             _translate_source_config(
-                stream=stream,
+                stream=_make_stream(),
                 source=source,
-                endpoint={},
+                endpoint=source.endpoint_document,
                 runtime=source.runtime,
             )
+        assert any("nosql" in r.message for r in caplog.records)
 
     def test_endpoint_ref_is_serialised(self):
         source = _make_source(connector_type="database")

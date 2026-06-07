@@ -88,6 +88,13 @@ def _translate_source_config(
     ``stream_source`` dicts. The translator only injects the runtime
     handle and the connector type discriminator so the engine knows which
     connector class to instantiate.
+
+    All kinds except ``api`` — including built-ins (``database``,
+    ``file``, ``stdout``) and any non-built-in kinds — receive the same
+    contract-document pass-through (``endpoint_document`` +
+    ``stream_source``). The worker registry raises
+    ``ConnectorNotRegisteredError`` at class-resolution time if no
+    connector is registered for the given kind.
     """
     _ = stream  # received from _build_config_dict but not needed at this layer
     kind = runtime.connector_type
@@ -97,14 +104,21 @@ def _translate_source_config(
         "endpoint_ref": source.endpoint_ref.to_dict(),
         "connection_ref": source.connection_ref,
     }
-    if kind == "database":
-        base.update(_translate_database_source(source, endpoint))
-    elif kind == "api":
+    if kind == "api":
         base.update(_translate_api_source(source, endpoint, runtime))
     else:
-        raise ValueError(
-            f"Unsupported source connector kind: {kind!r}; expected 'api' or 'database'"
-        )
+        # "api" is handled above. All other built-in kinds ("database",
+        # "file", "stdout") and non-built-in kinds use the same
+        # contract-document pass-through: endpoint_document + stream_source.
+        if kind not in ("database", "file", "stdout"):
+            logger.warning(
+                "Connector kind %r is not a recognised built-in kind; passing "
+                "contract documents through as endpoint_document + stream_source. "
+                "The worker registry will raise ConnectorNotRegisteredError if "
+                "no connector is registered for this kind.",
+                kind,
+            )
+        base.update(_translate_database_source(source, endpoint))
     return base
 
 
