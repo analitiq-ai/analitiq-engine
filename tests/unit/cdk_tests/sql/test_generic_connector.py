@@ -55,7 +55,12 @@ def _checkpoint(cursor: dict | None = None) -> AsyncMock:
     return cp
 
 
-def _endpoint_config(filters=None, replication=None, columns=("id", "updated_at")):
+def _endpoint_config(
+    filters=None,
+    replication=None,
+    columns=("id", "updated_at"),
+    database_pagination=None,
+):
     return {
         "endpoint_document": {
             "database_object": {"name": "orders", "schema": "public"},
@@ -64,6 +69,7 @@ def _endpoint_config(filters=None, replication=None, columns=("id", "updated_at"
         "stream_source": {
             "filters": filters or [],
             "replication": replication or {},
+            "database_pagination": database_pagination or {},
         },
     }
 
@@ -326,6 +332,58 @@ class TestReadAdbcBranchPaging:
         assert params == ["x"]
 
     @pytest.mark.asyncio
+    async def test_declared_order_by_field_used_without_fallback_warning(
+        self, caplog
+    ):
+        # source.database_pagination.order_by_field from the stream config
+        # is the declared page ordering: no first-column fallback, no warning.
+        from cdk.sql import generic as generic_mod
+
+        generic_mod._order_by_fallback_logged.clear()
+        runtime = _FakeRuntime(is_adbc=True)
+        page = [pa.RecordBatch.from_pydict({"id": [1], "updated_at": ["2024-01-01"]})]
+        reader = _RecordingReader([page, []])
+        connector = GenericSQLConnector()
+        with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()), patch(
+            "cdk.sql.generic.open_adbc_reader", return_value=_adbc_cm(reader)
+        ), patch("cdk.sql.generic.SchemaContract") as sc:
+            sc.return_value.cast_arrow_batch.side_effect = lambda b: b
+            config = _endpoint_config(
+                database_pagination={"type": "offset", "order_by_field": "updated_at"},
+            )
+            with caplog.at_level("WARNING"):
+                await _drain(connector, runtime, config, _checkpoint())
+
+        sql, _ = reader.calls[0]
+        assert 'ORDER BY "updated_at"' in sql
+        assert not any("defaulting ORDER BY" in r.message for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_declared_order_by_field_wins_over_cursor(self):
+        # An incremental stream may declare a page ordering distinct from
+        # its cursor; the declared ordering wins while the cursor stays
+        # the WHERE predicate.
+        runtime = _FakeRuntime(is_adbc=True)
+        checkpoint = _checkpoint(cursor={"cursor": "2024-01-02"})
+        page = [pa.RecordBatch.from_pydict({"id": [3], "updated_at": ["2024-01-03"]})]
+        reader = _RecordingReader([page, []])
+        connector = GenericSQLConnector()
+        with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()), patch(
+            "cdk.sql.generic.open_adbc_reader", return_value=_adbc_cm(reader)
+        ), patch("cdk.sql.generic.SchemaContract") as sc:
+            sc.return_value.cast_arrow_batch.side_effect = lambda b: b
+            config = _endpoint_config(
+                replication={"method": "incremental", "cursor_field": ["updated_at"]},
+                database_pagination={"type": "offset", "order_by_field": "id"},
+            )
+            await _drain(connector, runtime, config, checkpoint)
+
+        sql, params = reader.calls[0]
+        assert 'ORDER BY "id"' in sql
+        assert '"updated_at" >= ?' in sql
+        assert params == ["2024-01-02"]
+
+    @pytest.mark.asyncio
     async def test_order_by_fallback_warns_once(self, caplog):
         from cdk.sql import generic as generic_mod
 
@@ -467,6 +525,38 @@ class TestReadSqlAlchemyBranch:
         # One page of one row -> one yielded batch; short page ends the loop.
         assert out == [[{"id": 1, "updated_at": "2024-01-01"}]]
         runtime.close.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_declared_order_by_field_lands_in_paged_select(self):
+        # source.database_pagination.order_by_field flows through
+        # QueryConfig.order_by on the SQLAlchemy paging path.
+        runtime = _FakeRuntime(is_adbc=False, engine=object())
+
+        executed = []
+
+        class _RecordingConn:
+            async def exec_driver_sql(self, sql, params=None):
+                executed.append(sql)
+                return []
+
+        class _AcquireCM:
+            async def __aenter__(self):
+                return _RecordingConn()
+
+            async def __aexit__(self, *exc):
+                return False
+
+        connector = GenericSQLConnector()
+        with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()), patch(
+            "cdk.sql.generic.acquire_connection", return_value=_AcquireCM()
+        ), patch("cdk.sql.generic.SchemaContract") as sc:
+            sc.return_value.from_pylist.side_effect = lambda rows: rows
+            config = _endpoint_config(
+                database_pagination={"type": "offset", "order_by_field": "updated_at"},
+            )
+            await _drain(connector, runtime, config, _checkpoint(cursor=None))
+
+        assert "ORDER BY updated_at" in executed[0]
 
     @pytest.mark.asyncio
     async def test_query_builder_receives_dialect_paging_order_fallback(self):

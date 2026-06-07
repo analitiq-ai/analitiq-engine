@@ -1854,6 +1854,14 @@ class GenericSQLConnector(BaseDestinationHandler):
                 cursor_field = cursor_field[0] if cursor_field else None
             replication_method = replication.get("method", "full_refresh")
 
+            # Stream-declared page ordering (the contract's
+            # ``source.database_pagination.order_by_field``). Takes
+            # precedence over the cursor field and the ADBC first-column
+            # fallback; a full-refresh stream uses it to declare the
+            # ordering its paged read needs.
+            database_pagination = stream_source.get("database_pagination") or {}
+            order_by_field = database_pagination.get("order_by_field")
+
             if replication_method == "incremental" and cursor_field:
                 # The wildcard projection compiles to SELECT * (see
                 # QueryBuilder.build_select_query), but the fetched batch
@@ -1901,6 +1909,7 @@ class GenericSQLConnector(BaseDestinationHandler):
                         cursor_field if replication_method == "incremental" else None
                     ),
                     cursor_value=cursor_value,
+                    order_by_field=order_by_field,
                     batch_size=batch_size,
                     checkpoint=checkpoint,
                     stream_name=stream_name,
@@ -1933,6 +1942,7 @@ class GenericSQLConnector(BaseDestinationHandler):
                         ),
                         cursor_value=cursor_value,
                         cursor_mode="inclusive",
+                        order_by=order_by_field,
                         limit=batch_size,
                         offset=offset,
                     )
@@ -2004,6 +2014,7 @@ class GenericSQLConnector(BaseDestinationHandler):
         filters: List[Filter],
         cursor_field: Optional[str],
         cursor_value: Any,
+        order_by_field: Optional[str],
         batch_size: int,
         checkpoint: CheckpointStore,
         stream_name: str,
@@ -2039,7 +2050,12 @@ class GenericSQLConnector(BaseDestinationHandler):
             self.dialect.normalize_schema(schema_name) if schema_name else None
         )
 
-        if cursor_field:
+        # Page ordering: the stream's declared order_by_field wins, then
+        # the incremental cursor, then the first projected column (warned
+        # once — an undeclared order makes OFFSET paging best-effort).
+        if order_by_field:
+            order_by = order_by_field
+        elif cursor_field:
             order_by = cursor_field
         else:
             order_by = columns[0]
