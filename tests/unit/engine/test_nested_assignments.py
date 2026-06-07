@@ -17,7 +17,6 @@ from src.engine.data_transformer import (
     DataTransformer,
     build_output_schema,
 )
-from src.engine.exceptions import TransformationError
 from src.runner import _translate_assignment
 
 
@@ -540,7 +539,19 @@ class TestNotExpressionArgCount:
         )
         assert errors, "expected an error for not with zero args"
         assert "not" in errors[0]["error"]
-        assert "0" in errors[0]["error"]
+        assert "got 0" in errors[0]["error"]
+
+    @pytest.mark.asyncio
+    async def test_two_args_produces_error_entry(self):
+        _, errors = await AssignmentTransformer().transform_record(
+            record={}, assignments=[self._not_assignment([
+                {"op": "const", "value": True},
+                {"op": "const", "value": False},
+            ])]
+        )
+        assert errors, "expected an error for not with two args"
+        assert "not" in errors[0]["error"]
+        assert "got 2" in errors[0]["error"]
 
     @pytest.mark.asyncio
     async def test_one_true_arg_returns_false(self):
