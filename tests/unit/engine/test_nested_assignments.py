@@ -17,7 +17,7 @@ from src.engine.data_transformer import (
     DataTransformer,
     build_output_schema,
 )
-from src.engine.pipeline import _translate_assignment
+from src.runner import _translate_assignment
 
 
 class TestBuildOutputSchemaNested:
