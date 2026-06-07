@@ -318,7 +318,7 @@ class TestIsoTimestampStrictRaise:
             await t._fn_iso_to_date("not-a-date")
 
     @pytest.mark.asyncio
-    async def test_fn_iso_to_date_raises_on_type_error(self):
+    async def test_fn_iso_to_date_raises_on_non_iso_input(self):
         from src.engine.data_transformer import AssignmentTransformer
         from src.engine.exceptions import TransformationError
 
