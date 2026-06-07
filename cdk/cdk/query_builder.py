@@ -243,6 +243,7 @@ class QueryBuilder:
         paramstyle: Optional[str] = None,
         quote_identifiers: bool = False,
         inline_paging: bool = False,
+        paging_order_fallback: Optional[Callable[[], Optional[str]]] = None,
     ):
         """Initialize query builder with specified dialect.
 
@@ -261,10 +262,19 @@ class QueryBuilder:
                 rather than bound parameters. Snowflake rejects bind
                 variables in ``LIMIT``/``OFFSET``; filter and cursor
                 values stay parameterized.
+            paging_order_fallback: Hook supplying a raw SQL ordering
+                expression for paged queries that declare no ordering
+                (typically the connector dialect's
+                :meth:`~cdk.sql.dialects.SqlDialect.paging_order_fallback`
+                bound method). Consulted lazily, only when ``offset`` is
+                set and neither ``order_by`` nor ``cursor_field`` is
+                declared, so a raising hook never affects ordered reads.
+                ``None`` (and a hook returning ``None``) injects nothing.
         """
         self.dialect = dialect
         self._quote_identifiers = quote_identifiers
         self._inline_paging = inline_paging
+        self._paging_order_fallback = paging_order_fallback
         self._sa_dialect = _get_sqlalchemy_dialect(dialect, paramstyle=paramstyle)
 
     def _ident(self, name: str) -> Any:
@@ -340,11 +350,14 @@ class QueryBuilder:
                 query = query.order_by(desc(order_col))
             else:
                 query = query.order_by(asc(order_col))
-        elif config.offset is not None and self.dialect.lower() == "mssql":
-            # T-SQL refuses OFFSET / FETCH NEXT without ORDER BY.
-            # ``ORDER BY (SELECT NULL)`` is Microsoft's documented escape
-            # hatch for paginated reads that don't need a stable order.
-            query = query.order_by(text("(SELECT NULL)"))
+        elif config.offset is not None and self._paging_order_fallback is not None:
+            # The connector dialect declared a fallback ordering for paged
+            # reads that specify none (e.g. T-SQL refuses OFFSET without
+            # ORDER BY). Consulted lazily so a hook that raises to demand
+            # an explicit ordering fires only when one is actually missing.
+            fallback = self._paging_order_fallback()
+            if fallback is not None:
+                query = query.order_by(text(fallback))
 
         # Apply limit/offset
         if config.limit is not None:

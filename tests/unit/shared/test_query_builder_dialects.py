@@ -114,13 +114,34 @@ class TestPaging:
         assert "LIMIT 50" not in upper
         assert "LIMIT :" not in upper
 
-    def test_mssql_paging_without_cursor_injects_order_by(self):
-        """Full-refresh on MSSQL has no cursor / order_by, but T-SQL
-        refuses OFFSET without ORDER BY. The builder must inject
-        ``ORDER BY (SELECT NULL)`` (the documented no-op order) so the
-        compile succeeds.
+    def test_mssql_paging_without_ordering_and_without_fallback_fails_loudly(self):
+        """The builder no longer invents an MSSQL ordering. Without a
+        ``paging_order_fallback`` hook, T-SQL's OFFSET-requires-ORDER-BY
+        rule surfaces as SQLAlchemy's ``CompileError`` instead of a
+        silently injected ``(SELECT NULL)``; the mssql connector package
+        supplies the fallback via its ``SqlDialect`` subclass.
         """
+        from sqlalchemy.exc import CompileError
+
         builder = QueryBuilder("mssql")
+        with pytest.raises(CompileError, match="order_by"):
+            builder.build_select_query(
+                QueryConfig(
+                    schema_name="dbo",
+                    table_name="events",
+                    columns=["id"],
+                    limit=50,
+                    offset=100,
+                )
+            )
+
+    def test_paging_order_fallback_hook_injects_expression(self):
+        """A connector-supplied fallback hook provides the ordering for
+        paged queries that declare none (the mssql connector returns
+        ``(SELECT NULL)``, Microsoft's documented no-op order)."""
+        builder = QueryBuilder(
+            "mssql", paging_order_fallback=lambda: "(SELECT NULL)"
+        )
         sql, _ = builder.build_select_query(
             QueryConfig(
                 schema_name="dbo",
@@ -131,15 +152,49 @@ class TestPaging:
             )
         )
         upper = sql.upper()
-        # Either OFFSET/FETCH or ROW_NUMBER, plus the synthetic ORDER BY.
         assert "ORDER BY" in upper
-        assert "(SELECT NULL)" in upper or "SELECT NULL" in upper
+        assert "(SELECT NULL)" in upper
+
+    def test_paging_order_fallback_not_consulted_when_ordering_declared(self):
+        """The hook fires only when a paged query lacks an ordering, so a
+        connector hook that raises to demand an explicit ordering never
+        affects cursor-ordered or order_by reads."""
+
+        def raising_fallback():
+            raise AssertionError("fallback consulted despite declared ordering")
+
+        builder = QueryBuilder("mssql", paging_order_fallback=raising_fallback)
+        sql, _ = builder.build_select_query(
+            QueryConfig(
+                schema_name="dbo",
+                table_name="events",
+                columns=["id"],
+                limit=50,
+                offset=100,
+                cursor_field="id",
+                cursor_value=0,
+            )
+        )
+        assert "ORDER BY" in sql.upper()
+
+    def test_paging_order_fallback_returning_none_injects_nothing(self):
+        """A hook returning ``None`` (the ANSI ``SqlDialect`` base) leaves
+        the query unordered — matching the no-hook behavior."""
+        builder = QueryBuilder("postgresql", paging_order_fallback=lambda: None)
+        sql, _ = builder.build_select_query(
+            QueryConfig(
+                schema_name="public",
+                table_name="events",
+                columns=["id"],
+                limit=50,
+                offset=100,
+            )
+        )
+        assert "ORDER BY" not in sql.upper()
 
     def test_postgres_paging_without_cursor_omits_order_by(self):
-        """The synthetic ``ORDER BY (SELECT NULL)`` is MSSQL-only.
-        Non-MSSQL dialects accept OFFSET without ORDER BY and shouldn't
-        get the no-op order silently appended.
-        """
+        """Dialects that accept OFFSET without ORDER BY get no ordering
+        silently appended when no fallback hook is configured."""
         builder = QueryBuilder("postgresql")
         sql, _ = builder.build_select_query(
             QueryConfig(
@@ -216,8 +271,13 @@ class TestMssqlParamstyle:
         The previous ``list(compiled.params.values())`` would silently
         drop the repeat. Using ``positiontup`` keeps the right number
         of positional values for the driver to bind.
+
+        The fallback hook stands in for the mssql connector dialect so
+        the unordered paged query compiles at all.
         """
-        builder = QueryBuilder("mssql")
+        builder = QueryBuilder(
+            "mssql", paging_order_fallback=lambda: "(SELECT NULL)"
+        )
         sql, params = builder.build_select_query(
             QueryConfig(
                 schema_name="dbo",

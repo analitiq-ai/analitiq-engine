@@ -63,6 +63,16 @@ _UNIT_SHORT_TO_LONG: Final[dict[str, str]] = {
 # Long-form names matched by _TEMPORAL_UNIT_RE that pass through unchanged.
 _UNIT_LONG_FORMS: Final[frozenset[str]] = frozenset(_UNIT_SHORT_TO_LONG.values())
 
+# Arrow constrains which units are legal per temporal type:
+# Time32 accepts only SECOND/MILLISECOND; Time64 accepts only MICROSECOND/NANOSECOND.
+# Timestamp and Duration are unconstrained — every unit in _UNIT_SHORT_TO_LONG is legal.
+# This table is checked after unit expansion so the error fires on both short (us)
+# and long (MICROSECOND) inputs.
+_VALID_UNITS_BY_TYPE: Final[dict[str, frozenset[str]]] = {
+    "Time32": frozenset({"SECOND", "MILLISECOND"}),
+    "Time64": frozenset({"MICROSECOND", "NANOSECOND"}),
+}
+
 # Matches the opening of a temporal-type parameter list, capturing the type name
 # and its first argument (the unit).  The trailing \b ensures that short codes
 # (e.g. "s") do not partially match inside long-form names (e.g. "SECOND") —
@@ -89,16 +99,28 @@ def _expand_temporal_unit(m: re.Match[str]) -> str:
     dict have drifted out of sync — raised as ``AssertionError`` immediately
     rather than silently producing an un-expanded string that would later fail
     with a misleading ``UnmappedTypeError``.
+
+    After expansion, validates that the unit is legal for the given temporal
+    type and raises ``InvalidTypeMapError`` for cross-type mismatches (e.g.
+    ``Time32(MICROSECOND)`` or ``Time64(SECOND)``).
     """
     type_name, unit = m.group(1), m.group(2)
     if unit in _UNIT_SHORT_TO_LONG:
-        return f"{type_name}({_UNIT_SHORT_TO_LONG[unit]}"
-    if unit in _UNIT_LONG_FORMS:
-        return f"{type_name}({unit}"
-    raise AssertionError(
-        f"temporal-unit regex matched unexpected unit {unit!r}; "
-        f"update _UNIT_SHORT_TO_LONG or _UNIT_LONG_FORMS to include it"
-    )
+        long_unit = _UNIT_SHORT_TO_LONG[unit]
+    elif unit in _UNIT_LONG_FORMS:
+        long_unit = unit
+    else:
+        raise AssertionError(
+            f"temporal-unit regex matched unexpected unit {unit!r}; "
+            f"update _UNIT_SHORT_TO_LONG or _UNIT_LONG_FORMS to include it"
+        )
+    allowed = _VALID_UNITS_BY_TYPE.get(type_name)
+    if allowed is not None and long_unit not in allowed:
+        valid_str = "/".join(sorted(allowed))
+        raise InvalidTypeMapError(
+            f"{type_name} accepts {valid_str} only; got {long_unit}"
+        )
+    return f"{type_name}({long_unit}"
 
 
 def normalize_native_type(value: str) -> str:

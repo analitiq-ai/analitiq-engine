@@ -216,20 +216,22 @@ class TestDataTransformer:
             await transformer.apply_transformations(batch, config)
 
     @pytest.mark.asyncio
-    async def test_to_int_returns_none_on_unparseable(self, transformer):
-        """_fn_to_int returns None on non-numeric input rather than raising."""
+    async def test_to_int_raises_on_unparseable(self, transformer):
+        """_fn_to_int raises on non-numeric input (#183); the batch wrapper
+        surfaces it as TransformationError for engine DLQ routing."""
         batch = [{"val": "abc"}]
         config = {"mapping": {"assignments": [_assignment("out", expr=_pipe("val", "to_int"))]}}
-        result = await transformer.apply_transformations(batch, config)
-        assert result[0]["out"] is None
+        with pytest.raises(TransformationError, match="to_int"):
+            await transformer.apply_transformations(batch, config)
 
     @pytest.mark.asyncio
-    async def test_to_float_returns_none_on_unparseable(self, transformer):
-        """_fn_to_float returns None on non-numeric input rather than raising."""
+    async def test_to_float_raises_on_unparseable(self, transformer):
+        """_fn_to_float raises on non-numeric input (#183); the batch wrapper
+        surfaces it as TransformationError for engine DLQ routing."""
         batch = [{"val": "xyz"}]
         config = {"mapping": {"assignments": [_assignment("out", expr=_pipe("val", "to_float"))]}}
-        result = await transformer.apply_transformations(batch, config)
-        assert result[0]["out"] is None
+        with pytest.raises(TransformationError, match="to_float"):
+            await transformer.apply_transformations(batch, config)
 
     @pytest.mark.asyncio
     async def test_legacy_keys_emit_warning(self, transformer, sample_batch):
@@ -267,13 +269,12 @@ class TestDataTransformer:
 
     @pytest.mark.asyncio
     async def test_iso_date_function_edge_cases(self, transformer):
-        """iso_to_date handles multiple ISO variants and gracefully passes through invalid input."""
+        """iso_to_date converts ISO variants and raises on invalid input (#184)."""
         batch = [
             {
                 "d_utc_z": "2025-08-16T10:30:00Z",
                 "d_utc_off": "2025-08-16T10:30:00+00:00",
                 "d_tz_off": "2025-08-16T10:30:00+02:00",
-                "d_bad": "invalid-date",
                 "d_none": None,
             }
         ]
@@ -283,7 +284,6 @@ class TestDataTransformer:
                     _assignment("r_utc_z", expr=_pipe("d_utc_z", "iso_to_date")),
                     _assignment("r_utc_off", expr=_pipe("d_utc_off", "iso_to_date")),
                     _assignment("r_tz_off", expr=_pipe("d_tz_off", "iso_to_date")),
-                    _assignment("r_bad", expr=_pipe("d_bad", "iso_to_date")),
                     _assignment("r_none", expr=_pipe("d_none", "iso_to_date")),
                 ]
             }
@@ -293,5 +293,19 @@ class TestDataTransformer:
         assert result[0]["r_utc_z"] == "2025-08-16"
         assert result[0]["r_utc_off"] == "2025-08-16"
         assert result[0]["r_tz_off"] == "2025-08-16"
-        assert result[0]["r_bad"] == "invalid-date"
         assert result[0]["r_none"] is None
+
+    @pytest.mark.asyncio
+    async def test_iso_date_raises_on_invalid_input(self, transformer):
+        """Invalid input no longer passes through unchanged (#184): the
+        batch wrapper surfaces the parse failure as TransformationError."""
+        batch = [{"d_bad": "invalid-date"}]
+        config = {
+            "mapping": {
+                "assignments": [
+                    _assignment("r_bad", expr=_pipe("d_bad", "iso_to_date")),
+                ]
+            }
+        }
+        with pytest.raises(TransformationError, match="iso_to_date"):
+            await transformer.apply_transformations(batch, config)
