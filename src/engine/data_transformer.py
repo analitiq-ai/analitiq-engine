@@ -347,23 +347,34 @@ class AssignmentTransformer:
             return None
         return str(value).upper()
 
-    async def _fn_to_int(self, value: Any) -> int:
-        """Convert to integer."""
+    async def _fn_to_int(self, value: Any) -> Optional[int]:
+        """Convert to integer via int(float(value)). None passes through.
+
+        Decimal strings and floats are truncated toward zero ("3.9" → 3).
+        Raises TransformationError on unparseable input — silently returning
+        None would mask mis-configured pipelines with no DLQ entry."""
         if value is None:
             return None
         try:
             return int(float(value))
-        except (ValueError, TypeError):
-            return None
+        except (ValueError, TypeError, OverflowError) as e:
+            raise TransformationError(
+                f"to_int: cannot convert {value!r} ({type(value).__name__}) to int: {e}"
+            ) from e
 
-    async def _fn_to_float(self, value: Any) -> float:
-        """Convert to float."""
+    async def _fn_to_float(self, value: Any) -> Optional[float]:
+        """Convert to float. None passes through.
+
+        Raises TransformationError on unparseable input — same rationale as
+        _fn_to_int; silently returning None masks mis-configured pipelines."""
         if value is None:
             return None
         try:
             return float(value)
-        except (ValueError, TypeError):
-            return None
+        except (ValueError, TypeError, OverflowError) as e:
+            raise TransformationError(
+                f"to_float: cannot convert {value!r} ({type(value).__name__}) to float: {e}"
+            ) from e
 
     async def _fn_to_string(self, value: Any) -> str:
         """Convert to string."""

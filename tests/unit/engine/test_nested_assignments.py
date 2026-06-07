@@ -317,6 +317,110 @@ class TestDictConstantsEndToEnd:
         ]
 
 
+class TestFnToIntFnToFloat:
+    """Unit tests for _fn_to_int and _fn_to_float: None passthrough, valid
+    conversions, and TransformationError on unparseable or overflow input."""
+
+    @pytest.mark.asyncio
+    async def test_to_int_raises_on_unparseable(self):
+        from src.engine.exceptions import TransformationError
+
+        t = AssignmentTransformer()
+        with pytest.raises(TransformationError, match="to_int.*abc.*str"):
+            await t._fn_to_int("abc")
+
+    @pytest.mark.asyncio
+    async def test_to_float_raises_on_unparseable(self):
+        from src.engine.exceptions import TransformationError
+
+        t = AssignmentTransformer()
+        with pytest.raises(TransformationError, match="to_float.*xyz.*str"):
+            await t._fn_to_float("xyz")
+
+    @pytest.mark.asyncio
+    async def test_to_int_raises_on_non_numeric_type(self):
+        # Any non-numeric complex type triggers the same raise path.
+        from src.engine.exceptions import TransformationError
+
+        t = AssignmentTransformer()
+        with pytest.raises(TransformationError, match="to_int.*dict"):
+            await t._fn_to_int({"a": 1})
+
+    @pytest.mark.asyncio
+    async def test_to_float_raises_on_non_numeric_type(self):
+        from src.engine.exceptions import TransformationError
+
+        t = AssignmentTransformer()
+        with pytest.raises(TransformationError, match="to_float.*list"):
+            await t._fn_to_float([1, 2])
+
+    @pytest.mark.asyncio
+    async def test_to_int_raises_on_overflow(self):
+        # int(float("inf")) raises OverflowError — must become TransformationError.
+        from src.engine.exceptions import TransformationError
+
+        t = AssignmentTransformer()
+        with pytest.raises(TransformationError, match="to_int.*inf"):
+            await t._fn_to_int("inf")
+
+    @pytest.mark.asyncio
+    async def test_to_float_raises_on_overflow(self):
+        # float(10**400) raises OverflowError — must become TransformationError.
+        from src.engine.exceptions import TransformationError
+
+        t = AssignmentTransformer()
+        with pytest.raises(TransformationError, match="to_float"):
+            await t._fn_to_float(10**400)
+
+    @pytest.mark.asyncio
+    async def test_to_int_returns_none_for_none(self):
+        assert await AssignmentTransformer()._fn_to_int(None) is None
+
+    @pytest.mark.asyncio
+    async def test_to_float_returns_none_for_none(self):
+        assert await AssignmentTransformer()._fn_to_float(None) is None
+
+    @pytest.mark.asyncio
+    async def test_to_int_converts_valid_inputs(self):
+        t = AssignmentTransformer()
+        assert await t._fn_to_int("42") == 42
+        assert await t._fn_to_int(3.9) == 3  # truncated, not rounded
+        assert await t._fn_to_int(0) == 0
+
+    @pytest.mark.asyncio
+    async def test_to_float_converts_valid_inputs(self):
+        t = AssignmentTransformer()
+        assert await t._fn_to_float("3.14") == pytest.approx(3.14)
+        assert await t._fn_to_float(2) == pytest.approx(2.0)
+        assert await t._fn_to_float("0") == pytest.approx(0.0)
+
+    @pytest.mark.asyncio
+    async def test_to_int_failure_propagates_to_dlq_via_apply_transformations(self):
+        """TransformationError from _fn_to_int must reach the batch error
+        list through transform_record so DLQ routing fires (not silently None)."""
+        from src.engine.exceptions import TransformationError
+
+        # Use transformer-native shape directly (no _translate_assignment needed).
+        assignment = {
+            "target": {"path": ["amount"], "arrow_type": "Int32", "nullable": True},
+            "value": {
+                "kind": "expr",
+                "expr": {
+                    "op": "pipe",
+                    "args": [
+                        {"op": "get", "path": ["raw_amount"]},
+                        {"op": "fn", "name": "to_int", "version": 1, "args": []},
+                    ],
+                },
+            },
+        }
+        with pytest.raises(TransformationError):
+            await DataTransformer().apply_transformations(
+                [{"raw_amount": "not-a-number"}],
+                {"mapping": {"assignments": [assignment]}},
+            )
+
+
 class TestAssignmentTransformerBadInputs:
     """Verify that unknown ops, function names, and value kinds raise errors
     instead of silently returning None or passing values through."""
