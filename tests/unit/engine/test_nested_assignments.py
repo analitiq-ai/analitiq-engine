@@ -574,3 +574,24 @@ class TestPipeExpressionArgCount:
         )
         assert not errors
         assert result["out"] == 5
+
+    @pytest.mark.asyncio
+    async def test_three_stage_pipe_chains_correctly(self):
+        assignment = self._assignment(
+            {
+                "kind": "expr",
+                "expr": {
+                    "op": "pipe",
+                    "args": [
+                        {"op": "const", "value": "  hello  "},
+                        {"op": "fn", "name": "trim", "version": 1, "args": []},
+                        {"op": "fn", "name": "upper", "version": 1, "args": []},
+                    ],
+                },
+            }
+        )
+        result, errors = await AssignmentTransformer().transform_record(
+            record={}, assignments=[assignment]
+        )
+        assert not errors
+        assert result["out"] == "HELLO"
