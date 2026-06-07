@@ -346,6 +346,7 @@ class DestinationGRPCClient:
         await self._request_queue.put(StreamRequest(schema=schema_msg))
 
         # Wait for schema ACK
+        accepted = False
         try:
             response = await asyncio.wait_for(
                 self._response_queue.get(),
@@ -368,21 +369,25 @@ class DestinationGRPCClient:
                         "Stream signaled failure before schema ACK without "
                         "a recorded cause"
                     )
-                return False
-
-            if isinstance(response, SchemaAck):
+            elif isinstance(response, SchemaAck):
                 if response.accepted:
                     logger.info(f"Schema accepted for stream {stream_id}")
-                    return True
-                logger.error(f"Schema rejected: {response.message}")
-                return False
-
-            logger.error(f"Unexpected response type: {type(response)}")
-            return False
+                    accepted = True
+                else:
+                    logger.error(f"Schema rejected: {response.message}")
+            else:
+                logger.error(f"Unexpected response type: {type(response)}")
 
         except asyncio.TimeoutError:
             logger.error("Timeout waiting for schema ACK")
-            return False
+
+        if not accepted:
+            # A failed handshake must not leave a half-built stream behind
+            # (_stream_active True with queues/tasks installed): callers gate
+            # the rebuild path on _stream_active, so stale truth here would
+            # make every retry write into a dead stream instead of healing.
+            await self._teardown_stream()
+        return accepted
 
     async def send_batch(
         self,
@@ -460,6 +465,10 @@ class DestinationGRPCClient:
                         f"{batch_seq} without a recorded cause"
                     )
                 logger.error("Batch %d: %s", batch_seq, summary)
+                # The sentinel means the reader/writer tasks are already gone;
+                # tear down so _stream_active tells the truth and the next
+                # send_batch self-heals instead of writing into a dead stream.
+                await self._teardown_stream()
                 return BatchResult(
                     success=False,
                     status=AckStatus.ACK_STATUS_FATAL_FAILURE,
@@ -529,6 +538,10 @@ class DestinationGRPCClient:
 
     async def end_stream(self) -> None:
         """Signal end of stream and clean up."""
+        # Deliberate shutdown: drop the cached params even when a prior
+        # teardown already deactivated the stream, so a later send_batch
+        # raises rather than resurrecting a stream the caller ended.
+        self._stream_params = None
         if not self._stream_active:
             return
 
@@ -557,9 +570,6 @@ class DestinationGRPCClient:
         self._response_queue = None
         self._reader_task = None
         self._writer_task = None
-        # Deliberate shutdown: drop the cached params so a later send_batch
-        # raises rather than silently resurrecting a stream the caller ended.
-        self._stream_params = None
         logger.info("Stream ended")
 
     async def _teardown_stream(self) -> None:

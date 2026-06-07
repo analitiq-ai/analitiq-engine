@@ -369,6 +369,10 @@ class TestStreamTaskFailurePropagation:
         assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
         assert "RuntimeError" in result.failure_summary
         assert "writer blew up" in result.failure_summary
+        # The sentinel means the tasks are gone; the stream must be marked
+        # inactive so the worker-proxy retry self-heals instead of writing
+        # into a dead stream.
+        assert client._stream_active is False
 
     @pytest.mark.asyncio
     async def test_clean_peer_close_surfaces_distinct_diagnostic(self):
@@ -403,6 +407,7 @@ class TestStreamTaskFailurePropagation:
         assert "Destination closed stream" in result.failure_summary
         assert "42" in result.failure_summary
         assert "NoneType" not in result.failure_summary
+        assert client._stream_active is False
 
     @pytest.mark.asyncio
     async def test_read_responses_signals_sentinel_on_exception(self):
@@ -851,7 +856,6 @@ class TestSendBatchSelfHeal:
         import asyncio
         import pyarrow as pa
 
-        from src.grpc.client import BatchResult
         from src.grpc.generated.analitiq.v1 import AckStatus, Cursor
 
         client = DestinationGRPCClient()
@@ -873,15 +877,6 @@ class TestSendBatchSelfHeal:
             client._stream_active = True
             client._connected = True
             return True
-
-        success = BatchResult(
-            success=True,
-            status=AckStatus.ACK_STATUS_SUCCESS,
-            records_written=1,
-            committed_cursor=None,
-            failed_record_ids=[],
-            failure_summary="",
-        )
 
         with patch.object(client, "connect", connect_mock), \
              patch.object(client, "start_stream", side_effect=fake_start_stream), \
@@ -977,6 +972,66 @@ class TestSendBatchSelfHeal:
                 record_ids=["1"],
                 cursor=Cursor(token=b""),
             )
+
+    @pytest.mark.asyncio
+    async def test_end_stream_after_teardown_still_clears_cached_params(self):
+        """end_stream called after a timeout teardown (stream already inactive)
+        must still drop the cached params — the caller deliberately ended the
+        stream, so a later send_batch raises instead of self-healing."""
+        import pyarrow as pa
+
+        from src.grpc.generated.analitiq.v1 import Cursor
+
+        client = DestinationGRPCClient()
+        client._stream_params = {
+            "run_id": "r",
+            "stream_id": "s",
+            "schema_config": {"write_mode": "upsert", "schema_version": 1},
+        }
+        client._stream_active = False  # prior teardown already deactivated
+
+        await client.end_stream()
+        assert client._stream_params is None
+
+        with pytest.raises(RuntimeError, match="Stream not active"):
+            await client.send_batch(
+                run_id="r",
+                stream_id="s",
+                batch_seq=0,
+                record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
+                record_ids=["1"],
+                cursor=Cursor(token=b""),
+            )
+
+    @pytest.mark.asyncio
+    async def test_start_stream_failure_tears_down_half_built_stream(self):
+        """A failed schema handshake must not leave _stream_active True with
+        live queues/tasks: send_batch gates the self-heal rebuild on the flag,
+        so stale truth would send every retry into a dead stream."""
+        client = DestinationGRPCClient()
+        client._connected = True
+        client.timeout = 0.05  # force the schema-ACK wait to time out
+        client._stub = MagicMock()
+        client._stub.StreamRecords = MagicMock(return_value=MagicMock())
+
+        with patch.object(
+                 client, "_read_responses", new=AsyncMock()
+             ), \
+             patch.object(
+                 client, "_write_requests", new=AsyncMock()
+             ):
+            accepted = await client.start_stream(
+                run_id="r",
+                stream_id="s",
+                schema_config={"write_mode": "upsert", "schema_version": 1},
+            )
+
+        assert accepted is False
+        assert client._stream_active is False
+        assert client._reader_task is None
+        assert client._writer_task is None
+        # Params survive the failed start so a retry can still self-heal.
+        assert client._stream_params is not None
 
 
 def _batch_ack(status):
