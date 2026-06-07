@@ -626,6 +626,60 @@ class TestNormalizeCanonicalType:
             "Timestamp(MICROSECOND, America/New_York)"
         )
 
+    # --- cross-type unit validation (issue #174) ------------------------------
+
+    @pytest.mark.parametrize(
+        "bad_type",
+        [
+            "Time32(us)",         # short code, Time64-only unit
+            "Time32(ns)",         # short code, Time64-only unit
+            "Time32(MICROSECOND)",  # long form, Time64-only unit
+            "Time32(NANOSECOND)",   # long form, Time64-only unit
+        ],
+    )
+    def test_time32_rejects_time64_units(self, bad_type):
+        with pytest.raises(InvalidTypeMapError, match="Time32 accepts"):
+            normalize_canonical_type(bad_type)
+
+    @pytest.mark.parametrize(
+        "bad_type",
+        [
+            "Time64(s)",          # short code, Time32-only unit
+            "Time64(ms)",         # short code, Time32-only unit
+            "Time64(SECOND)",     # long form, Time32-only unit
+            "Time64(MILLISECOND)",  # long form, Time32-only unit
+        ],
+    )
+    def test_time64_rejects_time32_units(self, bad_type):
+        with pytest.raises(InvalidTypeMapError, match="Time64 accepts"):
+            normalize_canonical_type(bad_type)
+
+    @pytest.mark.parametrize(
+        "valid_type",
+        [
+            "Time32(s)",
+            "Time32(ms)",
+            "Time32(SECOND)",
+            "Time32(MILLISECOND)",
+            "Time64(us)",
+            "Time64(ns)",
+            "Time64(MICROSECOND)",
+            "Time64(NANOSECOND)",
+        ],
+    )
+    def test_time32_and_time64_accept_valid_units(self, valid_type):
+        # Must not raise — valid combinations pass through.
+        normalize_canonical_type(valid_type)
+
+    def test_timestamp_accepts_all_units(self):
+        # Timestamp is unconstrained; all four units must normalize without error.
+        for unit in ("s", "ms", "us", "ns", "SECOND", "MILLISECOND", "MICROSECOND", "NANOSECOND"):
+            normalize_canonical_type(f"Timestamp({unit})")
+
+    def test_duration_accepts_all_units(self):
+        for unit in ("s", "ms", "us", "ns", "SECOND", "MILLISECOND", "MICROSECOND", "NANOSECOND"):
+            normalize_canonical_type(f"Duration({unit})")
+
 
 # ---------------------------------------------------------------------------
 # WriteTypeMapRule validation
