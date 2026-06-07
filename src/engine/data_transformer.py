@@ -297,15 +297,20 @@ class AssignmentTransformer:
 
     # Function implementations
     async def _fn_iso_to_date(self, value: Any) -> str:
-        """Convert ISO datetime to date string."""
+        """Convert ISO string to date string (YYYY-MM-DD). Raises on
+        unparseable input — previously returned the raw string unchanged,
+        which passed a non-date value into typed date columns and surfaced
+        as a destination connector write error rather than a transformation
+        error."""
         if value is None:
             return None
         try:
             dt = datetime.fromisoformat(str(value))
             return dt.strftime('%Y-%m-%d')
         except (ValueError, TypeError) as e:
-            logger.warning(f"iso_to_date failed for '{value}': {e}")
-            return str(value)
+            raise TransformationError(
+                f"iso_to_date failed for {value!r}: {e}"
+            ) from e
 
     async def _fn_iso_to_datetime(self, value: Any) -> datetime:
         """Convert ISO string to datetime object. Raises on unparseable
