@@ -52,7 +52,7 @@ _STREAM_TASK_FAILED = object()  # Sentinel pushed onto the response queue when
 # than yield a hostless ":50051" address. ``or`` covers both unset and blank.
 DEFAULT_GRPC_HOST = os.getenv("DESTINATION_GRPC_HOST") or "localhost"
 DEFAULT_GRPC_PORT = int(os.getenv("DESTINATION_GRPC_PORT", "50051"))
-DEFAULT_GRPC_TIMEOUT = int(os.getenv("GRPC_TIMEOUT_SECONDS", "300"))
+DEFAULT_GRPC_TIMEOUT = int(os.getenv("GRPC_TIMEOUT_SECONDS", "30"))
 DEFAULT_MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
 
 
@@ -132,6 +132,13 @@ class DestinationGRPCClient:
         self._connected = False
         self._stream_active = False
 
+        # Parameters of the active stream, cached at start_stream so a later
+        # send_batch can rebuild the stream in place after a transport teardown
+        # without the caller re-driving start_stream. Survives _teardown_stream
+        # (the rebuild needs them); cleared only on deliberate shutdown
+        # (end_stream / disconnect). None means no stream was ever started.
+        self._stream_params: Optional[Dict[str, Any]] = None
+
     async def connect(
         self,
         max_connect_retries: int = DEFAULT_MAX_RETRIES,
@@ -206,6 +213,10 @@ class DestinationGRPCClient:
             self._stub = None
 
         self._connected = False
+        # Deliberate shutdown: drop cached params even if the stream was already
+        # torn down (inactive) so end_stream's clear was skipped. A reconnect
+        # must re-drive start_stream rather than self-heal an ended stream.
+        self._stream_params = None
         logger.info("Disconnected from destination")
 
     async def send_shutdown(self, reason: str = "pipeline_completed") -> bool:
@@ -297,6 +308,16 @@ class DestinationGRPCClient:
         if not self._connected:
             raise RuntimeError("Not connected to destination")
 
+        # Cache the stream parameters so send_batch can rebuild the stream in
+        # place after a transport teardown without the caller re-driving
+        # start_stream. Set before the stream starts so even a start that later
+        # fails leaves enough to retry against.
+        self._stream_params = {
+            "run_id": run_id,
+            "stream_id": stream_id,
+            "schema_config": schema_config,
+        }
+
         # Reset stream-lifetime state so a previous failed run cannot
         # poison the diagnostic surfaced by this run's send_batch.
         self._task_failure = None
@@ -325,6 +346,7 @@ class DestinationGRPCClient:
         await self._request_queue.put(StreamRequest(schema=schema_msg))
 
         # Wait for schema ACK
+        accepted = False
         try:
             response = await asyncio.wait_for(
                 self._response_queue.get(),
@@ -347,21 +369,25 @@ class DestinationGRPCClient:
                         "Stream signaled failure before schema ACK without "
                         "a recorded cause"
                     )
-                return False
-
-            if isinstance(response, SchemaAck):
+            elif isinstance(response, SchemaAck):
                 if response.accepted:
                     logger.info(f"Schema accepted for stream {stream_id}")
-                    return True
-                logger.error(f"Schema rejected: {response.message}")
-                return False
-
-            logger.error(f"Unexpected response type: {type(response)}")
-            return False
+                    accepted = True
+                else:
+                    logger.error(f"Schema rejected: {response.message}")
+            else:
+                logger.error(f"Unexpected response type: {type(response)}")
 
         except asyncio.TimeoutError:
             logger.error("Timeout waiting for schema ACK")
-            return False
+
+        if not accepted:
+            # A failed handshake must not leave a half-built stream behind
+            # (_stream_active True with queues/tasks installed): callers gate
+            # the rebuild path on _stream_active, so stale truth here would
+            # make every retry write into a dead stream instead of healing.
+            await self._teardown_stream()
+        return accepted
 
     async def send_batch(
         self,
@@ -378,7 +404,30 @@ class DestinationGRPCClient:
         Arrow IPC; the engine ships ``pa.RecordBatch`` straight through.
         """
         if not self._stream_active:
-            raise RuntimeError("Stream not active")
+            # A prior batch's transport teardown left the stream inactive but
+            # the cached params let us self-heal: rebuild the stream before
+            # sending so the engine's retry of this batch lands on a live
+            # stream instead of failing. No cached params means send_batch was
+            # called before any start_stream — a programming error, raised.
+            if self._stream_params is None:
+                raise RuntimeError("Stream not active")
+            rebuilt = await self._rebuild_stream()
+            if not rebuilt:
+                summary = (
+                    f"Failed to rebuild stream before sending batch "
+                    f"{batch_seq}; reporting retryable so the engine can "
+                    f"back off and retry"
+                )
+                logger.error(summary)
+                return BatchResult(
+                    success=False,
+                    status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
+                    records_written=0,
+                    committed_cursor=None,
+                    failed_record_ids=[],
+                    failure_summary=summary,
+                    transport_failure=True,
+                )
 
         batch_msg = RecordBatch(
             run_id=run_id,
@@ -394,12 +443,9 @@ class DestinationGRPCClient:
         # Send batch
         await self._request_queue.put(StreamRequest(batch=batch_msg))
 
-        # Wait for ACK (strict in-order)
+        # Wait for ACK with periodic heartbeat logging (strict in-order)
         try:
-            response = await asyncio.wait_for(
-                self._response_queue.get(),
-                timeout=self.timeout,
-            )
+            response = await self._wait_with_heartbeat(batch_seq)
 
             if response is _STREAM_TASK_FAILED:
                 cause = self._task_failure
@@ -419,6 +465,10 @@ class DestinationGRPCClient:
                         f"{batch_seq} without a recorded cause"
                     )
                 logger.error("Batch %d: %s", batch_seq, summary)
+                # The sentinel means the reader/writer tasks are already gone;
+                # tear down so _stream_active tells the truth and the next
+                # send_batch self-heals instead of writing into a dead stream.
+                await self._teardown_stream()
                 return BatchResult(
                     success=False,
                     status=AckStatus.ACK_STATUS_FATAL_FAILURE,
@@ -443,18 +493,55 @@ class DestinationGRPCClient:
             )
 
         except asyncio.TimeoutError:
-            logger.error(f"Timeout waiting for ACK on batch {batch_seq}")
+            # Give the reader task up to 2s to record its own RPC error —
+            # the real cause (e.g. "Too many pings") races with the ACK timeout.
+            if self._reader_task and not self._reader_task.done():
+                try:
+                    await asyncio.wait_for(
+                        asyncio.shield(self._reader_task), timeout=2.0
+                    )
+                except (asyncio.TimeoutError, asyncio.CancelledError):
+                    # Grace window elapsed or the task was cancelled: the
+                    # _task_failure check below picks up whatever the reader
+                    # recorded, so no diagnostic is lost by swallowing here.
+                    pass
+                except Exception:
+                    # The reader raised inside the grace window. Its exception
+                    # was already stored in _task_failure by _read_responses,
+                    # so let the recorded-failure path below surface it and run
+                    # teardown — never propagate the raw error out of send_batch.
+                    pass
+
+            if self._task_failure is not None:
+                summary = (
+                    f"Stream task failed (surfaced on ACK timeout for batch "
+                    f"{batch_seq}): {type(self._task_failure).__name__}: "
+                    f"{self._task_failure}"
+                )
+            else:
+                summary = f"Timeout waiting for ACK on batch {batch_seq}"
+
+            logger.error(summary)
+            await self._teardown_stream()
+            # An ACK timeout means the destination rendered no verdict on the
+            # batch — retryable, not fatal. The teardown above leaves the stream
+            # inactive; the next send_batch self-heals via the cached params.
             return BatchResult(
                 success=False,
                 status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
                 records_written=0,
                 committed_cursor=None,
                 failed_record_ids=[],
-                failure_summary="Timeout waiting for ACK",
+                failure_summary=summary,
+                transport_failure=True,
             )
 
     async def end_stream(self) -> None:
         """Signal end of stream and clean up."""
+        # Deliberate shutdown: drop the cached params even when a prior
+        # teardown already deactivated the stream, so a later send_batch
+        # raises rather than resurrecting a stream the caller ended.
+        self._stream_params = None
         if not self._stream_active:
             return
 
@@ -484,6 +571,130 @@ class DestinationGRPCClient:
         self._reader_task = None
         self._writer_task = None
         logger.info("Stream ended")
+
+    async def _teardown_stream(self) -> None:
+        """Force-cancel stream tasks and reset state after a non-clean exit.
+
+        Unlike end_stream(), skips the graceful writer shutdown and cancels
+        immediately — appropriate after a timeout or transport error where the
+        stream is already in an unknown state. Resets _task_failure and
+        _peer_closed_stream so stale diagnostics don't bleed into the next run.
+        """
+        if self._writer_task and not self._writer_task.done():
+            self._writer_task.cancel()
+            try:
+                await self._writer_task
+            except asyncio.CancelledError:
+                # Expected: we just cancelled the task ourselves.
+                pass
+            except Exception as e:
+                logger.warning("Writer task raised during teardown: %s", e)
+        if self._reader_task and not self._reader_task.done():
+            self._reader_task.cancel()
+            try:
+                await self._reader_task
+            except asyncio.CancelledError:
+                # Expected: we just cancelled the task ourselves.
+                pass
+            except Exception as e:
+                logger.warning("Reader task raised during teardown: %s", e)
+        self._stream_active = False
+        self._stream = None
+        self._request_queue = None
+        self._response_queue = None
+        self._reader_task = None
+        self._writer_task = None
+        self._task_failure = None
+        self._peer_closed_stream = False
+        logger.warning("Stream torn down after non-clean exit; channel retained for reconnect")
+
+    async def _rebuild_stream(self) -> bool:
+        """Rebuild the stream after a transport teardown using cached params.
+
+        Self-heal path shared by both deployments: tear down any remnants,
+        reconnect the channel if it dropped, then re-run start_stream with the
+        parameters cached at the original start_stream. Returns True on a clean
+        rebuild; False (fail loud in logs) so the caller surfaces a retryable
+        result. Requires _stream_params — the caller guards the no-params case.
+        """
+        params = self._stream_params
+        if params is None:
+            # Guarded by the caller; defensive so a future caller can't silently
+            # rebuild against nothing.
+            raise RuntimeError("Cannot rebuild stream without cached params")
+
+        if self._stream_active:
+            await self._teardown_stream()
+
+        if not self._connected:
+            if not await self.connect():
+                logger.error("Stream rebuild: reconnect to destination failed")
+                return False
+
+        try:
+            accepted = await self.start_stream(
+                run_id=params["run_id"],
+                stream_id=params["stream_id"],
+                schema_config=params["schema_config"],
+            )
+        except Exception as e:
+            logger.error("Stream rebuild: start_stream raised: %s", e, exc_info=True)
+            return False
+
+        if not accepted:
+            logger.error("Stream rebuild: destination rejected schema on restart")
+            return False
+
+        logger.info(
+            "Rebuilt stream %s after transport teardown", params["stream_id"]
+        )
+        return True
+
+    async def _wait_with_heartbeat(self, batch_seq: int) -> Any:
+        """Wait for an item from the response queue, logging progress every 10s.
+
+        Logs an INFO line after each 10-second slice that passes without a
+        response. The log is suppressed on the final slice that triggers the
+        timeout, so a hang lasting exactly self.timeout may produce one fewer
+        log line than expected.
+
+        Raises asyncio.TimeoutError after self.timeout seconds.
+        """
+        get_task = asyncio.ensure_future(self._response_queue.get())
+        heartbeat_interval = 10.0
+        elapsed = 0.0
+        try:
+            while True:
+                remaining = self.timeout - elapsed
+                if remaining <= 0:
+                    raise asyncio.TimeoutError()
+                wait_time = min(heartbeat_interval, remaining)
+                done, _ = await asyncio.wait({get_task}, timeout=wait_time)
+                if done:
+                    return get_task.result()
+                elapsed += wait_time
+                if elapsed >= self.timeout:
+                    raise asyncio.TimeoutError()
+                reader_alive = (
+                    self._reader_task is not None
+                    and not self._reader_task.done()
+                )
+                logger.info(
+                    "Still waiting for ACK batch=%d elapsed=%.0fs "
+                    "reader_task_alive=%s",
+                    batch_seq,
+                    elapsed,
+                    reader_alive,
+                )
+        finally:
+            if not get_task.done():
+                get_task.cancel()
+                try:
+                    await get_task
+                except asyncio.CancelledError:
+                    # Expected: we cancel the pending queue.get() ourselves
+                    # when leaving on timeout or after a response arrived.
+                    pass
 
     async def _write_requests(self) -> None:
         """Write requests from queue to gRPC stream."""
