@@ -234,7 +234,7 @@ class AssignmentTransformer:
             case "not":
                 args = expr.get("args", [])
                 if not args:
-                    return True
+                    raise TransformationError("not expression requires 1 arg, got 0")
                 return not await self._evaluate_expression(record, partial_result, args[0])
 
             case "concat":

@@ -17,6 +17,7 @@ from src.engine.data_transformer import (
     DataTransformer,
     build_output_schema,
 )
+from src.engine.exceptions import TransformationError
 from src.runner import _translate_assignment
 
 
@@ -521,3 +522,38 @@ class TestAssignmentTransformerBadInputs:
         assert len(errors) == 1
         assert errors[0]["field"] == "out"
         assert result.get("name") == "alice"
+
+
+class TestNotExpressionArgCount:
+    """not is a unary operator — zero args is always a config error."""
+
+    def _not_assignment(self, args: list) -> dict:
+        return {
+            "target": {"path": ["out"], "type": "boolean", "nullable": True},
+            "value": {"kind": "expr", "expr": {"op": "not", "args": args}},
+        }
+
+    @pytest.mark.asyncio
+    async def test_zero_args_produces_error_entry(self):
+        _, errors = await AssignmentTransformer().transform_record(
+            record={}, assignments=[self._not_assignment([])]
+        )
+        assert errors, "expected an error for not with zero args"
+        assert "not" in errors[0]["error"]
+        assert "0" in errors[0]["error"]
+
+    @pytest.mark.asyncio
+    async def test_one_true_arg_returns_false(self):
+        result, errors = await AssignmentTransformer().transform_record(
+            record={}, assignments=[self._not_assignment([{"op": "const", "value": True}])]
+        )
+        assert not errors
+        assert result["out"] is False
+
+    @pytest.mark.asyncio
+    async def test_one_false_arg_returns_true(self):
+        result, errors = await AssignmentTransformer().transform_record(
+            record={}, assignments=[self._not_assignment([{"op": "const", "value": False}])]
+        )
+        assert not errors
+        assert result["out"] is True
