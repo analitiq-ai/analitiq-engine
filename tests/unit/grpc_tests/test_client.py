@@ -110,7 +110,7 @@ class TestDestinationGRPCClient:
         client = DestinationGRPCClient()
 
         assert client.address == "localhost:50051"
-        assert client.timeout == 300
+        assert client.timeout == 30
         assert client.max_retries == 3
 
     def test_client_initialization_custom(self):
@@ -369,6 +369,10 @@ class TestStreamTaskFailurePropagation:
         assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
         assert "RuntimeError" in result.failure_summary
         assert "writer blew up" in result.failure_summary
+        # The sentinel means the tasks are gone; the stream must be marked
+        # inactive so the worker-proxy retry self-heals instead of writing
+        # into a dead stream.
+        assert client._stream_active is False
 
     @pytest.mark.asyncio
     async def test_clean_peer_close_surfaces_distinct_diagnostic(self):
@@ -403,6 +407,7 @@ class TestStreamTaskFailurePropagation:
         assert "Destination closed stream" in result.failure_summary
         assert "42" in result.failure_summary
         assert "NoneType" not in result.failure_summary
+        assert client._stream_active is False
 
     @pytest.mark.asyncio
     async def test_read_responses_signals_sentinel_on_exception(self):
@@ -454,3 +459,583 @@ class TestStreamTaskFailurePropagation:
         assert client._response_queue.get_nowait() is _STREAM_TASK_FAILED
         assert client._task_failure is None
         assert client._peer_closed_stream is True
+
+
+class TestAckTimeoutAndTeardown:
+    """Cover the ACK-timeout path: stream teardown, real-cause surfacing,
+    heartbeat logging, and the no-keepalive channel-options invariant.
+
+    Acceptance: a destination that goes silent after accepting the schema
+    causes send_batch to fail loudly within self.timeout seconds, tear down
+    the stream, and surface a real RPC error when the reader task set one.
+    """
+
+    @pytest.mark.asyncio
+    async def test_ack_timeout_tears_down_stream(self):
+        """A silent destination triggers timeout and leaves the stream inactive.
+
+        After the call returns, _stream_active must be False and the reader/writer
+        tasks must be cancelled — so a retry gets a clean channel rather than
+        pushing onto a zombie stream.
+        """
+        import asyncio
+        import pyarrow as pa
+
+        from src.grpc.generated.analitiq.v1 import Cursor
+
+        client = DestinationGRPCClient()
+        client.timeout = 0.05  # fast for test
+        client._stream_active = True
+        client._request_queue = asyncio.Queue()
+        client._response_queue = asyncio.Queue()
+
+        async def _noop():
+            await asyncio.sleep(60)
+
+        reader = asyncio.create_task(_noop())
+        writer = asyncio.create_task(_noop())
+        client._reader_task = reader
+        client._writer_task = writer
+
+        result = await client.send_batch(
+            run_id="r",
+            stream_id="s",
+            batch_seq=1,
+            record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
+            record_ids=["1"],
+            cursor=Cursor(token=b""),
+        )
+
+        assert result.success is False
+        # An ACK timeout rendered no verdict — retryable, not fatal. The
+        # teardown still fires; the next send_batch self-heals via cached params.
+        assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
+        assert result.transport_failure is True
+        assert "Timeout" in result.failure_summary
+        assert client._stream_active is False
+        assert client._reader_task is None
+        assert client._writer_task is None
+        assert reader.cancelled()
+
+    @pytest.mark.asyncio
+    async def test_ack_timeout_surfaces_task_failure_when_set(self):
+        """When _task_failure is populated at timeout-handling time the real
+        error (not the generic 'Timeout waiting for ACK') must appear in the
+        failure_summary — this is how the 'Too many pings' RPC error surfaces.
+        """
+        import asyncio
+        import pyarrow as pa
+
+        from src.grpc.generated.analitiq.v1 import Cursor
+
+        client = DestinationGRPCClient()
+        client.timeout = 0.05
+        client._stream_active = True
+        client._request_queue = asyncio.Queue()
+        client._response_queue = asyncio.Queue()
+        client._task_failure = grpc.aio.AioRpcError(
+            code=grpc.StatusCode.UNAVAILABLE,
+            initial_metadata=grpc.aio.Metadata(),
+            trailing_metadata=grpc.aio.Metadata(),
+            details="Too many pings",
+        )
+
+        async def _already_done():
+            pass
+
+        reader = asyncio.create_task(_already_done())
+        writer = asyncio.create_task(_already_done())
+        await asyncio.sleep(0)  # let tasks finish
+        client._reader_task = reader
+        client._writer_task = writer
+
+        result = await client.send_batch(
+            run_id="r",
+            stream_id="s",
+            batch_seq=2,
+            record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
+            record_ids=["2"],
+            cursor=Cursor(token=b""),
+        )
+
+        assert result.success is False
+        assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
+        assert result.transport_failure is True
+        assert "Too many pings" in result.failure_summary
+        assert client._stream_active is False
+
+    @pytest.mark.asyncio
+    async def test_wait_with_heartbeat_returns_queued_item(self):
+        """_wait_with_heartbeat returns the item immediately when the queue is ready."""
+        import asyncio
+
+        client = DestinationGRPCClient()
+        client.timeout = 5.0
+        client._reader_task = None
+        client._response_queue = asyncio.Queue()
+
+        sentinel = object()
+        client._response_queue.put_nowait(sentinel)
+
+        result = await client._wait_with_heartbeat(batch_seq=1)
+        assert result is sentinel
+
+    @pytest.mark.asyncio
+    async def test_wait_with_heartbeat_raises_timeout_on_empty_queue(self):
+        """_wait_with_heartbeat raises asyncio.TimeoutError when self.timeout expires."""
+        import asyncio
+
+        client = DestinationGRPCClient()
+        client.timeout = 0.05
+        client._reader_task = None
+        client._response_queue = asyncio.Queue()
+
+        with pytest.raises(asyncio.TimeoutError):
+            await client._wait_with_heartbeat(batch_seq=3)
+
+    @pytest.mark.asyncio
+    async def test_wait_with_heartbeat_logs_info_while_waiting(self):
+        """_wait_with_heartbeat logs an INFO line each time the heartbeat interval
+        expires without a response — batch_seq must be present in the log args."""
+        import asyncio
+
+        client = DestinationGRPCClient()
+        # timeout must exceed one heartbeat interval (10s) so the log fires
+        # before the overall deadline.
+        client.timeout = 25.0
+        client._reader_task = None
+        client._response_queue = asyncio.Queue()
+
+        sentinel = object()
+        call_count = 0
+        original_wait = asyncio.wait
+
+        async def patched_wait(fs, timeout=None):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                # First call: simulate interval expiry with no response
+                return set(), set(fs)
+            # Second call: deliver the item and let the real wait complete
+            client._response_queue.put_nowait(sentinel)
+            return await original_wait(fs, timeout=1.0)
+
+        with patch("src.grpc.client.asyncio.wait", patched_wait), \
+             patch("src.grpc.client.logger") as mock_logger:
+            result = await client._wait_with_heartbeat(batch_seq=7)
+
+        assert result is sentinel
+        # logger.info("Still waiting for ACK batch=%d ...", batch_seq, ...)
+        # The format string and numeric args are separate positional args.
+        heartbeat_calls = [
+            c for c in mock_logger.info.call_args_list
+            if c.args and "Still waiting" in c.args[0]
+        ]
+        assert heartbeat_calls, "Expected at least one heartbeat INFO log"
+        assert any(c.args[1] == 7 for c in heartbeat_calls)
+
+    @pytest.mark.asyncio
+    async def test_connect_channel_has_no_keepalive_options(self):
+        """The gRPC channel must not include any keepalive options.
+
+        PR #85 removed client-side keepalives that tripped the destination's
+        HTTP/2 ping-flood policy. This test pins the absence so they cannot be
+        quietly re-added.
+        """
+        from src.grpc.generated.analitiq.v1 import HealthCheckResponse
+
+        client = DestinationGRPCClient()
+        captured_options = []
+
+        def fake_channel(address, options=None):
+            captured_options.extend(options or [])
+            return MagicMock()
+
+        serving = HealthCheckResponse(
+            status=HealthCheckResponse.ServingStatus.SERVING, message="ok"
+        )
+        mock_stub = MagicMock()
+        mock_stub.HealthCheck = AsyncMock(return_value=serving)
+
+        with patch("src.grpc.client.grpc_aio.insecure_channel", side_effect=fake_channel), \
+             patch("src.grpc.client.DestinationServiceStub", return_value=mock_stub):
+            await client.connect(max_connect_retries=1)
+
+        keepalive_keys = {k for k, _ in captured_options if "keepalive" in k.lower()}
+        assert not keepalive_keys, (
+            f"Channel must not use keepalive options; found: {keepalive_keys}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_ack_timeout_surfaces_task_failure_set_during_grace(self):
+        """When the reader task is still live at timeout time and sets
+        _task_failure during the 2-second grace window, that real error must
+        appear in failure_summary — not the generic 'Timeout waiting for ACK'.
+
+        This is the core race the grace window exists to handle: the real RPC
+        cause (e.g. 'Too many pings') finishes just after the ACK timeout fires.
+        """
+        import asyncio
+        import pyarrow as pa
+
+        from src.grpc.generated.analitiq.v1 import Cursor
+
+        client = DestinationGRPCClient()
+        client.timeout = 0.05
+        client._stream_active = True
+        client._request_queue = asyncio.Queue()
+        client._response_queue = asyncio.Queue()
+
+        rpc_error = grpc.aio.AioRpcError(
+            code=grpc.StatusCode.UNAVAILABLE,
+            initial_metadata=grpc.aio.Metadata(),
+            trailing_metadata=grpc.aio.Metadata(),
+            details="Too many pings — live race",
+        )
+
+        async def _reader_sets_failure():
+            # Sleeps slightly longer than the ACK timeout so _reader_task is
+            # still alive when the TimeoutError handler checks .done(), then
+            # completes within the 2-second grace window.
+            await asyncio.sleep(0.08)
+            client._task_failure = rpc_error
+
+        reader = asyncio.create_task(_reader_sets_failure())
+        client._reader_task = reader
+        client._writer_task = asyncio.create_task(asyncio.sleep(60))
+
+        result = await client.send_batch(
+            run_id="r",
+            stream_id="s",
+            batch_seq=9,
+            record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
+            record_ids=["9"],
+            cursor=Cursor(token=b""),
+        )
+
+        assert result.success is False
+        assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
+        assert result.transport_failure is True
+        assert "Too many pings — live race" in result.failure_summary
+        assert client._stream_active is False
+
+    @pytest.mark.asyncio
+    async def test_ack_timeout_grace_window_swallows_reader_exception(self):
+        """A reader task that *raises* during the grace window must not
+        propagate its exception out of send_batch.
+
+        The grace block awaits asyncio.shield(reader); a raising reader
+        re-raises through the shield. send_batch must catch it so the
+        recorded _task_failure path runs and teardown still fires — never
+        leak the raw error past the BatchResult contract.
+        """
+        import asyncio
+        import pyarrow as pa
+
+        from src.grpc.generated.analitiq.v1 import Cursor
+
+        client = DestinationGRPCClient()
+        client.timeout = 0.05
+        client._stream_active = True
+        client._request_queue = asyncio.Queue()
+        client._response_queue = asyncio.Queue()
+
+        rpc_error = grpc.aio.AioRpcError(
+            code=grpc.StatusCode.UNAVAILABLE,
+            initial_metadata=grpc.aio.Metadata(),
+            trailing_metadata=grpc.aio.Metadata(),
+            details="reader raised in grace window",
+        )
+
+        async def _reader_raises():
+            # Still alive when the timeout handler checks .done(); records its
+            # failure like _read_responses would, then raises within the grace
+            # window so shield(reader) re-raises into send_batch.
+            await asyncio.sleep(0.08)
+            client._task_failure = rpc_error
+            raise rpc_error
+
+        reader = asyncio.create_task(_reader_raises())
+        client._reader_task = reader
+        client._writer_task = asyncio.create_task(asyncio.sleep(60))
+
+        # Must return a BatchResult, not raise rpc_error.
+        result = await client.send_batch(
+            run_id="r",
+            stream_id="s",
+            batch_seq=11,
+            record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
+            record_ids=["11"],
+            cursor=Cursor(token=b""),
+        )
+
+        assert result.success is False
+        assert result.transport_failure is True
+        assert "reader raised in grace window" in result.failure_summary
+        assert client._stream_active is False
+        # Grace-window reader exception is consumed; no task left dangling.
+        assert client._reader_task is None
+
+    @pytest.mark.asyncio
+    async def test_teardown_stream_resets_all_state(self):
+        """_teardown_stream cancels live tasks and clears all stream-lifetime
+        state, including _task_failure and _peer_closed_stream.
+
+        Calling it with None tasks (no stream was started) must also be safe.
+        """
+        import asyncio
+
+        client = DestinationGRPCClient()
+        client._stream_active = True
+        client._request_queue = asyncio.Queue()
+        client._response_queue = asyncio.Queue()
+        client._task_failure = RuntimeError("prior error")
+        client._peer_closed_stream = True
+
+        async def _noop():
+            await asyncio.sleep(60)
+
+        reader = asyncio.create_task(_noop())
+        writer = asyncio.create_task(_noop())
+        client._reader_task = reader
+        client._writer_task = writer
+
+        await client._teardown_stream()
+
+        assert client._stream_active is False
+        assert client._stream is None
+        assert client._request_queue is None
+        assert client._response_queue is None
+        assert client._reader_task is None
+        assert client._writer_task is None
+        assert client._task_failure is None
+        assert client._peer_closed_stream is False
+        assert reader.cancelled()
+        assert writer.cancelled()
+
+    @pytest.mark.asyncio
+    async def test_teardown_stream_safe_with_none_tasks(self):
+        """_teardown_stream must not raise when called before any stream is started."""
+        client = DestinationGRPCClient()
+        # All task/queue references are None by default
+        await client._teardown_stream()  # must not raise
+        assert client._stream_active is False
+
+
+class TestSendBatchSelfHeal:
+    """send_batch rebuilds a torn-down stream from the params cached at
+    start_stream, so the engine's retry of the same batch lands on a live
+    stream — the direct engine->destination path has no proxy to rebuild it.
+    """
+
+    @pytest.mark.asyncio
+    async def test_send_batch_without_start_stream_raises(self):
+        """send_batch before any start_stream is a programming error: no cached
+        params means there is nothing to rebuild, so it must raise."""
+        import pyarrow as pa
+
+        from src.grpc.generated.analitiq.v1 import Cursor
+
+        client = DestinationGRPCClient()
+        # _stream_active is False and _stream_params is None by default.
+        with pytest.raises(RuntimeError, match="Stream not active"):
+            await client.send_batch(
+                run_id="r",
+                stream_id="s",
+                batch_seq=0,
+                record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
+                record_ids=["1"],
+                cursor=Cursor(token=b""),
+            )
+
+    @pytest.mark.asyncio
+    async def test_send_batch_rebuilds_after_teardown_and_succeeds(self):
+        """After a teardown left the stream inactive, the next send_batch
+        reconnects and re-runs start_stream with the cached params, then
+        sends successfully."""
+        import asyncio
+        import pyarrow as pa
+
+        from src.grpc.generated.analitiq.v1 import AckStatus, Cursor
+
+        client = DestinationGRPCClient()
+        # Simulate a stream that was started then torn down by a prior timeout:
+        # params cached, but stream inactive and channel dropped.
+        client._stream_params = {
+            "run_id": "run-1",
+            "stream_id": "s1",
+            "schema_config": {"write_mode": "upsert", "schema_version": 1},
+        }
+        client._stream_active = False
+        client._connected = False
+
+        connect_mock = AsyncMock(return_value=True)
+        start_calls = []
+
+        async def fake_start_stream(run_id, stream_id, schema_config):
+            start_calls.append((run_id, stream_id, schema_config))
+            client._stream_active = True
+            client._connected = True
+            return True
+
+        with patch.object(client, "connect", connect_mock), \
+             patch.object(client, "start_stream", side_effect=fake_start_stream), \
+             patch.object(
+                 client, "_request_queue", new=asyncio.Queue()
+             ), \
+             patch.object(
+                 client, "_wait_with_heartbeat",
+                 AsyncMock(return_value=_batch_ack(AckStatus.ACK_STATUS_SUCCESS)),
+             ):
+            result = await client.send_batch(
+                run_id="run-1",
+                stream_id="s1",
+                batch_seq=0,
+                record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
+                record_ids=["1"],
+                cursor=Cursor(token=b""),
+            )
+
+        connect_mock.assert_awaited_once()
+        assert start_calls == [
+            ("run-1", "s1", {"write_mode": "upsert", "schema_version": 1})
+        ]
+        assert result.success is True
+        assert result.status == AckStatus.ACK_STATUS_SUCCESS
+
+    @pytest.mark.asyncio
+    async def test_send_batch_rebuild_failure_returns_retryable_not_exception(self):
+        """If the rebuild fails (reconnect or restart fails), send_batch returns
+        a RETRYABLE transport_failure result — never raises — so the engine's
+        bounded retry loop handles backoff and DLQ."""
+        import pyarrow as pa
+
+        from src.grpc.generated.analitiq.v1 import AckStatus, Cursor
+
+        client = DestinationGRPCClient()
+        client._stream_params = {
+            "run_id": "run-1",
+            "stream_id": "s1",
+            "schema_config": {"write_mode": "upsert", "schema_version": 1},
+        }
+        client._stream_active = False
+        client._connected = False
+
+        with patch.object(client, "connect", AsyncMock(return_value=False)):
+            result = await client.send_batch(
+                run_id="run-1",
+                stream_id="s1",
+                batch_seq=0,
+                record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
+                record_ids=["1"],
+                cursor=Cursor(token=b""),
+            )
+
+        assert result.success is False
+        assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
+        assert result.transport_failure is True
+        assert "rebuild" in result.failure_summary.lower()
+
+    @pytest.mark.asyncio
+    async def test_end_stream_clears_cached_params(self):
+        """A deliberate end_stream drops cached params so a later send_batch
+        raises rather than resurrecting an ended stream."""
+        import asyncio
+        import pyarrow as pa
+
+        from src.grpc.generated.analitiq.v1 import Cursor
+
+        client = DestinationGRPCClient()
+        client._stream_params = {
+            "run_id": "r",
+            "stream_id": "s",
+            "schema_config": {"write_mode": "upsert", "schema_version": 1},
+        }
+        client._stream_active = True
+        client._request_queue = asyncio.Queue()
+
+        async def _noop():
+            await asyncio.sleep(0)
+
+        client._writer_task = asyncio.create_task(_noop())
+        client._reader_task = asyncio.create_task(_noop())
+
+        await client.end_stream()
+        assert client._stream_params is None
+
+        with pytest.raises(RuntimeError, match="Stream not active"):
+            await client.send_batch(
+                run_id="r",
+                stream_id="s",
+                batch_seq=0,
+                record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
+                record_ids=["1"],
+                cursor=Cursor(token=b""),
+            )
+
+    @pytest.mark.asyncio
+    async def test_end_stream_after_teardown_still_clears_cached_params(self):
+        """end_stream called after a timeout teardown (stream already inactive)
+        must still drop the cached params — the caller deliberately ended the
+        stream, so a later send_batch raises instead of self-healing."""
+        import pyarrow as pa
+
+        from src.grpc.generated.analitiq.v1 import Cursor
+
+        client = DestinationGRPCClient()
+        client._stream_params = {
+            "run_id": "r",
+            "stream_id": "s",
+            "schema_config": {"write_mode": "upsert", "schema_version": 1},
+        }
+        client._stream_active = False  # prior teardown already deactivated
+
+        await client.end_stream()
+        assert client._stream_params is None
+
+        with pytest.raises(RuntimeError, match="Stream not active"):
+            await client.send_batch(
+                run_id="r",
+                stream_id="s",
+                batch_seq=0,
+                record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
+                record_ids=["1"],
+                cursor=Cursor(token=b""),
+            )
+
+    @pytest.mark.asyncio
+    async def test_start_stream_failure_tears_down_half_built_stream(self):
+        """A failed schema handshake must not leave _stream_active True with
+        live queues/tasks: send_batch gates the self-heal rebuild on the flag,
+        so stale truth would send every retry into a dead stream."""
+        client = DestinationGRPCClient()
+        client._connected = True
+        client.timeout = 0.05  # force the schema-ACK wait to time out
+        client._stub = MagicMock()
+        client._stub.StreamRecords = MagicMock(return_value=MagicMock())
+
+        with patch.object(
+                 client, "_read_responses", new=AsyncMock()
+             ), \
+             patch.object(
+                 client, "_write_requests", new=AsyncMock()
+             ):
+            accepted = await client.start_stream(
+                run_id="r",
+                stream_id="s",
+                schema_config={"write_mode": "upsert", "schema_version": 1},
+            )
+
+        assert accepted is False
+        assert client._stream_active is False
+        assert client._reader_task is None
+        assert client._writer_task is None
+        # Params survive the failed start so a retry can still self-heal.
+        assert client._stream_params is not None
+
+
+def _batch_ack(status):
+    """Build a BatchAck stand-in for _wait_with_heartbeat return values."""
+    from src.grpc.generated.analitiq.v1 import BatchAck
+
+    return BatchAck(status=status, records_written=1)

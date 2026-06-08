@@ -47,7 +47,9 @@ class WorkerProxyHandler(BaseDestinationHandler):
         self._stream_endpoints: Dict[str, Any] = {}
         self._handle: Optional[WorkerHandle] = None
         self._control: Optional[DestinationGRPCClient] = None
-        # One forwarded StreamRecords stream per stream_id.
+        # One forwarded StreamRecords stream per stream_id. The client caches
+        # its own start_stream params and self-heals after a transport teardown,
+        # so the proxy no longer tracks schema config for rebuilds.
         self._streams: Dict[str, DestinationGRPCClient] = {}
         self._capabilities: Optional[Any] = None
         self._label = "dest-worker"
@@ -136,22 +138,39 @@ class WorkerProxyHandler(BaseDestinationHandler):
             logger.error("%s: configure_schema before connect", self._label)
             return False
         stream_id = schema_spec.stream_id
-        client = DestinationGRPCClient(target=self._handle.target)
-        if not await client.connect(max_connect_retries=3):
-            return False
-        accepted = await client.start_stream(
-            run_id="",  # idempotency keys ride each forwarded batch
-            stream_id=stream_id,
-            schema_config={
-                "write_mode": _WRITE_MODE_NAMES[schema_spec.write_mode],
-                "schema_version": schema_spec.version,
-            },
-        )
-        if not accepted:
-            await client.disconnect()
+        schema_config = {
+            "write_mode": _WRITE_MODE_NAMES[schema_spec.write_mode],
+            "schema_version": schema_spec.version,
+        }
+        client = await self._open_stream(stream_id, schema_config)
+        if client is None:
             return False
         self._streams[stream_id] = client
         return True
+
+    async def _open_stream(
+        self, stream_id: str, schema_config: Dict[str, Any]
+    ) -> Optional[DestinationGRPCClient]:
+        """Open a fresh forwarded StreamRecords stream and send its schema.
+
+        Returns the connected client, or None if the worker channel did not
+        connect or rejected the schema. The caller owns caching the result.
+        """
+        if self._handle is None:
+            logger.error("%s: open_stream before connect", self._label)
+            return None
+        client = DestinationGRPCClient(target=self._handle.target)
+        if not await client.connect(max_connect_retries=3):
+            return None
+        accepted = await client.start_stream(
+            run_id="",  # idempotency keys ride each forwarded batch
+            stream_id=stream_id,
+            schema_config=schema_config,
+        )
+        if not accepted:
+            await client.disconnect()
+            return None
+        return client
 
     async def write_batch(
         self,
@@ -186,7 +205,15 @@ class WorkerProxyHandler(BaseDestinationHandler):
             # the connector never rendered a verdict. A worker crash is
             # retryable by design: the idempotency table resolves a
             # committed-before-crash batch on resend. Fatal is reserved
-            # for verdicts the connector actually returned.
+            # for verdicts the connector actually returned. (An ACK timeout
+            # already reports retryable; this also remaps the reader/writer
+            # task-failure and peer-close transport failures, which still
+            # carry a fatal status.)
+            #
+            # No rebuild here: the cached client self-heals on the engine's
+            # next send_batch using the params it cached at start_stream, so
+            # the retryable ACK returns immediately without blocking on a
+            # rebuild inside this call.
             status = AckStatus.ACK_STATUS_RETRYABLE_FAILURE
         if committed is not None and status not in SUCCESS_STATUSES:
             # The ack crossed an untrusted process boundary: a connector
