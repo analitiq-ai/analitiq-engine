@@ -160,7 +160,7 @@ class AssignmentTransformer:
             case "pipe":
                 args = expr.get("args", [])
                 if not args:
-                    return None
+                    raise TransformationError(f"pipe expression requires at least 1 arg, got {len(args)}")
                 # First arg is the initial value, rest are functions to apply
                 value = await self._evaluate_expression(record, partial_result, args[0])
                 for fn_expr in args[1:]:
