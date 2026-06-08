@@ -225,7 +225,7 @@ class AssignmentTransformer:
                             return left <= right
                         case _:
                             raise TransformationError(
-                                f"Unhandled comparison op in inner dispatch: {op!r}"
+                                f"comparison op {op!r} has no implementation — this is an engine defect"
                             )
                 except TypeError as exc:
                     raise TransformationError(

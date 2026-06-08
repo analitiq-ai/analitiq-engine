@@ -33,12 +33,12 @@ def _pipe(source_path, fn_name):
 
 
 def _const(value):
-    """Build a const expression."""
+    """Build an expression-level const node (op: "const") for use inside _comparison or expr= arguments."""
     return {"op": "const", "value": value}
 
 
 def _comparison(op, left, right):
-    """Build a comparison expression with two const args."""
+    """Build a binary comparison expression; left and right are raw Python values wrapped as const nodes."""
     return {"op": op, "args": [_const(left), _const(right)]}
 
 
@@ -322,19 +322,21 @@ class TestDataTransformer:
 
     @pytest.mark.asyncio
     async def test_gt_returns_correct_result(self, transformer):
-        """gt evaluates left > right correctly."""
+        """gt returns True when left is strictly greater than right, False otherwise (equal included)."""
         batch = [{}]
         config = {
             "mapping": {
                 "assignments": [
                     _assignment("true_case", expr=_comparison("gt", 5, 3)),
                     _assignment("false_case", expr=_comparison("gt", 3, 5)),
+                    _assignment("equal_case", expr=_comparison("gt", 5, 5)),
                 ]
             }
         }
         result = await transformer.apply_transformations(batch, config)
         assert result[0]["true_case"] is True
         assert result[0]["false_case"] is False
+        assert result[0]["equal_case"] is False
 
     @pytest.mark.asyncio
     async def test_gte_returns_correct_result(self, transformer):
@@ -354,19 +356,21 @@ class TestDataTransformer:
 
     @pytest.mark.asyncio
     async def test_lt_returns_correct_result(self, transformer):
-        """lt evaluates left < right correctly."""
+        """lt returns True when left is strictly less than right, False otherwise (equal included)."""
         batch = [{}]
         config = {
             "mapping": {
                 "assignments": [
                     _assignment("true_case", expr=_comparison("lt", 3, 5)),
                     _assignment("false_case", expr=_comparison("lt", 5, 3)),
+                    _assignment("equal_case", expr=_comparison("lt", 5, 5)),
                 ]
             }
         }
         result = await transformer.apply_transformations(batch, config)
         assert result[0]["true_case"] is True
         assert result[0]["false_case"] is False
+        assert result[0]["equal_case"] is False
 
     @pytest.mark.asyncio
     async def test_lte_returns_correct_result(self, transformer):
@@ -401,14 +405,15 @@ class TestDataTransformer:
 
     @pytest.mark.asyncio
     async def test_comparison_op_incompatible_types_raises(self, transformer):
-        """Comparing incompatible types raises TransformationError via the TypeError path."""
+        """Operands of incompatible types raise TransformationError naming the operator and both operands."""
         batch = [{}]
-        config = {
-            "mapping": {
-                "assignments": [
-                    _assignment("out", expr=_comparison("gt", 5, "not-a-number")),
-                ]
+        for op in ("gt", "gte", "lt", "lte"):
+            config = {
+                "mapping": {
+                    "assignments": [
+                        _assignment("out", expr=_comparison(op, 5, "not-a-number")),
+                    ]
+                }
             }
-        }
-        with pytest.raises(TransformationError, match="gt expression cannot compare"):
-            await transformer.apply_transformations(batch, config)
+            with pytest.raises(TransformationError, match=f"{op} expression cannot compare"):
+                await transformer.apply_transformations(batch, config)
