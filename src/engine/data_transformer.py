@@ -179,7 +179,9 @@ class AssignmentTransformer:
             case "if":
                 args = expr.get("args", [])
                 if len(args) != 3:
-                    raise ValueError("if expression requires 3 args: [condition, then, else]")
+                    raise TransformationError(
+                        f"if expression requires 3 args, got {len(args)}"
+                    )
                 condition = await self._evaluate_expression(record, partial_result, args[0])
                 if condition:
                     return await self._evaluate_expression(record, partial_result, args[1])
