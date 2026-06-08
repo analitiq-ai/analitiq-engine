@@ -10,7 +10,6 @@ from src.engine.exceptions import (
     StreamConfigurationError,
     PipelineValidationError,
     StreamExecutionError,
-    PipelineOrchestrationError,
     StageConfigurationError
 )
 
@@ -278,52 +277,6 @@ class TestStreamExecutionError:
         
         assert str(error) == "First batch failed [Batch: 0]"
         assert error.batch_id == 0
-
-
-class TestPipelineOrchestrationError:
-    """Test PipelineOrchestrationError exception."""
-    
-    def test_basic_error(self):
-        """Test basic pipeline orchestration error."""
-        error = PipelineOrchestrationError("Orchestration failed")
-        
-        assert str(error) == "Orchestration failed"
-        assert error.pipeline_id is None
-        assert error.failed_streams == []
-    
-    def test_with_pipeline_id(self):
-        """Test orchestration error with pipeline ID."""
-        error = PipelineOrchestrationError(
-            "Pipeline execution failed",
-            pipeline_id="pipeline_123"
-        )
-        
-        assert str(error) == "Pipeline execution failed"
-        assert error.pipeline_id == "pipeline_123"
-    
-    def test_with_failed_streams(self):
-        """Test orchestration error with failed streams."""
-        failed_streams = ["stream_1", "stream_2", "stream_3"]
-        error = PipelineOrchestrationError(
-            "Multiple streams failed",
-            failed_streams=failed_streams
-        )
-        
-        assert str(error) == "Multiple streams failed"
-        assert error.failed_streams == failed_streams
-    
-    def test_with_all_fields(self):
-        """Test orchestration error with all fields."""
-        failed_streams = ["stream_a", "stream_b"]
-        error = PipelineOrchestrationError(
-            "Pipeline failed with multiple stream failures",
-            pipeline_id="complex_pipeline",
-            failed_streams=failed_streams
-        )
-        
-        assert str(error) == "Pipeline failed with multiple stream failures"
-        assert error.pipeline_id == "complex_pipeline"
-        assert error.failed_streams == failed_streams
 
 
 class TestStageConfigurationError:
