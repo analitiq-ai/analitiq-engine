@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import pyarrow as pa
 
 from .exceptions import TransformationError
+from ..shared.dict_path import walk_path
 from cdk.type_map.arrow import resolve_arrow_type
 from cdk.type_map.exceptions import InvalidTypeMapError
 
@@ -430,14 +431,8 @@ class AssignmentTransformer:
         return None
 
     def _get_nested_value(self, record: Dict[str, Any], path: List[str]) -> Any:
-        """Get value from nested path."""
-        current = record
-        for key in path:
-            if isinstance(current, dict) and key in current:
-                current = current[key]
-            else:
-                return None
-        return current
+        """Return the value at *path* in *record*, or ``None`` if any step is missing."""
+        return walk_path(record, path)
 
     def _set_nested_value(self, result: Dict[str, Any], path: List[str], value: Any) -> None:
         """Set value at nested path."""
