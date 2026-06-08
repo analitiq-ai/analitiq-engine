@@ -253,7 +253,7 @@ class AssignmentTransformer:
             case "concat":
                 args = expr.get("args", [])
                 if not args:
-                    logger.warning("concat expression has 0 args; returning empty string — likely a pipeline builder bug")
+                    raise TransformationError("concat expression requires at least 1 arg, got 0")
                 parts = []
                 for arg in args:
                     val = await self._evaluate_expression(record, partial_result, arg)

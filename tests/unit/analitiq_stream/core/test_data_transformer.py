@@ -312,7 +312,7 @@ class TestDataTransformer:
 
     @pytest.mark.asyncio
     async def test_concat_with_args_returns_correct_result(self, transformer):
-        """concat joins non-None parts as strings."""
+        """Mixed get/const args are joined in order."""
         batch = [{"first": "hello", "second": "world"}]
         config = {
             "mapping": {
@@ -328,12 +328,25 @@ class TestDataTransformer:
         assert result[0]["out"] == "hello world"
 
     @pytest.mark.asyncio
-    async def test_concat_empty_args_warns_and_returns_empty_string(self, transformer):
-        """concat with 0 args emits a warning and still returns \"\"."""
-        from unittest.mock import patch
-        import sys
-        _mod = sys.modules[transformer.assignment_transformer.__class__.__module__]
+    async def test_concat_skips_none_valued_args(self, transformer):
+        """Args that evaluate to None are dropped; surrounding args still join."""
+        batch = [{"a": "hello", "b": None, "c": "world"}]
+        config = {
+            "mapping": {
+                "assignments": [
+                    _assignment("out", expr={
+                        "op": "concat",
+                        "args": [_get("a"), _get("b"), _get("c")],
+                    })
+                ]
+            }
+        }
+        result = await transformer.apply_transformations(batch, config)
+        assert result[0]["out"] == "helloworld"
 
+    @pytest.mark.asyncio
+    async def test_concat_empty_args_raises(self, transformer):
+        """Zero args is always a builder bug; raises rather than silently returning empty string."""
         batch = [{"x": 1}]
         config = {
             "mapping": {
@@ -342,15 +355,12 @@ class TestDataTransformer:
                 ]
             }
         }
-        with patch.object(_mod.logger, "warning") as mock_warn:
-            result = await transformer.apply_transformations(batch, config)
-        assert result[0]["out"] == ""
-        mock_warn.assert_called_once()
-        assert "concat" in mock_warn.call_args[0][0]
+        with pytest.raises(TransformationError, match="concat.*requires at least 1 arg"):
+            await transformer.apply_transformations(batch, config)
 
     @pytest.mark.asyncio
     async def test_coalesce_with_args_returns_first_non_none(self, transformer):
-        """coalesce returns the first non-None argument value."""
+        """Leading None args are skipped; the first non-None value is returned."""
         batch = [{"a": None, "b": None, "c": "found"}]
         config = {
             "mapping": {
@@ -366,8 +376,25 @@ class TestDataTransformer:
         assert result[0]["out"] == "found"
 
     @pytest.mark.asyncio
+    async def test_coalesce_all_none_returns_none(self, transformer):
+        """All-None args is legitimate — None propagates to the nullable check downstream."""
+        batch = [{"a": None, "b": None}]
+        config = {
+            "mapping": {
+                "assignments": [
+                    _assignment("out", expr={
+                        "op": "coalesce",
+                        "args": [_get("a"), _get("b")],
+                    })
+                ]
+            }
+        }
+        result = await transformer.apply_transformations(batch, config)
+        assert result[0]["out"] is None
+
+    @pytest.mark.asyncio
     async def test_coalesce_empty_args_raises(self, transformer):
-        """coalesce with 0 args raises TransformationError."""
+        """Zero args has no meaningful return value; raises rather than silently producing None."""
         batch = [{"x": 1}]
         config = {
             "mapping": {
