@@ -360,6 +360,7 @@ class ConnectionRuntime:
 
         secrets = await self._load_secrets()
         self._validate_secret_refs(secrets)
+        self._validate_connection_contract(secrets)
 
         has_transports = bool(
             self._connector_definition
@@ -421,6 +422,7 @@ class ConnectionRuntime:
         """
         secrets = await self._load_secrets()
         self._validate_secret_refs(secrets)
+        self._validate_connection_contract(secrets)
 
         has_transports = bool(
             self._connector_definition
@@ -703,6 +705,59 @@ class ConnectionRuntime:
                     f"connection {self._connection_id!r} declares secret_refs "
                     f"{missing!r} but none were found in the secret store"
                 ),
+            )
+
+    def _validate_connection_contract(self, secrets: Mapping[str, Any]) -> None:
+        """Enforce the connector's connection contract before any binding is
+        resolved.
+
+        The published connector schema defines ``ConnectionContractInput``'s
+        ``required`` as "whether resolution must produce a value" — the single
+        source of truth for which connection inputs are mandatory. Checking it
+        here, once, at the connection boundary, is what lets transport
+        resolution treat an absent binding as a genuinely optional one (driver
+        default) rather than a hard failure: by the time a binding resolves,
+        every required input is guaranteed present.
+
+        Only ``source: user`` inputs stored in ``connection.parameters`` or
+        ``secrets`` are checked — the values supplied when the connection is
+        created. Inputs produced later in the lifecycle (``discovered`` values,
+        post-auth selections) are not present at materialization and are not
+        the connection's responsibility to carry. Connectors with no contract
+        (or an older definition lacking one) are not constrained.
+        """
+        definition = self._connector_definition
+        if not definition:
+            return
+        contract = definition.get("connection_contract")
+        if not isinstance(contract, Mapping):
+            return
+        inputs = contract.get("inputs")
+        if not isinstance(inputs, Mapping):
+            return
+
+        scopes: Dict[str, Mapping[str, Any]] = {
+            "connection.parameters": self._raw_config.get("parameters") or {},
+            "secrets": secrets,
+        }
+        missing = []
+        for name, spec in inputs.items():
+            if not isinstance(spec, Mapping):
+                continue
+            if not spec.get("required") or spec.get("source") != "user":
+                continue
+            scope = scopes.get(spec.get("storage"))
+            if scope is None:
+                # Required input stored outside the connection-time scopes
+                # (e.g. a discovered value): not enforceable at this boundary.
+                continue
+            if scope.get(name) is None:
+                missing.append(f"{name} ({spec.get('storage')})")
+        if missing:
+            raise TransportSpecError(
+                f"connection {self._connection_id!r} ({self._connector_id}) is "
+                f"missing required input(s) {sorted(missing)} declared by the "
+                f"connector's connection contract"
             )
 
     def _build_resolution_context(

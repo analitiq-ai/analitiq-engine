@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from cdk.connection_runtime import ConnectionRuntime, _PreResolvedSecretsResolver
+from cdk.exceptions import TransportSpecError
 
 
 def _resolver(secrets=None):
@@ -190,3 +191,89 @@ class TestWorkerSideRuntime:
         }
         worker_runtime = ConnectionRuntime.from_resolved_payload(payload)
         assert worker_runtime.driver == "postgresql"
+
+
+class TestConnectionContractValidation:
+    """Required inputs are enforced once, at the connection boundary, from the
+    connector's ``connection_contract`` — the published schema's authoritative
+    optionality signal (``required`` = "whether resolution must produce a
+    value"). This is what lets transport resolution omit an absent optional
+    binding rather than fail."""
+
+    def _runtime(self, *, parameters, contract_inputs):
+        return ConnectionRuntime(
+            raw_config={"parameters": parameters, "secret_refs": {}},
+            connection_id="c1",
+            connector_id="demo",
+            connector_type="database",
+            resolver=_resolver({}),
+            connector_definition={
+                "connector_id": "demo",
+                "connection_contract": {"inputs": contract_inputs},
+            },
+        )
+
+    def test_missing_required_parameter_raises(self):
+        runtime = self._runtime(
+            parameters={"warehouse": "wh"},
+            contract_inputs={
+                "account": {"required": True, "source": "user",
+                            "storage": "connection.parameters"},
+                "warehouse": {"required": False, "source": "user",
+                              "storage": "connection.parameters"},
+            },
+        )
+        with pytest.raises(TransportSpecError, match="account"):
+            runtime._validate_connection_contract({})
+
+    def test_absent_optional_input_passes(self):
+        runtime = self._runtime(
+            parameters={"account": "abc"},
+            contract_inputs={
+                "account": {"required": True, "source": "user",
+                            "storage": "connection.parameters"},
+                "role": {"required": False, "source": "user",
+                         "storage": "connection.parameters"},
+            },
+        )
+        runtime._validate_connection_contract({})  # no raise
+
+    def test_required_secret_checked_against_secret_store(self):
+        runtime = self._runtime(
+            parameters={"account": "abc"},
+            contract_inputs={
+                "account": {"required": True, "source": "user",
+                            "storage": "connection.parameters"},
+                "password": {"required": True, "source": "user",
+                             "storage": "secrets"},
+            },
+        )
+        with pytest.raises(TransportSpecError, match="password"):
+            runtime._validate_connection_contract({})
+        # Present in the secret store -> passes.
+        runtime._validate_connection_contract({"password": "pw"})
+
+    def test_non_user_required_input_not_enforced_here(self):
+        # A discovered / post-auth required input is not present when the
+        # connection materializes and is not the connection's to carry.
+        runtime = self._runtime(
+            parameters={"account": "abc"},
+            contract_inputs={
+                "account": {"required": True, "source": "user",
+                            "storage": "connection.parameters"},
+                "table_id": {"required": True, "source": "discovered",
+                             "storage": "connection.discovered"},
+            },
+        )
+        runtime._validate_connection_contract({})  # no raise
+
+    def test_no_contract_is_unconstrained(self):
+        runtime = ConnectionRuntime(
+            raw_config={"parameters": {}},
+            connection_id="c1",
+            connector_id="demo",
+            connector_type="database",
+            resolver=_resolver({}),
+            connector_definition={"connector_id": "demo"},
+        )
+        runtime._validate_connection_contract({})  # no raise

@@ -6,8 +6,10 @@
   connector schema's ``AdbcTransport.driver`` enum — the engine derives the
   dbapi module by the upstream packaging convention instead of keeping a
   table.
-* ``_resolve_db_kwargs`` strips None values (matches the schema's optional
-  credential treatment) and rejects non-mapping inputs.
+* ``_resolve_db_kwargs`` renders each value to its ADBC option string,
+  drops entries with no value (an explicit None, or a ref to a connection
+  input the user did not supply), and rejects non-mapping inputs and
+  non-scalar values.
 * ``build_adbc_from_spec`` fails loudly when the connector's driver wheel
   is not installed.
 """
@@ -60,12 +62,20 @@ class TestResolveDbKwargs:
         with pytest.raises(TransportSpecError, match="db_kwargs"):
             _resolve_db_kwargs(["not", "a", "mapping"], _resolver())
 
-    def test_literals_pass_through(self):
+    def test_scalars_render_to_adbc_option_strings(self):
+        # ADBC database/connection options are string-valued; a typed input
+        # (an integer port) must reach the driver as a string, the same form
+        # the DSN path produces. Passing a native int would route to the
+        # SetOptionInt extension a driver may not implement (Snowflake).
         out = _resolve_db_kwargs(
             {"account": "abc", "warehouse": "wh", "port": 443},
             _resolver(),
         )
-        assert out == {"account": "abc", "warehouse": "wh", "port": 443}
+        assert out == {"account": "abc", "warehouse": "wh", "port": "443"}
+
+    def test_bool_renders_lowercase(self):
+        out = _resolve_db_kwargs({"use_high_precision": True}, _resolver())
+        assert out == {"use_high_precision": "true"}
 
     def test_none_values_dropped(self):
         # Matches the schema's treatment of optional credential fields
@@ -76,6 +86,24 @@ class TestResolveDbKwargs:
             _resolver(),
         )
         assert out == {"account": "abc"}
+
+    def test_missing_optional_ref_omitted(self):
+        # A ref to a connection input the user did not supply resolves to
+        # missing data (UnresolvedValueError); the entry is dropped so the
+        # driver applies its default. Required inputs are enforced earlier,
+        # at the connection-contract boundary, so this is always optional.
+        out = _resolve_db_kwargs(
+            {
+                "account": "abc",
+                "role": {"ref": "connection.parameters.role"},
+            },
+            _resolver(),
+        )
+        assert out == {"account": "abc"}
+
+    def test_non_scalar_value_rejected(self):
+        with pytest.raises(TransportSpecError, match="must be scalars"):
+            _resolve_db_kwargs({"opts": {"literal": ["a", "b"]}}, _resolver())
 
 
 class TestResolveAdbcSpec:
@@ -119,7 +147,8 @@ class TestResolveAdbcSpec:
             "transport_type": "adbc",
             "driver": "snowflake",  # folded
             "uri": None,
-            "db_kwargs": {"account": "abc", "port": 443},
+            # port renders to its ADBC option string (ADBC options are strings)
+            "db_kwargs": {"account": "abc", "port": "443"},
         }
         json.dumps(out)  # must round-trip into a worker bootstrap
 

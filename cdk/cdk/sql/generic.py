@@ -1275,6 +1275,10 @@ class GenericSQLConnector(BaseDestinationHandler):
         qualified = self.dialect.quote_qualified(
             state.schema_name, self.BATCH_COMMITS_TABLE
         )
+        # committed_cursor is BINARY; some ADBC drivers cannot bind a binary
+        # parameter, so the dialect supplies both the placeholder SQL and the
+        # matching bind value (they must agree).
+        cursor_placeholder, cursor_value = self.dialect.adbc_binary_bind(cursor_bytes)
         sql = (
             f"INSERT INTO {qualified} ("
             f"{self.dialect.quote_ident('run_id')}, "
@@ -1282,13 +1286,13 @@ class GenericSQLConnector(BaseDestinationHandler):
             f"{self.dialect.quote_ident('batch_seq')}, "
             f"{self.dialect.quote_ident('committed_cursor')}, "
             f"{self.dialect.quote_ident('records_written')}) "
-            f"VALUES (?, ?, ?, ?, ?)"
+            f"VALUES (?, ?, ?, {cursor_placeholder}, ?)"
         )
         try:
             await asyncio.to_thread(
                 self._execute_adbc_dml_sync,
                 sql,
-                (run_id, stream_id, batch_seq, cursor_bytes, records_written),
+                (run_id, stream_id, batch_seq, cursor_value, records_written),
             )
         except AdbcConfigurationError as exc:
             # An IntegrityError on the (run_id, stream_id, batch_seq)
@@ -1503,10 +1507,7 @@ class GenericSQLConnector(BaseDestinationHandler):
                         table_name,
                         cast_batch,
                         mode="append",
-                        db_schema_name=(
-                            self.dialect.normalize_schema(schema_name)
-                            if schema_name else None
-                        ),
+                        **self.dialect.adbc_ingest_schema_kwargs(schema_name),
                     )
                     conn.commit()
                 finally:
@@ -1634,19 +1635,18 @@ class GenericSQLConnector(BaseDestinationHandler):
                     self.dialect.adbc_stage_table_sql(stage_qualified, target_qualified)
                 )
                 conn.commit()
+                # Stage lives in the target schema. Dialects that support
+                # per-statement ingest targeting resolve it via
+                # ``db_schema_name`` (same normalization as the DDL path, so
+                # Snowflake's real PUBLIC matches a connector's lowercase
+                # ``public``); dialects that don't (Snowflake) fall back to
+                # the connection's session schema, where the stage was just
+                # created.
                 cursor.adbc_ingest(
                     stage_name,
                     cast_batch,
                     mode="append",
-                    # Stage lives in the target schema; the driver needs
-                    # the schema name to resolve the right table. Same
-                    # normalization as the DDL path so Snowflake's real
-                    # PUBLIC schema is matched when the connector
-                    # declared lowercase ``public``.
-                    db_schema_name=(
-                        self.dialect.normalize_schema(schema_name)
-                        if schema_name else None
-                    ),
+                    **self.dialect.adbc_ingest_schema_kwargs(schema_name),
                 )
                 conn.commit()
                 on_clause = " AND ".join(
