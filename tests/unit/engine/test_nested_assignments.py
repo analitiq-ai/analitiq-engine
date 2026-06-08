@@ -589,3 +589,21 @@ class TestTransformRecordExceptionBoundary:
         with patch.object(dt.assignment_transformer, "transform_record", _inject_defect):
             with pytest.raises(RuntimeError, match="unexpected engine bug"):
                 await dt.apply_transformations([{"x": 1}], config)
+
+    @pytest.mark.asyncio
+    async def test_if_expression_wrong_arg_count_is_dlq_routed(self):
+        """Malformed if expression (wrong arg count) raises TransformationError
+        and is DLQ-routed — not a fatal ValueError that bypasses the handler."""
+        assignment = {
+            "target": {"path": ["out"], "type": "string", "nullable": True},
+            "value": {
+                "kind": "expr",
+                "expr": {"op": "if", "args": [{"op": "const", "value": True}]},
+            },
+        }
+        _, errors = await AssignmentTransformer().transform_record(
+            record={}, assignments=[assignment]
+        )
+        assert len(errors) == 1
+        assert "if" in errors[0]["error"]
+        assert "3" in errors[0]["error"]
