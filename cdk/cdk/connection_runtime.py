@@ -719,12 +719,15 @@ class ConnectionRuntime:
         default) rather than a hard failure: by the time a binding resolves,
         every required input is guaranteed present.
 
-        Only ``source: user`` inputs stored in ``connection.parameters`` or
-        ``secrets`` are checked — the values supplied when the connection is
-        created. Inputs produced later in the lifecycle (``discovered`` values,
-        post-auth selections) are not present at materialization and are not
-        the connection's responsibility to carry. Connectors with no contract
-        (or an older definition lacking one) are not constrained.
+        Every required input is checked, regardless of ``source`` — both
+        ``user`` (operator-supplied) and ``platform`` (control-plane-supplied)
+        inputs are provisioned at connection setup and stored in
+        ``connection.parameters`` or ``secrets``, the scopes available here.
+        Post-auth outputs (``connection.selections`` / ``connection.discovered``)
+        are not contract *inputs* and so never appear in ``inputs``. A required
+        input that declares any other storage is a malformed connector
+        definition and fails loud. Connectors with no contract (or an older
+        definition lacking one) are not constrained.
         """
         definition = self._connector_definition
         if not definition:
@@ -744,15 +747,22 @@ class ConnectionRuntime:
         for name, spec in inputs.items():
             if not isinstance(spec, Mapping):
                 continue
-            if not spec.get("required") or spec.get("source") != "user":
+            if not spec.get("required"):
                 continue
-            scope = scopes.get(spec.get("storage"))
+            storage = spec.get("storage")
+            scope = scopes.get(storage)
             if scope is None:
-                # Required input stored outside the connection-time scopes
-                # (e.g. a discovered value): not enforceable at this boundary.
-                continue
+                # A required input must store its value where the connection
+                # carries it (connection.parameters or secrets); the schema's
+                # storage enum permits nothing else. Any other value is a
+                # malformed connector definition -- fail loud, never skip.
+                raise TransportSpecError(
+                    f"connection {self._connection_id!r} ({self._connector_id}) "
+                    f"declares required input {name!r} with unknown storage "
+                    f"{storage!r}; expected one of {sorted(scopes)}"
+                )
             if scope.get(name) is None:
-                missing.append(f"{name} ({spec.get('storage')})")
+                missing.append(f"{name} ({storage})")
         if missing:
             raise TransportSpecError(
                 f"connection {self._connection_id!r} ({self._connector_id}) is "

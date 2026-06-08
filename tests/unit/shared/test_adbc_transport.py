@@ -77,6 +77,10 @@ class TestResolveDbKwargs:
         out = _resolve_db_kwargs({"use_high_precision": True}, _resolver())
         assert out == {"use_high_precision": "true"}
 
+    def test_float_renders_to_string(self):
+        out = _resolve_db_kwargs({"login_timeout": 1.5}, _resolver())
+        assert out == {"login_timeout": "1.5"}
+
     def test_none_values_dropped(self):
         # Matches the schema's treatment of optional credential fields
         # — a binding that resolved to None should not be passed to the
