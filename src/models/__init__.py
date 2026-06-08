@@ -26,12 +26,6 @@ from .stream import (
     WriteMode,
 )
 
-# Engine models
-from .engine import (
-    PipelineMetricsSnapshot,
-    TaskExecutionInfo,
-)
-
 # Transformation models
 from .transformations import (
     TransformationConfig,
@@ -76,9 +70,6 @@ __all__ = [
     "ValueKind",
     "WriteConfig",
     "WriteMode",
-    # Engine models
-    "PipelineMetricsSnapshot",
-    "TaskExecutionInfo",
     # Transformation models
     "TransformationConfig",
     "TransformationType",

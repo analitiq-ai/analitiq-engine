@@ -230,6 +230,7 @@ class TypeMapRule(BaseModel):
                     f"canonical {self.canonical!r}; only regex rules may use "
                     f"named-capture substitution"
                 )
+            _ = normalize_canonical_type(self.canonical)  # validate; raises on bad unit
             return self
 
         _assert_re2_subset(self.native)
@@ -359,6 +360,7 @@ class WriteTypeMapRule(BaseModel):
         _assert_well_formed_placeholders(self.native, field="write rule native")
 
         if self.match == "exact":
+            _ = normalize_canonical_type(self.canonical)  # validate; raises on bad unit
             return self
 
         _assert_re2_subset(self.canonical)

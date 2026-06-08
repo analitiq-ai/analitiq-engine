@@ -122,32 +122,6 @@ external log/metrics shipper is a deployment concern, not an engine concern.
    and final pipeline metrics are persisted via
    `state.metrics_storage.save_pipeline_metrics`.
 
-## Pydantic Models
-
-Engine configuration uses Pydantic v2. Key models are in
-`src/models/engine.py`:
-
-- `StreamStageConfig` — per-stage timeout / retries / metrics.
-- `PipelineStagesConfig` — extract/transform/load/checkpoint stages.
-- `StreamProcessingConfig` — full per-stream config validated before
-  execution. Validates `replication_method ∈ {full, incremental}`,
-  `refresh_mode ∈ {insert, upsert, truncate_insert}`, and that source /
-  destination dicts include `endpoint_ref` and `connection_id`.
-- `PipelineMetricsSnapshot` — pipeline-level metrics snapshot for
-  orchestrator output.
-
-```python
-from src.models.engine import StreamProcessingConfig
-
-cfg = StreamProcessingConfig(
-    stream_id="wise-transfers",
-    stream_name="Wise transfers",
-    pipeline_id="wise-to-postgresql",
-    source={"endpoint_ref": "...", "connection_id": "my-wise"},
-    destination={"endpoint_ref": "...", "connection_id": "my-postgres"},
-)
-```
-
 ## Exception Hierarchy
 
 Defined in `src/engine/exceptions.py`:
@@ -162,8 +136,6 @@ ConfigurationError                      (base for config-time failures)
 ├── StreamConfigurationError
 ├── PipelineValidationError
 └── StageConfigurationError
-
-PipelineOrchestrationError              (orchestrator-level failures)
 ```
 
 Concurrent stream failures are aggregated with Python 3.11+

@@ -523,6 +523,258 @@ class TestAssignmentTransformerBadInputs:
         assert result.get("name") == "alice"
 
 
+class TestComparisonOpArgCount:
+    """Comparison ops must raise TransformationError (not silently return False) on wrong arg count."""
+
+    @staticmethod
+    def _assignment(op, args):
+        return {
+            "target": {"path": ["result"], "arrow_type": "Bool", "nullable": True},
+            "value": {"kind": "expr", "expr": {"op": op, "args": args}},
+        }
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("op", ["eq", "neq", "gt", "gte", "lt", "lte"])
+    async def test_zero_args_produces_error_entry(self, op):
+        _, errors = await AssignmentTransformer().transform_record(
+            {}, [self._assignment(op, [])]
+        )
+        assert len(errors) == 1
+        assert f"{op} expression requires 2 args, got 0" in errors[0]["error"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("op", ["eq", "neq", "gt", "gte", "lt", "lte"])
+    async def test_one_arg_produces_error_entry(self, op):
+        _, errors = await AssignmentTransformer().transform_record(
+            {}, [self._assignment(op, [{"op": "const", "value": 1}])]
+        )
+        assert len(errors) == 1
+        assert f"{op} expression requires 2 args, got 1" in errors[0]["error"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("op,a,b,expected", [
+        ("eq",  1, 1, True),
+        ("eq",  1, 2, False),
+        ("neq", 1, 2, True),
+        ("neq", 1, 1, False),
+        ("gt",  2, 1, True),
+        ("gt",  1, 2, False),
+        ("gte", 1, 1, True),
+        ("gte", 0, 1, False),
+        ("lt",  1, 2, True),
+        ("lt",  2, 1, False),
+        ("lte", 1, 1, True),
+        ("lte", 2, 1, False),
+    ])
+    async def test_two_args_returns_correct_boolean(self, op, a, b, expected):
+        assignment = self._assignment(op, [
+            {"op": "const", "value": a},
+            {"op": "const", "value": b},
+        ])
+        result, errors = await AssignmentTransformer().transform_record({}, [assignment])
+        assert errors == []
+        assert result == {"result": expected}
+
+
+class TestFnAbs:
+    """Unit tests for _fn_abs: None passthrough, valid numeric inputs, and
+    TransformationError on non-numeric input."""
+
+    @pytest.mark.asyncio
+    async def test_abs_returns_none_for_none(self):
+        assert await AssignmentTransformer()._fn_abs(None) is None
+
+    @pytest.mark.asyncio
+    async def test_abs_valid_int(self):
+        t = AssignmentTransformer()
+        assert await t._fn_abs(-5) == 5
+        assert await t._fn_abs(3) == 3
+        assert await t._fn_abs(0) == 0
+
+    @pytest.mark.asyncio
+    async def test_abs_valid_float(self):
+        t = AssignmentTransformer()
+        assert await t._fn_abs(-2.5) == pytest.approx(2.5)
+        assert await t._fn_abs(1.0) == pytest.approx(1.0)
+
+    @pytest.mark.asyncio
+    async def test_abs_valid_decimal(self):
+        from decimal import Decimal
+
+        t = AssignmentTransformer()
+        assert await t._fn_abs(Decimal("-3.5")) == Decimal("3.5")
+
+    @pytest.mark.asyncio
+    async def test_abs_bool_treated_as_int(self):
+        # bool is a subclass of int; abs(True)==1, abs(False)==0 — intentional.
+        t = AssignmentTransformer()
+        assert await t._fn_abs(True) == 1
+        assert await t._fn_abs(False) == 0
+
+    @pytest.mark.asyncio
+    async def test_abs_raises_on_string(self):
+        from src.engine.exceptions import TransformationError
+
+        t = AssignmentTransformer()
+        with pytest.raises(TransformationError, match="abs.*str"):
+            await t._fn_abs("hello")
+
+    @pytest.mark.asyncio
+    async def test_abs_raises_on_dict(self):
+        from src.engine.exceptions import TransformationError
+
+        t = AssignmentTransformer()
+        with pytest.raises(TransformationError, match="abs.*dict"):
+            await t._fn_abs({"x": 1})
+
+    @pytest.mark.asyncio
+    async def test_abs_failure_propagates_to_dlq_via_apply_transformations(self):
+        """TransformationError from _fn_abs must propagate through transform_record
+        and be re-raised by apply_transformations so the caller's error-strategy
+        layer can route the record to the DLQ."""
+        from src.engine.exceptions import TransformationError
+
+        assignment = {
+            "target": {"path": ["magnitude"], "arrow_type": "Float64", "nullable": True},
+            "value": {
+                "kind": "expr",
+                "expr": {
+                    "op": "pipe",
+                    "args": [
+                        {"op": "get", "path": ["raw_value"]},
+                        {"op": "fn", "name": "abs", "version": 1, "args": []},
+                    ],
+                },
+            },
+        }
+        with pytest.raises(TransformationError):
+            await DataTransformer().apply_transformations(
+                [{"raw_value": "not-a-number"}],
+                {"mapping": {"assignments": [assignment]}},
+            )
+
+
+class TestNotExpressionArgCount:
+    """not is a unary operator — zero args is always a config error."""
+
+    def _not_assignment(self, args: list) -> dict:
+        return {
+            "target": {"path": ["out"], "type": "boolean", "nullable": True},
+            "value": {"kind": "expr", "expr": {"op": "not", "args": args}},
+        }
+
+    @pytest.mark.asyncio
+    async def test_zero_args_produces_error_entry(self):
+        _, errors = await AssignmentTransformer().transform_record(
+            record={}, assignments=[self._not_assignment([])]
+        )
+        assert errors, "expected an error for not with zero args"
+        assert "not" in errors[0]["error"]
+        assert "got 0" in errors[0]["error"]
+
+    @pytest.mark.asyncio
+    async def test_two_args_produces_error_entry(self):
+        _, errors = await AssignmentTransformer().transform_record(
+            record={}, assignments=[self._not_assignment([
+                {"op": "const", "value": True},
+                {"op": "const", "value": False},
+            ])]
+        )
+        assert errors, "expected an error for not with two args"
+        assert "not" in errors[0]["error"]
+        assert "got 2" in errors[0]["error"]
+
+    @pytest.mark.asyncio
+    async def test_one_true_arg_returns_false(self):
+        result, errors = await AssignmentTransformer().transform_record(
+            record={}, assignments=[self._not_assignment([{"op": "const", "value": True}])]
+        )
+        assert not errors
+        assert result["out"] is False
+
+    @pytest.mark.asyncio
+    async def test_one_false_arg_returns_true(self):
+        result, errors = await AssignmentTransformer().transform_record(
+            record={}, assignments=[self._not_assignment([{"op": "const", "value": False}])]
+        )
+        assert not errors
+        assert result["out"] is True
+
+
+class TestPipeExpressionArgCount:
+    """pipe with empty args must error rather than silently return None."""
+
+    def _assignment(self, value_spec: dict) -> dict:
+        return {
+            "target": {"path": ["out"], "type": "string", "nullable": True},
+            "value": value_spec,
+        }
+
+    @pytest.mark.asyncio
+    async def test_empty_args_produces_error_entry(self):
+        assignment = self._assignment(
+            {"kind": "expr", "expr": {"op": "pipe", "args": []}}
+        )
+        _, errors = await AssignmentTransformer().transform_record(
+            record={}, assignments=[assignment]
+        )
+        assert errors, "expected an error for empty pipe args"
+        assert "pipe" in errors[0]["error"]
+        assert "got 0" in errors[0]["error"]
+
+    @pytest.mark.asyncio
+    async def test_single_arg_returns_value(self):
+        assignment = self._assignment(
+            {"kind": "expr", "expr": {"op": "pipe", "args": [{"op": "const", "value": "hello"}]}}
+        )
+        result, errors = await AssignmentTransformer().transform_record(
+            record={}, assignments=[assignment]
+        )
+        assert not errors
+        assert result["out"] == "hello"
+
+    @pytest.mark.asyncio
+    async def test_multi_arg_pipe_applies_functions(self):
+        assignment = self._assignment(
+            {
+                "kind": "expr",
+                "expr": {
+                    "op": "pipe",
+                    "args": [
+                        {"op": "const", "value": -5},
+                        {"op": "fn", "name": "abs", "version": 1, "args": []},
+                    ],
+                },
+            }
+        )
+        result, errors = await AssignmentTransformer().transform_record(
+            record={}, assignments=[assignment]
+        )
+        assert not errors
+        assert result["out"] == 5
+
+    @pytest.mark.asyncio
+    async def test_three_stage_pipe_chains_correctly(self):
+        assignment = self._assignment(
+            {
+                "kind": "expr",
+                "expr": {
+                    "op": "pipe",
+                    "args": [
+                        {"op": "const", "value": "  hello  "},
+                        {"op": "fn", "name": "trim", "version": 1, "args": []},
+                        {"op": "fn", "name": "upper", "version": 1, "args": []},
+                    ],
+                },
+            }
+        )
+        result, errors = await AssignmentTransformer().transform_record(
+            record={}, assignments=[assignment]
+        )
+        assert not errors
+        assert result["out"] == "HELLO"
+
+
 class TestIfExpressionArgCount:
     """if-expression arity check raises TransformationError (not ValueError)."""
 

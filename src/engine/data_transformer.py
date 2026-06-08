@@ -7,6 +7,7 @@ import asyncio
 import json
 import logging
 from datetime import datetime
+from decimal import Decimal
 from typing import Any, Dict, List, Optional, Tuple
 
 import pyarrow as pa
@@ -159,7 +160,7 @@ class AssignmentTransformer:
             case "pipe":
                 args = expr.get("args", [])
                 if not args:
-                    return None
+                    raise TransformationError(f"pipe expression requires at least 1 arg, got {len(args)}")
                 # First arg is the initial value, rest are functions to apply
                 value = await self._evaluate_expression(record, partial_result, args[0])
                 for fn_expr in args[1:]:
@@ -190,7 +191,7 @@ class AssignmentTransformer:
             case "eq":
                 args = expr.get("args", [])
                 if len(args) != 2:
-                    return False
+                    raise TransformationError(f"eq expression requires 2 args, got {len(args)}")
                 left = await self._evaluate_expression(record, partial_result, args[0])
                 right = await self._evaluate_expression(record, partial_result, args[1])
                 return left == right
@@ -198,7 +199,7 @@ class AssignmentTransformer:
             case "neq":
                 args = expr.get("args", [])
                 if len(args) != 2:
-                    return False
+                    raise TransformationError(f"neq expression requires 2 args, got {len(args)}")
                 left = await self._evaluate_expression(record, partial_result, args[0])
                 right = await self._evaluate_expression(record, partial_result, args[1])
                 return left != right
@@ -206,7 +207,7 @@ class AssignmentTransformer:
             case "gt" | "gte" | "lt" | "lte":
                 args = expr.get("args", [])
                 if len(args) != 2:
-                    return False
+                    raise TransformationError(f"{op} expression requires 2 args, got {len(args)}")
                 left = await self._evaluate_expression(record, partial_result, args[0])
                 right = await self._evaluate_expression(record, partial_result, args[1])
                 match op:
@@ -235,8 +236,10 @@ class AssignmentTransformer:
 
             case "not":
                 args = expr.get("args", [])
-                if not args:
-                    return True
+                if len(args) != 1:
+                    raise TransformationError(
+                        f"not expression requires 1 arg, got {len(args)}"
+                    )
                 return not await self._evaluate_expression(record, partial_result, args[0])
 
             case "concat":
@@ -381,12 +384,17 @@ class AssignmentTransformer:
         return str(value)
 
     async def _fn_abs(self, value: Any) -> Any:
-        """Absolute value."""
+        """Absolute value. None passes through.
+
+        Raises TransformationError for non-numeric input — silently returning
+        the value unchanged would mask mis-configured pipelines with no DLQ entry."""
         if value is None:
             return None
-        if isinstance(value, (int, float)):
+        if isinstance(value, (int, float, Decimal)):
             return abs(value)
-        return value
+        raise TransformationError(
+            f"abs: cannot apply to {value!r} ({type(value).__name__}); expected int, float, or Decimal"
+        )
 
     async def _fn_now(self, value: Any = None) -> datetime:
         """Return current datetime."""
