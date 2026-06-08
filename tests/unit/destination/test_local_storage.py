@@ -17,8 +17,37 @@ async def connected_storage(tmp_path):
     return s, tmp_path
 
 
+class TestConnect:
+    async def test_raises_when_path_missing(self, storage, tmp_path):
+        with pytest.raises(ValueError, match="requires 'path'"):
+            await storage.connect({})
+
+    async def test_raises_when_path_falsy(self, storage):
+        with pytest.raises(ValueError, match="requires 'path'"):
+            await storage.connect({"path": ""})
+
+    async def test_create_dirs_false_does_not_mkdir(self, storage, tmp_path):
+        target = tmp_path / "nonexistent"
+        await storage.connect({"path": str(target), "create_dirs": False})
+        assert not target.exists()
+        assert storage._connected
+
+    async def test_reconnect_replaces_base_path(self, storage, tmp_path):
+        path1 = tmp_path / "p1"
+        path2 = tmp_path / "p2"
+        await storage.connect({"path": str(path1)})
+        await storage.connect({"path": str(path2)})
+        assert storage._base_path == path2
+
+
 class TestRequirePath:
     def test_raises_when_not_connected(self, storage):
+        with pytest.raises(IOError, match="Storage not connected"):
+            storage._require_path("file.txt")
+
+    def test_raises_when_connected_but_base_path_none(self, storage):
+        storage._connected = True
+        storage._base_path = None
         with pytest.raises(IOError, match="Storage not connected"):
             storage._require_path("file.txt")
 
@@ -39,6 +68,12 @@ class TestWriteFile:
         assert result == str(base / "out.txt")
         assert (base / "out.txt").read_bytes() == b"hello"
 
+    async def test_overwrites_existing_file(self, connected_storage):
+        s, base = connected_storage
+        (base / "f.txt").write_bytes(b"old")
+        await s.write_file("f.txt", b"new")
+        assert (base / "f.txt").read_bytes() == b"new"
+
     async def test_creates_parent_dirs(self, connected_storage):
         s, base = connected_storage
         await s.write_file("a/b/c.txt", b"nested")
@@ -57,11 +92,22 @@ class TestAppendToFile:
         assert n == len(b"_second")
         assert (base / "f.txt").read_bytes() == b"first_second"
 
+    async def test_creates_file_when_absent(self, connected_storage):
+        s, base = connected_storage
+        n = await s.append_to_file("new.txt", b"created")
+        assert n == len(b"created")
+        assert (base / "new.txt").read_bytes() == b"created"
+
 
 class TestFileExists:
     async def test_returns_false_when_not_connected(self, storage):
         result = await storage.file_exists("any.txt")
         assert result is False
+
+    async def test_returns_false_when_base_path_none(self, storage):
+        storage._connected = True
+        storage._base_path = None
+        assert await storage.file_exists("any.txt") is False
 
     async def test_returns_false_when_file_absent(self, connected_storage):
         s, _ = connected_storage
@@ -120,3 +166,18 @@ class TestHealthCheck:
         s, _ = connected_storage
         await s.disconnect()
         assert await s.health_check() is False
+
+    async def test_returns_false_when_base_path_is_file(self, storage, tmp_path):
+        f = tmp_path / "notadir.txt"
+        f.write_bytes(b"x")
+        storage._base_path = f
+        storage._connected = True
+        assert await storage.health_check() is False
+
+
+class TestDisconnect:
+    async def test_idempotent(self, connected_storage):
+        s, _ = connected_storage
+        await s.disconnect()
+        await s.disconnect()
+        assert not s._connected

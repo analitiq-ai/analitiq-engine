@@ -132,10 +132,9 @@ class LocalFileStorage(BaseStorageBackend):
         Returns:
             True if file exists
         """
-        try:
-            full_path = self._require_path(path)
-        except IOError:
+        if not self._connected or self._base_path is None:
             return False
+        full_path = self._base_path / path
         return await aiofiles.os.path.exists(full_path)
 
     async def read_file(self, path: str) -> bytes:
