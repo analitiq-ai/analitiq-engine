@@ -112,6 +112,18 @@ class TestTypeMapRuleValidation:
         with pytest.raises(Exception):  # pydantic ValidationError
             TypeMapRule(match="partial", native="x", canonical="Utf8")  # type: ignore[arg-type]
 
+    @pytest.mark.parametrize("bad_canonical,match", [
+        ("Time32(us)", "Time32 accepts"),
+        ("Time32(MICROSECOND)", "Time32 accepts"),
+        ("Time64(s)", "Time64 accepts"),
+        ("Time64(MILLISECOND)", "Time64 accepts"),
+    ])
+    def test_exact_rule_rejects_invalid_canonical_cross_type_unit(self, bad_canonical, match):
+        # normalize_canonical_type must fire at construction, not deferred to
+        # parse_arrow_type downstream.
+        with pytest.raises(InvalidTypeMapError, match=match):
+            TypeMapRule(match="exact", native="TIME", canonical=bad_canonical)
+
 
 class TestParseRules:
     def test_empty_list_rejected(self):
@@ -757,6 +769,18 @@ class TestWriteTypeMapRuleValidation:
             match="exact", canonical="Utf8", native="VARCHAR(${length})"
         )
         assert rule.native == "VARCHAR(${length})"
+
+    @pytest.mark.parametrize("bad_canonical,match", [
+        ("Time32(us)", "Time32 accepts"),
+        ("Time32(MICROSECOND)", "Time32 accepts"),
+        ("Time64(s)", "Time64 accepts"),
+        ("Time64(MILLISECOND)", "Time64 accepts"),
+    ])
+    def test_exact_rule_rejects_invalid_canonical_cross_type_unit(self, bad_canonical, match):
+        # normalize_canonical_type must fire at WriteTypeMapRule construction,
+        # not deferred to TypeMapper.__init__ key pre-computation.
+        with pytest.raises(InvalidTypeMapError, match=match):
+            WriteTypeMapRule(match="exact", canonical=bad_canonical, native="TIME")
 
 
 class TestParseWriteRules:
