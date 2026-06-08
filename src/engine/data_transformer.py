@@ -7,6 +7,7 @@ import asyncio
 import json
 import logging
 from datetime import datetime
+from decimal import Decimal
 from typing import Any, Dict, List, Optional, Tuple
 
 import pyarrow as pa
@@ -159,7 +160,7 @@ class AssignmentTransformer:
             case "pipe":
                 args = expr.get("args", [])
                 if not args:
-                    return None
+                    raise TransformationError(f"pipe expression requires at least 1 arg, got {len(args)}")
                 # First arg is the initial value, rest are functions to apply
                 value = await self._evaluate_expression(record, partial_result, args[0])
                 for fn_expr in args[1:]:
@@ -190,7 +191,7 @@ class AssignmentTransformer:
             case "eq":
                 args = expr.get("args", [])
                 if len(args) != 2:
-                    return False
+                    raise TransformationError(f"eq expression requires 2 args, got {len(args)}")
                 left = await self._evaluate_expression(record, partial_result, args[0])
                 right = await self._evaluate_expression(record, partial_result, args[1])
                 return left == right
@@ -198,7 +199,7 @@ class AssignmentTransformer:
             case "neq":
                 args = expr.get("args", [])
                 if len(args) != 2:
-                    return False
+                    raise TransformationError(f"neq expression requires 2 args, got {len(args)}")
                 left = await self._evaluate_expression(record, partial_result, args[0])
                 right = await self._evaluate_expression(record, partial_result, args[1])
                 return left != right
@@ -206,18 +207,26 @@ class AssignmentTransformer:
             case "gt" | "gte" | "lt" | "lte":
                 args = expr.get("args", [])
                 if len(args) != 2:
-                    return False
+                    raise TransformationError(f"{op} expression requires 2 args, got {len(args)}")
                 left = await self._evaluate_expression(record, partial_result, args[0])
                 right = await self._evaluate_expression(record, partial_result, args[1])
-                match op:
-                    case "gt":
-                        return left > right
-                    case "gte":
-                        return left >= right
-                    case "lt":
-                        return left < right
-                    case "lte":
-                        return left <= right
+                # Comparing incompatible operand types (e.g. a null field
+                # against a number) is bad record data, not an engine defect:
+                # route it through the per-record error path, not the fatal one.
+                try:
+                    match op:
+                        case "gt":
+                            return left > right
+                        case "gte":
+                            return left >= right
+                        case "lt":
+                            return left < right
+                        case "lte":
+                            return left <= right
+                except TypeError as exc:
+                    raise TransformationError(
+                        f"{op} expression cannot compare {left!r} and {right!r}: {exc}"
+                    ) from exc
 
             case "and":
                 args = expr.get("args", [])
@@ -235,8 +244,10 @@ class AssignmentTransformer:
 
             case "not":
                 args = expr.get("args", [])
-                if not args:
-                    return True
+                if len(args) != 1:
+                    raise TransformationError(
+                        f"not expression requires 1 arg, got {len(args)}"
+                    )
                 return not await self._evaluate_expression(record, partial_result, args[0])
 
             case "concat":
@@ -291,7 +302,15 @@ class AssignmentTransformer:
             raise TransformationError(
                 f"FUNCTION_CATALOG entry for {name!r} references missing method {fn_name!r}"
             )
-        return await method(value, *args)
+        # A wrong argument count for the function (an authoring error in the
+        # mapping) surfaces as TypeError from the call; route it through the
+        # per-record error path rather than aborting the batch.
+        try:
+            return await method(value, *args)
+        except TypeError as exc:
+            raise TransformationError(
+                f"function {name!r} called with wrong arguments: {exc}"
+            ) from exc
 
     # Function implementations
     async def _fn_iso_to_date(self, value: Any) -> str:
@@ -381,12 +400,17 @@ class AssignmentTransformer:
         return str(value)
 
     async def _fn_abs(self, value: Any) -> Any:
-        """Absolute value."""
+        """Absolute value. None passes through.
+
+        Raises TransformationError for non-numeric input — silently returning
+        the value unchanged would mask mis-configured pipelines with no DLQ entry."""
         if value is None:
             return None
-        if isinstance(value, (int, float)):
+        if isinstance(value, (int, float, Decimal)):
             return abs(value)
-        return value
+        raise TransformationError(
+            f"abs: cannot apply to {value!r} ({type(value).__name__}); expected int, float, or Decimal"
+        )
 
     async def _fn_now(self, value: Any = None) -> datetime:
         """Return current datetime."""
@@ -455,17 +479,34 @@ class AssignmentTransformer:
                 case "pattern":
                     import re
                     pattern = rule.get("value", "")
-                    if value is not None and not re.match(pattern, str(value)):
-                        return rule.get("message", f"Value does not match pattern")
+                    if value is not None:
+                        # A malformed regex in the stream config is an authoring
+                        # error: surface it as a transform error, not a fatal crash.
+                        try:
+                            is_match = re.match(pattern, str(value))
+                        except re.error as exc:
+                            raise TransformationError(
+                                f"pattern validation rule has invalid regex {pattern!r}: {exc}"
+                            ) from exc
+                        if not is_match:
+                            return rule.get("message", "Value does not match pattern")
 
                 case "range":
                     min_val = rule.get("min")
                     max_val = rule.get("max")
                     if value is not None:
-                        if min_val is not None and value < min_val:
-                            return rule.get("message", f"Value must be >= {min_val}")
-                        if max_val is not None and value > max_val:
-                            return rule.get("message", f"Value must be <= {max_val}")
+                        # Comparing a value against bounds of an incompatible
+                        # type is bad record data: route it per-record.
+                        try:
+                            if min_val is not None and value < min_val:
+                                return rule.get("message", f"Value must be >= {min_val}")
+                            if max_val is not None and value > max_val:
+                                return rule.get("message", f"Value must be <= {max_val}")
+                        except TypeError as exc:
+                            raise TransformationError(
+                                f"range validation cannot compare {value!r} with bounds "
+                                f"min={min_val!r} max={max_val!r}: {exc}"
+                            ) from exc
 
                 case "in_list":
                     allowed = rule.get("value", [])

@@ -1,6 +1,6 @@
 """Custom exceptions for the streaming engine."""
 
-from typing import Optional, Any, Dict, List
+from typing import Optional, Dict, List
 
 
 class StreamProcessingError(Exception):
@@ -75,16 +75,6 @@ class StreamExecutionError(StreamProcessingError):
         if self.batch_id is not None:
             base_msg = f"{base_msg} [Batch: {self.batch_id}]"
         return base_msg
-
-
-class PipelineOrchestrationError(Exception):
-    """Exception for pipeline orchestration failures."""
-    
-    def __init__(self, message: str, pipeline_id: Optional[str] = None,
-                 failed_streams: Optional[List[str]] = None):
-        self.pipeline_id = pipeline_id
-        self.failed_streams = failed_streams or []
-        super().__init__(message)
 
 
 class StageConfigurationError(ConfigurationError):
