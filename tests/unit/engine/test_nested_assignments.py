@@ -574,3 +574,81 @@ class TestComparisonOpArgCount:
         result, errors = await AssignmentTransformer().transform_record({}, [assignment])
         assert errors == []
         assert result == {"result": expected}
+
+
+class TestFnAbs:
+    """Unit tests for _fn_abs: None passthrough, valid numeric inputs, and
+    TransformationError on non-numeric input."""
+
+    @pytest.mark.asyncio
+    async def test_abs_returns_none_for_none(self):
+        assert await AssignmentTransformer()._fn_abs(None) is None
+
+    @pytest.mark.asyncio
+    async def test_abs_valid_int(self):
+        t = AssignmentTransformer()
+        assert await t._fn_abs(-5) == 5
+        assert await t._fn_abs(3) == 3
+        assert await t._fn_abs(0) == 0
+
+    @pytest.mark.asyncio
+    async def test_abs_valid_float(self):
+        t = AssignmentTransformer()
+        assert await t._fn_abs(-2.5) == pytest.approx(2.5)
+        assert await t._fn_abs(1.0) == pytest.approx(1.0)
+
+    @pytest.mark.asyncio
+    async def test_abs_valid_decimal(self):
+        from decimal import Decimal
+
+        t = AssignmentTransformer()
+        assert await t._fn_abs(Decimal("-3.5")) == Decimal("3.5")
+
+    @pytest.mark.asyncio
+    async def test_abs_bool_treated_as_int(self):
+        # bool is a subclass of int; abs(True)==1, abs(False)==0 — intentional.
+        t = AssignmentTransformer()
+        assert await t._fn_abs(True) == 1
+        assert await t._fn_abs(False) == 0
+
+    @pytest.mark.asyncio
+    async def test_abs_raises_on_string(self):
+        from src.engine.exceptions import TransformationError
+
+        t = AssignmentTransformer()
+        with pytest.raises(TransformationError, match="abs.*str"):
+            await t._fn_abs("hello")
+
+    @pytest.mark.asyncio
+    async def test_abs_raises_on_dict(self):
+        from src.engine.exceptions import TransformationError
+
+        t = AssignmentTransformer()
+        with pytest.raises(TransformationError, match="abs.*dict"):
+            await t._fn_abs({"x": 1})
+
+    @pytest.mark.asyncio
+    async def test_abs_failure_propagates_to_dlq_via_apply_transformations(self):
+        """TransformationError from _fn_abs must propagate through transform_record
+        and be re-raised by apply_transformations so the caller's error-strategy
+        layer can route the record to the DLQ."""
+        from src.engine.exceptions import TransformationError
+
+        assignment = {
+            "target": {"path": ["magnitude"], "arrow_type": "Float64", "nullable": True},
+            "value": {
+                "kind": "expr",
+                "expr": {
+                    "op": "pipe",
+                    "args": [
+                        {"op": "get", "path": ["raw_value"]},
+                        {"op": "fn", "name": "abs", "version": 1, "args": []},
+                    ],
+                },
+            },
+        }
+        with pytest.raises(TransformationError):
+            await DataTransformer().apply_transformations(
+                [{"raw_value": "not-a-number"}],
+                {"mapping": {"assignments": [assignment]}},
+            )

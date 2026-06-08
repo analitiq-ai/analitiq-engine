@@ -7,6 +7,7 @@ import asyncio
 import json
 import logging
 from datetime import datetime
+from decimal import Decimal
 from typing import Any, Dict, List, Optional, Tuple
 
 import pyarrow as pa
@@ -379,12 +380,17 @@ class AssignmentTransformer:
         return str(value)
 
     async def _fn_abs(self, value: Any) -> Any:
-        """Absolute value."""
+        """Absolute value. None passes through.
+
+        Raises TransformationError for non-numeric input — silently returning
+        the value unchanged would mask mis-configured pipelines with no DLQ entry."""
         if value is None:
             return None
-        if isinstance(value, (int, float)):
+        if isinstance(value, (int, float, Decimal)):
             return abs(value)
-        return value
+        raise TransformationError(
+            f"abs: cannot apply to {value!r} ({type(value).__name__}); expected int, float, or Decimal"
+        )
 
     async def _fn_now(self, value: Any = None) -> datetime:
         """Return current datetime."""
