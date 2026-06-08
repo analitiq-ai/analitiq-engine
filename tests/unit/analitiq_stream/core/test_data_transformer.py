@@ -312,7 +312,7 @@ class TestDataTransformer:
 
     @pytest.mark.asyncio
     async def test_and_empty_args_raises(self, transformer):
-        """and with zero args raises TransformationError (#205)."""
+        """Empty args list would silently return True, masking a misconfigured filter; guard raises instead."""
         batch = [{"x": 1}]
         config = {
             "mapping": {
@@ -325,8 +325,22 @@ class TestDataTransformer:
             await transformer.apply_transformations(batch, config)
 
     @pytest.mark.asyncio
+    async def test_and_missing_args_key_raises(self, transformer):
+        """Absent args key is treated identically to an empty list; same guard fires."""
+        batch = [{"x": 1}]
+        config = {
+            "mapping": {
+                "assignments": [
+                    _assignment("out", expr={"op": "and"}),
+                ]
+            }
+        }
+        with pytest.raises(TransformationError, match="and expression requires at least 1 arg"):
+            await transformer.apply_transformations(batch, config)
+
+    @pytest.mark.asyncio
     async def test_or_empty_args_raises(self, transformer):
-        """or with zero args raises TransformationError (#205)."""
+        """Empty args list would silently return False, blocking every record; guard raises instead."""
         batch = [{"x": 1}]
         config = {
             "mapping": {
@@ -339,47 +353,67 @@ class TestDataTransformer:
             await transformer.apply_transformations(batch, config)
 
     @pytest.mark.asyncio
-    async def test_and_with_args_returns_correct_result(self, transformer):
-        """and short-circuits on False and returns True when all args are true (#205)."""
-        batch = [{"a": True, "b": False}]
-        true_expr = {"op": "get", "path": ["a"]}
-        false_expr = {"op": "get", "path": ["b"]}
+    async def test_or_missing_args_key_raises(self, transformer):
+        """Absent args key is treated identically to an empty list; same guard fires."""
+        batch = [{"x": 1}]
+        config = {
+            "mapping": {
+                "assignments": [
+                    _assignment("out", expr={"op": "or"}),
+                ]
+            }
+        }
+        with pytest.raises(TransformationError, match="or expression requires at least 1 arg"):
+            await transformer.apply_transformations(batch, config)
 
-        config_all_true = {
+    @pytest.mark.asyncio
+    async def test_and_all_true_returns_true(self, transformer):
+        batch = [{"a": True}]
+        true_expr = {"op": "get", "path": ["a"]}
+        config = {
             "mapping": {
                 "assignments": [_assignment("out", expr={"op": "and", "args": [true_expr, true_expr]})]
             }
         }
-        result = await transformer.apply_transformations(batch, config_all_true)
+        result = await transformer.apply_transformations(batch, config)
         assert result[0]["out"] is True
 
-        config_with_false = {
+    @pytest.mark.asyncio
+    async def test_and_short_circuits_on_false(self, transformer):
+        batch = [{"a": True, "b": False}]
+        config = {
             "mapping": {
-                "assignments": [_assignment("out", expr={"op": "and", "args": [true_expr, false_expr]})]
+                "assignments": [_assignment("out", expr={"op": "and", "args": [
+                    {"op": "get", "path": ["a"]},
+                    {"op": "get", "path": ["b"]},
+                ]})]
             }
         }
-        result = await transformer.apply_transformations(batch, config_with_false)
+        result = await transformer.apply_transformations(batch, config)
         assert result[0]["out"] is False
 
     @pytest.mark.asyncio
-    async def test_or_with_args_returns_correct_result(self, transformer):
-        """or short-circuits on True and returns False when all args are false (#205)."""
+    async def test_or_short_circuits_on_true(self, transformer):
         batch = [{"a": True, "b": False}]
-        true_expr = {"op": "get", "path": ["a"]}
-        false_expr = {"op": "get", "path": ["b"]}
-
-        config_with_true = {
+        config = {
             "mapping": {
-                "assignments": [_assignment("out", expr={"op": "or", "args": [false_expr, true_expr]})]
+                "assignments": [_assignment("out", expr={"op": "or", "args": [
+                    {"op": "get", "path": ["b"]},
+                    {"op": "get", "path": ["a"]},
+                ]})]
             }
         }
-        result = await transformer.apply_transformations(batch, config_with_true)
+        result = await transformer.apply_transformations(batch, config)
         assert result[0]["out"] is True
 
-        config_all_false = {
+    @pytest.mark.asyncio
+    async def test_or_all_false_returns_false(self, transformer):
+        batch = [{"b": False}]
+        false_expr = {"op": "get", "path": ["b"]}
+        config = {
             "mapping": {
                 "assignments": [_assignment("out", expr={"op": "or", "args": [false_expr, false_expr]})]
             }
         }
-        result = await transformer.apply_transformations(batch, config_all_false)
+        result = await transformer.apply_transformations(batch, config)
         assert result[0]["out"] is False
