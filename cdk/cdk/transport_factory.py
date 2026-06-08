@@ -39,7 +39,7 @@ if TYPE_CHECKING:
 
 from cdk._extras import reraise_for_missing_extra
 from cdk.derived_functions import DEFAULT_FUNCTIONS
-from cdk.exceptions import TransportSpecError
+from cdk.exceptions import TransportSpecError, UnresolvedValueError
 from cdk.resolver import ResolutionContext, Resolver
 from cdk.rate_limiter import RateLimiter
 
@@ -424,18 +424,32 @@ class AdbcTransport:
 def _resolve_db_kwargs(
     raw: Optional[Mapping[str, Any]], resolver: Resolver
 ) -> Dict[str, Any]:
-    """Resolve the optional ``db_kwargs`` block.
+    """Resolve the optional ``db_kwargs`` block into ADBC option strings.
 
     Each value goes through the resolver so secrets and connection
-    parameters flow in the same way as DSN bindings. ADBC accepts
-    non-string scalar values; stringification is left to the driver.
+    parameters flow in the same way as DSN bindings, then renders to its
+    ADBC option string (see :func:`_as_adbc_option_value`): ADBC database
+    and connection options are string-valued, so a typed connection input
+    (an integer port, a boolean flag) must reach the driver as a string —
+    the same form the DSN path produces — rather than relying on the
+    manager's value-type dispatch hitting a typed setter the driver may
+    not implement.
 
-    Keys whose values resolve to ``None`` are dropped — that matches
-    the schema's treatment of optional credential fields, where an
-    unset secret should not override the driver's own default. The
-    drop is logged at INFO so an operator can distinguish "field was
-    intentionally absent" from "the expression I authored resolved to
-    None (likely an unbound placeholder or empty secret)".
+    A db_kwargs entry is an independent optional driver argument (unlike a
+    DSN binding, which a URL template structurally requires). An entry is
+    dropped when it carries no value, in two cases:
+
+    * the ref targets a connection input the user did not supply, so the
+      resolver raises :class:`UnresolvedValueError` (the missing-data case);
+    * the expression resolves to ``None`` (an input present but null).
+
+    Both mean "no value" and let the driver apply its own default, realising
+    the connector contract's ``required: false`` ("resolution need not produce
+    a value"). This drop is safe because every *required* input is enforced
+    up front by ``ConnectionRuntime._validate_connection_contract`` before any
+    binding is resolved, so a missing value here is necessarily optional.
+    Authoring defects (an unknown scope, a malformed node) raise other
+    exceptions and still propagate. Each drop is logged at INFO.
     """
     if raw is None:
         return {}
@@ -443,7 +457,15 @@ def _resolve_db_kwargs(
         raise TransportSpecError("adbc transport `db_kwargs` must be an object")
     out: Dict[str, Any] = {}
     for name, value in raw.items():
-        resolved = resolver.resolve(value)
+        try:
+            resolved = resolver.resolve(value)
+        except UnresolvedValueError:
+            logger.info(
+                "adbc db_kwargs[%s] omitted: optional binding references a "
+                "connection input that is not set; passing driver default.",
+                name,
+            )
+            continue
         if resolved is None:
             logger.info(
                 "adbc db_kwargs[%s] resolved to None; passing driver default. "
@@ -452,8 +474,28 @@ def _resolve_db_kwargs(
                 name,
             )
             continue
-        out[str(name)] = resolved
+        out[str(name)] = _as_adbc_option_value(name, resolved)
     return out
+
+
+def _as_adbc_option_value(name: str, value: Any) -> str:
+    """Render a resolved db_kwargs scalar to its ADBC option string.
+
+    ADBC option values are strings: ``AdbcDatabaseSetOption`` takes a string,
+    while the typed setters (``SetOptionInt``/``SetOptionDouble``/...) are
+    optional driver extensions — passing a native ``int`` makes the manager
+    dispatch to a typed setter the driver may not implement (the Snowflake
+    driver rejects it outright). Booleans render lowercase to match the
+    ADBC/driver convention. A non-scalar value is an authoring defect.
+    """
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float, str)):
+        return str(value)
+    raise TransportSpecError(
+        f"adbc db_kwargs[{name}] resolved to a {type(value).__name__}; "
+        f"ADBC option values must be scalars (string, number, or boolean)"
+    )
 
 
 def resolve_adbc_spec(

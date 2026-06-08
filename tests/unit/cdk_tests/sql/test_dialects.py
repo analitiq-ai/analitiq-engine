@@ -292,3 +292,31 @@ class TestUnsupportedHooks:
         d = SqlDialect()
         assert d.supports_upsert_sqlalchemy is False
         assert d.supports_upsert_adbc is False
+
+
+class TestAdbcIngestSchemaKwargs:
+    """The base targets the schema explicitly via the standard ADBC option;
+    drivers without per-statement ingest targeting override to return none."""
+
+    def test_base_targets_normalized_schema(self):
+        assert SqlDialect().adbc_ingest_schema_kwargs("public") == {
+            "db_schema_name": "public"
+        }
+
+    def test_base_normalizes_before_targeting(self):
+        assert _UpperNormalizingDialect().adbc_ingest_schema_kwargs("public") == {
+            "db_schema_name": "PUBLIC"
+        }
+
+    def test_empty_schema_targets_nothing(self):
+        assert SqlDialect().adbc_ingest_schema_kwargs("") == {}
+
+
+class TestAdbcBinaryBind:
+    """The base binds binary values natively; drivers that cannot override the
+    placeholder and bind value together so they always agree."""
+
+    def test_base_binds_bytes_with_plain_placeholder(self):
+        placeholder, value = SqlDialect().adbc_binary_bind(b"\x00\x01")
+        assert placeholder == "?"
+        assert value == b"\x00\x01"

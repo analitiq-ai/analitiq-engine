@@ -213,6 +213,38 @@ class SqlDialect:
             "adbc_stage_table_sql", dialect=self.name
         )
 
+    def adbc_ingest_schema_kwargs(self, schema_name: str) -> Dict[str, Any]:
+        """Schema-targeting kwargs for ``cursor.adbc_ingest``.
+
+        ADBC exposes per-statement ingest targeting through the
+        ``adbc.ingest.target_db_schema`` option (the ``db_schema_name``
+        kwarg). The postgres driver and most others implement it, so the
+        base targets the normalized schema explicitly — read and write then
+        resolve the same physical schema.
+
+        Drivers that do not implement per-statement ingest targeting
+        (Snowflake rejects both ``target_db_schema`` and ``target_catalog``)
+        override this to return no kwargs; ingest follows the connection's
+        session schema instead, where the stage and target tables already
+        live.
+        """
+        if schema_name:
+            return {"db_schema_name": self.normalize_schema(schema_name)}
+        return {}
+
+    def adbc_binary_bind(self, value: bytes) -> Tuple[str, Any]:
+        """Placeholder SQL + bind value for a binary value in an ADBC
+        parameterized statement (the ``_batch_commits.committed_cursor``).
+
+        Default: a plain ``?`` placeholder bound to the raw bytes, which the
+        postgres driver and most others accept. Drivers that cannot bind a
+        binary parameter (Snowflake rejects it with "Unsupported bind param
+        type binary") override this to bind a hex string and convert it back
+        in SQL (``TO_BINARY(?, 'HEX')``); the column stays BINARY, so reads
+        round-trip to the original bytes either way.
+        """
+        return "?", value
+
     # ---- discovery queries (qmark placeholders + positional params) --------
     def schemas_query(self) -> Query:
         sql = "SELECT schema_name FROM information_schema.schemata"

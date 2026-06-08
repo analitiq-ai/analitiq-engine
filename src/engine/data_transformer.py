@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import pyarrow as pa
 
 from .exceptions import TransformationError
+from ..shared.dict_path import walk_path
 from cdk.type_map.arrow import resolve_arrow_type
 from cdk.type_map.exceptions import InvalidTypeMapError
 
@@ -234,6 +235,8 @@ class AssignmentTransformer:
 
             case "and":
                 args = expr.get("args", [])
+                if not args:
+                    raise TransformationError("and expression requires at least 1 arg, got 0")
                 for arg in args:
                     if not await self._evaluate_expression(record, partial_result, arg):
                         return False
@@ -241,6 +244,8 @@ class AssignmentTransformer:
 
             case "or":
                 args = expr.get("args", [])
+                if not args:
+                    raise TransformationError("or expression requires at least 1 arg, got 0")
                 for arg in args:
                     if await self._evaluate_expression(record, partial_result, arg):
                         return True
@@ -256,6 +261,8 @@ class AssignmentTransformer:
 
             case "concat":
                 args = expr.get("args", [])
+                if not args:
+                    raise TransformationError("concat expression requires at least 1 arg, got 0")
                 parts = []
                 for arg in args:
                     val = await self._evaluate_expression(record, partial_result, arg)
@@ -265,6 +272,8 @@ class AssignmentTransformer:
 
             case "coalesce":
                 args = expr.get("args", [])
+                if not args:
+                    raise TransformationError("coalesce expression requires at least 1 arg, got 0")
                 for arg in args:
                     val = await self._evaluate_expression(record, partial_result, arg)
                     if val is not None:
@@ -434,14 +443,8 @@ class AssignmentTransformer:
         return None
 
     def _get_nested_value(self, record: Dict[str, Any], path: List[str]) -> Any:
-        """Get value from nested path."""
-        current = record
-        for key in path:
-            if isinstance(current, dict) and key in current:
-                current = current[key]
-            else:
-                return None
-        return current
+        """Return the value at *path* in *record*, or ``None`` if any step is missing."""
+        return walk_path(record, path)
 
     def _set_nested_value(self, result: Dict[str, Any], path: List[str], value: Any) -> None:
         """Set value at nested path."""

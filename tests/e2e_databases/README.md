@@ -43,11 +43,8 @@ cd tests/e2e_databases && docker compose up -d --wait --remove-orphans && cd ../
 
 # 2. run a pipeline (engine in Docker, reaching the DBs via host.docker.internal).
 #    Pick a slug from pipelines/manifest.json, e.g. e2e-local-mysql-to-postgres,
-#    e2e-local-postgres-to-postgres, ...
-#    NOTE: the e2e-local-mariadb-* slugs currently FAIL at startup — the
-#    mariadb connector declares a sync driver (mariadb+pymysql), which the
-#    engine's create_async_engine rejects. Connector-side fix; see the
-#    "Known limitation" section of PR #144.
+#    e2e-local-postgres-to-postgres, e2e-local-postgres-to-mariadb, ... — every
+#    Postgres/MySQL/MariaDB pairing works in both directions.
 #    The subshell keeps the engine's exit status as the command's status.
 SLUG=e2e-local-postgres-to-mysql
 PIPELINE_ID=$(python3 -c "import json;print(next(p['pipeline_id'] for p in json.load(open('pipelines/manifest.json'))['pipelines'] if p['path'].startswith('$SLUG/')))")
