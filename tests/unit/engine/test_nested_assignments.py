@@ -521,3 +521,56 @@ class TestAssignmentTransformerBadInputs:
         assert len(errors) == 1
         assert errors[0]["field"] == "out"
         assert result.get("name") == "alice"
+
+
+class TestComparisonOpArgCount:
+    """Comparison ops must raise TransformationError (not silently return False) on wrong arg count."""
+
+    @staticmethod
+    def _assignment(op, args):
+        return {
+            "target": {"path": ["result"], "arrow_type": "Bool", "nullable": True},
+            "value": {"kind": "expr", "expr": {"op": op, "args": args}},
+        }
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("op", ["eq", "neq", "gt", "gte", "lt", "lte"])
+    async def test_zero_args_produces_error_entry(self, op):
+        _, errors = await AssignmentTransformer().transform_record(
+            {}, [self._assignment(op, [])]
+        )
+        assert len(errors) == 1
+        assert f"{op} expression requires 2 args, got 0" in errors[0]["error"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("op", ["eq", "neq", "gt", "gte", "lt", "lte"])
+    async def test_one_arg_produces_error_entry(self, op):
+        _, errors = await AssignmentTransformer().transform_record(
+            {}, [self._assignment(op, [{"op": "const", "value": 1}])]
+        )
+        assert len(errors) == 1
+        assert f"{op} expression requires 2 args, got 1" in errors[0]["error"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("op,a,b,expected", [
+        ("eq",  1, 1, True),
+        ("eq",  1, 2, False),
+        ("neq", 1, 2, True),
+        ("neq", 1, 1, False),
+        ("gt",  2, 1, True),
+        ("gt",  1, 2, False),
+        ("gte", 1, 1, True),
+        ("gte", 0, 1, False),
+        ("lt",  1, 2, True),
+        ("lt",  2, 1, False),
+        ("lte", 1, 1, True),
+        ("lte", 2, 1, False),
+    ])
+    async def test_two_args_returns_correct_boolean(self, op, a, b, expected):
+        assignment = self._assignment(op, [
+            {"op": "const", "value": a},
+            {"op": "const", "value": b},
+        ])
+        result, errors = await AssignmentTransformer().transform_record({}, [assignment])
+        assert errors == []
+        assert result == {"result": expected}

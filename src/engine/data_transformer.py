@@ -188,7 +188,7 @@ class AssignmentTransformer:
             case "eq":
                 args = expr.get("args", [])
                 if len(args) != 2:
-                    return False
+                    raise TransformationError(f"eq expression requires 2 args, got {len(args)}")
                 left = await self._evaluate_expression(record, partial_result, args[0])
                 right = await self._evaluate_expression(record, partial_result, args[1])
                 return left == right
@@ -196,7 +196,7 @@ class AssignmentTransformer:
             case "neq":
                 args = expr.get("args", [])
                 if len(args) != 2:
-                    return False
+                    raise TransformationError(f"neq expression requires 2 args, got {len(args)}")
                 left = await self._evaluate_expression(record, partial_result, args[0])
                 right = await self._evaluate_expression(record, partial_result, args[1])
                 return left != right
@@ -204,7 +204,7 @@ class AssignmentTransformer:
             case "gt" | "gte" | "lt" | "lte":
                 args = expr.get("args", [])
                 if len(args) != 2:
-                    return False
+                    raise TransformationError(f"{op} expression requires 2 args, got {len(args)}")
                 left = await self._evaluate_expression(record, partial_result, args[0])
                 right = await self._evaluate_expression(record, partial_result, args[1])
                 match op:
