@@ -699,13 +699,7 @@ def _extract_records(data: Any, records_ref: str) -> List[Dict[str, Any]]:
     if records_ref == prefix:
         cursor: Any = body
     elif records_ref.startswith(prefix + "."):
-        cursor = body
-        for segment in records_ref[len(prefix) + 1 :].split("."):
-            if isinstance(cursor, dict) and segment in cursor:
-                cursor = cursor[segment]
-            else:
-                cursor = None
-                break
+        cursor = walk_path(body, records_ref[len(prefix) + 1 :].split("."))
     else:
         cursor = None
     if isinstance(cursor, list):
@@ -733,6 +727,10 @@ def _extract_next_cursor(data: Any, response_field_ref: str) -> Optional[str]:
 
 
 def _get_nested_field(record: Dict[str, Any], field_path: str) -> Any:
+    """Return the value at the dot-delimited *field_path* in *record*, or ``None`` on any miss.
+
+    Field names containing a literal ``"."`` character are not supported.
+    """
     return walk_path(record, field_path.split("."))
 
 

@@ -431,6 +431,7 @@ class AssignmentTransformer:
         return None
 
     def _get_nested_value(self, record: Dict[str, Any], path: List[str]) -> Any:
+        """Return the value at *path* in *record*, or ``None`` if any step is missing."""
         return walk_path(record, path)
 
     def _set_nested_value(self, result: Dict[str, Any], path: List[str], value: Any) -> None:
