@@ -679,6 +679,10 @@ class TestFnToString:
         assert await AssignmentTransformer()._fn_to_string("hello") == "hello"
 
     @pytest.mark.asyncio
+    async def test_to_string_passes_through_empty_string(self):
+        assert await AssignmentTransformer()._fn_to_string("") == ""
+
+    @pytest.mark.asyncio
     async def test_none_propagates_through_pipe_to_string(self):
         """None fed through a pipe ending in to_string must remain None, not ""."""
         assignment = {
@@ -699,6 +703,29 @@ class TestFnToString:
         )
         assert errors == []
         assert result["label"] is None
+
+    @pytest.mark.asyncio
+    async def test_none_via_to_string_rejected_by_non_nullable_target(self):
+        """Before the fix, to_string returned "" for None, silently bypassing the
+        nullable check and writing an empty string to a non-nullable column."""
+        assignment = {
+            "target": {"path": ["label"], "arrow_type": "Utf8", "nullable": False},
+            "value": {
+                "kind": "expr",
+                "expr": {
+                    "op": "pipe",
+                    "args": [
+                        {"op": "get", "path": ["raw"]},
+                        {"op": "fn", "name": "to_string", "version": 1, "args": []},
+                    ],
+                },
+            },
+        }
+        result, errors = await AssignmentTransformer().transform_record(
+            record={"raw": None}, assignments=[assignment]
+        )
+        assert len(errors) == 1
+        assert "null" in errors[0]["error"].lower()
 
 
 class TestNotExpressionArgCount:
