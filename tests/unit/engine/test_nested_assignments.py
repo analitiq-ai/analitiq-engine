@@ -837,3 +837,168 @@ class TestIfExpressionArgCount:
         )
         assert not errors
         assert result["out"] == "no"
+
+
+class TestTransformRecordExceptionBoundary:
+    """transform_record must DLQ-route TransformationError only; programming
+    defects (AttributeError, KeyError, etc.) must propagate as fatal errors."""
+
+    def _assignment(self, value_spec: dict) -> dict:
+        return {
+            "target": {"path": ["out"], "type": "string", "nullable": True},
+            "value": value_spec,
+        }
+
+    @pytest.mark.asyncio
+    async def test_transformation_error_is_dlq_routed(self):
+        """TransformationError is still caught and appended to the error list."""
+        assignment = self._assignment({"kind": "literal", "literal": {"value": "x"}})
+        _, errors = await AssignmentTransformer().transform_record(
+            record={}, assignments=[assignment]
+        )
+        assert len(errors) == 1
+        assert "literal" in errors[0]["error"]
+
+    @pytest.mark.asyncio
+    async def test_attribute_error_propagates_as_fatal(self):
+        """AttributeError from a bug inside _evaluate_value propagates out of
+        transform_record rather than silently becoming a DLQ entry."""
+        from unittest.mock import AsyncMock
+
+        t = AssignmentTransformer()
+        t._evaluate_value = AsyncMock(
+            side_effect=AttributeError("'NoneType' has no attribute 'get'")
+        )
+        assignment = self._assignment({"kind": "const", "const": {"value": "x"}})
+
+        with pytest.raises(AttributeError):
+            await t.transform_record(record={}, assignments=[assignment])
+
+    @pytest.mark.asyncio
+    async def test_key_error_propagates_as_fatal(self):
+        """KeyError from a programming defect propagates rather than being
+        silently converted to a DLQ entry."""
+        from unittest.mock import AsyncMock
+
+        t = AssignmentTransformer()
+        t._evaluate_value = AsyncMock(side_effect=KeyError("missing_key"))
+        assignment = self._assignment({"kind": "const", "const": {"value": "x"}})
+
+        with pytest.raises(KeyError):
+            await t.transform_record(record={}, assignments=[assignment])
+
+    @pytest.mark.asyncio
+    async def test_programming_defect_propagates_through_apply_transformations(self):
+        """A programming defect inside transform_record propagates out of
+        apply_transformations as the original exception — not wrapped in
+        TransformationError — so it fails the pipeline fatally."""
+        from unittest.mock import patch
+
+        assignment = self._assignment({"kind": "const", "const": {"value": "x"}})
+        config = {"mapping": {"assignments": [assignment]}}
+
+        dt = DataTransformer()
+
+        async def _inject_defect(record, assignments, **kwargs):
+            raise RuntimeError("unexpected engine bug")
+
+        with patch.object(dt.assignment_transformer, "transform_record", _inject_defect):
+            with pytest.raises(RuntimeError, match="unexpected engine bug"):
+                await dt.apply_transformations([{"x": 1}], config)
+
+    @pytest.mark.asyncio
+    async def test_if_expression_wrong_arg_count_is_dlq_routed(self):
+        """Malformed if expression (wrong arg count) raises TransformationError
+        and is DLQ-routed — not a fatal ValueError that bypasses the handler."""
+        assignment = {
+            "target": {"path": ["out"], "type": "string", "nullable": True},
+            "value": {
+                "kind": "expr",
+                "expr": {"op": "if", "args": [{"op": "const", "value": True}]},
+            },
+        }
+        _, errors = await AssignmentTransformer().transform_record(
+            record={}, assignments=[assignment]
+        )
+        assert len(errors) == 1
+        assert "if" in errors[0]["error"]
+        assert "3" in errors[0]["error"]
+
+
+class TestNarrowedBoundaryDataErrors:
+    """After narrowing transform_record to ``except TransformationError``,
+    data- and config-dependent failures must be wrapped in TransformationError
+    so they still route per-record instead of aborting the whole batch."""
+
+    @pytest.mark.asyncio
+    async def test_comparison_type_mismatch_is_dlq_routed(self):
+        # None compared to a number raises TypeError under the hood; it must
+        # surface as a per-record error, not a fatal batch abort.
+        assignment = {
+            "target": {"path": ["out"], "type": "boolean", "nullable": True},
+            "value": {
+                "kind": "expr",
+                "expr": {
+                    "op": "gt",
+                    "args": [{"op": "get", "path": ["x"]}, {"op": "const", "value": 5}],
+                },
+            },
+        }
+        _, errors = await AssignmentTransformer().transform_record(
+            record={"x": None}, assignments=[assignment]
+        )
+        assert len(errors) == 1
+        assert "gt" in errors[0]["error"]
+
+    @pytest.mark.asyncio
+    async def test_function_wrong_arity_is_dlq_routed(self):
+        # trim takes only the piped value; an extra arg raises TypeError, which
+        # must be wrapped and routed per-record.
+        assignment = {
+            "target": {"path": ["out"], "type": "string", "nullable": True},
+            "value": {
+                "kind": "expr",
+                "expr": {
+                    "op": "pipe",
+                    "args": [
+                        {"op": "const", "value": "hi"},
+                        {"op": "fn", "name": "trim", "version": 1, "args": ["extra"]},
+                    ],
+                },
+            },
+        }
+        _, errors = await AssignmentTransformer().transform_record(
+            record={}, assignments=[assignment]
+        )
+        assert len(errors) == 1
+        assert "trim" in errors[0]["error"]
+
+    @pytest.mark.asyncio
+    async def test_invalid_pattern_regex_is_dlq_routed(self):
+        # An unterminated character class is a config authoring error (re.error);
+        # it must route per-record rather than crash the batch.
+        assignment = {
+            "target": {"path": ["out"], "type": "string", "nullable": True},
+            "value": {"kind": "const", "const": {"value": "abc"}},
+            "validate": {"rules": [{"type": "pattern", "value": "["}], "on_error": "dlq"},
+        }
+        _, errors = await AssignmentTransformer().transform_record(
+            record={}, assignments=[assignment]
+        )
+        assert len(errors) == 1
+        assert "regex" in errors[0]["error"]
+
+    @pytest.mark.asyncio
+    async def test_range_type_mismatch_is_dlq_routed(self):
+        # Comparing a string value to a numeric bound raises TypeError; must
+        # route per-record.
+        assignment = {
+            "target": {"path": ["out"], "type": "string", "nullable": True},
+            "value": {"kind": "const", "const": {"value": "abc"}},
+            "validate": {"rules": [{"type": "range", "min": 0}], "on_error": "dlq"},
+        }
+        _, errors = await AssignmentTransformer().transform_record(
+            record={}, assignments=[assignment]
+        )
+        assert len(errors) == 1
+        assert "range" in errors[0]["error"]

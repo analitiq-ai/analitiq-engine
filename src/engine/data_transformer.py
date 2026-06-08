@@ -111,7 +111,7 @@ class AssignmentTransformer:
 
                 self._set_nested_value(result, target_path, value)
 
-            except Exception as e:
+            except TransformationError as e:
                 field_path = ".".join(assignment.get("target", {}).get("path", ["unknown"]))
                 errors.append({
                     "field": field_path,
@@ -210,15 +210,23 @@ class AssignmentTransformer:
                     raise TransformationError(f"{op} expression requires 2 args, got {len(args)}")
                 left = await self._evaluate_expression(record, partial_result, args[0])
                 right = await self._evaluate_expression(record, partial_result, args[1])
-                match op:
-                    case "gt":
-                        return left > right
-                    case "gte":
-                        return left >= right
-                    case "lt":
-                        return left < right
-                    case "lte":
-                        return left <= right
+                # Comparing incompatible operand types (e.g. a null field
+                # against a number) is bad record data, not an engine defect:
+                # route it through the per-record error path, not the fatal one.
+                try:
+                    match op:
+                        case "gt":
+                            return left > right
+                        case "gte":
+                            return left >= right
+                        case "lt":
+                            return left < right
+                        case "lte":
+                            return left <= right
+                except TypeError as exc:
+                    raise TransformationError(
+                        f"{op} expression cannot compare {left!r} and {right!r}: {exc}"
+                    ) from exc
 
             case "and":
                 args = expr.get("args", [])
@@ -294,7 +302,15 @@ class AssignmentTransformer:
             raise TransformationError(
                 f"FUNCTION_CATALOG entry for {name!r} references missing method {fn_name!r}"
             )
-        return await method(value, *args)
+        # A wrong argument count for the function (an authoring error in the
+        # mapping) surfaces as TypeError from the call; route it through the
+        # per-record error path rather than aborting the batch.
+        try:
+            return await method(value, *args)
+        except TypeError as exc:
+            raise TransformationError(
+                f"function {name!r} called with wrong arguments: {exc}"
+            ) from exc
 
     # Function implementations
     async def _fn_iso_to_date(self, value: Any) -> str:
@@ -463,17 +479,34 @@ class AssignmentTransformer:
                 case "pattern":
                     import re
                     pattern = rule.get("value", "")
-                    if value is not None and not re.match(pattern, str(value)):
-                        return rule.get("message", f"Value does not match pattern")
+                    if value is not None:
+                        # A malformed regex in the stream config is an authoring
+                        # error: surface it as a transform error, not a fatal crash.
+                        try:
+                            is_match = re.match(pattern, str(value))
+                        except re.error as exc:
+                            raise TransformationError(
+                                f"pattern validation rule has invalid regex {pattern!r}: {exc}"
+                            ) from exc
+                        if not is_match:
+                            return rule.get("message", "Value does not match pattern")
 
                 case "range":
                     min_val = rule.get("min")
                     max_val = rule.get("max")
                     if value is not None:
-                        if min_val is not None and value < min_val:
-                            return rule.get("message", f"Value must be >= {min_val}")
-                        if max_val is not None and value > max_val:
-                            return rule.get("message", f"Value must be <= {max_val}")
+                        # Comparing a value against bounds of an incompatible
+                        # type is bad record data: route it per-record.
+                        try:
+                            if min_val is not None and value < min_val:
+                                return rule.get("message", f"Value must be >= {min_val}")
+                            if max_val is not None and value > max_val:
+                                return rule.get("message", f"Value must be <= {max_val}")
+                        except TypeError as exc:
+                            raise TransformationError(
+                                f"range validation cannot compare {value!r} with bounds "
+                                f"min={min_val!r} max={max_val!r}: {exc}"
+                            ) from exc
 
                 case "in_list":
                     allowed = rule.get("value", [])
