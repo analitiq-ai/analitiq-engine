@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from cdk.connection_runtime import ConnectionRuntime, _PreResolvedSecretsResolver
+from cdk.exceptions import TransportSpecError
 
 
 def _resolver(secrets=None):
@@ -190,3 +191,141 @@ class TestWorkerSideRuntime:
         }
         worker_runtime = ConnectionRuntime.from_resolved_payload(payload)
         assert worker_runtime.driver == "postgresql"
+
+
+class TestConnectionContractValidation:
+    """Required inputs are enforced once, at the connection boundary, from the
+    connector's ``connection_contract`` — the published schema's authoritative
+    optionality signal (``required`` = "whether resolution must produce a
+    value"). This is what lets transport resolution omit an absent optional
+    binding rather than fail."""
+
+    def _runtime(self, *, parameters, contract_inputs):
+        return ConnectionRuntime(
+            raw_config={"parameters": parameters, "secret_refs": {}},
+            connection_id="c1",
+            connector_id="demo",
+            connector_type="database",
+            resolver=_resolver({}),
+            connector_definition={
+                "connector_id": "demo",
+                "connection_contract": {"inputs": contract_inputs},
+            },
+        )
+
+    def test_missing_required_parameter_raises(self):
+        runtime = self._runtime(
+            parameters={"warehouse": "wh"},
+            contract_inputs={
+                "account": {"required": True, "source": "user",
+                            "storage": "connection.parameters"},
+                "warehouse": {"required": False, "source": "user",
+                              "storage": "connection.parameters"},
+            },
+        )
+        with pytest.raises(TransportSpecError, match="account"):
+            runtime._validate_connection_contract({})
+
+    def test_absent_optional_input_passes(self):
+        runtime = self._runtime(
+            parameters={"account": "abc"},
+            contract_inputs={
+                "account": {"required": True, "source": "user",
+                            "storage": "connection.parameters"},
+                "role": {"required": False, "source": "user",
+                         "storage": "connection.parameters"},
+            },
+        )
+        runtime._validate_connection_contract({})  # no raise
+
+    def test_required_secret_checked_against_secret_store(self):
+        runtime = self._runtime(
+            parameters={"account": "abc"},
+            contract_inputs={
+                "account": {"required": True, "source": "user",
+                            "storage": "connection.parameters"},
+                "password": {"required": True, "source": "user",
+                             "storage": "secrets"},
+            },
+        )
+        with pytest.raises(TransportSpecError, match="password"):
+            runtime._validate_connection_contract({})
+        # Present in the secret store -> passes.
+        runtime._validate_connection_contract({"password": "pw"})
+
+    def test_required_platform_input_enforced(self):
+        # ``required`` is enforced regardless of ``source``: a platform-
+        # provisioned input lands in the same scopes as a user one, so a
+        # missing required platform input must fail just like a user input.
+        # (The transport-resolution drop logic relies on *every* required
+        # input being present, not just the user-sourced ones.)
+        inputs = {
+            "account": {"required": True, "source": "user",
+                        "storage": "connection.parameters"},
+            "region": {"required": True, "source": "platform",
+                       "storage": "connection.parameters"},
+        }
+        with pytest.raises(TransportSpecError, match="region"):
+            self._runtime(parameters={"account": "abc"},
+                          contract_inputs=inputs)._validate_connection_contract({})
+        # Present -> passes.
+        self._runtime(
+            parameters={"account": "abc", "region": "eu"},
+            contract_inputs=inputs,
+        )._validate_connection_contract({})  # no raise
+
+    def test_required_input_unknown_storage_fails_loud(self):
+        # A required input whose storage is not one the connection carries
+        # (the schema's storage enum is closed to connection.parameters /
+        # secrets) is a malformed connector definition -- fail loud, never
+        # silently skip.
+        runtime = self._runtime(
+            parameters={"account": "abc"},
+            contract_inputs={
+                "account": {"required": True, "source": "user",
+                            "storage": "connection.parameters"},
+                "bogus": {"required": True, "source": "user",
+                          "storage": "connection.discovered"},
+            },
+        )
+        with pytest.raises(TransportSpecError, match="unknown storage"):
+            runtime._validate_connection_contract({})
+
+    def test_null_parameters_block_still_enforces_required(self):
+        # A connection with no (or null) parameters block must still raise
+        # for a required connection.parameters input -- this exercises the
+        # ``self._raw_config.get("parameters") or {}`` coalescing.
+        runtime = self._runtime(
+            parameters=None,
+            contract_inputs={
+                "account": {"required": True, "source": "user",
+                            "storage": "connection.parameters"},
+            },
+        )
+        with pytest.raises(TransportSpecError, match="account"):
+            runtime._validate_connection_contract({})
+
+    async def test_resolve_spec_enforces_contract_at_boundary(self):
+        # The contract check runs through the public boundary, after secrets
+        # load -- so a connection missing a required input fails resolve_spec,
+        # not just the private helper.
+        runtime = self._runtime(
+            parameters={},
+            contract_inputs={
+                "account": {"required": True, "source": "user",
+                            "storage": "connection.parameters"},
+            },
+        )
+        with pytest.raises(TransportSpecError, match="account"):
+            await runtime.resolve_spec()
+
+    def test_no_contract_is_unconstrained(self):
+        runtime = ConnectionRuntime(
+            raw_config={"parameters": {}},
+            connection_id="c1",
+            connector_id="demo",
+            connector_type="database",
+            resolver=_resolver({}),
+            connector_definition={"connector_id": "demo"},
+        )
+        runtime._validate_connection_contract({})  # no raise

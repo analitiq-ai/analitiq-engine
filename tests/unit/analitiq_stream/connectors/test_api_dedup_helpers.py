@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
-from src.source.connectors.api import APIConnector, _is_record_new
+from src.source.connectors.api import APIConnector, _extract_next_cursor, _is_record_new
 
 
 def _bookmark(cursor: str, tiebreakers: List[Dict[str, Any]] | None = None) -> Dict[str, Any]:
@@ -141,3 +141,38 @@ class TestDeduplicateRecords:
         }
         kept = connector._deduplicate_records(batch, state, "updated_at", ["id"])
         assert [r["id"] for r in kept] == ["15", "1"]
+
+
+# ---------------------------------------------------------------------------
+# _extract_next_cursor — prefix-stripping and traversal
+# ---------------------------------------------------------------------------
+
+
+class TestExtractNextCursor:
+    def test_response_body_exact_ref_returns_none(self):
+        # Bare "response.body" means the body IS the records array — no cursor field.
+        data = {"next_cursor": "tok"}
+        assert _extract_next_cursor(data, "response.body") is None
+
+    def test_response_body_dot_prefix_strips_correctly(self):
+        data = {"pagination": {"next": "tok-2"}}
+        assert _extract_next_cursor(data, "response.body.pagination.next") == "tok-2"
+
+    def test_no_prefix_splits_plain_dotted_path(self):
+        data = {"meta": {"cursor": "abc"}}
+        assert _extract_next_cursor(data, "meta.cursor") == "abc"
+
+    def test_empty_string_cursor_returns_none(self):
+        assert _extract_next_cursor({"next": ""}, "next") is None
+
+    def test_none_cursor_returns_none(self):
+        assert _extract_next_cursor({"next": None}, "next") is None
+
+    def test_non_dict_data_returns_none(self):
+        assert _extract_next_cursor([1, 2, 3], "response.body.next") is None
+
+    def test_missing_key_returns_none(self):
+        assert _extract_next_cursor({"other": "val"}, "response.body.next") is None
+
+    def test_integer_cursor_coerced_to_str(self):
+        assert _extract_next_cursor({"page": 3}, "page") == "3"

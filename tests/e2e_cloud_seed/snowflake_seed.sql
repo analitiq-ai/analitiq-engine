@@ -4,17 +4,24 @@
 -- configured on that connection.
 --
 --   snowsql -c <conn> -f tests/e2e_cloud_seed/snowflake_seed.sql
+--
+-- Column names are quoted lower-case on purpose: the e2e endpoint
+-- definitions declare the canonical lower-case columns (id, name, ...) and
+-- the engine quotes every identifier, so the physical columns must be the
+-- case-sensitive lower-case names the read path asks for. The table name
+-- stays unquoted (Snowflake folds it to the upper-case E2E_SEED the
+-- endpoint's database_object.table declares).
 
 CREATE OR REPLACE TABLE E2E_SEED (
-    ID         NUMBER(38,0)     NOT NULL PRIMARY KEY,
-    NAME       VARCHAR(100)     NOT NULL,
-    EMAIL      VARCHAR(255)     NOT NULL,
-    SCORE      NUMBER(38,0),
-    CREATED_AT TIMESTAMP_NTZ(6) NOT NULL,
-    UPDATED_AT TIMESTAMP_NTZ(6) NOT NULL
+    "id"         NUMBER(38,0)     NOT NULL PRIMARY KEY,
+    "name"       VARCHAR(100)     NOT NULL,
+    "email"      VARCHAR(255)     NOT NULL,
+    "score"      NUMBER(38,0),
+    "created_at" TIMESTAMP_NTZ(6) NOT NULL,
+    "updated_at" TIMESTAMP_NTZ(6) NOT NULL
 );
 
-INSERT INTO E2E_SEED (ID, NAME, EMAIL, SCORE, CREATED_AT, UPDATED_AT) VALUES
+INSERT INTO E2E_SEED ("id", "name", "email", "score", "created_at", "updated_at") VALUES
     (1, 'Alice',   'alice@example.com',   95,   '2026-01-01 08:30:00.100001', '2026-02-01 09:15:00.200002'),
     (2, 'Bob',     'bob@example.com',     80,   '2026-01-02 10:00:00.300003', '2026-02-02 11:45:00.400004'),
     (3, 'Charlie', 'charlie@example.com', NULL, '2026-01-03 14:20:00.500005', '2026-02-03 07:05:00.600006'),

@@ -405,3 +405,111 @@ class TestDataTransformer:
         }
         with pytest.raises(TransformationError, match="coalesce.*requires at least 1 arg"):
             await transformer.apply_transformations(batch, config)
+
+    @pytest.mark.asyncio
+    async def test_and_empty_args_raises(self, transformer):
+        """Empty args list would silently return True, masking a misconfigured filter; guard raises instead."""
+        batch = [{"x": 1}]
+        config = {
+            "mapping": {
+                "assignments": [
+                    _assignment("out", expr={"op": "and", "args": []}),
+                ]
+            }
+        }
+        with pytest.raises(TransformationError, match="and expression requires at least 1 arg"):
+            await transformer.apply_transformations(batch, config)
+
+    @pytest.mark.asyncio
+    async def test_and_missing_args_key_raises(self, transformer):
+        """Absent args key is treated identically to an empty list; same guard fires."""
+        batch = [{"x": 1}]
+        config = {
+            "mapping": {
+                "assignments": [
+                    _assignment("out", expr={"op": "and"}),
+                ]
+            }
+        }
+        with pytest.raises(TransformationError, match="and expression requires at least 1 arg"):
+            await transformer.apply_transformations(batch, config)
+
+    @pytest.mark.asyncio
+    async def test_or_empty_args_raises(self, transformer):
+        """Empty args list would silently return False, blocking every record; guard raises instead."""
+        batch = [{"x": 1}]
+        config = {
+            "mapping": {
+                "assignments": [
+                    _assignment("out", expr={"op": "or", "args": []}),
+                ]
+            }
+        }
+        with pytest.raises(TransformationError, match="or expression requires at least 1 arg"):
+            await transformer.apply_transformations(batch, config)
+
+    @pytest.mark.asyncio
+    async def test_or_missing_args_key_raises(self, transformer):
+        """Absent args key is treated identically to an empty list; same guard fires."""
+        batch = [{"x": 1}]
+        config = {
+            "mapping": {
+                "assignments": [
+                    _assignment("out", expr={"op": "or"}),
+                ]
+            }
+        }
+        with pytest.raises(TransformationError, match="or expression requires at least 1 arg"):
+            await transformer.apply_transformations(batch, config)
+
+    @pytest.mark.asyncio
+    async def test_and_all_true_returns_true(self, transformer):
+        batch = [{"a": True}]
+        true_expr = {"op": "get", "path": ["a"]}
+        config = {
+            "mapping": {
+                "assignments": [_assignment("out", expr={"op": "and", "args": [true_expr, true_expr]})]
+            }
+        }
+        result = await transformer.apply_transformations(batch, config)
+        assert result[0]["out"] is True
+
+    @pytest.mark.asyncio
+    async def test_and_short_circuits_on_false(self, transformer):
+        batch = [{"a": True, "b": False}]
+        config = {
+            "mapping": {
+                "assignments": [_assignment("out", expr={"op": "and", "args": [
+                    {"op": "get", "path": ["a"]},
+                    {"op": "get", "path": ["b"]},
+                ]})]
+            }
+        }
+        result = await transformer.apply_transformations(batch, config)
+        assert result[0]["out"] is False
+
+    @pytest.mark.asyncio
+    async def test_or_short_circuits_on_true(self, transformer):
+        batch = [{"a": True, "b": False}]
+        config = {
+            "mapping": {
+                "assignments": [_assignment("out", expr={"op": "or", "args": [
+                    {"op": "get", "path": ["b"]},
+                    {"op": "get", "path": ["a"]},
+                ]})]
+            }
+        }
+        result = await transformer.apply_transformations(batch, config)
+        assert result[0]["out"] is True
+
+    @pytest.mark.asyncio
+    async def test_or_all_false_returns_false(self, transformer):
+        batch = [{"b": False}]
+        false_expr = {"op": "get", "path": ["b"]}
+        config = {
+            "mapping": {
+                "assignments": [_assignment("out", expr={"op": "or", "args": [false_expr, false_expr]})]
+            }
+        }
+        result = await transformer.apply_transformations(batch, config)
+        assert result[0]["out"] is False
