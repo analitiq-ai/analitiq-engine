@@ -536,6 +536,13 @@ class TestIfExpressionArgCount:
         }
 
     @pytest.mark.asyncio
+    async def test_arity_error_type_is_transformation_error(self):
+        from src.engine.exceptions import TransformationError
+        t = AssignmentTransformer()
+        with pytest.raises(TransformationError, match="if.*3.*got 0"):
+            await t._evaluate_expression({}, {}, {"op": "if", "args": []})
+
+    @pytest.mark.asyncio
     async def test_zero_args_produces_error_entry(self):
         _, errors = await AssignmentTransformer().transform_record(
             record={}, assignments=[self._if_assignment()]
