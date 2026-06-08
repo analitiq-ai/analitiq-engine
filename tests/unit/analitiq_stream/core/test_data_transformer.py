@@ -311,6 +311,102 @@ class TestDataTransformer:
             await transformer.apply_transformations(batch, config)
 
     @pytest.mark.asyncio
+    async def test_concat_with_args_returns_correct_result(self, transformer):
+        """Mixed get/const args are joined in order."""
+        batch = [{"first": "hello", "second": "world"}]
+        config = {
+            "mapping": {
+                "assignments": [
+                    _assignment("out", expr={
+                        "op": "concat",
+                        "args": [_get("first"), {"op": "const", "value": " "}, _get("second")],
+                    })
+                ]
+            }
+        }
+        result = await transformer.apply_transformations(batch, config)
+        assert result[0]["out"] == "hello world"
+
+    @pytest.mark.asyncio
+    async def test_concat_skips_none_valued_args(self, transformer):
+        """Args that evaluate to None are dropped; surrounding args still join."""
+        batch = [{"a": "hello", "b": None, "c": "world"}]
+        config = {
+            "mapping": {
+                "assignments": [
+                    _assignment("out", expr={
+                        "op": "concat",
+                        "args": [_get("a"), _get("b"), _get("c")],
+                    })
+                ]
+            }
+        }
+        result = await transformer.apply_transformations(batch, config)
+        assert result[0]["out"] == "helloworld"
+
+    @pytest.mark.asyncio
+    async def test_concat_empty_args_raises(self, transformer):
+        """Zero args is always a builder bug; raises rather than silently returning empty string."""
+        batch = [{"x": 1}]
+        config = {
+            "mapping": {
+                "assignments": [
+                    _assignment("out", expr={"op": "concat", "args": []})
+                ]
+            }
+        }
+        with pytest.raises(TransformationError, match="concat.*requires at least 1 arg"):
+            await transformer.apply_transformations(batch, config)
+
+    @pytest.mark.asyncio
+    async def test_coalesce_with_args_returns_first_non_none(self, transformer):
+        """Leading None args are skipped; the first non-None value is returned."""
+        batch = [{"a": None, "b": None, "c": "found"}]
+        config = {
+            "mapping": {
+                "assignments": [
+                    _assignment("out", expr={
+                        "op": "coalesce",
+                        "args": [_get("a"), _get("b"), _get("c")],
+                    })
+                ]
+            }
+        }
+        result = await transformer.apply_transformations(batch, config)
+        assert result[0]["out"] == "found"
+
+    @pytest.mark.asyncio
+    async def test_coalesce_all_none_returns_none(self, transformer):
+        """All-None args is legitimate — None propagates to the nullable check downstream."""
+        batch = [{"a": None, "b": None}]
+        config = {
+            "mapping": {
+                "assignments": [
+                    _assignment("out", expr={
+                        "op": "coalesce",
+                        "args": [_get("a"), _get("b")],
+                    })
+                ]
+            }
+        }
+        result = await transformer.apply_transformations(batch, config)
+        assert result[0]["out"] is None
+
+    @pytest.mark.asyncio
+    async def test_coalesce_empty_args_raises(self, transformer):
+        """Zero args has no meaningful return value; raises rather than silently producing None."""
+        batch = [{"x": 1}]
+        config = {
+            "mapping": {
+                "assignments": [
+                    _assignment("out", expr={"op": "coalesce", "args": []})
+                ]
+            }
+        }
+        with pytest.raises(TransformationError, match="coalesce.*requires at least 1 arg"):
+            await transformer.apply_transformations(batch, config)
+
+    @pytest.mark.asyncio
     async def test_and_empty_args_raises(self, transformer):
         """Empty args list would silently return True, masking a misconfigured filter; guard raises instead."""
         batch = [{"x": 1}]
