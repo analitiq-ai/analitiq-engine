@@ -65,8 +65,22 @@ def test_serialize_batch_formats_bool_values(fmt):
 
 def test_serialize_batch_formats_none_as_empty(fmt):
     data = fmt.serialize_batch([{"val": None}])
-    # csv.DictWriter quotes the empty string, resulting in "" in the output
-    assert b"val\r\n" in data
+    # _format_value converts None to ""; csv.DictWriter quotes empty strings as ""
+    assert data == b'val\r\n""\r\n'
+
+
+def test_serialize_batch_formats_nested_value_as_json(fmt):
+    # _format_value serializes list/dict to JSON; DictWriter quotes the embedded quotes
+    data = fmt.serialize_batch([{"tags": ["a", "b"]}])
+    assert b'"[""a"", ""b""]"' in data
+
+
+def test_serialize_batch_include_header_false_with_append_suppresses(fmt):
+    fmt.configure({"include_header": False})
+    data = fmt.serialize_batch(RECORDS, append=True)
+    lines = data.decode().splitlines()
+    assert len(lines) == 2
+    assert lines[0] != "id,name,active"
 
 
 def test_serialize_batch_custom_delimiter(fmt):
@@ -108,6 +122,16 @@ def test_write_batch_to_stream_delegates_to_serialize_batch(fmt):
     buf.seek(0)
     stream_bytes = buf.read()
     direct_bytes = fmt.serialize_batch(RECORDS, append=False)
+    assert stream_bytes == direct_bytes
+
+
+def test_write_batch_to_stream_delegates_to_serialize_batch_append_true(fmt):
+    """write_batch_to_stream with append=True must equal serialize_batch(append=True)."""
+    buf = io.BytesIO()
+    fmt.write_batch_to_stream(RECORDS, buf, append=True)
+    buf.seek(0)
+    stream_bytes = buf.read()
+    direct_bytes = fmt.serialize_batch(RECORDS, append=True)
     assert stream_bytes == direct_bytes
 
 

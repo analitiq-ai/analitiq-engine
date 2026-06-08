@@ -15,7 +15,8 @@ class CsvFormatter(BaseFormatter):
     Formatter for CSV (Comma-Separated Values) format.
 
     Each record is serialized as a row with values in column order.
-    The first batch includes a header row with column names.
+    Header inclusion is controlled by the `include_header` config option
+    and the `append` parameter on each method call.
 
     Configuration options:
     - delimiter: Field delimiter (default: ',')
