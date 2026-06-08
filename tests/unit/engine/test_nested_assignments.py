@@ -521,3 +521,71 @@ class TestAssignmentTransformerBadInputs:
         assert len(errors) == 1
         assert errors[0]["field"] == "out"
         assert result.get("name") == "alice"
+
+
+class TestTransformRecordExceptionBoundary:
+    """transform_record must DLQ-route TransformationError only; programming
+    defects (AttributeError, KeyError, etc.) must propagate as fatal errors."""
+
+    def _assignment(self, value_spec: dict) -> dict:
+        return {
+            "target": {"path": ["out"], "type": "string", "nullable": True},
+            "value": value_spec,
+        }
+
+    @pytest.mark.asyncio
+    async def test_transformation_error_is_dlq_routed(self):
+        """TransformationError is still caught and appended to the error list."""
+        assignment = self._assignment({"kind": "literal", "literal": {"value": "x"}})
+        _, errors = await AssignmentTransformer().transform_record(
+            record={}, assignments=[assignment]
+        )
+        assert len(errors) == 1
+        assert "literal" in errors[0]["error"]
+
+    @pytest.mark.asyncio
+    async def test_attribute_error_propagates_as_fatal(self):
+        """AttributeError from a bug inside _evaluate_value propagates out of
+        transform_record rather than silently becoming a DLQ entry."""
+        from unittest.mock import AsyncMock
+
+        t = AssignmentTransformer()
+        t._evaluate_value = AsyncMock(
+            side_effect=AttributeError("'NoneType' has no attribute 'get'")
+        )
+        assignment = self._assignment({"kind": "const", "const": {"value": "x"}})
+
+        with pytest.raises(AttributeError):
+            await t.transform_record(record={}, assignments=[assignment])
+
+    @pytest.mark.asyncio
+    async def test_key_error_propagates_as_fatal(self):
+        """KeyError from a programming defect propagates rather than being
+        silently converted to a DLQ entry."""
+        from unittest.mock import AsyncMock
+
+        t = AssignmentTransformer()
+        t._evaluate_value = AsyncMock(side_effect=KeyError("missing_key"))
+        assignment = self._assignment({"kind": "const", "const": {"value": "x"}})
+
+        with pytest.raises(KeyError):
+            await t.transform_record(record={}, assignments=[assignment])
+
+    @pytest.mark.asyncio
+    async def test_programming_defect_propagates_through_apply_transformations(self):
+        """A programming defect inside transform_record propagates out of
+        apply_transformations as the original exception — not wrapped in
+        TransformationError — so it fails the pipeline fatally."""
+        from unittest.mock import patch
+
+        assignment = self._assignment({"kind": "const", "const": {"value": "x"}})
+        config = {"mapping": {"assignments": [assignment]}}
+
+        dt = DataTransformer()
+
+        async def _inject_defect(record, assignments, **kwargs):
+            raise RuntimeError("unexpected engine bug")
+
+        with patch.object(dt.assignment_transformer, "transform_record", _inject_defect):
+            with pytest.raises(RuntimeError, match="unexpected engine bug"):
+                await dt.apply_transformations([{"x": 1}], config)

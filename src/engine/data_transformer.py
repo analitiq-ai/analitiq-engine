@@ -110,7 +110,7 @@ class AssignmentTransformer:
 
                 self._set_nested_value(result, target_path, value)
 
-            except Exception as e:
+            except TransformationError as e:
                 field_path = ".".join(assignment.get("target", {}).get("path", ["unknown"]))
                 errors.append({
                     "field": field_path,
