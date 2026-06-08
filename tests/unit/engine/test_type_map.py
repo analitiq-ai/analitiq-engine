@@ -112,6 +112,18 @@ class TestTypeMapRuleValidation:
         with pytest.raises(Exception):  # pydantic ValidationError
             TypeMapRule(match="partial", native="x", canonical="Utf8")  # type: ignore[arg-type]
 
+    @pytest.mark.parametrize("bad_canonical,match", [
+        ("Time32(us)", "Time32 accepts"),
+        ("Time32(MICROSECOND)", "Time32 accepts"),
+        ("Time64(s)", "Time64 accepts"),
+        ("Time64(MILLISECOND)", "Time64 accepts"),
+    ])
+    def test_exact_rule_rejects_invalid_canonical_cross_type_unit(self, bad_canonical, match):
+        # normalize_canonical_type must fire at construction, not deferred to
+        # parse_arrow_type downstream.
+        with pytest.raises(InvalidTypeMapError, match=match):
+            TypeMapRule(match="exact", native="TIME", canonical=bad_canonical)
+
 
 class TestParseRules:
     def test_empty_list_rejected(self):
@@ -626,6 +638,61 @@ class TestNormalizeCanonicalType:
             "Timestamp(MICROSECOND, America/New_York)"
         )
 
+    # --- cross-type unit validation (issue #174) ------------------------------
+
+    @pytest.mark.parametrize(
+        "bad_type",
+        [
+            "Time32(us)",         # short code, Time64-only unit
+            "Time32(ns)",         # short code, Time64-only unit
+            "Time32(MICROSECOND)",  # long form, Time64-only unit
+            "Time32(NANOSECOND)",   # long form, Time64-only unit
+        ],
+    )
+    def test_time32_rejects_time64_units(self, bad_type):
+        with pytest.raises(InvalidTypeMapError, match="Time32 accepts"):
+            normalize_canonical_type(bad_type)
+
+    @pytest.mark.parametrize(
+        "bad_type",
+        [
+            "Time64(s)",          # short code, Time32-only unit
+            "Time64(ms)",         # short code, Time32-only unit
+            "Time64(SECOND)",     # long form, Time32-only unit
+            "Time64(MILLISECOND)",  # long form, Time32-only unit
+        ],
+    )
+    def test_time64_rejects_time32_units(self, bad_type):
+        with pytest.raises(InvalidTypeMapError, match="Time64 accepts"):
+            normalize_canonical_type(bad_type)
+
+    @pytest.mark.parametrize(
+        "valid_type",
+        [
+            "Time32(s)",
+            "Time32(ms)",
+            "Time32(SECOND)",
+            "Time32(MILLISECOND)",
+            "Time64(us)",
+            "Time64(ns)",
+            "Time64(MICROSECOND)",
+            "Time64(NANOSECOND)",
+        ],
+    )
+    def test_time32_and_time64_accept_valid_units(self, valid_type):
+        # Must not raise — valid combinations pass through.
+        normalize_canonical_type(valid_type)
+
+    def test_timestamp_accepts_all_units(self):
+        # Timestamp is unconstrained; all four units must normalize without error.
+        for unit in ("s", "ms", "us", "ns", "SECOND", "MILLISECOND", "MICROSECOND", "NANOSECOND"):
+            normalize_canonical_type(f"Timestamp({unit})")
+
+    def test_duration_accepts_all_units(self):
+        # Duration is unconstrained; all four units must normalize without error.
+        for unit in ("s", "ms", "us", "ns", "SECOND", "MILLISECOND", "MICROSECOND", "NANOSECOND"):
+            normalize_canonical_type(f"Duration({unit})")
+
 
 # ---------------------------------------------------------------------------
 # WriteTypeMapRule validation
@@ -703,6 +770,18 @@ class TestWriteTypeMapRuleValidation:
         )
         assert rule.native == "VARCHAR(${length})"
 
+    @pytest.mark.parametrize("bad_canonical,match", [
+        ("Time32(us)", "Time32 accepts"),
+        ("Time32(MICROSECOND)", "Time32 accepts"),
+        ("Time64(s)", "Time64 accepts"),
+        ("Time64(MILLISECOND)", "Time64 accepts"),
+    ])
+    def test_exact_rule_rejects_invalid_canonical_cross_type_unit(self, bad_canonical, match):
+        # normalize_canonical_type must fire at WriteTypeMapRule construction,
+        # not deferred to TypeMapper.__init__ key pre-computation.
+        with pytest.raises(InvalidTypeMapError, match=match):
+            WriteTypeMapRule(match="exact", canonical=bad_canonical, native="TIME")
+
 
 class TestParseWriteRules:
     def test_empty_list_rejected(self):
@@ -735,6 +814,88 @@ class TestParseWriteRules:
                 ],
                 source="<test>",
             )
+
+
+# ---------------------------------------------------------------------------
+# TypeMapper.compose — per-type fallback (issue #126)
+# ---------------------------------------------------------------------------
+
+
+def _read_mapper(slug: str, native: str, canonical: str) -> TypeMapper:
+    return TypeMapper(slug, parse_rules([{"match": "exact", "native": native, "canonical": canonical}], source="<r>"))
+
+
+def _full_mapper(slug: str, native: str, canonical: str) -> TypeMapper:
+    return TypeMapper(
+        slug,
+        parse_rules([{"match": "exact", "native": native, "canonical": canonical}], source="<r>"),
+        parse_write_rules([{"match": "exact", "canonical": canonical, "native": native}], source="<w>"),
+    )
+
+
+class TestTypeMapperCompose:
+    def test_primary_read_rule_wins(self):
+        primary = _read_mapper("conn", "CUSTOM", "Utf8")
+        fallback = _read_mapper("pg", "CUSTOM", "Int64")
+        composed = TypeMapper.compose(primary, fallback)
+        assert composed.to_arrow_type("CUSTOM") == "Utf8"
+
+    def test_fallback_read_rule_used_on_miss(self):
+        primary = _read_mapper("conn", "CUSTOM", "Utf8")
+        fallback = _read_mapper("pg", "BIGINT", "Int64")
+        composed = TypeMapper.compose(primary, fallback)
+        assert composed.to_arrow_type("BIGINT") == "Int64"
+
+    def test_both_miss_raises_unmapped(self):
+        primary = _read_mapper("conn", "CUSTOM", "Utf8")
+        fallback = _read_mapper("pg", "BIGINT", "Int64")
+        composed = TypeMapper.compose(primary, fallback)
+        with pytest.raises(UnmappedTypeError):
+            composed.to_arrow_type("MONEY")
+
+    def test_primary_write_rule_wins(self):
+        primary = _full_mapper("conn", "CUSTOM", "Utf8")
+        fallback = _full_mapper("pg", "CUSTOM", "Int64")
+        composed = TypeMapper.compose(primary, fallback)
+        assert composed.to_native_type("Utf8") == "CUSTOM"
+
+    def test_fallback_write_rule_used_on_miss(self):
+        primary = _full_mapper("conn", "CUSTOM", "Utf8")
+        fallback = _full_mapper("pg", "BIGINT", "Int64")
+        composed = TypeMapper.compose(primary, fallback)
+        assert composed.to_native_type("Int64") == "BIGINT"
+
+    def test_primary_read_only_inherits_fallback_write_map(self):
+        # Primary has read rules only; fallback has both. Composed mapper
+        # must expose write rules from the fallback.
+        primary = _read_mapper("conn", "CUSTOM", "Utf8")
+        fallback = _full_mapper("pg", "BIGINT", "Int64")
+        composed = TypeMapper.compose(primary, fallback)
+        assert composed.has_write_map is True
+        assert composed.to_native_type("Int64") == "BIGINT"
+
+    def test_neither_has_write_map_gives_no_write_map(self):
+        primary = _read_mapper("conn", "CUSTOM", "Utf8")
+        fallback = _read_mapper("pg", "BIGINT", "Int64")
+        composed = TypeMapper.compose(primary, fallback)
+        assert composed.has_write_map is False
+
+    def test_composed_slug_is_primary_slug(self):
+        primary = _read_mapper("conn:my-pg", "X", "Utf8")
+        fallback = _read_mapper("pg", "Y", "Int64")
+        composed = TypeMapper.compose(primary, fallback)
+        assert composed.connector_slug == "conn:my-pg"
+
+    def test_compose_preserves_regex_rules(self):
+        primary = TypeMapper("conn", parse_rules([
+            {"match": "regex", "native": r"^CUSTOM_(?<n>\d+)$", "canonical": "Utf8"},
+        ], source="<r>"))
+        fallback = TypeMapper("pg", parse_rules([
+            {"match": "regex", "native": r"^VARCHAR\((?<n>\d+)\)$", "canonical": "Utf8"},
+        ], source="<r>"))
+        composed = TypeMapper.compose(primary, fallback)
+        assert composed.to_arrow_type("CUSTOM_42") == "Utf8"
+        assert composed.to_arrow_type("VARCHAR(100)") == "Utf8"
 
 
 # ---------------------------------------------------------------------------
@@ -853,6 +1014,20 @@ class TestToNativeTypeUnitAliasNormalization:
         assert m.to_native_type("Duration(s)") == "DUR_S"
         assert m.to_native_type("Duration(ms)") == "DUR_MS"
         assert m.to_native_type("Duration(ns)") == "DUR_NS"
+
+    def test_write_mapper_construction_rejects_bad_time_unit_in_canonical(self):
+        # TypeMapper.__init__ pre-computes the normalized key for every exact
+        # write rule; a bad cross-type unit (Time32 + us) must raise here rather
+        # than surfacing as a confusing UnmappedTypeError at lookup time.
+        with pytest.raises(InvalidTypeMapError, match="Time32 accepts"):
+            _write_mapper([{"match": "exact", "canonical": "Time32(us)", "native": "TIME"}])
+
+    def test_to_native_type_rejects_cross_type_time_unit(self):
+        # Bad canonical supplied at lookup time must raise InvalidTypeMapError,
+        # not silently fall through to UnmappedTypeError.
+        m = _write_mapper([{"match": "exact", "canonical": "Time32(SECOND)", "native": "T32S"}])
+        with pytest.raises(InvalidTypeMapError, match="Time32 accepts"):
+            m.to_native_type("Time32(MICROSECOND)")
 
 
 class TestToNativeTypeRegex:

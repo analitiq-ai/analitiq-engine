@@ -1,8 +1,6 @@
 """Data transformation utilities for the streaming engine.
 
-Supports assignment-based mapping (per MAPPING_AND_TRANSFORMATIONS.md)
-and a flat ``field_mappings`` + ``computed_fields`` format used by
-fixture-driven tests.
+Supports assignment-based mapping (per MAPPING_AND_TRANSFORMATIONS.md).
 """
 
 import asyncio
@@ -14,7 +12,6 @@ from typing import Any, Dict, List, Optional, Tuple
 import pyarrow as pa
 
 from .exceptions import TransformationError
-from .expression_evaluator import SecureExpressionEvaluator
 from cdk.type_map.arrow import resolve_arrow_type
 from cdk.type_map.exceptions import InvalidTypeMapError
 
@@ -140,7 +137,7 @@ class AssignmentTransformer:
             expr = value_spec.get("expr", {})
             return await self._evaluate_expression(record, partial_result, expr)
 
-        return None
+        raise TransformationError(f"Unknown value kind: {kind!r}")
 
     async def _evaluate_expression(
         self,
@@ -258,8 +255,7 @@ class AssignmentTransformer:
                 return None
 
             case _:
-                logger.warning(f"Unknown expression op: {op}")
-                return None
+                raise TransformationError(f"Unknown expression op: {op!r}")
 
     async def _apply_function_expression(self, value: Any, fn_expr: Dict[str, Any]) -> Any:
         """Apply a function expression to a value (used in pipe)."""
@@ -273,8 +269,7 @@ class AssignmentTransformer:
                 fn_expr.get("args", [])
             )
         else:
-            logger.warning(f"Expected fn op in pipe, got: {op}")
-            return value
+            raise TransformationError(f"Expected fn op in pipe stage, got: {op!r}")
 
     async def _apply_function(
         self,
@@ -286,32 +281,37 @@ class AssignmentTransformer:
         """Apply a catalog function to a value."""
         catalog_entry = self.FUNCTION_CATALOG.get(name)
         if not catalog_entry:
-            logger.warning(f"Unknown function: {name}")
-            return value
+            raise TransformationError(f"Unknown function: {name!r}")
 
         fn_name = catalog_entry["fn"]
         method = getattr(self, fn_name, None)
-        if method:
-            return await method(value, *args)
-        return value
+        if method is None:
+            raise TransformationError(
+                f"FUNCTION_CATALOG entry for {name!r} references missing method {fn_name!r}"
+            )
+        return await method(value, *args)
 
     # Function implementations
     async def _fn_iso_to_date(self, value: Any) -> str:
-        """Convert ISO datetime to date string."""
+        """Convert ISO string to date string (YYYY-MM-DD). Raises on
+        unparseable input — previously returned the raw string unchanged,
+        which passed a non-date value into typed date columns and surfaced
+        as a destination connector write error rather than a transformation
+        error."""
         if value is None:
             return None
         try:
             dt = datetime.fromisoformat(str(value))
             return dt.strftime('%Y-%m-%d')
         except (ValueError, TypeError) as e:
-            logger.warning(f"iso_to_date failed for '{value}': {e}")
-            return str(value)
+            raise TransformationError(
+                f"iso_to_date failed for {value!r}: {e}"
+            ) from e
 
     async def _fn_iso_to_datetime(self, value: Any) -> datetime:
         """Convert ISO string to datetime object. Raises on unparseable
         input — a ``datetime.now()`` fallback would silently fabricate
-        timestamps and corrupt time-based queries and incremental sync
-        (see ``_parse_iso_timestamp``)."""
+        timestamps and corrupt time-based queries and incremental sync."""
         if value is None:
             return None
         try:
@@ -343,23 +343,34 @@ class AssignmentTransformer:
             return None
         return str(value).upper()
 
-    async def _fn_to_int(self, value: Any) -> int:
-        """Convert to integer."""
+    async def _fn_to_int(self, value: Any) -> Optional[int]:
+        """Convert to integer via int(float(value)). None passes through.
+
+        Decimal strings and floats are truncated toward zero ("3.9" → 3).
+        Raises TransformationError on unparseable input — silently returning
+        None would mask mis-configured pipelines with no DLQ entry."""
         if value is None:
             return None
         try:
             return int(float(value))
-        except (ValueError, TypeError):
-            return None
+        except (ValueError, TypeError, OverflowError) as e:
+            raise TransformationError(
+                f"to_int: cannot convert {value!r} ({type(value).__name__}) to int: {e}"
+            ) from e
 
-    async def _fn_to_float(self, value: Any) -> float:
-        """Convert to float."""
+    async def _fn_to_float(self, value: Any) -> Optional[float]:
+        """Convert to float. None passes through.
+
+        Raises TransformationError on unparseable input — same rationale as
+        _fn_to_int; silently returning None masks mis-configured pipelines."""
         if value is None:
             return None
         try:
             return float(value)
-        except (ValueError, TypeError):
-            return None
+        except (ValueError, TypeError, OverflowError) as e:
+            raise TransformationError(
+                f"to_float: cannot convert {value!r} ({type(value).__name__}) to float: {e}"
+            ) from e
 
     async def _fn_to_string(self, value: Any) -> str:
         """Convert to string."""
@@ -462,11 +473,9 @@ class AssignmentTransformer:
         return None
 
 class DataTransformer:
-    """Apply contract mapping assignments (and the ``field_mappings`` /
-    ``computed_fields`` fixture shape) to a batch of records."""
+    """Apply contract mapping assignments to a batch of records."""
 
     def __init__(self):
-        self.expression_evaluator = SecureExpressionEvaluator()
         self.assignment_transformer = AssignmentTransformer()
 
     async def apply_transformations(
@@ -475,7 +484,7 @@ class DataTransformer:
         config: Dict[str, Any]
     ) -> List[Dict[str, Any]]:
         """
-        Apply field mappings and transformations to batch.
+        Apply assignment-based transformations to batch.
 
         Args:
             batch: List of records to transform
@@ -488,22 +497,19 @@ class DataTransformer:
             TransformationError: If transformation fails
         """
         mapping = config.get("mapping", {})
-
-        # Check for new assignment-based format
+        # Warn before the assignments early-return so stray legacy keys are
+        # flagged even when valid assignments are present alongside them.
+        legacy_keys = {"field_mappings", "computed_fields"} & mapping.keys()
+        if legacy_keys:
+            logger.warning(
+                "mapping contains legacy keys %s which are no longer supported "
+                "and are ignored; migrate to 'assignments'.",
+                sorted(legacy_keys),
+            )
         assignments = mapping.get("assignments", [])
         if assignments:
             return await self._apply_assignment_transformations(batch, assignments)
-
-        # Fall back to legacy format
-        field_mappings = mapping.get("field_mappings", {})
-        computed_fields = mapping.get("computed_fields", {})
-
-        if not field_mappings and not computed_fields:
-            return batch  # No transformations to apply
-
-        return await self._apply_legacy_transformations(
-            batch, field_mappings, computed_fields
-        )
+        return batch
 
     async def _apply_assignment_transformations(
         self,
@@ -592,145 +598,6 @@ class DataTransformer:
             )
 
         return [record for _, record in kept]
-
-    async def _apply_legacy_transformations(
-        self,
-        batch: List[Dict[str, Any]],
-        field_mappings: Dict[str, Any],
-        computed_fields: Dict[str, Any]
-    ) -> List[Dict[str, Any]]:
-        """Apply legacy field_mappings and computed_fields."""
-        transformed_batch = []
-
-        try:
-            for record in batch:
-                transformed_record = {}
-
-                # Apply field mappings
-                for source_field, mapping_config in field_mappings.items():
-                    if isinstance(mapping_config, dict):
-                        target_field = mapping_config.get("target", source_field)
-                        transformations = mapping_config.get("transformations", [])
-                    else:
-                        target_field = mapping_config
-                        transformations = []
-
-                    source_value = self._get_nested_value(record, source_field)
-                    transformed_value = await self._apply_field_transformations(
-                        source_value, transformations
-                    )
-                    transformed_record[target_field] = transformed_value
-
-                # Apply computed fields
-                for field_name, field_config in computed_fields.items():
-                    if isinstance(field_config, dict):
-                        expression = field_config.get("expression", "")
-                    else:
-                        expression = field_config
-
-                    computed_value = await self.expression_evaluator.evaluate(
-                        expression, record, transformed_record
-                    )
-                    transformed_record[field_name] = computed_value
-
-                transformed_batch.append(transformed_record)
-
-        except Exception as e:
-            logger.error(f"Transformation failed: {e}")
-            raise TransformationError(f"Data transformation failed: {e}") from e
-
-        return transformed_batch
-
-    def _get_nested_value(self, record: Dict[str, Any], field_path: str) -> Any:
-        """Get value from nested field path like 'details.merchant.name'."""
-        if "." not in field_path:
-            return record.get(field_path)
-
-        current = record
-        for field in field_path.split("."):
-            if isinstance(current, dict) and field in current:
-                current = current[field]
-            else:
-                return None
-        return current
-
-    async def _apply_field_transformations(
-        self,
-        value: Any,
-        transformations: List[str]
-    ) -> Any:
-        """Apply transformations to a field value."""
-        if not transformations or value is None:
-            return value
-
-        for transformation in transformations:
-            await asyncio.sleep(0)  # Yield for async safety
-
-            match transformation:
-                case "abs" if isinstance(value, (int, float)):
-                    value = abs(value)
-                case "strip" | "trim" if isinstance(value, str):
-                    value = value.strip()
-                case "lowercase" | "lower" if isinstance(value, str):
-                    value = value.lower()
-                case "uppercase" | "upper" if isinstance(value, str):
-                    value = value.upper()
-                case "iso_to_date" if isinstance(value, str):
-                    value = await self._parse_iso_date(value)
-                case "iso_to_timestamp" if isinstance(value, str):
-                    value = await self._parse_iso_timestamp(value)
-                case "iso_string_to_datetime":
-                    value = await self._parse_iso_to_datetime_object(value)
-                case "to_int" if isinstance(value, (str, float)):
-                    try:
-                        value = int(float(value))
-                    except (ValueError, TypeError) as e:
-                        raise TransformationError(
-                            f"to_int: cannot convert {value!r} ({type(value).__name__}) to int: {e}"
-                        ) from e
-                case "to_float" if isinstance(value, (str, int)):
-                    try:
-                        value = float(value)
-                    except (ValueError, TypeError) as e:
-                        raise TransformationError(
-                            f"to_float: cannot convert {value!r} ({type(value).__name__}) to float: {e}"
-                        ) from e
-                case "to_str":
-                    value = str(value) if value is not None else ""
-                case _:
-                    logger.warning(f"Unknown transformation: {transformation}")
-
-        return value
-
-    async def _parse_iso_date(self, value: str) -> str:
-        """Parse ISO datetime string to date format. On parse failure
-        the original string is returned unchanged — this transformation
-        is used for output-side reformatting, not cursor math, so
-        passing the bad value through to the destination's schema is a
-        more localized failure than raising mid-batch."""
-        try:
-            dt = datetime.fromisoformat(value)
-            return dt.strftime('%Y-%m-%d')
-        except ValueError as e:
-            logger.warning("Failed to parse ISO date '%s': %s", value, e)
-            return value
-
-    async def _parse_iso_timestamp(self, value: str) -> datetime:
-        """Parse ISO datetime string to datetime object. Raises on
-        unparseable input — a ``datetime.now()`` fallback would silently
-        re-window cursors and corrupt incremental sync."""
-        return datetime.fromisoformat(value)
-
-    async def _parse_iso_to_datetime_object(self, value: Any) -> datetime:
-        """Convert ISO timestamp string or datetime to datetime object.
-        Raises on unparseable input — see ``_parse_iso_timestamp``."""
-        if value is None:
-            raise ValueError("Cannot convert None to datetime")
-
-        if isinstance(value, datetime):
-            return value
-
-        return datetime.fromisoformat(str(value))
 
 
 def _json_target_names(assignments: List[Dict[str, Any]]) -> set:

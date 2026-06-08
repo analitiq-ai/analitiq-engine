@@ -569,6 +569,127 @@ class TestRegistryDiscoveredKinds:
 
 
 # ---------------------------------------------------------------------------
+# Endpoint schema dispatch (#165)
+# ---------------------------------------------------------------------------
+
+
+class TestEndpointSchemaDispatch:
+    """``_resolve_endpoint`` extracts the endpoint variant from ``$schema`` URL
+    instead of a hard-coded two-branch check, so non-built-in endpoint kinds
+    fail at schema validation rather than at URL parsing (#165)."""
+
+    def test_missing_endpoint_path_segment_rejected(
+        self, pipeline_tree: Path
+    ) -> None:
+        """An endpoint whose $schema URL has no *-endpoint path segment must
+        raise with a message pointing to the problem."""
+        bad_endpoint = _endpoint_doc(ENDPOINT_SRC)
+        bad_endpoint["$schema"] = "https://schemas.analitiq.ai/connector/latest.json"
+        _write_json(
+            pipeline_tree
+            / "connectors"
+            / CONNECTOR_ID
+            / "definition"
+            / "endpoints"
+            / f"{ENDPOINT_SRC}.json",
+            bad_endpoint,
+        )
+        prep = PipelineConfigPrep()
+        with pytest.raises(ValueError, match=r"\*-endpoint path segment"):
+            prep.create_config()
+
+    def test_empty_schema_url_rejected(self, pipeline_tree: Path) -> None:
+        """An endpoint with an empty $schema field must raise."""
+        bad_endpoint = _endpoint_doc(ENDPOINT_SRC)
+        bad_endpoint["$schema"] = ""
+        _write_json(
+            pipeline_tree
+            / "connectors"
+            / CONNECTOR_ID
+            / "definition"
+            / "endpoints"
+            / f"{ENDPOINT_SRC}.json",
+            bad_endpoint,
+        )
+        prep = PipelineConfigPrep()
+        with pytest.raises(ValueError, match=r"\*-endpoint path segment"):
+            prep.create_config()
+
+    def test_non_built_in_endpoint_kind_fails_at_schema_validation(
+        self, pipeline_tree: Path
+    ) -> None:
+        """A non-built-in *-endpoint $schema URL has its variant name extracted
+        correctly; failure comes from schema validation (unknown kind), not
+        from the URL-parsing step — confirming the extraction succeeded."""
+        bad_endpoint = _endpoint_doc(ENDPOINT_SRC)
+        bad_endpoint["$schema"] = (
+            "https://schemas.analitiq.ai/nosql-endpoint/latest.json"
+        )
+        _write_json(
+            pipeline_tree
+            / "connectors"
+            / CONNECTOR_ID
+            / "definition"
+            / "endpoints"
+            / f"{ENDPOINT_SRC}.json",
+            bad_endpoint,
+        )
+        prep = PipelineConfigPrep()
+        # Kind "nosql-endpoint" was extracted; validate_artifact raises because
+        # it is not in ARTIFACT_KINDS — the error names the extracted kind.
+        with pytest.raises(ValueError, match="nosql-endpoint"):
+            prep.create_config()
+
+    def test_api_endpoint_schema_still_resolves(self, pipeline_tree: Path) -> None:
+        """Built-in api-endpoint still resolves correctly after the refactor."""
+        prep = PipelineConfigPrep()
+        _, stream_configs, _, _, _ = prep.create_config()
+        src = stream_configs[0].source
+        assert "api-endpoint" in (src.endpoint_document.get("$schema") or "")
+
+    def test_url_without_schema_key_rejected(self, pipeline_tree: Path) -> None:
+        """An endpoint document with no $schema key must raise."""
+        bad_endpoint = _endpoint_doc(ENDPOINT_SRC)
+        del bad_endpoint["$schema"]
+        _write_json(
+            pipeline_tree
+            / "connectors"
+            / CONNECTOR_ID
+            / "definition"
+            / "endpoints"
+            / f"{ENDPOINT_SRC}.json",
+            bad_endpoint,
+        )
+        prep = PipelineConfigPrep()
+        with pytest.raises(ValueError, match=r"\*-endpoint path segment"):
+            prep.create_config()
+
+    def test_schema_url_without_trailing_slash_still_extracts_kind(
+        self, pipeline_tree: Path
+    ) -> None:
+        """A $schema URL where the variant is the final path component (no
+        trailing slash) must still have its kind extracted correctly."""
+        bad_endpoint = _endpoint_doc(ENDPOINT_SRC)
+        # No trailing slash — regex must still match via the (?:/|$) boundary.
+        bad_endpoint["$schema"] = (
+            "https://schemas.analitiq.ai/nosql-endpoint"
+        )
+        _write_json(
+            pipeline_tree
+            / "connectors"
+            / CONNECTOR_ID
+            / "definition"
+            / "endpoints"
+            / f"{ENDPOINT_SRC}.json",
+            bad_endpoint,
+        )
+        prep = PipelineConfigPrep()
+        # The kind is extracted; failure comes from schema validation, not URL parsing.
+        with pytest.raises(ValueError, match="nosql-endpoint"):
+            prep.create_config()
+
+
+# ---------------------------------------------------------------------------
 # Connection-scoped endpoints (#94)
 # ---------------------------------------------------------------------------
 
@@ -622,8 +743,8 @@ class TestConnectionScopedEndpoints:
         runtime = connections[CONNECTION_DST_ID]
         assert runtime.connection_type_mapper is not None
         mapper = runtime.type_mapper_for(scope=EndpointScope.CONNECTION)
-        assert mapper is runtime.connection_type_mapper
-        # JSONB exists only in the connection-scoped map.
+        # JSONB exists only in the connection-scoped map; composition means it
+        # still resolves correctly (connection rules take precedence).
         assert mapper.to_arrow_type("JSONB") == "Utf8"
 
     def test_connection_scope_falls_back_to_connector_map_when_absent(

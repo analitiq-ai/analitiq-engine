@@ -157,6 +157,7 @@ class ConnectionRuntime:
         self._resolver = resolver
         self._connector_type_mapper = connector_type_mapper
         self._connection_type_mapper = connection_type_mapper
+        self._composed_connection_mapper: Optional[TypeMapper] = None
 
         # Worker-side pre-resolved payload (set by from_resolved_payload):
         # materialize() builds straight from these and never loads secrets.
@@ -246,11 +247,22 @@ class ConnectionRuntime:
     def type_mapper_for(self, *, scope: EndpointScope) -> TypeMapper:
         """Pick the type mapper for an endpoint of the given ``scope``.
 
-        For ``EndpointScope.CONNECTION`` the connection's own ``type-map-read.json``
-        wins when present; otherwise the connector's mapper is used. The
-        connector's native vocabulary is authoritative for the driver
-        (e.g. MySQL ``BIGINT`` is the same in every MySQL installation),
-        so a connection only needs its own map to override or extend it.
+        **Composition semantics (decision for issue #126):** connection maps
+        compose with the connector map per-type. The connection's rules are
+        tried first; on a miss the connector's rules are consulted — for both
+        the read direction (``to_arrow_type``) and the write direction
+        (``to_native_type``). A connection only needs to declare the types it
+        overrides; the connector map supplies everything else.
+
+        This means a connection endpoint that has a ``type-map-read.json`` but
+        no ``type-map-write.json`` still supports DDL generation: its read
+        overrides take effect and the connector's write rules cover the rest.
+
+        For ``EndpointScope.CONNECTOR`` the connector mapper is returned
+        directly; no composition takes place.
+
+        The composed mapper is cached after the first call — both source mappers
+        are immutable, so the composed result is deterministic.
 
         The caller passes the already-resolved :class:`~cdk.types.EndpointScope`
         (the engine maps its ``EndpointRef.scope`` to it at the boundary), so
@@ -261,7 +273,14 @@ class ConnectionRuntime:
             return self.connector_type_mapper
         if scope == EndpointScope.CONNECTION:
             if self._connection_type_mapper is not None:
-                return self._connection_type_mapper
+                if self._connector_type_mapper is None:
+                    # No connector map to compose with — return connection map alone.
+                    return self._connection_type_mapper
+                if self._composed_connection_mapper is None:
+                    self._composed_connection_mapper = TypeMapper.compose(
+                        self._connection_type_mapper, self._connector_type_mapper
+                    )
+                return self._composed_connection_mapper
             return self.connector_type_mapper
         raise ValueError(f"type_mapper_for: unknown endpoint scope {scope!r}")
 

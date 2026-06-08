@@ -23,10 +23,14 @@ from .exceptions import (
     ConfigurationError, StreamProcessingError, StreamExecutionError,
     StreamConfigurationError, StageConfigurationError
 )
-from .orchestrator import PipelineOrchestrator
 
 # gRPC imports for destination streaming
-from ..grpc.client import DestinationGRPCClient, BatchResult, generate_record_id
+from ..grpc.client import (
+    DEFAULT_GRPC_TIMEOUT,
+    DestinationGRPCClient,
+    BatchResult,
+    generate_record_id,
+)
 from ..grpc.cursor import compute_max_cursor, cursor_to_state_dict
 from ..grpc.generated.analitiq.v1 import AckStatus
 
@@ -67,9 +71,6 @@ class StreamingEngine:
         
         # Setup structured logging
         self.logger = logging.getLogger(f"{__name__}.{pipeline_id}")
-        
-        # Pipeline orchestration
-        self.orchestrator = PipelineOrchestrator(pipeline_id)
 
         # Fault tolerance components with state management
         self.sharded_state_manager = StateManager(pipeline_id, "./state")
@@ -833,7 +834,9 @@ class StreamingEngine:
 
         host = os.getenv("DESTINATION_GRPC_HOST") or grpc_config.get("host", "localhost")
         port = int(os.getenv("DESTINATION_GRPC_PORT", "0")) or grpc_config.get("port", 50051)
-        timeout = int(os.getenv("GRPC_TIMEOUT_SECONDS", "0")) or grpc_config.get("timeout_seconds", 300)
+        timeout = int(os.getenv("GRPC_TIMEOUT_SECONDS", "0")) or grpc_config.get(
+            "timeout_seconds", DEFAULT_GRPC_TIMEOUT
+        )
         max_retries = self.max_retries
         max_message_size = grpc_config.get("max_message_size", 16 * 1024 * 1024)
 
