@@ -63,6 +63,11 @@ class LocalFileStorage(BaseStorageBackend):
             self._connected = False
             logger.info("LocalFileStorage disconnected")
 
+    def _require_path(self, path: str) -> Path:
+        if not self._connected or self._base_path is None:
+            raise IOError("Storage not connected")
+        return self._base_path / path
+
     async def write_file(
         self,
         path: str,
@@ -80,10 +85,7 @@ class LocalFileStorage(BaseStorageBackend):
         Returns:
             Absolute path where file was written
         """
-        if not self._connected or self._base_path is None:
-            raise IOError("Storage not connected")
-
-        full_path = self._base_path / path
+        full_path = self._require_path(path)
 
         # Ensure parent directory exists
         full_path.parent.mkdir(parents=True, exist_ok=True)
@@ -109,10 +111,7 @@ class LocalFileStorage(BaseStorageBackend):
         Returns:
             Number of bytes written
         """
-        if not self._connected or self._base_path is None:
-            raise IOError("Storage not connected")
-
-        full_path = self._base_path / path
+        full_path = self._require_path(path)
 
         # Ensure parent directory exists
         full_path.parent.mkdir(parents=True, exist_ok=True)
@@ -133,10 +132,10 @@ class LocalFileStorage(BaseStorageBackend):
         Returns:
             True if file exists
         """
-        if not self._connected or self._base_path is None:
+        try:
+            full_path = self._require_path(path)
+        except IOError:
             return False
-
-        full_path = self._base_path / path
         return await aiofiles.os.path.exists(full_path)
 
     async def read_file(self, path: str) -> bytes:
@@ -149,10 +148,7 @@ class LocalFileStorage(BaseStorageBackend):
         Returns:
             File contents as bytes
         """
-        if not self._connected or self._base_path is None:
-            raise IOError("Storage not connected")
-
-        full_path = self._base_path / path
+        full_path = self._require_path(path)
 
         if not await aiofiles.os.path.exists(full_path):
             raise FileNotFoundError(f"File not found: {full_path}")
@@ -170,10 +166,7 @@ class LocalFileStorage(BaseStorageBackend):
         Returns:
             True if file was deleted, False if it didn't exist
         """
-        if not self._connected or self._base_path is None:
-            raise IOError("Storage not connected")
-
-        full_path = self._base_path / path
+        full_path = self._require_path(path)
 
         if not await aiofiles.os.path.exists(full_path):
             return False
