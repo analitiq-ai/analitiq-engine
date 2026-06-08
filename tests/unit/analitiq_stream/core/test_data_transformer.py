@@ -32,6 +32,16 @@ def _pipe(source_path, fn_name):
     }
 
 
+def _const(value):
+    """Build a const expression."""
+    return {"op": "const", "value": value}
+
+
+def _comparison(op, left, right):
+    """Build a comparison expression with two const args."""
+    return {"op": op, "args": [_const(left), _const(right)]}
+
+
 class TestDataTransformer:
     """Test suite for DataTransformer."""
 
@@ -308,4 +318,97 @@ class TestDataTransformer:
             }
         }
         with pytest.raises(TransformationError, match="iso_to_date"):
+            await transformer.apply_transformations(batch, config)
+
+    @pytest.mark.asyncio
+    async def test_gt_returns_correct_result(self, transformer):
+        """gt evaluates left > right correctly."""
+        batch = [{}]
+        config = {
+            "mapping": {
+                "assignments": [
+                    _assignment("true_case", expr=_comparison("gt", 5, 3)),
+                    _assignment("false_case", expr=_comparison("gt", 3, 5)),
+                ]
+            }
+        }
+        result = await transformer.apply_transformations(batch, config)
+        assert result[0]["true_case"] is True
+        assert result[0]["false_case"] is False
+
+    @pytest.mark.asyncio
+    async def test_gte_returns_correct_result(self, transformer):
+        """gte evaluates left >= right correctly, including the equal case."""
+        batch = [{}]
+        config = {
+            "mapping": {
+                "assignments": [
+                    _assignment("equal_case", expr=_comparison("gte", 5, 5)),
+                    _assignment("false_case", expr=_comparison("gte", 3, 5)),
+                ]
+            }
+        }
+        result = await transformer.apply_transformations(batch, config)
+        assert result[0]["equal_case"] is True
+        assert result[0]["false_case"] is False
+
+    @pytest.mark.asyncio
+    async def test_lt_returns_correct_result(self, transformer):
+        """lt evaluates left < right correctly."""
+        batch = [{}]
+        config = {
+            "mapping": {
+                "assignments": [
+                    _assignment("true_case", expr=_comparison("lt", 3, 5)),
+                    _assignment("false_case", expr=_comparison("lt", 5, 3)),
+                ]
+            }
+        }
+        result = await transformer.apply_transformations(batch, config)
+        assert result[0]["true_case"] is True
+        assert result[0]["false_case"] is False
+
+    @pytest.mark.asyncio
+    async def test_lte_returns_correct_result(self, transformer):
+        """lte evaluates left <= right correctly, including the equal case."""
+        batch = [{}]
+        config = {
+            "mapping": {
+                "assignments": [
+                    _assignment("equal_case", expr=_comparison("lte", 3, 3)),
+                    _assignment("false_case", expr=_comparison("lte", 5, 3)),
+                ]
+            }
+        }
+        result = await transformer.apply_transformations(batch, config)
+        assert result[0]["equal_case"] is True
+        assert result[0]["false_case"] is False
+
+    @pytest.mark.asyncio
+    async def test_comparison_op_wrong_arity_raises(self, transformer):
+        """Comparison ops with wrong arg count raise TransformationError."""
+        batch = [{}]
+        for op in ("gt", "gte", "lt", "lte"):
+            config = {
+                "mapping": {
+                    "assignments": [
+                        _assignment("out", expr={"op": op, "args": [_const(1)]}),
+                    ]
+                }
+            }
+            with pytest.raises(TransformationError, match=f"{op} expression requires 2 args"):
+                await transformer.apply_transformations(batch, config)
+
+    @pytest.mark.asyncio
+    async def test_comparison_op_incompatible_types_raises(self, transformer):
+        """Comparing incompatible types raises TransformationError via the TypeError path."""
+        batch = [{}]
+        config = {
+            "mapping": {
+                "assignments": [
+                    _assignment("out", expr=_comparison("gt", 5, "not-a-number")),
+                ]
+            }
+        }
+        with pytest.raises(TransformationError, match="gt expression cannot compare"):
             await transformer.apply_transformations(batch, config)
