@@ -41,6 +41,7 @@ from cdk.request_binding import bind_param_refs
 from cdk.resolver import Resolver
 from cdk.types import CheckpointStore
 from ...shared.http_utils import join_url
+from ...shared.dict_path import walk_path
 
 logger = logging.getLogger(__name__)
 
@@ -725,25 +726,14 @@ def _extract_next_cursor(data: Any, response_field_ref: str) -> Optional[str]:
         segments = response_field_ref[len(prefix) + 1 :].split(".")
     else:
         segments = response_field_ref.split(".")
-    cursor: Any = data
-    for segment in segments:
-        if isinstance(cursor, dict) and segment in cursor:
-            cursor = cursor[segment]
-        else:
-            return None
+    cursor = walk_path(data, segments)
     if cursor in (None, ""):
         return None
     return str(cursor)
 
 
 def _get_nested_field(record: Dict[str, Any], field_path: str) -> Any:
-    value: Any = record
-    for segment in field_path.split("."):
-        if isinstance(value, dict) and segment in value:
-            value = value[segment]
-        else:
-            return None
-    return value
+    return walk_path(record, field_path.split("."))
 
 
 def _is_record_new(
