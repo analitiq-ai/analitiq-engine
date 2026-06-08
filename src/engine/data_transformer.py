@@ -252,6 +252,8 @@ class AssignmentTransformer:
 
             case "concat":
                 args = expr.get("args", [])
+                if not args:
+                    logger.warning("concat expression has 0 args; returning empty string — likely a pipeline builder bug")
                 parts = []
                 for arg in args:
                     val = await self._evaluate_expression(record, partial_result, arg)
@@ -261,6 +263,8 @@ class AssignmentTransformer:
 
             case "coalesce":
                 args = expr.get("args", [])
+                if not args:
+                    raise TransformationError("coalesce expression requires at least 1 arg, got 0")
                 for arg in args:
                     val = await self._evaluate_expression(record, partial_result, arg)
                     if val is not None:

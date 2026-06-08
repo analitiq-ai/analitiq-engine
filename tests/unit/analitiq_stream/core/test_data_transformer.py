@@ -309,3 +309,72 @@ class TestDataTransformer:
         }
         with pytest.raises(TransformationError, match="iso_to_date"):
             await transformer.apply_transformations(batch, config)
+
+    @pytest.mark.asyncio
+    async def test_concat_with_args_returns_correct_result(self, transformer):
+        """concat joins non-None parts as strings."""
+        batch = [{"first": "hello", "second": "world"}]
+        config = {
+            "mapping": {
+                "assignments": [
+                    _assignment("out", expr={
+                        "op": "concat",
+                        "args": [_get("first"), {"op": "const", "value": " "}, _get("second")],
+                    })
+                ]
+            }
+        }
+        result = await transformer.apply_transformations(batch, config)
+        assert result[0]["out"] == "hello world"
+
+    @pytest.mark.asyncio
+    async def test_concat_empty_args_warns_and_returns_empty_string(self, transformer):
+        """concat with 0 args emits a warning and still returns \"\"."""
+        from unittest.mock import patch
+        import sys
+        _mod = sys.modules[transformer.assignment_transformer.__class__.__module__]
+
+        batch = [{"x": 1}]
+        config = {
+            "mapping": {
+                "assignments": [
+                    _assignment("out", expr={"op": "concat", "args": []})
+                ]
+            }
+        }
+        with patch.object(_mod.logger, "warning") as mock_warn:
+            result = await transformer.apply_transformations(batch, config)
+        assert result[0]["out"] == ""
+        mock_warn.assert_called_once()
+        assert "concat" in mock_warn.call_args[0][0]
+
+    @pytest.mark.asyncio
+    async def test_coalesce_with_args_returns_first_non_none(self, transformer):
+        """coalesce returns the first non-None argument value."""
+        batch = [{"a": None, "b": None, "c": "found"}]
+        config = {
+            "mapping": {
+                "assignments": [
+                    _assignment("out", expr={
+                        "op": "coalesce",
+                        "args": [_get("a"), _get("b"), _get("c")],
+                    })
+                ]
+            }
+        }
+        result = await transformer.apply_transformations(batch, config)
+        assert result[0]["out"] == "found"
+
+    @pytest.mark.asyncio
+    async def test_coalesce_empty_args_raises(self, transformer):
+        """coalesce with 0 args raises TransformationError."""
+        batch = [{"x": 1}]
+        config = {
+            "mapping": {
+                "assignments": [
+                    _assignment("out", expr={"op": "coalesce", "args": []})
+                ]
+            }
+        }
+        with pytest.raises(TransformationError, match="coalesce.*requires at least 1 arg"):
+            await transformer.apply_transformations(batch, config)
