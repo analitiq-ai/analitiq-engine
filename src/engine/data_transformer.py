@@ -224,6 +224,10 @@ class AssignmentTransformer:
                             return left < right
                         case "lte":
                             return left <= right
+                        case _:
+                            raise TransformationError(
+                                f"comparison op {op!r} has no implementation — this is an engine defect"
+                            )
                 except TypeError as exc:
                     raise TransformationError(
                         f"{op} expression cannot compare {left!r} and {right!r}: {exc}"
