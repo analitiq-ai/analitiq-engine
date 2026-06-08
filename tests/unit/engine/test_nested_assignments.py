@@ -521,3 +521,60 @@ class TestAssignmentTransformerBadInputs:
         assert len(errors) == 1
         assert errors[0]["field"] == "out"
         assert result.get("name") == "alice"
+
+
+class TestIfExpressionArgCount:
+    """if-expression arity check raises TransformationError (not ValueError)."""
+
+    def _if_assignment(self, *args) -> dict:
+        return {
+            "target": {"path": ["out"], "type": "string", "nullable": True},
+            "value": {
+                "kind": "expr",
+                "expr": {"op": "if", "args": list(args)},
+            },
+        }
+
+    @pytest.mark.asyncio
+    async def test_zero_args_produces_error_entry(self):
+        _, errors = await AssignmentTransformer().transform_record(
+            record={}, assignments=[self._if_assignment()]
+        )
+        assert errors, "expected error for zero args"
+        assert "if" in errors[0]["error"]
+        assert "0" in errors[0]["error"]
+
+    @pytest.mark.asyncio
+    async def test_two_args_produces_error_entry(self):
+        const_true = {"op": "const", "value": True}
+        const_a = {"op": "const", "value": "a"}
+        _, errors = await AssignmentTransformer().transform_record(
+            record={}, assignments=[self._if_assignment(const_true, const_a)]
+        )
+        assert errors, "expected error for two args"
+        assert "if" in errors[0]["error"]
+        assert "2" in errors[0]["error"]
+
+    @pytest.mark.asyncio
+    async def test_true_branch_returned(self):
+        const_true = {"op": "const", "value": True}
+        const_then = {"op": "const", "value": "yes"}
+        const_else = {"op": "const", "value": "no"}
+        result, errors = await AssignmentTransformer().transform_record(
+            record={},
+            assignments=[self._if_assignment(const_true, const_then, const_else)],
+        )
+        assert not errors
+        assert result["out"] == "yes"
+
+    @pytest.mark.asyncio
+    async def test_false_branch_returned(self):
+        const_false = {"op": "const", "value": False}
+        const_then = {"op": "const", "value": "yes"}
+        const_else = {"op": "const", "value": "no"}
+        result, errors = await AssignmentTransformer().transform_record(
+            record={},
+            assignments=[self._if_assignment(const_false, const_then, const_else)],
+        )
+        assert not errors
+        assert result["out"] == "no"
