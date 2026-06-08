@@ -231,6 +231,8 @@ class AssignmentTransformer:
 
             case "and":
                 args = expr.get("args", [])
+                if not args:
+                    raise TransformationError("and expression requires at least 1 arg, got 0")
                 for arg in args:
                     if not await self._evaluate_expression(record, partial_result, arg):
                         return False
@@ -238,6 +240,8 @@ class AssignmentTransformer:
 
             case "or":
                 args = expr.get("args", [])
+                if not args:
+                    raise TransformationError("or expression requires at least 1 arg, got 0")
                 for arg in args:
                     if await self._evaluate_expression(record, partial_result, arg):
                         return True
