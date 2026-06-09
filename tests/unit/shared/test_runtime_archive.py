@@ -75,6 +75,10 @@ def test_hydrate_archive_downloads_http_url(tmp_path: Path, monkeypatch) -> None
     assert (destination / "pipelines" / "manifest.json").is_file()
 
 
+# A presigned-style URL whose signature must never appear in any error message.
+_SIGNED_URL = "https://bucket.s3.amazonaws.com/cfg.tgz?X-Amz-Signature=SECRETSIG"
+
+
 def test_hydrate_archive_wraps_download_failure(tmp_path: Path, monkeypatch) -> None:
     def fake_urlopen(url, timeout=None):
         raise urllib.error.URLError("boom")
@@ -82,9 +86,11 @@ def test_hydrate_archive_wraps_download_failure(tmp_path: Path, monkeypatch) -> 
     monkeypatch.setattr(runtime_archive.urllib.request, "urlopen", fake_urlopen)
 
     try:
-        hydrate_archive("https://example.com/missing.tgz", tmp_path / "destination")
+        hydrate_archive(_SIGNED_URL, tmp_path / "destination")
     except RuntimeArchiveError as exc:
         assert "download" in str(exc).lower()
+        assert "SECRETSIG" not in str(exc)
+        assert "bucket.s3.amazonaws.com/cfg.tgz" in str(exc)
     else:
         raise AssertionError("Expected RuntimeArchiveError")
 
@@ -96,9 +102,10 @@ def test_hydrate_archive_wraps_http_error(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(runtime_archive.urllib.request, "urlopen", fake_urlopen)
 
     try:
-        hydrate_archive("https://example.com/expired.tgz", tmp_path / "destination")
+        hydrate_archive(_SIGNED_URL, tmp_path / "destination")
     except RuntimeArchiveError as exc:
         assert "403" in str(exc)
+        assert "SECRETSIG" not in str(exc)
     else:
         raise AssertionError("Expected RuntimeArchiveError")
 
@@ -110,9 +117,10 @@ def test_hydrate_archive_rejects_empty_download(tmp_path: Path, monkeypatch) -> 
     monkeypatch.setattr(runtime_archive.urllib.request, "urlopen", fake_urlopen)
 
     try:
-        hydrate_archive("https://example.com/empty.tgz", tmp_path / "destination")
+        hydrate_archive(_SIGNED_URL, tmp_path / "destination")
     except RuntimeArchiveError as exc:
         assert "empty" in str(exc).lower()
+        assert "SECRETSIG" not in str(exc)
     else:
         raise AssertionError("Expected RuntimeArchiveError")
 

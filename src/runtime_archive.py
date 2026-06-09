@@ -14,7 +14,7 @@ import urllib.request
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator, Sequence
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit, urlunsplit
 
 
 REQUIRED_FILES = ("pipelines/manifest.json",)
@@ -93,9 +93,17 @@ def _is_remote_url(archive_path: Path | str) -> bool:
     )
 
 
+def _redact_url(url: str) -> str:
+    """Drop the query string so a presigned URL's signature is never logged."""
+    return urlunsplit(urlsplit(url)._replace(query=""))
+
+
 def _download_archive(url: str, destination: Path) -> None:
     # _is_remote_url has already constrained the scheme to http(s), so urlopen
     # cannot be steered at file:// or another local-resource scheme here.
+    # Error messages report the redacted URL only: a presigned URL's signature
+    # lives in the query string, and these messages reach the container logs.
+    safe_url = _redact_url(url)
     try:
         with urllib.request.urlopen(  # noqa: S310 - scheme allowlisted above
             url, timeout=_DOWNLOAD_TIMEOUT_SECONDS
@@ -105,17 +113,17 @@ def _download_archive(url: str, destination: Path) -> None:
         # An expired or revoked presigned URL fails here. Report the HTTP status
         # so the operator is not sent chasing a "corrupt archive" at extraction.
         raise RuntimeArchiveError(
-            f"Runtime archive download returned HTTP {exc.code}: {url}"
+            f"Runtime archive download returned HTTP {exc.code}: {safe_url}"
         ) from exc
     except OSError as exc:
         raise RuntimeArchiveError(
-            f"Failed to download runtime archive: {url}: {exc}"
+            f"Failed to download runtime archive: {safe_url}: {exc}"
         ) from exc
 
     # An empty 200 body would otherwise surface as an opaque tar read error.
     if destination.stat().st_size == 0:
         raise RuntimeArchiveError(
-            f"Runtime archive download produced an empty file: {url}"
+            f"Runtime archive download produced an empty file: {safe_url}"
         )
 
 
