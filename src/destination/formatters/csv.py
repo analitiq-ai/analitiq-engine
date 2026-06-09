@@ -15,7 +15,8 @@ class CsvFormatter(BaseFormatter):
     Formatter for CSV (Comma-Separated Values) format.
 
     Each record is serialized as a row with values in column order.
-    The first batch includes a header row with column names.
+    Header inclusion is controlled by the `include_header` config option
+    and the `append` parameter on each method call.
 
     Configuration options:
     - delimiter: Field delimiter (default: ',')
@@ -81,6 +82,7 @@ class CsvFormatter(BaseFormatter):
         self,
         records: List[Dict[str, Any]],
         schema: Optional[Dict[str, Any]] = None,
+        append: bool = False,
     ) -> bytes:
         """
         Serialize a batch of records to CSV format.
@@ -88,6 +90,7 @@ class CsvFormatter(BaseFormatter):
         Args:
             records: List of record dictionaries
             schema: Optional JSON Schema for column ordering
+            append: Whether appending to existing content (suppresses header)
 
         Returns:
             UTF-8 encoded bytes with CSV data
@@ -97,13 +100,13 @@ class CsvFormatter(BaseFormatter):
 
         fieldnames = self._get_fieldnames(records, schema)
         csv_options = self._get_csv_options()
-        include_header = self._config.get("include_header", True)
+        include_header = self._config.get("include_header", True) and not append
 
         output = io.StringIO()
         writer = csv.DictWriter(
             output,
             fieldnames=fieldnames,
-            extrasaction="ignore",  # Ignore extra fields not in fieldnames
+            extrasaction="ignore",
             **csv_options,
         )
 
@@ -111,7 +114,6 @@ class CsvFormatter(BaseFormatter):
             writer.writeheader()
 
         for record in records:
-            # Convert non-string values to strings
             row = {k: self._format_value(v) for k, v in record.items()}
             writer.writerow(row)
 
@@ -139,28 +141,7 @@ class CsvFormatter(BaseFormatter):
         if not records:
             return 0
 
-        fieldnames = self._get_fieldnames(records, schema)
-        csv_options = self._get_csv_options()
-
-        # Only include header if not appending or explicitly configured
-        include_header = self._config.get("include_header", True) and not append
-
-        output = io.StringIO()
-        writer = csv.DictWriter(
-            output,
-            fieldnames=fieldnames,
-            extrasaction="ignore",
-            **csv_options,
-        )
-
-        if include_header:
-            writer.writeheader()
-
-        for record in records:
-            row = {k: self._format_value(v) for k, v in record.items()}
-            writer.writerow(row)
-
-        data = output.getvalue().encode("utf-8")
+        data = self.serialize_batch(records, schema, append=append)
         stream.write(data)
         return len(data)
 
