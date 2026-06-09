@@ -746,6 +746,17 @@ class GenericSQLConnector(BaseDestinationHandler):
         )
         commits_ddl = self._build_batch_commits_ddl(state.schema_name, type_mapper)
 
+        # Announce DDL before it runs (and before any lock wait) so a slow
+        # CREATE TABLE is attributable to a schema.table instead of a silent
+        # stall between "Received schema" and the SchemaAck. Paired with the
+        # "Destination tables ready" line below, the gap renders as elapsed
+        # time between two INFO logs.
+        logger.info(
+            "Ensuring destination tables exist for %s.%s (executing DDL)",
+            state.schema_name,
+            state.table_name,
+        )
+
         if self._adbc_only:
             await self._ensure_tables_via_adbc(state, [target_ddl, commits_ddl])
             return
@@ -795,7 +806,11 @@ class GenericSQLConnector(BaseDestinationHandler):
                     lambda sync_conn: _reflect(sync_conn)
                 )
 
-        logger.debug(f"Ensured tables exist in schema {state.schema_name}")
+        logger.info(
+            "Destination tables ready for %s.%s",
+            state.schema_name,
+            state.table_name,
+        )
 
 
     async def write_batch(
@@ -1125,8 +1140,10 @@ class GenericSQLConnector(BaseDestinationHandler):
         statements.extend(rendered_ddl)
         async with self._ddl_lock:
             await asyncio.to_thread(self._execute_adbc_ddl_sync, statements)
-        logger.debug(
-            "ADBC-only DDL applied for %s.%s", state.schema_name, state.table_name
+        logger.info(
+            "Destination tables ready for %s.%s",
+            state.schema_name,
+            state.table_name,
         )
 
     def _execute_adbc_ddl_sync(self, statements: List[str]) -> None:
