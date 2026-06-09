@@ -170,8 +170,8 @@ def test_hydrate_archive_local_path_not_found(tmp_path: Path) -> None:
 
 def test_hydrate_archive_requires_manifest(tmp_path: Path) -> None:
     source = tmp_path / "source"
-    source.mkdir()
-    (source / "other.json").write_text("{}", encoding="utf-8")
+    (source / "pipelines").mkdir(parents=True)
+    (source / "pipelines" / "other.json").write_text("{}", encoding="utf-8")
     archive_path = tmp_path / "runtime.tar.gz"
     _write_archive(archive_path, source)
 
@@ -179,6 +179,24 @@ def test_hydrate_archive_requires_manifest(tmp_path: Path) -> None:
         hydrate_archive(archive_path, tmp_path / "destination")
     except RuntimeArchiveError as exc:
         assert "pipelines/manifest.json" in str(exc)
+    else:
+        raise AssertionError("Expected RuntimeArchiveError")
+
+
+def test_hydrate_archive_rejects_path_outside_runtime_dirs(tmp_path: Path) -> None:
+    # A bundle must not be able to overwrite engine code (e.g. src/main.py)
+    # when it hydrates into the engine working directory.
+    archive_path = tmp_path / "runtime.tar"
+    with tarfile.open(archive_path, mode="w") as archive:
+        payload = b"print('pwned')"
+        info = tarfile.TarInfo("src/main.py")
+        info.size = len(payload)
+        archive.addfile(info, fileobj=io.BytesIO(payload))
+
+    try:
+        hydrate_archive(archive_path, tmp_path / "destination")
+    except RuntimeArchiveError as exc:
+        assert "allowed runtime directories" in str(exc)
     else:
         raise AssertionError("Expected RuntimeArchiveError")
 

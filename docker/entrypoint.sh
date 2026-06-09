@@ -28,7 +28,9 @@ set -u
 # bind-mounting host dirs. Local runs leave CONFIG_BUNDLE unset and bind-mount
 # the dirs as before, so this is a no-op for them.
 if [ -n "${CONFIG_BUNDLE:-}" ]; then
-    echo "[entrypoint] hydrating config bundle: $CONFIG_BUNDLE"
+    # Strip any query string before logging: a presigned object-store URL
+    # carries its signature there, and container logs outlive the URL.
+    echo "[entrypoint] hydrating config bundle: ${CONFIG_BUNDLE%%\?*}"
     python -m src.runtime_archive hydrate "$CONFIG_BUNDLE" \
         || { echo "[entrypoint] FATAL: config bundle hydration failed"; exit 1; }
 fi

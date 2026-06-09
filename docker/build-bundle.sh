@@ -40,7 +40,20 @@ for cid in conn_ids:
 
 paths = ["pipelines/manifest.json", f"pipelines/{pipe_dir}"]
 paths += [f"connections/{c}" for c in sorted(conn_ids)]
-paths += [f"connectors/{c}" for c in sorted(connector_ids)]
+
+# The engine loaders accept both "connectors/{id}" and the prefixed
+# "connectors/connector-{id}" layout; resolve whichever exists on disk so a
+# pipeline using the prefixed form still bundles.
+for cid in sorted(connector_ids):
+    for candidate in (f"connectors/{cid}", f"connectors/connector-{cid}"):
+        if os.path.isdir(os.path.join(root, candidate)):
+            paths.append(candidate)
+            break
+    else:
+        sys.exit(
+            f"connector dir not found for {cid}: tried "
+            f"connectors/{cid} and connectors/connector-{cid}"
+        )
 print("\n".join(paths))
 PY
 

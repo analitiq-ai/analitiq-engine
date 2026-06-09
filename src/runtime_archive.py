@@ -19,6 +19,22 @@ from urllib.parse import urlparse
 
 REQUIRED_FILES = ("pipelines/manifest.json",)
 
+# Top-level directories a bundle may write into. The archive hydrates into the
+# working directory, which is the engine root, so restricting members to these
+# runtime config/data dirs stops a bundle from overwriting engine code (src/,
+# cdk/, docker/) or packaging files.
+_ALLOWED_TOP_LEVEL = frozenset(
+    {
+        "connectors",
+        "connections",
+        "pipelines",
+        "state",
+        "logs",
+        "deadletter",
+        "metrics",
+    }
+)
+
 # Schemes the engine fetches over the network. A presigned object-store URL is
 # opaque HTTPS, so accepting these keeps the engine cloud-agnostic: no cloud SDK,
 # just urllib downloading bytes the same way it would from any other URL.
@@ -131,6 +147,13 @@ def _validate_member(member: tarfile.TarInfo, destination: Path) -> None:
         raise RuntimeArchiveError(f"Archive contains unsupported link: {member.name}")
     if not (member.isfile() or member.isdir()):
         raise RuntimeArchiveError(f"Archive contains unsupported entry: {member.name}")
+
+    top_level = member_path.parts[0] if member_path.parts else member.name
+    if top_level not in _ALLOWED_TOP_LEVEL:
+        raise RuntimeArchiveError(
+            "Archive entry outside the allowed runtime directories "
+            f"({', '.join(sorted(_ALLOWED_TOP_LEVEL))}): {member.name}"
+        )
 
     resolved = (destination / member.name).resolve()
     try:

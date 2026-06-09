@@ -97,6 +97,10 @@ connectors/
 connections/
 pipelines/
 
+# Generated per-run config bundle from docker/build-bundle.sh: carries resolved
+# config and credentials. Never bake it into the image.
+docker/bundle/
+
 # CI/CD
 .github/
 .gitlab-ci.yml
