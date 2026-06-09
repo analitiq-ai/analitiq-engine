@@ -218,6 +218,10 @@ TODO.md
 scripts/
 docker-cloud/
 
+# Per-run config bundle built by docker/build-bundle.sh: a generated archive
+# that carries resolved config and credentials. Never commit it.
+docker/bundle/
+
 # =============================================================================
 # IDE and Editor
 # =============================================================================
