@@ -406,10 +406,10 @@ class AssignmentTransformer:
                 f"to_float: cannot convert {value!r} ({type(value).__name__}) to float: {e}"
             ) from e
 
-    async def _fn_to_string(self, value: Any) -> str:
-        """Convert to string."""
+    async def _fn_to_string(self, value: Any) -> Optional[str]:
+        """Convert to string. None passes through."""
         if value is None:
-            return ""
+            return None
         return str(value)
 
     async def _fn_abs(self, value: Any) -> Any:
