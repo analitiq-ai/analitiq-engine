@@ -1,0 +1,69 @@
+name: analitiq-bundle
+
+# Bundle-mode proof harness. Config is delivered as a tar built from the local
+# connectors/connections/pipelines dirs and mounted read-only - NOT bind-mounted
+# as live directories. The entrypoint hydrates CONFIG_BUNDLE into /app, mirroring
+# the cloud path where AWS Batch attaches a per-run bundle. pipelines/ is excluded
+# from the image (.dockerignore), so a successful run proves config came from the
+# bundle, not the baked image.
+#
+#   cd tests/e2e_databases && docker compose up -d --wait e2e-postgres && cd ../..
+#   ./docker/build-bundle.sh eea23c0b-741f-5ea8-a666-f4858e0bfca1
+#   PIPELINE_ID=eea23c0b-741f-5ea8-a666-f4858e0bfca1 \
+#     docker compose -f docker/docker-compose.bundle.yml run --rm source_engine
+
+services:
+  destination:
+    image: analitiq-stream:latest
+    container_name: analitiq-bundle-destination
+    environment:
+      - RUN_MODE=destination
+      - GRPC_PORT=50051
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - DESTINATION_INDEX=${DESTINATION_INDEX:-0}
+      - PIPELINE_ID=${PIPELINE_ID}
+      - ENV=loc
+      # Config arrives as a tar, hydrated by the entrypoint - no config mounts.
+      - CONFIG_BUNDLE=/bundle/config.tgz
+    volumes:
+      - ./bundle/config.tgz:/bundle/config.tgz:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    expose:
+      - "50051"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('localhost',50051),2); s.close()"]
+      interval: 5s
+      timeout: 3s
+      retries: 60
+      # Covers the entrypoint's bundle hydration + connector driver install.
+      start_period: 300s
+    restart: on-failure
+    networks:
+      - analitiq-bundle-net
+
+  source_engine:
+    image: analitiq-stream:latest
+    container_name: analitiq-bundle-source
+    environment:
+      - RUN_MODE=source
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - DESTINATION_GRPC_HOST=destination
+      - DESTINATION_GRPC_PORT=50051
+      - PIPELINE_ID=${PIPELINE_ID}
+      - ENV=loc
+      - CONFIG_BUNDLE=/bundle/config.tgz
+    volumes:
+      - ./bundle/config.tgz:/bundle/config.tgz:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: "no"
+    depends_on:
+      destination:
+        condition: service_healthy
+    networks:
+      - analitiq-bundle-net
+
+networks:
+  analitiq-bundle-net:
+    driver: bridge

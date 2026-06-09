@@ -20,6 +20,19 @@
 # fails loudly at connect time with the missing-driver error.
 set -u
 
+# Bundle mode: when CONFIG_BUNDLE points at a config archive (a local path or
+# an http(s):// URL such as a presigned object-store URL), hydrate it into the
+# working directory before installing connectors or starting the engine.
+# The archive carries the same connectors/connections/pipelines layout the
+# engine reads locally; in the cloud AWS Batch attaches it per run instead of
+# bind-mounting host dirs. Local runs leave CONFIG_BUNDLE unset and bind-mount
+# the dirs as before, so this is a no-op for them.
+if [ -n "${CONFIG_BUNDLE:-}" ]; then
+    echo "[entrypoint] hydrating config bundle: $CONFIG_BUNDLE"
+    python -m src.runtime_archive hydrate "$CONFIG_BUNDLE" \
+        || { echo "[entrypoint] FATAL: config bundle hydration failed"; exit 1; }
+fi
+
 CONNECTORS_DIR="${CONNECTORS_DIR:-/app/connectors}"
 
 if [ -d "$CONNECTORS_DIR" ]; then

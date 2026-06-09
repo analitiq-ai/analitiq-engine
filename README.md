@@ -109,6 +109,35 @@ cd docker && \
 
 The engine reads from the source, transforms the data, and writes to the destination. State is checkpointed so interrupted runs resume where they left off.
 
+### Runtime archives
+
+For environments where the generated configuration is prepared separately, you
+can package the normal runtime directories into a local archive and hydrate them
+before starting the engine.
+
+Create an archive:
+
+```bash
+tar -czf runtime-config.tar.gz connectors connections pipelines state
+```
+
+Hydrate it into an empty working directory:
+
+```bash
+python src/runtime_archive.py hydrate runtime-config.tar.gz -C /tmp/analitiq-run
+```
+
+Hydrate and run the engine in one command:
+
+```bash
+PIPELINE_ID=<your-pipeline-id> \
+python src/runtime_archive.py run runtime-config.tar.gz -C /tmp/analitiq-run -- \
+  python -m src.main
+```
+
+The archive must contain `pipelines/manifest.json`. After hydration, the engine
+uses the same filesystem layout as a normal local run.
+
 ---
 
 ## Architecture

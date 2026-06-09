@@ -78,6 +78,9 @@ deadletter/
 .env.local
 .env.*.local
 
+# Poetry
+# poetry.lock - needed for Docker builds
+
 # Docker
 Dockerfile*
 docker-compose*.yml
@@ -86,8 +89,12 @@ docker-compose*.yml
 # Example configurations (will be mounted instead)
 src/examples/*
 
-# Sensitive configuration (mounted at runtime, never baked into image)
+# Runtime configuration - delivered per run, never baked into the image
+# (bind-mounted locally, tar bundle in the cloud). The Dockerfile creates these
+# dirs empty at build; the entrypoint populates them before the engine starts.
 .secrets/
+connectors/
+connections/
 pipelines/
 
 # CI/CD
