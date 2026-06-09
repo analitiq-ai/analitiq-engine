@@ -70,6 +70,7 @@ def test_hydrate_archive_downloads_http_url(tmp_path: Path, monkeypatch) -> None
     hydrated = hydrate_archive("https://example.com/config.tgz", destination)
 
     assert captured["url"] == "https://example.com/config.tgz"
+    assert captured["timeout"] == runtime_archive._DOWNLOAD_TIMEOUT_SECONDS
     assert hydrated == destination.resolve()
     assert (destination / "pipelines" / "manifest.json").is_file()
 
@@ -84,6 +85,85 @@ def test_hydrate_archive_wraps_download_failure(tmp_path: Path, monkeypatch) -> 
         hydrate_archive("https://example.com/missing.tgz", tmp_path / "destination")
     except RuntimeArchiveError as exc:
         assert "download" in str(exc).lower()
+    else:
+        raise AssertionError("Expected RuntimeArchiveError")
+
+
+def test_hydrate_archive_wraps_http_error(tmp_path: Path, monkeypatch) -> None:
+    def fake_urlopen(url, timeout=None):
+        raise urllib.error.HTTPError(url, 403, "Forbidden", {}, None)
+
+    monkeypatch.setattr(runtime_archive.urllib.request, "urlopen", fake_urlopen)
+
+    try:
+        hydrate_archive("https://example.com/expired.tgz", tmp_path / "destination")
+    except RuntimeArchiveError as exc:
+        assert "403" in str(exc)
+    else:
+        raise AssertionError("Expected RuntimeArchiveError")
+
+
+def test_hydrate_archive_rejects_empty_download(tmp_path: Path, monkeypatch) -> None:
+    def fake_urlopen(url, timeout=None):
+        return io.BytesIO(b"")
+
+    monkeypatch.setattr(runtime_archive.urllib.request, "urlopen", fake_urlopen)
+
+    try:
+        hydrate_archive("https://example.com/empty.tgz", tmp_path / "destination")
+    except RuntimeArchiveError as exc:
+        assert "empty" in str(exc).lower()
+    else:
+        raise AssertionError("Expected RuntimeArchiveError")
+
+
+def test_hydrate_archive_cleans_up_temp_file_on_download_failure(
+    tmp_path: Path, monkeypatch
+) -> None:
+    created: list[str] = []
+    real_mkstemp = runtime_archive.tempfile.mkstemp
+
+    def tracking_mkstemp(*args, **kwargs):
+        handle, name = real_mkstemp(*args, **kwargs)
+        created.append(name)
+        return handle, name
+
+    def fake_urlopen(url, timeout=None):
+        raise urllib.error.URLError("boom")
+
+    monkeypatch.setattr(runtime_archive.tempfile, "mkstemp", tracking_mkstemp)
+    monkeypatch.setattr(runtime_archive.urllib.request, "urlopen", fake_urlopen)
+
+    try:
+        hydrate_archive("https://example.com/missing.tgz", tmp_path / "destination")
+    except RuntimeArchiveError:
+        pass
+    else:
+        raise AssertionError("Expected RuntimeArchiveError")
+
+    assert created, "expected a temp file to be created"
+    assert not Path(created[0]).exists(), "temp file should be cleaned up on failure"
+
+
+def test_is_remote_url_scheme_boundary() -> None:
+    assert runtime_archive._is_remote_url("http://example.com/x.tgz") is True
+    assert runtime_archive._is_remote_url("https://example.com/x.tgz") is True
+    # urlparse lowercases the scheme, so case does not matter.
+    assert runtime_archive._is_remote_url("HTTPS://example.com/x.tgz") is True
+    # Local-resource schemes must never be treated as remote: this is the guard
+    # the download path relies on to refuse file://, s3://, ftp://.
+    assert runtime_archive._is_remote_url("file:///etc/passwd") is False
+    assert runtime_archive._is_remote_url("s3://bucket/key") is False
+    assert runtime_archive._is_remote_url("ftp://host/x") is False
+    assert runtime_archive._is_remote_url("/local/path/config.tgz") is False
+    assert runtime_archive._is_remote_url(Path("/local/path/config.tgz")) is False
+
+
+def test_hydrate_archive_local_path_not_found(tmp_path: Path) -> None:
+    try:
+        hydrate_archive(tmp_path / "missing.tar", tmp_path / "destination")
+    except RuntimeArchiveError as exc:
+        assert "not found" in str(exc).lower()
     else:
         raise AssertionError("Expected RuntimeArchiveError")
 
@@ -119,6 +199,54 @@ def test_hydrate_archive_rejects_parent_traversal(tmp_path: Path) -> None:
         raise AssertionError("Expected RuntimeArchiveError")
 
 
+def test_hydrate_archive_rejects_absolute_path(tmp_path: Path) -> None:
+    archive_path = tmp_path / "runtime.tar"
+    with tarfile.open(archive_path, mode="w") as archive:
+        payload = b"{}"
+        info = tarfile.TarInfo("/etc/evil.json")
+        info.size = len(payload)
+        archive.addfile(info, fileobj=io.BytesIO(payload))
+
+    try:
+        hydrate_archive(archive_path, tmp_path / "destination")
+    except RuntimeArchiveError as exc:
+        assert "absolute path" in str(exc)
+    else:
+        raise AssertionError("Expected RuntimeArchiveError")
+
+
+def test_hydrate_archive_rejects_symlink(tmp_path: Path) -> None:
+    archive_path = tmp_path / "runtime.tar"
+    with tarfile.open(archive_path, mode="w") as archive:
+        info = tarfile.TarInfo("link.json")
+        info.type = tarfile.SYMTYPE
+        info.linkname = "/etc/passwd"
+        archive.addfile(info)
+
+    try:
+        hydrate_archive(archive_path, tmp_path / "destination")
+    except RuntimeArchiveError as exc:
+        assert "unsupported link" in str(exc)
+    else:
+        raise AssertionError("Expected RuntimeArchiveError")
+
+
+def test_hydrate_archive_rejects_hardlink(tmp_path: Path) -> None:
+    archive_path = tmp_path / "runtime.tar"
+    with tarfile.open(archive_path, mode="w") as archive:
+        info = tarfile.TarInfo("hard.json")
+        info.type = tarfile.LNKTYPE
+        info.linkname = "manifest.json"
+        archive.addfile(info)
+
+    try:
+        hydrate_archive(archive_path, tmp_path / "destination")
+    except RuntimeArchiveError as exc:
+        assert "unsupported link" in str(exc)
+    else:
+        raise AssertionError("Expected RuntimeArchiveError")
+
+
 def test_main_run_hydrates_then_executes_command(tmp_path: Path) -> None:
     source = tmp_path / "source"
     (source / "pipelines").mkdir(parents=True)
@@ -147,3 +275,30 @@ def test_main_run_hydrates_then_executes_command(tmp_path: Path) -> None:
     assert exit_code == 0
     assert (destination / "pipelines" / "manifest.json").is_file()
     assert (destination / marker).read_text(encoding="utf-8") == "ok"
+
+
+def test_main_hydrate_returns_zero_on_success(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    (source / "pipelines").mkdir(parents=True)
+    (source / "pipelines" / "manifest.json").write_text(
+        '{"pipelines": []}', encoding="utf-8"
+    )
+    archive_path = tmp_path / "runtime.tar.gz"
+    _write_archive(archive_path, source)
+    destination = tmp_path / "destination"
+
+    exit_code = main(["hydrate", str(archive_path), "-C", str(destination)])
+
+    assert exit_code == 0
+    assert (destination / "pipelines" / "manifest.json").is_file()
+
+
+def test_main_hydrate_returns_error_code_on_failure(tmp_path: Path) -> None:
+    # The Docker entrypoint relies on this non-zero exit to abort before the
+    # engine starts; a bad archive must never return 0.
+    missing = tmp_path / "missing.tar.gz"
+    destination = tmp_path / "destination"
+
+    exit_code = main(["hydrate", str(missing), "-C", str(destination)])
+
+    assert exit_code == 2

@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import urllib.error
 import urllib.request
 from contextlib import contextmanager
 from pathlib import Path
@@ -84,10 +85,22 @@ def _download_archive(url: str, destination: Path) -> None:
             url, timeout=_DOWNLOAD_TIMEOUT_SECONDS
         ) as response, destination.open("wb") as out_file:
             shutil.copyfileobj(response, out_file)
+    except urllib.error.HTTPError as exc:
+        # An expired or revoked presigned URL fails here. Report the HTTP status
+        # so the operator is not sent chasing a "corrupt archive" at extraction.
+        raise RuntimeArchiveError(
+            f"Runtime archive download returned HTTP {exc.code}: {url}"
+        ) from exc
     except OSError as exc:
         raise RuntimeArchiveError(
             f"Failed to download runtime archive: {url}: {exc}"
         ) from exc
+
+    # An empty 200 body would otherwise surface as an opaque tar read error.
+    if destination.stat().st_size == 0:
+        raise RuntimeArchiveError(
+            f"Runtime archive download produced an empty file: {url}"
+        )
 
 
 def _extract_tar_safely(archive_path: Path, destination: Path) -> None:
@@ -98,7 +111,9 @@ def _extract_tar_safely(archive_path: Path, destination: Path) -> None:
                 _validate_member(member, destination)
             archive.extractall(destination, members=members, filter="data")
     except tarfile.TarError as exc:
-        raise RuntimeArchiveError(f"Invalid runtime archive: {archive_path}") from exc
+        raise RuntimeArchiveError(
+            f"Invalid runtime archive {archive_path}: {exc}"
+        ) from exc
     except OSError as exc:
         raise RuntimeArchiveError(
             f"Failed to extract runtime archive into {destination}: {exc}"
