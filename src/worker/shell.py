@@ -20,8 +20,12 @@ from src.grpc.client import resolve_grpc_ack_timeout_seconds
 # A destination SQL statement is cancelled before the engine's gRPC ack
 # timeout, so the database returns the cancelled statement instead of the
 # engine abandoning the handshake with a bare "ACK timeout" (issue #231). The
-# ack budget comes from the same resolver the engine's client uses, so the
-# statement timeout cannot drift relative to it.
+# ack budget comes from the same resolver the engine's client uses
+# (resolve_grpc_ack_timeout_seconds). Engine and destination run from the same
+# image and read the same GRPC_TIMEOUT_SECONDS, so the budgets match when it is
+# set once or left unset (both default to 30). A split deployment that sets the
+# var asymmetrically across the two would drift; making that impossible needs
+# the engine to pass its budget over the handshake (tracked separately).
 _STATEMENT_TIMEOUT_ACK_MARGIN_SECONDS = 5
 # For budgets too small to spare the full margin, fall back to a fraction of
 # the budget. Both terms are below the budget, so the result always is too -
