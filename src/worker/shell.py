@@ -15,6 +15,42 @@ from typing import Any, Dict, Optional
 
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.type_map.loader import connector_definition_dir, read_raw_type_maps
+from src.grpc.client import resolve_grpc_ack_timeout_seconds
+
+# A destination SQL statement is cancelled before the engine's gRPC ack
+# timeout, so the database returns the cancelled statement instead of the
+# engine abandoning the handshake with a bare "ACK timeout" (issue #231). The
+# ack budget comes from the same resolver the engine's client uses
+# (resolve_grpc_ack_timeout_seconds). Engine and destination run from the same
+# image and read the same GRPC_TIMEOUT_SECONDS, so the budgets match when it is
+# set once or left unset (both default to 30). A split deployment that sets the
+# var asymmetrically across the two would drift; making that impossible needs
+# the engine to pass its budget over the handshake (tracked separately).
+_STATEMENT_TIMEOUT_ACK_MARGIN_SECONDS = 5
+# For budgets too small to spare the full margin, fall back to a fraction of
+# the budget. Both terms are below the budget, so the result always is too -
+# leaving head-room for the cancel + rejection to reach the engine first.
+_STATEMENT_TIMEOUT_BUDGET_FRACTION = 0.5
+
+
+def _destination_statement_timeout_seconds() -> float:
+    """Per-statement budget for a destination worker, kept strictly below the
+    engine's gRPC ack timeout so a blocked DDL/write is cancelled before the
+    engine gives up waiting for the ack.
+
+    Returns the full ack budget minus a fixed margin where the budget is large
+    enough, otherwise half the budget. Both candidates are strictly below the
+    ack budget for any positive budget (including sub-second), so the statement
+    timeout can never meet or exceed it - the orphaned-statement race this
+    guards against (issue #231).
+    """
+    ack_timeout = resolve_grpc_ack_timeout_seconds()
+    return float(
+        max(
+            ack_timeout - _STATEMENT_TIMEOUT_ACK_MARGIN_SECONDS,
+            ack_timeout * _STATEMENT_TIMEOUT_BUDGET_FRACTION,
+        )
+    )
 
 
 def read_type_map_payloads(
@@ -71,4 +107,11 @@ async def build_bootstrap(
         "endpoint_refs": endpoint_refs or {},
         "stream_endpoints": stream_endpoints or {},
         "source_config": source_config or {},
+        # Only the destination worker bounds statements; a source read is not
+        # gated by the destination's ack budget.
+        "statement_timeout_seconds": (
+            _destination_statement_timeout_seconds()
+            if role == "destination"
+            else None
+        ),
     }

@@ -207,7 +207,19 @@ class DestinationServicer(DestinationServiceServicer):
                             write_mode=CdkWriteMode(schema_msg.write_mode),
                         )
                         accepted = await self.handler.configure_schema(schema_spec)
-                        ack_message = "" if accepted else "Schema configuration failed"
+                        # A handler that proxies to a worker (WorkerProxyHandler)
+                        # records the worker's real rejection reason; surface it
+                        # verbatim so the engine ack is not the generic message
+                        # (issue #231). Handlers that raise instead are caught
+                        # below; those that return False with no reason fall back.
+                        ack_message = (
+                            ""
+                            if accepted
+                            else (
+                                getattr(self.handler, "last_schema_rejection", None)
+                                or "Schema configuration failed"
+                            )
+                        )
                     except (UnmappedTypeError, InvalidTypeMapError) as e:
                         logger.error(
                             "type-map error configuring stream %s: %s",

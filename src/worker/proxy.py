@@ -53,6 +53,11 @@ class WorkerProxyHandler(BaseDestinationHandler):
         self._streams: Dict[str, DestinationGRPCClient] = {}
         self._capabilities: Optional[Any] = None
         self._label = "dest-worker"
+        # Reason the most recent configure_schema returned False, forwarded
+        # from the worker's SchemaAck. The destination service reads it so the
+        # engine-facing ack carries the worker's real reason (issue #231)
+        # instead of a generic "Schema configuration failed".
+        self.last_schema_rejection: Optional[str] = None
 
     # ------------------------------------------------------------------
     # Contract endpoints registration (kept shell-side AND forwarded via
@@ -134,8 +139,10 @@ class WorkerProxyHandler(BaseDestinationHandler):
     # ------------------------------------------------------------------
 
     async def configure_schema(self, schema_spec: SchemaSpec) -> bool:
+        self.last_schema_rejection = None
         if self._handle is None:
             logger.error("%s: configure_schema before connect", self._label)
+            self.last_schema_rejection = "destination worker not started"
             return False
         stream_id = schema_spec.stream_id
         schema_config = {
@@ -161,6 +168,7 @@ class WorkerProxyHandler(BaseDestinationHandler):
             return None
         client = DestinationGRPCClient(target=self._handle.target)
         if not await client.connect(max_connect_retries=3):
+            self.last_schema_rejection = "destination worker channel did not connect"
             return None
         accepted = await client.start_stream(
             run_id="",  # idempotency keys ride each forwarded batch
@@ -168,6 +176,9 @@ class WorkerProxyHandler(BaseDestinationHandler):
             schema_config=schema_config,
         )
         if not accepted:
+            # Forward the worker's real rejection reason so the engine-facing
+            # ack is not the generic "Schema configuration failed" (issue #231).
+            self.last_schema_rejection = client.schema_rejection_message
             await client.disconnect()
             return None
         return client
