@@ -174,6 +174,7 @@ class TestServerConfigureSchemaDeterministicErrors:
         )
         schema_msg = SchemaMessage(
             stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_UPSERT,
+            ack_timeout_seconds=30,
         )
         request = StreamRequest(schema=schema_msg)
 

@@ -75,10 +75,11 @@ class BaseDestinationHandler(ABC):
         blocks so the engine surfaces the real reason instead of a bare gRPC
         ACK timeout (issue #231).
 
-        The trusted shell derives the value from the engine's gRPC ack budget
-        and passes it in the worker bootstrap. ``None`` means unbounded.
-        Called once by the destination entrypoint before the gRPC server
-        starts. Default is a no-op; only SQL destinations honor it.
+        Called by the destination servicer on every schema handshake, before
+        ``configure_schema``, with a value derived from the ack budget the
+        sender stamped into the schema message (issue #234) — the bound
+        always tracks the budget the sender actually waits on. ``None``
+        means unbounded. Default is a no-op; only SQL destinations honor it.
         """
         _ = seconds  # no-op default
 

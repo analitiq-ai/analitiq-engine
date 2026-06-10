@@ -277,9 +277,10 @@ class GenericSQLConnector(BaseDestinationHandler):
         self._connected: bool = False
         self._driver: str = ""
         # Seconds to bound a destination SQL handler attempt, set by the
-        # destination entrypoint via set_statement_timeout() from the engine's
-        # gRPC ack budget. None (source-role instances, or unset) means
-        # unbounded - asyncio.timeout(None) never fires. See _statement_deadline.
+        # destination servicer via set_statement_timeout() on each schema
+        # handshake from the sender-stamped gRPC ack budget. None (source-role
+        # instances, or unset) means unbounded - asyncio.timeout(None) never
+        # fires. See _statement_deadline.
         self._statement_timeout_seconds: Optional[float] = None
         # ADBC-only mode: the runtime exposes no SQLAlchemy engine and
         # every write/DDL/idempotency operation runs through the cached
@@ -376,8 +377,9 @@ class GenericSQLConnector(BaseDestinationHandler):
     def set_statement_timeout(self, seconds: Optional[float]) -> None:
         """Bound every destination SQL statement to *seconds* (issue #231).
 
-        Called once by the destination entrypoint with a value the trusted
-        shell derived from the engine's gRPC ack budget. ``None`` leaves
+        Called by the destination servicer on each schema handshake, before
+        ``configure_schema``, with a value derived from the ack budget the
+        sender stamped into the schema message (issue #234). ``None`` leaves
         statements unbounded. Bounds the SQLAlchemy DDL and write attempts
         (with their idempotency statements) via :meth:`_statement_deadline`;
         the ADBC path is unaffected.

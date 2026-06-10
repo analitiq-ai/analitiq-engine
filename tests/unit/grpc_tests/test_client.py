@@ -310,8 +310,8 @@ class TestClientSchemaBuilder:
     """Tests for schema message building."""
 
     def test_build_schema_message_carries_identification_and_mode(self):
-        """The slim SchemaMessage carries only stream_id, version, and
-        write_mode — every other field comes from the preloaded contract
+        """The slim SchemaMessage carries stream_id, version, write_mode, and
+        the ack budget — every other field comes from the preloaded contract
         endpoint document on the destination side."""
         from src.grpc.generated.analitiq.v1 import WriteMode
 
@@ -329,6 +329,41 @@ class TestClientSchemaBuilder:
         client = DestinationGRPCClient()
         with pytest.raises(ValueError, match="Unknown write_mode"):
             client._build_schema_message("s", {"write_mode": "upsert_typo"})
+
+    def test_schema_message_stamps_clients_own_ack_budget(self):
+        """The stamped ack budget is the wait this client actually applies
+        (self.timeout), so the destination's statement timeout can never
+        drift from it (issue #234)."""
+        client = DestinationGRPCClient(timeout_seconds=42)
+        schema_msg = client._build_schema_message(
+            "s", {"write_mode": "upsert", "schema_version": 1}
+        )
+        assert schema_msg.ack_timeout_seconds == 42
+
+    def test_schema_message_forwards_smaller_upstream_budget(self):
+        """A forwarding hop (the worker proxy) passes the engine's budget in
+        schema_config; when it is tighter than this client's own wait, the
+        engine's value wins — the worker must stay below every waiter on
+        the path."""
+        client = DestinationGRPCClient(timeout_seconds=300)
+        schema_msg = client._build_schema_message(
+            "s",
+            {"write_mode": "upsert", "schema_version": 1,
+             "ack_timeout_seconds": 30},
+        )
+        assert schema_msg.ack_timeout_seconds == 30
+
+    def test_schema_message_caps_upstream_budget_at_own_wait(self):
+        """An upstream budget larger than this client's own wait must not
+        widen the stamp: this hop gives up sooner, so the statement bound
+        derives from the tighter wait."""
+        client = DestinationGRPCClient(timeout_seconds=30)
+        schema_msg = client._build_schema_message(
+            "s",
+            {"write_mode": "upsert", "schema_version": 1,
+             "ack_timeout_seconds": 300},
+        )
+        assert schema_msg.ack_timeout_seconds == 30
 
 
 class TestStreamTaskFailurePropagation:

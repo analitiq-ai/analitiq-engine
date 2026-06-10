@@ -834,8 +834,9 @@ class StreamingEngine:
 
         host = os.getenv("DESTINATION_GRPC_HOST") or grpc_config.get("host", "localhost")
         port = int(os.getenv("DESTINATION_GRPC_PORT", "0")) or grpc_config.get("port", 50051)
-        # Single source of truth for the ack budget, shared with the
-        # destination worker's statement-timeout derivation (issue #231).
+        # The engine's ack budget. The client stamps it into the schema
+        # handshake so the destination derives its statement timeout from
+        # the budget the engine actually waits on (issues #231, #234).
         timeout = resolve_grpc_ack_timeout_seconds()
         max_retries = self.max_retries
         max_message_size = grpc_config.get("max_message_size", 16 * 1024 * 1024)

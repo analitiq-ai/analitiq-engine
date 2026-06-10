@@ -148,6 +148,10 @@ class WorkerProxyHandler(BaseDestinationHandler):
         schema_config = {
             "write_mode": _WRITE_MODE_NAMES[schema_spec.write_mode],
             "schema_version": schema_spec.version,
+            # Forward the engine-stamped ack budget so the worker derives its
+            # statement timeout from the budget the engine actually waits on;
+            # the UDS client mins it with its own wait (issue #234).
+            "ack_timeout_seconds": schema_spec.ack_timeout_seconds,
         }
         client = await self._open_stream(stream_id, schema_config)
         if client is None:
