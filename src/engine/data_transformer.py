@@ -326,7 +326,7 @@ class AssignmentTransformer:
             ) from exc
 
     # Function implementations
-    async def _fn_iso_to_date(self, value: Any) -> str:
+    async def _fn_iso_to_date(self, value: Any) -> Optional[str]:
         """Convert ISO string to date string (YYYY-MM-DD). Raises on
         unparseable input — previously returned the raw string unchanged,
         which passed a non-date value into typed date columns and surfaced
@@ -342,7 +342,7 @@ class AssignmentTransformer:
                 f"iso_to_date failed for {value!r}: {e}"
             ) from e
 
-    async def _fn_iso_to_datetime(self, value: Any) -> datetime:
+    async def _fn_iso_to_datetime(self, value: Any) -> Optional[datetime]:
         """Convert ISO string to datetime object. Raises on unparseable
         input — a ``datetime.now()`` fallback would silently fabricate
         timestamps and corrupt time-based queries and incremental sync."""
@@ -355,23 +355,23 @@ class AssignmentTransformer:
                 f"iso_to_datetime failed for {value!r}: {e}"
             ) from e
 
-    async def _fn_iso_to_timestamp(self, value: Any) -> datetime:
+    async def _fn_iso_to_timestamp(self, value: Any) -> Optional[datetime]:
         """Alias for iso_to_datetime."""
         return await self._fn_iso_to_datetime(value)
 
-    async def _fn_trim(self, value: Any) -> str:
+    async def _fn_trim(self, value: Any) -> Optional[str]:
         """Trim whitespace from string."""
         if value is None:
             return None
         return str(value).strip()
 
-    async def _fn_lower(self, value: Any) -> str:
+    async def _fn_lower(self, value: Any) -> Optional[str]:
         """Convert to lowercase."""
         if value is None:
             return None
         return str(value).lower()
 
-    async def _fn_upper(self, value: Any) -> str:
+    async def _fn_upper(self, value: Any) -> Optional[str]:
         """Convert to uppercase."""
         if value is None:
             return None
