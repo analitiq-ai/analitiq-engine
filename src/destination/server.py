@@ -252,8 +252,13 @@ class DestinationServicer(DestinationServiceServicer):
                         # Bound statements before configure_schema runs DDL:
                         # the CREATE TABLE handshake is exactly the statement
                         # that must be cancelled ahead of the sender's ack
-                        # wait (issues #230/#231). No-op for handlers that
-                        # run no SQL (API, file, stdout, the worker proxy).
+                        # wait (issues #230/#231). Only the async-SQLAlchemy
+                        # handler path can enforce the bound; ADBC and
+                        # sync-engine statements run on worker threads and
+                        # rely on driver timeouts (the handler logs a warning
+                        # when it accepts a budget it cannot enforce). No-op
+                        # for handlers that run no SQL (API, file, stdout,
+                        # the worker proxy).
                         self.handler.set_statement_timeout(
                             derive_statement_timeout_seconds(
                                 schema_msg.ack_timeout_seconds

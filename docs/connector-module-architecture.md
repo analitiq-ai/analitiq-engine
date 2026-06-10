@@ -134,9 +134,10 @@ not the dataclass:
 ```python
 @dataclass(frozen=True)
 class SqlAlchemyTransport:
-    engine: AsyncEngine   # sqlalchemy.ext.asyncio.AsyncEngine
-    driver: str           # e.g. "postgresql+asyncpg"
+    engine: AsyncEngine | Engine   # async, or plain sync for sync-only drivers
+    driver: str           # e.g. "postgresql+asyncpg", "redshift+redshift_connector"
     dialect: str           # e.g. "postgresql"
+    is_async: bool         # which engine flavour `engine` carries
 
 @dataclass(frozen=True)
 class AdbcTransport:
@@ -145,9 +146,11 @@ class AdbcTransport:
 ```
 
 `await runtime.materialize()` builds the transport and exposes it via
-`runtime.engine` (SQLAlchemy), `runtime.open_adbc_connection()` /
-`runtime.is_adbc` (ADBC), and `runtime.driver` / `runtime.connector_type`.
-Lifecycle is ref-counted (`acquire()` / `close()`).
+`runtime.engine` (async SQLAlchemy), `runtime.sync_engine` /
+`runtime.is_sync_sqlalchemy` (sync-only SQLAlchemy drivers),
+`runtime.open_adbc_connection()` / `runtime.is_adbc` (ADBC), and
+`runtime.driver` / `runtime.connector_type`. Lifecycle is ref-counted
+(`acquire()` / `close()`).
 
 Secrets sit behind a swappable **ABC** (`cdk/cdk/secrets/protocol.py`), with
 local-file and in-memory implementations in-tree — the exact seam a separate

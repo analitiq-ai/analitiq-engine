@@ -173,3 +173,62 @@ class TestCaSslContext:
         assert ctx.verify_mode == _ssl.CERT_REQUIRED
         ctx2 = ca_ssl_context(pem, check_hostname=True)
         assert ctx2.check_hostname is True
+
+
+class _MultiArgDialect(SqlDialect):
+    """Dialect whose driver spreads TLS over several connect parameters
+    (redshift_connector shape: ``ssl: bool`` + ``sslmode: str``)."""
+
+    name = "multi-arg"
+
+    def build_tls_connect_args(self, mode, ca_pem):
+        if mode == "disable":
+            return {"ssl": False}
+        return {"ssl": True, "sslmode": mode}
+
+
+class TestTlsConnectArgsMapping:
+    def test_default_wraps_singular_under_ssl_key(self):
+        d = _FixtureDialect()
+        assert d.build_tls_connect_args("require", "PEM") == {
+            "ssl": "ssl<require:PEM>"
+        }
+
+    def test_default_omits_key_when_singular_returns_none(self):
+        assert _FixtureDialect().build_tls_connect_args("off", None) == {}
+
+    def test_base_dialect_mapping_hook_raises_via_singular(self):
+        with pytest.raises(
+            UnsupportedDialectOperationError, match="build_tls_connect_arg"
+        ):
+            SqlDialect().build_tls_connect_args("require", None)
+
+    @pytest.mark.asyncio
+    async def test_multi_arg_mapping_reaches_sync_connect_args(self):
+        # A sync-only driver (detected from the DSN's dialect capability)
+        # builds through create_engine; the dialect's full connect-args
+        # mapping lands there, not a single value under a fixed "ssl" key.
+        captured = {}
+
+        def fake_create(dsn, connect_args=None, **kw):
+            captured["connect_args"] = connect_args
+            engine = MagicMock()
+            engine.connect = MagicMock(side_effect=RuntimeError("stop"))
+            engine.dispose = MagicMock()
+            return engine
+
+        with patch(
+            "cdk.transport_factory.create_engine", side_effect=fake_create
+        ):
+            with pytest.raises(RuntimeError, match="stop"):
+                await build_sqlalchemy_from_spec(
+                    {
+                        "transport_type": "sqlalchemy",
+                        "driver": "sqlite+pysqlite",
+                        "dsn": "sqlite://",
+                        "tls": {"mode": "verify-ca", "ca_pem": None},
+                        "engine_kwargs": {},
+                    },
+                    sql_dialect=_MultiArgDialect(),
+                )
+        assert captured["connect_args"] == {"ssl": True, "sslmode": "verify-ca"}
