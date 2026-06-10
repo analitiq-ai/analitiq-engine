@@ -76,7 +76,7 @@ Shared building blocks moved to the CDK at `cdk/cdk/`:
 |----------|----------|-------------|
 | `DESTINATION_GRPC_HOST` | When using a remote destination | Hostname of destination gRPC server |
 | `DESTINATION_GRPC_PORT` | No | `50051` (default) |
-| `GRPC_TIMEOUT_SECONDS` | No | `300` (default) |
+| `GRPC_TIMEOUT_SECONDS` | No | `30` (default) — the engine's ack budget, stamped on the schema handshake |
 
 ### Destination server mode
 

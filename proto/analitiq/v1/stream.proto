@@ -50,6 +50,15 @@ message SchemaMessage {
 
   // Write mode for this stream (insert, upsert, truncate_insert).
   WriteMode write_mode = 3;
+
+  // The sender's gRPC ack budget in seconds — the longest it waits for the
+  // SchemaAck / each BatchAck before abandoning the stream. The destination
+  // derives its per-statement timeout from this value, so a blocked DDL or
+  // write is cancelled before the sender gives up (issue #234). Always
+  // positive on a conforming handshake; a forwarding hop (the destination
+  // shell's worker proxy) adopts the received budget as its own ack wait
+  // and re-stamps it, so the budget the engine waits on holds end-to-end.
+  uint32 ack_timeout_seconds = 4;
 }
 
 // Record batch message - contains a batch of data records

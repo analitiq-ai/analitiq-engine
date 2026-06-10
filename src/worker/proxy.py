@@ -148,6 +148,12 @@ class WorkerProxyHandler(BaseDestinationHandler):
         schema_config = {
             "write_mode": _WRITE_MODE_NAMES[schema_spec.write_mode],
             "schema_version": schema_spec.version,
+            # Forward the engine-stamped ack budget so the worker derives its
+            # statement timeout from the budget the engine actually waits on
+            # (issue #234). _open_stream also adopts it as the UDS client's
+            # own ack wait, so the worker hop honors the engine's budget
+            # instead of this container's env default.
+            "ack_timeout_seconds": schema_spec.ack_timeout_seconds,
         }
         client = await self._open_stream(stream_id, schema_config)
         if client is None:
@@ -166,7 +172,17 @@ class WorkerProxyHandler(BaseDestinationHandler):
         if self._handle is None:
             logger.error("%s: open_stream before connect", self._label)
             return None
-        client = DestinationGRPCClient(target=self._handle.target)
+        # The forwarded hop adopts the engine-stamped ack budget as its own
+        # wait: the engine is the only real waiter behind this hop, so waiting
+        # any less would abandon a worker statement the engine still has
+        # budget for, and any more would outwait the engine. The stamp the
+        # client puts on the forwarded schema message then mins to the same
+        # value, so the worker's statement bound tracks the engine budget
+        # end-to-end (issue #234).
+        client = DestinationGRPCClient(
+            target=self._handle.target,
+            timeout_seconds=schema_config["ack_timeout_seconds"],
+        )
         if not await client.connect(max_connect_retries=3):
             self.last_schema_rejection = "destination worker channel did not connect"
             return None

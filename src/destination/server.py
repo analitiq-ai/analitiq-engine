@@ -53,6 +53,37 @@ logger = logging.getLogger(__name__)
 # Default configuration from environment
 DEFAULT_GRPC_PORT = int(os.getenv("GRPC_PORT", "50051"))
 
+# A destination SQL statement is cancelled before the sender's gRPC ack
+# timeout, so the database returns the cancelled statement instead of the
+# engine abandoning the handshake with a bare "ACK timeout" (issue #231).
+# The ack budget arrives stamped on the SchemaMessage by the sender's client
+# (issue #234), so the statement timeout always tracks the budget the sender
+# actually waits on — no shared-env assumption across processes.
+_STATEMENT_TIMEOUT_ACK_MARGIN_SECONDS = 5
+# For budgets too small to spare the full margin, fall back to a fraction of
+# the budget. Both terms are below the budget, so the result always is too -
+# leaving head-room for the cancel + rejection to reach the engine first.
+_STATEMENT_TIMEOUT_BUDGET_FRACTION = 0.5
+
+
+def derive_statement_timeout_seconds(ack_timeout_seconds: int) -> float:
+    """Per-statement budget kept strictly below the sender's gRPC ack timeout
+    so a blocked DDL/write is cancelled before the sender gives up waiting for
+    the ack.
+
+    Returns the full ack budget minus a fixed margin where the budget is large
+    enough, otherwise half the budget. Both candidates are strictly below the
+    ack budget for any positive budget, so the statement timeout can never
+    meet or exceed it - the orphaned-statement race this guards against
+    (issue #231).
+    """
+    return float(
+        max(
+            ack_timeout_seconds - _STATEMENT_TIMEOUT_ACK_MARGIN_SECONDS,
+            ack_timeout_seconds * _STATEMENT_TIMEOUT_BUDGET_FRACTION,
+        )
+    )
+
 
 class DestinationGRPCServer:
     """
@@ -198,6 +229,17 @@ class DestinationServicer(DestinationServiceServicer):
                     # re-raises, failing the RPC with the real error instead
                     # of a generic schema rejection.
                     try:
+                        if not schema_msg.ack_timeout_seconds:
+                            # Every conforming sender stamps its ack budget on
+                            # the handshake (issue #234); without it the
+                            # destination cannot bound its statements below
+                            # the sender's wait. Reject loudly instead of
+                            # running statements unbounded.
+                            raise ValueError(
+                                "schema message carries no ack_timeout_seconds;"
+                                " the destination cannot derive its statement"
+                                " timeout (issue #234)"
+                            )
                         # Translate the wire message to the CDK-native SchemaSpec
                         # the handler contract now takes (the CDK must not import
                         # gRPC types). Field-for-field; structurally identical.
@@ -205,6 +247,17 @@ class DestinationServicer(DestinationServiceServicer):
                             stream_id=schema_msg.stream_id,
                             version=schema_msg.version,
                             write_mode=CdkWriteMode(schema_msg.write_mode),
+                            ack_timeout_seconds=schema_msg.ack_timeout_seconds,
+                        )
+                        # Bound statements before configure_schema runs DDL:
+                        # the CREATE TABLE handshake is exactly the statement
+                        # that must be cancelled ahead of the sender's ack
+                        # wait (issues #230/#231). No-op for handlers that
+                        # run no SQL (API, file, stdout, the worker proxy).
+                        self.handler.set_statement_timeout(
+                            derive_statement_timeout_seconds(
+                                schema_msg.ack_timeout_seconds
+                            )
                         )
                         accepted = await self.handler.configure_schema(schema_spec)
                         # A handler that proxies to a worker (WorkerProxyHandler)

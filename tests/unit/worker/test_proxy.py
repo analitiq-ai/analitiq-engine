@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from cdk.types import AckStatus
+from cdk.types import AckStatus, SchemaSpec, WriteMode
 from src.worker.proxy import WorkerProxyHandler
 
 
@@ -70,6 +70,40 @@ class TestProxyConnectFailures:
             with pytest.raises(ConnectionError, match="GetCapabilities"):
                 await _proxy().connect(_runtime())
         handle.close.assert_awaited_once()
+
+
+class TestProxyConfigureSchema:
+    async def test_forwards_engine_ack_budget_to_worker(self):
+        """The proxy must forward the engine-stamped ack budget on the UDS
+        hop AND adopt it as that hop's own ack wait, so the worker's bound
+        and the hop's patience both track the budget the engine actually
+        waits on — not the destination container's own environment
+        (issue #234)."""
+        proxy = _proxy()
+        proxy._handle = _handle()
+        client = MagicMock()
+        client.connect = AsyncMock(return_value=True)
+        client.start_stream = AsyncMock(return_value=True)
+
+        with patch(
+            "src.worker.proxy.DestinationGRPCClient", return_value=client
+        ) as client_cls:
+            accepted = await proxy.configure_schema(
+                SchemaSpec(
+                    stream_id="s1",
+                    version=1,
+                    write_mode=WriteMode.WRITE_MODE_UPSERT,
+                    ack_timeout_seconds=300,
+                )
+            )
+
+        assert accepted is True
+        # The UDS client waits the engine's budget, not the local env default,
+        # so an engine-raised budget is honored on the worker hop.
+        assert client_cls.call_args.kwargs["timeout_seconds"] == 300
+        schema_config = client.start_stream.call_args.kwargs["schema_config"]
+        assert schema_config["ack_timeout_seconds"] == 300
+        assert schema_config["write_mode"] == "upsert"
 
 
 class TestProxyWriteBatch:

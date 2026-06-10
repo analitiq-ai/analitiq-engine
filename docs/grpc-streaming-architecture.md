@@ -53,15 +53,18 @@ On `StreamRecords` the engine sends a `StreamRequest` carrying either a `SchemaM
 
 ### SchemaMessage is slim
 
-`SchemaMessage` carries only `stream_id`, `version`, and `write_mode`. It does **not** transmit columns, primary keys, or target table — both sides already hold the contract artifacts (loaded by `PipelineConfigPrep` from the shared `PIPELINE_ID`), so the destination looks up its endpoint document by `stream_id`. The server translates the wire message into the CDK-native `SchemaSpec` before calling the handler (the CDK never imports gRPC types).
+`SchemaMessage` carries only `stream_id`, `version`, `write_mode`, and the sender's ack budget. It does **not** transmit columns, primary keys, or target table — both sides already hold the contract artifacts (loaded by `PipelineConfigPrep` from the shared `PIPELINE_ID`), so the destination looks up its endpoint document by `stream_id`. The server translates the wire message into the CDK-native `SchemaSpec` before calling the handler (the CDK never imports gRPC types).
 
 ```protobuf
 message SchemaMessage {
   string stream_id = 1;
   uint32 version = 2;
-  WriteMode write_mode = 3;  // INSERT | UPSERT | TRUNCATE_INSERT
+  WriteMode write_mode = 3;        // INSERT | UPSERT | TRUNCATE_INSERT
+  uint32 ack_timeout_seconds = 4;  // sender's gRPC ack budget
 }
 ```
+
+`ack_timeout_seconds` is the budget the sender actually waits for each ack (`GRPC_TIMEOUT_SECONDS` on the engine, default 30). On every handshake the destination servicer derives the per-statement timeout from it (budget minus a 5s margin, or half the budget when it is too small to spare the margin) and applies it via `set_statement_timeout` before `configure_schema` runs DDL, so a blocked `CREATE TABLE` or write is cancelled and reported before the sender abandons the stream (issues #231, #234). The value rides the handshake instead of being read from the destination's own environment, so the two processes cannot drift. A schema message without it is rejected. The destination shell's worker proxy forwards the engine-stamped budget on the worker hop and adopts it as that hop's own ack wait, so the worker's statement bound tracks the budget the engine actually waits — end-to-end, with no dependence on the destination container's environment.
 
 ### RecordBatch
 

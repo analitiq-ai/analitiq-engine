@@ -47,12 +47,14 @@ def _schema_request(
     *,
     version: int = 1,
     write_mode: int = WriteMode.WRITE_MODE_INSERT,
+    ack_timeout_seconds: int = 30,
 ) -> StreamRequest:
     return StreamRequest(
         schema=SchemaMessage(
             stream_id=stream_id,
             version=version,
             write_mode=write_mode,
+            ack_timeout_seconds=ack_timeout_seconds,
         )
     )
 
@@ -131,6 +133,10 @@ class TestSchemaAckTypeMapError:
         failures."""
         handler = MagicMock()
         handler.configure_schema = AsyncMock(return_value=False)
+        # A bare MagicMock auto-creates a truthy last_schema_rejection, which
+        # the servicer would forward instead of the generic message; a handler
+        # with no recorded reason exposes None.
+        handler.last_schema_rejection = None
 
         servicer = DestinationServicer(handler, server=MagicMock())
         responses = []
@@ -238,6 +244,75 @@ class TestSchemaAckTypeMapError:
         ack = responses[0].schema_ack
         assert ack.accepted is False
         assert ack.message.startswith("UnsupportedDialectOperationError: ")
+
+
+class TestSchemaAckBudget:
+    """The sender stamps its gRPC ack budget on the handshake; the servicer
+    derives the destination statement timeout from it before configure_schema
+    runs DDL (issues #231, #234). A regression here either re-opens the
+    orphaned-statement window or lets a budget-less handshake run unbounded.
+    """
+
+    @pytest.mark.asyncio
+    async def test_statement_timeout_set_from_wire_budget_before_configure(self):
+        calls: list[str] = []
+        handler = MagicMock()
+        handler.set_statement_timeout = MagicMock(
+            side_effect=lambda _s: calls.append("set_statement_timeout")
+        )
+
+        async def _configure(_spec):
+            calls.append("configure_schema")
+            return True
+
+        handler.configure_schema = AsyncMock(side_effect=_configure)
+        servicer = DestinationServicer(handler, server=MagicMock())
+
+        async for _ in servicer.StreamRecords(
+            _iter_once(_schema_request(ack_timeout_seconds=30)),
+            context=MagicMock(),
+        ):
+            pass
+
+        # Derived from the wire budget (30 - 5s margin), not from any env var.
+        handler.set_statement_timeout.assert_called_once_with(25.0)
+        # The bound must be in place before configure_schema runs its DDL.
+        assert calls == ["set_statement_timeout", "configure_schema"]
+
+    @pytest.mark.asyncio
+    async def test_missing_ack_budget_rejects_schema(self):
+        """A handshake without the stamped budget cannot bound statements
+        below the sender's wait — reject loudly instead of running
+        unbounded."""
+        handler = MagicMock()
+        handler.configure_schema = AsyncMock(return_value=True)
+        servicer = DestinationServicer(handler, server=MagicMock())
+
+        responses = []
+        async for resp in servicer.StreamRecords(
+            _iter_once(_schema_request(ack_timeout_seconds=0)),
+            context=MagicMock(),
+        ):
+            responses.append(resp)
+
+        ack = responses[0].schema_ack
+        assert ack.accepted is False
+        assert "ack_timeout_seconds" in ack.message
+        handler.configure_schema.assert_not_called()
+        handler.set_statement_timeout.assert_not_called()
+
+    def test_derive_keeps_margin_for_large_budgets(self):
+        from src.destination.server import derive_statement_timeout_seconds
+
+        assert derive_statement_timeout_seconds(30) == 25.0
+        assert derive_statement_timeout_seconds(300) == 295.0
+
+    def test_derive_stays_below_small_budgets(self):
+        from src.destination.server import derive_statement_timeout_seconds
+
+        # Too small to spare the full 5s margin: half the budget instead.
+        assert derive_statement_timeout_seconds(8) == 4.0
+        assert derive_statement_timeout_seconds(1) == 0.5
 
 
 class TestGetCapabilities:
@@ -377,6 +452,7 @@ class TestWireToCdkTranslation:
         assert spec.stream_id == "s9"
         assert spec.version == 7
         assert spec.write_mode is CdkWriteMode.WRITE_MODE_UPSERT
+        assert spec.ack_timeout_seconds == 30
 
     @pytest.mark.asyncio
     async def test_batch_cursor_is_translated_in_and_committed_cursor_out(self):

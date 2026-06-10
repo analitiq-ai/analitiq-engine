@@ -603,6 +603,7 @@ class TestConfigureSchemaErrorPropagation:
                         stream_id="s1",
                         version=1,
                         write_mode=WriteMode.WRITE_MODE_INSERT,
+                        ack_timeout_seconds=30,
                     )
                 )
 
@@ -617,5 +618,8 @@ class TestConfigureSchemaErrorPropagation:
             SchemaConfigurationError, match="Unsupported proto write_mode"
         ):
             await handler.configure_schema(
-                SchemaSpec(stream_id="s1", version=1, write_mode=99)
+                SchemaSpec(
+                    stream_id="s1", version=1, write_mode=99,
+                    ack_timeout_seconds=30,
+                )
             )

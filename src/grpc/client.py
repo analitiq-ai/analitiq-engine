@@ -60,11 +60,12 @@ _FALLBACK_GRPC_TIMEOUT = 30
 def resolve_grpc_ack_timeout_seconds() -> int:
     """The engine's gRPC ack budget in seconds (``GRPC_TIMEOUT_SECONDS``).
 
-    The single source of truth for the handshake/ack deadline: the engine's
-    destination client reads it as its per-call timeout, and the destination
-    worker's statement timeout is derived from it (ack budget minus a margin).
-    Routing both through one function means the destination statement timeout
-    can never drift relative to the ack budget it must stay under (issue #231).
+    The single source of truth for the handshake/ack deadline on the engine
+    side. The client stamps its resolved budget into the schema handshake
+    (``SchemaMessage.ack_timeout_seconds``), and the destination derives its
+    statement timeout from that wire value rather than reading the env
+    directly — a forwarding hop may only tighten the stamp, never widen it —
+    so the bound cannot drift past the engine's wait (issues #231, #234).
 
     A non-positive value (``GRPC_TIMEOUT_SECONDS=0`` or negative) falls back to
     the default rather than being used as-is: a zero ack budget makes the
@@ -800,7 +801,8 @@ class DestinationGRPCClient:
         The destination loads the contract endpoint document via
         ``PipelineConfigPrep`` using the same ``PIPELINE_ID`` as the
         engine, so this message only carries the identification fields
-        needed to look it up and the write mode for this stream.
+        needed to look it up, the write mode for this stream, and the
+        ack budget the destination derives its statement timeout from.
         """
         write_mode_str = str(config.get("write_mode", "upsert")).lower()
         write_mode_map = {
@@ -815,10 +817,22 @@ class DestinationGRPCClient:
             )
         write_mode = write_mode_map[write_mode_str]
 
+        # Stamp the tightest ack budget any waiter on the path has: this
+        # client's own wait (self.timeout), min'ed with a budget an upstream
+        # hop already stamped (the destination shell's worker proxy forwards
+        # the engine's value through schema_config). The receiving servicer
+        # derives the destination statement timeout from it, so the bound can
+        # never drift from what a sender actually waits (issue #234).
+        upstream_budget = config.get("ack_timeout_seconds")
+        ack_timeout = int(self.timeout)
+        if upstream_budget:
+            ack_timeout = min(ack_timeout, int(upstream_budget))
+
         return SchemaMessage(
             stream_id=stream_id,
             version=int(config.get("schema_version", 1)),
             write_mode=write_mode,
+            ack_timeout_seconds=ack_timeout,
         )
 
     @staticmethod

@@ -66,14 +66,20 @@ class SchemaSpec:
     """Per-stream schema identification, sent once at stream start.
 
     The CDK-native stand-in for the gRPC ``SchemaMessage``. Carries only the
-    identification fields the wire message does: the destination looks up the
-    full contract endpoint document (columns, primary keys, target table) by
-    ``stream_id`` from configuration it already loaded, not from this object.
+    fields the wire message does: the destination looks up the full contract
+    endpoint document (columns, primary keys, target table) by ``stream_id``
+    from configuration it already loaded, not from this object.
     """
 
     stream_id: str
     version: int
     write_mode: WriteMode
+    # The sender's gRPC ack budget (seconds) stamped into the handshake. The
+    # destination servicer derives the per-statement timeout from it before
+    # configure_schema runs, and the worker proxy forwards it to the connector
+    # worker, so the statement bound always tracks the budget the engine
+    # actually waits on (issue #234).
+    ack_timeout_seconds: int
 
 
 # Statuses that count as a successful (committed) batch. Public: the

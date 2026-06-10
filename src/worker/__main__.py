@@ -39,7 +39,6 @@ async def _run_destination(bootstrap: WorkerBootstrap) -> int:
     )
     handler.set_endpoint_refs(bootstrap.endpoint_refs)
     handler.set_stream_endpoints(bootstrap.stream_endpoints)
-    handler.set_statement_timeout(bootstrap.statement_timeout_seconds)
 
     runtime = bootstrap.build_runtime()
     await handler.connect(runtime)

@@ -52,7 +52,6 @@ class WorkerBootstrap:
     endpoint_refs: Dict[str, Any]
     stream_endpoints: Dict[str, Any]
     source_config: Dict[str, Any]
-    statement_timeout_seconds: Optional[float] = None
 
     def build_runtime(self) -> ConnectionRuntime:
         """Rebuild the connection runtime from the resolved payload."""
@@ -98,7 +97,6 @@ def parse_bootstrap(raw: Dict[str, Any]) -> WorkerBootstrap:
         endpoint_refs=dict(raw.get("endpoint_refs") or {}),
         stream_endpoints=dict(raw.get("stream_endpoints") or {}),
         source_config=dict(raw.get("source_config") or {}),
-        statement_timeout_seconds=raw.get("statement_timeout_seconds"),
     )
 
 
