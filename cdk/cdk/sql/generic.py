@@ -28,7 +28,7 @@ import asyncio
 import hashlib
 import logging
 import threading
-from contextlib import asynccontextmanager
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, AsyncIterator, Dict, List, Literal, Mapping, Optional, Tuple
@@ -276,11 +276,10 @@ class GenericSQLConnector(BaseDestinationHandler):
         self._config: Dict[str, Any] = {}
         self._connected: bool = False
         self._driver: str = ""
-        # Seconds to bound a single destination SQL statement, set by the
+        # Seconds to bound a destination SQL handler attempt, set by the
         # destination entrypoint via set_statement_timeout() from the engine's
         # gRPC ack budget. None (source-role instances, or unset) means
-        # unbounded - asyncio.timeout(None) never fires. See _begin_bounded /
-        # _connect_bounded.
+        # unbounded - asyncio.timeout(None) never fires. See _statement_deadline.
         self._statement_timeout_seconds: Optional[float] = None
         # ADBC-only mode: the runtime exposes no SQLAlchemy engine and
         # every write/DDL/idempotency operation runs through the cached
@@ -379,40 +378,31 @@ class GenericSQLConnector(BaseDestinationHandler):
 
         Called once by the destination entrypoint with a value the trusted
         shell derived from the engine's gRPC ack budget. ``None`` leaves
-        statements unbounded. Applies to the SQLAlchemy DDL, write, and
-        idempotency statements via :meth:`_begin_bounded` /
-        :meth:`_connect_bounded`; the ADBC path is unaffected.
+        statements unbounded. Bounds the SQLAlchemy DDL and write attempts
+        (with their idempotency statements) via :meth:`_statement_deadline`;
+        the ADBC path is unaffected.
         """
         self._statement_timeout_seconds = seconds
 
-    @asynccontextmanager
-    async def _begin_bounded(self) -> AsyncIterator[AsyncConnection]:
-        """``self._engine.begin()`` bounded by the destination statement timeout.
+    def _statement_deadline(self):
+        """A statement-timeout deadline for one whole handler attempt - a DDL
+        handshake, or a write with its idempotency read and commit record - so
+        the total database time stays under the engine's gRPC ack budget rather
+        than each phase getting its own full budget that can sum past the ack
+        deadline (issue #231).
 
-        A statement that blocks - a ``CREATE TABLE`` behind a catalog lock, a
-        write behind a row lock - is cancelled after
-        ``_statement_timeout_seconds`` so the engine surfaces the real reason
-        instead of the source abandoning the handshake at its gRPC ack timeout
-        (issue #231). ``asyncio.timeout(None)`` never fires, so an instance
-        with no timeout configured behaves exactly as a plain ``begin()``.
+        SQLAlchemy operations get an ``asyncio.timeout``; the ADBC path gets a
+        null deadline because its operations run in a worker thread that
+        ``asyncio.timeout`` cannot cancel - it relies on the driver's own
+        timeout. With no timeout configured (source-role instances) the
+        SQLAlchemy deadline is ``asyncio.timeout(None)``, which never fires.
 
-        Callers guard ``self._engine is not None`` before entering, matching
-        the un-bounded call sites this replaces.
+        Callers guard ``self._engine is not None`` before entering the
+        transaction inside the deadline.
         """
-        async with asyncio.timeout(self._statement_timeout_seconds):
-            async with self._engine.begin() as conn:
-                yield conn
-
-    @asynccontextmanager
-    async def _connect_bounded(self) -> AsyncIterator[AsyncConnection]:
-        """``self._engine.connect()`` bounded by the destination statement
-        timeout - the read counterpart of :meth:`_begin_bounded`, so the
-        idempotency SELECT honors the same budget as the write that follows it.
-        Callers guard ``self._engine is not None`` before entering.
-        """
-        async with asyncio.timeout(self._statement_timeout_seconds):
-            async with self._engine.connect() as conn:
-                yield conn
+        if self._adbc_only:
+            return nullcontext()
+        return asyncio.timeout(self._statement_timeout_seconds)
 
     def _type_mapper_for_stream(self, stream_id: str) -> TypeMapper:
         """Resolve the type-mapper appropriate for ``stream_id``'s endpoint."""
@@ -843,9 +833,8 @@ class GenericSQLConnector(BaseDestinationHandler):
         # otherwise wait here outside any budget and then start its own
         # CREATE TABLE with a fresh timer, by which point the engine's ack for
         # this stream has long expired. Bounding the wait + statement together
-        # keeps the whole handshake under the ack budget (issue #231). The
-        # write path uses _begin_bounded directly - it holds no such lock.
-        async with asyncio.timeout(self._statement_timeout_seconds):
+        # keeps the whole handshake under the ack budget (issue #231).
+        async with self._statement_deadline():
             async with self._ddl_lock:
                 async with self._engine.begin() as conn:
                     # Dialect-declared preparation (e.g. postgres' CREATE SCHEMA
@@ -929,56 +918,65 @@ class GenericSQLConnector(BaseDestinationHandler):
             )
 
         try:
-            # The idempotency read and the empty-batch commit run on the same
-            # _batch_commits table the write touches and can block on the same
-            # lock; keep them inside the bounded try so a timeout there is
-            # cancelled and classified, not left to hang past the ack (#231).
-            existing = await self._check_batch_committed(state, run_id, stream_id, batch_seq)
-            if existing:
-                logger.info(f"Batch already committed: {run_id}/{stream_id}/{batch_seq}")
-                return BatchWriteResult(
-                    status=AckStatus.ACK_STATUS_ALREADY_COMMITTED,
-                    records_written=existing["records_written"],
-                    committed_cursor=Cursor(token=existing["committed_cursor"]),
+            # One deadline for the whole SQLAlchemy attempt - the idempotency
+            # read, the write, and the commit record - so the total stays under
+            # the ack budget. Bounding each phase separately would give each its
+            # own full budget, which can sum past the ack deadline and let the
+            # engine retry while the first write is still running (issue #231).
+            # The idempotency read and empty-batch commit also touch the same
+            # _batch_commits table the write does and can block on the same
+            # lock, so they belong inside the same deadline.
+            async with self._statement_deadline():
+                existing = await self._check_batch_committed(
+                    state, run_id, stream_id, batch_seq
                 )
-
-            record_count = record_batch.num_rows
-            if record_count == 0:
-                # Empty batch - still record for idempotency
-                await self._record_batch_commit(state, run_id, stream_id, batch_seq, cursor.token, 0)
-                return BatchWriteResult(
-                    status=AckStatus.ACK_STATUS_SUCCESS,
-                    records_written=0,
-                    committed_cursor=cursor,
-                )
-
-            if self._adbc_only:
-                await self._write_batch_adbc_only(
-                    state, run_id, stream_id, batch_seq,
-                    record_batch, cursor.token, record_count,
-                )
-            else:
-                prepared = self._prepare_for_sqlalchemy(state, record_batch)
-
-                async with self._begin_bounded() as conn:
-                    if state.write_mode == "truncate_insert":
-                        await self._truncate_and_insert(conn, state, prepared)
-                    elif state.write_mode == "upsert":
-                        await self._upsert_records(conn, state, prepared)
-                    else:
-                        await self._insert_records(conn, state, prepared)
-
-                    # Record batch commit
-                    await self._record_batch_commit_in_txn(
-                        conn, state, run_id, stream_id, batch_seq, cursor.token, record_count
+                if existing:
+                    logger.info(f"Batch already committed: {run_id}/{stream_id}/{batch_seq}")
+                    return BatchWriteResult(
+                        status=AckStatus.ACK_STATUS_ALREADY_COMMITTED,
+                        records_written=existing["records_written"],
+                        committed_cursor=Cursor(token=existing["committed_cursor"]),
                     )
 
-            logger.info(f"Wrote batch {batch_seq}: {record_count} records")
-            return BatchWriteResult(
-                status=AckStatus.ACK_STATUS_SUCCESS,
-                records_written=record_count,
-                committed_cursor=cursor,
-            )
+                record_count = record_batch.num_rows
+                if record_count == 0:
+                    # Empty batch - still record for idempotency
+                    await self._record_batch_commit(
+                        state, run_id, stream_id, batch_seq, cursor.token, 0
+                    )
+                    return BatchWriteResult(
+                        status=AckStatus.ACK_STATUS_SUCCESS,
+                        records_written=0,
+                        committed_cursor=cursor,
+                    )
+
+                if self._adbc_only:
+                    await self._write_batch_adbc_only(
+                        state, run_id, stream_id, batch_seq,
+                        record_batch, cursor.token, record_count,
+                    )
+                else:
+                    prepared = self._prepare_for_sqlalchemy(state, record_batch)
+
+                    async with self._engine.begin() as conn:
+                        if state.write_mode == "truncate_insert":
+                            await self._truncate_and_insert(conn, state, prepared)
+                        elif state.write_mode == "upsert":
+                            await self._upsert_records(conn, state, prepared)
+                        else:
+                            await self._insert_records(conn, state, prepared)
+
+                        # Record batch commit
+                        await self._record_batch_commit_in_txn(
+                            conn, state, run_id, stream_id, batch_seq, cursor.token, record_count
+                        )
+
+                logger.info(f"Wrote batch {batch_seq}: {record_count} records")
+                return BatchWriteResult(
+                    status=AckStatus.ACK_STATUS_SUCCESS,
+                    records_written=record_count,
+                    committed_cursor=cursor,
+                )
 
         except (UnmappedTypeError, InvalidTypeMapError) as e:
             # Type-map errors are deterministic — retrying cannot succeed.
@@ -1072,7 +1070,8 @@ class GenericSQLConnector(BaseDestinationHandler):
             return None
 
         commits = state.batch_commits_table
-        async with self._connect_bounded() as conn:
+        # Plain connect: write_batch wraps this read in its statement deadline.
+        async with self._engine.connect() as conn:
             result = await conn.execute(
                 commits.select().where(
                     (commits.c.run_id == run_id) &
@@ -1108,7 +1107,8 @@ class GenericSQLConnector(BaseDestinationHandler):
         if self._engine is None:
             return
 
-        async with self._begin_bounded() as conn:
+        # Plain begin: write_batch wraps this empty-batch commit in its deadline.
+        async with self._engine.begin() as conn:
             await self._record_batch_commit_in_txn(
                 conn, state, run_id, stream_id, batch_seq, cursor_bytes, records_written
             )

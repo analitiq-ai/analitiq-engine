@@ -55,8 +55,6 @@ DEFAULT_GRPC_PORT = int(os.getenv("DESTINATION_GRPC_PORT", "50051"))
 # Literal fallback (not env-derived) so a non-positive GRPC_TIMEOUT_SECONDS
 # cannot poison it - see resolve_grpc_ack_timeout_seconds.
 _FALLBACK_GRPC_TIMEOUT = 30
-DEFAULT_GRPC_TIMEOUT = int(os.getenv("GRPC_TIMEOUT_SECONDS", str(_FALLBACK_GRPC_TIMEOUT)))
-DEFAULT_MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
 
 
 def resolve_grpc_ack_timeout_seconds() -> int:
@@ -74,6 +72,13 @@ def resolve_grpc_ack_timeout_seconds() -> int:
     """
     raw = int(os.getenv("GRPC_TIMEOUT_SECONDS", str(_FALLBACK_GRPC_TIMEOUT)))
     return raw if raw > 0 else _FALLBACK_GRPC_TIMEOUT
+
+
+# Every client defaults to the guarded budget, so a non-positive
+# GRPC_TIMEOUT_SECONDS cannot make a client built without an explicit timeout
+# (e.g. the proxy's UDS client) wait_for(timeout=0) and reject immediately.
+DEFAULT_GRPC_TIMEOUT = resolve_grpc_ack_timeout_seconds()
+DEFAULT_MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
 
 
 @dataclass
