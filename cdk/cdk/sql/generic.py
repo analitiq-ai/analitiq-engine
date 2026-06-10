@@ -399,6 +399,19 @@ class GenericSQLConnector(BaseDestinationHandler):
         ``asyncio.timeout`` cannot cancel).
         """
         self._statement_timeout_seconds = seconds
+        if seconds is not None and (self._adbc_only or self._sync_engine is not None):
+            # The budget is accepted but cannot be enforced on this path;
+            # say so once per handshake instead of letting the operator
+            # believe the bound holds — a hung statement here reproduces
+            # the bare gRPC ack timeout this budget exists to prevent.
+            logger.warning(
+                "statement timeout %gs requested but cannot be enforced on "
+                "the %s path (statements run on worker threads "
+                "asyncio.timeout cannot cancel); relying on the driver's "
+                "own timeout",
+                seconds,
+                "ADBC" if self._adbc_only else "sync-engine",
+            )
 
     def _statement_deadline(self):
         """A statement-timeout deadline for one whole handler attempt - a DDL
@@ -1095,12 +1108,13 @@ class GenericSQLConnector(BaseDestinationHandler):
                 # handler with no budget set is never bounded), so a
                 # TimeoutError here is a driver/socket timeout, not our
                 # cancellation - classify it generically rather than claiming
-                # a statement was cancelled.
+                # a statement was cancelled. A bare TimeoutError often
+                # stringifies empty; never ack a reason-less failure.
                 logger.error(f"Error writing batch: {e}", exc_info=True)
                 return BatchWriteResult(
                     status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
                     records_written=0,
-                    failure_summary=str(e),
+                    failure_summary=str(e) or f"driver timeout ({type(e).__name__})",
                 )
             # The bounded SQLAlchemy statement was cancelled (issue #231). A lock
             # or slow write may clear, so stay retryable; carry the reason so it

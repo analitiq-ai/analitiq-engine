@@ -259,3 +259,207 @@ class TestSyncEngineReadPath:
             runtime.close.assert_awaited()
         finally:
             engine.dispose()
+
+
+class _SyncWriteRuntime:
+    """Materialized-runtime stand-in for the write role.
+
+    Mirrors the real ConnectionRuntime contract: the async ``engine``
+    accessor refuses on a sync-only transport, so a dispatch regression
+    in connect() fails here instead of silently picking the wrong mode.
+    """
+
+    def __init__(self, engine: Any, driver: str = "sqlite"):
+        self.is_adbc = False
+        self.is_sync_sqlalchemy = True
+        self.sync_engine = engine
+        self.driver = driver
+        self.close = AsyncMock()
+
+    @property
+    def engine(self):
+        raise RuntimeError(
+            "engine not available: sync-only transport; use sync_engine"
+        )
+
+
+class _StubTypeMapper:
+    """Two-type mapper, enough for the DDL builder on SQLite."""
+
+    _to_native = {
+        "Int64": "INTEGER",
+        "Int32": "INTEGER",
+        "Utf8": "TEXT",
+        "Binary": "BLOB",
+        "Timestamp(MICROSECOND)": "TIMESTAMP",
+        "Timestamp(MICROSECOND, UTC)": "TIMESTAMP",
+    }
+    _to_arrow = {"INTEGER": "Int64", "TEXT": "Utf8"}
+
+    def to_arrow_type(self, native: str) -> str:
+        return self._to_arrow[native.upper()]
+
+    def to_native_type(self, canonical: str, params: Any = None) -> str:
+        return self._to_native[canonical]
+
+
+class TestSyncRuntimeWiring:
+    """The dispatch between the three modes, driven through the real
+    entry points (connect -> DDL -> write) instead of injected fields."""
+
+    @pytest.mark.asyncio
+    async def test_connect_ddl_and_write_through_sync_runtime(self):
+        engine = _sqlite_sync_engine()
+        try:
+            handler = GenericSQLConnector()
+            with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()):
+                await handler.connect(_SyncWriteRuntime(engine))
+            assert handler._sync_engine is engine
+            assert handler._engine is None
+            assert handler._adbc_only is False
+
+            state = _StreamState(
+                schema_name="",
+                table_name="events",
+                primary_keys=["id"],
+                write_mode="insert",
+                endpoint_document={
+                    "columns": [
+                        {"name": "id", "native_type": "INTEGER", "nullable": False},
+                        {"name": "name", "native_type": "TEXT"},
+                    ],
+                },
+            )
+            await handler._ensure_tables_exist(state, _StubTypeMapper())
+            assert state.table is not None
+            assert state.batch_commits_table is not None
+
+            contract = MagicMock()
+            contract.to_db_records.side_effect = lambda rb: rb.to_pylist()
+            state.schema_contract = contract
+            handler._streams["s1"] = state
+
+            result = await _write(handler, rows=[{"id": 1, "name": "a"}])
+            assert result.status == AckStatus.ACK_STATUS_SUCCESS
+            assert _count(engine, "events") == 1
+            assert _count(engine, "_batch_commits") == 1
+        finally:
+            engine.dispose()
+
+
+class TestSyncEngineStatementTimeout:
+    """The ack-budget statement timeout (issues #231/#234) cannot cancel a
+    worker thread; the sync path must neither apply it nor mislabel a
+    driver timeout as a cancelled statement."""
+
+    @pytest.mark.asyncio
+    async def test_budget_does_not_cancel_sync_engine_write(self):
+        engine = _sqlite_sync_engine()
+        try:
+            handler = _connected_handler(engine)
+            # A zero budget wrongly applied as asyncio.timeout would fire
+            # immediately and abandon the in-flight worker-thread write.
+            handler.set_statement_timeout(0.0)
+            result = await _write(handler)
+            assert result.status == AckStatus.ACK_STATUS_SUCCESS
+        finally:
+            engine.dispose()
+
+    @pytest.mark.asyncio
+    async def test_driver_timeout_keeps_generic_reason(self):
+        engine = _sqlite_sync_engine()
+        try:
+            handler = _connected_handler(engine)
+            handler.set_statement_timeout(5.0)
+            with patch.object(
+                handler, "_write_batch_on_sync_engine",
+                side_effect=TimeoutError(),
+            ):
+                result = await _write(handler)
+            assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
+            # Never a reason-less ack, never the cancelled-statement claim.
+            assert result.failure_summary
+            assert "was cancelled" not in result.failure_summary
+        finally:
+            engine.dispose()
+
+    def test_unenforceable_budget_warns(self, caplog):
+        import logging
+
+        engine = _sqlite_sync_engine()
+        try:
+            handler = _connected_handler(engine)
+            with caplog.at_level(logging.WARNING, logger="cdk.sql.generic"):
+                handler.set_statement_timeout(2.0)
+            assert any(
+                "cannot be enforced" in r.getMessage() for r in caplog.records
+            )
+        finally:
+            engine.dispose()
+
+
+class TestAsyncEngineParity:
+    """The async flavour enters the same shared sync-Connection bodies via
+    run_sync; prove it against a real async driver, not a fake."""
+
+    async def _async_handler(self):
+        pytest.importorskip("aiosqlite")
+        from sqlalchemy.ext.asyncio import create_async_engine
+
+        engine = create_async_engine(
+            "sqlite+aiosqlite://",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        meta = MetaData()
+        async with engine.begin() as conn:
+            await conn.exec_driver_sql(TARGET_DDL)
+            await conn.exec_driver_sql(COMMITS_DDL)
+            table, commits = await conn.run_sync(
+                lambda c: (
+                    Table("events", meta, autoload_with=c),
+                    Table("_batch_commits", meta, autoload_with=c),
+                )
+            )
+        contract = MagicMock()
+        contract.to_db_records.side_effect = lambda rb: rb.to_pylist()
+        handler = GenericSQLConnector()
+        handler._connected = True
+        handler._engine = engine
+        handler._streams["s1"] = _StreamState(
+            schema_name="",
+            table_name="events",
+            table=table,
+            batch_commits_table=commits,
+            write_mode="insert",
+            primary_keys=["id"],
+            conflict_keys=[],
+            schema_contract=contract,
+        )
+        return handler, engine
+
+    async def _async_count(self, engine, table: str) -> int:
+        async with engine.connect() as conn:
+            result = await conn.exec_driver_sql(f"SELECT count(*) FROM {table}")
+            return result.scalar_one()
+
+    @pytest.mark.asyncio
+    async def test_insert_replay_and_rollback(self):
+        handler, engine = await self._async_handler()
+        try:
+            first = await _write(handler, seq=1, rows=[{"id": 1, "name": "a"}])
+            assert first.status == AckStatus.ACK_STATUS_SUCCESS
+            assert await self._async_count(engine, "events") == 1
+
+            replay = await _write(handler, seq=1, rows=[{"id": 1, "name": "a"}])
+            assert replay.status == AckStatus.ACK_STATUS_ALREADY_COMMITTED
+            assert await self._async_count(engine, "events") == 1
+
+            # Duplicate PK: DML raises, and the commit record shares the
+            # transaction, so neither survives.
+            dupe = await _write(handler, seq=2, rows=[{"id": 1, "name": "dupe"}])
+            assert dupe.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
+            assert await self._async_count(engine, "events") == 1
+            assert await self._async_count(engine, "_batch_commits") == 1
+        finally:
+            await engine.dispose()
