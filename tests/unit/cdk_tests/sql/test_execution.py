@@ -139,7 +139,7 @@ class TestSqlAlchemyRealDriver:
         from sqlalchemy.ext.asyncio import create_async_engine
 
         engine = create_async_engine("sqlite+aiosqlite:///:memory:")
-        runtime = SimpleNamespace(is_adbc=False, engine=engine)
+        runtime = SimpleNamespace(is_adbc=False, is_sync_sqlalchemy=False, engine=engine)
         try:
             await execute_ddl(runtime, "CREATE TABLE t (id INTEGER, label TEXT)")
             # A bound parameter survives the ? -> :_p0 rewrite into the driver.
@@ -154,6 +154,52 @@ class TestSqlAlchemyRealDriver:
             assert rows == [{"a": 1, "b": "two"}]
         finally:
             await engine.dispose()
+
+
+class TestSyncEngineRealDriver:
+    """Real sync sqlite engine — the sync-only-driver branch (issue #224)
+    runs the same qmark rewrite and DDL batching off the event loop."""
+
+    @pytest.mark.asyncio
+    async def test_fetch_and_ddl_round_trip(self):
+        from sqlalchemy import create_engine
+        from sqlalchemy.pool import StaticPool
+
+        engine = create_engine(
+            "sqlite://",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        runtime = SimpleNamespace(
+            is_adbc=False, is_sync_sqlalchemy=True, sync_engine=engine
+        )
+        try:
+            await execute_ddl(runtime, "CREATE TABLE t (id INTEGER, label TEXT)")
+            created = await fetch_rows(
+                runtime,
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+                ["t"],
+            )
+            assert created == [{"name": "t"}]
+
+            rows = await fetch_rows(runtime, "SELECT ? AS a, ? AS b", [1, "two"])
+            assert rows == [{"a": 1, "b": "two"}]
+        finally:
+            engine.dispose()
+
+    @pytest.mark.asyncio
+    async def test_ddl_failure_becomes_create_table_error(self):
+        from sqlalchemy import create_engine
+
+        engine = create_engine("sqlite://")
+        runtime = SimpleNamespace(
+            is_adbc=False, is_sync_sqlalchemy=True, sync_engine=engine
+        )
+        try:
+            with pytest.raises(CreateTableError, match="DDL execution failed"):
+                await execute_ddl(runtime, "CREATE GIBBERISH")
+        finally:
+            engine.dispose()
 
 
 class TestErrorWrapping:

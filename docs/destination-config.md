@@ -43,9 +43,11 @@ For the connection / connector schema itself, see
 
 `GenericSQLConnector` is the single database handler. It serves both the
 source and destination roles and supports two transports selected by the
-connector definition: `transport_type: "sqlalchemy"` (async SQLAlchemy
-engine — Postgres asyncpg, MySQL aiomysql) and `transport_type: "adbc"`
-(ADBC DBAPI — Snowflake, BigQuery, Postgres-via-ADBC for Redshift). The
+connector definition: `transport_type: "sqlalchemy"` (SQLAlchemy engine —
+async for dialects with an async driver such as Postgres asyncpg and MySQL
+aiomysql, plain sync for sync-only drivers such as Redshift
+`redshift_connector`, dispatched via `asyncio.to_thread`) and
+`transport_type: "adbc"` (ADBC DBAPI — Snowflake, BigQuery). The
 transport detail lives in
 [`pyarrow-and-destinations.md`](pyarrow-and-destinations.md).
 

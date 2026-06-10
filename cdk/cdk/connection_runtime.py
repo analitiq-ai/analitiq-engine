@@ -25,10 +25,12 @@ Lifecycle:
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import logging
 from typing import TYPE_CHECKING, Any, Dict, Mapping, Optional
 
+from sqlalchemy.engine import Engine
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 if TYPE_CHECKING:
@@ -167,6 +169,10 @@ class ConnectionRuntime:
         # Transport state — set by materialize()
         self._materialized = False
         self._engine: Optional[AsyncEngine] = None
+        # Sync SQLAlchemy engine for sync-only drivers (e.g. Redshift's
+        # redshift_connector). Exactly one of _engine / _sync_engine /
+        # _adbc_transport / _session is set for a transport-driven runtime.
+        self._sync_engine: Optional[Engine] = None
         self._session: Optional[aiohttp.ClientSession] = None
         self._base_url: Optional[str] = None
         self._rate_limiter: Optional[RateLimiter] = None
@@ -391,7 +397,10 @@ class ConnectionRuntime:
     def _apply_transport(self, transport: Any) -> None:
         """Wire a built transport's objects onto this runtime."""
         if isinstance(transport, SqlAlchemyTransport):
-            self._engine = transport.engine
+            if transport.is_async:
+                self._engine = transport.engine
+            else:
+                self._sync_engine = transport.engine
             self._transport_driver = transport.driver
             self._transport_dialect = transport.dialect
         elif isinstance(transport, AdbcTransport):
@@ -509,11 +518,48 @@ class ConnectionRuntime:
                 f"{self._adbc_transport.driver!r}); use is_adbc / "
                 f"open_adbc_connection() instead"
             )
+        if self._sync_engine is not None and self._engine is None:
+            raise RuntimeError(
+                f"engine not available for {self._connection_id}: this runtime "
+                f"was materialized with a sync-only SQLAlchemy driver "
+                f"({self._transport_driver!r}); use is_sync_sqlalchemy / "
+                f"sync_engine instead"
+            )
         if self._engine is None:
             raise RuntimeError(
                 "engine not available: wrong connector_type for SQLAlchemy"
             )
         return self._engine
+
+    @property
+    def sync_engine(self) -> Engine:
+        """Sync SQLAlchemy engine for sync-only drivers.
+
+        Callers run its operations on a worker thread
+        (``asyncio.to_thread``) — mirroring the ADBC pattern — so the
+        async handler interface is preserved.
+        """
+        if not self._materialized:
+            raise RuntimeError(
+                "sync_engine not available: call materialize() first"
+            )
+        if self._sync_engine is None:
+            raise RuntimeError(
+                f"sync_engine not available for {self._connection_id}: this "
+                f"runtime was not materialized with a sync-only SQLAlchemy "
+                f"driver (check is_sync_sqlalchemy / is_adbc first)"
+            )
+        return self._sync_engine
+
+    @property
+    def is_sync_sqlalchemy(self) -> bool:
+        """True when this runtime carries a sync SQLAlchemy engine.
+
+        Source/destination handlers branch on this to run engine
+        operations through ``asyncio.to_thread`` instead of awaiting an
+        :class:`AsyncEngine`.
+        """
+        return self._sync_engine is not None
 
     @property
     def is_adbc(self) -> bool:
@@ -643,6 +689,17 @@ class ConnectionRuntime:
                         f"Failed to dispose engine for {self._connection_id}: {e}"
                     )
                 self._engine = None
+            if self._sync_engine is not None:
+                try:
+                    # Sync dispose closes pooled DBAPI connections; off the
+                    # event loop like every other sync-engine operation.
+                    await asyncio.to_thread(self._sync_engine.dispose)
+                except Exception as e:
+                    logger.error(
+                        f"Failed to dispose sync engine for "
+                        f"{self._connection_id}: {e}"
+                    )
+                self._sync_engine = None
         finally:
             if self._session is not None:
                 try:

@@ -106,6 +106,12 @@ connector definition picks the path:
 transport_type: "sqlalchemy"  → SQLAlchemy backend (DDL, idempotency,
                                   insert/upsert/truncate). Breadth
                                   layer for every dialect SA covers.
+                                  Async engine for dialects with an
+                                  async driver (asyncpg, aiomysql);
+                                  plain sync engine for sync-only
+                                  drivers (Redshift
+                                  redshift_connector), run via
+                                  asyncio.to_thread.
 
 transport_type: "adbc"        → ADBC backend (DDL via cursor.execute,
                                   idempotency via SQL, ingest via
@@ -115,9 +121,12 @@ transport_type: "adbc"        → ADBC backend (DDL via cursor.execute,
                                   driver (Snowflake today).
 ```
 
-`GenericSQLConnector` dispatches on `runtime.is_adbc` at `connect()`
-time; the two backends share the cast/schema-contract logic but
-otherwise own every read/write call on their own primitives.
+`GenericSQLConnector` dispatches on `runtime.is_adbc` /
+`runtime.is_sync_sqlalchemy` at `connect()` time; the backends share
+the cast/schema-contract logic — and the two SQLAlchemy flavours share
+one set of sync-`Connection` transaction bodies (the async engine
+enters them via `run_sync`) — but otherwise own every read/write call
+on their own primitives.
 
 ### ADBC coverage (production-ready, 2026)
 

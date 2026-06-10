@@ -108,6 +108,7 @@ class FakeAdbcRuntime:
     ) -> None:
         self.driver = driver
         self.is_adbc = True
+        self.is_sync_sqlalchemy = False
         self._mapper = mapper
         self._responder = responder
         self._fail_execute = fail_execute
@@ -206,6 +207,7 @@ class FakeSaRuntime:
     ) -> None:
         self.driver = driver
         self.is_adbc = False
+        self.is_sync_sqlalchemy = False
         self._mapper = mapper
         self.engine = FakeAsyncEngine(rows=rows, fail=fail)
 

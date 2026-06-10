@@ -28,14 +28,15 @@ import asyncio
 import hashlib
 import logging
 import threading
-from contextlib import nullcontext
+from contextlib import AsyncExitStack, nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, AsyncIterator, Dict, List, Literal, Mapping, Optional, Tuple
 
 import pyarrow as pa
 from sqlalchemy import MetaData, Table, text
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncConnection
+from sqlalchemy.engine import Connection, Engine
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from cdk.base_handler import BaseDestinationHandler, BatchWriteResult
 from cdk.schema_contract import SchemaContract
@@ -232,13 +233,19 @@ class GenericSQLConnector(BaseDestinationHandler):
     Supports two transports, selected by the connector definition and
     set on the runtime that ``connect()`` consumes:
 
-    * ``transport_type: "sqlalchemy"`` — async SQLAlchemy engine
-      (Postgres asyncpg, MySQL aiomysql). DDL via ``MetaData.create_all``,
-      DML via the dialect's INSERT/INSERT-ON-CONFLICT/MERGE compilers.
+    * ``transport_type: "sqlalchemy"`` — SQLAlchemy engine. Async drivers
+      (Postgres asyncpg, MySQL aiomysql) run on an ``AsyncEngine``;
+      sync-only drivers (Redshift ``redshift_connector``) run on a plain
+      sync ``Engine`` whose operations are dispatched via
+      ``asyncio.to_thread``. Both flavours share one set of
+      sync-``Connection`` transaction bodies (the async path enters them
+      through ``AsyncConnection.run_sync``), so DML/DDL semantics are
+      identical. DDL via rendered ``CREATE TABLE`` + reflection, DML via
+      the dialect's INSERT/INSERT-ON-CONFLICT/MERGE compilers.
     * ``transport_type: "adbc"`` — direct ADBC DBAPI 2.0 connection
-      (Snowflake, BigQuery, Postgres-via-ADBC for Redshift). DDL via
-      ``cursor.execute`` of per-driver native SQL, ingest via
-      ``cursor.adbc_ingest``, upsert via stage-table + ``MERGE INTO``.
+      (Snowflake, BigQuery). DDL via ``cursor.execute`` of per-driver
+      native SQL, ingest via ``cursor.adbc_ingest``, upsert via
+      stage-table + ``MERGE INTO``.
 
     Both modes share idempotency tracking (``_batch_commits`` table
     keyed on ``(run_id, stream_id, batch_seq)``), the schema-contract
@@ -273,6 +280,11 @@ class GenericSQLConnector(BaseDestinationHandler):
         self.dialect: SqlDialect = self.dialect_class()
         self._runtime: ConnectionRuntime | None = None
         self._engine: AsyncEngine | None = None
+        # Sync SQLAlchemy engine for sync-only drivers (e.g. Redshift's
+        # redshift_connector). Mutually exclusive with ``self._engine``
+        # and ADBC-only mode; its operations run via asyncio.to_thread,
+        # mirroring the ADBC sync-in-thread pattern.
+        self._sync_engine: Engine | None = None
         self._config: Dict[str, Any] = {}
         self._connected: bool = False
         self._driver: str = ""
@@ -380,9 +392,11 @@ class GenericSQLConnector(BaseDestinationHandler):
         Called by the destination servicer on each schema handshake, before
         ``configure_schema``, with a value derived from the ack budget the
         sender stamped into the schema message (issue #234). ``None`` leaves
-        statements unbounded. Bounds the SQLAlchemy DDL and write attempts
-        (with their idempotency statements) via :meth:`_statement_deadline`;
-        the ADBC path is unaffected.
+        statements unbounded. Bounds the async-SQLAlchemy DDL and write
+        attempts (with their idempotency statements) via
+        :meth:`_statement_deadline`; the ADBC and sync-engine paths are
+        unaffected (their statements run on worker threads that
+        ``asyncio.timeout`` cannot cancel).
         """
         self._statement_timeout_seconds = seconds
 
@@ -393,16 +407,17 @@ class GenericSQLConnector(BaseDestinationHandler):
         rather than each phase getting its own full budget that can sum past
         the ack deadline (issue #231).
 
-        SQLAlchemy operations get an ``asyncio.timeout``; the ADBC path gets a
-        null deadline because its operations run in a worker thread that
-        ``asyncio.timeout`` cannot cancel - it relies on the driver's own
-        timeout. With no timeout configured (source-role instances) the
-        SQLAlchemy deadline is ``asyncio.timeout(None)``, which never fires.
+        Async-SQLAlchemy operations get an ``asyncio.timeout``; the ADBC and
+        sync-engine paths get a null deadline because their operations run in
+        a worker thread that ``asyncio.timeout`` cannot cancel - they rely on
+        the driver's own timeout. With no timeout configured (source-role
+        instances) the SQLAlchemy deadline is ``asyncio.timeout(None)``,
+        which never fires.
 
         Callers guard ``self._engine is not None`` before entering the
         transaction inside the deadline.
         """
-        if self._adbc_only:
+        if self._adbc_only or self._sync_engine is not None:
             return nullcontext()
         return asyncio.timeout(self._statement_timeout_seconds)
 
@@ -489,6 +504,7 @@ class GenericSQLConnector(BaseDestinationHandler):
         # previous mode forward.
         self._adbc_only = False
         self._engine = None
+        self._sync_engine = None
         if runtime.is_adbc:
             self._adbc_only = True
             # Open the ADBC connection eagerly so a bad credential
@@ -510,6 +526,12 @@ class GenericSQLConnector(BaseDestinationHandler):
                 raise ConnectionError(f"ADBC connection failed: {e}") from e
             logger.info(
                 "GenericSQLConnector connected via ADBC to %s",
+                self._driver,
+            )
+        elif runtime.is_sync_sqlalchemy:
+            self._sync_engine = runtime.sync_engine
+            logger.info(
+                "GenericSQLConnector connected via sync SQLAlchemy to %s",
                 self._driver,
             )
         else:
@@ -655,11 +677,16 @@ class GenericSQLConnector(BaseDestinationHandler):
         try:
             await self._ensure_tables_exist(state, type_mapper)
         except TimeoutError as exc:
-            if self._adbc_only or self._statement_timeout_seconds is None:
-                # Only the SQLAlchemy DDL is wrapped in asyncio.timeout; the
-                # ADBC DDL runs in a worker thread. A TimeoutError here is a
-                # driver timeout, not our cancellation - let it propagate as
-                # the raw driver error rather than mislabel it.
+            if (
+                self._adbc_only
+                or self._sync_engine is not None
+                or self._statement_timeout_seconds is None
+            ):
+                # Only the async-SQLAlchemy DDL is wrapped in asyncio.timeout;
+                # ADBC and sync-engine DDL run in a worker thread. A
+                # TimeoutError here is a driver timeout, not our cancellation
+                # - let it propagate as the raw driver error rather than
+                # mislabel it.
                 raise
             # The bounded DDL transaction was cancelled. Re-raise as the
             # deterministic schema error the gRPC layer translates into the
@@ -818,7 +845,7 @@ class GenericSQLConnector(BaseDestinationHandler):
             await self._ensure_tables_via_adbc(state, [target_ddl, commits_ddl])
             return
 
-        if self._engine is None:
+        if self._engine is None and self._sync_engine is None:
             # Silently skipping DDL here would leave state.table None and the
             # write_batch readiness guard returning RETRYABLE_FAILURE forever.
             raise AdbcConfigurationError(
@@ -838,44 +865,74 @@ class GenericSQLConnector(BaseDestinationHandler):
         # keeps the whole handshake under the ack budget (issue #231).
         async with self._statement_deadline():
             async with self._ddl_lock:
-                async with self._engine.begin() as conn:
-                    # Dialect-declared preparation (e.g. postgres' CREATE SCHEMA
-                    # IF NOT EXISTS for a non-default schema). The neutral base
-                    # declares none.
-                    for stmt in self.dialect.sqlalchemy_pre_ddl(state.schema_name):
-                        await conn.execute(text(stmt))
-                    await conn.execute(text(target_ddl))
-                    await conn.execute(text(commits_ddl))
-
-                    # Reflect both tables for DML binding: SQLAlchemy derives
-                    # the column types from what the database actually created,
-                    # so inserts/upserts bind correctly without a second
-                    # hand-kept type surface.
-                    def _reflect(sync_conn):
-                        meta = MetaData()
-                        table = Table(
-                            state.table_name,
-                            meta,
-                            autoload_with=sync_conn,
-                            schema=state.schema_name or None,
+                if self._sync_engine is not None:
+                    state.table, state.batch_commits_table = (
+                        await asyncio.to_thread(
+                            self._ddl_and_reflect_on_sync_engine,
+                            state, target_ddl, commits_ddl,
                         )
-                        commits = Table(
-                            self.BATCH_COMMITS_TABLE,
-                            meta,
-                            autoload_with=sync_conn,
-                            schema=state.schema_name or None,
-                        )
-                        return table, commits
-
-                    state.table, state.batch_commits_table = await conn.run_sync(
-                        lambda sync_conn: _reflect(sync_conn)
                     )
+                else:
+                    async with self._engine.begin() as conn:
+                        state.table, state.batch_commits_table = (
+                            await conn.run_sync(
+                                self._run_ddl_and_reflect,
+                                state, target_ddl, commits_ddl,
+                            )
+                        )
 
         logger.info(
             "Destination tables ready for %s.%s",
             state.schema_name,
             state.table_name,
         )
+
+    def _run_ddl_and_reflect(
+        self,
+        conn: Connection,
+        state: _StreamState,
+        target_ddl: str,
+        commits_ddl: str,
+    ) -> Tuple[Table, Table]:
+        """DDL + reflection transaction body, written once against the sync
+        ``Connection`` API. The async engine enters via
+        ``AsyncConnection.run_sync``; the sync engine runs it directly on a
+        worker thread — both transports execute the identical statements.
+
+        Reflection matters for DML binding: SQLAlchemy derives the column
+        types from what the database actually created, so inserts/upserts
+        bind correctly without a second hand-kept type surface.
+        """
+        # Dialect-declared preparation (e.g. postgres' CREATE SCHEMA
+        # IF NOT EXISTS for a non-default schema). The neutral base
+        # declares none.
+        for stmt in self.dialect.sqlalchemy_pre_ddl(state.schema_name):
+            conn.execute(text(stmt))
+        conn.execute(text(target_ddl))
+        conn.execute(text(commits_ddl))
+
+        meta = MetaData()
+        table = Table(
+            state.table_name,
+            meta,
+            autoload_with=conn,
+            schema=state.schema_name or None,
+        )
+        commits = Table(
+            self.BATCH_COMMITS_TABLE,
+            meta,
+            autoload_with=conn,
+            schema=state.schema_name or None,
+        )
+        return table, commits
+
+    def _ddl_and_reflect_on_sync_engine(
+        self, state: _StreamState, target_ddl: str, commits_ddl: str
+    ) -> Tuple[Table, Table]:
+        """Run the shared DDL + reflection body on the sync engine
+        (worker thread)."""
+        with self._sync_engine.begin() as conn:
+            return self._run_ddl_and_reflect(conn, state, target_ddl, commits_ddl)
 
 
     async def write_batch(
@@ -899,7 +956,11 @@ class GenericSQLConnector(BaseDestinationHandler):
                 records_written=0,
                 failure_summary="Handler not connected",
             )
-        if not self._adbc_only and self._engine is None:
+        if (
+            not self._adbc_only
+            and self._engine is None
+            and self._sync_engine is None
+        ):
             return BatchWriteResult(
                 status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
                 records_written=0,
@@ -957,20 +1018,25 @@ class GenericSQLConnector(BaseDestinationHandler):
                         state, run_id, stream_id, batch_seq,
                         record_batch, cursor.token, record_count,
                     )
+                elif self._sync_engine is not None:
+                    prepared = self._prepare_for_sqlalchemy(state, record_batch)
+                    await asyncio.to_thread(
+                        self._write_batch_on_sync_engine,
+                        state, prepared, run_id, stream_id, batch_seq,
+                        cursor.token, record_count,
+                    )
                 else:
                     prepared = self._prepare_for_sqlalchemy(state, record_batch)
 
                     async with self._engine.begin() as conn:
-                        if state.write_mode == "truncate_insert":
-                            await self._truncate_and_insert(conn, state, prepared)
-                        elif state.write_mode == "upsert":
-                            await self._upsert_records(conn, state, prepared)
-                        else:
-                            await self._insert_records(conn, state, prepared)
-
-                        # Record batch commit
-                        await self._record_batch_commit_in_txn(
-                            conn, state, run_id, stream_id, batch_seq, cursor.token, record_count
+                        await conn.run_sync(
+                            self._apply_write_in_txn, state, prepared
+                        )
+                        # Record batch commit in the same transaction
+                        await conn.run_sync(
+                            self._record_batch_commit_in_txn,
+                            state, run_id, stream_id, batch_seq,
+                            cursor.token, record_count,
                         )
 
                 logger.info(f"Wrote batch {batch_seq}: {record_count} records")
@@ -1019,12 +1085,17 @@ class GenericSQLConnector(BaseDestinationHandler):
                 failure_summary=str(e),
             )
         except TimeoutError as e:
-            if self._adbc_only or self._statement_timeout_seconds is None:
-                # Only the SQLAlchemy path is wrapped in asyncio.timeout. The
-                # ADBC path runs in a worker thread (and a handler with no
-                # budget set is never bounded), so a TimeoutError here is a
-                # driver/socket timeout, not our cancellation - classify it
-                # generically rather than claiming a statement was cancelled.
+            if (
+                self._adbc_only
+                or self._sync_engine is not None
+                or self._statement_timeout_seconds is None
+            ):
+                # Only the async-SQLAlchemy path is wrapped in asyncio.timeout.
+                # The ADBC and sync-engine paths run in a worker thread (and a
+                # handler with no budget set is never bounded), so a
+                # TimeoutError here is a driver/socket timeout, not our
+                # cancellation - classify it generically rather than claiming
+                # a statement was cancelled.
                 logger.error(f"Error writing batch: {e}", exc_info=True)
                 return BatchWriteResult(
                     status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
@@ -1068,26 +1139,57 @@ class GenericSQLConnector(BaseDestinationHandler):
             )
         if state.batch_commits_table is None:
             return None
+        if self._sync_engine is not None:
+            return await asyncio.to_thread(
+                self._check_batch_committed_on_sync_engine,
+                state, run_id, stream_id, batch_seq,
+            )
         if self._engine is None:
             return None
 
-        commits = state.batch_commits_table
         # Plain connect: write_batch wraps this read in its statement deadline.
         async with self._engine.connect() as conn:
-            result = await conn.execute(
-                commits.select().where(
-                    (commits.c.run_id == run_id) &
-                    (commits.c.stream_id == stream_id) &
-                    (commits.c.batch_seq == batch_seq)
-                )
+            return await conn.run_sync(
+                self._select_batch_commit, state, run_id, stream_id, batch_seq
             )
-            row = result.fetchone()
-            if row:
-                return {
-                    "records_written": row.records_written,
-                    "committed_cursor": row.committed_cursor,
-                }
+
+    def _select_batch_commit(
+        self,
+        conn: Connection,
+        state: _StreamState,
+        run_id: str,
+        stream_id: str,
+        batch_seq: int,
+    ) -> Optional[Dict[str, Any]]:
+        """Idempotency read, written once against the sync ``Connection``
+        API (async path via ``run_sync``, sync path on a worker thread)."""
+        commits = state.batch_commits_table
+        result = conn.execute(
+            commits.select().where(
+                (commits.c.run_id == run_id) &
+                (commits.c.stream_id == stream_id) &
+                (commits.c.batch_seq == batch_seq)
+            )
+        )
+        row = result.fetchone()
+        if row:
+            return {
+                "records_written": row.records_written,
+                "committed_cursor": row.committed_cursor,
+            }
         return None
+
+    def _check_batch_committed_on_sync_engine(
+        self,
+        state: _StreamState,
+        run_id: str,
+        stream_id: str,
+        batch_seq: int,
+    ) -> Optional[Dict[str, Any]]:
+        with self._sync_engine.connect() as conn:
+            return self._select_batch_commit(
+                conn, state, run_id, stream_id, batch_seq
+            )
 
     async def _record_batch_commit(
         self,
@@ -1106,18 +1208,26 @@ class GenericSQLConnector(BaseDestinationHandler):
             return
         if state.batch_commits_table is None:
             return
+        if self._sync_engine is not None:
+            await asyncio.to_thread(
+                self._record_batch_commit_on_sync_engine,
+                state, run_id, stream_id, batch_seq,
+                cursor_bytes, records_written,
+            )
+            return
         if self._engine is None:
             return
 
         # Plain begin: write_batch wraps this empty-batch commit in its deadline.
         async with self._engine.begin() as conn:
-            await self._record_batch_commit_in_txn(
-                conn, state, run_id, stream_id, batch_seq, cursor_bytes, records_written
+            await conn.run_sync(
+                self._record_batch_commit_in_txn,
+                state, run_id, stream_id, batch_seq,
+                cursor_bytes, records_written,
             )
 
-    async def _record_batch_commit_in_txn(
+    def _record_batch_commit_on_sync_engine(
         self,
-        conn: AsyncConnection,
         state: _StreamState,
         run_id: str,
         stream_id: str,
@@ -1125,11 +1235,28 @@ class GenericSQLConnector(BaseDestinationHandler):
         cursor_bytes: bytes,
         records_written: int,
     ) -> None:
-        """Record batch commit within existing transaction."""
+        with self._sync_engine.begin() as conn:
+            self._record_batch_commit_in_txn(
+                conn, state, run_id, stream_id, batch_seq,
+                cursor_bytes, records_written,
+            )
+
+    def _record_batch_commit_in_txn(
+        self,
+        conn: Connection,
+        state: _StreamState,
+        run_id: str,
+        stream_id: str,
+        batch_seq: int,
+        cursor_bytes: bytes,
+        records_written: int,
+    ) -> None:
+        """Record batch commit within an existing transaction (sync
+        ``Connection`` body; async path enters via ``run_sync``)."""
         if state.batch_commits_table is None:
             return
 
-        await conn.execute(
+        conn.execute(
             state.batch_commits_table.insert().values(
                 run_id=run_id,
                 stream_id=stream_id,
@@ -1140,20 +1267,60 @@ class GenericSQLConnector(BaseDestinationHandler):
             )
         )
 
-    async def _insert_records(
+    def _apply_write_in_txn(
         self,
-        conn: AsyncConnection,
+        conn: Connection,
+        state: _StreamState,
+        records: List[Dict[str, Any]],
+    ) -> None:
+        """Dispatch one batch's DML on an open transaction.
+
+        Written once against the sync ``Connection`` API so both
+        SQLAlchemy engine flavours execute identical statements: the
+        async engine enters via ``AsyncConnection.run_sync``, the sync
+        engine directly from its worker thread.
+        """
+        if state.write_mode == "truncate_insert":
+            self._truncate_and_insert(conn, state, records)
+        elif state.write_mode == "upsert":
+            self._upsert_records(conn, state, records)
+        else:
+            self._insert_records(conn, state, records)
+
+    def _write_batch_on_sync_engine(
+        self,
+        state: _StreamState,
+        records: List[Dict[str, Any]],
+        run_id: str,
+        stream_id: str,
+        batch_seq: int,
+        cursor_bytes: bytes,
+        records_written: int,
+    ) -> None:
+        """One write attempt on the sync engine (worker thread): DML and
+        the commit record in a single transaction, exactly like the async
+        path."""
+        with self._sync_engine.begin() as conn:
+            self._apply_write_in_txn(conn, state, records)
+            self._record_batch_commit_in_txn(
+                conn, state, run_id, stream_id, batch_seq,
+                cursor_bytes, records_written,
+            )
+
+    def _insert_records(
+        self,
+        conn: Connection,
         state: _StreamState,
         records: List[Dict[str, Any]],
     ) -> None:
         """Insert pre-cast records (plain INSERT)."""
         if state.table is None or not records:
             return
-        await conn.execute(state.table.insert(), records)
+        conn.execute(state.table.insert(), records)
 
-    async def _upsert_records(
+    def _upsert_records(
         self,
-        conn: AsyncConnection,
+        conn: Connection,
         state: _StreamState,
         records: List[Dict[str, Any]],
     ) -> None:
@@ -1179,7 +1346,7 @@ class GenericSQLConnector(BaseDestinationHandler):
                 "falling back to plain INSERT — duplicates are possible",
                 state.schema_name, state.table_name,
             )
-            await self._insert_records(conn, state, records)
+            self._insert_records(conn, state, records)
             return
         if not records:
             return
@@ -1187,19 +1354,19 @@ class GenericSQLConnector(BaseDestinationHandler):
         stmt = self.dialect.build_sqlalchemy_upsert(
             state.table, records, conflict_keys
         )
-        await conn.execute(stmt)
+        conn.execute(stmt)
 
-    async def _truncate_and_insert(
+    def _truncate_and_insert(
         self,
-        conn: AsyncConnection,
+        conn: Connection,
         state: _StreamState,
         records: List[Dict[str, Any]],
     ) -> None:
         """Truncate table and insert pre-cast records."""
         if state.table is None:
             return
-        await conn.execute(state.table.delete())
-        await self._insert_records(conn, state, records)
+        conn.execute(state.table.delete())
+        self._insert_records(conn, state, records)
 
     def _prepare_for_sqlalchemy(
         self, state: _StreamState, record_batch: pa.RecordBatch
@@ -1873,6 +2040,14 @@ class GenericSQLConnector(BaseDestinationHandler):
                 logger.warning(f"Health check failed: {e}")
                 return False
 
+        if self._sync_engine is not None:
+            try:
+                await asyncio.to_thread(self._health_check_sync_engine)
+                return True
+            except Exception as e:
+                logger.warning(f"Health check failed: {e}")
+                return False
+
         if self._engine is None:
             return False
         try:
@@ -1882,6 +2057,11 @@ class GenericSQLConnector(BaseDestinationHandler):
         except Exception as e:
             logger.warning(f"Health check failed: {e}")
             return False
+
+    def _health_check_sync_engine(self) -> None:
+        """Health probe for the sync engine (worker thread)."""
+        with self._sync_engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
 
     def _health_check_adbc_sync(self) -> None:
         """Health probe for ADBC-only mode.
@@ -1961,10 +2141,12 @@ class GenericSQLConnector(BaseDestinationHandler):
 
         driver = runtime.driver or ""
         adbc_only = runtime.is_adbc
-        engine = None if adbc_only else runtime.engine
+        sa_sync = not adbc_only and runtime.is_sync_sqlalchemy
+        engine = None if (adbc_only or sa_sync) else runtime.engine
         logger.info(
             "Reading source via %s (%s)",
-            driver, "ADBC" if adbc_only else "SQLAlchemy",
+            driver,
+            "ADBC" if adbc_only else "sync SQLAlchemy" if sa_sync else "SQLAlchemy",
         )
 
         try:
@@ -2096,27 +2278,35 @@ class GenericSQLConnector(BaseDestinationHandler):
             last_cursor_value = cursor_value
             offset = 0
 
-            async with acquire_connection(engine) as conn:
+            # One connection for the whole read on either engine flavour.
+            # The sync engine's connection is opened/used/closed on worker
+            # threads (sequential use, same pattern as the ADBC reader);
+            # the async engine pages via run_sync so both flavours execute
+            # the identical page body (_fetch_page_rows).
+            async with AsyncExitStack() as stack:
+                if sa_sync:
+                    sync_conn = await asyncio.to_thread(
+                        runtime.sync_engine.connect
+                    )
+                    stack.push_async_callback(asyncio.to_thread, sync_conn.close)
+
+                    async def fetch_page(sql: str, params: Any) -> List[Dict[str, Any]]:
+                        return await asyncio.to_thread(
+                            self._fetch_page_rows, sync_conn, sql, params
+                        )
+                else:
+                    conn = await stack.enter_async_context(
+                        acquire_connection(engine)
+                    )
+
+                    async def fetch_page(sql: str, params: Any) -> List[Dict[str, Any]]:
+                        return await conn.run_sync(
+                            self._fetch_page_rows, sql, params
+                        )
+
                 while True:
                     paged_query, paged_params = page_query(offset)
-                    if isinstance(paged_params, dict):
-                        # Named-paramstyle dialects (Snowflake pyformat,
-                        # BigQuery named): the driver binds by name and
-                        # expects a dict, not a positional tuple.
-                        if paged_params:
-                            result = await conn.exec_driver_sql(
-                                paged_query, paged_params
-                            )
-                        else:
-                            result = await conn.exec_driver_sql(paged_query)
-                    elif paged_params:
-                        result = await conn.exec_driver_sql(
-                            paged_query, tuple(paged_params)
-                        )
-                    else:
-                        result = await conn.exec_driver_sql(paged_query)
-
-                    rows = [dict(row._mapping) for row in result]
+                    rows = await fetch_page(paged_query, paged_params)
                     if not rows:
                         break
 
@@ -2279,6 +2469,29 @@ class GenericSQLConnector(BaseDestinationHandler):
                 if page_rows < batch_size:
                     break
                 offset += page_rows
+
+    @staticmethod
+    def _fetch_page_rows(
+        conn: Connection, sql: str, params: Any
+    ) -> List[Dict[str, Any]]:
+        """Run one page SELECT on a sync ``Connection`` and return dict rows.
+
+        Shared by both SQLAlchemy engine flavours (async via ``run_sync``,
+        sync via ``asyncio.to_thread``). ``params`` is a list for
+        positional dialects and a dict for named-paramstyle dialects
+        (Snowflake pyformat, BigQuery named) — the driver binds by name
+        and expects a dict, not a positional tuple.
+        """
+        if isinstance(params, dict):
+            if params:
+                result = conn.exec_driver_sql(sql, params)
+            else:
+                result = conn.exec_driver_sql(sql)
+        elif params:
+            result = conn.exec_driver_sql(sql, tuple(params))
+        else:
+            result = conn.exec_driver_sql(sql)
+        return [dict(row._mapping) for row in result]
 
     @staticmethod
     def _select_columns(

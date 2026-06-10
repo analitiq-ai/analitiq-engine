@@ -499,3 +499,69 @@ class TestHttpSpecValidation:
             "timeout_seconds": 30.0,
             "rate_limit": {"max_requests": 10, "time_window_seconds": 60},
         }
+
+
+# ---------------------------------------------------------------------------
+# SQLAlchemy engine flavour — selected by the dialect's own async capability
+# ---------------------------------------------------------------------------
+
+
+class TestSqlAlchemyEngineFlavour:
+    def test_dialect_capability_detection(self):
+        from cdk.transport_factory import _dialect_is_async
+
+        # The dialect class declares the capability — no hardcoded list.
+        assert _dialect_is_async("postgresql+asyncpg://u:p@h:5432/db") is True
+        assert _dialect_is_async("sqlite://") is False
+
+    @pytest.mark.asyncio
+    async def test_sync_only_dialect_builds_sync_engine(self):
+        import asyncio
+
+        from sqlalchemy.engine import Engine
+
+        from cdk.transport_factory import build_sqlalchemy_from_spec
+
+        # SQLite's stdlib driver is the in-process stand-in for a
+        # sync-only dialect (the production case is Redshift's
+        # redshift+redshift_connector). The SELECT 1 probe runs at
+        # build time on a worker thread.
+        transport = await build_sqlalchemy_from_spec(
+            {
+                "transport_type": "sqlalchemy",
+                "driver": "sqlite+pysqlite",
+                "dsn": "sqlite://",
+                "tls": None,
+                "engine_kwargs": {},
+            }
+        )
+        try:
+            assert transport.is_async is False
+            assert isinstance(transport.engine, Engine)
+            assert transport.dialect == "sqlite"
+            assert transport.driver == "sqlite+pysqlite"
+        finally:
+            await asyncio.to_thread(transport.engine.dispose)
+
+    @pytest.mark.asyncio
+    async def test_sync_probe_failure_disposes_engine(self):
+        from unittest.mock import patch
+
+        from cdk.transport_factory import build_sqlalchemy_from_spec
+
+        engine = MagicMock()
+        engine.connect = MagicMock(side_effect=RuntimeError("probe failed"))
+        with patch(
+            "cdk.transport_factory.create_engine", return_value=engine
+        ):
+            with pytest.raises(RuntimeError, match="probe failed"):
+                await build_sqlalchemy_from_spec(
+                    {
+                        "transport_type": "sqlalchemy",
+                        "driver": "sqlite+pysqlite",
+                        "dsn": "sqlite://",
+                        "tls": None,
+                        "engine_kwargs": {},
+                    }
+                )
+        engine.dispose.assert_called_once()

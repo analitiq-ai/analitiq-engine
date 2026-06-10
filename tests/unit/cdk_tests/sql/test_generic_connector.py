@@ -31,6 +31,7 @@ class _FakeRuntime:
 
     def __init__(self, *, is_adbc: bool, driver: str = "postgresql", engine: Any = None):
         self.is_adbc = is_adbc
+        self.is_sync_sqlalchemy = False
         self.driver = driver
         self.engine = engine
         self.close = AsyncMock()
@@ -520,11 +521,16 @@ class TestReadSqlAlchemyBranch:
             def __init__(self):
                 self.calls = 0
 
-            async def exec_driver_sql(self, sql, params=None):
+            def exec_driver_sql(self, sql, params=None):
                 self.calls += 1
                 if self.calls == 1:
                     return [_Row({"id": 1, "updated_at": "2024-01-01"})]
                 return []
+
+            async def run_sync(self, fn, *args):
+                # AsyncConnection.run_sync hands the sync Connection to fn;
+                # this fake plays both roles.
+                return fn(self, *args)
 
         conn = _FakeConn()
 
@@ -557,9 +563,12 @@ class TestReadSqlAlchemyBranch:
         executed = []
 
         class _RecordingConn:
-            async def exec_driver_sql(self, sql, params=None):
+            def exec_driver_sql(self, sql, params=None):
                 executed.append(sql)
                 return []
+
+            async def run_sync(self, fn, *args):
+                return fn(self, *args)
 
         class _AcquireCM:
             async def __aenter__(self):
@@ -589,8 +598,11 @@ class TestReadSqlAlchemyBranch:
         runtime = _FakeRuntime(is_adbc=False, engine=object())
 
         class _EmptyConn:
-            async def exec_driver_sql(self, sql, params=None):
+            def exec_driver_sql(self, sql, params=None):
                 return []
+
+            async def run_sync(self, fn, *args):
+                return fn(self, *args)
 
         class _AcquireCM:
             async def __aenter__(self):
