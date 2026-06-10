@@ -6,7 +6,7 @@ delegates all data operations to these handlers.
 """
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any, List, Mapping
+from typing import TYPE_CHECKING, Any, List, Mapping, Optional
 
 import pyarrow as pa
 
@@ -69,6 +69,18 @@ class BaseDestinationHandler(ABC):
         override it.
         """
         _ = stream_endpoints  # no-op default
+
+    def set_statement_timeout(self, seconds: Optional[float]) -> None:
+        """Bound each destination statement to *seconds*, cancelling one that
+        blocks so the engine surfaces the real reason instead of a bare gRPC
+        ACK timeout (issue #231).
+
+        The trusted shell derives the value from the engine's gRPC ack budget
+        and passes it in the worker bootstrap. ``None`` means unbounded.
+        Called once by the destination entrypoint before the gRPC server
+        starts. Default is a no-op; only SQL destinations honor it.
+        """
+        _ = seconds  # no-op default
 
     @abstractmethod
     async def connect(self, runtime: "ConnectionRuntime") -> None:

@@ -128,6 +128,13 @@ class DestinationGRPCClient:
         # a generic "stream signaled failure".
         self._peer_closed_stream: bool = False
 
+        # Reason text from the most recent SchemaAck rejection, or None when
+        # the last start_stream was accepted / never ran. The destination
+        # proxy forwards it so the engine-facing ack carries the worker's real
+        # reason (e.g. a statement-timeout cancel) instead of a generic
+        # "Schema configuration failed".
+        self._schema_rejection_message: Optional[str] = None
+
         # Connection state
         self._connected = False
         self._stream_active = False
@@ -322,6 +329,7 @@ class DestinationGRPCClient:
         # poison the diagnostic surfaced by this run's send_batch.
         self._task_failure = None
         self._peer_closed_stream = False
+        self._schema_rejection_message = None
 
         # Create queues for bidirectional communication
         self._request_queue = asyncio.Queue()
@@ -374,6 +382,7 @@ class DestinationGRPCClient:
                     logger.info(f"Schema accepted for stream {stream_id}")
                     accepted = True
                 else:
+                    self._schema_rejection_message = response.message
                     logger.error(f"Schema rejected: {response.message}")
             else:
                 logger.error(f"Unexpected response type: {type(response)}")
@@ -388,6 +397,12 @@ class DestinationGRPCClient:
             # make every retry write into a dead stream instead of healing.
             await self._teardown_stream()
         return accepted
+
+    @property
+    def schema_rejection_message(self) -> Optional[str]:
+        """Reason from the last rejected SchemaAck, or None when the most
+        recent start_stream was accepted (or none has run)."""
+        return self._schema_rejection_message
 
     async def send_batch(
         self,

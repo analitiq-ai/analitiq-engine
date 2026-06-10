@@ -10,11 +10,34 @@ never touches the filesystem config or the secret store.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.type_map.loader import connector_definition_dir, read_raw_type_maps
+
+# A destination SQL statement is cancelled this many seconds before the
+# engine's gRPC ack timeout, so the database returns the cancelled statement
+# and reason instead of the engine abandoning the handshake with a bare "ACK
+# timeout" (issue #231). Source and destination run from the same image, so
+# the shell reads the same GRPC_TIMEOUT_SECONDS the engine uses as its ack
+# budget.
+_STATEMENT_TIMEOUT_ACK_MARGIN_SECONDS = 5
+_MIN_DESTINATION_STATEMENT_TIMEOUT_SECONDS = 5
+
+
+def _destination_statement_timeout_seconds() -> float:
+    """Per-statement budget for a destination worker, kept below the engine's
+    gRPC ack timeout so a blocked DDL/write is cancelled before the engine
+    gives up waiting for the ack."""
+    ack_timeout = int(os.getenv("GRPC_TIMEOUT_SECONDS", "30"))
+    return float(
+        max(
+            ack_timeout - _STATEMENT_TIMEOUT_ACK_MARGIN_SECONDS,
+            _MIN_DESTINATION_STATEMENT_TIMEOUT_SECONDS,
+        )
+    )
 
 
 def read_type_map_payloads(
@@ -71,4 +94,11 @@ async def build_bootstrap(
         "endpoint_refs": endpoint_refs or {},
         "stream_endpoints": stream_endpoints or {},
         "source_config": source_config or {},
+        # Only the destination worker bounds statements; a source read is not
+        # gated by the destination's ack budget.
+        "statement_timeout_seconds": (
+            _destination_statement_timeout_seconds()
+            if role == "destination"
+            else None
+        ),
     }

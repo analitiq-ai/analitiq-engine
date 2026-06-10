@@ -28,6 +28,7 @@ import asyncio
 import hashlib
 import logging
 import threading
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, AsyncIterator, Dict, List, Literal, Mapping, Optional, Tuple
@@ -275,6 +276,11 @@ class GenericSQLConnector(BaseDestinationHandler):
         self._config: Dict[str, Any] = {}
         self._connected: bool = False
         self._driver: str = ""
+        # Seconds to bound a single destination SQL statement, set by the
+        # destination entrypoint via set_statement_timeout() from the engine's
+        # gRPC ack budget. None (source-role instances, or unset) means
+        # unbounded - asyncio.timeout(None) never fires. See _begin_bounded.
+        self._statement_timeout_seconds: Optional[float] = None
         # ADBC-only mode: the runtime exposes no SQLAlchemy engine and
         # every write/DDL/idempotency operation runs through the cached
         # ADBC DBAPI connection. Set in ``connect()`` from
@@ -366,6 +372,34 @@ class GenericSQLConnector(BaseDestinationHandler):
         self._stream_endpoints = {
             sid: dict(doc) for sid, doc in stream_endpoints.items()
         }
+
+    def set_statement_timeout(self, seconds: Optional[float]) -> None:
+        """Bound every destination SQL statement to *seconds* (issue #231).
+
+        Called once by the destination entrypoint with a value the trusted
+        shell derived from the engine's gRPC ack budget. ``None`` leaves
+        statements unbounded. Applies to the SQLAlchemy DDL and write
+        transactions via :meth:`_begin_bounded`; the ADBC path is unaffected.
+        """
+        self._statement_timeout_seconds = seconds
+
+    @asynccontextmanager
+    async def _begin_bounded(self) -> AsyncIterator[AsyncConnection]:
+        """``self._engine.begin()`` bounded by the destination statement timeout.
+
+        A statement that blocks - a ``CREATE TABLE`` behind a catalog lock, a
+        write behind a row lock - is cancelled after
+        ``_statement_timeout_seconds`` so the engine surfaces the real reason
+        instead of the source abandoning the handshake at its gRPC ack timeout
+        (issue #231). ``asyncio.timeout(None)`` never fires, so an instance
+        with no timeout configured behaves exactly as a plain ``begin()``.
+
+        Callers guard ``self._engine is not None`` before entering, matching
+        the un-bounded call sites this replaces.
+        """
+        async with asyncio.timeout(self._statement_timeout_seconds):
+            async with self._engine.begin() as conn:
+                yield conn
 
     def _type_mapper_for_stream(self, stream_id: str) -> TypeMapper:
         """Resolve the type-mapper appropriate for ``stream_id``'s endpoint."""
@@ -613,7 +647,19 @@ class GenericSQLConnector(BaseDestinationHandler):
         # both DDL generation and the schema contract use it.
         type_mapper = self._type_mapper_for_stream(stream_id)
 
-        await self._ensure_tables_exist(state, type_mapper)
+        try:
+            await self._ensure_tables_exist(state, type_mapper)
+        except TimeoutError as exc:
+            # The bounded DDL transaction was cancelled. Re-raise as the
+            # deterministic schema error the gRPC layer translates into the
+            # SchemaAck (server.py), so the operator gets the cancelled
+            # CREATE TABLE and reason instead of a bare ACK timeout.
+            raise SchemaConfigurationError(
+                f"CREATE TABLE for {state.schema_name}.{state.table_name} did "
+                f"not complete within the {self._statement_timeout_seconds:g}s "
+                f"destination statement timeout (likely blocked on a lock or a "
+                f"slow catalog); the statement was cancelled"
+            ) from exc
 
         state.schema_contract = SchemaContract(state.endpoint_document)
 
@@ -773,7 +819,7 @@ class GenericSQLConnector(BaseDestinationHandler):
         # Serialize DDL across concurrent streams so they do not race the
         # database catalog (e.g. PostgreSQL's pg_type_typname_nsp_index).
         async with self._ddl_lock:
-            async with self._engine.begin() as conn:
+            async with self._begin_bounded() as conn:
                 # Dialect-declared preparation (e.g. postgres' CREATE SCHEMA
                 # IF NOT EXISTS for a non-default schema). The neutral base
                 # declares none.
@@ -882,7 +928,7 @@ class GenericSQLConnector(BaseDestinationHandler):
             else:
                 prepared = self._prepare_for_sqlalchemy(state, record_batch)
 
-                async with self._engine.begin() as conn:
+                async with self._begin_bounded() as conn:
                     if state.write_mode == "truncate_insert":
                         await self._truncate_and_insert(conn, state, prepared)
                     elif state.write_mode == "upsert":
@@ -939,6 +985,22 @@ class GenericSQLConnector(BaseDestinationHandler):
                 status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
                 records_written=0,
                 failure_summary=str(e),
+            )
+        except TimeoutError:
+            # The bounded write transaction was cancelled (issue #231). A lock
+            # or slow write may clear, so stay retryable; carry the reason so
+            # it surfaces instead of an empty str(TimeoutError).
+            summary = (
+                f"destination write for {state.schema_name}.{state.table_name} "
+                f"did not complete within the {self._statement_timeout_seconds:g}s "
+                f"statement timeout (likely a lock or slow write); the statement "
+                f"was cancelled"
+            )
+            logger.error("Timeout writing batch: %s", summary)
+            return BatchWriteResult(
+                status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
+                records_written=0,
+                failure_summary=summary,
             )
         except Exception as e:
             logger.error(f"Error writing batch: {e}", exc_info=True)
