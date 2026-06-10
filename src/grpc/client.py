@@ -63,8 +63,9 @@ def resolve_grpc_ack_timeout_seconds() -> int:
     The single source of truth for the handshake/ack deadline on the engine
     side. The client stamps its resolved budget into the schema handshake
     (``SchemaMessage.ack_timeout_seconds``), and the destination derives its
-    statement timeout from that wire value — never from its own environment —
-    so the two cannot drift across processes (issues #231, #234).
+    statement timeout from that wire value rather than reading the env
+    directly — a forwarding hop may only tighten the stamp, never widen it —
+    so the bound cannot drift past the engine's wait (issues #231, #234).
 
     A non-positive value (``GRPC_TIMEOUT_SECONDS=0`` or negative) falls back to
     the default rather than being used as-is: a zero ack budget makes the

@@ -389,9 +389,9 @@ class GenericSQLConnector(BaseDestinationHandler):
     def _statement_deadline(self):
         """A statement-timeout deadline for one whole handler attempt - a DDL
         handshake, or a write with its idempotency read and commit record - so
-        the total database time stays under the engine's gRPC ack budget rather
-        than each phase getting its own full budget that can sum past the ack
-        deadline (issue #231).
+        the total database time stays under the sender-stamped gRPC ack budget
+        rather than each phase getting its own full budget that can sum past
+        the ack deadline (issue #231).
 
         SQLAlchemy operations get an ``asyncio.timeout``; the ADBC path gets a
         null deadline because its operations run in a worker thread that

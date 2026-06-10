@@ -73,9 +73,9 @@ def derive_statement_timeout_seconds(ack_timeout_seconds: int) -> float:
 
     Returns the full ack budget minus a fixed margin where the budget is large
     enough, otherwise half the budget. Both candidates are strictly below the
-    ack budget for any positive budget (including sub-second), so the statement
-    timeout can never meet or exceed it - the orphaned-statement race this
-    guards against (issue #231).
+    ack budget for any positive budget, so the statement timeout can never
+    meet or exceed it - the orphaned-statement race this guards against
+    (issue #231).
     """
     return float(
         max(

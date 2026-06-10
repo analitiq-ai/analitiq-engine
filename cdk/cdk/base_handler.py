@@ -78,8 +78,9 @@ class BaseDestinationHandler(ABC):
         Called by the destination servicer on every schema handshake, before
         ``configure_schema``, with a value derived from the ack budget the
         sender stamped into the schema message (issue #234) — the bound
-        always tracks the budget the sender actually waits on. ``None``
-        means unbounded. Default is a no-op; only SQL destinations honor it.
+        always stays at or below the budget of every waiter on the path.
+        ``None`` means unbounded. Default is a no-op; only SQL destinations
+        honor it.
         """
         _ = seconds  # no-op default
 
