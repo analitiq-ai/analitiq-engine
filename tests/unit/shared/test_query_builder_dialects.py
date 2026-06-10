@@ -633,3 +633,34 @@ class TestFilterFailLoud:
         )
         assert "WHERE" in sql.upper()
         assert params == [1]
+
+
+class TestRedshiftDriverFlavour:
+    """Redshift must resolve the ``redshift_connector`` flavour of the
+    sqlalchemy-redshift dialect. The registry default is psycopg2-shaped
+    and compiles named ``%(name)s`` params, which redshift_connector
+    rejects at execute time with "Only %s and %% are supported in the
+    query" — positional params are the regression signal here."""
+
+    def test_redshift_compiles_positional_params(self):
+        pytest.importorskip("sqlalchemy_redshift")
+        builder = QueryBuilder("redshift")
+        sql, params = builder.build_select_query(
+            QueryConfig(
+                schema_name="public",
+                table_name="orders",
+                columns=["id", "status"],
+                filters=[Filter(field="status", op="eq", value="active")],
+                limit=25,
+                offset=0,
+            )
+        )
+        # A dict here means the default (psycopg2-flavoured) dialect was
+        # loaded; redshift_connector binds positionally. (The redshift
+        # compiler renders LIMIT/OFFSET as literals, so only the filter
+        # value is bound.)
+        assert isinstance(params, list)
+        assert params == ["active"]
+        assert "%(" not in sql
+        assert "%s" in sql
+        assert "LIMIT" in sql.upper()
