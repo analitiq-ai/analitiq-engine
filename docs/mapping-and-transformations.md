@@ -158,8 +158,10 @@ Implemented `op` values (see `_evaluate_expression` in
 | `concat` | String concatenation of evaluated args (None args dropped) |
 | `coalesce` | First non-null evaluated arg |
 
-Unknown `op` values log a warning and resolve to `null` rather than
-raising — keep authoring tooling honest by validating against this list.
+Unknown `op` values raise a `TransformationError`, routing the record
+through the configured error path (`on_error: dlq` or `on_error:
+skip_record`) — keep authoring tooling honest by validating against
+this list.
 
 ## Function Catalog
 
