@@ -705,3 +705,59 @@ class TestDataTransformer:
             for ver, fn_name in versions.items():
                 assert isinstance(ver, int), f"{name}: key {ver!r} is not int"
                 assert isinstance(fn_name, str), f"{name}: value {fn_name!r} is not str"
+
+    @pytest.mark.asyncio
+    async def test_version_defaults_to_1_when_absent_from_ast(self, transformer):
+        """Omitting 'version' from the AST node defaults to v1 and dispatches correctly.
+        Guards the .get('version', 1) default in _apply_function_expression."""
+        batch = [{"val": "  hello  "}]
+        config = {
+            "mapping": {
+                "assignments": [
+                    _assignment("out", expr={
+                        "op": "pipe",
+                        "args": [
+                            {"op": "get", "path": ["val"]},
+                            {"op": "fn", "name": "trim", "args": []},  # no "version" key
+                        ],
+                    })
+                ]
+            }
+        }
+        result = await transformer.apply_transformations(batch, config)
+        assert result[0]["out"] == "hello"
+
+    @pytest.mark.asyncio
+    async def test_fn_op_direct_version_dispatch(self, transformer):
+        """The standalone 'fn' op (not inside pipe, used by e.g. 'now') dispatches by version.
+        Unregistered version raises TransformationError naming the function."""
+        batch = [{}]
+        config = {
+            "mapping": {
+                "assignments": [
+                    _assignment("out", expr={"op": "fn", "name": "now", "version": 99, "args": []})
+                ]
+            }
+        }
+        with pytest.raises(TransformationError, match=r"now.*version 99"):
+            await transformer.apply_transformations(batch, config)
+
+    @pytest.mark.asyncio
+    async def test_unregistered_version_error_names_function_and_version(self, transformer):
+        """Error for an unregistered version names the function AND the requested version."""
+        batch = [{"val": "x"}]
+        config = {
+            "mapping": {
+                "assignments": [
+                    _assignment("out", expr={
+                        "op": "pipe",
+                        "args": [
+                            {"op": "get", "path": ["val"]},
+                            {"op": "fn", "name": "trim", "version": 99, "args": []},
+                        ],
+                    })
+                ]
+            }
+        }
+        with pytest.raises(TransformationError, match=r"trim.*version 99"):
+            await transformer.apply_transformations(batch, config)

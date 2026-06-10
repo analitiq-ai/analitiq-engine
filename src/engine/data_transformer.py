@@ -30,7 +30,7 @@ class AssignmentTransformer:
     - validate: {rules: [...], on_error: str}
     """
 
-    # {function_name: {version_int: method_name}} — add new version keys; never mutate existing ones.
+    # Never add a new key for an existing version — register new behaviour under a new version int.
     FUNCTION_CATALOG: dict[str, dict[int, str]] = {
         "iso_to_date":      {1: "_fn_iso_to_date"},
         "iso_to_datetime":  {1: "_fn_iso_to_datetime"},
@@ -304,7 +304,11 @@ class AssignmentTransformer:
         version: int,
         args: List[Any]
     ) -> Any:
-        """Apply a catalog function to a value, dispatching by version."""
+        if not name:
+            raise TransformationError(
+                f"fn expression is missing a 'name' field (got {name!r}); "
+                "check the pipeline mapping config"
+            )
         versions = self.FUNCTION_CATALOG.get(name)
         if versions is None:
             raise TransformationError(f"Unknown function: {name!r}")
