@@ -30,21 +30,21 @@ class AssignmentTransformer:
     - validate: {rules: [...], on_error: str}
     """
 
-    # Function catalog for built-in transforms
-    FUNCTION_CATALOG = {
-        "iso_to_date": {"version": 1, "fn": "_fn_iso_to_date"},
-        "iso_to_datetime": {"version": 1, "fn": "_fn_iso_to_datetime"},
-        "iso_to_timestamp": {"version": 1, "fn": "_fn_iso_to_timestamp"},
-        "trim": {"version": 1, "fn": "_fn_trim"},
-        "lower": {"version": 1, "fn": "_fn_lower"},
-        "upper": {"version": 1, "fn": "_fn_upper"},
-        "to_int": {"version": 1, "fn": "_fn_to_int"},
-        "to_float": {"version": 1, "fn": "_fn_to_float"},
-        "to_string": {"version": 1, "fn": "_fn_to_string"},
-        "abs": {"version": 1, "fn": "_fn_abs"},
-        "now": {"version": 1, "fn": "_fn_now"},
-        "default": {"version": 1, "fn": "_fn_default"},
-        "coalesce": {"version": 1, "fn": "_fn_coalesce"},
+    # Never add a new key for an existing version — register new behaviour under a new version int.
+    FUNCTION_CATALOG: dict[str, dict[int, str]] = {
+        "iso_to_date":      {1: "_fn_iso_to_date"},
+        "iso_to_datetime":  {1: "_fn_iso_to_datetime"},
+        "iso_to_timestamp": {1: "_fn_iso_to_timestamp"},
+        "trim":             {1: "_fn_trim"},
+        "lower":            {1: "_fn_lower"},
+        "upper":            {1: "_fn_upper"},
+        "to_int":           {1: "_fn_to_int"},
+        "to_float":         {1: "_fn_to_float"},
+        "to_string":        {1: "_fn_to_string"},
+        "abs":              {1: "_fn_abs"},
+        "now":              {1: "_fn_now"},
+        "default":          {1: "_fn_default"},
+        "coalesce":         {1: "_fn_coalesce"},
     }
 
     def __init__(self):
@@ -304,16 +304,26 @@ class AssignmentTransformer:
         version: int,
         args: List[Any]
     ) -> Any:
-        """Apply a catalog function to a value."""
-        catalog_entry = self.FUNCTION_CATALOG.get(name)
-        if not catalog_entry:
+        if not name:
+            raise TransformationError(
+                f"fn expression is missing a 'name' field (got {name!r}); "
+                "check the pipeline mapping config"
+            )
+        versions = self.FUNCTION_CATALOG.get(name)
+        if versions is None:
             raise TransformationError(f"Unknown function: {name!r}")
 
-        fn_name = catalog_entry["fn"]
+        fn_name = versions.get(version)
+        if fn_name is None:
+            available = sorted(versions.keys())
+            raise TransformationError(
+                f"function {name!r} has no handler for version {version}; "
+                f"registered versions: {available}"
+            )
         method = getattr(self, fn_name, None)
         if method is None:
             raise TransformationError(
-                f"FUNCTION_CATALOG entry for {name!r} references missing method {fn_name!r}"
+                f"FUNCTION_CATALOG entry for {name!r} v{version} references missing method {fn_name!r}"
             )
         # A wrong argument count for the function (an authoring error in the
         # mapping) surfaces as TypeError from the call; route it through the
