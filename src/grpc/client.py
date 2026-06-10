@@ -56,6 +56,18 @@ DEFAULT_GRPC_TIMEOUT = int(os.getenv("GRPC_TIMEOUT_SECONDS", "30"))
 DEFAULT_MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
 
 
+def resolve_grpc_ack_timeout_seconds() -> int:
+    """The engine's gRPC ack budget in seconds (``GRPC_TIMEOUT_SECONDS``).
+
+    The single source of truth for the handshake/ack deadline: the engine's
+    destination client reads it as its per-call timeout, and the destination
+    worker's statement timeout is derived from it (ack budget minus a margin).
+    Routing both through one function means the destination statement timeout
+    can never drift relative to the ack budget it must stay under (issue #231).
+    """
+    return int(os.getenv("GRPC_TIMEOUT_SECONDS", str(DEFAULT_GRPC_TIMEOUT)))
+
+
 @dataclass
 class BatchResult:
     """Result of sending a batch to the destination."""
