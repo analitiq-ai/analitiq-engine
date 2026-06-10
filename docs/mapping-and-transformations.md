@@ -158,8 +158,12 @@ Implemented `op` values (see `_evaluate_expression` in
 | `concat` | String concatenation of evaluated args (None args dropped) |
 | `coalesce` | First non-null evaluated arg |
 
-Unknown `op` values log a warning and resolve to `null` rather than
-raising — keep authoring tooling honest by validating against this list.
+Unknown `op` values raise a `TransformationError`. Expression
+evaluation is not subject to per-assignment `on_error` routing (that
+applies only to `validate` rule failures); a single expression error
+fails the entire batch and surfaces as a transform-stage stream
+failure — keep authoring tooling honest by validating against this
+list.
 
 ## Function Catalog
 
