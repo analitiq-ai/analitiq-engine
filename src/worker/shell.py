@@ -27,16 +27,22 @@ _MIN_DESTINATION_STATEMENT_TIMEOUT_SECONDS = 5
 
 
 def _destination_statement_timeout_seconds() -> float:
-    """Per-statement budget for a destination worker, kept below the engine's
-    gRPC ack timeout so a blocked DDL/write is cancelled before the engine
-    gives up waiting for the ack."""
+    """Per-statement budget for a destination worker, kept strictly below the
+    engine's gRPC ack timeout so a blocked DDL/write is cancelled before the
+    engine gives up waiting for the ack.
+
+    The result is always below the ack budget. For short budgets the floor
+    alone would meet or exceed it (a 5s ack with a 5s floor, a 3s ack with a 5s
+    floor), which would re-create the orphaned-statement race this guards
+    against (issue #231); clamp the value to leave at least 1s of head-room
+    under the budget.
+    """
     ack_timeout = resolve_grpc_ack_timeout_seconds()
-    return float(
-        max(
-            ack_timeout - _STATEMENT_TIMEOUT_ACK_MARGIN_SECONDS,
-            _MIN_DESTINATION_STATEMENT_TIMEOUT_SECONDS,
-        )
+    budget = max(
+        ack_timeout - _STATEMENT_TIMEOUT_ACK_MARGIN_SECONDS,
+        _MIN_DESTINATION_STATEMENT_TIMEOUT_SECONDS,
     )
+    return float(min(budget, max(ack_timeout - 1, 1)))
 
 
 def read_type_map_payloads(
