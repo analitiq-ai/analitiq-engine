@@ -19,10 +19,11 @@ from cdk.type_map.loader import connector_definition_dir, read_raw_type_maps
 
 # A destination SQL statement is cancelled this many seconds before the
 # engine's gRPC ack timeout, so the database returns the cancelled statement
-# and reason instead of the engine abandoning the handshake with a bare "ACK
-# timeout" (issue #231). Source and destination run from the same image, so
-# the shell reads the same GRPC_TIMEOUT_SECONDS the engine uses as its ack
-# budget.
+# instead of the engine abandoning the handshake with a bare "ACK timeout"
+# (issue #231). The shell reads GRPC_TIMEOUT_SECONDS - the engine's ack budget
+# whenever that env var is set (the common case; both run from the same image).
+# The engine otherwise falls back to the pipeline's grpc.timeout_seconds, which
+# the destination shell does not see; set the env var to keep the two in step.
 _STATEMENT_TIMEOUT_ACK_MARGIN_SECONDS = 5
 _MIN_DESTINATION_STATEMENT_TIMEOUT_SECONDS = 5
 

@@ -364,19 +364,19 @@ class DestinationGRPCClient:
             if response is _STREAM_TASK_FAILED:
                 cause = self._task_failure
                 if cause is not None:
-                    logger.error(
-                        "Stream reader/writer exited before schema ACK: %s",
-                        cause,
+                    self._schema_rejection_message = (
+                        f"stream reader/writer exited before schema ACK: {cause}"
                     )
                 elif self._peer_closed_stream:
-                    logger.error(
-                        "Destination closed stream before sending schema ACK"
+                    self._schema_rejection_message = (
+                        "destination closed stream before sending schema ACK"
                     )
                 else:
-                    logger.error(
-                        "Stream signaled failure before schema ACK without "
+                    self._schema_rejection_message = (
+                        "stream signaled failure before schema ACK without "
                         "a recorded cause"
                     )
+                logger.error(self._schema_rejection_message)
             elif isinstance(response, SchemaAck):
                 if response.accepted:
                     logger.info(f"Schema accepted for stream {stream_id}")
@@ -385,9 +385,15 @@ class DestinationGRPCClient:
                     self._schema_rejection_message = response.message
                     logger.error(f"Schema rejected: {response.message}")
             else:
-                logger.error(f"Unexpected response type: {type(response)}")
+                self._schema_rejection_message = (
+                    f"unexpected response type before schema ACK: {type(response)}"
+                )
+                logger.error(self._schema_rejection_message)
 
         except asyncio.TimeoutError:
+            self._schema_rejection_message = (
+                f"destination did not acknowledge the schema within {self.timeout}s"
+            )
             logger.error("Timeout waiting for schema ACK")
 
         if not accepted:
@@ -400,8 +406,10 @@ class DestinationGRPCClient:
 
     @property
     def schema_rejection_message(self) -> Optional[str]:
-        """Reason from the last rejected SchemaAck, or None when the most
-        recent start_stream was accepted (or none has run)."""
+        """Reason the last start_stream did not get an accepted SchemaAck - a
+        rejection message, an ack-wait timeout, or a stream failure before the
+        ack. None when the most recent start_stream was accepted (or none has
+        run)."""
         return self._schema_rejection_message
 
     async def send_batch(

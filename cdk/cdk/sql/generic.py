@@ -401,6 +401,17 @@ class GenericSQLConnector(BaseDestinationHandler):
             async with self._engine.begin() as conn:
                 yield conn
 
+    @asynccontextmanager
+    async def _connect_bounded(self) -> AsyncIterator[AsyncConnection]:
+        """``self._engine.connect()`` bounded by the destination statement
+        timeout - the read counterpart of :meth:`_begin_bounded`, so the
+        idempotency SELECT honors the same budget as the write that follows it.
+        Callers guard ``self._engine is not None`` before entering.
+        """
+        async with asyncio.timeout(self._statement_timeout_seconds):
+            async with self._engine.connect() as conn:
+                yield conn
+
     def _type_mapper_for_stream(self, stream_id: str) -> TypeMapper:
         """Resolve the type-mapper appropriate for ``stream_id``'s endpoint."""
         if self._runtime is None:
@@ -650,6 +661,12 @@ class GenericSQLConnector(BaseDestinationHandler):
         try:
             await self._ensure_tables_exist(state, type_mapper)
         except TimeoutError as exc:
+            if self._adbc_only or self._statement_timeout_seconds is None:
+                # Only the SQLAlchemy DDL is wrapped in asyncio.timeout; the
+                # ADBC DDL runs in a worker thread. A TimeoutError here is a
+                # driver timeout, not our cancellation - let it propagate as
+                # the raw driver error rather than mislabel it.
+                raise
             # The bounded DDL transaction was cancelled. Re-raise as the
             # deterministic schema error the gRPC layer translates into the
             # SchemaAck (server.py), so the operator gets the cancelled
@@ -900,26 +917,30 @@ class GenericSQLConnector(BaseDestinationHandler):
                 failure_summary="Schema not configured",
             )
 
-        existing = await self._check_batch_committed(state, run_id, stream_id, batch_seq)
-        if existing:
-            logger.info(f"Batch already committed: {run_id}/{stream_id}/{batch_seq}")
-            return BatchWriteResult(
-                status=AckStatus.ACK_STATUS_ALREADY_COMMITTED,
-                records_written=existing["records_written"],
-                committed_cursor=Cursor(token=existing["committed_cursor"]),
-            )
-
-        record_count = record_batch.num_rows
-        if record_count == 0:
-            # Empty batch - still record for idempotency
-            await self._record_batch_commit(state, run_id, stream_id, batch_seq, cursor.token, 0)
-            return BatchWriteResult(
-                status=AckStatus.ACK_STATUS_SUCCESS,
-                records_written=0,
-                committed_cursor=cursor,
-            )
-
         try:
+            # The idempotency read and the empty-batch commit run on the same
+            # _batch_commits table the write touches and can block on the same
+            # lock; keep them inside the bounded try so a timeout there is
+            # cancelled and classified, not left to hang past the ack (#231).
+            existing = await self._check_batch_committed(state, run_id, stream_id, batch_seq)
+            if existing:
+                logger.info(f"Batch already committed: {run_id}/{stream_id}/{batch_seq}")
+                return BatchWriteResult(
+                    status=AckStatus.ACK_STATUS_ALREADY_COMMITTED,
+                    records_written=existing["records_written"],
+                    committed_cursor=Cursor(token=existing["committed_cursor"]),
+                )
+
+            record_count = record_batch.num_rows
+            if record_count == 0:
+                # Empty batch - still record for idempotency
+                await self._record_batch_commit(state, run_id, stream_id, batch_seq, cursor.token, 0)
+                return BatchWriteResult(
+                    status=AckStatus.ACK_STATUS_SUCCESS,
+                    records_written=0,
+                    committed_cursor=cursor,
+                )
+
             if self._adbc_only:
                 await self._write_batch_adbc_only(
                     state, run_id, stream_id, batch_seq,
@@ -986,10 +1007,22 @@ class GenericSQLConnector(BaseDestinationHandler):
                 records_written=0,
                 failure_summary=str(e),
             )
-        except TimeoutError:
-            # The bounded write transaction was cancelled (issue #231). A lock
-            # or slow write may clear, so stay retryable; carry the reason so
-            # it surfaces instead of an empty str(TimeoutError).
+        except TimeoutError as e:
+            if self._adbc_only or self._statement_timeout_seconds is None:
+                # Only the SQLAlchemy path is wrapped in asyncio.timeout. The
+                # ADBC path runs in a worker thread (and a handler with no
+                # budget set is never bounded), so a TimeoutError here is a
+                # driver/socket timeout, not our cancellation - classify it
+                # generically rather than claiming a statement was cancelled.
+                logger.error(f"Error writing batch: {e}", exc_info=True)
+                return BatchWriteResult(
+                    status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
+                    records_written=0,
+                    failure_summary=str(e),
+                )
+            # The bounded SQLAlchemy statement was cancelled (issue #231). A lock
+            # or slow write may clear, so stay retryable; carry the reason so it
+            # surfaces instead of an empty str(TimeoutError).
             summary = (
                 f"destination write for {state.schema_name}.{state.table_name} "
                 f"did not complete within the {self._statement_timeout_seconds:g}s "
@@ -1028,7 +1061,7 @@ class GenericSQLConnector(BaseDestinationHandler):
             return None
 
         commits = state.batch_commits_table
-        async with self._engine.connect() as conn:
+        async with self._connect_bounded() as conn:
             result = await conn.execute(
                 commits.select().where(
                     (commits.c.run_id == run_id) &
@@ -1064,7 +1097,7 @@ class GenericSQLConnector(BaseDestinationHandler):
         if self._engine is None:
             return
 
-        async with self._engine.begin() as conn:
+        async with self._begin_bounded() as conn:
             await self._record_batch_commit_in_txn(
                 conn, state, run_id, stream_id, batch_seq, cursor_bytes, records_written
             )
