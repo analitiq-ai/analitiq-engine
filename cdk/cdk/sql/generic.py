@@ -837,39 +837,48 @@ class GenericSQLConnector(BaseDestinationHandler):
 
         # Serialize DDL across concurrent streams so they do not race the
         # database catalog (e.g. PostgreSQL's pg_type_typname_nsp_index).
-        async with self._ddl_lock:
-            async with self._begin_bounded() as conn:
-                # Dialect-declared preparation (e.g. postgres' CREATE SCHEMA
-                # IF NOT EXISTS for a non-default schema). The neutral base
-                # declares none.
-                for stmt in self.dialect.sqlalchemy_pre_ddl(state.schema_name):
-                    await conn.execute(text(stmt))
-                await conn.execute(text(target_ddl))
-                await conn.execute(text(commits_ddl))
+        #
+        # The statement deadline wraps the _ddl_lock acquisition, not just the
+        # transaction: a stream queued behind another stream's slow DDL would
+        # otherwise wait here outside any budget and then start its own
+        # CREATE TABLE with a fresh timer, by which point the engine's ack for
+        # this stream has long expired. Bounding the wait + statement together
+        # keeps the whole handshake under the ack budget (issue #231). The
+        # write path uses _begin_bounded directly - it holds no such lock.
+        async with asyncio.timeout(self._statement_timeout_seconds):
+            async with self._ddl_lock:
+                async with self._engine.begin() as conn:
+                    # Dialect-declared preparation (e.g. postgres' CREATE SCHEMA
+                    # IF NOT EXISTS for a non-default schema). The neutral base
+                    # declares none.
+                    for stmt in self.dialect.sqlalchemy_pre_ddl(state.schema_name):
+                        await conn.execute(text(stmt))
+                    await conn.execute(text(target_ddl))
+                    await conn.execute(text(commits_ddl))
 
-                # Reflect both tables for DML binding: SQLAlchemy derives the
-                # column types from what the database actually created, so
-                # inserts/upserts bind correctly without a second hand-kept
-                # type surface.
-                def _reflect(sync_conn):
-                    meta = MetaData()
-                    table = Table(
-                        state.table_name,
-                        meta,
-                        autoload_with=sync_conn,
-                        schema=state.schema_name or None,
-                    )
-                    commits = Table(
-                        self.BATCH_COMMITS_TABLE,
-                        meta,
-                        autoload_with=sync_conn,
-                        schema=state.schema_name or None,
-                    )
-                    return table, commits
+                    # Reflect both tables for DML binding: SQLAlchemy derives
+                    # the column types from what the database actually created,
+                    # so inserts/upserts bind correctly without a second
+                    # hand-kept type surface.
+                    def _reflect(sync_conn):
+                        meta = MetaData()
+                        table = Table(
+                            state.table_name,
+                            meta,
+                            autoload_with=sync_conn,
+                            schema=state.schema_name or None,
+                        )
+                        commits = Table(
+                            self.BATCH_COMMITS_TABLE,
+                            meta,
+                            autoload_with=sync_conn,
+                            schema=state.schema_name or None,
+                        )
+                        return table, commits
 
-                state.table, state.batch_commits_table = await conn.run_sync(
-                    lambda sync_conn: _reflect(sync_conn)
-                )
+                    state.table, state.batch_commits_table = await conn.run_sync(
+                        lambda sync_conn: _reflect(sync_conn)
+                    )
 
         logger.info(
             "Destination tables ready for %s.%s",

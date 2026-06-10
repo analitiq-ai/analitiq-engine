@@ -52,7 +52,10 @@ _STREAM_TASK_FAILED = object()  # Sentinel pushed onto the response queue when
 # than yield a hostless ":50051" address. ``or`` covers both unset and blank.
 DEFAULT_GRPC_HOST = os.getenv("DESTINATION_GRPC_HOST") or "localhost"
 DEFAULT_GRPC_PORT = int(os.getenv("DESTINATION_GRPC_PORT", "50051"))
-DEFAULT_GRPC_TIMEOUT = int(os.getenv("GRPC_TIMEOUT_SECONDS", "30"))
+# Literal fallback (not env-derived) so a non-positive GRPC_TIMEOUT_SECONDS
+# cannot poison it - see resolve_grpc_ack_timeout_seconds.
+_FALLBACK_GRPC_TIMEOUT = 30
+DEFAULT_GRPC_TIMEOUT = int(os.getenv("GRPC_TIMEOUT_SECONDS", str(_FALLBACK_GRPC_TIMEOUT)))
 DEFAULT_MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
 
 
@@ -64,8 +67,13 @@ def resolve_grpc_ack_timeout_seconds() -> int:
     worker's statement timeout is derived from it (ack budget minus a margin).
     Routing both through one function means the destination statement timeout
     can never drift relative to the ack budget it must stay under (issue #231).
+
+    A non-positive value (``GRPC_TIMEOUT_SECONDS=0`` or negative) falls back to
+    the default rather than being used as-is: a zero ack budget makes the
+    schema-ACK ``wait_for`` fire immediately, before the destination can reply.
     """
-    return int(os.getenv("GRPC_TIMEOUT_SECONDS", str(DEFAULT_GRPC_TIMEOUT)))
+    raw = int(os.getenv("GRPC_TIMEOUT_SECONDS", str(_FALLBACK_GRPC_TIMEOUT)))
+    return raw if raw > 0 else _FALLBACK_GRPC_TIMEOUT
 
 
 @dataclass

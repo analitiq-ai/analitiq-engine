@@ -17,13 +17,16 @@ from cdk.connection_runtime import ConnectionRuntime
 from cdk.type_map.loader import connector_definition_dir, read_raw_type_maps
 from src.grpc.client import resolve_grpc_ack_timeout_seconds
 
-# A destination SQL statement is cancelled this many seconds before the
-# engine's gRPC ack timeout, so the database returns the cancelled statement
-# instead of the engine abandoning the handshake with a bare "ACK timeout"
-# (issue #231). The ack budget comes from the same resolver the engine's
-# client uses, so the statement timeout cannot drift relative to it.
+# A destination SQL statement is cancelled before the engine's gRPC ack
+# timeout, so the database returns the cancelled statement instead of the
+# engine abandoning the handshake with a bare "ACK timeout" (issue #231). The
+# ack budget comes from the same resolver the engine's client uses, so the
+# statement timeout cannot drift relative to it.
 _STATEMENT_TIMEOUT_ACK_MARGIN_SECONDS = 5
-_MIN_DESTINATION_STATEMENT_TIMEOUT_SECONDS = 5
+# For budgets too small to spare the full margin, fall back to a fraction of
+# the budget. Both terms are below the budget, so the result always is too -
+# leaving head-room for the cancel + rejection to reach the engine first.
+_STATEMENT_TIMEOUT_BUDGET_FRACTION = 0.5
 
 
 def _destination_statement_timeout_seconds() -> float:
@@ -31,18 +34,19 @@ def _destination_statement_timeout_seconds() -> float:
     engine's gRPC ack timeout so a blocked DDL/write is cancelled before the
     engine gives up waiting for the ack.
 
-    The result is always below the ack budget. For short budgets the floor
-    alone would meet or exceed it (a 5s ack with a 5s floor, a 3s ack with a 5s
-    floor), which would re-create the orphaned-statement race this guards
-    against (issue #231); clamp the value to leave at least 1s of head-room
-    under the budget.
+    Returns the full ack budget minus a fixed margin where the budget is large
+    enough, otherwise half the budget. Both candidates are strictly below the
+    ack budget for any positive budget (including sub-second), so the statement
+    timeout can never meet or exceed it - the orphaned-statement race this
+    guards against (issue #231).
     """
     ack_timeout = resolve_grpc_ack_timeout_seconds()
-    budget = max(
-        ack_timeout - _STATEMENT_TIMEOUT_ACK_MARGIN_SECONDS,
-        _MIN_DESTINATION_STATEMENT_TIMEOUT_SECONDS,
+    return float(
+        max(
+            ack_timeout - _STATEMENT_TIMEOUT_ACK_MARGIN_SECONDS,
+            ack_timeout * _STATEMENT_TIMEOUT_BUDGET_FRACTION,
+        )
     )
-    return float(min(budget, max(ack_timeout - 1, 1)))
 
 
 def read_type_map_payloads(
