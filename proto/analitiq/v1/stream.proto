@@ -56,8 +56,8 @@ message SchemaMessage {
   // derives its per-statement timeout from this value, so a blocked DDL or
   // write is cancelled before the sender gives up (issue #234). Always
   // positive on a conforming handshake; a forwarding hop (the destination
-  // shell's worker proxy) stamps the minimum of the budget it received and
-  // its own.
+  // shell's worker proxy) adopts the received budget as its own ack wait
+  // and re-stamps it, so the budget the engine waits on holds end-to-end.
   uint32 ack_timeout_seconds = 4;
 }
 
