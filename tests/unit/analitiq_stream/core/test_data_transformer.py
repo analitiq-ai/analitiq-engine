@@ -621,3 +621,87 @@ class TestDataTransformer:
         }
         result = await transformer.apply_transformations(batch, config)
         assert result[0]["out"] is False
+
+    # ------------------------------------------------------------------
+    # Version dispatch tests (issue #227)
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_version_1_dispatches_correctly(self, transformer):
+        """Explicitly requesting version=1 dispatches to the registered v1 handler."""
+        batch = [{"val": "  hello  "}]
+        config = {
+            "mapping": {
+                "assignments": [
+                    _assignment("out", expr={
+                        "op": "pipe",
+                        "args": [
+                            {"op": "get", "path": ["val"]},
+                            {"op": "fn", "name": "trim", "version": 1, "args": []},
+                        ],
+                    })
+                ]
+            }
+        }
+        result = await transformer.apply_transformations(batch, config)
+        assert result[0]["out"] == "hello"
+
+    @pytest.mark.asyncio
+    async def test_unregistered_version_raises_with_clear_message(self, transformer):
+        """Requesting a version with no registered handler raises TransformationError
+        naming the function, the requested version, and available versions."""
+        batch = [{"val": "x"}]
+        config = {
+            "mapping": {
+                "assignments": [
+                    _assignment("out", expr={
+                        "op": "pipe",
+                        "args": [
+                            {"op": "get", "path": ["val"]},
+                            {"op": "fn", "name": "trim", "version": 99, "args": []},
+                        ],
+                    })
+                ]
+            }
+        }
+        with pytest.raises(TransformationError, match="version 99"):
+            await transformer.apply_transformations(batch, config)
+
+    @pytest.mark.asyncio
+    async def test_unregistered_version_error_names_available_versions(self, transformer):
+        """The error message for an unregistered version includes the list of
+        registered versions so the pipeline author knows what to pin to."""
+        from src.engine.data_transformer import AssignmentTransformer
+        at = AssignmentTransformer()
+        with pytest.raises(TransformationError, match=r"\[1\]"):
+            await at._apply_function("x", "trim", 99, [])
+
+    @pytest.mark.asyncio
+    async def test_unknown_function_still_raises(self, transformer):
+        """Calling a function name not in FUNCTION_CATALOG still raises TransformationError."""
+        batch = [{"val": "x"}]
+        config = {
+            "mapping": {
+                "assignments": [
+                    _assignment("out", expr={
+                        "op": "pipe",
+                        "args": [
+                            {"op": "get", "path": ["val"]},
+                            {"op": "fn", "name": "nonexistent_fn", "version": 1, "args": []},
+                        ],
+                    })
+                ]
+            }
+        }
+        with pytest.raises(TransformationError, match="Unknown function"):
+            await transformer.apply_transformations(batch, config)
+
+    @pytest.mark.asyncio
+    async def test_all_catalog_entries_are_version_dicts(self):
+        """Every FUNCTION_CATALOG entry is a dict[int, str] (not the old {version, fn} shape)."""
+        from src.engine.data_transformer import AssignmentTransformer
+        for name, versions in AssignmentTransformer.FUNCTION_CATALOG.items():
+            assert isinstance(versions, dict), f"{name}: expected dict, got {type(versions)}"
+            for ver, fn_name in versions.items():
+                assert isinstance(ver, int), f"{name}: key {ver!r} is not int"
+                assert isinstance(fn_name, str), f"{name}: value {fn_name!r} is not str"
