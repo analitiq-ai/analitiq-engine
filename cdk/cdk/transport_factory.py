@@ -8,8 +8,11 @@ concrete transport object.
 
 Currently registered transport families:
 
-* ``sqlalchemy`` — SQLAlchemy ``AsyncEngine`` for database connectors
-  whose dialect has an async driver (Postgres asyncpg, MySQL aiomysql).
+* ``sqlalchemy`` — SQLAlchemy engine for database connectors. The engine
+  flavour follows the driver's own capability: an async dialect (Postgres
+  asyncpg, MySQL aiomysql) gets an ``AsyncEngine``; a sync-only dialect
+  (Redshift ``redshift+redshift_connector``) gets a plain ``Engine`` whose
+  operations callers run via ``asyncio.to_thread``.
 * ``adbc``       — ADBC DBAPI 2.0 connection for database connectors
   whose dialect has no async SA driver (Snowflake, BigQuery) or wants
   the Arrow-native bulk path (Postgres). Driver enum closed to the
@@ -31,7 +34,8 @@ import urllib.parse
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, Mapping, Optional
 
-from sqlalchemy import text as _sa_text
+from sqlalchemy import create_engine, text as _sa_text
+from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 if TYPE_CHECKING:
@@ -164,8 +168,8 @@ def _apply_encoding(encoding: str, value: Any, *, binding: str) -> str:
 # Each driver speaks its own native SSL vocabulary. The RESOLUTION step
 # (engine/shell side) only extracts the stored ``tls.mode`` string and the
 # CA bundle PEM — both JSON-safe. The BUILD step (worker side) turns them
-# into the driver's connect argument via the connector dialect's
-# ``build_tls_connect_arg`` hook; the per-driver logic lives in each
+# into the driver's connect arguments via the connector dialect's
+# ``build_tls_connect_args`` hook; the per-driver logic lives in each
 # connector package, never here. ``ca_ssl_context`` is the shared helper
 # those packages call to build a verifying SSLContext from a CA bundle.
 # ---------------------------------------------------------------------------
@@ -271,11 +275,18 @@ def _select_transport(
 
 @dataclass(frozen=True)
 class SqlAlchemyTransport:
-    """Materialized SQLAlchemy transport."""
+    """Materialized SQLAlchemy transport.
 
-    engine: AsyncEngine
+    ``is_async`` records which engine flavour ``engine`` carries: an
+    :class:`AsyncEngine` for dialects with an async driver, or a plain
+    sync :class:`Engine` for sync-only drivers (callers run sync-engine
+    operations via ``asyncio.to_thread``).
+    """
+
+    engine: AsyncEngine | Engine
     driver: str
     dialect: str
+    is_async: bool
 
 
 def resolve_sqlalchemy_spec(
@@ -324,15 +335,48 @@ def resolve_sqlalchemy_spec(
     }
 
 
+def _dialect_is_async(dsn: str) -> bool:
+    """Whether the DSN's SQLAlchemy dialect ships an async driver.
+
+    The dialect class itself declares the capability
+    (``Dialect.is_async``), so no driver list is hardcoded here: any
+    sync-only dialect (e.g. ``redshift+redshift_connector``) routes to
+    the sync engine path automatically.
+    """
+    return bool(getattr(make_url(dsn).get_dialect(), "is_async", False))
+
+
+def _build_and_probe_sync_engine(
+    dsn: str, connect_args: Mapping[str, Any], engine_kwargs: Mapping[str, Any]
+) -> Engine:
+    """Build a sync engine and run the ``SELECT 1`` probe (worker thread)."""
+    engine = create_engine(dsn, connect_args=dict(connect_args), **dict(engine_kwargs))
+    try:
+        with engine.connect() as conn:
+            conn.execute(_sa_text("SELECT 1"))
+    except Exception:
+        engine.dispose()
+        raise
+    return engine
+
+
 async def build_sqlalchemy_from_spec(
     resolved: Mapping[str, Any], *, sql_dialect: Any = None
 ) -> SqlAlchemyTransport:
     """Build the SQLAlchemy transport from a resolved spec (worker side).
 
+    The engine flavour follows the driver's capability: an async dialect
+    gets ``create_async_engine``; a sync-only dialect (no async SQLAlchemy
+    driver exists, e.g. Redshift's vendor-supported ``redshift_connector``)
+    gets a plain ``create_engine`` built and probed on a worker thread.
+
     TLS connect arguments are produced by the connector dialect's
-    ``build_tls_connect_arg`` hook — the per-driver SSL vocabulary lives in
-    the connector package. A declared TLS mode without a dialect that
-    implements the hook fails loudly.
+    ``build_tls_connect_args`` hook — the per-driver SSL vocabulary lives
+    in the connector package. Most drivers take a single ``ssl`` argument;
+    drivers whose TLS configuration spans several connect parameters
+    (``redshift_connector``: ``ssl`` + ``sslmode``) return them all. A
+    declared TLS mode without a dialect that implements the hook fails
+    loudly.
     """
     driver = resolved["driver"]
     connect_args: Dict[str, Any] = {}
@@ -342,31 +386,36 @@ async def build_sqlalchemy_from_spec(
             raise ValueError(
                 f"transport for driver {driver!r} declares tls but no "
                 f"connector dialect was supplied; the connector package's "
-                f"dialect implements build_tls_connect_arg"
+                f"dialect implements build_tls_connect_args"
             )
-        ssl_value = sql_dialect.build_tls_connect_arg(
-            tls["mode"], tls.get("ca_pem")
+        connect_args.update(
+            sql_dialect.build_tls_connect_args(tls["mode"], tls.get("ca_pem"))
         )
-        if ssl_value is not None:
-            connect_args["ssl"] = ssl_value
 
-    engine = create_async_engine(
-        resolved["dsn"],
-        connect_args=connect_args,
-        **dict(resolved.get("engine_kwargs") or {}),
-    )
-    try:
-        async with engine.connect() as conn:
-            await conn.execute(_sa_text("SELECT 1"))
-    except Exception:
-        await engine.dispose()
-        raise
+    dsn = resolved["dsn"]
+    engine_kwargs = dict(resolved.get("engine_kwargs") or {})
+    is_async = _dialect_is_async(dsn)
+    if is_async:
+        engine: AsyncEngine | Engine = create_async_engine(
+            dsn, connect_args=connect_args, **engine_kwargs
+        )
+        try:
+            async with engine.connect() as conn:
+                await conn.execute(_sa_text("SELECT 1"))
+        except Exception:
+            await engine.dispose()
+            raise
+    else:
+        engine = await asyncio.to_thread(
+            _build_and_probe_sync_engine, dsn, connect_args, engine_kwargs
+        )
 
     base_dialect = driver.split("+", 1)[0]
     return SqlAlchemyTransport(
         engine=engine,
         driver=driver,
         dialect=base_dialect,
+        is_async=is_async,
     )
 
 

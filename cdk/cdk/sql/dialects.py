@@ -148,6 +148,20 @@ class SqlDialect:
             "build_tls_connect_arg", dialect=self.name
         )
 
+    def build_tls_connect_args(self, mode: str, ca_pem: str | None) -> Dict[str, Any]:
+        """Full ``connect_args`` mapping for the driver's TLS configuration.
+
+        This is the hook the transport factory calls. Most drivers take
+        their entire TLS configuration as a single ``ssl`` argument, so
+        the default places :meth:`build_tls_connect_arg`'s value under
+        that key (omitting it when the value is ``None``, meaning "no ssl
+        argument at all"). A dialect whose driver spreads TLS over several
+        connect parameters (``redshift_connector``: ``ssl: bool`` +
+        ``sslmode: str``) overrides this method instead of the singular.
+        """
+        value = self.build_tls_connect_arg(mode, ca_pem)
+        return {} if value is None else {"ssl": value}
+
     def sqlalchemy_pre_ddl(self, schema_name: str) -> List[str]:
         """Statements to run before ``MetaData.create_all`` (e.g. postgres'
         ``CREATE SCHEMA IF NOT EXISTS`` for a non-default schema). None by

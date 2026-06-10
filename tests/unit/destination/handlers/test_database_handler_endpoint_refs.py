@@ -197,9 +197,14 @@ class TestWriteBatchFatalOnTypeMapError:
             schema_contract=contract_mock,
         )
 
+        class _FakeTxnConn:
+            async def run_sync(self, fn, *args):
+                # AsyncConnection.run_sync hands the sync Connection to fn.
+                return fn(MagicMock(), *args)
+
         @asynccontextmanager
         async def _fake_begin():
-            yield AsyncMock()
+            yield _FakeTxnConn()
 
         handler._engine.begin = _fake_begin
 
@@ -210,7 +215,7 @@ class TestWriteBatchFatalOnTypeMapError:
 
         # The schema contract's prepare_records is called inside _insert_records;
         # route the UnmappedTypeError through that entry.
-        async def _raising_insert(_conn, _state, _records):
+        def _raising_insert(_conn, _state, _records):
             raise UnmappedTypeError("pg", "forward", "MONEY")
 
         handler._insert_records = _raising_insert  # type: ignore[method-assign]
@@ -281,7 +286,7 @@ class TestUpsertDowngradeWarns:
         from cdk.sql.generic import GenericSQLConnector, _StreamState
 
         handler = GenericSQLConnector()
-        handler._insert_records = AsyncMock()  # type: ignore[method-assign]
+        handler._insert_records = MagicMock()  # type: ignore[method-assign]
         state = _StreamState(
             table=MagicMock(),
             schema_name="public",
@@ -292,9 +297,9 @@ class TestUpsertDowngradeWarns:
         )
 
         with caplog.at_level(logging.WARNING, logger="cdk.sql.generic"):
-            await handler._upsert_records(AsyncMock(), state, [{"id": 1}])
+            handler._upsert_records(MagicMock(), state, [{"id": 1}])
 
-        handler._insert_records.assert_awaited_once()
+        handler._insert_records.assert_called_once()
         assert any(
             "duplicates are possible" in r.getMessage() for r in caplog.records
         )
@@ -317,11 +322,11 @@ class TestUpsertDowngradeWarns:
             primary_keys=["id"],
         )
 
-        conn = AsyncMock()
+        conn = MagicMock()
         with caplog.at_level(logging.WARNING, logger="cdk.sql.generic"):
-            await handler._upsert_records(conn, state, [{"id": 1}])
+            handler._upsert_records(conn, state, [{"id": 1}])
 
-        conn.execute.assert_awaited_once()
+        conn.execute.assert_called_once()
         assert not caplog.records
 
 

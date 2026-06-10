@@ -139,7 +139,8 @@ class TestConnectionRuntimeMaterialize:
     async def test_materialize_database_uses_transport_factory(self):
         engine = AsyncMock()
         transport = SqlAlchemyTransport(
-            engine=engine, driver="postgresql+asyncpg", dialect="postgresql"
+            engine=engine, driver="postgresql+asyncpg", dialect="postgresql",
+            is_async=True,
         )
         runtime = ConnectionRuntime(
             raw_config={"parameters": {"host": "h", "port": 5432}},
@@ -237,12 +238,84 @@ class TestConnectionRuntimeMaterialize:
 # ---------------------------------------------------------------------------
 
 
+class TestConnectionRuntimeSyncEngine:
+    """A sync-only SQLAlchemy driver (is_async=False transport) lands on
+    sync_engine / is_sync_sqlalchemy; the async accessor refuses loudly
+    and close() disposes the sync pool (issue #224)."""
+
+    def _materializable_runtime(self):
+        return ConnectionRuntime(
+            raw_config={"parameters": {}},
+            connection_id="conn-db",
+            connector_id="test-connector",
+            connector_type="database",
+            resolver=_resolver(),
+            connector_definition=_db_connector(),
+        )
+
+    def _sync_transport(self, engine):
+        return SqlAlchemyTransport(
+            engine=engine,
+            driver="redshift+redshift_connector",
+            dialect="redshift",
+            is_async=False,
+        )
+
+    @pytest.mark.asyncio
+    async def test_materialize_sync_transport_exposes_sync_engine(self):
+        engine = MagicMock()
+        runtime = self._materializable_runtime()
+        with patch(
+            "cdk.connection_runtime.build_transport",
+            new=AsyncMock(return_value=self._sync_transport(engine)),
+        ):
+            await runtime.materialize()
+        assert runtime.is_sync_sqlalchemy is True
+        assert runtime.is_adbc is False
+        assert runtime.sync_engine is engine
+        assert runtime.driver == "redshift"
+        assert runtime.driver_string == "redshift+redshift_connector"
+        with pytest.raises(RuntimeError, match="sync-only"):
+            _ = runtime.engine
+
+    @pytest.mark.asyncio
+    async def test_async_runtime_refuses_sync_engine_accessor(self):
+        engine = AsyncMock()
+        transport = SqlAlchemyTransport(
+            engine=engine, driver="postgresql+asyncpg", dialect="postgresql",
+            is_async=True,
+        )
+        runtime = self._materializable_runtime()
+        with patch(
+            "cdk.connection_runtime.build_transport",
+            new=AsyncMock(return_value=transport),
+        ):
+            await runtime.materialize()
+        assert runtime.is_sync_sqlalchemy is False
+        with pytest.raises(RuntimeError, match="sync_engine not available"):
+            _ = runtime.sync_engine
+
+    @pytest.mark.asyncio
+    async def test_close_disposes_sync_engine(self):
+        engine = MagicMock()
+        runtime = self._materializable_runtime()
+        with patch(
+            "cdk.connection_runtime.build_transport",
+            new=AsyncMock(return_value=self._sync_transport(engine)),
+        ):
+            await runtime.materialize()
+        await runtime.close()
+        engine.dispose.assert_called_once()
+        assert not runtime._materialized
+
+
 class TestConnectionRuntimeClose:
     @pytest.mark.asyncio
     async def test_close_disposes_engine(self):
         engine = AsyncMock()
         transport = SqlAlchemyTransport(
-            engine=engine, driver="postgresql+asyncpg", dialect="postgresql"
+            engine=engine, driver="postgresql+asyncpg", dialect="postgresql",
+            is_async=True,
         )
         runtime = ConnectionRuntime(
             raw_config={"parameters": {}},
@@ -290,7 +363,8 @@ class TestConnectionRuntimeClose:
     async def test_double_close_is_safe(self):
         engine = AsyncMock()
         transport = SqlAlchemyTransport(
-            engine=engine, driver="postgresql+asyncpg", dialect="postgresql"
+            engine=engine, driver="postgresql+asyncpg", dialect="postgresql",
+            is_async=True,
         )
         runtime = ConnectionRuntime(
             raw_config={"parameters": {}},
@@ -413,7 +487,8 @@ class TestScrubResolvedConfig:
         materialized."""
         engine = AsyncMock()
         transport = SqlAlchemyTransport(
-            engine=engine, driver="postgresql+asyncpg", dialect="postgresql"
+            engine=engine, driver="postgresql+asyncpg", dialect="postgresql",
+            is_async=True,
         )
         runtime = ConnectionRuntime(
             raw_config={"parameters": {}},

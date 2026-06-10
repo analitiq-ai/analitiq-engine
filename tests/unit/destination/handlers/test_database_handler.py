@@ -73,6 +73,7 @@ def _patch_transport(*, engine=None, side_effect=None):
         engine=engine or AsyncMock(),
         driver="postgresql+asyncpg",
         dialect="postgresql",
+        is_async=True,
     )
     return patch(
         "cdk.connection_runtime.build_transport",
@@ -183,7 +184,8 @@ class TestDatabaseHandlerConnect:
         # Reset resolver to return empty dict — sqlite has no secrets.
         runtime._resolver.resolve = AsyncMock(return_value={})
         transport = SqlAlchemyTransport(
-            engine=AsyncMock(), driver="sqlite+aiosqlite", dialect="sqlite"
+            engine=AsyncMock(), driver="sqlite+aiosqlite", dialect="sqlite",
+            is_async=True,
         )
         with patch(
             "cdk.connection_runtime.build_transport",

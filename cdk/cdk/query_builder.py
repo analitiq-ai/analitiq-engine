@@ -114,14 +114,19 @@ class QueryConfig:
 
 
 # Third-party SQLAlchemy dialects loaded on demand. Each entry names the
-# importable module that calling ``import_module`` triggers the dialect
-# registration side effect for, so we can resolve ``dialect()`` after.
-_LAZY_DIALECT_PACKAGES: Dict[str, str] = {
-    "snowflake": "snowflake.sqlalchemy",
-    "bigquery": "sqlalchemy_bigquery",
-    "redshift": "sqlalchemy_redshift.dialect",
-    "duckdb": "duckdb_engine",
-    "clickhouse": "clickhouse_sqlalchemy",
+# importable module (whose import registers the dialect) and the registry
+# name to resolve. The registry name pins the DRIVER FLAVOUR of the
+# dialect when it matters for compiled paramstyle — mirroring how the
+# builtin postgres entry pins the asyncpg flavour. Redshift resolves the
+# ``redshift_connector`` flavour: the registry default is psycopg2-shaped
+# and compiles ``%(name)s`` named params, which redshift_connector
+# rejects ("Only %s and %% are supported in the query").
+_LAZY_DIALECT_PACKAGES: Dict[str, tuple] = {
+    "snowflake": ("snowflake.sqlalchemy", "snowflake"),
+    "bigquery": ("sqlalchemy_bigquery", "bigquery"),
+    "redshift": ("sqlalchemy_redshift.dialect", "redshift.redshift_connector"),
+    "duckdb": ("duckdb_engine", "duckdb"),
+    "clickhouse": ("clickhouse_sqlalchemy", "clickhouse"),
 }
 
 
@@ -178,9 +183,10 @@ def _get_sqlalchemy_dialect(
             return postgresql.dialect(**kwargs)
         return factory(**kwargs)
 
-    package = _LAZY_DIALECT_PACKAGES.get(dialect_lower)
-    if package is None:
+    entry = _LAZY_DIALECT_PACKAGES.get(dialect_lower)
+    if entry is None:
         raise ValueError(f"Unsupported dialect: {dialect}")
+    package, registry_name = entry
 
     try:
         importlib.import_module(package)
@@ -195,7 +201,7 @@ def _get_sqlalchemy_dialect(
     # it via SQLAlchemy's URL machinery so we don't hard-code each
     # third-party dialect's module path.
     from sqlalchemy.dialects import registry
-    cls = registry.load(dialect_lower)
+    cls = registry.load(registry_name)
     return cls(**kwargs)
 
 

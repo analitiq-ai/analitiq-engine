@@ -10,9 +10,10 @@ transport is SQLAlchemy or ADBC. This module is that single seam:
 Queries are authored once with ``?`` (qmark) placeholders. On the ADBC path the
 DBAPI binds qmark positionally as-is; on the SQLAlchemy path the placeholders are
 rewritten to named binds so SQLAlchemy compiles them to whatever paramstyle the
-async driver wants (asyncpg ``$1``, aiomysql ``%s``, …). The ADBC DBAPI is
-synchronous, so its calls are off-loaded with ``asyncio.to_thread`` — matching
-how the streaming ADBC reader/handler already drive their cursors.
+driver wants (asyncpg ``$1``, aiomysql ``%s``, …). The ADBC DBAPI and the sync
+SQLAlchemy engine (sync-only drivers, e.g. Redshift's ``redshift_connector``)
+are synchronous, so their calls are off-loaded with ``asyncio.to_thread`` —
+matching how the streaming ADBC reader/handler already drive their cursors.
 """
 
 from __future__ import annotations
@@ -77,6 +78,10 @@ async def fetch_rows(runtime: Any, sql: str, params: Sequence[Any]) -> List[Row]
     try:
         if runtime.is_adbc:
             return await asyncio.to_thread(_fetch_rows_adbc_sync, runtime, sql, params)
+        if runtime.is_sync_sqlalchemy:
+            return await asyncio.to_thread(
+                _fetch_rows_sync_engine, runtime, sql, params
+            )
         return await _fetch_rows_sqlalchemy(runtime, sql, params)
     except SqlIntrospectionError:
         raise
@@ -92,6 +97,13 @@ async def _fetch_rows_sqlalchemy(
     text_sql, binds = _qmark_to_named(sql, params)
     async with acquire_connection(runtime.engine) as conn:
         result = await conn.execute(text(text_sql), binds)
+        return [dict(row) for row in result.mappings().all()]
+
+
+def _fetch_rows_sync_engine(runtime: Any, sql: str, params: Sequence[Any]) -> List[Row]:
+    text_sql, binds = _qmark_to_named(sql, params)
+    with runtime.sync_engine.connect() as conn:
+        result = conn.execute(text(text_sql), binds)
         return [dict(row) for row in result.mappings().all()]
 
 
@@ -128,6 +140,9 @@ async def execute_ddl(runtime: Any, statements: Union[str, Sequence[str]]) -> No
         if runtime.is_adbc:
             await asyncio.to_thread(_execute_ddl_adbc_sync, runtime, stmts)
             return
+        if runtime.is_sync_sqlalchemy:
+            await asyncio.to_thread(_execute_ddl_sync_engine, runtime, stmts)
+            return
         async with runtime.engine.begin() as conn:
             for ddl in stmts:
                 await conn.exec_driver_sql(ddl)
@@ -135,6 +150,13 @@ async def execute_ddl(runtime: Any, statements: Union[str, Sequence[str]]) -> No
         raise
     except Exception as err:
         raise CreateTableError(f"DDL execution failed: {err}") from err
+
+
+def _execute_ddl_sync_engine(runtime: Any, statements: Sequence[str]) -> None:
+    """Run the DDL batch on the sync engine in one transaction (worker thread)."""
+    with runtime.sync_engine.begin() as conn:
+        for ddl in statements:
+            conn.exec_driver_sql(ddl)
 
 
 def _execute_ddl_adbc_sync(runtime: Any, statements: Sequence[str]) -> None:
