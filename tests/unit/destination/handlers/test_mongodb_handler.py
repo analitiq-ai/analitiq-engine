@@ -5,7 +5,7 @@ Covers:
 * configure_schema: collection + index creation, missing endpoint, create_collection error
 * write_batch: insert, upsert (with and without conflict_keys), truncate-insert
 * Idempotency: ALREADY_COMMITTED on replayed (run_id, stream_id, batch_seq)
-* Empty batch, unconfigured stream (FATAL_FAILURE), insert error (RETRYABLE)
+* Empty batch, unconfigured stream (RETRYABLE_FAILURE), insert error (RETRYABLE)
 * Commit-record failure returns RETRYABLE_FAILURE for all write modes
 * Per-database _batch_commits_ready flag
 """
@@ -317,10 +317,9 @@ async def test_write_batch_upsert_with_conflict_keys():
 
 
 @pytest.mark.asyncio
-async def test_write_batch_upsert_without_conflict_keys_falls_through_to_insert():
-    """Upsert mode with no conflict_keys falls through to insert_many."""
+async def test_write_batch_upsert_without_conflict_keys_returns_retryable():
+    """Upsert mode with no conflict_keys must fail loudly, not silently insert."""
     rt, commits_coll, target_coll, db_mock = _make_runtime()
-    target_coll.insert_many = AsyncMock(return_value=MagicMock(inserted_ids=["x"]))
 
     handler, _ = await _connected_handler(rt)
     handler._streams["s1"] = _MongoStreamState(
@@ -334,8 +333,8 @@ async def test_write_batch_upsert_without_conflict_keys_falls_through_to_insert(
         record_batch=batch, record_ids=["r1"], cursor=_cursor(),
     )
 
-    assert result.status == AckStatus.ACK_STATUS_SUCCESS
-    target_coll.insert_many.assert_awaited_once()
+    assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
+    target_coll.insert_many.assert_not_called()
     target_coll.bulk_write.assert_not_called()
 
 
@@ -680,3 +679,128 @@ async def test_write_batch_decodes_json_fields():
 
     assert result.status == AckStatus.ACK_STATUS_SUCCESS
     assert written_docs[0]["payload"] == {"key": "value"}
+
+
+# ---------------------------------------------------------------------------
+# find_one error handling
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_write_batch_find_one_failure_returns_retryable():
+    """A network error during the idempotency find_one must return RETRYABLE,
+    not propagate as an unhandled exception that bypasses BatchWriteResult."""
+    rt, commits_coll, target_coll, db_mock = _make_runtime()
+    commits_coll.find_one = AsyncMock(side_effect=RuntimeError("connection reset"))
+
+    handler, _ = await _connected_handler(rt)
+    handler._streams["s1"] = _MongoStreamState("testdb", "orders", WriteMode.WRITE_MODE_INSERT)
+    handler._batch_commits_ready.add("testdb")
+
+    result = await handler.write_batch(
+        run_id="r", stream_id="s1", batch_seq=0,
+        record_batch=_make_batch({"id": 1}), record_ids=["r1"], cursor=_cursor(),
+    )
+
+    assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
+    assert "Idempotency check failed" in result.failure_summary
+    target_coll.insert_many.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Malformed JSON field returns FATAL
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_write_batch_malformed_json_field_returns_fatal():
+    """A batch with a malformed Json column must return FATAL_FAILURE — it
+    cannot be fixed by retrying."""
+    rt, commits_coll, target_coll, db_mock = _make_runtime()
+
+    handler, _ = await _connected_handler(rt)
+    handler._streams["s1"] = _MongoStreamState(
+        "testdb", "events", WriteMode.WRITE_MODE_INSERT,
+        json_fields={"payload"},
+    )
+    handler._batch_commits_ready.add("testdb")
+
+    batch = _make_batch({"id": "e1", "payload": "not-valid-json{"})
+    result = await handler.write_batch(
+        run_id="r", stream_id="s1", batch_seq=0,
+        record_batch=batch, record_ids=["r1"], cursor=_cursor(),
+    )
+
+    assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+    target_coll.insert_many.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# UPSERT with empty conflict_keys at write time
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_write_batch_upsert_empty_conflict_keys_at_write_time_returns_retryable():
+    """If UPSERT stream state somehow has empty conflict_keys at write time,
+    _write_docs must raise rather than silently falling through to insert."""
+    rt, commits_coll, target_coll, db_mock = _make_runtime()
+
+    handler, _ = await _connected_handler(rt)
+    # Inject inconsistent state directly (bypassing configure_schema validation)
+    handler._streams["s1"] = _MongoStreamState(
+        "testdb", "items", WriteMode.WRITE_MODE_UPSERT, conflict_keys=[]
+    )
+    handler._batch_commits_ready.add("testdb")
+
+    batch = _make_batch({"id": 1})
+    result = await handler.write_batch(
+        run_id="r", stream_id="s1", batch_seq=0,
+        record_batch=batch, record_ids=["r1"], cursor=_cursor(),
+    )
+
+    assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
+    target_coll.bulk_write.assert_not_called()
+    target_coll.insert_many.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# connect() failure path
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_connect_failure_leaves_handler_not_connected():
+    """A materialize() failure must propagate; _connected must remain False."""
+    rt, *_ = _make_runtime()
+    rt.materialize = AsyncMock(side_effect=RuntimeError("auth failed"))
+
+    handler = MongoDbDestinationHandler()
+    with pytest.raises(RuntimeError, match="auth failed"):
+        await handler.connect(rt)
+
+    assert handler._connected is False
+
+
+# ---------------------------------------------------------------------------
+# UPSERT commit-record failure
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_write_batch_upsert_commit_failure_returns_retryable():
+    """Upsert mode: a lost commit record must return RETRYABLE, same as INSERT."""
+    rt, commits_coll, target_coll, db_mock = _make_runtime()
+    commits_coll.insert_one = AsyncMock(side_effect=RuntimeError("write conflict"))
+
+    with patch.dict(sys.modules, {
+        "pymongo": MagicMock(UpdateOne=lambda f, u, **kw: (f, u)),
+    }):
+        handler, _ = await _connected_handler(rt)
+        handler._streams["s1"] = _MongoStreamState(
+            "testdb", "users", WriteMode.WRITE_MODE_UPSERT, conflict_keys=["email"]
+        )
+        handler._batch_commits_ready.add("testdb")
+
+        batch = _make_batch({"email": "a@b.com", "name": "Alice"})
+        result = await handler.write_batch(
+            run_id="r", stream_id="s1", batch_seq=0,
+            record_batch=batch, record_ids=["r1"], cursor=_cursor(),
+        )
+
+    assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE

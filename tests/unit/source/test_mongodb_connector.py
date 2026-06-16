@@ -589,3 +589,120 @@ async def test_read_batches_with_properties_schema():
 
     assert len(batches) == 1
     assert batches[0].num_rows == 1
+
+
+# ---------------------------------------------------------------------------
+# Missing database raises ReadError
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_read_batches_missing_database_raises():
+    """No database in endpoint AND no default database on runtime → ReadError."""
+    runtime = _make_runtime(db_name="")  # empty string → falsy
+    runtime.mongo_default_database = ""
+    runtime.mongo_client = MagicMock()
+
+    config = {
+        "endpoint_document": {"collection": "users"},  # no database key
+        "stream_source": {},
+    }
+    connector = MongoDbSourceConnector()
+    from src.source.connectors.base import ReadError
+    with pytest.raises(ReadError, match="database"):
+        async for _ in connector.read_batches(
+            runtime, config, checkpoint=_make_checkpoint(), stream_name="x"
+        ):
+            pass
+
+
+# ---------------------------------------------------------------------------
+# cursor_field as list: first element is used
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_incremental_cursor_field_as_list_uses_first_element():
+    """When cursor_field is a list, the first element must be used for filtering."""
+    bson = sys.modules["bson"]
+    now = datetime.datetime(2024, 6, 1, 12, 0, 0, tzinfo=datetime.timezone.utc)
+    docs = [{"_id": bson.ObjectId("507f191e810c19729de860e1"), "updated_at": now}]
+
+    client, coll = _make_motor_client([docs, []])
+    runtime = _make_runtime()
+    runtime.mongo_client = client
+
+    config = {
+        "endpoint_document": {"collection": "events", "database": "mydb"},
+        "stream_source": {
+            "replication": {
+                "method": "incremental",
+                "cursor_field": ["updated_at"],  # list form
+            }
+        },
+    }
+
+    cp = _make_checkpoint(cursor_value=now)
+    connector = MongoDbSourceConnector()
+    async for _ in connector.read_batches(
+        runtime, config, checkpoint=cp, stream_name="events"
+    ):
+        pass
+
+    first_filter = coll.find.call_args_list[0][0][0]
+    assert "updated_at" in first_filter
+
+
+# ---------------------------------------------------------------------------
+# Safety window with non-datetime cursor → warning only, no crash
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_safety_window_with_non_datetime_cursor_no_crash():
+    """When cursor_value is not a datetime, safety_window_seconds must be skipped
+    with a warning rather than crashing or corrupting the cursor value."""
+    bson = sys.modules["bson"]
+    integer_cursor = 42  # non-datetime cursor
+    docs = [{"_id": bson.ObjectId("507f191e810c19729de860e1"), "seq": 45}]
+
+    client, _ = _make_motor_client([docs, []])
+    runtime = _make_runtime()
+    runtime.mongo_client = client
+
+    config = {
+        "endpoint_document": {"collection": "ev6", "database": "mydb"},
+        "stream_source": {
+            "replication": {
+                "method": "incremental",
+                "cursor_field": "seq",
+                "safety_window_seconds": 300,
+            }
+        },
+    }
+
+    cp = _make_checkpoint(cursor_value=integer_cursor)
+    connector = MongoDbSourceConnector()
+    batches = []
+    async for batch in connector.read_batches(
+        runtime, config, checkpoint=cp, stream_name="ev6"
+    ):
+        batches.append(batch)
+
+    assert len(batches) == 1
+    # The cursor should have been saved (45 > 42)
+    cp.save_cursor.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# connect() failure in source connector
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_source_connect_failure_propagates():
+    """A materialize() failure must propagate as ConnectionError from connect()."""
+    runtime = _make_runtime()
+    runtime.materialize = AsyncMock(side_effect=RuntimeError("auth failed"))
+    runtime.mongo_client = MagicMock()
+
+    connector = MongoDbSourceConnector()
+    from src.source.connectors.base import ConnectionError as ConnectorConnectionError
+    with pytest.raises(ConnectorConnectionError, match="MongoDB connection failed"):
+        await connector.connect(runtime)

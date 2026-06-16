@@ -8,8 +8,9 @@ the full ``BaseDestinationHandler`` contract:
   *all* documents are duplicates is treated as an idempotent success (returns
   0 records written).
 * **Upsert** — ``collection.bulk_write([UpdateOne({key: val}, {$set: doc},
-  upsert=True) for doc in batch], ordered=False)``; conflict key set comes
-  from the endpoint's ``write.conflict_keys``.
+  upsert=True) for doc in batch], ordered=False)``; conflict key set is read
+  from ``_write_conflict_keys`` (set by the engine after primary-key fallback
+  resolution) or falls back to the endpoint's ``write.conflict_keys``.
 * **Truncate-insert** — ``collection.delete_many({})`` then ``insert_many``.
   Not atomic: a concurrent reader sees an empty collection mid-window.
 
@@ -268,9 +269,16 @@ class MongoDbDestinationHandler(BaseDestinationHandler):
                 background=True,
             )
         except Exception as exc:
-            # Swallow only "index already exists with the same options".
-            # IndexOptionsConflict means the index exists but is NOT unique,
-            # which would silently break the idempotency guard — re-raise it.
+            # Re-raise IndexOptionsConflict (code 85): the index exists but
+            # lacks unique=True, which would silently break the idempotency
+            # guard.  Any other exception is re-raised unless the message
+            # confirms the identical unique index was already present.
+            try:
+                from pymongo.errors import OperationFailure
+                if isinstance(exc, OperationFailure) and exc.code == 85:
+                    raise
+            except ImportError:
+                pass  # pymongo not importable; fall through to string check
             if "already exists" not in str(exc).lower():
                 raise
 
@@ -312,7 +320,18 @@ class MongoDbDestinationHandler(BaseDestinationHandler):
 
         commit_key = {"run_id": run_id, "stream_id": stream_id, "batch_seq": batch_seq}
 
-        existing = await commits_coll.find_one(commit_key)
+        try:
+            existing = await commits_coll.find_one(commit_key)
+        except Exception as exc:
+            logger.error(
+                "Idempotency check failed (run=%s stream=%s seq=%d): %s",
+                run_id, stream_id, batch_seq, exc,
+            )
+            return BatchWriteResult(
+                status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
+                records_written=0,
+                failure_summary=f"Idempotency check failed: {exc}",
+            )
         if existing is not None:
             stored_token: bytes = existing.get("cursor_token") or b""
             return BatchWriteResult(
@@ -321,9 +340,20 @@ class MongoDbDestinationHandler(BaseDestinationHandler):
                 committed_cursor=Cursor(token=stored_token),
             )
 
-        docs = _arrow_to_doc_list(record_batch)
-        if state.json_fields:
-            docs = decode_json_fields(docs, state.json_fields)
+        try:
+            docs = _arrow_to_doc_list(record_batch)
+            if state.json_fields:
+                docs = decode_json_fields(docs, state.json_fields)
+        except ValueError as exc:
+            logger.error(
+                "Malformed Json field in batch (run=%s stream=%s seq=%d): %s",
+                run_id, stream_id, batch_seq, exc,
+            )
+            return BatchWriteResult(
+                status=AckStatus.ACK_STATUS_FATAL_FAILURE,
+                records_written=0,
+                failure_summary=str(exc),
+            )
         if not docs:
             try:
                 await commits_coll.insert_one(
@@ -398,7 +428,14 @@ class MongoDbDestinationHandler(BaseDestinationHandler):
             result = await collection.insert_many(docs, ordered=False)
             return len(result.inserted_ids)
 
-        if write_mode == WriteMode.WRITE_MODE_UPSERT and conflict_keys:
+        if write_mode == WriteMode.WRITE_MODE_UPSERT:
+            if not conflict_keys:
+                # configure_schema rejects UPSERT without conflict_keys; if we
+                # reach here the stream state is inconsistent — fail loudly.
+                raise ValueError(
+                    "UPSERT mode requires conflict_keys but none are set on the "
+                    "stream state; this indicates a configure_schema logic error"
+                )
             from pymongo import UpdateOne
             ops = []
             for doc in docs:
@@ -416,8 +453,29 @@ class MongoDbDestinationHandler(BaseDestinationHandler):
                     if k != "_id" or "_id" in conflict_keys
                 }
                 ops.append(UpdateOne(filter_doc, {"$set": set_doc}, upsert=True))
-            result = await collection.bulk_write(ops, ordered=False)
-            return result.upserted_count + result.modified_count
+            try:
+                result = await collection.bulk_write(ops, ordered=False)
+                return result.upserted_count + result.modified_count
+            except Exception as exc:
+                try:
+                    from pymongo.errors import BulkWriteError
+                except ImportError:
+                    raise exc  # pymongo unavailable; re-raise the original error
+                if not isinstance(exc, BulkWriteError):
+                    raise
+                details = exc.details or {}
+                non_dup = [
+                    e for e in (details.get("writeErrors") or [])
+                    if e.get("code") != 11000
+                ]
+                if non_dup:
+                    logger.error(
+                        "bulk_write (upsert): %d operation(s) failed with "
+                        "non-duplicate errors (first: %s); raising",
+                        len(non_dup), non_dup[0],
+                    )
+                    raise
+                return (details.get("nUpserted") or 0) + (details.get("nModified") or 0)
 
         try:
             result = await collection.insert_many(docs, ordered=False)
@@ -428,7 +486,7 @@ class MongoDbDestinationHandler(BaseDestinationHandler):
             try:
                 from pymongo.errors import BulkWriteError
             except ImportError:
-                raise exc
+                raise exc  # pymongo unavailable; re-raise the original error
             if not isinstance(exc, BulkWriteError):
                 raise
 

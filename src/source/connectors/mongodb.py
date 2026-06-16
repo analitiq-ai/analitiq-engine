@@ -8,16 +8,18 @@ Pagination uses ``_id``-keyset paging — ``{_id: {$gt: last_id}}`` with
 ``sort(_id, 1)`` — not ``skip()``/``limit()``, which degrades on large
 collections. The keyset filter is omitted on the first page so any ``_id``
 type (ObjectId, string, integer, compound) works correctly. Incremental
-replication adds a ``$gte`` filter on the declared cursor field before the
-keyset clause.
+replication adds a ``$gte`` filter on the declared cursor field combined with
+the keyset clause.
 
 BSON special values are coerced to Python primitives before Arrow ingestion:
 
-* ``bson.ObjectId`` → ``str`` (hex representation)
+* ``bson.ObjectId`` → ``str`` (24-character hex representation)
 * ``bson.Decimal128`` → ``str`` (preserves precision without lossy float cast)
 * ``bson.Binary`` → ``bytes``
-* ``datetime.datetime`` → Arrow normalises it as ``Timestamp``
 * Embedded documents and arrays are recursively coerced.
+
+``datetime.datetime`` values pass through unchanged; Arrow infers them as
+``Timestamp`` during ``from_pylist``.
 """
 
 from __future__ import annotations
@@ -193,8 +195,9 @@ class MongoDbSourceConnector(BaseConnector):
         initial_cursor_value = cursor_value
 
         # Roll the incremental cursor back by the safety window so late-arriving
-        # records are re-read. Record the pre-rollback time as the ceiling for
-        # the high-water mark so the next run stays within the same window.
+        # records are re-read. Capture the run-start timestamp as an upper bound
+        # for max_cursor_seen so the saved checkpoint never advances past "now",
+        # keeping the next run inside the same lookback window.
         cutoff: Optional[datetime] = None
         if safety_window_seconds > 0 and cursor_value is not None:
             if isinstance(cursor_value, datetime):
