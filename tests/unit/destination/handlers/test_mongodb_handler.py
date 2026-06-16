@@ -815,8 +815,11 @@ async def test_configure_schema_unspecified_mode_logs_warning(caplog):
         )
 
     assert result is True
-    assert any("WRITE_MODE_UNSPECIFIED" in r.message for r in caplog.records)
-    assert any("s1" in r.message for r in caplog.records)
+    assert any(
+        "WRITE_MODE_UNSPECIFIED" in r.message and "s1" in r.message
+        and r.levelno == logging.WARNING
+        for r in caplog.records
+    )
 
 
 # ---------------------------------------------------------------------------
