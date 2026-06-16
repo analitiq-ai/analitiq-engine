@@ -30,12 +30,32 @@ from typing import Any, AsyncIterator, Dict, List, Optional
 
 import pyarrow as pa
 
-from .base import BaseConnector, ConnectionError, ReadError
+from .base import BaseConnector, ConnectionError, ReadError, TransientReadError
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.schema_contract import SchemaContract
 from cdk.types import CheckpointStore
 
 logger = logging.getLogger(__name__)
+
+try:
+    from pymongo.errors import (
+        AutoReconnect,
+        CursorNotFound,
+        ServerSelectionTimeoutError,
+        WaitQueueTimeoutError,
+    )
+    _TRANSIENT_MOTOR_ERRORS: tuple = (
+        AutoReconnect,
+        CursorNotFound,
+        ServerSelectionTimeoutError,
+        WaitQueueTimeoutError,
+    )
+except ImportError:
+    logger.warning(
+        "pymongo.errors unavailable; Motor transient errors during cursor iteration "
+        "will be classified as fatal ReadErrors until pymongo is installed."
+    )
+    _TRANSIENT_MOTOR_ERRORS = ()
 
 
 def _coerce_bson(value: Any) -> Any:
@@ -234,8 +254,31 @@ class MongoDbSourceConnector(BaseConnector):
             )
 
             docs: List[Dict[str, Any]] = []
-            async for doc in cursor_obj:
-                docs.append(doc)
+            try:
+                async for doc in cursor_obj:
+                    docs.append(doc)
+            except _TRANSIENT_MOTOR_ERRORS as exc:
+                logger.warning(
+                    "Transient Motor error reading '%s' "
+                    "(stream=%s, database=%s, last_id=%r): %s",
+                    collection_name, stream_name, database_name, last_id, exc,
+                    exc_info=True,
+                )
+                raise TransientReadError(
+                    f"Transient Motor error reading '{collection_name}' "
+                    f"(stream={stream_name!r}, database={database_name!r}): {exc}"
+                ) from exc
+            except Exception as exc:  # CancelledError is BaseException in 3.8+; propagates freely
+                logger.error(
+                    "Unexpected error reading '%s' "
+                    "(stream=%s, database=%s, last_id=%r): %s",
+                    collection_name, stream_name, database_name, last_id, exc,
+                    exc_info=True,
+                )
+                raise ReadError(
+                    f"MongoDB read error on '{collection_name}' "
+                    f"(stream={stream_name!r}, database={database_name!r}): {exc}"
+                ) from exc
 
             if not docs:
                 break
