@@ -124,7 +124,8 @@ class MongoDbDestinationHandler(BaseDestinationHandler):
                 runtime.mongo_default_database,
             )
         except Exception as exc:
-            logger.error("Failed to connect to MongoDB destination: %s", exc)
+            self._runtime = None
+            logger.error("Failed to connect to MongoDB destination: %s", exc, exc_info=True)
             raise
 
     async def disconnect(self) -> None:
@@ -152,7 +153,10 @@ class MongoDbDestinationHandler(BaseDestinationHandler):
 
     async def configure_schema(self, schema_spec: SchemaSpec) -> bool:
         if self._runtime is None:
-            logger.error("configure_schema called before connect()")
+            logger.error(
+                "configure_schema called before connect() for stream %r",
+                schema_spec.stream_id,
+            )
             return False
 
         stream_id = schema_spec.stream_id
@@ -198,6 +202,7 @@ class MongoDbDestinationHandler(BaseDestinationHandler):
             logger.error(
                 "configure_schema: failed to ensure collection %r for stream %r: %s",
                 collection_name, stream_id, exc,
+                exc_info=True,
             )
             return False
 
@@ -218,6 +223,7 @@ class MongoDbDestinationHandler(BaseDestinationHandler):
                     "configure_schema: failed to create conflict-key index on %r for "
                     "stream %r: %s — UPSERT idempotency cannot be guaranteed",
                     collection_name, stream_id, exc,
+                    exc_info=True,
                 )
                 return False
 
@@ -227,6 +233,7 @@ class MongoDbDestinationHandler(BaseDestinationHandler):
             logger.error(
                 "configure_schema: failed to set up _batch_commits for database %r: %s",
                 database_name, exc,
+                exc_info=True,
             )
             return False
 
@@ -326,6 +333,7 @@ class MongoDbDestinationHandler(BaseDestinationHandler):
             logger.error(
                 "Idempotency check failed (run=%s stream=%s seq=%d): %s",
                 run_id, stream_id, batch_seq, exc,
+                exc_info=True,
             )
             return BatchWriteResult(
                 status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
@@ -348,6 +356,7 @@ class MongoDbDestinationHandler(BaseDestinationHandler):
             logger.error(
                 "Malformed Json field in batch (run=%s stream=%s seq=%d): %s",
                 run_id, stream_id, batch_seq, exc,
+                exc_info=True,
             )
             return BatchWriteResult(
                 status=AckStatus.ACK_STATUS_FATAL_FAILURE,
@@ -363,6 +372,7 @@ class MongoDbDestinationHandler(BaseDestinationHandler):
                 logger.error(
                     "Failed to record empty-batch commit (run=%s stream=%s seq=%d): %s",
                     run_id, stream_id, batch_seq, exc,
+                    exc_info=True,
                 )
                 return BatchWriteResult(
                     status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
@@ -383,6 +393,7 @@ class MongoDbDestinationHandler(BaseDestinationHandler):
             logger.error(
                 "MongoDB write_batch failed (run=%s stream=%s seq=%d): %s",
                 run_id, stream_id, batch_seq, exc,
+                exc_info=True,
             )
             return BatchWriteResult(
                 status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
@@ -403,6 +414,7 @@ class MongoDbDestinationHandler(BaseDestinationHandler):
                 "Failed to record batch commit (run=%s stream=%s seq=%d mode=%s): %s — "
                 "idempotency token not saved; retry will re-execute the write",
                 run_id, stream_id, batch_seq, state.write_mode.name, exc,
+                exc_info=True,
             )
             return BatchWriteResult(
                 status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
@@ -473,9 +485,16 @@ class MongoDbDestinationHandler(BaseDestinationHandler):
                         "bulk_write (upsert): %d operation(s) failed with "
                         "non-duplicate errors (first: %s); raising",
                         len(non_dup), non_dup[0],
+                        exc_info=True,
                     )
                     raise
                 return (details.get("nUpserted") or 0) + (details.get("nModified") or 0)
+
+        if write_mode == WriteMode.WRITE_MODE_UNSPECIFIED:
+            logger.warning(
+                "write_mode is WRITE_MODE_UNSPECIFIED; treating as INSERT. "
+                "This may indicate a configuration error."
+            )
 
         try:
             result = await collection.insert_many(docs, ordered=False)
@@ -500,6 +519,7 @@ class MongoDbDestinationHandler(BaseDestinationHandler):
                     "insert_many: %d of %d documents failed with non-duplicate-key "
                     "errors (first: %s); raising",
                     len(non_dup), n_total, non_dup[0],
+                    exc_info=True,
                 )
                 raise
             if n_inserted > 0:

@@ -778,6 +778,48 @@ async def test_connect_failure_leaves_handler_not_connected():
     assert handler._connected is False
 
 
+@pytest.mark.asyncio
+async def test_connect_failure_clears_runtime():
+    """After connect() failure _runtime must be None so disconnect() is a no-op."""
+    rt, *_ = _make_runtime()
+    rt.materialize = AsyncMock(side_effect=RuntimeError("auth failed"))
+
+    handler = MongoDbDestinationHandler()
+    with pytest.raises(RuntimeError):
+        await handler.connect(rt)
+
+    assert handler._runtime is None
+
+
+# ---------------------------------------------------------------------------
+# WRITE_MODE_UNSPECIFIED warning
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_write_batch_unspecified_mode_logs_warning_and_inserts(caplog):
+    """WRITE_MODE_UNSPECIFIED must log a warning and fall through to insert."""
+    import logging
+    rt, commits_coll, target_coll, db_mock = _make_runtime()
+    target_coll.insert_many = AsyncMock(return_value=MagicMock(inserted_ids=["id1"]))
+
+    handler, _ = await _connected_handler(rt)
+    handler._streams["s1"] = _MongoStreamState(
+        "testdb", "items", WriteMode.WRITE_MODE_UNSPECIFIED
+    )
+    handler._batch_commits_ready.add("testdb")
+
+    batch = _make_batch({"id": 1})
+    with caplog.at_level(logging.WARNING, logger="src.destination.connectors.mongodb"):
+        result = await handler.write_batch(
+            run_id="r", stream_id="s1", batch_seq=0,
+            record_batch=batch, record_ids=["r1"], cursor=_cursor(),
+        )
+
+    assert result.status == AckStatus.ACK_STATUS_SUCCESS
+    assert any("WRITE_MODE_UNSPECIFIED" in r.message for r in caplog.records)
+    target_coll.insert_many.assert_awaited_once()
+
+
 # ---------------------------------------------------------------------------
 # UPSERT commit-record failure
 # ---------------------------------------------------------------------------
