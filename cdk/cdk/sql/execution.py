@@ -25,6 +25,7 @@ from typing import Any, Dict, List, Sequence, Tuple, Union
 from sqlalchemy import text
 
 from ..database_utils import acquire_connection
+from ._adbc_utils import _adbc_execute
 from .exceptions import CreateTableError, DiscoveryError, SqlIntrospectionError
 
 logger = logging.getLogger(__name__)
@@ -112,10 +113,7 @@ def _fetch_rows_adbc_sync(runtime: Any, sql: str, params: Sequence[Any]) -> List
     try:
         cursor = conn.cursor()
         try:
-            if params:
-                cursor.execute(sql, list(params))
-            else:
-                cursor.execute(sql)
+            _adbc_execute(cursor, sql, params)
             table = cursor.fetch_arrow_table()
         finally:
             cursor.close()
