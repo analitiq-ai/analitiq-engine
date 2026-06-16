@@ -30,12 +30,18 @@ from typing import Any, AsyncIterator, Dict, List, Optional
 
 import pyarrow as pa
 
-from .base import BaseConnector, ConnectionError, ReadError
+from .base import BaseConnector, ConnectionError, ReadError, TransientReadError
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.schema_contract import SchemaContract
 from cdk.types import CheckpointStore
 
 logger = logging.getLogger(__name__)
+
+try:
+    from pymongo.errors import AutoReconnect, CursorNotFound, ServerSelectionTimeoutError
+    _TRANSIENT_MOTOR_ERRORS: tuple = (AutoReconnect, CursorNotFound, ServerSelectionTimeoutError)
+except ImportError:
+    _TRANSIENT_MOTOR_ERRORS = ()
 
 
 def _coerce_bson(value: Any) -> Any:
@@ -234,8 +240,17 @@ class MongoDbSourceConnector(BaseConnector):
             )
 
             docs: List[Dict[str, Any]] = []
-            async for doc in cursor_obj:
-                docs.append(doc)
+            try:
+                async for doc in cursor_obj:
+                    docs.append(doc)
+            except _TRANSIENT_MOTOR_ERRORS as exc:
+                raise TransientReadError(
+                    f"Transient Motor error reading '{collection_name}': {exc}"
+                ) from exc
+            except Exception as exc:
+                raise ReadError(
+                    f"MongoDB read error on '{collection_name}': {exc}"
+                ) from exc
 
             if not docs:
                 break
