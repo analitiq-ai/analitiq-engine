@@ -4,28 +4,26 @@ Reads documents from a MongoDB collection and yields them as Arrow
 ``RecordBatch`` objects, following the same ``Readable`` contract as the
 SQL and API source connectors.
 
-Pagination uses ``_id``-keyset paging (``{_id: {$gt: last_id}}`` with
-``sort(_id, 1)``), not ``skip()``/``limit()``, which degrades on large
-collections. Incremental replication uses a caller-declared cursor field
-(``updatedAt``, ``_id``, …) with a ``$gt``/``$gte`` filter applied before
-the keyset page.
+Pagination uses ``_id``-keyset paging — ``{_id: {$gt: last_id}}`` with
+``sort(_id, 1)`` — not ``skip()``/``limit()``, which degrades on large
+collections. The keyset filter is omitted on the first page so any ``_id``
+type (ObjectId, string, integer, compound) works correctly. Incremental
+replication adds a ``$gte`` filter on the declared cursor field before the
+keyset clause.
 
-BSON special values are coerced to Python primitives before Arrow
-ingestion:
+BSON special values are coerced to Python primitives before Arrow ingestion:
 
 * ``bson.ObjectId`` → ``str`` (hex representation)
 * ``bson.Decimal128`` → ``str`` (preserves precision without lossy float cast)
 * ``bson.Binary`` → ``bytes``
 * ``datetime.datetime`` → Arrow normalises it as ``Timestamp``
-* Embedded documents and arrays are passed through as-is; Arrow infers
-  the nested type from the first non-null value in each batch (SchemaContract
-  is applied at the destination to cast to the declared schema).
+* Embedded documents and arrays are recursively coerced.
 """
 
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, AsyncIterator, Dict, List, Optional
 
 import pyarrow as pa
@@ -36,9 +34,6 @@ from cdk.schema_contract import SchemaContract
 from cdk.types import CheckpointStore
 
 logger = logging.getLogger(__name__)
-
-# _id sentinel used to detect the start of a fresh (non-resumed) keyset page.
-_ZERO_OID_STR = "000000000000000000000000"
 
 
 def _coerce_bson(value: Any) -> Any:
@@ -62,7 +57,6 @@ def _coerce_bson(value: Any) -> Any:
 
 
 def _coerce_document(doc: Dict[str, Any]) -> Dict[str, Any]:
-    """Coerce all values in a document from BSON to Arrow-safe Python."""
     return {k: _coerce_bson(v) for k, v in doc.items()}
 
 
@@ -104,8 +98,9 @@ class MongoDbSourceConnector(BaseConnector):
             raise ConnectionError(f"MongoDB connection failed: {exc}") from exc
 
     async def disconnect(self) -> None:
-        if self._runtime:
-            await self._runtime.close()
+        runtime, self._runtime = self._runtime, None
+        if runtime:
+            await runtime.close()
         self.is_connected = False
 
     async def write_batch(self, batch: Any, config: Any) -> None:  # pragma: no cover
@@ -125,12 +120,18 @@ class MongoDbSourceConnector(BaseConnector):
         partition: Optional[Dict[str, Any]] = None,
         batch_size: int = 1000,
     ) -> AsyncIterator[pa.RecordBatch]:
+        """Read upstream documents as Arrow batches.
+
+        Manages its own connect/disconnect lifecycle — callers must not call
+        ``connect()`` separately.
+        """
         try:
             await self.connect(runtime)
             async for batch in self._read_batches_impl(
                 config,
                 checkpoint=checkpoint,
                 stream_name=stream_name,
+                partition=partition,
                 batch_size=batch_size,
             ):
                 yield batch
@@ -143,6 +144,7 @@ class MongoDbSourceConnector(BaseConnector):
         *,
         checkpoint: CheckpointStore,
         stream_name: str,
+        partition: Optional[Dict[str, Any]],
         batch_size: int,
     ) -> AsyncIterator[pa.RecordBatch]:
         endpoint_doc = config.get("endpoint_document")
@@ -153,7 +155,7 @@ class MongoDbSourceConnector(BaseConnector):
         database_name = endpoint_doc.get("database") or self._runtime.mongo_default_database
         if not collection_name:
             raise ReadError(
-                f"MongoDbSourceConnector: endpoint_document missing 'collection' field"
+                "MongoDbSourceConnector: endpoint_document missing 'collection' field"
             )
         if not database_name:
             raise ReadError(
@@ -175,35 +177,36 @@ class MongoDbSourceConnector(BaseConnector):
         db = client[database_name]
         collection = db[collection_name]
 
-        # Load incremental cursor value from checkpoint
+        # Load the stored cursor value from checkpoint (async Protocol).
+        # The checkpoint stores {"cursor": value}; extract the raw value.
         cursor_value: Any = None
         if replication_method == "incremental" and cursor_field:
-            raw_cursor = checkpoint.get_cursor(stream_name)
-            if raw_cursor:
-                cursor_value = raw_cursor
+            cursor_state = await checkpoint.get_cursor(stream_name, partition)
+            cursor_value = (cursor_state or {}).get("cursor")
 
-        # Determine safety-window cutoff for incremental runs
+        # Roll the incremental cursor back by the safety window so late-arriving
+        # records are re-read. Record the pre-rollback time as the ceiling for
+        # the high-water mark so the next run stays within the same window.
         cutoff: Optional[datetime] = None
         if safety_window_seconds > 0 and cursor_value is not None:
-            try:
-                if isinstance(cursor_value, datetime):
-                    cutoff = datetime.now(tz=timezone.utc)
-                    cursor_value = _subtract_safety_window(cursor_value, safety_window_seconds)
-            except Exception:
-                pass
+            if isinstance(cursor_value, datetime):
+                cutoff = datetime.now(tz=timezone.utc)
+                cursor_value = _subtract_safety_window(cursor_value, safety_window_seconds)
+            else:
+                logger.warning(
+                    "safety_window_seconds configured for stream %r but cursor "
+                    "value is %s (not datetime); safety window not applied",
+                    stream_name,
+                    type(cursor_value).__name__,
+                )
 
-        # Build the incremental filter
         incremental_filter: Dict[str, Any] = {}
         if replication_method == "incremental" and cursor_field and cursor_value is not None:
             incremental_filter = {cursor_field: {"$gte": cursor_value}}
 
-        # Keyset paging: start after zero ObjectId for fresh runs
-        try:
-            from bson import ObjectId
-            last_id: Any = ObjectId(_ZERO_OID_STR)
-        except ImportError:
-            last_id = None
-
+        # Keyset paging on _id. Start with None so the first page has no _id
+        # filter — this works for any _id type (ObjectId, string, int, compound).
+        last_id: Any = None
         max_cursor_seen: Any = cursor_value
 
         while True:
@@ -226,7 +229,6 @@ class MongoDbSourceConnector(BaseConnector):
 
             last_id = docs[-1].get("_id", last_id)
 
-            # Track the high-water mark for the declared cursor field
             if cursor_field:
                 for doc in docs:
                     val = doc.get(cursor_field)
@@ -249,14 +251,20 @@ class MongoDbSourceConnector(BaseConnector):
             if len(docs) < batch_size:
                 break
 
-        # Persist the high-water mark so the next run resumes from here
+        # Advance the checkpoint, capped by the safety-window cutoff so the
+        # next run always re-reads the lookback window.
         if replication_method == "incremental" and cursor_field and max_cursor_seen is not None:
-            checkpoint.save_cursor(stream_name, max_cursor_seen)
+            value_to_save = (
+                min(max_cursor_seen, cutoff)
+                if cutoff is not None and isinstance(max_cursor_seen, datetime)
+                else max_cursor_seen
+            )
+            await checkpoint.save_cursor(
+                stream_name, partition, {"cursor": value_to_save}
+            )
 
 
 def _subtract_safety_window(value: datetime, seconds: int) -> datetime:
-    """Subtract *seconds* from a datetime, returning a tz-aware result."""
-    from datetime import timedelta
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
     return value - timedelta(seconds=seconds)

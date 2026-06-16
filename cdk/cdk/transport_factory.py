@@ -40,6 +40,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 if TYPE_CHECKING:
     import aiohttp
+    from motor.motor_asyncio import AsyncIOMotorClient
 
 from cdk._extras import reraise_for_missing_extra
 from cdk.derived_functions import DEFAULT_FUNCTIONS
@@ -760,16 +761,22 @@ async def build_http_from_spec(
 class MongoDbTransport:
     """Materialized MongoDB transport carrying a Motor async client.
 
-    ``client`` is a connected ``AsyncIOMotorClient``; Motor manages an
-    internal connection pool so this single object is shared across all
-    reads and writes for the lifetime of the pipeline run.
-    ``default_database`` is the database name declared in the connector
-    definition (``database`` key); connectors use it when the endpoint
-    document does not override the target database.
+    ``client`` is an ``AsyncIOMotorClient`` whose connectivity was probed at
+    build time (a ``ping`` fired in ``build_mongodb_from_spec``). Motor manages
+    pooling and reconnection internally — the client itself is not a persistent
+    connection. ``default_database`` is the database name declared in the
+    connector definition; connectors use it when the endpoint document does not
+    override the target database.
     """
 
-    client: Any  # AsyncIOMotorClient
+    client: "AsyncIOMotorClient"
     default_database: Optional[str]
+
+    def __post_init__(self) -> None:
+        if self.default_database is not None and not self.default_database:
+            raise ValueError(
+                "MongoDbTransport.default_database must be non-empty or None"
+            )
 
 
 def resolve_mongodb_spec(

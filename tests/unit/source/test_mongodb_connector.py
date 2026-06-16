@@ -2,9 +2,12 @@
 
 Tests cover:
 * BSON-type coercion (ObjectId, Decimal128, Binary, nested) without a live
-  Mongo instance — the bson module is mocked when not installed.
+  Mongo instance — the bson module is stubbed via a pytest fixture.
 * Full-refresh and incremental read paths using an AsyncMock motor client.
-* Checkpoint save/load for incremental replication.
+* Checkpoint save/load for incremental replication (AsyncMock, matching the
+  CheckpointStore Protocol's async interface).
+* Safety-window rollback and cutoff enforcement.
+* Edge cases: empty collection, missing endpoint_document, missing collection.
 """
 
 from __future__ import annotations
@@ -13,7 +16,7 @@ import datetime
 import sys
 from types import ModuleType
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pyarrow as pa
 import pytest
@@ -55,7 +58,6 @@ def _make_bson_stub() -> ModuleType:
 
 @pytest.fixture(autouse=True)
 def _inject_bson_stub(monkeypatch):
-    """Inject the bson stub if real bson is not installed."""
     if "bson" not in sys.modules:
         stub = _make_bson_stub()
         monkeypatch.setitem(sys.modules, "bson", stub)
@@ -151,11 +153,10 @@ class TestSubtractSafetyWindow:
 
 
 # ---------------------------------------------------------------------------
-# MongoDbSourceConnector.read_batches — full refresh
+# Motor cursor / client stubs
 # ---------------------------------------------------------------------------
 
 def _make_runtime(db_name: str = "mydb"):
-    """Build a minimal ConnectionRuntime mock for MongoDB tests."""
     rt = MagicMock()
     rt.acquire = MagicMock()
     rt.materialize = AsyncMock()
@@ -208,6 +209,20 @@ def _make_motor_client(pages: list[list[dict]]):
     return client_mock, collection_mock
 
 
+def _make_checkpoint(cursor_value=None):
+    """Build an async-correct CheckpointStore mock."""
+    cp = MagicMock()
+    # CheckpointStore.get_cursor and save_cursor are async — use AsyncMock.
+    stored = {"cursor": cursor_value} if cursor_value is not None else None
+    cp.get_cursor = AsyncMock(return_value=stored)
+    cp.save_cursor = AsyncMock()
+    return cp
+
+
+# ---------------------------------------------------------------------------
+# Full-refresh reads
+# ---------------------------------------------------------------------------
+
 @pytest.mark.asyncio
 async def test_read_batches_full_refresh_single_page():
     bson = sys.modules["bson"]
@@ -215,36 +230,26 @@ async def test_read_batches_full_refresh_single_page():
         {"_id": bson.ObjectId("507f191e810c19729de860e1"), "name": "Alice", "age": 30},
         {"_id": bson.ObjectId("507f191e810c19729de860e2"), "name": "Bob", "age": 25},
     ]
-    client, _ = _make_motor_client([docs, []])  # second call returns empty → stop
+    client, _ = _make_motor_client([docs, []])
 
     runtime = _make_runtime()
     runtime.mongo_client = client
 
     config = {
-        "endpoint_document": {
-            "collection": "users",
-            "database": "mydb",
-        },
-        "stream_source": {
-            "replication": {"method": "full_refresh"},
-        },
+        "endpoint_document": {"collection": "users", "database": "mydb"},
+        "stream_source": {"replication": {"method": "full_refresh"}},
     }
-
-    checkpoint = MagicMock()
-    checkpoint.get_cursor = MagicMock(return_value=None)
-    checkpoint.save_cursor = MagicMock()
 
     connector = MongoDbSourceConnector()
     batches = []
     async for batch in connector.read_batches(
-        runtime, config, checkpoint=checkpoint, stream_name="users"
+        runtime, config, checkpoint=_make_checkpoint(), stream_name="users"
     ):
         batches.append(batch)
 
     assert len(batches) == 1
     assert batches[0].num_rows == 2
-    names = batches[0].column("name").to_pylist()
-    assert names == ["Alice", "Bob"]
+    assert batches[0].column("name").to_pylist() == ["Alice", "Bob"]
 
 
 @pytest.mark.asyncio
@@ -263,14 +268,10 @@ async def test_read_batches_multi_page():
         "stream_source": {"replication": {"method": "full_refresh"}},
     }
 
-    checkpoint = MagicMock()
-    checkpoint.get_cursor.return_value = None
-    checkpoint.save_cursor = MagicMock()
-
     connector = MongoDbSourceConnector()
     batches = []
     async for batch in connector.read_batches(
-        runtime, config, checkpoint=checkpoint, stream_name="items", batch_size=3
+        runtime, config, checkpoint=_make_checkpoint(), stream_name="items", batch_size=3
     ):
         batches.append(batch)
 
@@ -280,7 +281,37 @@ async def test_read_batches_multi_page():
 
 
 @pytest.mark.asyncio
+async def test_read_batches_empty_collection_yields_no_batches():
+    """Empty first page → no batches, no save_cursor call."""
+    client, _ = _make_motor_client([[]])
+
+    runtime = _make_runtime()
+    runtime.mongo_client = client
+
+    config = {
+        "endpoint_document": {"collection": "empty", "database": "mydb"},
+        "stream_source": {"replication": {"method": "full_refresh"}},
+    }
+
+    cp = _make_checkpoint()
+    connector = MongoDbSourceConnector()
+    batches = []
+    async for batch in connector.read_batches(
+        runtime, config, checkpoint=cp, stream_name="empty"
+    ):
+        batches.append(batch)
+
+    assert batches == []
+    cp.save_cursor.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Incremental reads + checkpoint protocol
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
 async def test_read_batches_incremental_saves_cursor():
+    """Incremental: checkpoint.get_cursor and save_cursor are awaited."""
     bson = sys.modules["bson"]
     now = datetime.datetime(2024, 6, 1, 12, 0, 0, tzinfo=datetime.timezone.utc)
     docs = [
@@ -288,48 +319,134 @@ async def test_read_batches_incremental_saves_cursor():
     ]
 
     client, _ = _make_motor_client([docs, []])
-
     runtime = _make_runtime()
     runtime.mongo_client = client
 
     config = {
         "endpoint_document": {"collection": "events", "database": "mydb"},
         "stream_source": {
-            "replication": {
-                "method": "incremental",
-                "cursor_field": "updated_at",
-            }
+            "replication": {"method": "incremental", "cursor_field": "updated_at"}
         },
     }
 
-    checkpoint = MagicMock()
-    checkpoint.get_cursor.return_value = None
-    checkpoint.save_cursor = MagicMock()
-
+    cp = _make_checkpoint()
     connector = MongoDbSourceConnector()
     batches = []
     async for batch in connector.read_batches(
-        runtime, config, checkpoint=checkpoint, stream_name="events"
+        runtime, config, checkpoint=cp, stream_name="events"
     ):
         batches.append(batch)
 
     assert len(batches) == 1
-    checkpoint.save_cursor.assert_called_once_with("events", now)
+    cp.get_cursor.assert_awaited_once_with("events", None)
+    # save_cursor should be awaited with the high-water mark wrapped in a dict
+    cp.save_cursor.assert_awaited_once()
+    call_args = cp.save_cursor.call_args
+    assert call_args[0][0] == "events"   # stream_name
+    assert call_args[0][1] is None        # partition
+    saved = call_args[0][2]
+    assert isinstance(saved, dict) and saved.get("cursor") == now
 
+
+@pytest.mark.asyncio
+async def test_read_batches_incremental_uses_stored_cursor():
+    """Stored cursor is unpacked from {"cursor": value} and used in the filter."""
+    bson = sys.modules["bson"]
+    prev_cursor = datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc)
+    docs = [{"_id": bson.ObjectId("507f191e810c19729de860aa"), "updated_at": prev_cursor, "v": 5}]
+
+    client, coll = _make_motor_client([docs, []])
+    runtime = _make_runtime()
+    runtime.mongo_client = client
+
+    config = {
+        "endpoint_document": {"collection": "ev2", "database": "mydb"},
+        "stream_source": {
+            "replication": {"method": "incremental", "cursor_field": "updated_at"}
+        },
+    }
+
+    cp = _make_checkpoint(cursor_value=prev_cursor)
+    connector = MongoDbSourceConnector()
+    async for _ in connector.read_batches(
+        runtime, config, checkpoint=cp, stream_name="ev2"
+    ):
+        pass
+
+    # The first find call's filter should include the $gte clause
+    first_call_filter = coll.find.call_args_list[0][0][0]
+    assert "updated_at" in first_call_filter
+    assert "$gte" in first_call_filter["updated_at"]
+
+
+@pytest.mark.asyncio
+async def test_read_batches_incremental_safety_window_caps_saved_cursor():
+    """Safety window: cursor is rolled back for querying; saved value is capped at cutoff."""
+    bson = sys.modules["bson"]
+    base_cursor = datetime.datetime(2024, 6, 1, 12, 0, 0, tzinfo=datetime.timezone.utc)
+    future_val = datetime.datetime(2024, 6, 1, 13, 0, 0, tzinfo=datetime.timezone.utc)
+    docs = [{"_id": bson.ObjectId("507f191e810c19729de860bb"), "ts": future_val, "v": 1}]
+
+    client, _ = _make_motor_client([docs, []])
+    runtime = _make_runtime()
+    runtime.mongo_client = client
+
+    config = {
+        "endpoint_document": {"collection": "ev3", "database": "mydb"},
+        "stream_source": {
+            "replication": {
+                "method": "incremental",
+                "cursor_field": "ts",
+                "safety_window_seconds": 300,
+            }
+        },
+    }
+
+    cp = _make_checkpoint(cursor_value=base_cursor)
+    connector = MongoDbSourceConnector()
+    async for _ in connector.read_batches(
+        runtime, config, checkpoint=cp, stream_name="ev3"
+    ):
+        pass
+
+    cp.save_cursor.assert_awaited_once()
+    saved_cursor_val = cp.save_cursor.call_args[0][2]["cursor"]
+    # The saved cursor is capped at cutoff (approx. now), not at future_val
+    assert saved_cursor_val <= datetime.datetime.now(tz=datetime.timezone.utc)
+
+
+# ---------------------------------------------------------------------------
+# Error cases
+# ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
 async def test_read_batches_missing_endpoint_raises():
     runtime = _make_runtime()
     runtime.mongo_client = MagicMock()
 
-    config = {}  # no endpoint_document
-    checkpoint = MagicMock()
-    checkpoint.get_cursor.return_value = None
-
+    config = {}
     connector = MongoDbSourceConnector()
     from src.source.connectors.base import ReadError
     with pytest.raises(ReadError, match="endpoint_document"):
         async for _ in connector.read_batches(
-            runtime, config, checkpoint=checkpoint, stream_name="x"
+            runtime, config, checkpoint=_make_checkpoint(), stream_name="x"
+        ):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_read_batches_missing_collection_raises():
+    runtime = _make_runtime()
+    runtime.mongo_client = MagicMock()
+
+    config = {
+        "endpoint_document": {"database": "mydb"},  # no collection
+        "stream_source": {},
+    }
+    connector = MongoDbSourceConnector()
+    from src.source.connectors.base import ReadError
+    with pytest.raises(ReadError, match="collection"):
+        async for _ in connector.read_batches(
+            runtime, config, checkpoint=_make_checkpoint(), stream_name="x"
         ):
             pass

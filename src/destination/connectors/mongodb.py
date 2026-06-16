@@ -15,20 +15,23 @@ the full ``BaseDestinationHandler`` contract:
 same database that records ``(run_id, stream_id, batch_seq)`` together with
 the committed cursor token. A pre-flight ``find_one`` on that triple gates
 replays and returns ``ALREADY_COMMITTED`` so the engine does not double-write.
+The ``_batch_commits`` collection is tracked per-database: if two streams
+target different databases, each database gets its own collection and index.
 
 **DDL equivalent** (schemaless Mongo):
 
 * Ensures the target collection exists via ``create_collection`` (swallowing
-  ``CollectionInvalid`` when it already exists).
+  ``CollectionInvalid`` when it already exists; re-raising anything else).
 * Ensures a unique compound index on conflict keys when in upsert mode.
 * Ensures the ``_batch_commits`` collection and its unique index exist on
-  first write.
+  first write to a given database.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Mapping, Optional
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Mapping, Optional, Set
 
 import pyarrow as pa
 
@@ -41,8 +44,17 @@ logger = logging.getLogger(__name__)
 _BATCH_COMMITS_COLLECTION = "_batch_commits"
 
 
+@dataclass
+class _MongoStreamState:
+    """All per-stream configuration, set atomically by configure_schema."""
+    database_name: str
+    collection_name: str
+    write_mode: WriteMode
+    conflict_keys: List[str] = field(default_factory=list)
+
+
 def _arrow_to_doc_list(record_batch: pa.RecordBatch) -> List[Dict[str, Any]]:
-    """Convert an Arrow RecordBatch to a list of row dicts."""
+    """Motor's insert_many/bulk_write require plain Python dicts."""
     columns = record_batch.schema.names
     col_arrays = [record_batch.column(i).to_pylist() for i in range(record_batch.num_columns)]
     return [
@@ -57,16 +69,10 @@ class MongoDbDestinationHandler(BaseDestinationHandler):
     def __init__(self) -> None:
         self._runtime: Optional[ConnectionRuntime] = None
         self._connected: bool = False
-        # stream_id → endpoint document
         self._stream_endpoints: Dict[str, Mapping[str, Any]] = {}
-        # stream_id → configured write mode (set by configure_schema)
-        self._stream_modes: Dict[str, WriteMode] = {}
-        # stream_id → conflict key list (for upsert)
-        self._stream_conflict_keys: Dict[str, List[str]] = {}
-        # stream_id → (database_name, collection_name)
-        self._stream_collections: Dict[str, tuple[str, str]] = {}
-        # Whether _batch_commits is set up in the current run
-        self._batch_commits_ready: bool = False
+        self._streams: Dict[str, _MongoStreamState] = {}
+        # Databases whose _batch_commits collection and index are ready.
+        self._batch_commits_ready: Set[str] = set()
 
     @property
     def connector_type(self) -> str:
@@ -108,8 +114,9 @@ class MongoDbDestinationHandler(BaseDestinationHandler):
             raise
 
     async def disconnect(self) -> None:
-        if self._runtime:
-            await self._runtime.close()
+        runtime, self._runtime = self._runtime, None
+        if runtime:
+            await runtime.close()
         self._connected = False
 
     async def health_check(self) -> bool:
@@ -119,7 +126,10 @@ class MongoDbDestinationHandler(BaseDestinationHandler):
             client = self._runtime.mongo_client
             await client.admin.command("ping")
             return True
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "MongoDB health_check failed: %s", exc
+            )
             return False
 
     # ------------------------------------------------------------------
@@ -127,6 +137,10 @@ class MongoDbDestinationHandler(BaseDestinationHandler):
     # ------------------------------------------------------------------
 
     async def configure_schema(self, schema_spec: SchemaSpec) -> bool:
+        if self._runtime is None:
+            logger.error("configure_schema called before connect()")
+            return False
+
         stream_id = schema_spec.stream_id
         write_mode = schema_spec.write_mode
 
@@ -150,29 +164,23 @@ class MongoDbDestinationHandler(BaseDestinationHandler):
             )
             return False
 
-        self._stream_modes[stream_id] = write_mode
-        self._stream_collections[stream_id] = (database_name, collection_name)
-
         write_spec = (
             (endpoint_doc.get("operations") or {}).get("write") or {}
         )
         conflict_keys: List[str] = list(write_spec.get("conflict_keys") or [])
-        self._stream_conflict_keys[stream_id] = conflict_keys
 
         client = self._runtime.mongo_client
         db = client[database_name]
 
-        # Ensure the target collection exists
         try:
-            from pymongo.errors import CollectionInvalid
-            await db.create_collection(collection_name)
+            await self._ensure_collection(db, collection_name)
         except Exception as exc:
-            # CollectionInvalid means it already exists — that is fine
-            exc_type = type(exc).__name__
-            if "CollectionInvalid" not in exc_type:
-                logger.debug("create_collection(%r): %s", collection_name, exc)
+            logger.error(
+                "configure_schema: failed to ensure collection %r for stream %r: %s",
+                collection_name, stream_id, exc,
+            )
+            return False
 
-        # Ensure conflict-key index for upsert mode
         if write_mode == WriteMode.WRITE_MODE_UPSERT and conflict_keys:
             coll = db[collection_name]
             index_spec = [(k, 1) for k in conflict_keys]
@@ -181,23 +189,47 @@ class MongoDbDestinationHandler(BaseDestinationHandler):
             except Exception as exc:
                 logger.warning(
                     "Failed to create conflict-key index on %r: %s",
-                    collection_name,
-                    exc,
+                    collection_name, exc,
                 )
 
-        await self._ensure_batch_commits(db)
+        try:
+            await self._ensure_batch_commits(db, database_name)
+        except Exception as exc:
+            logger.error(
+                "configure_schema: failed to set up _batch_commits for database %r: %s",
+                database_name, exc,
+            )
+            return False
+
+        self._streams[stream_id] = _MongoStreamState(
+            database_name=database_name,
+            collection_name=collection_name,
+            write_mode=write_mode,
+            conflict_keys=conflict_keys,
+        )
         return True
 
-    async def _ensure_batch_commits(self, db: Any) -> None:
-        if self._batch_commits_ready:
-            return
+    async def _ensure_collection(self, db: Any, collection_name: str) -> None:
+        """Create the collection if it does not already exist."""
         try:
-            from pymongo.errors import CollectionInvalid
-            await db.create_collection(_BATCH_COMMITS_COLLECTION)
+            await db.create_collection(collection_name)
         except Exception as exc:
-            exc_type = type(exc).__name__
-            if "CollectionInvalid" not in exc_type:
-                logger.debug("create_collection(_batch_commits): %s", exc)
+            try:
+                from pymongo.errors import CollectionInvalid as _CI
+                if isinstance(exc, _CI):
+                    return  # already exists — fine
+            except ImportError:
+                pass
+            if "CollectionInvalid" in type(exc).__name__:
+                return  # already exists — fine (pymongo not imported above)
+            raise
+
+    async def _ensure_batch_commits(self, db: Any, database_name: str) -> None:
+        """Ensure _batch_commits collection and its unique index exist."""
+        if database_name in self._batch_commits_ready:
+            return
+
+        await self._ensure_collection(db, _BATCH_COMMITS_COLLECTION)
 
         coll = db[_BATCH_COMMITS_COLLECTION]
         try:
@@ -207,9 +239,16 @@ class MongoDbDestinationHandler(BaseDestinationHandler):
                 background=True,
             )
         except Exception as exc:
-            logger.warning("Failed to create _batch_commits index: %s", exc)
+            # OperationFailure with "already exists" is acceptable.
+            already_exists = (
+                "already exists" in str(exc).lower()
+                or "IndexOptionsConflict" in type(exc).__name__
+            )
+            if not already_exists:
+                raise
 
-        self._batch_commits_ready = True
+        # Only mark ready after all DDL succeeds.
+        self._batch_commits_ready.add(database_name)
 
     # ------------------------------------------------------------------
     # Batch writing
@@ -224,25 +263,21 @@ class MongoDbDestinationHandler(BaseDestinationHandler):
         record_ids: List[str],
         cursor: Cursor,
     ) -> BatchWriteResult:
-        if stream_id not in self._stream_collections:
+        state = self._streams.get(stream_id)
+        if state is None:
             return BatchWriteResult(
                 status=AckStatus.ACK_STATUS_FATAL_FAILURE,
                 records_written=0,
                 failure_summary=f"Stream {stream_id!r} not configured; configure_schema must run first",
             )
 
-        database_name, collection_name = self._stream_collections[stream_id]
-        write_mode = self._stream_modes.get(stream_id, WriteMode.WRITE_MODE_INSERT)
-        conflict_keys = self._stream_conflict_keys.get(stream_id, [])
-
         client = self._runtime.mongo_client
-        db = client[database_name]
+        db = client[state.database_name]
         commits_coll = db[_BATCH_COMMITS_COLLECTION]
-        target_coll = db[collection_name]
+        target_coll = db[state.collection_name]
 
         commit_key = {"run_id": run_id, "stream_id": stream_id, "batch_seq": batch_seq}
 
-        # Idempotency check
         existing = await commits_coll.find_one(commit_key)
         if existing is not None:
             stored_token: bytes = existing.get("cursor_token") or b""
@@ -265,15 +300,12 @@ class MongoDbDestinationHandler(BaseDestinationHandler):
 
         try:
             records_written = await self._write_docs(
-                target_coll, docs, write_mode, conflict_keys
+                target_coll, docs, state.write_mode, state.conflict_keys
             )
         except Exception as exc:
             logger.error(
                 "MongoDB write_batch failed (run=%s stream=%s seq=%d): %s",
-                run_id,
-                stream_id,
-                batch_seq,
-                exc,
+                run_id, stream_id, batch_seq, exc,
             )
             return BatchWriteResult(
                 status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
@@ -281,21 +313,28 @@ class MongoDbDestinationHandler(BaseDestinationHandler):
                 failure_summary=str(exc),
             )
 
-        # Record commit (best-effort: if this fails the batch will be retried
-        # and insert_many will hit duplicate-key errors, which is safe with
-        # ordered=False)
+        # Record the commit token. If this fails, the engine will retry. For
+        # INSERT mode the retry is safe (dup-key errors are tolerated). For
+        # UPSERT it is idempotent by key. For TRUNCATE_INSERT a retry would
+        # issue delete_many again, so return RETRYABLE_FAILURE to let the
+        # engine decide whether to replay — the docs were written but the
+        # idempotency record was not.
         try:
             await commits_coll.insert_one(
                 {**commit_key, "cursor_token": cursor.token}
             )
         except Exception as exc:
-            logger.warning(
-                "Failed to record batch commit (run=%s seq=%d): %s — "
-                "batch will be retried but is already written",
-                run_id,
-                batch_seq,
-                exc,
+            logger.error(
+                "Failed to record batch commit (run=%s stream=%s seq=%d mode=%s): %s — "
+                "idempotency token not saved; retry will re-execute the write",
+                run_id, stream_id, batch_seq, state.write_mode.name, exc,
             )
+            if state.write_mode == WriteMode.WRITE_MODE_TRUNCATE_INSERT:
+                return BatchWriteResult(
+                    status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
+                    records_written=records_written,
+                    failure_summary=f"Commit record not saved after truncate-insert: {exc}",
+                )
 
         return BatchWriteResult(
             status=AckStatus.ACK_STATUS_SUCCESS,
@@ -328,17 +367,37 @@ class MongoDbDestinationHandler(BaseDestinationHandler):
             result = await collection.bulk_write(ops, ordered=False)
             return result.upserted_count + result.modified_count
 
-        # Default: insert (ordered=False so a dup-key on one doc doesn't abort)
         try:
             result = await collection.insert_many(docs, ordered=False)
             return len(result.inserted_ids)
         except Exception as exc:
-            # BulkWriteError may carry partial results; log and propagate
-            details = getattr(exc, "details", {})
-            n_inserted = (details.get("nInserted") or 0) if details else 0
+            # Narrow to BulkWriteError for partial-write recovery; re-raise
+            # everything else (network errors, timeouts).
+            try:
+                from pymongo.errors import BulkWriteError
+            except ImportError:
+                raise exc
+            if not isinstance(exc, BulkWriteError):
+                raise
+
+            details = exc.details or {}
+            n_inserted = details.get("nInserted") or 0
+            n_total = len(docs)
+            write_errors = details.get("writeErrors") or []
+            non_dup = [e for e in write_errors if e.get("code") != 11000]
+            if non_dup:
+                logger.error(
+                    "insert_many: %d of %d documents failed with non-duplicate-key "
+                    "errors (first: %s); raising",
+                    len(non_dup), n_total, non_dup[0],
+                )
+                raise
             if n_inserted > 0:
+                n_dropped = n_total - n_inserted
                 logger.warning(
-                    "insert_many partial write (%d inserted, error: %s)", n_inserted, exc
+                    "insert_many partial write: %d inserted, %d skipped as duplicates "
+                    "(%d total in batch)",
+                    n_inserted, n_dropped, n_total,
                 )
                 return n_inserted
             raise
