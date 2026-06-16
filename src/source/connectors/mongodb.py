@@ -99,7 +99,10 @@ class MongoDbSourceConnector(BaseConnector):
                 runtime.mongo_default_database,
             )
         except Exception as exc:
-            self._runtime = None
+            try:
+                await runtime.close()
+            finally:
+                self._runtime = None
             logger.error("Failed to connect to MongoDB: %s", exc, exc_info=True)
             raise ConnectionError(f"MongoDB connection failed: {exc}") from exc
 

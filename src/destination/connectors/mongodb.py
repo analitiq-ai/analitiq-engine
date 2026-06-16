@@ -124,7 +124,10 @@ class MongoDbDestinationHandler(BaseDestinationHandler):
                 runtime.mongo_default_database,
             )
         except Exception as exc:
-            self._runtime = None
+            try:
+                await runtime.close()
+            finally:
+                self._runtime = None
             logger.error("Failed to connect to MongoDB destination: %s", exc, exc_info=True)
             raise
 
@@ -161,6 +164,12 @@ class MongoDbDestinationHandler(BaseDestinationHandler):
 
         stream_id = schema_spec.stream_id
         write_mode = schema_spec.write_mode
+        if write_mode == WriteMode.WRITE_MODE_UNSPECIFIED:
+            logger.warning(
+                "Stream %r has WRITE_MODE_UNSPECIFIED; treating as INSERT. "
+                "This may indicate a configuration error.",
+                stream_id,
+            )
 
         endpoint_doc = self._stream_endpoints.get(stream_id)
         if not endpoint_doc:
@@ -489,12 +498,6 @@ class MongoDbDestinationHandler(BaseDestinationHandler):
                     )
                     raise
                 return (details.get("nUpserted") or 0) + (details.get("nModified") or 0)
-
-        if write_mode == WriteMode.WRITE_MODE_UNSPECIFIED:
-            logger.warning(
-                "write_mode is WRITE_MODE_UNSPECIFIED; treating as INSERT. "
-                "This may indicate a configuration error."
-            )
 
         try:
             result = await collection.insert_many(docs, ordered=False)

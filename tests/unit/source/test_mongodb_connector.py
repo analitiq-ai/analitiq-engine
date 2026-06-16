@@ -710,7 +710,8 @@ async def test_source_connect_failure_propagates():
 
 @pytest.mark.asyncio
 async def test_source_connect_failure_clears_runtime():
-    """After a connect() failure _runtime must be None so disconnect() is a no-op."""
+    """After connect() failure _runtime is None and runtime.close() was called to
+    release the ref taken by acquire()."""
     runtime = _make_runtime()
     runtime.materialize = AsyncMock(side_effect=RuntimeError("auth failed"))
 
@@ -721,3 +722,4 @@ async def test_source_connect_failure_clears_runtime():
 
     assert connector._runtime is None
     assert not connector.is_connected
+    runtime.close.assert_awaited_once()

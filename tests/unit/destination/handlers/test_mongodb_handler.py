@@ -212,11 +212,14 @@ async def test_configure_schema_missing_endpoint_returns_false():
 
 
 @pytest.mark.asyncio
-async def test_configure_schema_before_connect_returns_false():
+async def test_configure_schema_before_connect_returns_false(caplog):
+    import logging
     handler = MongoDbDestinationHandler()
     handler.set_stream_endpoints({"s1": _endpoint()})
-    result = await handler.configure_schema(_schema_spec("s1"))
+    with caplog.at_level(logging.ERROR):
+        result = await handler.configure_schema(_schema_spec("s1"))
     assert result is False
+    assert any("s1" in r.message for r in caplog.records)
 
 
 @pytest.mark.asyncio
@@ -780,7 +783,8 @@ async def test_connect_failure_leaves_handler_not_connected():
 
 @pytest.mark.asyncio
 async def test_connect_failure_clears_runtime():
-    """After connect() failure _runtime must be None so disconnect() is a no-op."""
+    """After connect() failure _runtime is None and runtime.close() was called to
+    release the ref taken by acquire()."""
     rt, *_ = _make_runtime()
     rt.materialize = AsyncMock(side_effect=RuntimeError("auth failed"))
 
@@ -789,6 +793,7 @@ async def test_connect_failure_clears_runtime():
         await handler.connect(rt)
 
     assert handler._runtime is None
+    rt.close.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------
@@ -796,28 +801,22 @@ async def test_connect_failure_clears_runtime():
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_write_batch_unspecified_mode_logs_warning_and_inserts(caplog):
-    """WRITE_MODE_UNSPECIFIED must log a warning and fall through to insert."""
+async def test_configure_schema_unspecified_mode_logs_warning(caplog):
+    """WRITE_MODE_UNSPECIFIED must log a warning at configure_schema time (once per
+    stream, not once per batch) and still return True."""
     import logging
-    rt, commits_coll, target_coll, db_mock = _make_runtime()
-    target_coll.insert_many = AsyncMock(return_value=MagicMock(inserted_ids=["id1"]))
-
+    rt, *_ = _make_runtime()
     handler, _ = await _connected_handler(rt)
-    handler._streams["s1"] = _MongoStreamState(
-        "testdb", "items", WriteMode.WRITE_MODE_UNSPECIFIED
-    )
-    handler._batch_commits_ready.add("testdb")
+    handler.set_stream_endpoints({"s1": _endpoint()})
 
-    batch = _make_batch({"id": 1})
-    with caplog.at_level(logging.WARNING, logger="src.destination.connectors.mongodb"):
-        result = await handler.write_batch(
-            run_id="r", stream_id="s1", batch_seq=0,
-            record_batch=batch, record_ids=["r1"], cursor=_cursor(),
+    with caplog.at_level(logging.WARNING):
+        result = await handler.configure_schema(
+            _schema_spec("s1", WriteMode.WRITE_MODE_UNSPECIFIED)
         )
 
-    assert result.status == AckStatus.ACK_STATUS_SUCCESS
+    assert result is True
     assert any("WRITE_MODE_UNSPECIFIED" in r.message for r in caplog.records)
-    target_coll.insert_many.assert_awaited_once()
+    assert any("s1" in r.message for r in caplog.records)
 
 
 # ---------------------------------------------------------------------------
