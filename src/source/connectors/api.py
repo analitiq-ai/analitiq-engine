@@ -37,7 +37,7 @@ import pyarrow as pa
 from .base import BaseConnector, ConnectionError, ReadError, TransientReadError
 from cdk.schema_contract import SchemaContract
 from cdk.connection_runtime import ConnectionRuntime
-from cdk.request_binding import bind_param_refs
+from cdk.request_binding import bind_param_refs, resolve_param_defaults
 from cdk.resolver import Resolver
 from cdk.types import CheckpointStore
 from ...shared.http_utils import join_url
@@ -352,7 +352,6 @@ class APIConnector(BaseConnector):
         param. Callers use it to keep pagination/replication loops from
         clobbering each other's values.
         """
-        param_values: Dict[str, Any] = {}
         placements: Dict[str, str] = {}
         controlled: Dict[str, str] = {}
         declared = read_spec.get("params") or {}
@@ -363,16 +362,12 @@ class APIConnector(BaseConnector):
             controlled_by = decl.get("controlled_by")
             if controlled_by:
                 controlled[name] = controlled_by
-                continue
-            if "default" in decl:
-                value = resolver.resolve_for_request(decl["default"])
-                if value is None:
-                    logger.warning(
-                        "param %r: default did not resolve; parameter omitted",
-                        name,
-                    )
-                    continue
-                param_values[name] = value
+
+        uncontrolled = {
+            n: d for n, d in declared.items()
+            if isinstance(d, dict) and not d.get("controlled_by")
+        }
+        param_values = resolve_param_defaults(uncontrolled, resolver)
 
         for f in stream_filters:
             target = f.get("field")

@@ -29,7 +29,42 @@ sibling keys next to the marker) is an authoring error and raises.
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, List, Mapping, Optional
+
+logger = logging.getLogger(__name__)
+
+
+def resolve_param_defaults(
+    params_spec: Mapping[str, Any],
+    resolver: Any,
+    *,
+    context: str = "param",
+) -> Dict[str, Any]:
+    """Resolve ``default`` expressions for each declared param.
+
+    Iterates *params_spec*, skips non-dict entries and those without a
+    ``default`` key, calls ``resolver.resolve_for_request`` on each default,
+    and omits params whose default resolves to ``None`` (logging a warning).
+    Returns a ``{name: value}`` dict of all successfully-resolved defaults.
+
+    *context* is the label used in warning messages (e.g. ``"param"`` for
+    read params, ``"write param"`` for destination write params).
+    """
+    values: Dict[str, Any] = {}
+    for name, decl in params_spec.items():
+        if not isinstance(decl, dict) or "default" not in decl:
+            continue
+        value = resolver.resolve_for_request(decl["default"])
+        if value is None:
+            logger.warning(
+                "%s %r: default did not resolve; parameter omitted",
+                context,
+                name,
+            )
+            continue
+        values[name] = value
+    return values
 
 
 def bind_param_refs(spec: Any, params: Mapping[str, Any]) -> Any:

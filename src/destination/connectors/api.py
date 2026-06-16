@@ -23,6 +23,7 @@ from cdk.request_binding import (
     bind_param_refs,
     bind_record_inputs,
     collect_from_input_selectors,
+    resolve_param_defaults,
 )
 from cdk.resolver import Resolver
 from cdk.types import (
@@ -500,20 +501,9 @@ class ApiDestinationHandler(BaseDestinationHandler):
         unresolved default simply leaves the param out of the table (its
         ``from_param`` node then binds ``None`` and is dropped).
         """
-        values: Dict[str, Any] = {}
-        for name, decl in state.params_spec.items():
-            if not isinstance(decl, dict) or "default" not in decl:
-                continue
-            value = self._request_resolver.resolve_for_request(decl["default"])
-            if value is None:
-                logger.warning(
-                    "write param %r: default did not resolve; omitted from "
-                    "body bindings",
-                    name,
-                )
-                continue
-            values[name] = value
-        return values
+        return resolve_param_defaults(
+            state.params_spec, self._request_resolver, context="write param"
+        )
 
     def _build_body(
         self,
