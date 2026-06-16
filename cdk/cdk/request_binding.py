@@ -48,6 +48,11 @@ def resolve_param_defaults(
     and omits params whose default resolves to ``None`` (logging a warning).
     Returns a ``{name: value}`` dict of all successfully-resolved defaults.
 
+    *resolver* must expose a ``resolve_for_request(expr)`` method
+    (e.g. :class:`cdk.resolver.Resolver`).  Authoring errors such as
+    unknown scopes or conflicting expression markers raise
+    ``TransportSpecError`` and propagate uncaught.
+
     *context* is the label used in warning messages (e.g. ``"param"`` for
     read params, ``"write param"`` for destination write params).
     """

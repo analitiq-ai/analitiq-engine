@@ -141,6 +141,19 @@ class TestResolveParamDefaults:
         resolver = self._make_resolver({})
         assert resolve_param_defaults({}, resolver) == {}
 
+    def test_falsy_resolved_values_are_kept(self):
+        resolver = self._make_resolver({"$zero": 0, "$flag": False, "$empty": ""})
+        spec = {
+            "page": {"default": "$zero"},
+            "enabled": {"default": "$flag"},
+            "prefix": {"default": "$empty"},
+        }
+        assert resolve_param_defaults(spec, resolver) == {
+            "page": 0,
+            "enabled": False,
+            "prefix": "",
+        }
+
 
 class TestCollectFromInputSelectors:
     def test_collects_nested_selectors_skipping_literals(self):
