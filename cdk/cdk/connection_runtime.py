@@ -713,7 +713,8 @@ class ConnectionRuntime:
                     await self._engine.dispose()
                 except Exception as e:
                     logger.error(
-                        f"Failed to dispose engine for {self._connection_id}: {e}"
+                        f"Failed to dispose engine for {self._connection_id}: {e}",
+                        exc_info=True,
                     )
                 self._engine = None
             if self._sync_engine is not None:
@@ -724,7 +725,8 @@ class ConnectionRuntime:
                 except Exception as e:
                     logger.error(
                         f"Failed to dispose sync engine for "
-                        f"{self._connection_id}: {e}"
+                        f"{self._connection_id}: {e}",
+                        exc_info=True,
                     )
                 self._sync_engine = None
         finally:
@@ -733,7 +735,8 @@ class ConnectionRuntime:
                     await self._session.close()
                 except Exception as e:
                     logger.error(
-                        f"Failed to close session for {self._connection_id}: {e}"
+                        f"Failed to close session for {self._connection_id}: {e}",
+                        exc_info=True,
                     )
                 self._session = None
             self._base_url = None
@@ -753,7 +756,8 @@ class ConnectionRuntime:
                     self._mongo_transport.client.close()
                 except Exception as e:
                     logger.error(
-                        f"Failed to close MongoDB client for {self._connection_id}: {e}"
+                        f"Failed to close MongoDB client for {self._connection_id}: {e}",
+                        exc_info=True,
                     )
                 self._mongo_transport = None
 

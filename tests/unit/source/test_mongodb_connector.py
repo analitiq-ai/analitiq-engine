@@ -706,3 +706,20 @@ async def test_source_connect_failure_propagates():
     from src.source.connectors.base import ConnectionError as ConnectorConnectionError
     with pytest.raises(ConnectorConnectionError, match="MongoDB connection failed"):
         await connector.connect(runtime)
+
+
+@pytest.mark.asyncio
+async def test_source_connect_failure_clears_runtime():
+    """After connect() failure _runtime is None and runtime.close() was called to
+    release the ref taken by acquire()."""
+    runtime = _make_runtime()
+    runtime.materialize = AsyncMock(side_effect=RuntimeError("auth failed"))
+
+    connector = MongoDbSourceConnector()
+    from src.source.connectors.base import ConnectionError as ConnectorConnectionError
+    with pytest.raises(ConnectorConnectionError):
+        await connector.connect(runtime)
+
+    assert connector._runtime is None
+    assert not connector.is_connected
+    runtime.close.assert_awaited_once()
