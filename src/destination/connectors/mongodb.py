@@ -39,6 +39,7 @@ import pyarrow as pa
 
 from cdk.base_handler import BaseDestinationHandler, BatchWriteResult
 from cdk.connection_runtime import ConnectionRuntime
+from cdk.json_utils import decode_json_fields
 from cdk.types import AckStatus, Cursor, SchemaSpec, WriteMode
 
 logger = logging.getLogger(__name__)
@@ -53,6 +54,16 @@ class _MongoStreamState:
     collection_name: str
     write_mode: WriteMode
     conflict_keys: List[str] = field(default_factory=list)
+    json_fields: Set[str] = field(default_factory=set)
+
+
+def _collect_json_fields(endpoint_doc: Dict[str, Any]) -> Set[str]:
+    """Return field names declared with ``arrow_type: "Json"`` in the endpoint."""
+    props = endpoint_doc.get("properties") or {}
+    return {
+        name for name, defn in props.items()
+        if isinstance(defn, dict) and defn.get("arrow_type") == "Json"
+    }
 
 
 def _arrow_to_doc_list(record_batch: pa.RecordBatch) -> List[Dict[str, Any]]:
@@ -169,7 +180,13 @@ class MongoDbDestinationHandler(BaseDestinationHandler):
         write_spec = (
             (endpoint_doc.get("operations") or {}).get("write") or {}
         )
-        conflict_keys: List[str] = list(write_spec.get("conflict_keys") or [])
+        # Prefer the engine-enriched key list (set by run_destination_mode after
+        # resolving primary_keys fallback) over the static endpoint declaration.
+        conflict_keys: List[str] = list(
+            endpoint_doc.get("_write_conflict_keys")
+            or write_spec.get("conflict_keys")
+            or []
+        )
 
         client = self._runtime.mongo_client
         db = client[database_name]
@@ -217,6 +234,7 @@ class MongoDbDestinationHandler(BaseDestinationHandler):
             collection_name=collection_name,
             write_mode=write_mode,
             conflict_keys=conflict_keys,
+            json_fields=_collect_json_fields(endpoint_doc),
         )
         return True
 
@@ -230,7 +248,7 @@ class MongoDbDestinationHandler(BaseDestinationHandler):
                 if isinstance(exc, _CI):
                     return  # already exists — fine
             except ImportError:
-                pass
+                pass  # pymongo not importable; fall through to name-based check
             if "CollectionInvalid" in type(exc).__name__:
                 return  # already exists — fine (pymongo not imported above)
             raise
@@ -250,13 +268,10 @@ class MongoDbDestinationHandler(BaseDestinationHandler):
                 background=True,
             )
         except Exception as exc:
-            # Index already exists (string match) or has conflicting options
-            # (IndexOptionsConflict) — both are acceptable on a restart.
-            already_exists = (
-                "already exists" in str(exc).lower()
-                or "IndexOptionsConflict" in type(exc).__name__
-            )
-            if not already_exists:
+            # Swallow only "index already exists with the same options".
+            # IndexOptionsConflict means the index exists but is NOT unique,
+            # which would silently break the idempotency guard — re-raise it.
+            if "already exists" not in str(exc).lower():
                 raise
 
         # Only mark ready after all DDL succeeds.
@@ -307,6 +322,8 @@ class MongoDbDestinationHandler(BaseDestinationHandler):
             )
 
         docs = _arrow_to_doc_list(record_batch)
+        if state.json_fields:
+            docs = decode_json_fields(docs, state.json_fields)
         if not docs:
             try:
                 await commits_coll.insert_one(
@@ -343,12 +360,10 @@ class MongoDbDestinationHandler(BaseDestinationHandler):
                 failure_summary=str(exc),
             )
 
-        # Record the commit token. If this fails, the engine will retry. For
-        # INSERT mode the retry is safe (dup-key errors are tolerated). For
-        # UPSERT it is idempotent by key. For TRUNCATE_INSERT a retry would
-        # issue delete_many again, so return RETRYABLE_FAILURE to let the
-        # engine decide whether to replay — the docs were written but the
-        # idempotency record was not.
+        # Record the commit token. Without it the idempotency guard cannot
+        # detect a replay, so a retry would re-execute the write regardless of
+        # mode. Return RETRYABLE so the engine can decide whether to replay;
+        # the write succeeded but cannot be safely ACK'd without the record.
         try:
             await commits_coll.insert_one(
                 {**commit_key, "cursor_token": cursor.token}
@@ -359,12 +374,11 @@ class MongoDbDestinationHandler(BaseDestinationHandler):
                 "idempotency token not saved; retry will re-execute the write",
                 run_id, stream_id, batch_seq, state.write_mode.name, exc,
             )
-            if state.write_mode == WriteMode.WRITE_MODE_TRUNCATE_INSERT:
-                return BatchWriteResult(
-                    status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
-                    records_written=records_written,
-                    failure_summary=f"Commit record not saved after truncate-insert: {exc}",
-                )
+            return BatchWriteResult(
+                status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
+                records_written=records_written,
+                failure_summary=f"Commit record not saved: {exc}",
+            )
 
         return BatchWriteResult(
             status=AckStatus.ACK_STATUS_SUCCESS,
@@ -386,14 +400,22 @@ class MongoDbDestinationHandler(BaseDestinationHandler):
 
         if write_mode == WriteMode.WRITE_MODE_UPSERT and conflict_keys:
             from pymongo import UpdateOne
-            ops = [
-                UpdateOne(
-                    {k: doc.get(k) for k in conflict_keys},
-                    {"$set": doc},
-                    upsert=True,
-                )
-                for doc in docs
-            ]
+            ops = []
+            for doc in docs:
+                missing = [k for k in conflict_keys if k not in doc]
+                if missing:
+                    raise ValueError(
+                        f"Upsert document is missing conflict key(s) {missing}; "
+                        "cannot build a deterministic filter"
+                    )
+                filter_doc = {k: doc[k] for k in conflict_keys}
+                # Exclude _id from $set when it's not a conflict key — MongoDB
+                # raises ImmutableField if you attempt to update _id in-place.
+                set_doc = {
+                    k: v for k, v in doc.items()
+                    if k != "_id" or "_id" in conflict_keys
+                }
+                ops.append(UpdateOne(filter_doc, {"$set": set_doc}, upsert=True))
             result = await collection.bulk_write(ops, ordered=False)
             return result.upserted_count + result.modified_count
 

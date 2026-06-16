@@ -18,7 +18,6 @@ from types import ModuleType
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
-import pyarrow as pa
 import pytest
 
 
@@ -37,8 +36,20 @@ def _make_bson_stub() -> ModuleType:
         def __str__(self) -> str:
             return self._hex
 
+        def __eq__(self, other: object) -> bool:
+            return self._hex == str(other)
+
+        def __lt__(self, other: Any) -> bool:
+            return self._hex < str(other)
+
+        def __le__(self, other: Any) -> bool:
+            return self._hex <= str(other)
+
         def __gt__(self, other: Any) -> bool:
             return self._hex > str(other)
+
+        def __ge__(self, other: Any) -> bool:
+            return self._hex >= str(other)
 
     class Decimal128:
         def __init__(self, val: str = "1.5"):
@@ -490,3 +501,91 @@ async def test_incremental_tz_naive_cursor_no_crash_with_safety_window():
     cp.save_cursor.assert_awaited_once()
     saved = cp.save_cursor.call_args[0][2]["cursor"]
     assert saved.tzinfo is not None
+
+
+# ---------------------------------------------------------------------------
+# Safety-window: cursor must not move backwards on empty result
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_safety_window_empty_result_does_not_move_cursor_backwards():
+    """With safety_window_seconds, an empty result must save the pre-rollback
+    cursor, not the rolled-back query cursor.
+
+    Without this fix, max_cursor_seen would be initialised from cursor_value
+    (already rolled back), so each run with no new rows would push the saved
+    cursor further into the past (double-rollback per run).
+    """
+    bson = sys.modules["bson"]
+    base_cursor = datetime.datetime(2024, 6, 1, 12, 0, 0, tzinfo=datetime.timezone.utc)
+
+    # Empty page — no new records
+    client, _ = _make_motor_client([[]])
+    runtime = _make_runtime()
+    runtime.mongo_client = client
+
+    config = {
+        "endpoint_document": {"collection": "ev5", "database": "mydb"},
+        "stream_source": {
+            "replication": {
+                "method": "incremental",
+                "cursor_field": "ts",
+                "safety_window_seconds": 300,
+            }
+        },
+    }
+
+    cp = _make_checkpoint(cursor_value=base_cursor)
+    connector = MongoDbSourceConnector()
+    batches = []
+    async for batch in connector.read_batches(
+        runtime, config, checkpoint=cp, stream_name="ev5"
+    ):
+        batches.append(batch)
+
+    assert batches == []
+    # The saved cursor must not be earlier than base_cursor — even though the
+    # query cursor was rolled back by safety_window_seconds, max_cursor_seen
+    # must start from the pre-rollback value.
+    cp.save_cursor.assert_awaited_once()
+    saved_cursor_val = cp.save_cursor.call_args[0][2]["cursor"]
+    assert saved_cursor_val >= base_cursor
+
+
+# ---------------------------------------------------------------------------
+# Schema contract path
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_read_batches_with_properties_schema():
+    """Endpoint with a 'properties' key must pass the full endpoint doc to
+    SchemaContract — not the bare field map — so SchemaContract can find its
+    'properties' key."""
+    bson = sys.modules["bson"]
+    docs = [{"_id": bson.ObjectId("507f191e810c19729de860e1"), "name": "Alice"}]
+    client, _ = _make_motor_client([docs, []])
+
+    runtime = _make_runtime()
+    runtime.mongo_client = client
+
+    config = {
+        "endpoint_document": {
+            "collection": "users",
+            "database": "mydb",
+            "properties": {
+                "_id": {"arrow_type": "Utf8"},
+                "name": {"arrow_type": "Utf8"},
+            },
+        },
+        "stream_source": {"replication": {"method": "full_refresh"}},
+    }
+
+    connector = MongoDbSourceConnector()
+    batches = []
+    async for batch in connector.read_batches(
+        runtime, config, checkpoint=_make_checkpoint(), stream_name="users"
+    ):
+        batches.append(batch)
+
+    assert len(batches) == 1
+    assert batches[0].num_rows == 1

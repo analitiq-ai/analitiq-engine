@@ -61,19 +61,22 @@ def _coerce_document(doc: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _resolve_records_schema(endpoint_doc: Dict[str, Any]) -> Dict[str, Any]:
-    """Extract the ``properties`` schema from a collection endpoint document.
+    """Return the schema wrapper dict to pass to ``SchemaContract``.
 
     Supports both the MongoDB-native layout (top-level ``properties`` key)
-    and the API-style layout (``operations.read.response.records.items``),
-    so a connector definition can use either shape.
+    and the API-style layout (``operations.read.response.records.items``).
+    Returns an empty dict (falsy) when no typed schema is declared.
+
+    ``SchemaContract`` expects the *wrapping* dict that carries the
+    ``"columns"`` or ``"properties"`` key — not the bare field map itself.
     """
-    if "properties" in endpoint_doc:
-        return endpoint_doc["properties"]
+    if "properties" in endpoint_doc or "columns" in endpoint_doc:
+        return endpoint_doc
     read_op = ((endpoint_doc.get("operations") or {}).get("read") or {})
     items = (
         ((read_op.get("response") or {}).get("records") or {}).get("items") or {}
     )
-    return items.get("properties") or {}
+    return items
 
 
 class MongoDbSourceConnector(BaseConnector):
@@ -184,6 +187,11 @@ class MongoDbSourceConnector(BaseConnector):
             cursor_state = await checkpoint.get_cursor(stream_name, partition)
             cursor_value = (cursor_state or {}).get("cursor")
 
+        # Keep a pre-rollback copy so max_cursor_seen never drifts backwards:
+        # if safety_window_seconds rolls cursor_value back for querying, we still
+        # want the saved cursor to be at least as recent as the previous run.
+        initial_cursor_value = cursor_value
+
         # Roll the incremental cursor back by the safety window so late-arriving
         # records are re-read. Record the pre-rollback time as the ceiling for
         # the high-water mark so the next run stays within the same window.
@@ -207,7 +215,9 @@ class MongoDbSourceConnector(BaseConnector):
         # Keyset paging on _id. Start with None so the first page has no _id
         # filter — this works for any _id type (ObjectId, string, int, compound).
         last_id: Any = None
-        max_cursor_seen: Any = cursor_value
+        # Use the pre-rollback cursor as the floor so a run with no new rows
+        # never saves a cursor earlier than the previous run's high-water mark.
+        max_cursor_seen: Any = initial_cursor_value
 
         while True:
             page_filter: Dict[str, Any] = {**incremental_filter}
@@ -263,6 +273,17 @@ class MongoDbSourceConnector(BaseConnector):
                 if cutoff is not None and isinstance(max_cursor_seen, datetime)
                 else max_cursor_seen
             )
+            # BSON ObjectId is not JSON-serialisable; coerce to str so the
+            # checkpoint layer can round-trip it. On reload the filter uses
+            # {$gte: str}, which is only correct when _id values are strings.
+            # Streams that paginate on a non-string _id should use a separate
+            # cursor_field rather than relying on ObjectId ordering.
+            try:
+                from bson import ObjectId as _ObjectId
+                if isinstance(value_to_save, _ObjectId):
+                    value_to_save = str(value_to_save)
+            except ImportError:
+                pass
             await checkpoint.save_cursor(
                 stream_name, partition, {"cursor": value_to_save}
             )
