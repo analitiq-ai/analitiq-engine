@@ -413,7 +413,7 @@ async def test_write_batch_unconfigured_stream():
         run_id="r", stream_id="missing", batch_seq=0,
         record_batch=_make_batch({"id": 1}), record_ids=["r1"], cursor=_cursor(),
     )
-    assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+    assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
 
 
 @pytest.mark.asyncio
@@ -451,6 +451,113 @@ async def test_write_batch_insert_commit_failure_non_truncate_returns_success():
     )
 
     assert result.status == AckStatus.ACK_STATUS_SUCCESS
+
+
+@pytest.mark.asyncio
+async def test_write_batch_empty_records_commit_failure_returns_retryable():
+    """Empty-batch commit_one failure must return RETRYABLE, not raise."""
+    rt, commits_coll, target_coll, db_mock = _make_runtime()
+    commits_coll.insert_one = AsyncMock(side_effect=RuntimeError("write timeout"))
+
+    handler, _ = await _connected_handler(rt)
+    handler._streams["s1"] = _MongoStreamState("testdb", "items", WriteMode.WRITE_MODE_INSERT)
+    handler._batch_commits_ready.add("testdb")
+
+    result = await handler.write_batch(
+        run_id="r", stream_id="s1", batch_seq=9,
+        record_batch=pa.RecordBatch.from_pylist([]),
+        record_ids=[], cursor=_cursor(),
+    )
+
+    assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
+    assert "write timeout" in result.failure_summary
+
+
+@pytest.mark.asyncio
+async def test_configure_schema_upsert_without_conflict_keys_returns_false():
+    """UPSERT with no conflict_keys must fail configure_schema — no silent INSERT fallback."""
+    rt, commits_coll, target_coll, db_mock = _make_runtime()
+    handler, _ = await _connected_handler(rt)
+    handler.set_stream_endpoints({"s1": _endpoint(conflict_keys=[])})
+
+    result = await handler.configure_schema(_schema_spec("s1", WriteMode.WRITE_MODE_UPSERT))
+
+    assert result is False
+    assert "s1" not in handler._streams
+
+
+@pytest.mark.asyncio
+async def test_write_batch_all_duplicate_insert_returns_zero_written():
+    """All-duplicate BulkWriteError should be treated as idempotent success, not RETRYABLE."""
+    import sys
+    from types import ModuleType
+
+    rt, commits_coll, target_coll, db_mock = _make_runtime()
+
+    # Build a fake BulkWriteError whose details indicate 0 inserted, all dup-key
+    class FakeBulkWriteError(Exception):
+        def __init__(self, details):
+            self.details = details
+
+    fake_pymongo_errors = ModuleType("pymongo.errors")
+    fake_pymongo_errors.BulkWriteError = FakeBulkWriteError
+    fake_pymongo = ModuleType("pymongo")
+    fake_pymongo.errors = fake_pymongo_errors
+
+    with patch.dict(sys.modules, {"pymongo": fake_pymongo, "pymongo.errors": fake_pymongo_errors}):
+        bulk_exc = FakeBulkWriteError(
+            {"nInserted": 0, "writeErrors": [{"code": 11000, "errmsg": "dup"}]}
+        )
+        target_coll.insert_many = AsyncMock(side_effect=bulk_exc)
+
+        handler, _ = await _connected_handler(rt)
+        handler._streams["s1"] = _MongoStreamState("testdb", "items", WriteMode.WRITE_MODE_INSERT)
+        handler._batch_commits_ready.add("testdb")
+
+        result = await handler.write_batch(
+            run_id="r", stream_id="s1", batch_seq=0,
+            record_batch=_make_batch({"id": 1}), record_ids=["r1"], cursor=_cursor(),
+        )
+
+    assert result.status == AckStatus.ACK_STATUS_SUCCESS
+    assert result.records_written == 0
+
+
+@pytest.mark.asyncio
+async def test_write_batch_partial_duplicate_insert_returns_n_inserted():
+    """Partial BulkWriteError (some dup, some inserted) returns the inserted count."""
+    import sys
+    from types import ModuleType
+
+    rt, commits_coll, target_coll, db_mock = _make_runtime()
+
+    class FakeBulkWriteError(Exception):
+        def __init__(self, details):
+            self.details = details
+
+    fake_pymongo_errors = ModuleType("pymongo.errors")
+    fake_pymongo_errors.BulkWriteError = FakeBulkWriteError
+    fake_pymongo = ModuleType("pymongo")
+    fake_pymongo.errors = fake_pymongo_errors
+
+    with patch.dict(sys.modules, {"pymongo": fake_pymongo, "pymongo.errors": fake_pymongo_errors}):
+        bulk_exc = FakeBulkWriteError(
+            {"nInserted": 1, "writeErrors": [{"code": 11000, "errmsg": "dup"}]}
+        )
+        target_coll.insert_many = AsyncMock(side_effect=bulk_exc)
+
+        handler, _ = await _connected_handler(rt)
+        handler._streams["s1"] = _MongoStreamState("testdb", "items", WriteMode.WRITE_MODE_INSERT)
+        handler._batch_commits_ready.add("testdb")
+
+        result = await handler.write_batch(
+            run_id="r", stream_id="s1", batch_seq=0,
+            record_batch=_make_batch({"id": 1}, {"id": 2}),
+            record_ids=["r1", "r2"], cursor=_cursor(),
+        )
+
+    assert result.status == AckStatus.ACK_STATUS_SUCCESS
+    assert result.records_written == 1
 
 
 # ---------------------------------------------------------------------------

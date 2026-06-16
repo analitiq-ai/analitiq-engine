@@ -232,6 +232,10 @@ class MongoDbSourceConnector(BaseConnector):
             if cursor_field:
                 for doc in docs:
                     val = doc.get(cursor_field)
+                    # Normalise tz-naive datetimes from Motor (tz_aware=False default)
+                    # so comparisons with a tz-aware max_cursor_seen don't crash.
+                    if isinstance(val, datetime) and val.tzinfo is None:
+                        val = val.replace(tzinfo=timezone.utc)
                     if val is not None and (
                         max_cursor_seen is None or val > max_cursor_seen
                     ):

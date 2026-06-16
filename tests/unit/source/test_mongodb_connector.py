@@ -450,3 +450,43 @@ async def test_read_batches_missing_collection_raises():
             runtime, config, checkpoint=_make_checkpoint(), stream_name="x"
         ):
             pass
+
+
+@pytest.mark.asyncio
+async def test_incremental_tz_naive_cursor_no_crash_with_safety_window():
+    """Motor returns tz-naive datetimes by default; after safety-window rollback
+    max_cursor_seen becomes tz-aware. Comparison must not raise TypeError."""
+    bson = sys.modules["bson"]
+    prev_cursor = datetime.datetime(2024, 1, 1, 0, 0, 0, tzinfo=datetime.timezone.utc)
+    # Motor returns tz-naive datetimes (no tzinfo)
+    tz_naive_ts = datetime.datetime(2024, 1, 1, 1, 0, 0)
+    docs = [{"_id": bson.ObjectId("507f191e810c19729de860cc"), "ts": tz_naive_ts, "v": 1}]
+
+    client, _ = _make_motor_client([docs, []])
+    runtime = _make_runtime()
+    runtime.mongo_client = client
+
+    config = {
+        "endpoint_document": {"collection": "ev4", "database": "mydb"},
+        "stream_source": {
+            "replication": {
+                "method": "incremental",
+                "cursor_field": "ts",
+                "safety_window_seconds": 300,
+            }
+        },
+    }
+
+    cp = _make_checkpoint(cursor_value=prev_cursor)
+    connector = MongoDbSourceConnector()
+    # Should not raise TypeError from tz-aware vs tz-naive comparison
+    batches = []
+    async for batch in connector.read_batches(
+        runtime, config, checkpoint=cp, stream_name="ev4"
+    ):
+        batches.append(batch)
+
+    assert len(batches) == 1
+    cp.save_cursor.assert_awaited_once()
+    saved = cp.save_cursor.call_args[0][2]["cursor"]
+    assert saved.tzinfo is not None

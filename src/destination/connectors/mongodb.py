@@ -4,7 +4,9 @@ Writes Arrow ``RecordBatch`` records to a MongoDB collection, implementing
 the full ``BaseDestinationHandler`` contract:
 
 * **Insert** — ``collection.insert_many(docs, ordered=False)``; a duplicate
-  key error on one document does not abort the batch.
+  key error on *some* documents does not abort the batch. A batch where
+  *all* documents are duplicates is treated as an idempotent success (returns
+  0 records written).
 * **Upsert** — ``collection.bulk_write([UpdateOne({key: val}, {$set: doc},
   upsert=True) for doc in batch], ordered=False)``; conflict key set comes
   from the endpoint's ``write.conflict_keys``.
@@ -181,16 +183,25 @@ class MongoDbDestinationHandler(BaseDestinationHandler):
             )
             return False
 
-        if write_mode == WriteMode.WRITE_MODE_UPSERT and conflict_keys:
+        if write_mode == WriteMode.WRITE_MODE_UPSERT:
+            if not conflict_keys:
+                logger.error(
+                    "configure_schema: UPSERT mode requires conflict_keys for stream %r "
+                    "but none were provided; UPSERT cannot be satisfied without a key set",
+                    stream_id,
+                )
+                return False
             coll = db[collection_name]
             index_spec = [(k, 1) for k in conflict_keys]
             try:
                 await coll.create_index(index_spec, unique=True, background=True)
             except Exception as exc:
-                logger.warning(
-                    "Failed to create conflict-key index on %r: %s",
-                    collection_name, exc,
+                logger.error(
+                    "configure_schema: failed to create conflict-key index on %r for "
+                    "stream %r: %s — UPSERT idempotency cannot be guaranteed",
+                    collection_name, stream_id, exc,
                 )
+                return False
 
         try:
             await self._ensure_batch_commits(db, database_name)
@@ -239,7 +250,8 @@ class MongoDbDestinationHandler(BaseDestinationHandler):
                 background=True,
             )
         except Exception as exc:
-            # OperationFailure with "already exists" is acceptable.
+            # Index already exists (string match) or has conflicting options
+            # (IndexOptionsConflict) — both are acceptable on a restart.
             already_exists = (
                 "already exists" in str(exc).lower()
                 or "IndexOptionsConflict" in type(exc).__name__
@@ -266,9 +278,16 @@ class MongoDbDestinationHandler(BaseDestinationHandler):
         state = self._streams.get(stream_id)
         if state is None:
             return BatchWriteResult(
-                status=AckStatus.ACK_STATUS_FATAL_FAILURE,
+                status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
                 records_written=0,
                 failure_summary=f"Stream {stream_id!r} not configured; configure_schema must run first",
+            )
+
+        if self._runtime is None:
+            return BatchWriteResult(
+                status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
+                records_written=0,
+                failure_summary="write_batch called before connect() or after disconnect()",
             )
 
         client = self._runtime.mongo_client
@@ -289,9 +308,20 @@ class MongoDbDestinationHandler(BaseDestinationHandler):
 
         docs = _arrow_to_doc_list(record_batch)
         if not docs:
-            await commits_coll.insert_one(
-                {**commit_key, "cursor_token": cursor.token}
-            )
+            try:
+                await commits_coll.insert_one(
+                    {**commit_key, "cursor_token": cursor.token}
+                )
+            except Exception as exc:
+                logger.error(
+                    "Failed to record empty-batch commit (run=%s stream=%s seq=%d): %s",
+                    run_id, stream_id, batch_seq, exc,
+                )
+                return BatchWriteResult(
+                    status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
+                    records_written=0,
+                    failure_summary=str(exc),
+                )
             return BatchWriteResult(
                 status=AckStatus.ACK_STATUS_SUCCESS,
                 records_written=0,
@@ -400,4 +430,10 @@ class MongoDbDestinationHandler(BaseDestinationHandler):
                     n_inserted, n_dropped, n_total,
                 )
                 return n_inserted
-            raise
+            # All documents were already present (all dup-key, zero inserted).
+            # The batch was applied on a prior attempt; treat as idempotent success.
+            logger.info(
+                "insert_many: all %d documents were duplicates; batch already applied",
+                n_total,
+            )
+            return 0

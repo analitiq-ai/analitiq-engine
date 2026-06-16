@@ -15,9 +15,10 @@ Currently registered transport families:
   operations callers run via ``asyncio.to_thread``.
 * ``adbc``       — ADBC DBAPI 2.0 connection for database connectors
   whose dialect has no async SA driver (Snowflake, BigQuery) or wants
-  the Arrow-native bulk path (Postgres). Driver enum closed to the
-  registry in ``_ADBC_DRIVER_MODULES``.
+  the Arrow-native bulk path (Postgres). Driver names validated by the
+  published connector schema's ``AdbcTransport.driver`` enum.
 * ``http``       — ``aiohttp.ClientSession`` for API connectors.
+* ``mongodb``    — ``motor.motor_asyncio.AsyncIOMotorClient`` for nosql connectors.
 
 Plugin packages call :func:`register_transport_kind` at import time to
 add new families.
@@ -827,7 +828,11 @@ async def build_mongodb_from_spec(
     default_database = resolved.get("database")
 
     client = AsyncIOMotorClient(uri, serverSelectionTimeoutMS=10_000)
-    await client.admin.command("ping")
+    try:
+        await client.admin.command("ping")
+    except Exception:
+        client.close()
+        raise
 
     return MongoDbTransport(client=client, default_database=default_database)
 
