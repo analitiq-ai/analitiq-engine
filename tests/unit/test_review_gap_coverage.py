@@ -17,12 +17,13 @@ from unittest.mock import AsyncMock, MagicMock
 
 
 class TestWriteConflictKeysWiring:
-    """The destination handler must use ``_write_conflict_keys`` from the
-    enriched endpoint document when present, falling back to primary_keys
-    only when the key is absent entirely (not just empty)."""
+    """The destination handler consumes ``_write_conflict_keys`` from the
+    enriched endpoint document verbatim. When the key is absent or empty
+    the conflict target is empty — the engine never derives one from
+    ``primary_keys``."""
 
     @pytest.mark.asyncio
-    async def test_explicit_conflict_keys_override_primary_keys(self):
+    async def test_conflict_keys_consumed_verbatim(self):
         from cdk.sql.generic import (
             GenericSQLConnector,
         )
@@ -69,7 +70,7 @@ class TestWriteConflictKeysWiring:
         assert handler._streams["s1"].primary_keys == ["id"]
 
     @pytest.mark.asyncio
-    async def test_missing_write_conflict_keys_falls_back_to_primary_keys(self):
+    async def test_absent_write_conflict_keys_yields_empty_no_primary_keys_fallback(self):
         from cdk.sql.generic import (
             GenericSQLConnector,
         )
@@ -107,7 +108,11 @@ class TestWriteConflictKeysWiring:
         )
         await handler.configure_schema(msg)
 
-        assert handler._streams["s1"].conflict_keys == ["id"]
+        # No ``_write_conflict_keys`` on the endpoint doc: the conflict
+        # target is empty. The engine does NOT fabricate one from
+        # ``primary_keys`` (the misconfiguration surfaces loudly later, at
+        # the write path).
+        assert handler._streams["s1"].conflict_keys == []
 
 
 # --------------------------------------------------------------------------- #
@@ -116,34 +121,16 @@ class TestWriteConflictKeysWiring:
 
 
 class TestMainConflictKeysWiring:
-    """Misconfigured pipelines must fail fast at destination startup —
-    silently downgrading UPSERT to INSERT corrupts replication
-    semantics."""
+    """An unknown ``write.mode`` must fail fast at destination startup
+    (format validation). Conflict-key enforcement is no longer the
+    engine's job — Infra validates it, so the engine only rejects a mode
+    string it cannot parse."""
 
     def test_unknown_mode_raises(self):
-        from src.models.stream import WriteConfig, WriteMode
+        from src.models.stream import WriteMode
 
         with pytest.raises(ValueError):
             WriteMode("merge-typo")
-
-        # Confirm the helper's contract: ValueError on UPSERT without keys
-        wc = WriteConfig(mode=WriteMode.UPSERT)
-        with pytest.raises(ValueError, match="UPSERT requires"):
-            wc.effective_conflict_keys([])
-
-    def test_effective_conflict_keys_flattens_for_database_handler(self):
-        """The database handler uses a single flat list. The first
-        composite returned by ``effective_conflict_keys`` is what
-        main.py threads through ``_write_conflict_keys``."""
-        from src.models.stream import WriteConfig, WriteMode
-
-        wc = WriteConfig(
-            mode=WriteMode.UPSERT,
-            conflict_keys=[["tenant_id", "id"]],
-        )
-        composites = wc.effective_conflict_keys(["id"]) or []
-        assert composites == [["tenant_id", "id"]]
-        assert list(composites[0]) == ["tenant_id", "id"]
 
 
 # --------------------------------------------------------------------------- #

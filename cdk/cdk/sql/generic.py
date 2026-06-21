@@ -208,12 +208,11 @@ class _StreamState:
     table: Optional[Table] = None
     batch_commits_table: Optional[Table] = None
     primary_keys: List[str] = field(default_factory=list)
-    # Columns used as the ON CONFLICT target for upsert. Set at
-    # configure_schema time from ``endpoint_doc["_write_conflict_keys"]``
-    # — main.py computes that via WriteConfig.effective_conflict_keys,
-    # which uses the stream's explicit ``write.conflict_keys`` when
-    # set and falls back to ``primary_keys``. Empty here means INSERT
-    # mode or no conflict target available.
+    # Columns used as the ON CONFLICT / MERGE target for upsert. Set at
+    # configure_schema time from ``endpoint_doc["_write_conflict_keys"]``,
+    # which main.py copies verbatim from the stream's Infra-validated
+    # ``write.conflict_keys``. Empty here means INSERT mode — an upsert
+    # always carries an explicit conflict target under the contract.
     conflict_keys: List[str] = field(default_factory=list)
     write_mode: WriteMode = "upsert"
     endpoint_document: Dict[str, Any] = field(default_factory=dict)
@@ -647,16 +646,11 @@ class GenericSQLConnector(BaseDestinationHandler):
             return False
 
         primary_keys = list(endpoint_doc.get("primary_keys") or [])
-        # ``_write_conflict_keys`` is populated at startup by main.py
-        # from the stream's WriteConfig (already resolved against the
-        # endpoint's primary keys). A missing key means INSERT mode
-        # — main.py always sets the field for UPSERT streams. An
-        # explicit empty list also means "no conflict target", so we
-        # only fall back to primary_keys when the key is absent.
-        if "_write_conflict_keys" in endpoint_doc:
-            conflict_keys = list(endpoint_doc["_write_conflict_keys"] or [])
-        else:
-            conflict_keys = list(primary_keys)
+        # ``_write_conflict_keys`` is the stream's Infra-validated upsert
+        # conflict target, copied verbatim by main.py. Absent or empty
+        # means no conflict target (INSERT mode); the engine never derives
+        # one from ``primary_keys``.
+        conflict_keys = list(endpoint_doc.get("_write_conflict_keys") or [])
         raw_schema = database_object.get("schema")
         if self._adbc_only:
             # Snowflake's default schema is account-/role-dependent;
@@ -1078,6 +1072,16 @@ class GenericSQLConnector(BaseDestinationHandler):
                 records_written=0,
                 failure_summary=f"dialect: {e}",
             )
+        except SchemaConfigurationError as e:
+            # The stream is misconfigured for this write (e.g. upsert with
+            # no conflict_keys). Deterministic — retrying cannot heal it, so
+            # fail fatally instead of silently degrading or looping forever.
+            logger.error("Write configuration error: %s", e, exc_info=True)
+            return BatchWriteResult(
+                status=AckStatus.ACK_STATUS_FATAL_FAILURE,
+                records_written=0,
+                failure_summary=f"write-config: {e}",
+            )
         except AdbcConfigurationError as e:
             # ADBC misconfiguration cannot heal between attempts; bail
             # fatally so the engine does not retry forever.
@@ -1348,25 +1352,24 @@ class GenericSQLConnector(BaseDestinationHandler):
         upsert here in the first place: ``supports_upsert`` gates the
         advertised write modes.
 
-        When no conflict keys resolve (neither ``conflict_keys`` nor
-        ``primary_keys``), there is nothing to match conflicts on; the
-        write falls back to plain INSERT with a WARNING, since duplicates
-        are then possible.
+        ``conflict_keys`` is the stream's Infra-validated upsert target;
+        the contract guarantees it is non-empty for an upsert. If it is
+        empty here the stream is misconfigured — fail loud rather than
+        silently fall back to INSERT, which would duplicate rows.
         """
-        conflict_keys = state.conflict_keys or state.primary_keys
-        if state.table is None or not conflict_keys:
-            logger.warning(
-                "upsert requested for %s.%s but no conflict keys resolved; "
-                "falling back to plain INSERT — duplicates are possible",
-                state.schema_name, state.table_name,
-            )
-            self._insert_records(conn, state, records)
+        if state.table is None:
             return
+        if not state.conflict_keys:
+            raise SchemaConfigurationError(
+                f"upsert requested for {state.schema_name}.{state.table_name} "
+                f"but the stream carries no conflict_keys; refusing to fall back "
+                f"to plain INSERT (would silently duplicate rows)"
+            )
         if not records:
             return
 
         stmt = self.dialect.build_sqlalchemy_upsert(
-            state.table, records, conflict_keys
+            state.table, records, state.conflict_keys
         )
         conn.execute(stmt)
 
@@ -1729,14 +1732,23 @@ class GenericSQLConnector(BaseDestinationHandler):
                 "requires a configured SchemaContract; schema alignment was skipped"
             )
         cast_batch = state.schema_contract.cast_arrow_batch(record_batch)
-        conflict_keys = state.conflict_keys or state.primary_keys
 
         if state.write_mode == "truncate_insert":
             await asyncio.to_thread(
                 self._truncate_then_ingest_sync,
                 cast_batch, state.schema_name, state.table_name,
             )
-        elif state.write_mode == "upsert" and conflict_keys:
+        elif state.write_mode == "upsert":
+            # ``conflict_keys`` is the stream's Infra-validated upsert
+            # target; the contract guarantees it is non-empty for an
+            # upsert. If it is empty the stream is misconfigured — fail
+            # loud rather than silently ingest, which would duplicate rows.
+            if not state.conflict_keys:
+                raise SchemaConfigurationError(
+                    f"upsert requested for {state.schema_name}.{state.table_name} "
+                    f"but the stream carries no conflict_keys; refusing to fall "
+                    f"back to plain ingest (would silently duplicate rows)"
+                )
             # Fingerprint via SHA-256 over (run_id, stream_id, batch_seq)
             # gives a fixed-width collision-resistant token that survives
             # any future identifier-length pressure. Critical here because
@@ -1753,19 +1765,10 @@ class GenericSQLConnector(BaseDestinationHandler):
             await asyncio.to_thread(
                 self._merge_ingest_sync,
                 cast_batch, state.schema_name, state.table_name,
-                list(cast_batch.schema.names), conflict_keys,
+                list(cast_batch.schema.names), state.conflict_keys,
                 stage_token,
             )
         else:
-            if state.write_mode == "upsert":
-                # Same fallback semantics as the SQLAlchemy path's
-                # _upsert_records: no conflict keys means nothing to match
-                # conflicts on, so the write degrades loudly to plain ingest.
-                logger.warning(
-                    "upsert requested for %s.%s but no conflict keys resolved; "
-                    "falling back to plain ingest — duplicates are possible",
-                    state.schema_name, state.table_name,
-                )
             await asyncio.to_thread(
                 self._adbc_only_ingest_sync,
                 cast_batch, state.schema_name, state.table_name,

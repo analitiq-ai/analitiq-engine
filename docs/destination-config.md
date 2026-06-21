@@ -234,7 +234,7 @@ tests.
     },
     "write": {
       "mode": "upsert",
-      "conflict_keys": [["id"]]
+      "conflict_keys": ["id"]
     },
     "execution": {
       "batch_size": 1000
@@ -247,7 +247,7 @@ tests.
 |-------|----------|-------------|
 | `endpoint_ref` | Yes | Object `{scope, connection_id, endpoint_id}` (always an object — there is no string form). `scope` is `connection` or `connector`; `connection_id` is the destination connection; `endpoint_id` the endpoint name |
 | `write.mode` | No | `insert`, `upsert`, or `truncate_insert` (default: `upsert`) |
-| `write.conflict_keys` | When `mode = upsert` | List of token-path field references for conflict resolution (e.g. `[["id"]]`) |
+| `write.conflict_keys` | When `mode = upsert` | Single composite conflict-key set: a non-empty list of destination field names (e.g. `["id"]` or `["tenant_id", "id"]`) |
 | `execution.batch_size` | No | Per-destination batch-size override |
 | `execution.max_concurrent_batches` | No | Per-destination concurrency override |
 
