@@ -210,29 +210,18 @@ class TestWriteConfigDefaults:
         assert WriteConfig().mode is WriteMode.UPSERT
 
     @pytest.mark.unit
-    def test_effective_conflict_keys_falls_back_to_primary_keys(self):
-        from src.models.stream import WriteConfig, WriteMode
-        cfg = WriteConfig(mode=WriteMode.UPSERT)
-        assert cfg.effective_conflict_keys(["id"]) == [["id"]]
+    def test_conflict_keys_default_is_none(self):
+        from src.models.stream import WriteConfig
+        assert WriteConfig().conflict_keys is None
 
     @pytest.mark.unit
-    def test_effective_conflict_keys_prefers_explicit(self):
+    def test_conflict_keys_is_a_flat_key_set(self):
+        # Infra supplies a single composite conflict-key set (a flat list
+        # of destination field names); the engine stores it verbatim and
+        # never derives or reshapes it.
         from src.models.stream import WriteConfig, WriteMode
-        cfg = WriteConfig(mode=WriteMode.UPSERT, conflict_keys=[["tenant", "id"]])
-        assert cfg.effective_conflict_keys(["id"]) == [["tenant", "id"]]
-
-    @pytest.mark.unit
-    def test_effective_conflict_keys_raises_when_upsert_unkeyed(self):
-        from src.models.stream import WriteConfig, WriteMode
-        cfg = WriteConfig(mode=WriteMode.UPSERT)
-        with pytest.raises(ValueError, match="UPSERT requires"):
-            cfg.effective_conflict_keys([])
-
-    @pytest.mark.unit
-    def test_effective_conflict_keys_none_for_insert(self):
-        from src.models.stream import WriteConfig, WriteMode
-        cfg = WriteConfig(mode=WriteMode.INSERT)
-        assert cfg.effective_conflict_keys(["id"]) is None
+        cfg = WriteConfig(mode=WriteMode.UPSERT, conflict_keys=["tenant_id", "id"])
+        assert cfg.conflict_keys == ["tenant_id", "id"]
 
 
 class TestBatchWriteResultInvariant:

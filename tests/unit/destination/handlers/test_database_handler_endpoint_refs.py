@@ -274,40 +274,39 @@ class TestWriteBatchFatalOnTypeMapError:
         assert "myschema.events" in result.failure_summary
 
 
-class TestUpsertDowngradeWarns:
-    """Upsert with no resolvable conflict keys falls back to plain INSERT,
-    but never silently (issue #151)."""
+class TestUpsertFailsLoudWithoutConflictKeys:
+    """Upsert with no conflict keys fails loud — the engine never silently
+    degrades to INSERT (which would duplicate rows) and never derives a
+    target from ``primary_keys`` (issue #254)."""
 
     @pytest.mark.asyncio
-    async def test_upsert_without_conflict_keys_warns_and_inserts(self, caplog):
-        import logging
-        from unittest.mock import AsyncMock, MagicMock
+    async def test_upsert_without_conflict_keys_raises(self):
+        from unittest.mock import MagicMock
 
+        from cdk.sql.exceptions import SchemaConfigurationError
         from cdk.sql.generic import GenericSQLConnector, _StreamState
 
         handler = GenericSQLConnector()
         handler._insert_records = MagicMock()  # type: ignore[method-assign]
+        conn = MagicMock()
         state = _StreamState(
             table=MagicMock(),
             schema_name="public",
             table_name="events",
             write_mode="upsert",
-            primary_keys=[],
+            primary_keys=["id"],  # present, but must NOT be used as a fallback
             conflict_keys=[],
         )
 
-        with caplog.at_level(logging.WARNING, logger="cdk.sql.generic"):
-            handler._upsert_records(MagicMock(), state, [{"id": 1}])
+        with pytest.raises(SchemaConfigurationError, match="no conflict_keys"):
+            handler._upsert_records(conn, state, [{"id": 1}])
 
-        handler._insert_records.assert_called_once()
-        assert any(
-            "duplicates are possible" in r.getMessage() for r in caplog.records
-        )
+        handler._insert_records.assert_not_called()
+        conn.execute.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_upsert_with_conflict_keys_does_not_warn(self, caplog):
-        import logging
-        from unittest.mock import AsyncMock, MagicMock
+    async def test_upsert_with_conflict_keys_executes(self):
+        from unittest.mock import MagicMock
 
         from cdk.sql.generic import GenericSQLConnector, _StreamState
 
@@ -319,15 +318,14 @@ class TestUpsertDowngradeWarns:
             schema_name="public",
             table_name="events",
             write_mode="upsert",
-            primary_keys=["id"],
+            conflict_keys=["id"],
         )
 
         conn = MagicMock()
-        with caplog.at_level(logging.WARNING, logger="cdk.sql.generic"):
-            handler._upsert_records(conn, state, [{"id": 1}])
+        handler._upsert_records(conn, state, [{"id": 1}])
 
+        handler.dialect.build_sqlalchemy_upsert.assert_called_once()
         conn.execute.assert_called_once()
-        assert not caplog.records
 
 
 class TestEnsureTablesEngineNoneRaises:

@@ -37,7 +37,7 @@ import os
 import sys
 from typing import Any, Dict
 
-from src.models.stream import WriteConfig, WriteMode
+from src.models.stream import WriteMode
 
 # Set up logging
 log_level = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -192,29 +192,24 @@ async def run_destination_mode() -> None:
             stream_id = stream.stream_id
             endpoint_refs[stream_id] = dest.endpoint_ref.to_dict()
             endpoint_doc = dest.endpoint_document
-            # Resolve effective conflict keys via WriteConfig. The
-            # database handler uses a single flat list, so we flatten
-            # the first composite returned by the helper. Errors
-            # (unknown mode, UPSERT without keys) propagate so a
-            # misconfigured pipeline fails at startup instead of
-            # silently downgrading UPSERT to INSERT.
+            # Infra validates and supplies the upsert conflict target on
+            # the stream; the engine copies it verbatim. The mode is
+            # parsed only to reject an unknown value at startup (format
+            # validation) — the engine no longer derives or enforces
+            # conflict keys, so a misconfigured upsert surfaces loudly at
+            # the write path rather than being silently downgraded here.
             mode_value = dest.write.get("mode") or "upsert"
-            primary_keys = list(endpoint_doc.get("primary_keys") or [])
             try:
-                write_mode = WriteMode(mode_value)
+                WriteMode(mode_value)
             except ValueError as e:
                 raise ValueError(
                     f"Stream {stream_id!r} destination has unknown write.mode "
                     f"{mode_value!r}; expected one of {[m.value for m in WriteMode]}"
                 ) from e
-            wc = WriteConfig(
-                mode=write_mode,
-                conflict_keys=dest.write.get("conflict_keys"),
-            )
-            composites = wc.effective_conflict_keys(primary_keys) or []
-            conflict_keys: list[str] = list(composites[0]) if composites else []
             enriched_endpoint = dict(endpoint_doc)
-            enriched_endpoint["_write_conflict_keys"] = conflict_keys
+            enriched_endpoint["_write_conflict_keys"] = list(
+                dest.write.get("conflict_keys") or []
+            )
             stream_endpoints[stream_id] = enriched_endpoint
             break
     logger.info(

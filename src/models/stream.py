@@ -296,35 +296,15 @@ class SourceConfig:
 class WriteConfig:
     """Destination write behavior.
 
-    ``conflict_keys`` is only consulted when ``mode == UPSERT``; for
-    INSERT it is ignored. When unset under UPSERT, the destination
-    handler falls back to the stream's primary keys (see
-    :meth:`effective_conflict_keys`).
+    ``conflict_keys`` is the database upsert conflict target — a single
+    composite key set (destination field names). It is only consulted
+    when ``mode == UPSERT``; for INSERT it is absent. Infra validates and
+    supplies it against the published contract; the engine consumes it
+    verbatim and never derives it from the stream's primary keys.
     """
 
     mode: WriteMode = WriteMode.UPSERT
-    conflict_keys: Optional[List[List[str]]] = None
-
-    def effective_conflict_keys(
-        self, primary_keys: List[str]
-    ) -> Optional[List[List[str]]]:
-        """Return the conflict keys the destination should use.
-
-        For UPSERT mode, returns ``conflict_keys`` when set, otherwise
-        wraps the stream's primary keys as a single composite. Raises
-        ``ValueError`` for UPSERT when neither is available — there is
-        no safe default for a destination-side conflict resolution.
-        """
-        if self.mode is not WriteMode.UPSERT:
-            return None
-        if self.conflict_keys:
-            return self.conflict_keys
-        if primary_keys:
-            return [list(primary_keys)]
-        raise ValueError(
-            "WriteConfig.mode=UPSERT requires either conflict_keys or "
-            "non-empty primary_keys on the stream"
-        )
+    conflict_keys: Optional[List[str]] = None
 
 
 @dataclass
