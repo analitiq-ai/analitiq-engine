@@ -273,6 +273,60 @@ class TestWriteBatchFatalOnTypeMapError:
         assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
         assert "myschema.events" in result.failure_summary
 
+    @pytest.mark.asyncio
+    async def test_upsert_without_conflict_keys_classified_as_fatal(self):
+        # End-to-end through write_batch: the _upsert_records raise must be
+        # classified FATAL (deterministic — retrying an unkeyed upsert can
+        # never heal), not retried forever or degraded.
+        from contextlib import asynccontextmanager
+        from unittest.mock import MagicMock
+
+        from cdk.sql.generic import GenericSQLConnector, _StreamState
+        from src.grpc.generated.analitiq.v1 import AckStatus, Cursor
+
+        handler = GenericSQLConnector()
+        contract_mock = MagicMock()
+        contract_mock.to_db_records.return_value = [{"id": 1}]
+
+        handler._engine = MagicMock()
+        handler._connected = True
+        handler._streams["s1"] = _StreamState(
+            table=MagicMock(),
+            batch_commits_table=MagicMock(),
+            write_mode="upsert",
+            conflict_keys=[],
+            schema_contract=contract_mock,
+        )
+
+        class _FakeTxnConn:
+            async def run_sync(self, fn, *args):
+                return fn(MagicMock(), *args)
+
+        @asynccontextmanager
+        async def _fake_begin():
+            yield _FakeTxnConn()
+
+        handler._engine.begin = _fake_begin
+
+        async def _not_committed(*_args, **_kwargs):
+            return False
+
+        handler._check_batch_committed = _not_committed  # type: ignore[method-assign]
+
+        import pyarrow as pa
+        result = await handler.write_batch(
+            run_id="run-1",
+            stream_id="s1",
+            batch_seq=1,
+            record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
+            record_ids=["1"],
+            cursor=Cursor(token=b""),
+        )
+
+        assert result.success is False
+        assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+        assert "write-config" in result.failure_summary
+
 
 class TestUpsertFailsLoudWithoutConflictKeys:
     """Upsert with no conflict keys fails loud — the engine never silently
@@ -325,7 +379,42 @@ class TestUpsertFailsLoudWithoutConflictKeys:
         handler._upsert_records(conn, state, [{"id": 1}])
 
         handler.dialect.build_sqlalchemy_upsert.assert_called_once()
+        # The verbatim conflict target must reach the SQL builder unchanged.
+        args, _ = handler.dialect.build_sqlalchemy_upsert.call_args
+        assert args[2] == ["id"]
         conn.execute.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_adbc_upsert_without_conflict_keys_raises(self):
+        # ADBC twin of the SQLAlchemy raise: the same fail-loud semantics
+        # must hold on the MERGE path (Snowflake/BigQuery), before any ingest.
+        from unittest.mock import MagicMock
+
+        from cdk.sql.exceptions import SchemaConfigurationError
+        from cdk.sql.generic import GenericSQLConnector, _StreamState
+
+        handler = GenericSQLConnector()
+        handler._adbc_only = True
+        handler._merge_ingest_sync = MagicMock()  # type: ignore[method-assign]
+        handler._adbc_only_ingest_sync = MagicMock()  # type: ignore[method-assign]
+        contract = MagicMock()
+        contract.cast_arrow_batch.return_value = MagicMock()
+        state = _StreamState(
+            schema_name="analytics",
+            table_name="events",
+            write_mode="upsert",
+            conflict_keys=[],
+            schema_contract=contract,
+        )
+
+        with pytest.raises(SchemaConfigurationError, match="no conflict_keys"):
+            await handler._write_batch_adbc_only(
+                state, "run-1", "s1", 1, MagicMock(), b"", 1,
+            )
+
+        # Fail before any ingest/MERGE — no partial write.
+        handler._merge_ingest_sync.assert_not_called()
+        handler._adbc_only_ingest_sync.assert_not_called()
 
 
 class TestEnsureTablesEngineNoneRaises:
