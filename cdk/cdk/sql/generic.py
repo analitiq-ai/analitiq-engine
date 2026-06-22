@@ -2284,7 +2284,15 @@ class GenericSQLConnector(BaseDestinationHandler):
                             else None
                         ),
                         cursor_value=cursor_value,
-                        cursor_mode="inclusive",
+                        # Resume strictly after the last committed high-water
+                        # mark. The stored cursor was fully processed in a
+                        # prior run, so an inclusive >= would re-read the
+                        # boundary row every re-run and collide under
+                        # write.mode=insert. Assumes a monotonic cursor; a
+                        # non-unique one (e.g. a coarse timestamp with ties)
+                        # should pair with upsert so a late row sharing the
+                        # boundary value is not skipped.
+                        cursor_mode="exclusive",
                         order_by=order_by_field,
                         limit=batch_size,
                         offset=offset,
@@ -2437,7 +2445,10 @@ class GenericSQLConnector(BaseDestinationHandler):
                         filters=filters,
                         cursor_field=cursor_field,
                         cursor_value=initial_cursor_value if cursor_field else None,
-                        cursor_mode="inclusive",
+                        # Exclusive resume bound: see the matching note on the
+                        # SQLAlchemy read path. Re-reading the committed
+                        # boundary row (>=) collides under write.mode=insert.
+                        cursor_mode="exclusive",
                         order_by=order_by,
                         limit=batch_size,
                         offset=offset,

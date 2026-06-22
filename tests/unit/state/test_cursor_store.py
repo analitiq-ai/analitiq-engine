@@ -9,12 +9,13 @@ rather than crash the run.
 """
 from __future__ import annotations
 
+import json
 import logging
 from datetime import date, datetime
 
 import pytest
 
-from src.state.store import CursorStore
+from src.state.store import CursorStore, parse_resume_state
 
 _PIPELINE = "pipe-1"
 _STREAM = "stream-1"
@@ -138,3 +139,63 @@ def test_distinct_failing_paths_each_warn(tmp_path, caplog):
 
     warnings = [r for r in caplog.records if "failed to persist" in r.message]
     assert len(warnings) == 2  # a distinct path's failure is not masked
+
+
+class TestParseResumeState:
+    """Decoding the durable RESUME_STATE env payload a fresh container restores from.
+
+    On Fargate the local ``state/`` directory is empty, so this injected map is
+    the only bookmark an incremental stream can resume from. A timestamp cursor
+    must come back as a ``datetime`` (asyncpg rejects a string for a timestamp
+    bind), while ints, bare dates, and opaque strings pass through untouched.
+    """
+
+    @pytest.mark.parametrize("raw", [None, ""])
+    def test_missing_payload_is_empty(self, raw):
+        assert parse_resume_state(raw) == {}
+
+    def test_numeric_cursor_passes_through_as_int(self):
+        restored = parse_resume_state(json.dumps({"s1": 100}))
+        assert restored == {"s1": 100}
+        assert isinstance(restored["s1"], int)
+
+    def test_timestamp_cursor_reconstructs_as_datetime(self):
+        ts = "2024-06-01T12:00:00+00:00"
+        restored = parse_resume_state(json.dumps({"s1": ts}))
+        assert restored["s1"] == datetime.fromisoformat(ts)
+        assert isinstance(restored["s1"], datetime)
+
+    def test_space_separated_timestamp_reconstructs(self):
+        restored = parse_resume_state(json.dumps({"s1": "2024-06-01 12:00:00"}))
+        assert restored["s1"] == datetime(2024, 6, 1, 12, 0, 0)
+
+    def test_bare_date_stays_a_string(self):
+        # No time separator: a date-only (or opaque) cursor is never guessed
+        # to be a timestamp.
+        restored = parse_resume_state(json.dumps({"s1": "2024-06-01"}))
+        assert restored["s1"] == "2024-06-01"
+
+    def test_opaque_string_cursor_stays_a_string(self):
+        restored = parse_resume_state(json.dumps({"s1": "v2.1.0"}))
+        assert restored["s1"] == "v2.1.0"
+
+    def test_unparseable_timestamp_like_string_stays_a_string(self):
+        # Has a time separator but is not valid ISO: kept verbatim, not dropped.
+        restored = parse_resume_state(json.dumps({"s1": "13:99 not a time"}))
+        assert restored["s1"] == "13:99 not a time"
+
+    def test_multiple_streams_decoded_independently(self):
+        restored = parse_resume_state(
+            json.dumps({"num": 42, "ts": "2024-06-01T00:00:00"})
+        )
+        assert restored == {"num": 42, "ts": datetime(2024, 6, 1, 0, 0, 0)}
+
+    def test_invalid_json_degrades_to_empty_loudly(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="src.state.store"):
+            assert parse_resume_state("{not json") == {}
+        assert any("not valid JSON" in r.message for r in caplog.records)
+
+    def test_non_object_payload_degrades_to_empty_loudly(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="src.state.store"):
+            assert parse_resume_state(json.dumps([1, 2, 3])) == {}
+        assert any("must be a JSON object" in r.message for r in caplog.records)

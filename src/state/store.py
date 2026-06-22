@@ -34,12 +34,75 @@ import logging
 import os
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Dict, Set
+from typing import Any, Dict, Optional, Set
 
 logger = logging.getLogger(__name__)
 
 _TYPE_KEY = "__type__"
 _VALUE_KEY = "value"
+
+
+def parse_resume_state(raw: Optional[str]) -> Dict[str, Any]:
+    """Decode the durable resume-state env payload into per-stream cursors.
+
+    The engine emits its cursor checkpoints as ``ANALITIQ_STATE`` log lines
+    (see :mod:`src.state.state_emission`); the deployment harvests those into
+    durable storage and re-injects them on the next run as the ``RESUME_STATE``
+    environment variable -- a JSON object mapping ``stream_id`` to the
+    high-water-mark cursor value. A fresh container's local ``state/``
+    directory is empty, so this injected value is the only bookmark an
+    incremental stream can resume from. Reading it here keeps the engine
+    cloud-agnostic: it consumes a resolved value the same way it consumes any
+    other secret/config input, and never reaches for cloud storage itself.
+
+    A timestamp cursor crosses the wire as an ISO-8601 string but must rebind
+    as a ``datetime`` -- asyncpg infers the bind as the column's type and
+    rejects a plain string for a timestamp param (the same constraint
+    :func:`_decode` documents). Strings carrying a time component are
+    reconstructed to ``datetime``; ints, bare dates, and non-temporal strings
+    pass through unchanged.
+
+    Returns an empty mapping on a missing or unparseable payload so a startup
+    with corrupt state degrades to a full re-scan -- loudly -- rather than
+    aborting the run.
+    """
+    if not raw:
+        return {}
+    try:
+        decoded = json.loads(raw)
+    except ValueError as exc:
+        logger.warning(
+            "RESUME_STATE is not valid JSON (%s); incremental streams resume "
+            "with a full re-scan",
+            exc,
+        )
+        return {}
+    if not isinstance(decoded, dict):
+        logger.warning(
+            "RESUME_STATE must be a JSON object {stream_id: cursor}; got %s; "
+            "incremental streams resume with a full re-scan",
+            type(decoded).__name__,
+        )
+        return {}
+    return {
+        str(stream_id): _reconstruct_cursor_value(value)
+        for stream_id, value in decoded.items()
+    }
+
+
+def _reconstruct_cursor_value(value: Any) -> Any:
+    """Invert the datetime -> ISO-string serialization the wire applied.
+
+    Only strings with a time separator (``T`` or ``:``) are candidates, so a
+    bare date or an opaque string cursor is never misread as a timestamp; a
+    string that looks like a datetime but does not parse is left as-is.
+    """
+    if isinstance(value, str) and ("T" in value or ":" in value):
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            return value
+    return value
 
 
 def encode_cursor_state(cursor: Dict[str, Any]) -> Dict[str, Any]:

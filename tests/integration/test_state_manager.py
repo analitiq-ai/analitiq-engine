@@ -117,5 +117,62 @@ class TestStateManager:
         assert manager.commit_tracker is not None
 
 
+class TestStateManagerDurableRestore:
+    """Restoring incremental cursors from the injected RESUME_STATE env var.
+
+    A fresh container's local ``state/`` directory is empty (Fargate wipes it
+    every task), so the cursor a prior run emitted must come back through the
+    deployment-injected env var. The engine reads the source cursor keyed by
+    ``stream_id`` with the empty partition (see ``engine._extract_stage``), so
+    that is the shape these assert.
+    """
+
+    def setup_method(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.tmp_path = Path(self.temp_dir)
+
+    def teardown_method(self):
+        if Path(self.temp_dir).exists():
+            shutil.rmtree(self.temp_dir)
+
+    async def test_restores_numeric_cursor_across_fresh_container(self, monkeypatch):
+        # No local checkpoint on disk -> the env var is the only bookmark.
+        monkeypatch.setenv("RESUME_STATE", json.dumps({"orders": 100}))
+        manager = _make_manager(self.tmp_path)
+
+        assert await manager.get_cursor("orders") == {"cursor": 100}
+
+    async def test_restores_timestamp_cursor_as_datetime(self, monkeypatch):
+        ts = "2024-06-01T12:00:00+00:00"
+        monkeypatch.setenv("RESUME_STATE", json.dumps({"events": ts}))
+        manager = _make_manager(self.tmp_path)
+
+        restored = await manager.get_cursor("events")
+        from datetime import datetime
+
+        assert restored == {"cursor": datetime.fromisoformat(ts)}
+
+    async def test_unknown_stream_has_no_cursor(self, monkeypatch):
+        monkeypatch.setenv("RESUME_STATE", json.dumps({"orders": 100}))
+        manager = _make_manager(self.tmp_path)
+
+        assert await manager.get_cursor("not-in-payload") is None
+
+    async def test_no_env_var_means_no_cursor(self, monkeypatch):
+        monkeypatch.delenv("RESUME_STATE", raising=False)
+        manager = _make_manager(self.tmp_path)
+
+        assert await manager.get_cursor("orders") is None
+
+    async def test_in_run_save_overrides_restored_cursor(self, monkeypatch):
+        # A cursor saved during the run supersedes the restored bookmark.
+        monkeypatch.setenv("RESUME_STATE", json.dumps({"orders": 100}))
+        manager = _make_manager(self.tmp_path)
+
+        await manager.save_cursor("orders", {}, {"cursor": 250})
+
+        assert await manager.get_cursor("orders") == {"cursor": 250}
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

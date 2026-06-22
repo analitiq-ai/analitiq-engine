@@ -90,6 +90,24 @@ The engine has zero cloud SDK dependencies. State, logs, DLQ, and
 metrics use the local filesystem and stdout; downstream ingestion by an
 external log/metrics shipper is a deployment concern, not an engine concern.
 
+### Incremental state restore
+
+An incremental stream's resume cursor is written two ways: to the local
+`state/{pipeline_id}/{stream_id}.json` checkpoint, and to an
+`ANALITIQ_STATE` stdout log line the external shipper harvests into durable
+storage. On a fresh container (each Batch/Fargate task starts clean) the
+local checkpoint is gone, so restore reads the `RESUME_STATE` environment
+variable instead — a JSON object `{stream_id: cursor}` the deployment
+injects from whatever it harvested off the prior run. `StateManager` seeds
+its cursor cache from it at startup (`src/state/store.py:parse_resume_state`,
+`src/state/state_manager.py`). This keeps restore symmetric with emission:
+the engine never reaches for cloud storage itself, it only consumes a
+resolved value the deployment supplies — exactly as it does for secrets and
+config. A resume reads strictly past the last committed high-water mark
+(exclusive `>`), so a no-change re-run re-emits no rows; a non-unique cursor
+(e.g. a coarse timestamp with ties) should pair with `upsert` so a late row
+sharing the boundary value is not skipped.
+
 ## Pipeline Lifecycle
 
 1. `src.main` reads `RUN_MODE`. `source` runs the pipeline engine;

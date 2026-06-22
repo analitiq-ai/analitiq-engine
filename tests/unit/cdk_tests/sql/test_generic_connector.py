@@ -242,7 +242,8 @@ class TestReadAdbcBranch:
         sql, params = reader.calls[0]
         assert "?" in sql
         assert '"status" = ?' in sql
-        assert '"updated_at" >= ?' in sql
+        # Exclusive resume bound (>): the stored cursor was committed last run.
+        assert '"updated_at" > ?' in sql
         assert 'ORDER BY "updated_at"' in sql
         assert "LIMIT 2 OFFSET 0" in sql
         # Filter value first, cursor value second (WHERE build order).
@@ -403,7 +404,7 @@ class TestReadAdbcBranchPaging:
 
         sql, params = reader.calls[0]
         assert 'ORDER BY "updated_at"' in sql
-        assert '"updated_at" >= ?' in sql
+        assert '"updated_at" > ?' in sql
         assert params == ["2024-01-02"]
 
     @pytest.mark.asyncio
