@@ -190,6 +190,14 @@ class TestParseResumeState:
         assert restored["s1"] == "13:99 not a time"
         assert any("not valid ISO-8601" in r.message for r in caplog.records)
 
+    def test_null_cursor_value_preserved_as_none(self):
+        # A stream the deployment harvested before it ever emitted a cursor
+        # arrives as JSON null. It must decode to None (not a fabricated value)
+        # so _restore_durable_cursors can skip it and leave the stream to a
+        # full re-scan rather than seeding a useless {"cursor": None}.
+        restored = parse_resume_state(json.dumps({"orders": None}))
+        assert restored == {"orders": None}
+
     def test_multiple_streams_decoded_independently(self):
         restored = parse_resume_state(
             json.dumps({"num": 42, "ts": "2024-06-01T00:00:00"})

@@ -96,9 +96,12 @@ def parse_resume_state(raw: Optional[str]) -> Dict[str, Any]:
 def _reconstruct_cursor_value(value: Any) -> Any:
     """Invert the datetime -> ISO-string serialization the wire applied.
 
-    Only strings with a time separator (``T`` or ``:``) are candidates, so a
-    bare date or an opaque string cursor is never misread as a timestamp; a
-    string that looks like a datetime but does not parse is left as-is.
+    Only strings with a time separator (``T`` or ``:``) are candidates: a bare
+    date or any separator-free string is never even tried. A candidate that
+    fails to parse -- an opaque cursor that happens to carry a colon
+    (``"shard:01"``), or a truncated timestamp -- is returned verbatim, not
+    dropped, so a real string cursor is never lost (a garbled timestamp will
+    instead be rejected later by the asyncpg bind).
     """
     if isinstance(value, str) and ("T" in value or ":" in value):
         try:

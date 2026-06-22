@@ -174,6 +174,19 @@ class TestStateManagerDurableRestore:
 
         assert await manager.get_cursor("orders") == {"cursor": 250}
 
+    async def test_null_valued_stream_is_skipped_not_seeded(self, monkeypatch):
+        # A null cursor in the payload (stream harvested before it emitted one)
+        # must be skipped, not seeded as {"cursor": None} -- otherwise it would
+        # shadow a real on-disk checkpoint with a useless value.
+        first = _make_manager(self.tmp_path)
+        await first.save_cursor("orders", {}, {"cursor": 50})  # writes ./state
+
+        monkeypatch.setenv("RESUME_STATE", json.dumps({"orders": None}))
+        second = _make_manager(self.tmp_path)  # same base_dir -> 50 on disk
+
+        # The null seed is skipped, so get_cursor falls through to disk.
+        assert await second.get_cursor("orders") == {"cursor": 50}
+
     async def test_restored_cursor_wins_over_stale_on_disk_checkpoint(
         self, monkeypatch
     ):
