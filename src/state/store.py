@@ -11,19 +11,22 @@ because the engine must remain cloud-agnostic per the brief.
 
 Cursor values are usually scalars (an ``int`` id, an ISO ``str``), but a
 timestamp cursor arrives as a ``datetime`` — which JSON cannot represent and
-which the source rebinds verbatim into ``cursor_field >= ?`` with no cast.
+which the source rebinds verbatim into ``cursor_field > ?`` with no cast.
 asyncpg infers that bind as the column's type and rejects a plain string for a
 timestamp param, so a reloaded timestamp cursor must come back as a
 ``datetime``, not its ISO text. ``_encode``/``_decode`` tag ``datetime``/``date``
 to round-trip them losslessly; JSON-native scalars (``int``, ``str``) pass
 through unchanged.
 
-Checkpointing is an optimization, not a correctness guarantee: incremental
-writes are idempotent (inclusive ``>=`` cursor + upsert), so a lost or
-unreadable checkpoint costs a one-time full re-scan, never data. Both the read
-and write paths therefore degrade to that re-scan on I/O failure rather than
-aborting a load — but say so loudly, since a corrupt checkpoint usually means a
-prior crash an operator should see.
+The resume bound is exclusive (``>``): the stored cursor is the last
+high-water mark already fully processed, so the source reads strictly past it
+(see the read path in ``cdk/cdk/sql/generic.py``). A lost or unreadable
+checkpoint costs a one-time full re-scan, never data, so both the read and
+write paths degrade to that re-scan on I/O failure rather than aborting a load
+— but say so loudly, since a corrupt checkpoint usually means a prior crash an
+operator should see. The exclusive bound assumes a monotonic cursor; a
+non-unique one (e.g. a coarse timestamp with ties) should pair with upsert so
+a late row sharing the boundary value is not skipped.
 """
 
 from __future__ import annotations
@@ -57,10 +60,10 @@ def parse_resume_state(raw: Optional[str]) -> Dict[str, Any]:
 
     A timestamp cursor crosses the wire as an ISO-8601 string but must rebind
     as a ``datetime`` -- asyncpg infers the bind as the column's type and
-    rejects a plain string for a timestamp param (the same constraint
-    :func:`_decode` documents). Strings carrying a time component are
-    reconstructed to ``datetime``; ints, bare dates, and non-temporal strings
-    pass through unchanged.
+    rejects a plain string for a timestamp param (the constraint this module's
+    docstring explains). Strings carrying a time component are reconstructed to
+    ``datetime``; ints, bare dates, and non-temporal strings pass through
+    unchanged.
 
     Returns an empty mapping on a missing or unparseable payload so a startup
     with corrupt state degrades to a full re-scan -- loudly -- rather than
@@ -101,6 +104,17 @@ def _reconstruct_cursor_value(value: Any) -> Any:
         try:
             return datetime.fromisoformat(value)
         except ValueError:
+            # A genuine opaque string cursor that happens to contain a colon
+            # is correct to pass through, so this is not an error -- but a
+            # truncated/garbled timestamp lands here too and an asyncpg
+            # timestamp bind will then reject it downstream. Leave a DEBUG
+            # breadcrumb rather than a WARNING, which would cry wolf on every
+            # legitimate colon-bearing string cursor.
+            logger.debug(
+                "RESUME_STATE cursor %r has a time separator but is not valid "
+                "ISO-8601; using it verbatim",
+                value,
+            )
             return value
     return value
 

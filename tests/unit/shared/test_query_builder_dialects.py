@@ -14,6 +14,7 @@ Exercises:
 
 from __future__ import annotations
 
+from datetime import datetime
 from unittest.mock import patch
 
 import pytest
@@ -108,7 +109,9 @@ class TestPaging:
         )
         upper = sql.upper()
         # Either modern OFFSET/FETCH or legacy ROW_NUMBER pagination is fine.
-        assert any(token in upper for token in ("FETCH NEXT", "FETCH FIRST", "ROW_NUMBER"))
+        assert any(
+            token in upper for token in ("FETCH NEXT", "FETCH FIRST", "ROW_NUMBER")
+        )
         # The naive ``LIMIT N OFFSET M`` form is what we were producing
         # before; assert it does NOT appear (T-SQL doesn't accept it).
         assert "LIMIT 50" not in upper
@@ -139,9 +142,7 @@ class TestPaging:
         """A connector-supplied fallback hook provides the ordering for
         paged queries that declare none (the mssql connector returns
         ``(SELECT NULL)``, Microsoft's documented no-op order)."""
-        builder = QueryBuilder(
-            "mssql", paging_order_fallback=lambda: "(SELECT NULL)"
-        )
+        builder = QueryBuilder("mssql", paging_order_fallback=lambda: "(SELECT NULL)")
         sql, _ = builder.build_select_query(
             QueryConfig(
                 schema_name="dbo",
@@ -275,9 +276,7 @@ class TestMssqlParamstyle:
         The fallback hook stands in for the mssql connector dialect so
         the unordered paged query compiles at all.
         """
-        builder = QueryBuilder(
-            "mssql", paging_order_fallback=lambda: "(SELECT NULL)"
-        )
+        builder = QueryBuilder("mssql", paging_order_fallback=lambda: "(SELECT NULL)")
         sql, params = builder.build_select_query(
             QueryConfig(
                 schema_name="dbo",
@@ -413,6 +412,46 @@ class TestPositionalParamConversion:
         )
         assert sql.count("$") == 2
         assert params == [10, 0]
+
+
+class TestCursorBoundOperator:
+    """The resume bound's operator is the single source of truth for whether a
+    no-change re-run re-reads the boundary row. Exclusive (>) is what makes
+    that re-run return zero rows; pin both renderings so a silent flip back to
+    >= is caught here, at the cheapest layer.
+    """
+
+    def _cursor_sql(self, mode, value="2024-01-01"):
+        builder = QueryBuilder("postgresql")
+        return builder.build_select_query(
+            QueryConfig(
+                schema_name="public",
+                table_name="events",
+                columns=["id"],
+                cursor_field="updated_at",
+                cursor_value=value,
+                cursor_mode=mode,
+            )
+        )
+
+    def test_exclusive_renders_strict_greater_than(self):
+        sql, params = self._cursor_sql("exclusive")
+        assert "updated_at >" in sql
+        assert "updated_at >=" not in sql
+        assert params == ["2024-01-01"]
+
+    def test_inclusive_renders_greater_or_equal(self):
+        sql, _ = self._cursor_sql("inclusive")
+        assert "updated_at >=" in sql
+
+    def test_datetime_cursor_value_survives_as_datetime_in_params(self):
+        # Restore reconstructs a timestamp to a datetime precisely so the bind
+        # is not a string (asyncpg rejects a string for a timestamp param);
+        # the builder must pass that datetime through to params untouched.
+        value = datetime(2024, 6, 1, 12, 0, 0)
+        _, params = self._cursor_sql("exclusive", value=value)
+        assert params == [value]
+        assert isinstance(params[0], datetime)
 
 
 class TestAdbcQmarkMode:

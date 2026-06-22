@@ -95,7 +95,7 @@ external log/metrics shipper is a deployment concern, not an engine concern.
 An incremental stream's resume cursor is written two ways: to the local
 `state/{pipeline_id}/{stream_id}.json` checkpoint, and to an
 `ANALITIQ_STATE` stdout log line the external shipper harvests into durable
-storage. On a fresh container (each Batch/Fargate task starts clean) the
+storage. On a fresh container (each task starts with an empty `state/`) the
 local checkpoint is gone, so restore reads the `RESUME_STATE` environment
 variable instead — a JSON object `{stream_id: cursor}` the deployment
 injects from whatever it harvested off the prior run. `StateManager` seeds

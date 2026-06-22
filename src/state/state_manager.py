@@ -52,23 +52,25 @@ class StateManager:
     def _restore_durable_cursors(self) -> None:
         """Seed the cursor cache from the injected durable resume state.
 
-        The on-disk ``state/`` checkpoint is wiped on a fresh container (each
-        Batch/Fargate task starts clean), so without this an incremental
-        stream would find no bookmark on re-run and full-rescan the source.
-        The deployment re-injects the cursors it harvested from the prior
-        run's emitted state as the ``RESUME_STATE`` env var; we decode it into
-        the same ``{"cursor": <value>}`` shape :meth:`get_cursor` returns,
-        keyed by ``stream_id`` with the empty partition the engine reads with.
+        The on-disk ``state/`` checkpoint is wiped on a fresh container, so
+        without this an incremental stream would find no bookmark on re-run
+        and full-rescan the source. The deployment re-injects the cursors it
+        harvested from the prior run's emitted state as the ``RESUME_STATE``
+        env var; we decode it into the same ``{"cursor": <value>}`` shape
+        :meth:`get_cursor` returns, keyed by ``stream_id`` with the empty
+        partition the engine reads with.
         """
         restored = parse_resume_state(os.environ.get("RESUME_STATE"))
+        seeded = 0
         for stream_id, value in restored.items():
             if value is None:
                 continue
             self._cursors[self._cursor_key(stream_id, {})] = {"cursor": value}
-        if restored:
+            seeded += 1
+        if seeded:
             logger.info(
                 "restored durable cursor state for %d stream(s) from RESUME_STATE",
-                len(restored),
+                seeded,
             )
 
     def init_commit_tracker(self, run_id: str) -> None:

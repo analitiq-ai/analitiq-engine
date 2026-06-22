@@ -1,11 +1,12 @@
 """Integration tests for state manager functionality."""
 
 import json
-import pytest
-import tempfile
 import shutil
+import tempfile
 from pathlib import Path
 from unittest.mock import patch
+
+import pytest
 
 from src.state.state_manager import StateManager
 
@@ -172,6 +173,20 @@ class TestStateManagerDurableRestore:
         await manager.save_cursor("orders", {}, {"cursor": 250})
 
         assert await manager.get_cursor("orders") == {"cursor": 250}
+
+    async def test_restored_cursor_wins_over_stale_on_disk_checkpoint(
+        self, monkeypatch
+    ):
+        # A leftover on-disk checkpoint must not shadow the injected resume
+        # state: the durable value is authoritative, the local file is stale.
+        monkeypatch.delenv("RESUME_STATE", raising=False)
+        first = _make_manager(self.tmp_path)
+        await first.save_cursor("orders", {}, {"cursor": 50})  # writes ./state
+
+        monkeypatch.setenv("RESUME_STATE", json.dumps({"orders": 100}))
+        second = _make_manager(self.tmp_path)  # same base_dir -> stale 50 on disk
+
+        assert await second.get_cursor("orders") == {"cursor": 100}
 
 
 if __name__ == "__main__":

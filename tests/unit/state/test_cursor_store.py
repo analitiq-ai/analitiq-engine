@@ -106,7 +106,9 @@ def test_bad_tagged_datetime_reverts_to_full_scan_loudly(tmp_path, caplog, bad_v
     path.parent.mkdir(parents=True)
     import json
 
-    path.write_text(json.dumps({"cursor": {"__type__": "datetime", "value": bad_value}}))
+    path.write_text(
+        json.dumps({"cursor": {"__type__": "datetime", "value": bad_value}})
+    )
 
     with caplog.at_level(logging.WARNING, logger="src.state.store"):
         assert store.get(_PIPELINE, _STREAM) is None
@@ -179,10 +181,14 @@ class TestParseResumeState:
         restored = parse_resume_state(json.dumps({"s1": "v2.1.0"}))
         assert restored["s1"] == "v2.1.0"
 
-    def test_unparseable_timestamp_like_string_stays_a_string(self):
-        # Has a time separator but is not valid ISO: kept verbatim, not dropped.
-        restored = parse_resume_state(json.dumps({"s1": "13:99 not a time"}))
+    def test_unparseable_timestamp_like_string_stays_a_string(self, caplog):
+        # Has a time separator but is not valid ISO: kept verbatim, not dropped,
+        # with a DEBUG breadcrumb (not a WARNING, which would cry wolf on every
+        # legitimate colon-bearing string cursor).
+        with caplog.at_level(logging.DEBUG, logger="src.state.store"):
+            restored = parse_resume_state(json.dumps({"s1": "13:99 not a time"}))
         assert restored["s1"] == "13:99 not a time"
+        assert any("not valid ISO-8601" in r.message for r in caplog.records)
 
     def test_multiple_streams_decoded_independently(self):
         restored = parse_resume_state(
