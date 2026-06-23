@@ -103,10 +103,22 @@ its cursor cache from it at startup (`src/state/store.py:parse_resume_state`,
 `src/state/state_manager.py`). This keeps restore symmetric with emission:
 the engine never reaches for cloud storage itself, it only consumes a
 resolved value the deployment supplies — exactly as it does for secrets and
-config. A resume reads strictly past the last committed high-water mark
-(exclusive `>`), so a no-change re-run re-emits no rows; a non-unique cursor
-(e.g. a coarse timestamp with ties) should pair with `upsert` so a late row
-sharing the boundary value is not skipped.
+config.
+
+Each cursor carries its type. A `datetime`/`date` travels as a tagged
+`{"__type__": ..., "value": ...}` value — the same form the on-disk checkpoint
+and the gRPC cursor token use — so a timestamp cursor comes back as a
+`datetime` (asyncpg rejects a plain string for a timestamp bind) and a string
+cursor whose value looks like a date stays a string. The type is carried
+end-to-end, never guessed from a value's shape.
+
+A resume reads inclusively (`>=`) from the last committed high-water mark, so
+the boundary row is re-read. This keeps a non-unique cursor lossless: a row
+that arrives at the boundary value between runs is still read, where an
+exclusive `>` would filter it out at the source and drop it. The default
+`upsert` write mode dedups the re-read against its `conflict_keys`; an `insert`
+stream re-reading the boundary fails loud on the duplicate key rather than
+silently losing rows.
 
 ## Pipeline Lifecycle
 

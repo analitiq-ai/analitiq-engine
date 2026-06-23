@@ -144,8 +144,11 @@ class TestStateManagerDurableRestore:
         assert await manager.get_cursor("orders") == {"cursor": 100}
 
     async def test_restores_timestamp_cursor_as_datetime(self, monkeypatch):
+        # A timestamp cursor crosses durable state tagged, so it comes back a
+        # datetime (asyncpg rejects a plain string for a timestamp bind).
         ts = "2024-06-01T12:00:00+00:00"
-        monkeypatch.setenv("RESUME_STATE", json.dumps({"events": ts}))
+        tagged = {"__type__": "datetime", "value": ts}
+        monkeypatch.setenv("RESUME_STATE", json.dumps({"events": tagged}))
         manager = _make_manager(self.tmp_path)
 
         restored = await manager.get_cursor("events")

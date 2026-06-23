@@ -9,24 +9,30 @@ ownership to a future contract; until then the engine writes minimal
 deliberately tiny — no persistence backend, no schema migrations —
 because the engine must remain cloud-agnostic per the brief.
 
-Cursor values are usually scalars (an ``int`` id, an ISO ``str``), but a
-timestamp cursor arrives as a ``datetime`` — which JSON cannot represent and
-which the source rebinds verbatim into ``cursor_field > ?`` with no cast.
-asyncpg infers that bind as the column's type and rejects a plain string for a
-timestamp param, so a reloaded timestamp cursor must come back as a
-``datetime``, not its ISO text. ``_encode``/``_decode`` tag ``datetime``/``date``
-to round-trip them losslessly; JSON-native scalars (``int``, ``str``) pass
-through unchanged.
+Cursor values are usually scalars (an ``int`` id, a ``str``), but a timestamp
+cursor arrives as a ``datetime`` — which JSON cannot represent and which the
+source rebinds verbatim into ``cursor_field >= ?`` with no cast. asyncpg infers
+that bind as the column's type and rejects a plain string for a timestamp
+param, so a reloaded timestamp cursor must come back as a ``datetime``, not its
+ISO text. ``encode_value``/``decode_value`` tag ``datetime``/``date`` as
+``{"__type__": ..., "value": ...}`` to round-trip them losslessly; JSON-native
+scalars (``int``, ``str``) pass through unchanged. This same tagging travels
+the gRPC cursor token and the durable ``RESUME_STATE`` payload (see
+``src/grpc/cursor.py`` and ``parse_resume_state``), so the type is carried
+end-to-end and never guessed from a string's shape — a ``str`` cursor whose
+value looks like a date stays a ``str``.
 
-The resume bound is exclusive (``>``): the stored cursor is the last
-high-water mark already fully processed, so the source reads strictly past it
-(see the read path in ``cdk/cdk/sql/generic.py``). A lost or unreadable
-checkpoint costs a one-time full re-scan, never data, so both the read and
-write paths degrade to that re-scan on I/O failure rather than aborting a load
-— but say so loudly, since a corrupt checkpoint usually means a prior crash an
-operator should see. The exclusive bound assumes a monotonic cursor; a
-non-unique one (e.g. a coarse timestamp with ties) should pair with upsert so
-a late row sharing the boundary value is not skipped.
+The resume bound is inclusive (``>=``): the stored cursor is re-read on the
+next run (see the read path in ``cdk/cdk/sql/generic.py``). This is what keeps
+a non-unique cursor lossless — a row that arrives at the last committed value
+between runs is still read, where an exclusive ``>`` would filter it out at the
+source and drop it for good. The re-read is deduped by the default upsert
+write mode against its conflict_keys; an insert stream re-reading the boundary
+fails loud on the duplicate key rather than silently losing rows. A lost or
+unreadable checkpoint costs a one-time full re-scan, never data, so both the
+read and write paths degrade to that re-scan on I/O failure rather than
+aborting a load — but say so loudly, since a corrupt checkpoint usually means a
+prior crash an operator should see.
 """
 
 from __future__ import annotations
@@ -58,12 +64,12 @@ def parse_resume_state(raw: Optional[str]) -> Dict[str, Any]:
     cloud-agnostic: it consumes a resolved value the same way it consumes any
     other secret/config input, and never reaches for cloud storage itself.
 
-    A timestamp cursor crosses the wire as an ISO-8601 string but must rebind
-    as a ``datetime`` -- asyncpg infers the bind as the column's type and
-    rejects a plain string for a timestamp param (the constraint this module's
-    docstring explains). Strings carrying a time component are reconstructed to
-    ``datetime``; ints, bare dates, and non-temporal strings pass through
-    unchanged.
+    Each value carries its type the same way the on-disk checkpoint does: a
+    ``datetime``/``date`` is the tagged ``{"__type__": ..., "value": ...}`` form
+    and is decoded back to the real type (asyncpg rejects a plain string for a
+    timestamp bind); a JSON-native ``int``/``str`` is used verbatim. Because the
+    type is carried, not inferred, a ``str`` cursor whose value happens to look
+    like a date stays a ``str`` -- no shape-guessing.
 
     Returns an empty mapping on a missing or unparseable payload so a startup
     with corrupt state degrades to a full re-scan -- loudly -- rather than
@@ -87,39 +93,7 @@ def parse_resume_state(raw: Optional[str]) -> Dict[str, Any]:
             type(decoded).__name__,
         )
         return {}
-    return {
-        str(stream_id): _reconstruct_cursor_value(value)
-        for stream_id, value in decoded.items()
-    }
-
-
-def _reconstruct_cursor_value(value: Any) -> Any:
-    """Invert the datetime -> ISO-string serialization the wire applied.
-
-    Only strings with a time separator (``T`` or ``:``) are candidates: a bare
-    date or any separator-free string is never even tried. A candidate that
-    fails to parse -- an opaque cursor that happens to carry a colon
-    (``"shard:01"``), or a truncated timestamp -- is returned verbatim, not
-    dropped, so a real string cursor is never lost (a garbled timestamp will
-    instead be rejected later by the asyncpg bind).
-    """
-    if isinstance(value, str) and ("T" in value or ":" in value):
-        try:
-            return datetime.fromisoformat(value)
-        except ValueError:
-            # A genuine opaque string cursor that happens to contain a colon
-            # is correct to pass through, so this is not an error -- but a
-            # truncated/garbled timestamp lands here too and an asyncpg
-            # timestamp bind will then reject it downstream. Leave a DEBUG
-            # breadcrumb rather than a WARNING, which would cry wolf on every
-            # legitimate colon-bearing string cursor.
-            logger.debug(
-                "RESUME_STATE cursor %r has a time separator but is not valid "
-                "ISO-8601; using it verbatim",
-                value,
-            )
-            return value
-    return value
+    return {str(stream_id): decode_value(value) for stream_id, value in decoded.items()}
 
 
 def encode_cursor_state(cursor: Dict[str, Any]) -> Dict[str, Any]:
@@ -129,12 +103,12 @@ def encode_cursor_state(cursor: Dict[str, Any]) -> Dict[str, Any]:
     same tagging the on-disk store uses so a timestamp cursor survives the
     hop as a ``datetime``, not its ISO text.
     """
-    return {key: _encode(value) for key, value in cursor.items()}
+    return {key: encode_value(value) for key, value in cursor.items()}
 
 
 def decode_cursor_state(cursor: Dict[str, Any]) -> Dict[str, Any]:
     """Inverse of :func:`encode_cursor_state`."""
-    return {key: _decode(value) for key, value in cursor.items()}
+    return {key: decode_value(value) for key, value in cursor.items()}
 
 
 class CursorStore:
@@ -151,9 +125,9 @@ class CursorStore:
             return None
         try:
             payload = json.loads(path.read_text())
-            return _decode(payload.get("cursor"))
+            return decode_value(payload.get("cursor"))
         except (OSError, ValueError, TypeError) as exc:
-            # Torn write, unparseable JSON, or a bad ISO value (_decode raises
+            # Torn write, unparseable JSON, or a bad ISO value (decode_value raises
             # ValueError/TypeError; JSONDecodeError is a ValueError). Treat any
             # unreadable checkpoint the same: resume with a full re-scan, loudly.
             logger.warning(
@@ -171,7 +145,7 @@ class CursorStore:
         tmp = path.parent / f"{path.name}.tmp"
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            tmp.write_text(json.dumps({"cursor": _encode(cursor)}, default=str))
+            tmp.write_text(json.dumps({"cursor": encode_value(cursor)}, default=str))
             # Atomic swap so a concurrent/next-run reader never sees a torn file.
             os.replace(tmp, path)
         except OSError as exc:
@@ -192,7 +166,14 @@ class CursorStore:
                 )
 
 
-def _encode(value: Any) -> Any:
+def encode_value(value: Any) -> Any:
+    """Tag a ``datetime``/``date`` so JSON can round-trip its type.
+
+    Shared by the on-disk checkpoint, the worker cursor-state wire, and the
+    gRPC cursor token (``src/grpc/cursor.py``) so every place a cursor is
+    serialized carries the type the same way. JSON-native scalars are returned
+    unchanged.
+    """
     # datetime is a subclass of date, so check it first.
     if isinstance(value, datetime):
         return {_TYPE_KEY: "datetime", _VALUE_KEY: value.isoformat()}
@@ -201,7 +182,8 @@ def _encode(value: Any) -> Any:
     return value
 
 
-def _decode(value: Any) -> Any:
+def decode_value(value: Any) -> Any:
+    """Inverse of :func:`encode_value`; untagged scalars pass through."""
     if isinstance(value, dict) and _TYPE_KEY in value:
         kind = value[_TYPE_KEY]
         raw = value.get(_VALUE_KEY)

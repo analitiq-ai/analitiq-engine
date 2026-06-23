@@ -147,9 +147,12 @@ class TestParseResumeState:
     """Decoding the durable RESUME_STATE env payload a fresh container restores from.
 
     On Fargate the local ``state/`` directory is empty, so this injected map is
-    the only bookmark an incremental stream can resume from. A timestamp cursor
-    must come back as a ``datetime`` (asyncpg rejects a string for a timestamp
-    bind), while ints, bare dates, and opaque strings pass through untouched.
+    the only bookmark an incremental stream can resume from. Each value carries
+    its type the same way the on-disk checkpoint does: a ``datetime``/``date`` is
+    the tagged ``{"__type__": ..., "value": ...}`` form and decodes back to the
+    real type (asyncpg rejects a string for a timestamp bind); a JSON-native
+    ``int``/``str`` passes through untouched -- a string is never coerced from
+    its shape.
     """
 
     @pytest.mark.parametrize("raw", [None, ""])
@@ -161,34 +164,32 @@ class TestParseResumeState:
         assert restored == {"s1": 100}
         assert isinstance(restored["s1"], int)
 
-    def test_timestamp_cursor_reconstructs_as_datetime(self):
+    def test_tagged_timestamp_decodes_as_datetime(self):
         ts = "2024-06-01T12:00:00+00:00"
-        restored = parse_resume_state(json.dumps({"s1": ts}))
+        tagged = {"__type__": "datetime", "value": ts}
+        restored = parse_resume_state(json.dumps({"s1": tagged}))
         assert restored["s1"] == datetime.fromisoformat(ts)
         assert isinstance(restored["s1"], datetime)
 
-    def test_space_separated_timestamp_reconstructs(self):
-        restored = parse_resume_state(json.dumps({"s1": "2024-06-01 12:00:00"}))
-        assert restored["s1"] == datetime(2024, 6, 1, 12, 0, 0)
+    def test_tagged_date_decodes_as_date(self):
+        tagged = {"__type__": "date", "value": "2024-06-01"}
+        restored = parse_resume_state(json.dumps({"s1": tagged}))
+        assert restored["s1"] == date(2024, 6, 1)
+        assert isinstance(restored["s1"], date) and not isinstance(
+            restored["s1"], datetime
+        )
 
-    def test_bare_date_stays_a_string(self):
-        # No time separator: a date-only (or opaque) cursor is never guessed
-        # to be a timestamp.
-        restored = parse_resume_state(json.dumps({"s1": "2024-06-01"}))
-        assert restored["s1"] == "2024-06-01"
+    def test_iso_looking_string_cursor_is_not_coerced(self):
+        # The P2 fix: an untagged string is a string, even if it looks like a
+        # timestamp. A varchar cursor whose values resemble dates must not be
+        # turned into a datetime (which would mis-bind as varchar > timestamp).
+        restored = parse_resume_state(json.dumps({"s1": "2024-06-01T12:00:00"}))
+        assert restored["s1"] == "2024-06-01T12:00:00"
+        assert isinstance(restored["s1"], str)
 
     def test_opaque_string_cursor_stays_a_string(self):
         restored = parse_resume_state(json.dumps({"s1": "v2.1.0"}))
         assert restored["s1"] == "v2.1.0"
-
-    def test_unparseable_timestamp_like_string_stays_a_string(self, caplog):
-        # Has a time separator but is not valid ISO: kept verbatim, not dropped,
-        # with a DEBUG breadcrumb (not a WARNING, which would cry wolf on every
-        # legitimate colon-bearing string cursor).
-        with caplog.at_level(logging.DEBUG, logger="src.state.store"):
-            restored = parse_resume_state(json.dumps({"s1": "13:99 not a time"}))
-        assert restored["s1"] == "13:99 not a time"
-        assert any("not valid ISO-8601" in r.message for r in caplog.records)
 
     def test_null_cursor_value_preserved_as_none(self):
         # A stream the deployment harvested before it ever emitted a cursor
@@ -200,7 +201,12 @@ class TestParseResumeState:
 
     def test_multiple_streams_decoded_independently(self):
         restored = parse_resume_state(
-            json.dumps({"num": 42, "ts": "2024-06-01T00:00:00"})
+            json.dumps(
+                {
+                    "num": 42,
+                    "ts": {"__type__": "datetime", "value": "2024-06-01T00:00:00"},
+                }
+            )
         )
         assert restored == {"num": 42, "ts": datetime(2024, 6, 1, 0, 0, 0)}
 

@@ -38,42 +38,32 @@ from sqlalchemy import MetaData, Table, text
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from cdk.base_handler import BaseDestinationHandler, BatchWriteResult
-from cdk.schema_contract import SchemaContract
-from cdk.type_map import (
-    InvalidTypeMapError,
-    TypeMapper,
-    UnmappedTypeError,
-)
-from cdk.types import (
-    AckStatus,
-    CheckpointStore,
-    Cursor,
-    EndpointScope,
-    SchemaSpec,
-)
 from cdk.adbc_registry import AdbcConfigurationError
+from cdk.base_handler import BaseDestinationHandler, BatchWriteResult
 from cdk.connection_runtime import (
-    ConnectionRuntime,
     DETERMINISTIC_CONNECT_ERRORS,
+    ConnectionRuntime,
     materialize_runtime,
 )
 from cdk.database_utils import acquire_connection
 from cdk.query_builder import Filter, QueryBuilder, QueryConfig
+from cdk.schema_contract import SchemaContract
+from cdk.type_map import InvalidTypeMapError, TypeMapper, UnmappedTypeError
+from cdk.types import AckStatus, CheckpointStore, Cursor, EndpointScope, SchemaSpec
+
+from ..contract import ColumnDef
 from .adbc_reader import open_adbc_reader
+from .ddl import build_create_table_sql
+from .ddl import create_table as _sql_create_table
 from .dialects import SqlDialect
 from .discovery import list_columns as _sql_list_columns
 from .discovery import list_schemas as _sql_list_schemas
 from .discovery import list_tables as _sql_list_tables
-from .ddl import build_create_table_sql
-from .ddl import create_table as _sql_create_table
 from .exceptions import (
     ReadError,
     SchemaConfigurationError,
     UnsupportedDialectOperationError,
 )
-from ..contract import ColumnDef
-
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +94,8 @@ def _note_order_by_fallback(table_name: str, column_name: str) -> None:
         "first selected column %r. Set cursor_field on the stream if this "
         "column is a non-orderable type (JSON / STRUCT / VARIANT) -- the "
         "warehouse will otherwise reject the query.",
-        table_name, column_name,
+        table_name,
+        column_name,
     )
 
 
@@ -113,12 +104,14 @@ def _note_order_by_fallback(table_name: str, column_name: str) -> None:
 # objects, permission denials, type mismatches, unsupported operations.
 # Driver modules re-export these names per PEP-249; we match on the
 # class name so the check works without importing the optional driver.
-_FATAL_ADBC_ERROR_NAMES = frozenset({
-    "ProgrammingError",
-    "NotSupportedError",
-    "IntegrityError",
-    "DataError",
-})
+_FATAL_ADBC_ERROR_NAMES = frozenset(
+    {
+        "ProgrammingError",
+        "NotSupportedError",
+        "IntegrityError",
+        "DataError",
+    }
+)
 
 
 def _is_fatal_adbc_error(exc: BaseException) -> bool:
@@ -502,9 +495,7 @@ class GenericSQLConnector(BaseDestinationHandler):
         """
         self._runtime = runtime
         try:
-            await materialize_runtime(
-                runtime, sql_dialect=self.dialect
-            )
+            await materialize_runtime(runtime, sql_dialect=self.dialect)
         except DETERMINISTIC_CONNECT_ERRORS:
             raise
         except Exception as e:
@@ -524,9 +515,7 @@ class GenericSQLConnector(BaseDestinationHandler):
             # the driver-specific exception in ConnectionError to
             # match the materialize() failure shape.
             try:
-                self._adbc_conn = await asyncio.to_thread(
-                    runtime.open_adbc_connection
-                )
+                self._adbc_conn = await asyncio.to_thread(runtime.open_adbc_connection)
             except Exception as e:
                 logger.error(
                     "ADBC eager-open failed during connect: %s", e, exc_info=True
@@ -873,19 +862,19 @@ class GenericSQLConnector(BaseDestinationHandler):
         async with self._statement_deadline():
             async with self._ddl_lock:
                 if self._sync_engine is not None:
-                    state.table, state.batch_commits_table = (
-                        await asyncio.to_thread(
-                            self._ddl_and_reflect_on_sync_engine,
-                            state, target_ddl, commits_ddl,
-                        )
+                    state.table, state.batch_commits_table = await asyncio.to_thread(
+                        self._ddl_and_reflect_on_sync_engine,
+                        state,
+                        target_ddl,
+                        commits_ddl,
                     )
                 else:
                     async with self._engine.begin() as conn:
-                        state.table, state.batch_commits_table = (
-                            await conn.run_sync(
-                                self._run_ddl_and_reflect,
-                                state, target_ddl, commits_ddl,
-                            )
+                        state.table, state.batch_commits_table = await conn.run_sync(
+                            self._run_ddl_and_reflect,
+                            state,
+                            target_ddl,
+                            commits_ddl,
                         )
 
         logger.info(
@@ -941,7 +930,6 @@ class GenericSQLConnector(BaseDestinationHandler):
         with self._sync_engine.begin() as conn:
             return self._run_ddl_and_reflect(conn, state, target_ddl, commits_ddl)
 
-
     async def write_batch(
         self,
         run_id: str,
@@ -963,11 +951,7 @@ class GenericSQLConnector(BaseDestinationHandler):
                 records_written=0,
                 failure_summary="Handler not connected",
             )
-        if (
-            not self._adbc_only
-            and self._engine is None
-            and self._sync_engine is None
-        ):
+        if not self._adbc_only and self._engine is None and self._sync_engine is None:
             return BatchWriteResult(
                 status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
                 records_written=0,
@@ -1001,7 +985,9 @@ class GenericSQLConnector(BaseDestinationHandler):
                     state, run_id, stream_id, batch_seq
                 )
                 if existing:
-                    logger.info(f"Batch already committed: {run_id}/{stream_id}/{batch_seq}")
+                    logger.info(
+                        f"Batch already committed: {run_id}/{stream_id}/{batch_seq}"
+                    )
                     return BatchWriteResult(
                         status=AckStatus.ACK_STATUS_ALREADY_COMMITTED,
                         records_written=existing["records_written"],
@@ -1022,28 +1008,40 @@ class GenericSQLConnector(BaseDestinationHandler):
 
                 if self._adbc_only:
                     await self._write_batch_adbc_only(
-                        state, run_id, stream_id, batch_seq,
-                        record_batch, cursor.token, record_count,
+                        state,
+                        run_id,
+                        stream_id,
+                        batch_seq,
+                        record_batch,
+                        cursor.token,
+                        record_count,
                     )
                 elif self._sync_engine is not None:
                     prepared = self._prepare_for_sqlalchemy(state, record_batch)
                     await asyncio.to_thread(
                         self._write_batch_on_sync_engine,
-                        state, prepared, run_id, stream_id, batch_seq,
-                        cursor.token, record_count,
+                        state,
+                        prepared,
+                        run_id,
+                        stream_id,
+                        batch_seq,
+                        cursor.token,
+                        record_count,
                     )
                 else:
                     prepared = self._prepare_for_sqlalchemy(state, record_batch)
 
                     async with self._engine.begin() as conn:
-                        await conn.run_sync(
-                            self._apply_write_in_txn, state, prepared
-                        )
+                        await conn.run_sync(self._apply_write_in_txn, state, prepared)
                         # Record batch commit in the same transaction
                         await conn.run_sync(
                             self._record_batch_commit_in_txn,
-                            state, run_id, stream_id, batch_seq,
-                            cursor.token, record_count,
+                            state,
+                            run_id,
+                            stream_id,
+                            batch_seq,
+                            cursor.token,
+                            record_count,
                         )
 
                 logger.info(f"Wrote batch {batch_seq}: {record_count} records")
@@ -1153,14 +1151,20 @@ class GenericSQLConnector(BaseDestinationHandler):
         """Check if batch was already committed."""
         if self._adbc_only:
             return await self._check_batch_committed_via_adbc(
-                state, run_id, stream_id, batch_seq,
+                state,
+                run_id,
+                stream_id,
+                batch_seq,
             )
         if state.batch_commits_table is None:
             return None
         if self._sync_engine is not None:
             return await asyncio.to_thread(
                 self._check_batch_committed_on_sync_engine,
-                state, run_id, stream_id, batch_seq,
+                state,
+                run_id,
+                stream_id,
+                batch_seq,
             )
         if self._engine is None:
             return None
@@ -1184,9 +1188,9 @@ class GenericSQLConnector(BaseDestinationHandler):
         commits = state.batch_commits_table
         result = conn.execute(
             commits.select().where(
-                (commits.c.run_id == run_id) &
-                (commits.c.stream_id == stream_id) &
-                (commits.c.batch_seq == batch_seq)
+                (commits.c.run_id == run_id)
+                & (commits.c.stream_id == stream_id)
+                & (commits.c.batch_seq == batch_seq)
             )
         )
         row = result.fetchone()
@@ -1205,9 +1209,7 @@ class GenericSQLConnector(BaseDestinationHandler):
         batch_seq: int,
     ) -> Optional[Dict[str, Any]]:
         with self._sync_engine.connect() as conn:
-            return self._select_batch_commit(
-                conn, state, run_id, stream_id, batch_seq
-            )
+            return self._select_batch_commit(conn, state, run_id, stream_id, batch_seq)
 
     async def _record_batch_commit(
         self,
@@ -1221,7 +1223,12 @@ class GenericSQLConnector(BaseDestinationHandler):
         """Record batch commit (outside transaction)."""
         if self._adbc_only:
             await self._record_batch_commit_via_adbc(
-                state, run_id, stream_id, batch_seq, cursor_bytes, records_written,
+                state,
+                run_id,
+                stream_id,
+                batch_seq,
+                cursor_bytes,
+                records_written,
             )
             return
         if state.batch_commits_table is None:
@@ -1229,8 +1236,12 @@ class GenericSQLConnector(BaseDestinationHandler):
         if self._sync_engine is not None:
             await asyncio.to_thread(
                 self._record_batch_commit_on_sync_engine,
-                state, run_id, stream_id, batch_seq,
-                cursor_bytes, records_written,
+                state,
+                run_id,
+                stream_id,
+                batch_seq,
+                cursor_bytes,
+                records_written,
             )
             return
         if self._engine is None:
@@ -1240,8 +1251,12 @@ class GenericSQLConnector(BaseDestinationHandler):
         async with self._engine.begin() as conn:
             await conn.run_sync(
                 self._record_batch_commit_in_txn,
-                state, run_id, stream_id, batch_seq,
-                cursor_bytes, records_written,
+                state,
+                run_id,
+                stream_id,
+                batch_seq,
+                cursor_bytes,
+                records_written,
             )
 
     def _record_batch_commit_on_sync_engine(
@@ -1255,8 +1270,13 @@ class GenericSQLConnector(BaseDestinationHandler):
     ) -> None:
         with self._sync_engine.begin() as conn:
             self._record_batch_commit_in_txn(
-                conn, state, run_id, stream_id, batch_seq,
-                cursor_bytes, records_written,
+                conn,
+                state,
+                run_id,
+                stream_id,
+                batch_seq,
+                cursor_bytes,
+                records_written,
             )
 
     def _record_batch_commit_in_txn(
@@ -1321,8 +1341,13 @@ class GenericSQLConnector(BaseDestinationHandler):
         with self._sync_engine.begin() as conn:
             self._apply_write_in_txn(conn, state, records)
             self._record_batch_commit_in_txn(
-                conn, state, run_id, stream_id, batch_seq,
-                cursor_bytes, records_written,
+                conn,
+                state,
+                run_id,
+                stream_id,
+                batch_seq,
+                cursor_bytes,
+                records_written,
             )
 
     def _insert_records(
@@ -1413,8 +1438,6 @@ class GenericSQLConnector(BaseDestinationHandler):
     # also opt in (e.g. for Redshift via the libpq-compatible driver),
     # but its SA path remains the primary route.
 
-
-
     async def _ensure_tables_via_adbc(
         self, state: _StreamState, rendered_ddl: List[str]
     ) -> None:
@@ -1503,9 +1526,7 @@ class GenericSQLConnector(BaseDestinationHandler):
             if self._adbc_conn is not None:
                 return self._adbc_conn
             if self._runtime is None:
-                raise AdbcConfigurationError(
-                    "Runtime not available for ADBC reconnect"
-                )
+                raise AdbcConfigurationError("Runtime not available for ADBC reconnect")
             # open_adbc_connection is sync; safe to call inside the lock
             # because the lock is fast (no I/O) — only the connect() call
             # itself blocks, but that's the work this method is doing.
@@ -1531,13 +1552,17 @@ class GenericSQLConnector(BaseDestinationHandler):
             f"AND {self.dialect.quote_ident('batch_seq')} = ?"
         )
         row = await asyncio.to_thread(
-            self._fetch_one_adbc_sync, sql, (run_id, stream_id, batch_seq),
+            self._fetch_one_adbc_sync,
+            sql,
+            (run_id, stream_id, batch_seq),
         )
         if row is None:
             return None
         records_written, committed_cursor = row
         return {
-            "records_written": int(records_written) if records_written is not None else 0,
+            "records_written": int(records_written)
+            if records_written is not None
+            else 0,
             "committed_cursor": bytes(committed_cursor) if committed_cursor else b"",
         }
 
@@ -1627,7 +1652,11 @@ class GenericSQLConnector(BaseDestinationHandler):
                 cls.__name__ == "IntegrityError" for cls in type(cause).__mro__
             ):
                 self._handle_commit_collision(
-                    state, run_id, stream_id, batch_seq, cause,
+                    state,
+                    run_id,
+                    stream_id,
+                    batch_seq,
+                    cause,
                 )
                 return
             raise
@@ -1655,13 +1684,18 @@ class GenericSQLConnector(BaseDestinationHandler):
                 "ADBC _batch_commits raced concurrent retry for %s/%s/%s "
                 "in insert mode — rows likely duplicated by the loser's "
                 "prior adbc_ingest",
-                run_id, stream_id, batch_seq,
+                run_id,
+                stream_id,
+                batch_seq,
             )
             raise AdbcCommitRecordError(cause, state.write_mode) from cause
         logger.info(
             "ADBC _batch_commits raced concurrent retry for %s/%s/%s "
             "(%s mode); idempotent — treating as already-committed",
-            run_id, stream_id, batch_seq, state.write_mode,
+            run_id,
+            stream_id,
+            batch_seq,
+            state.write_mode,
         )
 
     def _execute_adbc_dml_sync(self, sql: str, params: Tuple[Any, ...]) -> int:
@@ -1736,7 +1770,9 @@ class GenericSQLConnector(BaseDestinationHandler):
         if state.write_mode == "truncate_insert":
             await asyncio.to_thread(
                 self._truncate_then_ingest_sync,
-                cast_batch, state.schema_name, state.table_name,
+                cast_batch,
+                state.schema_name,
+                state.table_name,
             )
         elif state.write_mode == "upsert":
             # ``conflict_keys`` is the stream's Infra-validated upsert
@@ -1759,24 +1795,37 @@ class GenericSQLConnector(BaseDestinationHandler):
             # per-(stream, batch) uniqueness within a destination handler's
             # lifetime; "b" prefix keeps the token a valid identifier in
             # every supported dialect.
-            stage_token = "b" + hashlib.sha256(
-                f"{run_id}|{stream_id}|{batch_seq}".encode("utf-8")
-            ).hexdigest()[:16]
+            stage_token = (
+                "b"
+                + hashlib.sha256(
+                    f"{run_id}|{stream_id}|{batch_seq}".encode("utf-8")
+                ).hexdigest()[:16]
+            )
             await asyncio.to_thread(
                 self._merge_ingest_sync,
-                cast_batch, state.schema_name, state.table_name,
-                list(cast_batch.schema.names), state.conflict_keys,
+                cast_batch,
+                state.schema_name,
+                state.table_name,
+                list(cast_batch.schema.names),
+                state.conflict_keys,
                 stage_token,
             )
         else:
             await asyncio.to_thread(
                 self._adbc_only_ingest_sync,
-                cast_batch, state.schema_name, state.table_name,
+                cast_batch,
+                state.schema_name,
+                state.table_name,
             )
 
         try:
             await self._record_batch_commit_via_adbc(
-                state, run_id, stream_id, batch_seq, cursor_bytes, record_count,
+                state,
+                run_id,
+                stream_id,
+                batch_seq,
+                cursor_bytes,
+                record_count,
             )
         except AdbcConfigurationError:
             # Already classified as fatal by _record_batch_commit_via_adbc
@@ -1795,7 +1844,9 @@ class GenericSQLConnector(BaseDestinationHandler):
             logger.error(
                 "ADBC-only ingest committed but commit-record failed "
                 "for %s/%s/%s — see AdbcCommitRecordError for retry semantics",
-                run_id, stream_id, batch_seq,
+                run_id,
+                stream_id,
+                batch_seq,
                 exc_info=True,
             )
             raise AdbcCommitRecordError(commit_exc, state.write_mode) from commit_exc
@@ -1897,7 +1948,8 @@ class GenericSQLConnector(BaseDestinationHandler):
                 "ADBC upsert into %s.%s has no non-key columns to update "
                 "(all_columns == conflict_keys); MERGE will only INSERT "
                 "new rows. Consider write_mode='insert' for clarity.",
-                schema_name, table_name,
+                schema_name,
+                table_name,
             )
         # _adbc_op_lock serializes the full DROP+CREATE+INGEST+MERGE+DROP
         # sequence so concurrent streams against the same handler don't
@@ -1907,8 +1959,14 @@ class GenericSQLConnector(BaseDestinationHandler):
         # leave the stage table empty.
         with self._adbc_op_lock:
             self._merge_ingest_locked_sync(
-                cast_batch, target_qualified, stage_qualified, stage_name,
-                schema_name, all_columns, conflict_keys, update_cols,
+                cast_batch,
+                target_qualified,
+                stage_qualified,
+                stage_name,
+                schema_name,
+                all_columns,
+                conflict_keys,
+                update_cols,
             )
 
     def _merge_ingest_locked_sync(
@@ -1966,7 +2024,9 @@ class GenericSQLConnector(BaseDestinationHandler):
                     f"t.{self.dialect.quote_ident(c)} = s.{self.dialect.quote_ident(c)}"
                     for c in update_cols
                 )
-                insert_cols = ", ".join(self.dialect.quote_ident(c) for c in all_columns)
+                insert_cols = ", ".join(
+                    self.dialect.quote_ident(c) for c in all_columns
+                )
                 insert_vals = ", ".join(
                     f"s.{self.dialect.quote_ident(c)}" for c in all_columns
                 )
@@ -1998,17 +2058,13 @@ class GenericSQLConnector(BaseDestinationHandler):
             try:
                 drop_cursor = conn.cursor()
                 try:
-                    drop_cursor.execute(
-                        f"DROP TABLE IF EXISTS {stage_qualified}"
-                    )
+                    drop_cursor.execute(f"DROP TABLE IF EXISTS {stage_qualified}")
                     conn.commit()
                 finally:
                     try:
                         drop_cursor.close()
                     except Exception:
-                        logger.debug(
-                            "ADBC cursor close failed", exc_info=True
-                        )
+                        logger.debug("ADBC cursor close failed", exc_info=True)
             except Exception:
                 # The next retry's pre-flight DROP-IF-EXISTS will clean
                 # the orphan up; warn so an operator sees the leftover
@@ -2016,7 +2072,8 @@ class GenericSQLConnector(BaseDestinationHandler):
                 logger.warning(
                     "ADBC stage table %s left behind after MERGE failure; "
                     "the next retry's pre-flight DROP-IF-EXISTS will clean it up",
-                    stage_qualified, exc_info=True,
+                    stage_qualified,
+                    exc_info=True,
                 )
             self._poison_adbc_connection()
             if _is_fatal_adbc_error(exc):
@@ -2041,7 +2098,8 @@ class GenericSQLConnector(BaseDestinationHandler):
             logger.warning(
                 "ADBC stage table %s post-MERGE DROP failed; next retry of "
                 "this batch will clean it up via pre-flight DROP-IF-EXISTS",
-                stage_qualified, exc_info=True,
+                stage_qualified,
+                exc_info=True,
             )
 
     async def health_check(self) -> bool:
@@ -2147,9 +2205,7 @@ class GenericSQLConnector(BaseDestinationHandler):
         schema_name = database_object.get("schema")
 
         try:
-            await materialize_runtime(
-                runtime, sql_dialect=self.dialect
-            )
+            await materialize_runtime(runtime, sql_dialect=self.dialect)
         except DETERMINISTIC_CONNECT_ERRORS:
             raise
         except Exception as e:
@@ -2284,15 +2340,18 @@ class GenericSQLConnector(BaseDestinationHandler):
                             else None
                         ),
                         cursor_value=cursor_value,
-                        # Resume strictly after the last committed high-water
-                        # mark. The stored cursor was fully processed in a
-                        # prior run, so an inclusive >= would re-read the
-                        # boundary row every re-run and collide under
-                        # write.mode=insert. Assumes a monotonic cursor; a
-                        # non-unique one (e.g. a coarse timestamp with ties)
-                        # should pair with upsert so a late row sharing the
-                        # boundary value is not skipped.
-                        cursor_mode="exclusive",
+                        # Resume inclusively (>=), re-reading the boundary row.
+                        # A non-unique cursor (e.g. a coarse timestamp with
+                        # ties) can gain a new row at the last committed value
+                        # between runs; an exclusive > would filter that row out
+                        # at the source and lose it for good. Re-reading is safe
+                        # because the default write.mode is upsert, which dedups
+                        # the boundary row against its conflict_keys. An insert
+                        # stream re-reading the boundary fails loud on the
+                        # duplicate key (the visible signal that an incremental
+                        # cursor needs a conflict target) rather than silently
+                        # dropping rows.
+                        cursor_mode="inclusive",
                         order_by=order_by_field,
                         limit=batch_size,
                         offset=offset,
@@ -2310,24 +2369,19 @@ class GenericSQLConnector(BaseDestinationHandler):
             # the identical page body (_fetch_page_rows).
             async with AsyncExitStack() as stack:
                 if sa_sync:
-                    sync_conn = await asyncio.to_thread(
-                        runtime.sync_engine.connect
-                    )
+                    sync_conn = await asyncio.to_thread(runtime.sync_engine.connect)
                     stack.push_async_callback(asyncio.to_thread, sync_conn.close)
 
                     async def fetch_page(sql: str, params: Any) -> List[Dict[str, Any]]:
                         return await asyncio.to_thread(
                             self._fetch_page_rows, sync_conn, sql, params
                         )
+
                 else:
-                    conn = await stack.enter_async_context(
-                        acquire_connection(engine)
-                    )
+                    conn = await stack.enter_async_context(acquire_connection(engine))
 
                     async def fetch_page(sql: str, params: Any) -> List[Dict[str, Any]]:
-                        return await conn.run_sync(
-                            self._fetch_page_rows, sql, params
-                        )
+                        return await conn.run_sync(self._fetch_page_rows, sql, params)
 
                 while True:
                     paged_query, paged_params = page_query(offset)
@@ -2397,9 +2451,7 @@ class GenericSQLConnector(BaseDestinationHandler):
             # The first selected column is the ORDER BY fallback and an empty
             # projection compiles to ``SELECT`` with no columns; fail loudly
             # rather than emit an invalid statement.
-            raise ReadError(
-                "ADBC-only source requires a non-empty column projection"
-            )
+            raise ReadError("ADBC-only source requires a non-empty column projection")
 
         # The ADBC path quotes every identifier, so normalize the schema
         # through the connector's dialect — the same rule the destination
@@ -2445,10 +2497,11 @@ class GenericSQLConnector(BaseDestinationHandler):
                         filters=filters,
                         cursor_field=cursor_field,
                         cursor_value=initial_cursor_value if cursor_field else None,
-                        # Exclusive resume bound: see the matching note on the
-                        # SQLAlchemy read path. Re-reading the committed
-                        # boundary row (>=) collides under write.mode=insert.
-                        cursor_mode="exclusive",
+                        # Inclusive resume bound: see the matching note on the
+                        # SQLAlchemy read path. Re-reading the boundary row is
+                        # what keeps a late row sharing the last cursor value
+                        # from being lost; upsert dedups the re-read.
+                        cursor_mode="inclusive",
                         order_by=order_by,
                         limit=batch_size,
                         offset=offset,
@@ -2477,12 +2530,15 @@ class GenericSQLConnector(BaseDestinationHandler):
                     page_rows += cast_batch.num_rows
                     if cursor_field and cast_batch.num_rows > 0:
                         if cursor_field in cast_batch.schema.names:
-                            last_cursor_value = cast_batch.column(cursor_field)[-1].as_py()
+                            last_cursor_value = cast_batch.column(cursor_field)[
+                                -1
+                            ].as_py()
                         elif not cursor_missing_warned:
                             logger.warning(
                                 "stream %r: cursor_field %r not present in "
                                 "result batch; cursor will not advance",
-                                stream_name, cursor_field,
+                                stream_name,
+                                cursor_field,
                             )
                             cursor_missing_warned = True
                     self.metrics["records_read"] += cast_batch.num_rows
@@ -2560,17 +2616,13 @@ class GenericSQLConnector(BaseDestinationHandler):
     async def list_schemas(self, runtime: ConnectionRuntime) -> List[str]:
         return await _sql_list_schemas(runtime, dialect=self.dialect)
 
-    async def list_tables(
-        self, runtime: ConnectionRuntime, schema: str
-    ) -> List[str]:
+    async def list_tables(self, runtime: ConnectionRuntime, schema: str) -> List[str]:
         return await _sql_list_tables(runtime, schema, dialect=self.dialect)
 
     async def list_columns(
         self, runtime: ConnectionRuntime, schema: str, table: str
     ) -> Tuple[List[ColumnDef], List[str]]:
-        return await _sql_list_columns(
-            runtime, schema, table, dialect=self.dialect
-        )
+        return await _sql_list_columns(runtime, schema, table, dialect=self.dialect)
 
     async def create_table(
         self,

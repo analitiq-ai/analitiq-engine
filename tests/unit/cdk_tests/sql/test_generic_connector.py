@@ -242,8 +242,9 @@ class TestReadAdbcBranch:
         sql, params = reader.calls[0]
         assert "?" in sql
         assert '"status" = ?' in sql
-        # Exclusive resume bound (>): the stored cursor was committed last run.
-        assert '"updated_at" > ?' in sql
+        # Inclusive resume bound (>=): the boundary row is re-read and deduped
+        # by upsert, so a late row sharing the cursor value is not lost.
+        assert '"updated_at" >= ?' in sql
         assert 'ORDER BY "updated_at"' in sql
         assert "LIMIT 2 OFFSET 0" in sql
         # Filter value first, cursor value second (WHERE build order).
@@ -404,7 +405,7 @@ class TestReadAdbcBranchPaging:
 
         sql, params = reader.calls[0]
         assert 'ORDER BY "updated_at"' in sql
-        assert '"updated_at" > ?' in sql
+        assert '"updated_at" >= ?' in sql
         assert params == ["2024-01-02"]
 
     @pytest.mark.asyncio
@@ -598,10 +599,11 @@ class TestReadSqlAlchemyBranch:
         assert "ORDER BY updated_at" in executed[0]
 
     @pytest.mark.asyncio
-    async def test_incremental_cursor_uses_exclusive_bound(self):
-        # The exclusive (>) resume bound must hold on the SQLAlchemy paging
-        # path too, not only ADBC: an inclusive >= would re-read the committed
-        # boundary row every re-run and collide under write.mode=insert.
+    async def test_incremental_cursor_uses_inclusive_bound(self):
+        # The inclusive (>=) resume bound must hold on the SQLAlchemy paging
+        # path too, not only ADBC: an exclusive > would filter out a late row
+        # sharing the committed boundary value and lose it. The re-read is
+        # deduped by upsert.
         runtime = _FakeRuntime(is_adbc=False, engine=object())
 
         executed = []
@@ -633,8 +635,7 @@ class TestReadSqlAlchemyBranch:
                 connector, runtime, config, _checkpoint(cursor={"cursor": "2024-01-02"})
             )
 
-        assert "updated_at >" in executed[0]
-        assert "updated_at >=" not in executed[0]
+        assert "updated_at >=" in executed[0]
 
     @pytest.mark.asyncio
     async def test_query_builder_receives_dialect_paging_order_fallback(self):

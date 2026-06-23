@@ -13,12 +13,19 @@ Cursor format (internal to engine):
 }
 
 This is JSON-encoded and stored as bytes for simplicity and debuggability.
+A ``datetime``/``date`` value is tagged via ``encode_value``
+(``{"__type__": "datetime", "value": ...}``) so its type survives the JSON
+round trip through the destination ACK and into the durable resume state,
+instead of being flattened to an ambiguous ISO string. The destination still
+treats the whole token as opaque, so the tagging is internal to the engine.
 """
 
 import json
 import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+
+from src.state.store import encode_value
 
 from .generated.analitiq.v1 import Cursor
 
@@ -45,13 +52,13 @@ def encode_cursor(
     """
     cursor_data = {
         "field": cursor_field,
-        "value": _serialize_value(cursor_value),
+        "value": encode_value(cursor_value),
         "encoded_at": datetime.now(timezone.utc).isoformat(),
     }
 
     if tie_breaker_fields and tie_breaker_values:
         cursor_data["tie_breakers"] = [
-            {"field": field, "value": _serialize_value(tie_breaker_values.get(field))}
+            {"field": field, "value": encode_value(tie_breaker_values.get(field))}
             for field in tie_breaker_fields
             if field in tie_breaker_values
         ]
@@ -122,7 +129,9 @@ def compute_max_cursor(
         elif _compare_values(cursor_value, max_cursor_value) > 0:
             max_cursor_value = cursor_value
             max_record = record
-        elif _compare_values(cursor_value, max_cursor_value) == 0 and tie_breaker_fields:
+        elif (
+            _compare_values(cursor_value, max_cursor_value) == 0 and tie_breaker_fields
+        ):
             # Same cursor value, compare tie-breakers
             if _compare_tie_breakers(record, max_record, tie_breaker_fields) > 0:
                 max_record = record
@@ -178,13 +187,6 @@ def cursor_to_state_dict(cursor: Cursor) -> Dict[str, Any]:
         ]
 
     return state
-
-
-def _serialize_value(value: Any) -> Any:
-    """Serialize a value for JSON encoding."""
-    if isinstance(value, datetime):
-        return value.isoformat()
-    return value
 
 
 def _compare_values(a: Any, b: Any) -> int:
