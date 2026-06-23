@@ -62,6 +62,40 @@ def _coerce_document(doc: Dict[str, Any]) -> Dict[str, Any]:
     return {k: _coerce_bson(v) for k, v in doc.items()}
 
 
+# Sentinel key used to round-trip a BSON ObjectId cursor through the JSON-only
+# checkpoint layer (mirrors MongoDB Extended JSON's ``$oid``). A bare string
+# bound does not match ObjectId-valued fields because Mongo range predicates
+# are type-bracketed, so the type is preserved on save and rehydrated on load.
+_OBJECTID_CURSOR_TAG = "$oid"
+
+
+def _encode_cursor_value(value: Any) -> Any:
+    """Make a cursor value JSON-safe while preserving its BSON type."""
+    try:
+        from bson import ObjectId
+    except ImportError:
+        return value
+    if isinstance(value, ObjectId):
+        return {_OBJECTID_CURSOR_TAG: str(value)}
+    return value
+
+
+def _decode_cursor_value(value: Any) -> Any:
+    """Rehydrate a cursor value produced by :func:`_encode_cursor_value`."""
+    if not (isinstance(value, dict) and set(value) == {_OBJECTID_CURSOR_TAG}):
+        return value
+    try:
+        from bson import ObjectId
+    except ImportError:
+        # pymongo/bson absent: the connector cannot query Mongo at all, so fail
+        # loudly rather than silently filtering on a wrongly-typed cursor.
+        raise ReadError(
+            "Checkpoint holds an ObjectId cursor but bson is not installed; "
+            "cannot rehydrate the cursor for the incremental filter"
+        )
+    return ObjectId(value[_OBJECTID_CURSOR_TAG])
+
+
 def _resolve_records_schema(endpoint_doc: Dict[str, Any]) -> Dict[str, Any]:
     """Return the schema wrapper dict to pass to ``SchemaContract``.
 
@@ -187,7 +221,7 @@ class MongoDbSourceConnector(BaseConnector):
         cursor_value: Any = None
         if replication_method == "incremental" and cursor_field:
             cursor_state = await checkpoint.get_cursor(stream_name, partition)
-            cursor_value = (cursor_state or {}).get("cursor")
+            cursor_value = _decode_cursor_value((cursor_state or {}).get("cursor"))
 
         # Keep a pre-rollback copy so max_cursor_seen never drifts backwards:
         # if safety_window_seconds rolls cursor_value back for querying, we still
@@ -276,19 +310,12 @@ class MongoDbSourceConnector(BaseConnector):
                 if cutoff is not None and isinstance(max_cursor_seen, datetime)
                 else max_cursor_seen
             )
-            # BSON ObjectId is not JSON-serialisable; coerce to str so the
-            # checkpoint layer can round-trip it. On reload the filter uses
-            # {$gte: str}, which is only correct when _id values are strings.
-            # Streams that paginate on a non-string _id should use a separate
-            # cursor_field rather than relying on ObjectId ordering.
-            try:
-                from bson import ObjectId as _ObjectId
-                if isinstance(value_to_save, _ObjectId):
-                    value_to_save = str(value_to_save)
-            except ImportError:
-                pass
+            # ObjectId is not JSON-serialisable; encode it with type information
+            # so the next run rehydrates the correct BSON type before building
+            # the {$gte: ...} filter (a bare string bound would not match
+            # ObjectId-valued fields — Mongo range predicates are type-bracketed).
             await checkpoint.save_cursor(
-                stream_name, partition, {"cursor": value_to_save}
+                stream_name, partition, {"cursor": _encode_cursor_value(value_to_save)}
             )
 
 

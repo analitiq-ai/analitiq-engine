@@ -445,37 +445,29 @@ class MongoDbDestinationHandler(BaseDestinationHandler):
                         f"Upsert document is missing conflict key(s) {missing}; "
                         "cannot build a deterministic filter"
                     )
-                filter_doc = {k: doc[k] for k in conflict_keys}
-                # Exclude _id from $set when it's not a conflict key — MongoDB
-                # raises ImmutableField if you attempt to update _id in-place.
-                set_doc = {
-                    k: v for k, v in doc.items()
-                    if k != "_id" or "_id" in conflict_keys
-                }
-                ops.append(UpdateOne(filter_doc, {"$set": set_doc}, upsert=True))
-            try:
-                result = await collection.bulk_write(ops, ordered=False)
-                return result.upserted_count + result.modified_count
-            except Exception as exc:
-                try:
-                    from pymongo.errors import BulkWriteError
-                except ImportError:
-                    raise exc  # pymongo unavailable; re-raise the original error
-                if not isinstance(exc, BulkWriteError):
-                    raise
-                details = exc.details or {}
-                non_dup = [
-                    e for e in (details.get("writeErrors") or [])
-                    if e.get("code") != 11000
-                ]
-                if non_dup:
-                    logger.error(
-                        "bulk_write (upsert): %d operation(s) failed with "
-                        "non-duplicate errors (first: %s); raising",
-                        len(non_dup), non_dup[0],
+                null_keys = [k for k in conflict_keys if doc[k] is None]
+                if null_keys:
+                    raise ValueError(
+                        f"Upsert document has null conflict key(s) {null_keys}; "
+                        "a null filter value also matches missing-field documents "
+                        "in MongoDB and would collapse unrelated records"
                     )
-                    raise
-                return (details.get("nUpserted") or 0) + (details.get("nModified") or 0)
+                filter_doc = {k: doc[k] for k in conflict_keys}
+                # _id is immutable and cannot appear in $set, even when it is the
+                # conflict key — the equality filter already supplies it on insert.
+                # If nothing else remains to set, use $setOnInsert so a missing doc
+                # is still created and an existing one is left untouched ($set
+                # rejects an empty document).
+                set_doc = {k: v for k, v in doc.items() if k != "_id"}
+                update = {"$set": set_doc} if set_doc else {"$setOnInsert": filter_doc}
+                ops.append(UpdateOne(filter_doc, update, upsert=True))
+            # Let any bulk_write error (including duplicate-key) propagate. Unlike
+            # plain inserts, a duplicate key on an unordered upsert means a racing
+            # operation's $set was dropped, so the batch must fail and be retried
+            # (idempotent: the losing op becomes an update on retry) rather than be
+            # committed as a success that silently loses the update.
+            result = await collection.bulk_write(ops, ordered=False)
+            return result.upserted_count + result.modified_count
 
         try:
             result = await collection.insert_many(docs, ordered=False)

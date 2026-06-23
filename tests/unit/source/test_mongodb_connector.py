@@ -516,7 +516,6 @@ async def test_safety_window_empty_result_does_not_move_cursor_backwards():
     (already rolled back), so each run with no new rows would push the saved
     cursor further into the past (double-rollback per run).
     """
-    bson = sys.modules["bson"]
     base_cursor = datetime.datetime(2024, 6, 1, 12, 0, 0, tzinfo=datetime.timezone.utc)
 
     # Empty page — no new records
@@ -706,3 +705,95 @@ async def test_source_connect_failure_propagates():
     from src.source.connectors.base import ConnectionError as ConnectorConnectionError
     with pytest.raises(ConnectorConnectionError, match="MongoDB connection failed"):
         await connector.connect(runtime)
+
+
+# ---------------------------------------------------------------------------
+# ObjectId incremental cursor round-trip (issue #92 review P1)
+# ---------------------------------------------------------------------------
+
+def test_objectid_cursor_encode_decode_roundtrip():
+    """An ObjectId cursor must survive the JSON checkpoint layer as an ObjectId."""
+    from src.source.connectors.mongodb import (
+        _encode_cursor_value,
+        _decode_cursor_value,
+    )
+    bson = sys.modules["bson"]
+    oid = bson.ObjectId("507f1f77bcf86cd799439011")
+
+    encoded = _encode_cursor_value(oid)
+    assert encoded == {"$oid": "507f1f77bcf86cd799439011"}  # JSON-safe
+
+    decoded = _decode_cursor_value(encoded)
+    assert isinstance(decoded, bson.ObjectId)
+    assert str(decoded) == "507f1f77bcf86cd799439011"
+
+
+def test_non_objectid_cursor_values_pass_through():
+    """Plain JSON-safe cursor values (and non-envelope dicts) are untouched."""
+    from src.source.connectors.mongodb import (
+        _encode_cursor_value,
+        _decode_cursor_value,
+    )
+    for value in ("2024-01-01T00:00:00Z", 42):
+        assert _encode_cursor_value(value) == value
+        assert _decode_cursor_value(value) == value
+    assert _decode_cursor_value({"a": 1}) == {"a": 1}
+
+
+@pytest.mark.asyncio
+async def test_objectid_cursor_saved_with_type_tag():
+    """When the cursor field yields ObjectIds, the saved checkpoint must carry
+    the typed envelope rather than a bare string."""
+    bson = sys.modules["bson"]
+    docs = [{"_id": bson.ObjectId("507f1f77bcf86cd799439011"), "v": 1}]
+
+    client, _ = _make_motor_client([docs, []])
+    runtime = _make_runtime()
+    runtime.mongo_client = client
+
+    config = {
+        "endpoint_document": {"collection": "events", "database": "mydb"},
+        "stream_source": {
+            "replication": {"method": "incremental", "cursor_field": "_id"}
+        },
+    }
+
+    cp = _make_checkpoint()
+    connector = MongoDbSourceConnector()
+    async for _ in connector.read_batches(
+        runtime, config, checkpoint=cp, stream_name="events"
+    ):
+        pass
+
+    cp.save_cursor.assert_awaited_once()
+    saved = cp.save_cursor.call_args[0][2]
+    assert saved == {"cursor": {"$oid": "507f1f77bcf86cd799439011"}}
+
+
+@pytest.mark.asyncio
+async def test_objectid_cursor_rehydrated_into_filter_on_reload():
+    """A stored ObjectId envelope must be rehydrated to an ObjectId before it is
+    used in the {$gte: ...} filter — a string bound would never match."""
+    bson = sys.modules["bson"]
+    client, coll = _make_motor_client([[], []])
+    runtime = _make_runtime()
+    runtime.mongo_client = client
+
+    config = {
+        "endpoint_document": {"collection": "events", "database": "mydb"},
+        "stream_source": {
+            "replication": {"method": "incremental", "cursor_field": "_id"}
+        },
+    }
+
+    cp = _make_checkpoint(cursor_value={"$oid": "507f1f77bcf86cd799439011"})
+    connector = MongoDbSourceConnector()
+    async for _ in connector.read_batches(
+        runtime, config, checkpoint=cp, stream_name="events"
+    ):
+        pass
+
+    first_filter = coll.find.call_args_list[0][0][0]
+    gte_bound = first_filter["_id"]["$gte"]
+    assert isinstance(gte_bound, bson.ObjectId)
+    assert str(gte_bound) == "507f1f77bcf86cd799439011"

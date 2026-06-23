@@ -804,3 +804,118 @@ async def test_write_batch_upsert_commit_failure_returns_retryable():
         )
 
     assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
+
+
+# ---------------------------------------------------------------------------
+# Upsert correctness: _id immutability, null keys, duplicate-key failures
+# (issue #92 review P1s)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_write_batch_upsert_excludes_id_from_set_when_id_is_conflict_key():
+    """_id must never appear in $set, even when it is the conflict key — Mongo
+    rejects an in-place _id update with ImmutableField."""
+    rt, commits_coll, target_coll, db_mock = _make_runtime()
+
+    with patch.dict(sys.modules, {
+        "pymongo": MagicMock(UpdateOne=lambda f, u, **kw: (f, u)),
+    }):
+        handler, _ = await _connected_handler(rt)
+        handler._streams["s1"] = _MongoStreamState(
+            "testdb", "users", WriteMode.WRITE_MODE_UPSERT, conflict_keys=["_id"]
+        )
+        handler._batch_commits_ready.add("testdb")
+
+        batch = _make_batch({"_id": "u1", "name": "Alice"})
+        result = await handler.write_batch(
+            run_id="r", stream_id="s1", batch_seq=0,
+            record_batch=batch, record_ids=["r1"], cursor=_cursor(),
+        )
+
+    assert result.status == AckStatus.ACK_STATUS_SUCCESS
+    ops = target_coll.bulk_write.call_args[0][0]
+    filter_doc, update = ops[0]
+    assert filter_doc == {"_id": "u1"}
+    assert update == {"$set": {"name": "Alice"}}  # _id excluded
+
+
+@pytest.mark.asyncio
+async def test_write_batch_upsert_id_only_doc_uses_set_on_insert():
+    """A doc carrying only its _id conflict key has nothing to $set; it must use
+    $setOnInsert so the upsert is still valid ($set rejects an empty document)."""
+    rt, commits_coll, target_coll, db_mock = _make_runtime()
+
+    with patch.dict(sys.modules, {
+        "pymongo": MagicMock(UpdateOne=lambda f, u, **kw: (f, u)),
+    }):
+        handler, _ = await _connected_handler(rt)
+        handler._streams["s1"] = _MongoStreamState(
+            "testdb", "users", WriteMode.WRITE_MODE_UPSERT, conflict_keys=["_id"]
+        )
+        handler._batch_commits_ready.add("testdb")
+
+        batch = _make_batch({"_id": "u1"})
+        result = await handler.write_batch(
+            run_id="r", stream_id="s1", batch_seq=0,
+            record_batch=batch, record_ids=["r1"], cursor=_cursor(),
+        )
+
+    assert result.status == AckStatus.ACK_STATUS_SUCCESS
+    ops = target_coll.bulk_write.call_args[0][0]
+    filter_doc, update = ops[0]
+    assert filter_doc == {"_id": "u1"}
+    assert update == {"$setOnInsert": {"_id": "u1"}}
+
+
+@pytest.mark.asyncio
+async def test_write_batch_upsert_null_conflict_key_returns_retryable():
+    """A present-but-null conflict key must be rejected: {k: None} also matches
+    missing-field docs in Mongo and would collapse unrelated records."""
+    rt, commits_coll, target_coll, db_mock = _make_runtime()
+
+    with patch.dict(sys.modules, {
+        "pymongo": MagicMock(UpdateOne=lambda f, u, **kw: (f, u)),
+    }):
+        handler, _ = await _connected_handler(rt)
+        handler._streams["s1"] = _MongoStreamState(
+            "testdb", "users", WriteMode.WRITE_MODE_UPSERT, conflict_keys=["email"]
+        )
+        handler._batch_commits_ready.add("testdb")
+
+        batch = _make_batch({"email": None, "name": "Alice"})
+        result = await handler.write_batch(
+            run_id="r", stream_id="s1", batch_seq=0,
+            record_batch=batch, record_ids=["r1"], cursor=_cursor(),
+        )
+
+    assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
+    target_coll.bulk_write.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_write_batch_upsert_duplicate_key_returns_retryable_not_success():
+    """A duplicate-key failure on an unordered upsert means a racing op's $set was
+    dropped; the batch must fail (retryable) rather than be committed as success."""
+    rt, commits_coll, target_coll, db_mock = _make_runtime()
+    target_coll.bulk_write = AsyncMock(
+        side_effect=RuntimeError("E11000 duplicate key error")
+    )
+
+    with patch.dict(sys.modules, {
+        "pymongo": MagicMock(UpdateOne=lambda f, u, **kw: (f, u)),
+    }):
+        handler, _ = await _connected_handler(rt)
+        handler._streams["s1"] = _MongoStreamState(
+            "testdb", "users", WriteMode.WRITE_MODE_UPSERT, conflict_keys=["email"]
+        )
+        handler._batch_commits_ready.add("testdb")
+
+        batch = _make_batch({"email": "a@b.com", "name": "Alice"})
+        result = await handler.write_batch(
+            run_id="r", stream_id="s1", batch_seq=0,
+            record_batch=batch, record_ids=["r1"], cursor=_cursor(),
+        )
+
+    assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
+    assert "duplicate key" in result.failure_summary
+    commits_coll.insert_one.assert_not_awaited()  # no commit recorded
