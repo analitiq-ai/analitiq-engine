@@ -10,7 +10,7 @@ from typing import Any, Dict, Optional
 from ..shared.run_id import get_or_generate_run_id
 from .batch_commit_tracker import BatchCommitTracker
 from .state_emission import emit_state_log
-from .store import CursorStore
+from .store import CursorStore, parse_resume_state
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +47,31 @@ class StateManager:
         # run left off instead of re-scanning the whole source.
         self._cursors: Dict[str, Dict[str, Any]] = {}
         self._cursor_store = CursorStore(self.base_dir)
+        self._restore_durable_cursors()
+
+    def _restore_durable_cursors(self) -> None:
+        """Seed the cursor cache from the injected durable resume state.
+
+        The on-disk ``state/`` checkpoint is wiped on a fresh container, so
+        without this an incremental stream would find no bookmark on re-run
+        and full-rescan the source. The deployment re-injects the cursors it
+        harvested from the prior run's emitted state as the ``RESUME_STATE``
+        env var; we decode it into the same ``{"cursor": <value>}`` shape
+        :meth:`get_cursor` returns, keyed by ``stream_id`` with the empty
+        partition the engine reads with.
+        """
+        restored = parse_resume_state(os.environ.get("RESUME_STATE"))
+        seeded = 0
+        for stream_id, value in restored.items():
+            if value is None:
+                continue
+            self._cursors[self._cursor_key(stream_id, {})] = {"cursor": value}
+            seeded += 1
+        if seeded:
+            logger.info(
+                "restored durable cursor state for %d stream(s) from RESUME_STATE",
+                seeded,
+            )
 
     def init_commit_tracker(self, run_id: str) -> None:
         """Initialize batch commit tracker for the current run."""

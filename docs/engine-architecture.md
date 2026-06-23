@@ -90,6 +90,36 @@ The engine has zero cloud SDK dependencies. State, logs, DLQ, and
 metrics use the local filesystem and stdout; downstream ingestion by an
 external log/metrics shipper is a deployment concern, not an engine concern.
 
+### Incremental state restore
+
+An incremental stream's resume cursor is written two ways: to the local
+`state/{pipeline_id}/{stream_id}.json` checkpoint, and to an
+`ANALITIQ_STATE` stdout log line the external shipper harvests into durable
+storage. On a fresh container (each task starts with an empty `state/`) the
+local checkpoint is gone, so restore reads the `RESUME_STATE` environment
+variable instead — a JSON object `{stream_id: cursor}` the deployment
+injects from whatever it harvested off the prior run. `StateManager` seeds
+its cursor cache from it at startup (`src/state/store.py:parse_resume_state`,
+`src/state/state_manager.py`). This keeps restore symmetric with emission:
+the engine never reaches for cloud storage itself, it only consumes a
+resolved value the deployment supplies — exactly as it does for secrets and
+config.
+
+Each cursor carries its type. A `datetime`/`date` travels as a tagged
+`{"__type__": ..., "value": ...}` value — the same form the on-disk checkpoint
+and the gRPC cursor token use — so a timestamp cursor comes back as a
+`datetime` (asyncpg rejects a plain string for a timestamp bind) and a string
+cursor whose value looks like a date stays a string. The type is carried
+end-to-end, never guessed from a value's shape.
+
+A resume reads inclusively (`>=`) from the last committed high-water mark, so
+the boundary row is re-read. This keeps a non-unique cursor lossless: a row
+that arrives at the boundary value between runs is still read, where an
+exclusive `>` would filter it out at the source and drop it. The default
+`upsert` write mode dedups the re-read against its `conflict_keys`; an `insert`
+stream re-reading the boundary fails loud on the duplicate key rather than
+silently losing rows.
+
 ## Pipeline Lifecycle
 
 1. `src.main` reads `RUN_MODE`. `source` runs the pipeline engine;

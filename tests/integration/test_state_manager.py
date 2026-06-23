@@ -1,11 +1,12 @@
 """Integration tests for state manager functionality."""
 
 import json
-import pytest
-import tempfile
 import shutil
+import tempfile
 from pathlib import Path
 from unittest.mock import patch
+
+import pytest
 
 from src.state.state_manager import StateManager
 
@@ -115,6 +116,106 @@ class TestStateManager:
         manager.init_commit_tracker("run-123")
 
         assert manager.commit_tracker is not None
+
+
+class TestStateManagerDurableRestore:
+    """Restoring incremental cursors from the injected RESUME_STATE env var.
+
+    A fresh container's local ``state/`` directory is empty (Fargate wipes it
+    every task), so the cursor a prior run emitted must come back through the
+    deployment-injected env var. The engine reads the source cursor keyed by
+    ``stream_id`` with the empty partition (see ``engine._extract_stage``), so
+    that is the shape these assert.
+    """
+
+    def setup_method(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.tmp_path = Path(self.temp_dir)
+
+    def teardown_method(self):
+        if Path(self.temp_dir).exists():
+            shutil.rmtree(self.temp_dir)
+
+    async def test_restores_numeric_cursor_across_fresh_container(self, monkeypatch):
+        # No local checkpoint on disk -> the env var is the only bookmark.
+        monkeypatch.setenv("RESUME_STATE", json.dumps({"orders": 100}))
+        manager = _make_manager(self.tmp_path)
+
+        assert await manager.get_cursor("orders") == {"cursor": 100}
+
+    async def test_restores_timestamp_cursor_as_datetime(self, monkeypatch):
+        # A timestamp cursor crosses durable state tagged, so it comes back a
+        # datetime (asyncpg rejects a plain string for a timestamp bind).
+        ts = "2024-06-01T12:00:00+00:00"
+        tagged = {"__type__": "datetime", "value": ts}
+        monkeypatch.setenv("RESUME_STATE", json.dumps({"events": tagged}))
+        manager = _make_manager(self.tmp_path)
+
+        restored = await manager.get_cursor("events")
+        from datetime import datetime
+
+        assert restored == {"cursor": datetime.fromisoformat(ts)}
+
+    async def test_unknown_stream_has_no_cursor(self, monkeypatch):
+        monkeypatch.setenv("RESUME_STATE", json.dumps({"orders": 100}))
+        manager = _make_manager(self.tmp_path)
+
+        assert await manager.get_cursor("not-in-payload") is None
+
+    async def test_malformed_resume_state_does_not_abort_construction(
+        self, monkeypatch
+    ):
+        # A corrupt tagged cursor must degrade to a full re-scan, not crash
+        # StateManager.__init__ on a fresh container.
+        monkeypatch.setenv(
+            "RESUME_STATE",
+            json.dumps({"orders": {"__type__": "datetime", "value": "garbage"}}),
+        )
+        manager = _make_manager(self.tmp_path)  # must not raise
+
+        assert await manager.get_cursor("orders") is None
+
+    async def test_no_env_var_means_no_cursor(self, monkeypatch):
+        monkeypatch.delenv("RESUME_STATE", raising=False)
+        manager = _make_manager(self.tmp_path)
+
+        assert await manager.get_cursor("orders") is None
+
+    async def test_in_run_save_overrides_restored_cursor(self, monkeypatch):
+        # A cursor saved during the run supersedes the restored bookmark.
+        monkeypatch.setenv("RESUME_STATE", json.dumps({"orders": 100}))
+        manager = _make_manager(self.tmp_path)
+
+        await manager.save_cursor("orders", {}, {"cursor": 250})
+
+        assert await manager.get_cursor("orders") == {"cursor": 250}
+
+    async def test_null_valued_stream_is_skipped_not_seeded(self, monkeypatch):
+        # A null cursor in the payload (stream harvested before it emitted one)
+        # must be skipped, not seeded as {"cursor": None} -- otherwise it would
+        # shadow a real on-disk checkpoint with a useless value.
+        first = _make_manager(self.tmp_path)
+        await first.save_cursor("orders", {}, {"cursor": 50})  # writes ./state
+
+        monkeypatch.setenv("RESUME_STATE", json.dumps({"orders": None}))
+        second = _make_manager(self.tmp_path)  # same base_dir -> 50 on disk
+
+        # The null seed is skipped, so get_cursor falls through to disk.
+        assert await second.get_cursor("orders") == {"cursor": 50}
+
+    async def test_restored_cursor_wins_over_stale_on_disk_checkpoint(
+        self, monkeypatch
+    ):
+        # A leftover on-disk checkpoint must not shadow the injected resume
+        # state: the durable value is authoritative, the local file is stale.
+        monkeypatch.delenv("RESUME_STATE", raising=False)
+        first = _make_manager(self.tmp_path)
+        await first.save_cursor("orders", {}, {"cursor": 50})  # writes ./state
+
+        monkeypatch.setenv("RESUME_STATE", json.dumps({"orders": 100}))
+        second = _make_manager(self.tmp_path)  # same base_dir -> stale 50 on disk
+
+        assert await second.get_cursor("orders") == {"cursor": 100}
 
 
 if __name__ == "__main__":

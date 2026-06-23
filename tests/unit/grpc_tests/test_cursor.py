@@ -1,14 +1,13 @@
 """Unit tests for cursor utilities."""
 
 import json
-import pytest
 from datetime import datetime, timezone
 
 from src.grpc.cursor import (
-    encode_cursor,
-    decode_cursor,
     compute_max_cursor,
     cursor_to_state_dict,
+    decode_cursor,
+    encode_cursor,
 )
 from src.grpc.generated.analitiq.v1 import Cursor
 
@@ -50,7 +49,9 @@ class TestEncodeDecode:
         assert decoded["tie_breakers"][1]["value"] == 456
 
     def test_encode_cursor_with_datetime(self):
-        """Test encoding cursor with datetime object."""
+        """A datetime value is tagged so its type survives the JSON round trip."""
+        from src.state.store import decode_value
+
         dt = datetime(2025, 1, 8, 10, 30, 0, tzinfo=timezone.utc)
         cursor = encode_cursor(
             cursor_field="timestamp",
@@ -58,7 +59,11 @@ class TestEncodeDecode:
         )
 
         decoded = json.loads(cursor.token.decode("utf-8"))
-        assert decoded["value"] == dt.isoformat()
+        # Tagged, not flattened to a bare ISO string that restore would have to
+        # guess at.
+        assert decoded["value"] == {"__type__": "datetime", "value": dt.isoformat()}
+        # And it round-trips back to the exact datetime.
+        assert decode_value(decoded["value"]) == dt
 
     def test_decode_cursor(self):
         """Test decoding a cursor back to components."""
@@ -189,3 +194,17 @@ class TestCursorToStateDict:
         cursor = Cursor(token=b"")
         state = cursor_to_state_dict(cursor)
         assert state == {}
+
+    def test_datetime_value_round_trips_through_state_dict(self):
+        """A datetime survives encode -> token -> state dict as a tagged value
+        that decode_value restores exactly -- the durable-resume contract that
+        keeps the engine from guessing the cursor's type on restore."""
+        from src.state.store import decode_value
+
+        dt = datetime(2025, 1, 8, 10, 30, 0, tzinfo=timezone.utc)
+        cursor = encode_cursor(cursor_field="updated_at", cursor_value=dt)
+
+        state = cursor_to_state_dict(cursor)
+        tagged = state["cursor"]["primary"]["value"]
+        assert tagged == {"__type__": "datetime", "value": dt.isoformat()}
+        assert decode_value(tagged) == dt

@@ -29,7 +29,9 @@ from cdk.sql.generic import GenericSQLConnector
 class _FakeRuntime:
     """Minimal materialized runtime for the read path."""
 
-    def __init__(self, *, is_adbc: bool, driver: str = "postgresql", engine: Any = None):
+    def __init__(
+        self, *, is_adbc: bool, driver: str = "postgresql", engine: Any = None
+    ):
         self.is_adbc = is_adbc
         self.is_sync_sqlalchemy = False
         self.driver = driver
@@ -132,9 +134,7 @@ class TestReadGuards:
         # selected_columns ['*'] compiles to SELECT *, which always carries
         # the cursor column — the projection guard must not reject it.
         runtime = _FakeRuntime(is_adbc=True)
-        page = [pa.RecordBatch.from_pydict(
-            {"id": [1], "updated_at": ["2024-01-01"]}
-        )]
+        page = [pa.RecordBatch.from_pydict({"id": [1], "updated_at": ["2024-01-01"]})]
         reader = _RecordingReader([page, []])
 
         class _CM:
@@ -242,6 +242,8 @@ class TestReadAdbcBranch:
         sql, params = reader.calls[0]
         assert "?" in sql
         assert '"status" = ?' in sql
+        # Inclusive resume bound (>=): the boundary row is re-read and deduped
+        # by upsert, so a late row sharing the cursor value is not lost.
         assert '"updated_at" >= ?' in sql
         assert 'ORDER BY "updated_at"' in sql
         assert "LIMIT 2 OFFSET 0" in sql
@@ -268,9 +270,11 @@ class TestReadAdbcBranch:
     async def test_saves_last_cursor_value_from_batch(self):
         runtime = _FakeRuntime(is_adbc=True)
         checkpoint = _checkpoint(cursor=None)
-        page = [pa.RecordBatch.from_pydict(
-            {"id": [1, 2], "updated_at": ["2024-01-02", "2024-01-09"]}
-        )]
+        page = [
+            pa.RecordBatch.from_pydict(
+                {"id": [1, 2], "updated_at": ["2024-01-02", "2024-01-09"]}
+            )
+        ]
         reader = _RecordingReader([page, []])
 
         class _CM:
@@ -333,9 +337,7 @@ class TestReadAdbcBranchPaging:
         assert params == ["x"]
 
     @pytest.mark.asyncio
-    async def test_declared_order_by_field_used_without_fallback_warning(
-        self, caplog
-    ):
+    async def test_declared_order_by_field_used_without_fallback_warning(self, caplog):
         # source.database_pagination.order_by_field from the stream config
         # is the declared page ordering: no first-column fallback, no warning.
         from cdk.sql import generic as generic_mod
@@ -437,9 +439,11 @@ class TestReadAdbcBranchPaging:
             with caplog.at_level("WARNING"):
                 for _ in range(2):
                     runtime = _FakeRuntime(is_adbc=True)
-                    page = [pa.RecordBatch.from_pydict(
-                        {"id": [1], "updated_at": ["2024-01-01"]}
-                    )]
+                    page = [
+                        pa.RecordBatch.from_pydict(
+                            {"id": [1], "updated_at": ["2024-01-01"]}
+                        )
+                    ]
                     reader = _RecordingReader([page, []])
                     with patch(
                         "cdk.sql.generic.open_adbc_reader",
@@ -460,12 +464,16 @@ class TestReadAdbcBranchPaging:
         # identical across pages.
         runtime = _FakeRuntime(is_adbc=True)
         checkpoint = _checkpoint(cursor={"cursor": "2024-01-01"})
-        page1 = [pa.RecordBatch.from_pydict(
-            {"id": [1, 2], "updated_at": ["2024-01-02", "2024-01-03"]}
-        )]
-        page2 = [pa.RecordBatch.from_pydict(
-            {"id": [3, 4], "updated_at": ["2024-01-04", "2024-01-05"]}
-        )]
+        page1 = [
+            pa.RecordBatch.from_pydict(
+                {"id": [1, 2], "updated_at": ["2024-01-02", "2024-01-03"]}
+            )
+        ]
+        page2 = [
+            pa.RecordBatch.from_pydict(
+                {"id": [3, 4], "updated_at": ["2024-01-04", "2024-01-05"]}
+            )
+        ]
         reader = _RecordingReader([page1, page2, []])
         connector = GenericSQLConnector()
         with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()), patch(
@@ -494,7 +502,8 @@ class TestReadAdbcBranchPaging:
         runtime = _FakeRuntime(is_adbc=True)
         connector = GenericSQLConnector()
         with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()), patch(
-            "cdk.sql.generic.open_adbc_reader", return_value=_adbc_cm(_RecordingReader([]))
+            "cdk.sql.generic.open_adbc_reader",
+            return_value=_adbc_cm(_RecordingReader([])),
         ), patch("cdk.sql.generic.SchemaContract") as sc, patch(
             "cdk.sql.generic.QueryBuilder"
         ) as qb:
@@ -590,6 +599,45 @@ class TestReadSqlAlchemyBranch:
         assert "ORDER BY updated_at" in executed[0]
 
     @pytest.mark.asyncio
+    async def test_incremental_cursor_uses_inclusive_bound(self):
+        # The inclusive (>=) resume bound must hold on the SQLAlchemy paging
+        # path too, not only ADBC: an exclusive > would filter out a late row
+        # sharing the committed boundary value and lose it. The re-read is
+        # deduped by upsert.
+        runtime = _FakeRuntime(is_adbc=False, engine=object())
+
+        executed = []
+
+        class _RecordingConn:
+            def exec_driver_sql(self, sql, params=None):
+                executed.append(sql)
+                return []
+
+            async def run_sync(self, fn, *args):
+                return fn(self, *args)
+
+        class _AcquireCM:
+            async def __aenter__(self):
+                return _RecordingConn()
+
+            async def __aexit__(self, *exc):
+                return False
+
+        connector = GenericSQLConnector()
+        with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()), patch(
+            "cdk.sql.generic.acquire_connection", return_value=_AcquireCM()
+        ), patch("cdk.sql.generic.SchemaContract") as sc:
+            sc.return_value.from_pylist.side_effect = lambda rows: rows
+            config = _endpoint_config(
+                replication={"method": "incremental", "cursor_field": ["updated_at"]},
+            )
+            await _drain(
+                connector, runtime, config, _checkpoint(cursor={"cursor": "2024-01-02"})
+            )
+
+        assert "updated_at >=" in executed[0]
+
+    @pytest.mark.asyncio
     async def test_query_builder_receives_dialect_paging_order_fallback(self):
         # The SQLAlchemy paging path hands the connector dialect's
         # paging_order_fallback hook to QueryBuilder, so per-system
@@ -618,7 +666,9 @@ class TestReadSqlAlchemyBranch:
             "cdk.sql.generic.QueryBuilder"
         ) as qb:
             qb.return_value.build_select_query.return_value = ("SELECT 1", [])
-            await _drain(connector, runtime, _endpoint_config(), _checkpoint(cursor=None))
+            await _drain(
+                connector, runtime, _endpoint_config(), _checkpoint(cursor=None)
+            )
 
         assert (
             qb.call_args.kwargs["paging_order_fallback"]
