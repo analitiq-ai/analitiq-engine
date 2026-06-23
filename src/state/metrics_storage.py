@@ -18,6 +18,7 @@ from typing import Any, Dict, Optional
 
 from pydantic import BaseModel, Field
 
+from src.state.error_classification import ErrorCode
 from src.state.log_emitter import emit_log
 
 logger = logging.getLogger(__name__)
@@ -53,7 +54,27 @@ class PipelineMetricsRecord(BaseModel):
 
     # Status
     status: str = Field(..., description="Pipeline execution status: success, failed, partial")
-    error_message: Optional[str] = Field(default=None, description="Error message if failed")
+    error_code: Optional[ErrorCode] = Field(
+        default=None,
+        description=(
+            "Stable, customer-safe failure category (published contract). Set on "
+            "failed (and partial where a dominant cause exists); None on success."
+        ),
+    )
+    error_message: Optional[str] = Field(
+        default=None,
+        description=(
+            "Short, customer-safe failure message. Carries no exception text, "
+            "secrets, driver internals, or stack traces; safe to expose externally."
+        ),
+    )
+    error_detail: Optional[str] = Field(
+        default=None,
+        description=(
+            "Internal-only raw error text (credential-scrubbed) for engineer "
+            "debugging. The control plane must NOT forward this to external customers."
+        ),
+    )
 
     # Performance metrics
     records_per_second: Optional[float] = Field(default=None, ge=0, description="Processing throughput")
@@ -74,7 +95,9 @@ def create_metrics_record(
     records_failed: int = 0,
     batches_processed: int = 0,
     status: str = "success",
+    error_code: Optional[ErrorCode] = None,
     error_message: Optional[str] = None,
+    error_detail: Optional[str] = None,
     pipeline_name: Optional[str] = None,
 ) -> PipelineMetricsRecord:
     """
@@ -89,7 +112,9 @@ def create_metrics_record(
         records_failed: Number of failed records
         batches_processed: Number of batches processed
         status: Execution status (success, failed, partial)
-        error_message: Error message if failed
+        error_code: Stable, customer-safe failure category if failed
+        error_message: Short, customer-safe failure message if failed
+        error_detail: Internal-only raw (scrubbed) error text if failed
         pipeline_name: Human-readable pipeline name
 
     Returns:
@@ -115,7 +140,9 @@ def create_metrics_record(
         records_total=records_total,
         batches_processed=batches_processed,
         status=status,
+        error_code=error_code,
         error_message=error_message,
+        error_detail=error_detail,
         records_per_second=records_per_second,
     )
 
@@ -129,7 +156,9 @@ def save_pipeline_metrics(
     records_failed: int = 0,
     batches_processed: int = 0,
     status: str = "success",
+    error_code: Optional[ErrorCode] = None,
     error_message: Optional[str] = None,
+    error_detail: Optional[str] = None,
     pipeline_name: Optional[str] = None,
 ) -> None:
     """
@@ -147,7 +176,9 @@ def save_pipeline_metrics(
         records_failed: Number of failed records
         batches_processed: Number of batches processed
         status: Execution status (success, failed, partial)
-        error_message: Error message if failed
+        error_code: Stable, customer-safe failure category if failed
+        error_message: Short, customer-safe failure message if failed
+        error_detail: Internal-only raw (scrubbed) error text if failed
         pipeline_name: Human-readable pipeline name
     """
     record = create_metrics_record(
@@ -159,7 +190,9 @@ def save_pipeline_metrics(
         records_failed=records_failed,
         batches_processed=batches_processed,
         status=status,
+        error_code=error_code,
         error_message=error_message,
+        error_detail=error_detail,
         pipeline_name=pipeline_name,
     )
 

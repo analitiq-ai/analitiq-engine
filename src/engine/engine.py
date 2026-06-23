@@ -14,6 +14,12 @@ from cdk.contract import Readable
 from ..shared.run_id import get_or_generate_run_id
 from ..state.circuit_breaker import CircuitBreaker
 from ..state.dead_letter_queue import DeadLetterQueue
+from ..state.error_classification import (
+    ErrorCode,
+    classify_for_metrics,
+    customer_message,
+    sanitize_detail,
+)
 from ..state.metrics_storage import emit_metrics_log, create_metrics_record
 from ..state.retry_handler import RetryHandler
 from ..state.state_manager import StateManager
@@ -84,6 +90,11 @@ class StreamingEngine:
 
         # Metrics tracking with Pydantic validation
         self.metrics = PipelineMetrics()
+
+        # Representative destination failure from a DLQ'd batch. When a run ends
+        # "partial" (records failed but no exception raised, the dlq strategy),
+        # the runner reads this to classify the dominant cause.
+        self._dlq_failure_summary: Optional[str] = None
 
         # Connector code never runs in the engine process: every source read
         # goes through an isolated worker subprocess that owns the connector
@@ -215,7 +226,9 @@ class StreamingEngine:
             "batches_failed": 0,
         }
         status = "success"
+        error_code: Optional[ErrorCode] = None
         error_message: Optional[str] = None
+        error_detail: Optional[str] = None
 
         try:
             source_cfg = stream_config["source"]
@@ -248,10 +261,19 @@ class StreamingEngine:
                 schema_config=destination_cfg,
             )
             if not schema_accepted:
-                raise StreamProcessingError(
-                    f"Destination rejected schema for stream {stream_name}",
-                    stream_id=stream_id,
-                )
+                # Carry the destination's concrete reason so the actionable
+                # detail survives into error_detail and the logs. Word it by
+                # cause: a real SchemaAck NACK is a schema mismatch, while a
+                # transport-side handshake failure (timeout, peer close,
+                # reader/writer exit) is a destination write failure -- the two
+                # must not both read as "rejected schema".
+                reason = grpc_client.schema_rejection_message
+                detail = f": {reason}" if reason else ""
+                if grpc_client.schema_rejected:
+                    message = f"Destination rejected schema for stream {stream_name}{detail}"
+                else:
+                    message = f"Destination handshake failed for stream {stream_name}{detail}"
+                raise StreamProcessingError(message, stream_id=stream_id)
             logger.info(f"Stream {stream_name}: gRPC stream started, schema accepted")
 
             extract_queue = Queue(maxsize=self.buffer_size)
@@ -291,11 +313,25 @@ class StreamingEngine:
             # Wait for all stream stages to complete
             await asyncio.gather(*tasks)
 
-            logger.info(f"Stream {stream_name} completed successfully")
+            if stream_metrics["records_failed"] > 0:
+                # The dlq strategy dead-letters exhausted batches and completes
+                # without raising; reflect that the stream only partly succeeded
+                # and carry the destination cause rather than reporting success.
+                status = "partial"
+                error_code = ErrorCode.DESTINATION_WRITE_FAILED
+                error_message = customer_message(error_code)
+                stream_failure = stream_metrics.get("dlq_failure_summary")
+                error_detail = sanitize_detail(stream_failure) if stream_failure else None
+                logger.warning(
+                    f"Stream {stream_name} completed partially: "
+                    f"{stream_metrics['records_failed']} records dead-lettered"
+                )
+            else:
+                logger.info(f"Stream {stream_name} completed successfully")
 
         except Exception as e:
             status = "failed"
-            error_message = str(e)
+            error_code, error_message, error_detail = classify_for_metrics(e)
             logger.exception("Stream %s processing failed: %s", stream_name, e)
             # Cancel any running tasks for this stream, then drive them to
             # completion. The source reader releases its runtime in its own
@@ -335,7 +371,9 @@ class StreamingEngine:
                     records_failed=stream_metrics["records_failed"],
                     batches_processed=stream_metrics["batches_processed"],
                     status=status,
+                    error_code=error_code,
                     error_message=error_message,
+                    error_detail=error_detail,
                     pipeline_name=pipeline_name,
                 )
                 if os.getenv("METRICS_ENABLED", "false").lower() == "true":
@@ -658,6 +696,7 @@ class StreamingEngine:
                             stream_metrics["records_failed"] += record_count
                             stream_metrics["batches_failed"] += 1
                             if error_strategy == "dlq":
+                                self._record_dlq_failure(result.failure_summary, stream_metrics)
                                 await stream_dlq.send_batch(
                                     record_dicts, result.failure_summary,
                                     self.pipeline_id, stream_id=stream_id,
@@ -691,6 +730,7 @@ class StreamingEngine:
 
                         # Send entire batch to DLQ with record_ids for correlation
                         if error_strategy == "dlq":
+                            self._record_dlq_failure(result.failure_summary, stream_metrics)
                             await stream_dlq.send_batch(
                                 record_dicts, result.failure_summary,
                                 self.pipeline_id, stream_id=stream_id,
@@ -712,6 +752,7 @@ class StreamingEngine:
                         stream_metrics["records_failed"] += record_count
                         stream_metrics["batches_failed"] += 1
                         if error_strategy == "dlq":
+                            self._record_dlq_failure(f"Unknown ACK status: {result.status}", stream_metrics)
                             await stream_dlq.send_batch(
                                 record_dicts, f"Unknown ACK status: {result.status}",
                                 self.pipeline_id, stream_id=stream_id,
@@ -878,6 +919,29 @@ class StreamingEngine:
     def get_metrics(self) -> PipelineMetrics:
         """Get pipeline execution metrics as a validated Pydantic model."""
         return self.metrics
+
+    def get_dominant_failure(self) -> Optional[str]:
+        """Representative destination failure summary from DLQ'd batches, if any.
+
+        Set when a batch is written to the dead-letter queue. The runner uses it
+        to classify a partial run (records failed but no exception); those
+        failures are always destination write rejections.
+        """
+        return self._dlq_failure_summary
+
+    def _record_dlq_failure(self, summary: str, stream_metrics: Dict[str, Any]) -> None:
+        """Keep the first DLQ failure summary, both run-wide and per stream.
+
+        The run-wide value (``_dlq_failure_summary``) is the pipeline's dominant
+        cause for the runner; the per-stream copy in ``stream_metrics`` keeps
+        each stream's own metric record from borrowing another stream's detail.
+        """
+        if not summary:
+            return
+        if self._dlq_failure_summary is None:
+            self._dlq_failure_summary = summary
+        if not stream_metrics.get("dlq_failure_summary"):
+            stream_metrics["dlq_failure_summary"] = summary
 
     def get_state_manager(self) -> StateManager:
         """Get the state manager instance."""

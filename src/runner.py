@@ -21,6 +21,12 @@ from src.models.resolved import ResolvedPipeline, ResolvedStream, ResolvedSource
 from cdk.connection_runtime import ConnectionRuntime
 from .engine.pipeline_config_prep import PipelineConfigPrep
 from .shared.run_id import get_or_generate_run_id
+from .state.error_classification import (
+    ErrorCode,
+    classify_for_metrics,
+    customer_message,
+    sanitize_detail,
+)
 from .state.metrics_storage import save_pipeline_metrics
 
 
@@ -250,7 +256,10 @@ class PipelineRunner:
         records_failed = 0
         batches_processed = 0
         status = "failed"
+        error_code: ErrorCode | None = None
         error_message = None
+        error_detail = None
+        config_ready = False
 
         try:
             logger.info("Initializing PipelineConfigPrep...")
@@ -258,6 +267,15 @@ class PipelineRunner:
             pipeline_config, stream_configs, resolved_connections, resolved_endpoints, connectors = (
                 pipeline_config_prep.create_config()
             )
+
+            # Translate the resolved contract into the engine config dict. This
+            # still validates config (e.g. a stream with no destinations), so it
+            # belongs in the config phase. Done immediately after create_config
+            # so the flag below covers config load + translation only -- not the
+            # directory/engine setup that follows, whose failures (a read-only
+            # filesystem, etc.) are runtime, not config, errors.
+            config_dict = _build_config_dict(pipeline_config, stream_configs)
+            config_ready = True
 
             logger.info(f"Starting {pipeline_config.name} (ID: {pipeline_config.pipeline_id})")
 
@@ -286,8 +304,6 @@ class PipelineRunner:
                 retry_delay=error_handling.get("retry_delay_seconds", 5),
             )
 
-            config_dict = _build_config_dict(pipeline_config, stream_configs)
-
             logger.info("Starting pipeline execution...")
             await engine.stream_data(config_dict)
 
@@ -308,14 +324,35 @@ class PipelineRunner:
             if records_failed > 0:
                 logger.warning(f"Failed records: {records_failed} (check dead letter queue)")
                 status = "partial"
+                # A partial run raised no exception, but records were dead-
+                # lettered -- a destination write rejection. Carry the dominant
+                # cause so the public error_code is populated for partial runs.
+                error_code = ErrorCode.DESTINATION_WRITE_FAILED
+                error_message = customer_message(error_code)
+                dominant_failure = engine.get_dominant_failure()
+                error_detail = sanitize_detail(dominant_failure) if dominant_failure else None
             else:
                 status = "success"
 
             return True
 
         except Exception as e:
-            error_message = str(e)
-            logger.error(f"Pipeline failed: {error_message}", exc_info=True)
+            # Classify the terminating exception into a stable, customer-safe
+            # code here -- the runner is the catch site that sees the failure
+            # whole. error_message is customer-safe; error_detail keeps the raw
+            # (scrubbed) text for internal debugging only. A failure raised
+            # before config_ready is config loading/parsing, which surfaces as
+            # builtin error types (FileNotFoundError, ValueError, ...) the type
+            # classifier cannot read -- the phase is the reliable signal there.
+            if not config_ready:
+                error_code = ErrorCode.CONFIG_INVALID
+                error_message = customer_message(error_code)
+                error_detail = sanitize_detail(str(e))
+            else:
+                error_code, error_message, error_detail = classify_for_metrics(e)
+            logger.error(
+                f"Pipeline failed [{error_code.value}]: {error_detail}", exc_info=True
+            )
             return False
 
         finally:
@@ -330,7 +367,9 @@ class PipelineRunner:
                     records_failed=records_failed,
                     batches_processed=batches_processed,
                     status=status,
+                    error_code=error_code,
                     error_message=error_message,
+                    error_detail=error_detail,
                     pipeline_name=pipeline_config.name if pipeline_config else None,
                 )
                 logger.info("Emitted pipeline metrics to logs")

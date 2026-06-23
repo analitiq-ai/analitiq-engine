@@ -320,6 +320,10 @@ class TestEngineFatalFailureHandling:
         # Initial call + 3 retries (default max_retries=3) = 4 calls
         assert mock_grpc_client.send_batch.call_count == 4
 
+        # The dead-lettered batch's summary is captured as the run's dominant
+        # cause, so the runner can classify the (exception-free) partial run.
+        assert engine.get_dominant_failure() == "Connection timeout"
+
     @pytest.mark.asyncio
     async def test_load_stage_retryable_exhaustion_raises_with_fail_strategy(
         self,
