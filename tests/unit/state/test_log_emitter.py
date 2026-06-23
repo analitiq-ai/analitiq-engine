@@ -70,8 +70,6 @@ def test_emitted_at_clamped_when_clock_steps_back(monkeypatch, caplog):
     # Simulate the host clock stepping backward mid-run: the second now() is
     # older than the first. emitted_at must still advance, so a later
     # checkpoint (newer cursor) never carries an older stamp.
-    import src.state.log_emitter as log_emitter
-
     ticks = iter(
         [
             datetime(2026, 1, 1, 0, 0, 0, 500, tzinfo=timezone.utc),
@@ -85,8 +83,8 @@ def test_emitted_at_clamped_when_clock_steps_back(monkeypatch, caplog):
         def now(tz=None):
             return next(ticks)
 
-    monkeypatch.setattr(log_emitter, "datetime", _FrozenClock)
-    monkeypatch.setattr(log_emitter, "_last_emitted_at", None)
+    monkeypatch.setattr("src.state.log_emitter.datetime", _FrozenClock)
+    monkeypatch.setattr("src.state.log_emitter._last_emitted_at", None)
 
     with caplog.at_level(logging.INFO, logger="src.state.log_emitter"):
         for i in range(3):
