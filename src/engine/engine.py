@@ -265,7 +265,7 @@ class StreamingEngine:
                 "pipeline_id": pipeline_config["pipeline_id"],
                 "stream_id": stream_id,
                 "stream_name": stream_name,
-                "stream_version": stream_config.get("stream_version", 1),
+                "stream_version": stream_config["stream_version"],
                 "source": source_cfg,
                 "destination": destination_cfg,
                 "mapping": stream_config.get("mapping") or {},
@@ -466,7 +466,7 @@ class StreamingEngine:
         """
         stream_name = config["stream_name"]
         stream_id = config["stream_id"]
-        stream_version = config.get("stream_version", 1)
+        stream_version = config["stream_version"]
 
         # Source-side contract dict carries replication and primary-key
         # metadata. Record IDs hash the source primary key (stable across

@@ -39,11 +39,13 @@ def emit_log(category: str, data: Mapping[str, Any]) -> None:
     records where it is missing.
 
     ``emitted_at`` is stamped on every record at emission time: a sub-second
-    UTC ISO-8601 timestamp. It gives collectors a single reliable ordering
-    key across all categories (state/metrics/dlq) without parsing a
-    category-specific field — for state lines specifically it lets the
-    deployment overwrite a durable cursor monotonically. Microsecond
-    precision keeps two fast emissions in one run from colliding.
+    UTC ISO-8601 wall-clock timestamp. It gives collectors one ordering key
+    across all categories (state/metrics/dlq) without parsing a
+    category-specific field — for state lines the deployment uses it to make
+    its "latest cursor" overwrite conditional on a newer stamp. It is a
+    best-effort wall-clock key, not a strict monotonic guarantee (subject to
+    clock skew/adjustment); microsecond precision orders closely-spaced
+    emissions but does not make the stamp unique.
     """
     marker = MARKERS.get(category)
     if marker is None:

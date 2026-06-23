@@ -440,6 +440,25 @@ class TestStreamVersionParsing:
         assert stream_configs[0].stream_id == STREAM_ID  # bare, unchanged
         assert stream_configs[0].stream_version == 4
 
+    def test_versioned_ref_without_matching_record_raises_naming_both_ids(
+        self, pipeline_tree: Path
+    ) -> None:
+        """A versioned ref whose bare id has no stream file fails loud, and the
+        message names both the full ref and the bare id it looked up."""
+        missing_bare = "00000000-0000-4000-8000-000000000000"
+        pipeline_doc = _pipeline_doc()
+        pipeline_doc["streams"] = [f"{missing_bare}_v4"]
+        _write_json(
+            pipeline_tree / "pipelines" / PIPELINE_ID / "pipeline.json", pipeline_doc
+        )
+
+        prep = PipelineConfigPrep()
+        with pytest.raises(ValueError) as exc:
+            prep.create_config()
+        message = str(exc.value)
+        assert f"{missing_bare}_v4" in message  # the full reference
+        assert missing_bare in message  # the bare id actually looked up
+
 
 # ---------------------------------------------------------------------------
 # Error paths — each should raise loudly with a message that names the offender

@@ -129,11 +129,11 @@ class StateManager:
             http_conditionals: Unused, kept for call-site compatibility
             stats: Unused, kept for call-site compatibility
 
-        ``stream_version`` rides on every state line so the deployment can key
-        the stored cursor by the version that produced it; the engine still
-        emits and keys by bare ``stream_id``. ``emitted_at`` (sub-second UTC,
-        the monotonic ordering key) is stamped on every record centrally by
-        :func:`src.state.log_emitter.emit_log`, not here.
+        The engine still emits and keys its in-run cursor by bare
+        ``stream_id``; ``stream_version`` is pass-through metadata. The
+        emission-time ``emitted_at`` ordering key is not stamped here -- it is
+        added to every record centrally by
+        :func:`src.state.log_emitter.emit_log`.
         """
         emit_state_log(
             run_id=self.current_run_id or "",
