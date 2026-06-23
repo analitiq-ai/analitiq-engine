@@ -516,8 +516,20 @@ class PipelineConfigPrep:
         # the emitted checkpoint line.
         pipeline_stream_refs = list(pipeline_doc.get("streams") or [])
         stream_configs: List[ResolvedStream] = []
+        seen_bare: Dict[str, str] = {}
         for stream_ref in pipeline_stream_refs:
             bare_stream_id, stream_version = _split_stream_ref(stream_ref)
+            # Distinct versioned refs (``abc_v1``, ``abc_v2``) pass the pipeline
+            # schema's uniqueItems but collapse to one bare id. Downstream keys
+            # the stream (and its cursor/commits) by that bare id, so a collision
+            # would silently drop one stream -- fail loud instead.
+            if bare_stream_id in seen_bare:
+                raise ValueError(
+                    f"pipeline.streams lists the same stream twice after version "
+                    f"stripping: {seen_bare[bare_stream_id]!r} and {stream_ref!r} "
+                    f"both resolve to stream_id {bare_stream_id!r}"
+                )
+            seen_bare[bare_stream_id] = stream_ref
             record = self._stream_records.get(bare_stream_id)
             if record is None:
                 raise ValueError(

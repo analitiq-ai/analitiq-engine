@@ -459,6 +459,24 @@ class TestStreamVersionParsing:
         assert f"{missing_bare}_v4" in message  # the full reference
         assert missing_bare in message  # the bare id actually looked up
 
+    def test_two_versioned_refs_of_one_stream_fail_loud(
+        self, pipeline_tree: Path
+    ) -> None:
+        """Distinct versioned refs that strip to the same bare id pass the
+        schema's uniqueItems but would silently collide downstream -- the
+        loader must reject them instead of dropping one."""
+        pipeline_doc = _pipeline_doc()
+        pipeline_doc["streams"] = [f"{STREAM_ID}_v1", f"{STREAM_ID}_v2"]
+        _write_json(
+            pipeline_tree / "pipelines" / PIPELINE_ID / "pipeline.json", pipeline_doc
+        )
+
+        prep = PipelineConfigPrep()
+        with pytest.raises(ValueError, match="same stream twice") as exc:
+            prep.create_config()
+        message = str(exc.value)
+        assert f"{STREAM_ID}_v1" in message and f"{STREAM_ID}_v2" in message
+
 
 # ---------------------------------------------------------------------------
 # Error paths — each should raise loudly with a message that names the offender

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pytest
 
@@ -55,14 +55,46 @@ def test_emitted_at_stamped_on_every_category(caplog, category, marker):
     assert "org_id" in payload
 
 
-def test_emitted_at_is_non_decreasing_across_calls(caplog):
+def test_emitted_at_is_strictly_increasing_across_calls(caplog):
     with caplog.at_level(logging.INFO, logger="src.state.log_emitter"):
         for i in range(10):
             emit_log("state", {"seq": i})
 
     stamps = [payload["emitted_at"] for _, payload in _emitted_records(caplog)]
     assert len(stamps) == 10
-    assert stamps == sorted(stamps)
+    assert stamps == sorted(stamps)  # non-decreasing
+    assert len(set(stamps)) == 10  # clamp keeps them collision-free
+
+
+def test_emitted_at_clamped_when_clock_steps_back(monkeypatch, caplog):
+    # Simulate the host clock stepping backward mid-run: the second now() is
+    # older than the first. emitted_at must still advance, so a later
+    # checkpoint (newer cursor) never carries an older stamp.
+    import src.state.log_emitter as log_emitter
+
+    ticks = iter(
+        [
+            datetime(2026, 1, 1, 0, 0, 0, 500, tzinfo=timezone.utc),
+            datetime(2026, 1, 1, 0, 0, 0, 200, tzinfo=timezone.utc),  # steps back
+            datetime(2026, 1, 1, 0, 0, 0, 400, tzinfo=timezone.utc),  # still behind
+        ]
+    )
+
+    class _FrozenClock:
+        @staticmethod
+        def now(tz=None):
+            return next(ticks)
+
+    monkeypatch.setattr(log_emitter, "datetime", _FrozenClock)
+    monkeypatch.setattr(log_emitter, "_last_emitted_at", None)
+
+    with caplog.at_level(logging.INFO, logger="src.state.log_emitter"):
+        for i in range(3):
+            emit_log("state", {"seq": i})
+
+    stamps = [payload["emitted_at"] for _, payload in _emitted_records(caplog)]
+    assert stamps == sorted(stamps)  # monotonic despite the backward step
+    assert len(set(stamps)) == 3  # and collision-free
 
 
 def test_caller_field_named_emitted_at_is_overridden_by_envelope(caplog):

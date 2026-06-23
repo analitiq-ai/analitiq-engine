@@ -69,7 +69,6 @@ def sample_stream_config():
         "version": "1.0",
         "stream_id": "test-stream-001",
         "stream_name": "test-stream",
-        "stream_version": 1,
         "source": {
             "connector_type": "api",
             "host": "https://api.example.com",
