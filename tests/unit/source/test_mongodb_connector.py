@@ -797,3 +797,21 @@ async def test_objectid_cursor_rehydrated_into_filter_on_reload():
     gte_bound = first_filter["_id"]["$gte"]
     assert isinstance(gte_bound, bson.ObjectId)
     assert str(gte_bound) == "507f1f77bcf86cd799439011"
+
+
+def test_decimal128_cursor_encode_decode_roundtrip():
+    """A Decimal128 cursor must also survive the JSON layer with its type, since
+    a string {$gte: ...} bound would not match Decimal128-valued fields."""
+    from src.source.connectors.mongodb import (
+        _encode_cursor_value,
+        _decode_cursor_value,
+    )
+    bson = sys.modules["bson"]
+    dec = bson.Decimal128("3.14159")
+
+    encoded = _encode_cursor_value(dec)
+    assert encoded == {"$numberDecimal": "3.14159"}  # JSON-safe
+
+    decoded = _decode_cursor_value(encoded)
+    assert isinstance(decoded, bson.Decimal128)
+    assert str(decoded) == "3.14159"

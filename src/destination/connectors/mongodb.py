@@ -453,13 +453,22 @@ class MongoDbDestinationHandler(BaseDestinationHandler):
                         "in MongoDB and would collapse unrelated records"
                     )
                 filter_doc = {k: doc[k] for k in conflict_keys}
-                # _id is immutable and cannot appear in $set, even when it is the
-                # conflict key — the equality filter already supplies it on insert.
-                # If nothing else remains to set, use $setOnInsert so a missing doc
-                # is still created and an existing one is left untouched ($set
-                # rejects an empty document).
+                # _id is immutable: it must stay out of $set (Mongo rejects an
+                # in-place _id change), but a source-provided _id still has to
+                # survive an upsert *insert*. Put non-_id fields in $set and pin a
+                # present _id via $setOnInsert when the filter does not already
+                # supply it; otherwise the insert would mint a fresh _id and drop
+                # the source's.
                 set_doc = {k: v for k, v in doc.items() if k != "_id"}
-                update = {"$set": set_doc} if set_doc else {"$setOnInsert": filter_doc}
+                update: Dict[str, Any] = {}
+                if set_doc:
+                    update["$set"] = set_doc
+                if "_id" in doc and "_id" not in conflict_keys:
+                    update["$setOnInsert"] = {"_id": doc["_id"]}
+                if not update:
+                    # Doc carries only its _id conflict key; nothing to $set.
+                    # $set rejects an empty document, so insert via $setOnInsert.
+                    update["$setOnInsert"] = filter_doc
                 ops.append(UpdateOne(filter_doc, update, upsert=True))
             # Let any bulk_write error (including duplicate-key) propagate. Unlike
             # plain inserts, a duplicate key on an unordered upsert means a racing

@@ -919,3 +919,34 @@ async def test_write_batch_upsert_duplicate_key_returns_retryable_not_success():
     assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
     assert "duplicate key" in result.failure_summary
     commits_coll.insert_one.assert_not_awaited()  # no commit recorded
+
+
+@pytest.mark.asyncio
+async def test_write_batch_upsert_preserves_source_id_on_insert():
+    """When _id is present but is NOT a conflict key, it must be pinned via
+    $setOnInsert (preserved on insert) while staying out of $set (immutable on
+    update) — otherwise an upsert insert would mint a fresh _id and drop the
+    source's."""
+    rt, commits_coll, target_coll, db_mock = _make_runtime()
+
+    with patch.dict(sys.modules, {
+        "pymongo": MagicMock(UpdateOne=lambda f, u, **kw: (f, u)),
+    }):
+        handler, _ = await _connected_handler(rt)
+        handler._streams["s1"] = _MongoStreamState(
+            "testdb", "users", WriteMode.WRITE_MODE_UPSERT, conflict_keys=["email"]
+        )
+        handler._batch_commits_ready.add("testdb")
+
+        batch = _make_batch({"_id": "x1", "email": "a@b.com", "name": "Alice"})
+        result = await handler.write_batch(
+            run_id="r", stream_id="s1", batch_seq=0,
+            record_batch=batch, record_ids=["r1"], cursor=_cursor(),
+        )
+
+    assert result.status == AckStatus.ACK_STATUS_SUCCESS
+    ops = target_coll.bulk_write.call_args[0][0]
+    filter_doc, update = ops[0]
+    assert filter_doc == {"email": "a@b.com"}
+    assert update["$set"] == {"email": "a@b.com", "name": "Alice"}  # _id not in $set
+    assert update["$setOnInsert"] == {"_id": "x1"}  # source _id preserved on insert

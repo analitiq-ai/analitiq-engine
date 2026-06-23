@@ -62,38 +62,49 @@ def _coerce_document(doc: Dict[str, Any]) -> Dict[str, Any]:
     return {k: _coerce_bson(v) for k, v in doc.items()}
 
 
-# Sentinel key used to round-trip a BSON ObjectId cursor through the JSON-only
-# checkpoint layer (mirrors MongoDB Extended JSON's ``$oid``). A bare string
-# bound does not match ObjectId-valued fields because Mongo range predicates
-# are type-bracketed, so the type is preserved on save and rehydrated on load.
+# Sentinel keys used to round-trip non-JSON BSON cursor types through the
+# JSON-only checkpoint layer (mirroring MongoDB Extended JSON's ``$oid`` /
+# ``$numberDecimal``). A bare string bound does not match ObjectId- or
+# Decimal128-valued fields because Mongo range predicates are type-bracketed,
+# so the type is preserved on save and rehydrated on load.
 _OBJECTID_CURSOR_TAG = "$oid"
+_DECIMAL128_CURSOR_TAG = "$numberDecimal"
 
 
 def _encode_cursor_value(value: Any) -> Any:
     """Make a cursor value JSON-safe while preserving its BSON type."""
     try:
-        from bson import ObjectId
+        from bson import ObjectId, Decimal128
     except ImportError:
         return value
     if isinstance(value, ObjectId):
         return {_OBJECTID_CURSOR_TAG: str(value)}
+    if isinstance(value, Decimal128):
+        return {_DECIMAL128_CURSOR_TAG: str(value)}
     return value
 
 
 def _decode_cursor_value(value: Any) -> Any:
     """Rehydrate a cursor value produced by :func:`_encode_cursor_value`."""
-    if not (isinstance(value, dict) and set(value) == {_OBJECTID_CURSOR_TAG}):
+    if not isinstance(value, dict):
+        return value
+    keys = set(value)
+    if keys == {_OBJECTID_CURSOR_TAG}:
+        cls_name, raw = "ObjectId", value[_OBJECTID_CURSOR_TAG]
+    elif keys == {_DECIMAL128_CURSOR_TAG}:
+        cls_name, raw = "Decimal128", value[_DECIMAL128_CURSOR_TAG]
+    else:
         return value
     try:
-        from bson import ObjectId
+        import bson
     except ImportError:
         # pymongo/bson absent: the connector cannot query Mongo at all, so fail
         # loudly rather than silently filtering on a wrongly-typed cursor.
         raise ReadError(
-            "Checkpoint holds an ObjectId cursor but bson is not installed; "
+            f"Checkpoint holds a {cls_name} cursor but bson is not installed; "
             "cannot rehydrate the cursor for the incremental filter"
         )
-    return ObjectId(value[_OBJECTID_CURSOR_TAG])
+    return getattr(bson, cls_name)(raw)
 
 
 def _resolve_records_schema(endpoint_doc: Dict[str, Any]) -> Dict[str, Any]:
