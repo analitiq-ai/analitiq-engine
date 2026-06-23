@@ -506,7 +506,10 @@ class TestAdbcIngestSchemaNormalization:
         captured: dict = {}
 
         class _FakeCursor:
-            def adbc_ingest(self, table, batch, mode, db_schema_name):
+            # ``db_schema_name`` is an optional kwarg on the real ADBC cursor
+            # (default None); the empty-schema path omits it entirely
+            # (adbc_ingest_schema_kwargs returns {}), so it must default here.
+            def adbc_ingest(self, table, batch, mode, db_schema_name=None):
                 captured["table"] = table
                 captured["mode"] = mode
                 captured["db_schema_name"] = db_schema_name

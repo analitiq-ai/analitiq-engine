@@ -61,6 +61,7 @@ def _build_config_dict(
 
         streams[stream.stream_id] = {
             "name": stream.stream_id,
+            "stream_version": stream.stream_version,
             "source": source_config,
             "destination": dest_config,
             "mapping": mapping_config,

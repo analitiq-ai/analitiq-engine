@@ -54,11 +54,14 @@ def _make_destination(write=None):
     )
 
 
-def _make_stream(stream_id="orders", connector_type="database", mapping=None):
+def _make_stream(
+    stream_id="orders", connector_type="database", mapping=None, stream_version=1
+):
     src = _make_source(connector_type=connector_type)
     dest = _make_destination()
     return ResolvedStream(
         stream_id=stream_id,
+        stream_version=stream_version,
         pipeline_id="test-pipeline",
         display_name=None,
         description=None,
@@ -242,6 +245,14 @@ class TestBuildConfigDict:
 
         assert "invoices" in result["streams"]
         assert result["streams"]["invoices"]["name"] == "invoices"
+
+    def test_stream_version_propagated(self):
+        pipeline = _make_pipeline()
+        stream = _make_stream(stream_id="invoices", stream_version=3)
+
+        result = _build_config_dict(pipeline, [stream])
+
+        assert result["streams"]["invoices"]["stream_version"] == 3
 
     def test_pipeline_id_and_name_propagated(self):
         pipeline = _make_pipeline(pipeline_id="wise-to-pg", display_name="Wise → PG")

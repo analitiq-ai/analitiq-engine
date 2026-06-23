@@ -75,6 +75,26 @@ logger = logging.getLogger(__name__)
 # "https://schemas.analitiq.ai/api-endpoint" extract "api-endpoint".
 _ENDPOINT_KIND_RE = re.compile(r"/([A-Za-z][\w-]*-endpoint)(?:/|$)")
 
+# A stream reference in the pipeline's ``streams`` list may carry a trailing
+# version suffix (e.g. ``{uuid}_v2``). The stream document's own ``stream_id``
+# is always bare, so the suffix is split off for the index lookup and the
+# integer rides onto every emitted checkpoint line. The engine never acts on
+# the version; it is metadata the deployment uses to scope the durable cursor.
+_STREAM_VERSION_RE = re.compile(r"_v(\d+)$")
+
+
+def _split_stream_ref(ref: str) -> Tuple[str, int]:
+    """Split a stream reference into ``(bare_stream_id, version)``.
+
+    A bare reference (no ``_v{n}`` suffix) is version 1: a stream that was
+    never edited, or any locally hand-authored config with no versioning
+    concept. Resolution and cursor keying use the bare id regardless.
+    """
+    match = _STREAM_VERSION_RE.search(ref)
+    if not match:
+        return ref, 1
+    return ref[: match.start()], int(match.group(1))
+
 
 # ---------------------------------------------------------------------------
 # Dataclasses for internal state
@@ -491,18 +511,23 @@ class PipelineConfigPrep:
         for dest_id in dest_ids:
             self._resolve_connection_by_id(dest_id)
 
-        # Stream configs
-        pipeline_stream_ids = list(pipeline_doc.get("streams") or [])
+        # Stream configs. A reference may carry a ``_v{n}`` version suffix;
+        # the bare id resolves the stream record and the version rides onto
+        # the emitted checkpoint line.
+        pipeline_stream_refs = list(pipeline_doc.get("streams") or [])
         stream_configs: List[ResolvedStream] = []
-        for stream_id in pipeline_stream_ids:
-            record = self._stream_records.get(stream_id)
+        for stream_ref in pipeline_stream_refs:
+            bare_stream_id, stream_version = _split_stream_ref(stream_ref)
+            record = self._stream_records.get(bare_stream_id)
             if record is None:
                 raise ValueError(
-                    f"pipeline.streams references {stream_id!r} but no stream "
-                    f"file in {self._pipeline_dir}/streams declares that id; "
-                    f"known: {sorted(self._stream_records)}"
+                    f"pipeline.streams references {stream_ref!r} but no stream "
+                    f"file in {self._pipeline_dir}/streams declares id "
+                    f"{bare_stream_id!r}; known: {sorted(self._stream_records)}"
                 )
-            stream_configs.append(self._build_stream_config(record))
+            stream_configs.append(
+                self._build_stream_config(record, stream_version)
+            )
 
         pipeline_id = pipeline_doc.get("pipeline_id")
         display_name = pipeline_doc.get("display_name")
@@ -563,7 +588,9 @@ class PipelineConfigPrep:
         endpoint = self._resolve_endpoint(endpoint_ref)
         return endpoint_ref, runtime, endpoint
 
-    def _build_stream_config(self, record: _StreamRecord) -> ResolvedStream:
+    def _build_stream_config(
+        self, record: _StreamRecord, stream_version: int
+    ) -> ResolvedStream:
         """Translate a saved stream document into a typed :class:`ResolvedStream`."""
         document = record.raw_document
         stream_id = record.stream_id
@@ -599,6 +626,7 @@ class PipelineConfigPrep:
 
         return ResolvedStream(
             stream_id=stream_id,
+            stream_version=stream_version,
             display_name=document.get("display_name"),
             description=document.get("description"),
             pipeline_id=document.get("pipeline_id"),
