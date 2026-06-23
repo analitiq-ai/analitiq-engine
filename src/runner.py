@@ -25,6 +25,7 @@ from .state.error_classification import (
     ErrorCode,
     classify_for_metrics,
     customer_message,
+    is_local_io_error,
     sanitize_detail,
 )
 from .state.metrics_storage import save_pipeline_metrics
@@ -344,7 +345,10 @@ class PipelineRunner:
             # before config_ready is config loading/parsing, which surfaces as
             # builtin error types (FileNotFoundError, ValueError, ...) the type
             # classifier cannot read -- the phase is the reliable signal there.
-            if not config_ready:
+            # A builtin local-IO error during config load (e.g. an unreadable
+            # config file) is infra, not bad config, so let the classifier keep
+            # it as INTERNAL rather than forcing CONFIG_INVALID.
+            if not config_ready and not is_local_io_error(e):
                 error_code = ErrorCode.CONFIG_INVALID
                 error_message = customer_message(error_code)
                 error_detail = sanitize_detail(str(e))

@@ -23,6 +23,7 @@ from src.state.error_classification import (
     classify_exception,
     classify_for_metrics,
     customer_message,
+    is_local_io_error,
     sanitize_detail,
 )
 
@@ -249,6 +250,28 @@ def test_exception_group_picks_dominant_cause():
     ])
     # source-unreachable outranks the unclassifiable internal leaf
     assert classify_exception(group) is ErrorCode.SOURCE_UNREACHABLE
+
+
+def test_exception_group_detail_includes_leaf_messages():
+    # str(ExceptionGroup) is only the summary; error_detail must carry the
+    # per-stream causes so the all-streams-failed case is actionable.
+    group = ExceptionGroup("All streams failed", [
+        _make("StreamProcessingError", message="Stream s1: connection refused at upstream"),
+        _make("StreamProcessingError", message="Stream s2: Batch 4 fatal failure: duplicate key"),
+    ])
+    _, _, detail = classify_for_metrics(group)
+    assert "connection refused at upstream" in detail
+    assert "duplicate key" in detail
+
+
+@pytest.mark.parametrize("exc,expected", [
+    (PermissionError("[Errno 13] Permission denied: '/app/connections/c.json'"), True),
+    (FileExistsError("exists"), True),
+    (RuntimeError("Could not find pipelines/manifest.json"), False),
+    (ValueError("manifest.json missing required key"), False),
+])
+def test_is_local_io_error(exc, expected):
+    assert is_local_io_error(exc) is expected
 
 
 def test_original_error_attribute_is_followed():

@@ -118,7 +118,7 @@ def classify_for_metrics(exc: BaseException) -> Tuple[ErrorCode, str, str]:
     produced identically wherever a metrics record is built.
     """
     code = classify_exception(exc)
-    return code, customer_message(code), sanitize_detail(str(exc))
+    return code, customer_message(code), sanitize_detail(_detail_text(exc))
 
 
 # --------------------------------------------------------------------------- #
@@ -187,6 +187,35 @@ def _signature(exc: BaseException) -> Tuple[Set[str], str]:
             names.add(prefix.group(1))
         messages.append(message)
     return names, " \n ".join(messages).lower()
+
+
+def _detail_text(exc: BaseException) -> str:
+    """Build the internal ``error_detail`` text from the whole chain.
+
+    ``str(exc)`` alone loses information for the most important case: an
+    ``ExceptionGroup`` renders only ``All streams failed (N sub-exceptions)``,
+    dropping every per-stream cause. Join the de-duplicated messages of every
+    chained member (leaves included) so the always-emitted pipeline detail keeps
+    the actual causes. Scrubbing and truncation happen in ``sanitize_detail``.
+    """
+    parts: List[str] = []
+    for member in _walk_chain(exc):
+        message = str(member).strip()
+        if message and message not in parts:
+            parts.append(message)
+    return " | ".join(parts)
+
+
+def is_local_io_error(exc: BaseException) -> bool:
+    """True if the chain carries a builtin local-filesystem error.
+
+    Lets the runner keep such a failure as the engine/infra fault it is
+    (``INTERNAL``) instead of the config-phase ``CONFIG_INVALID`` default -- e.g.
+    an unreadable manifest/connection JSON raises ``PermissionError`` during
+    config load, which is a volume/permissions problem, not a bad config.
+    """
+    names, _ = _signature(exc)
+    return bool(names & _LOCAL_IO_NAMES)
 
 
 # --------------------------------------------------------------------------- #
