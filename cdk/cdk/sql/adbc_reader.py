@@ -26,6 +26,8 @@ from typing import Any, AsyncIterator, List, Sequence
 
 import pyarrow as pa
 
+from ._adbc_utils import _adbc_execute
+
 logger = logging.getLogger(__name__)
 
 
@@ -91,10 +93,7 @@ class AdbcReader:
             )
         cursor = self._conn.cursor()
         try:
-            if params:
-                cursor.execute(sql, list(params))
-            else:
-                cursor.execute(sql)
+            _adbc_execute(cursor, sql, params)
             # Some ADBC drivers expose ``fetch_record_batch`` (a streaming
             # iterator). Materialising the whole result via
             # ``fetch_arrow_table`` is simpler; per-page paging keeps

@@ -16,6 +16,7 @@ import pyarrow as pa
 import pytest
 
 from cdk.sql import AdbcReader, AdbcReaderClosedError
+from cdk.sql._adbc_utils import _adbc_execute
 
 
 class _FakeCursor:
@@ -91,3 +92,32 @@ class TestAdbcReaderExecution:
         with pytest.raises(AdbcReaderClosedError):
             await reader.fetch_page("SELECT 1")
         assert conn.closed is True
+
+
+class _RecordingCursor:
+    """Minimal ADBC cursor that records how execute() was called."""
+
+    def __init__(self) -> None:
+        self.calls: List[Tuple[str, Optional[list]]] = []
+
+    def execute(self, sql: str, params: Optional[list] = None) -> None:
+        self.calls.append((sql, params))
+
+
+class TestAdbcExecuteHelper:
+    def test_binds_params_when_non_empty(self):
+        cursor = _RecordingCursor()
+        _adbc_execute(cursor, "SELECT ?", [42])
+        assert cursor.calls == [("SELECT ?", [42])]
+
+    def test_skips_second_arg_when_params_empty(self):
+        cursor = _RecordingCursor()
+        _adbc_execute(cursor, "SELECT 1", [])
+        # execute() is called with a single argument so drivers that reject
+        # an empty bind list (treating it as "expects 0 params") are not tripped.
+        assert cursor.calls == [("SELECT 1", None)]
+
+    def test_converts_sequence_to_list(self):
+        cursor = _RecordingCursor()
+        _adbc_execute(cursor, "SELECT ?", (99,))
+        assert cursor.calls == [("SELECT ?", [99])]

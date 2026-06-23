@@ -92,6 +92,11 @@ class TestThinControlPlaneImports:
             # control-plane actually uses) must resolve, not just attr access.
             from cdk.sql import create_table, list_columns  # noqa: F401
 
+            # _adbc_utils is on the eager import path via execution.py; any
+            # pyarrow import added there would break this assertion.
+            from cdk.sql._adbc_utils import _adbc_execute  # noqa: F401
+            assert callable(_adbc_execute)
+
             print("OK")
             """
         )
