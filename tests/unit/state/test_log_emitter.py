@@ -4,7 +4,8 @@
 dlq) passes through. It stamps two envelope fields on every record: ``org_id``
 (for downstream keying) and ``emitted_at`` (a sub-second UTC ISO-8601
 emission timestamp the collector uses as a single ordering key across all
-categories). These tests lock that envelope.
+categories), plus ambient run-identity defaults ``run_id`` and (in cloud)
+``invocation_id``. These tests lock that envelope.
 """
 from __future__ import annotations
 
@@ -115,3 +116,72 @@ def test_emitted_at_survives_unserialisable_payload(caplog):
     (_, payload), = _emitted_records(caplog)
     assert "error" in payload
     datetime.fromisoformat(payload["emitted_at"])  # raises if not ISO-8601
+
+
+@pytest.mark.parametrize("category", ["state", "metrics", "dlq"])
+def test_run_id_stamped_on_every_record(monkeypatch, caplog, category):
+    # run_id rides on every record so collectors can attribute it to a run
+    # even when the caller payload omits it.
+    monkeypatch.setenv("RUN_ID", "run-xyz")
+    with caplog.at_level(logging.INFO, logger="src.state.log_emitter"):
+        emit_log(category, {"k": "v"})
+
+    (_, payload), = _emitted_records(caplog)
+    assert payload["run_id"] == "run-xyz"
+
+
+def test_caller_run_id_overrides_ambient_default(monkeypatch, caplog):
+    # The ambient run_id is a default, not an envelope: a caller that owns
+    # run_id (the typed metrics field) still wins.
+    monkeypatch.setenv("RUN_ID", "ambient-run")
+    with caplog.at_level(logging.INFO, logger="src.state.log_emitter"):
+        emit_log("metrics", {"run_id": "caller-run"})
+
+    (_, payload), = _emitted_records(caplog)
+    assert payload["run_id"] == "caller-run"
+
+
+def test_invocation_id_present_when_env_set(monkeypatch, caplog):
+    # In cloud the control plane injects INVOCATION_ID; echoing it lets the
+    # run-status processor key lookups by it directly.
+    monkeypatch.setenv("INVOCATION_ID", "inv-123")
+    with caplog.at_level(logging.INFO, logger="src.state.log_emitter"):
+        emit_log("state", {"k": "v"})
+
+    (_, payload), = _emitted_records(caplog)
+    assert payload["invocation_id"] == "inv-123"
+
+
+def test_invocation_id_omitted_when_env_absent(monkeypatch, caplog):
+    # Local runs have no INVOCATION_ID: the field is omitted, not null or an
+    # error.
+    monkeypatch.delenv("INVOCATION_ID", raising=False)
+    with caplog.at_level(logging.INFO, logger="src.state.log_emitter"):
+        emit_log("state", {"k": "v"})
+
+    (_, payload), = _emitted_records(caplog)
+    assert "invocation_id" not in payload
+
+
+def test_blank_invocation_id_is_treated_as_absent(monkeypatch, caplog):
+    # A whitespace-only INVOCATION_ID is not a real id and must not surface.
+    monkeypatch.setenv("INVOCATION_ID", "   ")
+    with caplog.at_level(logging.INFO, logger="src.state.log_emitter"):
+        emit_log("state", {"k": "v"})
+
+    (_, payload), = _emitted_records(caplog)
+    assert "invocation_id" not in payload
+
+
+def test_run_identity_present_in_error_fallback(monkeypatch, caplog):
+    # The serialisation-failure fallback record must still carry run-identity
+    # so a dropped payload stays correlatable.
+    monkeypatch.setenv("RUN_ID", "run-xyz")
+    monkeypatch.setenv("INVOCATION_ID", "inv-123")
+    with caplog.at_level(logging.INFO, logger="src.state.log_emitter"):
+        emit_log("state", {("tuple", "key"): 1})  # non-str key -> json.dumps raises
+
+    (_, payload), = _emitted_records(caplog)
+    assert "error" in payload
+    assert payload["run_id"] == "run-xyz"
+    assert payload["invocation_id"] == "inv-123"
