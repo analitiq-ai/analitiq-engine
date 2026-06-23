@@ -1,8 +1,10 @@
 """Integration tests for state manager functionality."""
 
 import json
+import logging
 import shutil
 import tempfile
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -90,6 +92,7 @@ class TestStateManager:
                 partition={},
                 cursor=cursor,
                 hwm=hwm,
+                stream_version=2,
             )
 
             mock_emit.assert_called_once()
@@ -99,6 +102,43 @@ class TestStateManager:
             assert call_kwargs.kwargs["stream_id"] == "stream1"
             assert call_kwargs.kwargs["cursor_value"] == hwm
             assert call_kwargs.kwargs["cursor_hex"] == json.dumps(cursor).encode().hex()
+            assert call_kwargs.kwargs["stream_version"] == 2
+            # emitted_at is stamped centrally by emit_log, not passed here.
+            assert "emitted_at" not in call_kwargs.kwargs
+
+    def test_save_stream_checkpoint_real_line_carries_both_fields(self, caplog):
+        """End-to-end through the real emit chain: the ANALITIQ_STATE:: line a
+        checkpoint produces carries every original field plus stream_version and
+        emitted_at (the two fields issue 260 adds), with nothing else dropped."""
+        manager = _make_manager(self.tmp_path)
+        manager.start_run({"pipeline_id": "test"}, "run-xyz")
+
+        cursor = {"primary": {"field": "created", "value": "2025-08-18T12:00:00Z"}}
+        with caplog.at_level(logging.INFO, logger="src.state.log_emitter"):
+            manager.save_stream_checkpoint(
+                stream_name="orders",
+                partition={},
+                cursor=cursor,
+                hwm="2025-08-18T12:00:00Z",
+                stream_version=2,
+            )
+
+        lines = [
+            r.getMessage() for r in caplog.records
+            if r.getMessage().startswith("ANALITIQ_STATE::")
+        ]
+        assert len(lines) == 1
+        payload = json.loads(lines[0].split("::", 1)[1])
+
+        # Original fields preserved.
+        assert payload["run_id"] == "run-xyz"
+        assert payload["pipeline_id"] == "test-pipeline"
+        assert payload["stream_id"] == "orders"
+        assert payload["cursor_value"] == "2025-08-18T12:00:00Z"
+        assert payload["cursor_hex"] == json.dumps(cursor).encode().hex()
+        # The two added fields.
+        assert payload["stream_version"] == 2
+        assert datetime.fromisoformat(payload["emitted_at"]).tzinfo is not None
 
     def test_get_run_info_no_run(self):
         """Test get_run_info returns empty dict when no run started."""

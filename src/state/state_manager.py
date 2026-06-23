@@ -109,6 +109,7 @@ class StateManager:
         partition: Dict[str, Any],
         cursor: Dict[str, Any],
         hwm: str,
+        stream_version: int,
         page_state: Optional[Dict[str, Any]] = None,
         http_conditionals: Optional[Dict[str, Any]] = None,
         stats: Optional[Dict[str, Any]] = None,
@@ -121,14 +122,24 @@ class StateManager:
             partition: Partition key dict (ignored)
             cursor: Cursor state with primary/tiebreaker fields
             hwm: High-water mark timestamp
+            stream_version: Version the manifest pins for this stream. Carried
+                on the line so the deployment can scope the durable bookmark to
+                the version that produced it; the engine never acts on it.
             page_state: Unused, kept for call-site compatibility
             http_conditionals: Unused, kept for call-site compatibility
             stats: Unused, kept for call-site compatibility
+
+        The engine still emits and keys its in-run cursor by bare
+        ``stream_id``; ``stream_version`` is pass-through metadata. The
+        emission-time ``emitted_at`` ordering key is not stamped here -- it is
+        added to every record centrally by
+        :func:`src.state.log_emitter.emit_log`.
         """
         emit_state_log(
             run_id=self.current_run_id or "",
             pipeline_id=self.pipeline_id,
             stream_id=stream_name,
+            stream_version=stream_version,
             cursor_hex=json.dumps(cursor).encode().hex() if cursor else "",
             cursor_value=hwm,
         )

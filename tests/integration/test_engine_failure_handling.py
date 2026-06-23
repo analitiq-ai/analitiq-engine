@@ -214,6 +214,62 @@ class TestEngineFatalFailureHandling:
         assert end_marker is None
 
     @pytest.mark.asyncio
+    async def test_load_stage_checkpoint_threads_stream_version(
+        self,
+        engine: StreamingEngine,
+        mock_grpc_client: AsyncMock,
+        sample_stream_config: Dict[str, Any],
+        temp_dir: str,
+    ):
+        """A committed batch threads config['stream_version'] into the
+        emitted checkpoint. Guards the engine -> save_stream_checkpoint seam,
+        which only runs when the ACK carries a committed_cursor."""
+        from src.state.dead_letter_queue import DeadLetterQueue
+        from src.grpc.cursor import encode_cursor
+
+        input_queue = asyncio.Queue()
+        output_queue = asyncio.Queue()
+        await input_queue.put(pa.RecordBatch.from_pylist([{"id": 1}]))
+        await input_queue.put(None)
+
+        # A real committed cursor so cursor_to_state_dict decodes a hwm and the
+        # checkpoint call site (gated on committed_cursor) actually runs.
+        success_result = MockBatchResult(
+            success=True,
+            status=AckStatus.ACK_STATUS_SUCCESS,
+            records_written=1,
+            committed_cursor=encode_cursor("updated_at", "2025-08-18T12:00:00Z"),
+            failed_record_ids=[],
+            failure_summary="",
+        )
+        mock_grpc_client.send_batch = AsyncMock(return_value=success_result)
+
+        config = dict(sample_stream_config, stream_version=7)
+        engine.state_manager.save_stream_checkpoint = MagicMock()
+        stream_dlq = DeadLetterQueue(f"{temp_dir}/dlq")
+        stream_metrics = {
+            "records_processed": 0, "records_failed": 0,
+            "batches_processed": 0, "batches_failed": 0,
+        }
+
+        with patch.dict("os.environ", {"METRICS_ENABLED": "false"}):
+            await engine._load_stage(
+                input_queue=input_queue,
+                output_queue=output_queue,
+                grpc_client=mock_grpc_client,
+                config=config,
+                stream_dlq=stream_dlq,
+                run_id="test-run-001",
+                stream_metrics=stream_metrics,
+            )
+
+        engine.state_manager.save_stream_checkpoint.assert_called_once()
+        assert (
+            engine.state_manager.save_stream_checkpoint.call_args.kwargs["stream_version"]
+            == 7
+        )
+
+    @pytest.mark.asyncio
     async def test_load_stage_retryable_failure_retries_then_dlq(
         self,
         engine: StreamingEngine,

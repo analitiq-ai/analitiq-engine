@@ -22,7 +22,7 @@ import pytest
 
 from cdk.types import EndpointScope
 from src.config.schema_validator import ContractValidationError, _load_schema
-from src.engine.pipeline_config_prep import PipelineConfigPrep
+from src.engine.pipeline_config_prep import PipelineConfigPrep, _split_stream_ref
 
 # ---------------------------------------------------------------------------
 # Schema-mirror infrastructure
@@ -347,6 +347,8 @@ class TestCreateConfigHappyPath:
         assert len(stream_configs) == 1
         stream = stream_configs[0]
         assert stream.stream_id == STREAM_ID
+        # A bare reference (no ``_v{n}`` suffix) resolves to version 1.
+        assert stream.stream_version == 1
         assert stream.source.connection_ref == CONNECTION_SRC_ID
         assert stream.source.runtime is connections[CONNECTION_SRC_ID]
         assert stream.source.endpoint_document["endpoint_id"] == ENDPOINT_SRC
@@ -396,6 +398,84 @@ class TestCreateConfigHappyPath:
                 f"to_source_config() must not embed ConnectionRuntime; got {type(v)}"
             )
         json.dumps(source_config)  # raises if not serialisable
+
+
+# ---------------------------------------------------------------------------
+# Stream version parsing — the ``_v{n}`` suffix rides onto the checkpoint line
+# ---------------------------------------------------------------------------
+
+
+class TestStreamVersionParsing:
+    @pytest.mark.parametrize(
+        "ref,expected",
+        [
+            ("abc-123", ("abc-123", 1)),
+            ("abc-123_v2", ("abc-123", 2)),
+            ("abc-123_v17", ("abc-123", 17)),
+            # A uuid with internal underscores keeps everything but the suffix.
+            ("a_b_c_v3", ("a_b_c", 3)),
+            # No trailing integer -> treated as bare (version 1).
+            ("abc_vX", ("abc_vX", 1)),
+            ("abc_v", ("abc_v", 1)),
+        ],
+    )
+    def test_split_stream_ref(self, ref, expected) -> None:
+        assert _split_stream_ref(ref) == expected
+
+    def test_versioned_ref_resolves_bare_record_and_carries_version(
+        self, pipeline_tree: Path
+    ) -> None:
+        """A ``{uuid}_v{n}`` reference in pipeline.streams resolves the bare
+        stream document and surfaces version ``n`` on the resolved stream."""
+        pipeline_doc = _pipeline_doc()
+        pipeline_doc["streams"] = [f"{STREAM_ID}_v4"]
+        _write_json(
+            pipeline_tree / "pipelines" / PIPELINE_ID / "pipeline.json", pipeline_doc
+        )
+
+        prep = PipelineConfigPrep()
+        _, stream_configs, _, _, _ = prep.create_config()
+
+        assert len(stream_configs) == 1
+        assert stream_configs[0].stream_id == STREAM_ID  # bare, unchanged
+        assert stream_configs[0].stream_version == 4
+
+    def test_versioned_ref_without_matching_record_raises_naming_both_ids(
+        self, pipeline_tree: Path
+    ) -> None:
+        """A versioned ref whose bare id has no stream file fails loud, and the
+        message names both the full ref and the bare id it looked up."""
+        missing_bare = "00000000-0000-4000-8000-000000000000"
+        pipeline_doc = _pipeline_doc()
+        pipeline_doc["streams"] = [f"{missing_bare}_v4"]
+        _write_json(
+            pipeline_tree / "pipelines" / PIPELINE_ID / "pipeline.json", pipeline_doc
+        )
+
+        prep = PipelineConfigPrep()
+        with pytest.raises(ValueError) as exc:
+            prep.create_config()
+        message = str(exc.value)
+        assert f"{missing_bare}_v4" in message  # the full reference
+        assert missing_bare in message  # the bare id actually looked up
+
+    def test_two_versioned_refs_of_one_stream_fail_loud(
+        self, pipeline_tree: Path
+    ) -> None:
+        """Distinct versioned refs that strip to the same bare id pass the
+        schema's uniqueItems but would silently collide downstream -- the
+        loader must reject them instead of dropping one."""
+        pipeline_doc = _pipeline_doc()
+        pipeline_doc["streams"] = [f"{STREAM_ID}_v1", f"{STREAM_ID}_v2"]
+        _write_json(
+            pipeline_tree / "pipelines" / PIPELINE_ID / "pipeline.json", pipeline_doc
+        )
+
+        prep = PipelineConfigPrep()
+        with pytest.raises(ValueError, match="same stream twice") as exc:
+            prep.create_config()
+        message = str(exc.value)
+        assert f"{STREAM_ID}_v1" in message and f"{STREAM_ID}_v2" in message
 
 
 # ---------------------------------------------------------------------------

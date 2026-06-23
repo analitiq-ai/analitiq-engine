@@ -59,6 +59,7 @@ class ResolvedStream:
     """Fully resolved stream — typed source/destinations and metadata."""
 
     stream_id: str
+    stream_version: int
     pipeline_id: Optional[str]
     display_name: Optional[str]
     description: Optional[str]

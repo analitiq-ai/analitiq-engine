@@ -265,6 +265,9 @@ class StreamingEngine:
                 "pipeline_id": pipeline_config["pipeline_id"],
                 "stream_id": stream_id,
                 "stream_name": stream_name,
+                # Absent version -> 1, mirroring _split_stream_ref's bare -> 1
+                # rule so an unversioned or minimally-built config stays runnable.
+                "stream_version": stream_config.get("stream_version", 1),
                 "source": source_cfg,
                 "destination": destination_cfg,
                 "mapping": stream_config.get("mapping") or {},
@@ -465,6 +468,7 @@ class StreamingEngine:
         """
         stream_name = config["stream_name"]
         stream_id = config["stream_id"]
+        stream_version = config.get("stream_version", 1)
 
         # Source-side contract dict carries replication and primary-key
         # metadata. Record IDs hash the source primary key (stable across
@@ -570,6 +574,7 @@ class StreamingEngine:
                                 partition={},
                                 cursor=cursor_data,
                                 hwm=hwm,
+                                stream_version=stream_version,
                             )
                         logger.debug(
                             f"Stream {stream_name}: Batch {batch_seq} committed, "
@@ -622,6 +627,7 @@ class StreamingEngine:
                                 partition={},
                                 cursor=cursor_data,
                                 hwm=hwm,
+                                stream_version=stream_version,
                             )
 
                         # Record batch commit for in-run idempotency (prevents re-send on retry)
