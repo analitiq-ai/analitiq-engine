@@ -162,6 +162,19 @@ class TestStateManagerDurableRestore:
 
         assert await manager.get_cursor("not-in-payload") is None
 
+    async def test_malformed_resume_state_does_not_abort_construction(
+        self, monkeypatch
+    ):
+        # A corrupt tagged cursor must degrade to a full re-scan, not crash
+        # StateManager.__init__ on a fresh container.
+        monkeypatch.setenv(
+            "RESUME_STATE",
+            json.dumps({"orders": {"__type__": "datetime", "value": "garbage"}}),
+        )
+        manager = _make_manager(self.tmp_path)  # must not raise
+
+        assert await manager.get_cursor("orders") is None
+
     async def test_no_env_var_means_no_cursor(self, monkeypatch):
         monkeypatch.delenv("RESUME_STATE", raising=False)
         manager = _make_manager(self.tmp_path)

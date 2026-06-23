@@ -2345,12 +2345,13 @@ class GenericSQLConnector(BaseDestinationHandler):
                         # ties) can gain a new row at the last committed value
                         # between runs; an exclusive > would filter that row out
                         # at the source and lose it for good. Re-reading is safe
-                        # because the default write.mode is upsert, which dedups
-                        # the boundary row against its conflict_keys. An insert
-                        # stream re-reading the boundary fails loud on the
-                        # duplicate key (the visible signal that an incremental
-                        # cursor needs a conflict target) rather than silently
-                        # dropping rows.
+                        # under the default upsert write mode, which dedups the
+                        # boundary row against its conflict_keys. Under insert
+                        # mode a unique/primary key rejects the re-read duplicate
+                        # loudly; a keyless insert stream has nothing to dedup
+                        # against and would append a duplicate boundary row, so
+                        # insert + an incremental cursor without a uniqueness
+                        # key is an unsafe combination.
                         cursor_mode="inclusive",
                         order_by=order_by_field,
                         limit=batch_size,

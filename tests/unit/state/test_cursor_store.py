@@ -219,3 +219,17 @@ class TestParseResumeState:
         with caplog.at_level(logging.WARNING, logger="src.state.store"):
             assert parse_resume_state(json.dumps([1, 2, 3])) == {}
         assert any("must be a JSON object" in r.message for r in caplog.records)
+
+    def test_malformed_tagged_value_skips_stream_loudly(self, caplog):
+        # A corrupt tagged datetime (bad durable state or manual injection) must
+        # not abort StateManager construction: skip the bad stream (full
+        # re-scan), keep the good ones, and log it -- like CursorStore.get does
+        # for an unreadable on-disk checkpoint.
+        payload = {
+            "good": 100,
+            "bad": {"__type__": "datetime", "value": "not-a-real-timestamp"},
+        }
+        with caplog.at_level(logging.WARNING, logger="src.state.store"):
+            restored = parse_resume_state(json.dumps(payload))
+        assert restored == {"good": 100}
+        assert any("unreadable" in r.message for r in caplog.records)

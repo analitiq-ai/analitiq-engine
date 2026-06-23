@@ -27,8 +27,10 @@ next run (see the read path in ``cdk/cdk/sql/generic.py``). This is what keeps
 a non-unique cursor lossless — a row that arrives at the last committed value
 between runs is still read, where an exclusive ``>`` would filter it out at the
 source and drop it for good. The re-read is deduped by the default upsert
-write mode against its conflict_keys; an insert stream re-reading the boundary
-fails loud on the duplicate key rather than silently losing rows. A lost or
+write mode against its conflict_keys; under insert mode a unique/primary key
+rejects the re-read duplicate loudly, while a keyless insert stream has nothing
+to dedup against and would append a duplicate boundary row (insert + an
+incremental cursor without a uniqueness key is unsafe). A lost or
 unreadable checkpoint costs a one-time full re-scan, never data, so both the
 read and write paths degrade to that re-scan on I/O failure rather than
 aborting a load — but say so loudly, since a corrupt checkpoint usually means a
@@ -71,9 +73,10 @@ def parse_resume_state(raw: Optional[str]) -> Dict[str, Any]:
     type is carried, not inferred, a ``str`` cursor whose value happens to look
     like a date stays a ``str`` -- no shape-guessing.
 
-    Returns an empty mapping on a missing or unparseable payload so a startup
-    with corrupt state degrades to a full re-scan -- loudly -- rather than
-    aborting the run.
+    Corrupt state degrades to a full re-scan -- loudly -- rather than aborting
+    the run: a missing or non-object payload yields an empty mapping, and a
+    single malformed tagged value (e.g. a bad ISO string) skips just that
+    stream, the same way :meth:`CursorStore.get` degrades on disk.
     """
     if not raw:
         return {}
@@ -93,7 +96,22 @@ def parse_resume_state(raw: Optional[str]) -> Dict[str, Any]:
             type(decoded).__name__,
         )
         return {}
-    return {str(stream_id): decode_value(value) for stream_id, value in decoded.items()}
+    restored: Dict[str, Any] = {}
+    for stream_id, value in decoded.items():
+        try:
+            restored[str(stream_id)] = decode_value(value)
+        except (ValueError, TypeError) as exc:
+            # A malformed tagged datetime/date (corrupt durable state or a bad
+            # manual injection) must not abort StateManager construction. Skip
+            # the stream so it resumes with a full re-scan -- loudly -- exactly
+            # as CursorStore.get does for an unreadable on-disk checkpoint.
+            logger.warning(
+                "RESUME_STATE cursor for stream %r is unreadable (%s); that "
+                "stream resumes with a full re-scan",
+                stream_id,
+                exc,
+            )
+    return restored
 
 
 def encode_cursor_state(cursor: Dict[str, Any]) -> Dict[str, Any]:
