@@ -261,19 +261,17 @@ class StreamingEngine:
                 schema_config=destination_cfg,
             )
             if not schema_accepted:
-                # Carry the destination's concrete reason so the actionable
-                # detail survives into error_detail and the logs. Word it by
-                # cause: a real SchemaAck NACK is a schema mismatch, while a
-                # transport-side handshake failure (timeout, peer close,
-                # reader/writer exit) is a destination write failure -- the two
-                # must not both read as "rejected schema".
+                # The destination did not accept the stream. configure_schema
+                # only prepares the destination's own table (no schema is
+                # validated), so this is either a destination config defect or a
+                # transport failure; carry the concrete reason so the classifier
+                # can tell them apart and the detail survives into the logs.
                 reason = grpc_client.schema_rejection_message
                 detail = f": {reason}" if reason else ""
-                if grpc_client.schema_rejected:
-                    message = f"Destination rejected schema for stream {stream_name}{detail}"
-                else:
-                    message = f"Destination handshake failed for stream {stream_name}{detail}"
-                raise StreamProcessingError(message, stream_id=stream_id)
+                raise StreamProcessingError(
+                    f"Destination did not accept the stream for {stream_name}{detail}",
+                    stream_id=stream_id,
+                )
             logger.info(f"Stream {stream_name}: gRPC stream started, schema accepted")
 
             extract_queue = Queue(maxsize=self.buffer_size)

@@ -116,14 +116,17 @@ def test_source_unreachable_by_builtin_type():
     assert classify_exception(ConnectionRefusedError("refused")) is ErrorCode.SOURCE_UNREACHABLE
 
 
+# There is no schema validation in the engine, so type-map / mapping / schema-
+# configuration failures are configuration defects, not a data-vs-schema
+# mismatch -- they classify as CONFIG_INVALID.
 @pytest.mark.parametrize("name,message", [
     ("UnmappedTypeError", "No forward type-map rule for 'geography' in connector 'postgres'"),
     ("TransformationError", "cannot convert value to Int64"),
-    ("SchemaError", "schema validation failed"),
-    ("StreamProcessingError", "Destination rejected schema for stream orders"),
+    ("SchemaError", "source schema could not be read"),
+    ("SchemaConfigurationError", "unsupported proto write mode"),
 ])
-def test_schema_mismatch(name, message):
-    assert classify_exception(_make(name, message=message)) is ErrorCode.SCHEMA_MISMATCH
+def test_type_and_mapping_defects_are_config_invalid(name, message):
+    assert classify_exception(_make(name, message=message)) is ErrorCode.CONFIG_INVALID
 
 
 @pytest.mark.parametrize("name,message", [
@@ -155,13 +158,12 @@ def test_source_driver_error_not_destination(message, expected):
 
 
 def test_real_typemap_mro_routing():
-    # UnmappedTypeError subclasses TypeMapError but must reach SCHEMA_MISMATCH,
-    # while a broken/missing type-map file stays CONFIG_INVALID -- the classifier
-    # must not match the shared base.
+    # A type-map miss and a broken/missing type-map file are both configuration
+    # defects (no schema validation exists in the engine).
     from cdk.type_map import UnmappedTypeError, InvalidTypeMapError
 
     unmapped = UnmappedTypeError("postgres", "forward", "geography")
-    assert classify_exception(unmapped) is ErrorCode.SCHEMA_MISMATCH
+    assert classify_exception(unmapped) is ErrorCode.CONFIG_INVALID
     assert classify_exception(InvalidTypeMapError("broken file")) is ErrorCode.CONFIG_INVALID
 
 
@@ -196,19 +198,22 @@ def test_local_filesystem_error_is_internal_not_source_auth():
     ) is ErrorCode.SOURCE_AUTH_FAILED
 
 
-def test_handshake_transport_failure_is_destination_not_schema():
-    # start_stream() returning False for a transport reason (timeout / peer
-    # close) must be a destination write failure, not a schema mismatch.
-    assert classify_exception(_make(
-        "StreamProcessingError",
-        message="Destination handshake failed for stream orders: "
-                "destination did not acknowledge the schema within 30s",
-    )) is ErrorCode.DESTINATION_WRITE_FAILED
-    # An explicit SchemaAck NACK stays a schema mismatch.
-    assert classify_exception(_make(
-        "StreamProcessingError",
-        message="Destination rejected schema for stream orders: unsupported write mode",
-    )) is ErrorCode.SCHEMA_MISMATCH
+@pytest.mark.parametrize("reason,expected", [
+    # transport reasons -> the destination was unreachable mid-handshake. These
+    # cover the direct path and the worker-proxy path (the proxy forwards the
+    # inner reason text), so no proto change is needed to tell them apart.
+    ("destination did not acknowledge the schema within 30s", ErrorCode.DESTINATION_WRITE_FAILED),
+    ("stream reader/writer exited before schema ACK: boom", ErrorCode.DESTINATION_WRITE_FAILED),
+    ("destination worker channel did not connect", ErrorCode.DESTINATION_WRITE_FAILED),
+    # configuration reasons -> a destination config defect (configure_schema only
+    # builds the destination's own table; nothing is validated against a schema).
+    ("SchemaConfigurationError: unsupported write mode", ErrorCode.CONFIG_INVALID),
+    ("PlaceholderExpansionError: failed to expand 'pw'", ErrorCode.CONFIG_INVALID),
+    ("Schema configuration failed", ErrorCode.CONFIG_INVALID),
+])
+def test_destination_handshake_failure_routing(reason, expected):
+    msg = f"Destination did not accept the stream for orders: {reason}"
+    assert classify_exception(_make("StreamProcessingError", message=msg)) is expected
 
 
 @pytest.mark.parametrize("message,expected", [

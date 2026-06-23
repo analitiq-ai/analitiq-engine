@@ -200,11 +200,17 @@ existing ones. Coordinate additions with the control plane's error-code catalog.
 |---|---|
 | `SOURCE_AUTH_FAILED` | Authentication/credentials to the source were rejected |
 | `SOURCE_UNREACHABLE` | Source could not be reached (offline, DNS, refused, timeout) |
-| `DESTINATION_WRITE_FAILED` | Writing to / connecting to the destination failed |
-| `SCHEMA_MISMATCH` | Data did not match the expected schema or types (either side) |
+| `DESTINATION_WRITE_FAILED` | Writing to / reaching the destination failed (incl. a transport-side handshake failure) |
 | `RATE_LIMITED` | Source rate-limited / throttled the request |
-| `CONFIG_INVALID` | Pipeline/connector/connection configuration is invalid |
+| `CONFIG_INVALID` | Pipeline/connector/connection config invalid — incl. type-map / mapping defects and destination schema-configuration failures |
 | `INTERNAL` | Anything not matched above (treated as an engine-side fault) |
+
+There is deliberately no `SCHEMA_MISMATCH` code: the engine performs no schema
+validation. The destination "schema" handshake (`configure_schema`) only prepares
+the destination's own table via DDL, so a failed handshake is a destination
+*configuration* defect (`CONFIG_INVALID`) or a transport failure
+(`DESTINATION_WRITE_FAILED`) — never a data-vs-schema mismatch. Type-map misses
+and mapping/transform errors are likewise configuration defects.
 
 Three error fields appear on the record, with distinct audiences:
 
@@ -223,8 +229,9 @@ existing name-based pattern in `cdk.sql.generic._is_fatal_adbc_error` and handle
 the gRPC worker boundary, where the original source exception type collapses to
 `ReadError` / `RuntimeError` but its class name survives as an `error_type:`
 prefix in the message. Rules are evaluated in priority order (local-IO, config,
-schema, destination, then the source-side auth/rate/unreachable buckets), so for
-an aggregated `ExceptionGroup` the dominant cause wins.
+destination handshake, destination write, then the source-side
+auth/rate/unreachable buckets), so for an aggregated `ExceptionGroup` the
+dominant cause wins.
 
 The `error_code` enum is the stable, audited contract. The *textual* part of
 classification (un-typed driver/HTTP errors) and `error_detail` credential

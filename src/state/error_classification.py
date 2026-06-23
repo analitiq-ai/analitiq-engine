@@ -36,9 +36,9 @@ Known limitations (best-effort heuristics over free text):
 - ``error_code`` is the stable, audited contract; the textual classification of
   un-typed driver/HTTP errors is best-effort. An ambiguous message can fall to a
   neighbouring code or ``INTERNAL`` -- it is never a secret leak, only a coarser
-  label. Known soft spots: a bare HTTP status with no companion word, a
+  label. Known soft spots: a bare HTTP status with no companion word, and a
   deterministic source-config error that crosses the worker boundary as plain
-  text, and a config sub-cause embedded inside a real schema rejection.
+  text.
 - ``sanitize_detail`` redacts the common credential shapes (URL userinfo,
   ``key=value`` / quoted / hyphenated secret keys, Authorization headers) but
   cannot guarantee completeness over arbitrary free text -- e.g. a multi-line PEM
@@ -69,7 +69,6 @@ class ErrorCode(str, Enum):
     SOURCE_AUTH_FAILED = "SOURCE_AUTH_FAILED"
     SOURCE_UNREACHABLE = "SOURCE_UNREACHABLE"
     DESTINATION_WRITE_FAILED = "DESTINATION_WRITE_FAILED"
-    SCHEMA_MISMATCH = "SCHEMA_MISMATCH"
     RATE_LIMITED = "RATE_LIMITED"
     CONFIG_INVALID = "CONFIG_INVALID"
     INTERNAL = "INTERNAL"
@@ -87,9 +86,6 @@ _CUSTOMER_MESSAGES: dict[ErrorCode, str] = {
     ),
     ErrorCode.DESTINATION_WRITE_FAILED: (
         "Writing to the destination system failed."
-    ),
-    ErrorCode.SCHEMA_MISMATCH: (
-        "The data did not match the expected schema or types."
     ),
     ErrorCode.RATE_LIMITED: (
         "The source system rate-limited the request. Try again later."
@@ -229,27 +225,26 @@ def is_local_io_error(exc: BaseException) -> bool:
 # aggregated ``ExceptionGroup`` (every stream failed) this yields the dominant
 # cause -- the highest-priority signal present across all leaves.
 #
-# Order: config (setup defect, the root cause when present) -> schema (specific,
-# actionable) -> destination (so a destination connect/permission failure is not
-# mislabelled SOURCE_*, since the enum's auth/unreachable/rate codes are
-# source-side) -> source auth -> rate limit -> source unreachable -> internal.
+# Order: config (setup defect, the root cause when present) -> destination
+# handshake (config vs transport) -> destination write -> source auth -> rate
+# limit -> source unreachable -> internal.
 
-# Config / contract / connector-definition defects. A bad setup is the root
-# cause whenever it appears, so this is checked first.
-# Note: the type-map base ``TypeMapError`` is deliberately NOT listed. A broken
-# or missing type-map file (InvalidTypeMapError / TypeMapNotFoundError) is a
-# config defect, but UnmappedTypeError -- a value with no rule -- subclasses the
-# same base and must reach SCHEMA_MISMATCH, so we match only the concrete
-# config subclasses, not the shared base.
+# Config / contract / connector-definition / type-map / mapping defects. There
+# is no schema validation in the engine (the destination only configures its own
+# table via DDL), so type-map misses, mapping/transform errors, and destination
+# schema-configuration failures are all configuration defects, not a data-vs-
+# schema mismatch -- they live here. ``TypeMapError`` covers UnmappedTypeError /
+# InvalidTypeMapError / TypeMapNotFoundError.
 _CONFIG_NAMES = frozenset({
     "ConfigError", "ConfigNotFoundError", "ConfigValidationError",
     "ConnectorNotFoundError", "EndpointNotFoundError", "ConnectionConfigError",
     "ContractValidationError", "ConfigurationError", "StreamConfigurationError",
     "PipelineValidationError", "StageConfigurationError",
-    "TransportSpecError", "InvalidTypeMapError",
-    "TypeMapNotFoundError", "UnsupportedDialectOperationError",
+    "TransportSpecError", "TypeMapError", "InvalidTypeMapError",
+    "TypeMapNotFoundError", "UnmappedTypeError", "UnsupportedDialectOperationError",
     "AdbcConfigurationError", "ConnectorNotRegisteredError",
     "UnresolvedValueError", "SecretNotFoundError", "PlaceholderExpansionError",
+    "SchemaError", "SchemaConfigurationError", "TransformationError",
 })
 
 _AUTH_NAMES = frozenset({"SecretAccessDeniedError"})
@@ -285,14 +280,19 @@ _UNREACHABLE_PHRASES = (
     "timed out", "unreachable", "host is down",
 )
 
-_SCHEMA_NAMES = frozenset({
-    "SchemaError", "UnmappedTypeError", "TransformationError",
-    "SchemaConfigurationError", "DataError",
-})
-_SCHEMA_PHRASES = (
-    "schema mismatch", "destination rejected schema", "type mismatch",
-    "incompatible type", "cannot convert", "could not convert",
-    "type-map rule", "schema validation",
+# The destination "schema" handshake (configure_schema) only prepares the
+# destination's own table via DDL -- it never validates data against a schema --
+# so a failed handshake is either a destination configuration defect or a
+# transport failure, not a schema mismatch. The engine raises one wording,
+# "Destination did not accept the stream ...", and forwards the concrete reason
+# (including the inner reason on the worker-proxy path). These transport reasons
+# (engine/proxy-generated, a controlled set) mean the destination was
+# unreachable mid-handshake -> DESTINATION_WRITE_FAILED; any other reason is a
+# configuration defect -> CONFIG_INVALID.
+_HANDSHAKE_MARKER = "did not accept the stream"
+_HANDSHAKE_TRANSPORT_PHRASES = (
+    "before schema ack", "did not acknowledge the schema",
+    "channel did not connect", "did not connect",
 )
 
 # PEP-249 driver names (ProgrammingError / IntegrityError / NotSupportedError)
@@ -306,9 +306,8 @@ _DESTINATION_NAMES = frozenset({
     "WriteError", "CreateTableError", "AdbcCommitRecordError",
 })
 _DESTINATION_PHRASES = (
-    "failed to connect to grpc destination", "destination rejected",
+    "failed to connect to grpc destination",
     "write to destination", "destination write", "load stage",
-    "destination handshake failed",
     # Load-stage wrappers from the engine (_load_stage) around a destination
     # ack failure; the wrapper text itself is the destination signal.
     "fatal failure", "retries:", "unknown ack status",
@@ -344,8 +343,12 @@ def classify_exception(exc: BaseException) -> ErrorCode:
         return ErrorCode.INTERNAL
     if _matches(names, text, _CONFIG_NAMES, ()):
         return ErrorCode.CONFIG_INVALID
-    if _matches(names, text, _SCHEMA_NAMES, _SCHEMA_PHRASES):
-        return ErrorCode.SCHEMA_MISMATCH
+    if _HANDSHAKE_MARKER in text:
+        # Destination handshake failure: a transport reason means the
+        # destination was unreachable; anything else is a config defect.
+        if any(phrase in text for phrase in _HANDSHAKE_TRANSPORT_PHRASES):
+            return ErrorCode.DESTINATION_WRITE_FAILED
+        return ErrorCode.CONFIG_INVALID
     if _matches(names, text, _DESTINATION_NAMES, _DESTINATION_PHRASES):
         return ErrorCode.DESTINATION_WRITE_FAILED
     if _matches(names, text, _AUTH_NAMES, _AUTH_PHRASES) or _HTTP_AUTH_STATUS.search(text):

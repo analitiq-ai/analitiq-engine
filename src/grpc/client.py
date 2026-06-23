@@ -161,12 +161,6 @@ class DestinationGRPCClient:
         # "Schema configuration failed".
         self._schema_rejection_message: Optional[str] = None
 
-        # True only when the destination returned an explicit SchemaAck NACK
-        # (a real schema rejection). False when start_stream failed for a
-        # transport reason (reader/writer exit, peer close, ACK timeout), which
-        # is a destination connectivity/write failure, not a schema mismatch.
-        self._schema_rejected: bool = False
-
         # Connection state
         self._connected = False
         self._stream_active = False
@@ -186,15 +180,6 @@ class DestinationGRPCClient:
         does not accept the stream, so the concrete cause is not lost.
         """
         return self._schema_rejection_message
-
-    @property
-    def schema_rejected(self) -> bool:
-        """True only when the last handshake failed with an explicit SchemaAck NACK.
-
-        Lets the engine tell a real schema rejection (a schema mismatch) apart
-        from a transport-side handshake failure (a destination write failure).
-        """
-        return self._schema_rejected
 
     async def connect(
         self,
@@ -380,7 +365,6 @@ class DestinationGRPCClient:
         self._task_failure = None
         self._peer_closed_stream = False
         self._schema_rejection_message = None
-        self._schema_rejected = False
 
         # Create queues for bidirectional communication
         self._request_queue = asyncio.Queue()
@@ -433,7 +417,6 @@ class DestinationGRPCClient:
                     logger.info(f"Schema accepted for stream {stream_id}")
                     accepted = True
                 else:
-                    self._schema_rejected = True
                     self._schema_rejection_message = response.message
                     logger.error(f"Schema rejected: {response.message}")
             else:
