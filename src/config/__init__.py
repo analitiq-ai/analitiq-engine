@@ -1,9 +1,5 @@
 """Configuration management for Analitiq Stream."""
 
-from .analitiq_config import (
-    validate_pipeline_config,
-    validate_connection_config,
-)
 from .schema_validator import (
     ContractValidationError,
     validate as validate_artifact,
@@ -36,8 +32,6 @@ __all__ = [
     "validate_artifact",
     "validate_artifact_file",
     "ARTIFACT_KINDS",
-    "validate_pipeline_config",
-    "validate_connection_config",
     # Endpoint resolver
     "ConnectionLookup",
     "resolve_endpoint_path",

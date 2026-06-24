@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from src.state.retry_handler import (
     RetryHandler, ExponentialBackoffRetry, LinearBackoffRetry,
-    DatabaseRetry, APIRetry
+    APIRetry
 )
 
 
@@ -182,40 +182,6 @@ class TestLinearBackoffRetry:
         handler = LinearBackoffRetry()
 
         assert handler.backoff_multiplier == 1.0  # Linear multiplier
-
-
-class TestDatabaseRetry:
-    """Test database-specific retry handler."""
-
-    def test_database_retry_initialization(self):
-        """Test database retry initialization."""
-        db_retry = DatabaseRetry()
-
-        assert db_retry.max_retries == 3
-        assert db_retry.base_delay == 1.0
-        assert db_retry.backoff_multiplier == 2.0
-        assert isinstance(db_retry, RetryHandler)
-    
-    @pytest.mark.asyncio
-    async def test_database_retry_with_db_errors(self):
-        """Test database retry with actual database errors."""
-        db_retry = DatabaseRetry()
-        db_retry.max_retries = 2
-        db_retry.base_delay = 0.01
-        call_count = 0
-
-        async def db_operation():
-            nonlocal call_count
-            call_count += 1
-            if call_count <= 2:
-                # Simulate transient database error
-                raise ConnectionError("Database connection lost")
-            return "Database operation successful"
-
-        result = await db_retry.execute_with_retry(db_operation)
-
-        assert result == "Database operation successful"
-        assert call_count == 3  # Initial + 2 retries
 
 
 class TestAPIRetry:

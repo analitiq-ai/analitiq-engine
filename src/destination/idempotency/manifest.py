@@ -8,7 +8,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from ..storage.base import BaseStorageBackend
 
@@ -204,11 +204,3 @@ class ManifestTracker:
         await self.save()
 
         logger.debug(f"Recorded commit: {key}")
-
-    def get_all_commits(self) -> List[BatchCommit]:
-        """Get all commits in the manifest."""
-        return list(self._commits.values())
-
-    def get_commits_for_stream(self, stream_id: str) -> List[BatchCommit]:
-        """Get all commits for a specific stream."""
-        return [c for c in self._commits.values() if c.stream_id == stream_id]

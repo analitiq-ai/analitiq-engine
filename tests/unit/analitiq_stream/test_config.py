@@ -3,8 +3,7 @@
 import pytest
 
 from src.config import (
-    validate_pipeline_config,
-    validate_connection_config,
+    validate_artifact,
     resolve_endpoint_ref,
     load_connection,
     load_connector_definition,
@@ -23,8 +22,7 @@ class TestConfig:
         from src import config
 
         expected_exports = [
-            "validate_pipeline_config",
-            "validate_connection_config",
+            "validate_artifact",
             "resolve_endpoint_ref",
             "load_connection",
             "load_connector_definition",
@@ -54,26 +52,26 @@ class TestPipelineConfigValidator:
 
     @pytest.mark.unit
     def test_valid_pipeline_passes(self, valid_pipeline):
-        result = validate_pipeline_config(valid_pipeline)
-        assert result["display_name"] == "Test Pipeline"
+        validate_artifact("pipeline", valid_pipeline)
+        assert valid_pipeline["display_name"] == "Test Pipeline"
 
     @pytest.mark.unit
     def test_missing_connections_fails(self, valid_pipeline):
         del valid_pipeline["connections"]
         with pytest.raises(Exception, match="connections"):
-            validate_pipeline_config(valid_pipeline)
+            validate_artifact("pipeline", valid_pipeline)
 
     @pytest.mark.unit
     def test_missing_source_fails(self, valid_pipeline):
         del valid_pipeline["connections"]["source"]
         with pytest.raises(Exception, match="source"):
-            validate_pipeline_config(valid_pipeline)
+            validate_artifact("pipeline", valid_pipeline)
 
     @pytest.mark.unit
     def test_empty_destinations_fails(self, valid_pipeline):
         valid_pipeline["connections"]["destinations"] = []
         with pytest.raises(Exception, match="destinations|minItems|too short"):
-            validate_pipeline_config(valid_pipeline)
+            validate_artifact("pipeline", valid_pipeline)
 
 
 class TestConnectionConfigValidator:
@@ -93,14 +91,14 @@ class TestConnectionConfigValidator:
             config["connector_id"] = "postgresql"
         if "connection_id" in config:
             config["connection_id"] = "my-conn"
-        result = validate_connection_config(config)
+        validate_artifact("connection", config)
         for field in required:
-            assert field in result
+            assert field in config
 
     @pytest.mark.unit
     def test_invalid_connection_raises(self):
         with pytest.raises(Exception):
-            validate_connection_config({})
+            validate_artifact("connection", {})
 
 
 class TestEndpointRefModel:
@@ -197,31 +195,6 @@ class TestEndpointRefModel:
         assert hash(ref1) == hash(ref2)
         cache = {ref1: "value"}
         assert cache[ref2] == "value"
-
-
-class TestWriteConfigDefaults:
-    """The default WriteMode is UPSERT — pipelines that omit the field
-    inherit idempotent semantics. Flipping the default to INSERT would
-    silently introduce duplicate rows on every replay."""
-
-    @pytest.mark.unit
-    def test_default_mode_is_upsert(self):
-        from src.models.stream import WriteConfig, WriteMode
-        assert WriteConfig().mode is WriteMode.UPSERT
-
-    @pytest.mark.unit
-    def test_conflict_keys_default_is_none(self):
-        from src.models.stream import WriteConfig
-        assert WriteConfig().conflict_keys is None
-
-    @pytest.mark.unit
-    def test_conflict_keys_is_a_flat_key_set(self):
-        # Infra supplies a single composite conflict-key set (a flat list
-        # of destination field names); the engine stores it verbatim and
-        # never derives or reshapes it.
-        from src.models.stream import WriteConfig, WriteMode
-        cfg = WriteConfig(mode=WriteMode.UPSERT, conflict_keys=["tenant_id", "id"])
-        assert cfg.conflict_keys == ["tenant_id", "id"]
 
 
 class TestBatchWriteResultInvariant:

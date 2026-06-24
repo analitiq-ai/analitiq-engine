@@ -19,11 +19,6 @@ pre-materialized ``ConnectionRuntime`` to verify:
 and connects/disconnects internally, so these tests pass the runtime directly
 rather than calling ``connect()`` first.
 
-Tie-breaker dedup is intentionally not exercised here: ``read_batches``
-initialises ``state["bookmarks"]`` empty, so the dedup comparators are
-unreachable through this entry point. They are pinned directly as pure
-functions in ``test_api_dedup_helpers.py``.
-
 No live HTTP. The session is a ``MagicMock`` with ``request`` returning
 an async context manager that yields a stub response.
 """
@@ -151,7 +146,6 @@ def _stream_source(
     replication_method: str = "full_refresh",
     cursor_field: Optional[str] = None,
     safety_window: Optional[int] = None,
-    tie_breaker_fields: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     block: Dict[str, Any] = {
         "endpoint_ref": {
@@ -166,8 +160,6 @@ def _stream_source(
         block["replication"]["cursor_field"] = cursor_field
     if safety_window is not None:
         block["replication"]["safety_window_seconds"] = safety_window
-    if tie_breaker_fields:
-        block["replication"]["tie_breaker_fields"] = tie_breaker_fields
     return block
 
 

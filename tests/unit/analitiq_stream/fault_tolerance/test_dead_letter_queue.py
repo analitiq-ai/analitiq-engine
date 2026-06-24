@@ -405,21 +405,17 @@ class TestDeadLetterQueue:
         assert len(dlq_files_after) == 0
     
     @pytest.mark.asyncio
-    async def test_clear_dlq_specific_pipeline(self):
-        """Test clearing DLQ records for specific pipeline."""
+    async def test_clear_dlq_specific_pipeline_not_implemented(self):
+        """Selective per-pipeline clearing is not implemented and must fail
+        loud rather than silently report success."""
         dlq = DeadLetterQueue(dlq_path=str(self.dlq_path))
 
         # Add records for different pipelines
         await dlq.send_to_dlq({"id": 1}, Exception("Error 1"), "pipeline1")
         await dlq.send_to_dlq({"id": 2}, Exception("Error 2"), "pipeline2")
 
-        with patch('src.state.dead_letter_queue.logger') as mock_logger:
-            # This should log that it's not implemented
+        with pytest.raises(NotImplementedError, match="pipeline_id"):
             await dlq.clear_dlq("pipeline1")
-
-            mock_logger.info.assert_called_once_with(
-                "Selective DLQ clearing for pipeline pipeline1 not implemented"
-            )
 
 
 class TestDeadLetterQueueEdgeCases:

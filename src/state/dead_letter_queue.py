@@ -238,7 +238,12 @@ class LocalDLQStorage:
         return stats
 
     async def clear(self, pipeline_id: Optional[str] = None) -> None:
-        """Clear DLQ records."""
+        """Clear DLQ records.
+
+        With no ``pipeline_id`` every DLQ file is removed. Selective
+        per-pipeline clearing is not implemented and raises rather than
+        silently reporting success.
+        """
         if pipeline_id is None:
             dlq_files = list(self.dlq_path.glob("dlq_*.jsonl"))
             for dlq_file in dlq_files:
@@ -247,7 +252,10 @@ class LocalDLQStorage:
             self.current_file_size = 0
             logger.info("Cleared all DLQ records")
         else:
-            logger.info(f"Selective DLQ clearing for pipeline {pipeline_id} not implemented")
+            raise NotImplementedError(
+                "Selective DLQ clearing by pipeline_id is not implemented; "
+                "call clear() with no pipeline_id to clear all records"
+            )
 
     async def cleanup_old_records(self, retention_days: int) -> None:
         """Clean up old DLQ files."""

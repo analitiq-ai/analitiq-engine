@@ -80,29 +80,6 @@ class BaseStorageBackend(ABC):
         pass
 
     @abstractmethod
-    async def append_to_file(
-        self,
-        path: str,
-        data: bytes,
-    ) -> int:
-        """
-        Append data to an existing file.
-
-        If the file doesn't exist, it will be created.
-
-        Args:
-            path: Path to the file
-            data: Data to append
-
-        Returns:
-            Number of bytes written
-
-        Raises:
-            IOError: If append fails
-        """
-        pass
-
-    @abstractmethod
     async def file_exists(self, path: str) -> bool:
         """
         Check if a file exists at the given path.
