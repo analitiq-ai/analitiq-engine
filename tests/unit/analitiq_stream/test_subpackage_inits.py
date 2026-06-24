@@ -169,30 +169,6 @@ class TestSharedPackageInit:
             assert obj is not None
 
 
-class TestTransformationsPackageInit:
-    """Test transformations package __init__ file."""
-
-    @pytest.mark.unit
-    def test_transformations_imports(self):
-        """Test that transformations package can be imported."""
-        import src.transformations as transformations
-
-        # Package should be importable
-        assert transformations is not None
-
-    @pytest.mark.unit
-    def test_transformations_registry_import(self):
-        """Test that transformations can be imported from registry."""
-        from src.transformations.registry import (
-            TransformationRegistry, transformation_registry, TransformationError
-        )
-
-        assert TransformationRegistry is not None
-        assert transformation_registry is not None
-        assert TransformationError is not None
-        assert isinstance(transformation_registry, TransformationRegistry)
-
-
 class TestModelsPackageInit:
     """Test models package __init__ file."""
 

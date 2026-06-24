@@ -5,7 +5,7 @@ CSV is a widely-supported tabular format, ideal for spreadsheet compatibility.
 
 import csv
 import io
-from typing import Any, BinaryIO, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from .base import BaseFormatter
 
@@ -34,11 +34,6 @@ class CsvFormatter(BaseFormatter):
     def file_extension(self) -> str:
         """Return the file extension."""
         return ".csv"
-
-    @property
-    def is_binary(self) -> bool:
-        """CSV is a text format encoded as UTF-8 bytes."""
-        return False
 
     @property
     def content_type(self) -> str:
@@ -118,32 +113,6 @@ class CsvFormatter(BaseFormatter):
             writer.writerow(row)
 
         return output.getvalue().encode("utf-8")
-
-    def write_batch_to_stream(
-        self,
-        records: List[Dict[str, Any]],
-        stream: BinaryIO,
-        schema: Optional[Dict[str, Any]] = None,
-        append: bool = True,
-    ) -> int:
-        """
-        Write a batch of records directly to a stream.
-
-        Args:
-            records: List of record dictionaries
-            stream: Binary stream to write to
-            schema: Optional JSON Schema for column ordering
-            append: Whether appending (affects header inclusion)
-
-        Returns:
-            Number of bytes written
-        """
-        if not records:
-            return 0
-
-        data = self.serialize_batch(records, schema, append=append)
-        stream.write(data)
-        return len(data)
 
     def _format_value(self, value: Any) -> str:
         """

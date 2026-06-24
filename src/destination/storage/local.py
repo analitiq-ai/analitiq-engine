@@ -96,32 +96,6 @@ class LocalFileStorage(BaseStorageBackend):
         logger.debug(f"Wrote {len(data)} bytes to: {full_path}")
         return str(full_path)
 
-    async def append_to_file(
-        self,
-        path: str,
-        data: bytes,
-    ) -> int:
-        """
-        Append data to an existing file.
-
-        Args:
-            path: Relative path from base_path
-            data: Data to append
-
-        Returns:
-            Number of bytes written
-        """
-        full_path = self._require_path(path)
-
-        # Ensure parent directory exists
-        full_path.parent.mkdir(parents=True, exist_ok=True)
-
-        async with aiofiles.open(full_path, "ab") as f:
-            await f.write(data)
-
-        logger.debug(f"Appended {len(data)} bytes to: {full_path}")
-        return len(data)
-
     async def file_exists(self, path: str) -> bool:
         """
         Check if a file exists at the given path.

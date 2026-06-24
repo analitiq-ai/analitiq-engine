@@ -736,17 +736,3 @@ class ApiDestinationHandler(BaseDestinationHandler):
                 type(e).__name__, e, exc_info=True,
             )
             return False
-
-    def _mask_sensitive_headers(self, headers: Dict[str, str]) -> Dict[str, str]:
-        """Mask sensitive header values for logging."""
-        sensitive_keys = {"authorization", "x-api-key", "api-key", "token", "bearer"}
-        masked = {}
-        for key, value in headers.items():
-            if key.lower() in sensitive_keys:
-                if len(value) > 14:
-                    masked[key] = value[:14] + "***MASKED***"
-                else:
-                    masked[key] = "***MASKED***"
-            else:
-                masked[key] = value
-        return masked

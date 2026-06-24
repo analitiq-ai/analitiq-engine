@@ -19,11 +19,6 @@ pre-materialized ``ConnectionRuntime`` to verify:
 and connects/disconnects internally, so these tests pass the runtime directly
 rather than calling ``connect()`` first.
 
-Tie-breaker dedup is intentionally not exercised here: ``read_batches``
-initialises ``state["bookmarks"]`` empty, so the dedup comparators are
-unreachable through this entry point. They are pinned directly as pure
-functions in ``test_api_dedup_helpers.py``.
-
 No live HTTP. The session is a ``MagicMock`` with ``request`` returning
 an async context manager that yields a stub response.
 """
@@ -39,7 +34,7 @@ import pytest
 
 from cdk.secrets import InMemorySecretsResolver
 from cdk.connection_runtime import ConnectionRuntime
-from src.source.connectors.api import APIConnector
+from src.source.connectors.api import APIConnector, _extract_next_cursor
 from src.source.connectors.base import ReadError, TransientReadError
 
 # ---------------------------------------------------------------------------
@@ -151,7 +146,6 @@ def _stream_source(
     replication_method: str = "full_refresh",
     cursor_field: Optional[str] = None,
     safety_window: Optional[int] = None,
-    tie_breaker_fields: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     block: Dict[str, Any] = {
         "endpoint_ref": {
@@ -166,8 +160,6 @@ def _stream_source(
         block["replication"]["cursor_field"] = cursor_field
     if safety_window is not None:
         block["replication"]["safety_window_seconds"] = safety_window
-    if tie_breaker_fields:
-        block["replication"]["tie_breaker_fields"] = tie_breaker_fields
     return block
 
 
@@ -1292,3 +1284,34 @@ class TestReadBatchesRequestBody:
             {"paging": {"offset": 0, "limit": 2}},
             {"paging": {"offset": 2, "limit": 2}},
         ]
+
+
+class TestExtractNextCursor:
+    """``_extract_next_cursor`` is exercised end-to-end by the cursor-pagination
+    tests above; these pin its edge cases directly, restoring the direct
+    coverage that moved out with the removed dedup-helper test module."""
+
+    @pytest.mark.unit
+    def test_extracts_token_from_body_path(self):
+        assert _extract_next_cursor({"next": "abc"}, "response.body.next") == "abc"
+
+    @pytest.mark.unit
+    def test_non_dict_data_returns_none(self):
+        assert _extract_next_cursor("not-a-dict", "response.body.next") is None
+
+    @pytest.mark.unit
+    def test_none_token_returns_none(self):
+        assert _extract_next_cursor({"next": None}, "response.body.next") is None
+
+    @pytest.mark.unit
+    def test_empty_string_token_returns_none(self):
+        assert _extract_next_cursor({"next": ""}, "response.body.next") is None
+
+    @pytest.mark.unit
+    def test_body_only_ref_returns_none(self):
+        # ``response.body`` with no trailing field can never name a cursor.
+        assert _extract_next_cursor({"next": "abc"}, "response.body") is None
+
+    @pytest.mark.unit
+    def test_integer_token_coerced_to_str(self):
+        assert _extract_next_cursor({"next": 42}, "response.body.next") == "42"

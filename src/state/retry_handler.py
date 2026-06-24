@@ -187,32 +187,6 @@ class LinearBackoffRetry(RetryHandler):
         )
 
 
-class DatabaseRetry(RetryHandler):
-    """Specialized retry handler for database operations."""
-
-    def __init__(self):
-        import asyncio
-
-        # Define database-specific retryable exceptions
-        retryable_exceptions = (
-            ConnectionError,
-            TimeoutError,
-            asyncio.TimeoutError,
-            # Add database-specific exceptions here
-            # asyncpg.exceptions.ConnectionDoesNotExistError,
-            # asyncpg.exceptions.InterfaceError,
-        )
-
-        super().__init__(
-            max_retries=3,
-            base_delay=1.0,
-            max_delay=30.0,
-            backoff_multiplier=2.0,
-            jitter=True,
-            retryable_exceptions=retryable_exceptions,
-        )
-
-
 class APIRetry(RetryHandler):
     """Specialized retry handler for API operations."""
 

@@ -187,13 +187,12 @@ class APIConnector(BaseConnector):
         if isinstance(cursor_field, list):
             cursor_field = cursor_field[0] if cursor_field else None
         safety_window = replication_block.get("safety_window_seconds")
-        tie_breaker_fields = list(replication_block.get("tie_breaker_fields") or [])
 
         # Build the param value table from the declared ``params`` block:
         # defaults via value-expression resolution, then stream-level filter
         # overrides. ``controlled_by: pagination|replication`` params are
         # filled by their respective loops.
-        param_values, param_placements, controlled_params = self._build_base_params(
+        param_values, param_placements = self._build_base_params(
             read_spec, resolver, stream_source.get("filters") or []
         )
 
@@ -240,19 +239,12 @@ class APIConnector(BaseConnector):
             "ref", "response.body"
         )
 
-        state = {
-            "bookmarks": [],
-            "cursor_field": cursor_field,
-            "replication_method": replication_method,
-        }
-
         batch_count = 0
         total_records = 0
         async for batch in self._iterate_pages(
             full_url=full_url,
             method=method,
             base_params=param_values,
-            controlled_params=controlled_params,
             pagination=read_spec.get("pagination") or {},
             batch_size=batch_size,
             records_ref=records_ref,
@@ -260,15 +252,12 @@ class APIConnector(BaseConnector):
         ):
             if not batch:
                 continue
-            deduped = self._deduplicate_records(batch, state, cursor_field, tie_breaker_fields)
-            if not deduped:
-                continue
-            yield schema_contract.from_pylist(deduped)
+            yield schema_contract.from_pylist(batch)
 
             batch_count += 1
-            total_records += len(deduped)
+            total_records += len(batch)
             if cursor_field:
-                cursor_value = deduped[-1].get(cursor_field)
+                cursor_value = batch[-1].get(cursor_field)
                 if cursor_value is not None:
                     await checkpoint.save_cursor(
                         stream_name, partition, {"cursor": cursor_value}
@@ -334,7 +323,7 @@ class APIConnector(BaseConnector):
         read_spec: Dict[str, Any],
         resolver: Resolver,
         stream_filters: List[Dict[str, Any]],
-    ) -> tuple[Dict[str, Any], Dict[str, str], Dict[str, str]]:
+    ) -> tuple[Dict[str, Any], Dict[str, str]]:
         """Resolve declared param defaults and apply stream filter overrides.
 
         Defaults resolve through the full value-expression grammar
@@ -342,26 +331,19 @@ class APIConnector(BaseConnector):
         that does not resolve omits the parameter with a warning rather
         than sending the raw expression structure upstream.
 
-        Returns ``(param_values, placements, controlled_params)``:
-        ``param_values`` is the single value table (body ``from_param``
-        binding reads it whole; the caller filters ``in: body`` params
-        out of the query string via ``placements``), ``placements`` maps
-        param name to its declared ``in`` location, and
-        ``controlled_params`` maps controller name (``pagination`` or
-        ``replication``) to the controlled-by group recorded for the
-        param. Callers use it to keep pagination/replication loops from
-        clobbering each other's values.
+        Returns ``(param_values, placements)``: ``param_values`` is the
+        single value table (body ``from_param`` binding reads it whole;
+        the caller filters ``in: body`` params out of the query string via
+        ``placements``), and ``placements`` maps param name to its declared
+        ``in`` location. Params declared ``controlled_by`` pagination or
+        replication are left out of the defaults so their loops set them.
         """
         placements: Dict[str, str] = {}
-        controlled: Dict[str, str] = {}
         declared = read_spec.get("params") or {}
         for name, decl in declared.items():
             if not isinstance(decl, dict):
                 continue
             placements[name] = decl.get("in") or "query"
-            controlled_by = decl.get("controlled_by")
-            if controlled_by:
-                controlled[name] = controlled_by
 
         uncontrolled = {
             n: d for n, d in declared.items()
@@ -376,7 +358,7 @@ class APIConnector(BaseConnector):
             value = f.get("value")
             if value is not None:
                 param_values[target] = value
-        return param_values, placements, controlled
+        return param_values, placements
 
     # ------------------------------------------------------------------
     # Incremental replication
@@ -463,7 +445,6 @@ class APIConnector(BaseConnector):
         full_url: str,
         method: str,
         base_params: Dict[str, Any],
-        controlled_params: Dict[str, str],
         pagination: Dict[str, Any],
         batch_size: int,
         records_ref: str,
@@ -641,27 +622,6 @@ class APIConnector(BaseConnector):
         return data, records
 
     # ------------------------------------------------------------------
-    # Deduplication / checkpointing
-    # ------------------------------------------------------------------
-
-    def _deduplicate_records(
-        self,
-        batch: List[Dict[str, Any]],
-        state: Dict[str, Any],
-        cursor_field: Optional[str],
-        tie_breaker_fields: List[str],
-    ) -> List[Dict[str, Any]]:
-        bookmarks = state.get("bookmarks") or []
-        if not bookmarks or not cursor_field:
-            return batch
-        bookmark = bookmarks[0]
-        return [
-            r
-            for r in batch
-            if _is_record_new(r, bookmark, cursor_field, tie_breaker_fields or [])
-        ]
-
-    # ------------------------------------------------------------------
     # Base interface stubs
     # ------------------------------------------------------------------
 
@@ -719,80 +679,3 @@ def _extract_next_cursor(data: Any, response_field_ref: str) -> Optional[str]:
     if cursor in (None, ""):
         return None
     return str(cursor)
-
-
-def _get_nested_field(record: Dict[str, Any], field_path: str) -> Any:
-    """Return the value at the dot-delimited *field_path* in *record*, or ``None`` on any miss.
-
-    Field names containing a literal ``"."`` character are not supported.
-    """
-    return walk_path(record, field_path.split("."))
-
-
-def _is_record_new(
-    record: Dict[str, Any],
-    bookmark: Dict[str, Any],
-    cursor_field: str,
-    tie_breaker_fields: List[str],
-) -> bool:
-    """Decide whether ``record`` is past the stored bookmark.
-
-    Cursor values are compared as ISO timestamps when parseable, else as
-    strings. Equal cursors fall through to tie-breaker comparison; in
-    inclusive mode an exact tie-breaker match is treated as a duplicate.
-    """
-    from dateutil.parser import isoparse
-
-    record_cursor_value = record.get(cursor_field)
-    if record_cursor_value is None:
-        return True
-    stored_cursor = bookmark.get("cursor")
-    if stored_cursor is None:
-        return True
-    try:
-        rdt = isoparse(str(record_cursor_value))
-        sdt = isoparse(str(stored_cursor))
-        if rdt.tzinfo is None:
-            rdt = rdt.replace(tzinfo=timezone.utc)
-        if sdt.tzinfo is None:
-            sdt = sdt.replace(tzinfo=timezone.utc)
-        if rdt > sdt:
-            return True
-        if rdt < sdt:
-            return False
-    except (ValueError, TypeError):
-        if str(record_cursor_value) > str(stored_cursor):
-            return True
-        if str(record_cursor_value) < str(stored_cursor):
-            return False
-    # Tie on cursor value: compare tie-breakers (inclusive mode keeps
-    # exact matches out).
-    aux = bookmark.get("aux") or {}
-    stored_tiebreakers = aux.get("tiebreakers") or []
-    for i, field_name in enumerate(tie_breaker_fields):
-        if i >= len(stored_tiebreakers):
-            return True
-        record_value = _get_nested_field(record, field_name)
-        stored_value = stored_tiebreakers[i].get("value")
-        if record_value is None:
-            return True
-        try:
-            if (
-                isinstance(stored_value, str)
-                and str(record_value).isdigit()
-                and stored_value.isdigit()
-            ):
-                if int(record_value) > int(stored_value):
-                    return True
-                if int(record_value) < int(stored_value):
-                    return False
-                continue
-        except (ValueError, TypeError):
-            # Non-integer digit-strings (e.g. Unicode digits) fall through
-            # to the lexicographic compare below.
-            pass
-        if str(record_value) > str(stored_value):
-            return True
-        if str(record_value) < str(stored_value):
-            return False
-    return False
