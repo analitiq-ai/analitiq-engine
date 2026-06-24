@@ -243,11 +243,33 @@ _CONFIG_NAMES = frozenset({
     "TransportSpecError", "TypeMapError", "InvalidTypeMapError",
     "TypeMapNotFoundError", "UnmappedTypeError", "UnsupportedDialectOperationError",
     "AdbcConfigurationError", "ConnectorNotRegisteredError",
-    "UnresolvedValueError", "SecretNotFoundError", "PlaceholderExpansionError",
-    "SchemaError", "SchemaConfigurationError", "TransformationError",
+    "UnresolvedValueError", "SchemaError", "SchemaConfigurationError",
+    "TransformationError",
+    # Secret resolution (missing/denied/malformed credentials, placeholder
+    # expansion) is config/setup, not source-system auth -- match the base so
+    # every subclass routes to CONFIG_INVALID.
+    "SecretResolutionError", "SecretNotFoundError", "SecretAccessDeniedError",
+    "PlaceholderExpansionError",
 })
 
-_AUTH_NAMES = frozenset({"SecretAccessDeniedError"})
+# Config-exception class names that survive only as text across a process
+# boundary (forwarded as "{TypeName}: ..." in a worker prefix, a destination
+# fatal-ack summary, or a handshake reason), where the live type is just the
+# wrapper and the name is mid-message. Matching them keeps a config defect
+# classified as CONFIG_INVALID wherever it surfaces. These are our own
+# controlled class names, not arbitrary driver text.
+_CONFIG_PHRASES = (
+    "secretresolutionerror", "secretnotfounderror", "secretaccessdeniederror",
+    "placeholderexpansionerror", "unmappedtypeerror", "invalidtypemaperror",
+    "typemapnotfounderror", "type-map:", "transportspecerror",
+    "adbcconfigurationerror", "unsupporteddialectoperationerror",
+    "schemaconfigurationerror", "transformationerror", "configvalidationerror",
+    "connectornotregisterederror",
+)
+
+# Source-system auth failures surface only as driver/HTTP text (this engine has
+# no typed source-auth exception; secret-store errors are config, see above).
+_AUTH_NAMES = frozenset()
 _AUTH_PHRASES = (
     "authentication failed", "password authentication failed",
     "permission denied", "access denied", "access is denied",
@@ -291,8 +313,8 @@ _UNREACHABLE_PHRASES = (
 # configuration defect -> CONFIG_INVALID.
 _HANDSHAKE_MARKER = "did not accept the stream"
 _HANDSHAKE_TRANSPORT_PHRASES = (
-    "before schema ack", "did not acknowledge the schema",
-    "channel did not connect", "did not connect",
+    "before schema ack", "before sending schema ack", "closed stream",
+    "did not acknowledge the schema", "channel did not connect", "did not connect",
 )
 
 # PEP-249 driver names (ProgrammingError / IntegrityError / NotSupportedError)
@@ -341,7 +363,7 @@ def classify_exception(exc: BaseException) -> ErrorCode:
 
     if names & _LOCAL_IO_NAMES:
         return ErrorCode.INTERNAL
-    if _matches(names, text, _CONFIG_NAMES, ()):
+    if _matches(names, text, _CONFIG_NAMES, _CONFIG_PHRASES):
         return ErrorCode.CONFIG_INVALID
     if _HANDSHAKE_MARKER in text:
         # Destination handshake failure: a transport reason means the

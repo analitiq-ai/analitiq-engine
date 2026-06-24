@@ -522,7 +522,9 @@ class TestEngineStreamFailurePropagation:
             nonlocal call_count
             call_count += 1
             if stream_config.get("name") == "failing-stream":
-                raise StreamProcessingError("Stream failed", stream_id=stream_id)
+                raise StreamProcessingError(
+                    "password authentication failed", stream_id=stream_id
+                )
             # Success for other streams
             return None
 
@@ -539,6 +541,15 @@ class TestEngineStreamFailurePropagation:
         # Assert: one succeeded, one failed
         assert engine.metrics.streams_failed == 1
         assert engine.metrics.streams_processed == 1
+
+        # The failed stream's exception is surfaced so the runner can classify
+        # the partial run instead of reporting success (issue #258).
+        from src.state.error_classification import classify_for_metrics, ErrorCode
+
+        dominant = engine.get_dominant_stream_error()
+        assert dominant is not None
+        code, _, _ = classify_for_metrics(dominant)
+        assert code is ErrorCode.SOURCE_AUTH_FAILED
 
 
 @pytest.mark.integration

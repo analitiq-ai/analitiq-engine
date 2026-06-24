@@ -318,16 +318,26 @@ class PipelineRunner:
             records_processed = getattr(metrics, "records_processed", 0)
             batches_processed = getattr(metrics, "batches_processed", 0)
             records_failed = getattr(metrics, "records_failed", 0)
+            streams_failed = getattr(metrics, "streams_failed", 0)
 
             logger.info(f"Records processed: {records_processed}")
             logger.info(f"Batches processed: {batches_processed}")
 
-            if records_failed > 0:
+            # stream_data only raises when ALL streams fail; a partial run (some
+            # streams failed, or records were dead-lettered) returns normally, so
+            # classify the dominant cause here rather than reporting success.
+            stream_error = engine.get_dominant_stream_error()
+            if stream_error is not None:
+                # A stream raised (e.g. a source auth/config failure) while
+                # others succeeded. Classify that exception.
+                status = "partial"
+                error_code, error_message, error_detail = classify_for_metrics(stream_error)
+                logger.warning(f"Partial run: {streams_failed} stream(s) failed [{error_code.value}]")
+            elif records_failed > 0:
                 logger.warning(f"Failed records: {records_failed} (check dead letter queue)")
                 status = "partial"
-                # A partial run raised no exception, but records were dead-
-                # lettered -- a destination write rejection. Carry the dominant
-                # cause so the public error_code is populated for partial runs.
+                # Records were dead-lettered with no raised exception -- a
+                # destination write rejection. Carry the dominant DLQ cause.
                 error_code = ErrorCode.DESTINATION_WRITE_FAILED
                 error_message = customer_message(error_code)
                 dominant_failure = engine.get_dominant_failure()

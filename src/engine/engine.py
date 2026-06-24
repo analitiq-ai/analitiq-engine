@@ -96,6 +96,12 @@ class StreamingEngine:
         # the runner reads this to classify the dominant cause.
         self._dlq_failure_summary: Optional[str] = None
 
+        # Representative exception from a stream that failed while OTHER streams
+        # succeeded (a partial run that stream_data does not re-raise). The
+        # runner classifies it so a partial run with a failed stream is not
+        # reported as success.
+        self._dominant_stream_error: Optional[BaseException] = None
+
         # Connector code never runs in the engine process: every source read
         # goes through an isolated worker subprocess that owns the connector
         # class, the driver, and the external connection (registry resolution
@@ -176,9 +182,11 @@ class StreamingEngine:
                     logger.error("All streams failed - pipeline failed completely")
                     raise ExceptionGroup("All streams failed", stream_exceptions)
                 else:
-                    # Partial failure - log but allow pipeline to complete
+                    # Partial failure - log but allow pipeline to complete.
+                    # Keep the first failed-stream exception so the runner can
+                    # classify the partial run instead of reporting success.
                     logger.warning(f"Pipeline completed with {len(stream_exceptions)} failed streams out of {len(streams)}")
-                    # Could optionally raise ExceptionGroup based on failure threshold
+                    self._dominant_stream_error = stream_exceptions[0]
             else:
                 logger.info(f"Pipeline {pipeline_id} completed successfully - all {len(streams)} streams processed")
 
@@ -926,6 +934,14 @@ class StreamingEngine:
         failures are always destination write rejections.
         """
         return self._dlq_failure_summary
+
+    def get_dominant_stream_error(self) -> Optional[BaseException]:
+        """Representative exception from a stream that failed in a partial run.
+
+        Set when some (not all) streams fail: stream_data logs and returns
+        without raising, so the runner reads this to classify the partial run.
+        """
+        return self._dominant_stream_error
 
     def _record_dlq_failure(self, summary: str, stream_metrics: Dict[str, Any]) -> None:
         """Keep the first DLQ failure summary, both run-wide and per stream.

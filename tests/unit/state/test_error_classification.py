@@ -88,10 +88,27 @@ def test_source_auth_failed_by_message(message):
     assert classify_exception(_make("RuntimeError", message=message)) is ErrorCode.SOURCE_AUTH_FAILED
 
 
-def test_source_auth_failed_by_type():
-    from cdk.secrets.exceptions import SecretAccessDeniedError
+def test_secret_resolution_failures_are_config_invalid():
+    # Secret-store resolution failures (missing / access-denied / malformed
+    # credentials, placeholder expansion) are config/setup -- not source-system
+    # auth, which the engine only ever sees as driver/HTTP text.
+    from cdk.secrets.exceptions import (
+        SecretResolutionError,
+        SecretNotFoundError,
+        SecretAccessDeniedError,
+        PlaceholderExpansionError,
+    )
 
-    assert classify_exception(SecretAccessDeniedError("conn-1")) is ErrorCode.SOURCE_AUTH_FAILED
+    for exc in [
+        SecretResolutionError("malformed credentials.json"),
+        SecretNotFoundError("conn-1"),
+        SecretAccessDeniedError("conn-1"),
+        PlaceholderExpansionError("password", "conn-1"),
+    ]:
+        assert classify_exception(exc) is ErrorCode.CONFIG_INVALID, exc
+    # Across the worker boundary it survives only as an "error_type:" prefix.
+    boundary = _make("RuntimeError", message="SecretResolutionError: bad file (worker src-worker:pg:s1)")
+    assert classify_exception(boundary) is ErrorCode.CONFIG_INVALID
 
 
 @pytest.mark.parametrize("message", [
@@ -144,6 +161,22 @@ def test_destination_write_failed(name, message):
     assert classify_exception(_make(name, message=message)) is ErrorCode.DESTINATION_WRITE_FAILED
 
 
+@pytest.mark.parametrize("summary,expected", [
+    # A destination batch write that fails with a CONFIG-typed cause (forwarded
+    # in the fatal-ack summary) is a config defect, not a write failure.
+    ("UnmappedTypeError: no rule for 'geography'", ErrorCode.CONFIG_INVALID),
+    ("SchemaConfigurationError: unsupported write mode", ErrorCode.CONFIG_INVALID),
+    ("type-map: no reverse rule", ErrorCode.CONFIG_INVALID),
+    # A genuine write failure (constraint / permission on the destination) stays
+    # a write failure.
+    ("duplicate key value violates unique constraint", ErrorCode.DESTINATION_WRITE_FAILED),
+    ("permission denied for table orders", ErrorCode.DESTINATION_WRITE_FAILED),
+])
+def test_destination_write_config_cause_is_config(summary, expected):
+    msg = f"Batch 3 fatal failure: {summary}"
+    assert classify_exception(_make("StreamProcessingError", message=msg)) is expected
+
+
 @pytest.mark.parametrize("message,expected", [
     # PEP-249 driver names are transport-ambiguous; a live driver exception in
     # the chain comes from the SOURCE worker (the "src-worker" label), so it must
@@ -170,7 +203,7 @@ def test_real_typemap_mro_routing():
 @pytest.mark.parametrize("error_type,expected", [
     ("SecretNotFoundError", ErrorCode.CONFIG_INVALID),
     ("ConnectorNotRegisteredError", ErrorCode.CONFIG_INVALID),
-    ("SecretAccessDeniedError", ErrorCode.SOURCE_AUTH_FAILED),
+    ("SecretAccessDeniedError", ErrorCode.CONFIG_INVALID),
 ])
 def test_worker_error_type_prefix_promoted_to_name(error_type, expected):
     # The gRPC worker collapses the type to ReadError/RuntimeError but preserves
@@ -204,6 +237,7 @@ def test_local_filesystem_error_is_internal_not_source_auth():
     # inner reason text), so no proto change is needed to tell them apart.
     ("destination did not acknowledge the schema within 30s", ErrorCode.DESTINATION_WRITE_FAILED),
     ("stream reader/writer exited before schema ACK: boom", ErrorCode.DESTINATION_WRITE_FAILED),
+    ("destination closed stream before sending schema ACK", ErrorCode.DESTINATION_WRITE_FAILED),
     ("destination worker channel did not connect", ErrorCode.DESTINATION_WRITE_FAILED),
     # configuration reasons -> a destination config defect (configure_schema only
     # builds the destination's own table; nothing is validated against a schema).
@@ -281,12 +315,11 @@ def test_is_local_io_error(exc, expected):
 
 def test_original_error_attribute_is_followed():
     from src.engine.exceptions import StreamProcessingError
-    from cdk.secrets.exceptions import SecretAccessDeniedError
 
     wrapped = StreamProcessingError(
         "Stream processing failed",
         stream_id="s1",
-        original_error=SecretAccessDeniedError("conn-1"),
+        original_error=_make("RuntimeError", message="password authentication failed"),
     )
     assert classify_exception(wrapped) is ErrorCode.SOURCE_AUTH_FAILED
 
