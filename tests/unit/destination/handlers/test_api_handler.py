@@ -561,6 +561,62 @@ class TestApiHandlerBatchModes:
         assert result.committed_cursor is None
         assert result.failed_record_ids == ("r2", "r3", "r4")
 
+    @pytest.mark.asyncio
+    async def test_batch_mode_first_chunk_failure_reraises(
+        self,
+        api_handler: ApiDestinationHandler,
+    ):
+        """A transport failure on the FIRST chunk (nothing landed yet) must
+        re-raise so it surfaces as RETRYABLE — there is no landed chunk to
+        duplicate, so it must not be fatally DLQ'd."""
+        import aiohttp
+
+        state = api_handler._streams["test-stream"]
+        state.batch_mode = ApiDestinationHandler.BATCH_MODE_BATCH
+        state.batch_size = 2
+
+        api_handler._send_request = AsyncMock(
+            side_effect=aiohttp.ClientConnectionError("first chunk down")
+        )
+        records = [{"id": i} for i in range(5)]
+        record_ids = [f"r{i}" for i in range(5)]
+
+        with pytest.raises(aiohttp.ClientConnectionError):
+            await api_handler._write_batch_mode(state, records, record_ids)
+
+    @pytest.mark.asyncio
+    async def test_write_batch_first_chunk_failure_is_retryable_end_to_end(
+        self,
+        api_handler: ApiDestinationHandler,
+        mock_cursor: MagicMock,
+    ):
+        """End-to-end: a first-chunk transport failure is RETRYABLE (no dup
+        risk), matching bulk mode, instead of FATAL."""
+        import aiohttp
+
+        api_handler._connected = True
+        api_handler._session = MagicMock()
+        state = api_handler._streams["test-stream"]
+        state.batch_mode = ApiDestinationHandler.BATCH_MODE_BATCH
+        state.batch_size = 2
+
+        api_handler._send_request = AsyncMock(
+            side_effect=aiohttp.ClientConnectionError("first chunk down")
+        )
+
+        result = await api_handler.write_batch(
+            run_id="r",
+            stream_id="test-stream",
+            batch_seq=1,
+            record_batch=_to_record_batch([{"id": i} for i in range(5)]),
+            record_ids=[f"r{i}" for i in range(5)],
+            cursor=mock_cursor,
+        )
+
+        assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
+        assert result.records_written == 0
+        assert result.committed_cursor is None
+
 
 @pytest.mark.unit
 class TestApiHandlerConfigureSchemaModeDispatch:

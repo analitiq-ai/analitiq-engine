@@ -13,7 +13,7 @@ Cursor format (internal to engine):
 }
 
 This is JSON-encoded and stored as bytes for simplicity and debuggability.
-A ``datetime``/``date``/``Decimal`` value is tagged via ``encode_value``
+A ``datetime``/``date``/``time``/``Decimal`` value is tagged via ``encode_value``
 (``{"__type__": "datetime", "value": ...}``) so its type survives the JSON
 round trip through the destination ACK and into the durable resume state,
 instead of being flattened to an ambiguous ISO string or a lossy float. The
@@ -64,13 +64,12 @@ def encode_cursor(
             if field in tie_breaker_values
         ]
 
-    # ``encode_value`` already tags the types JSON cannot represent
-    # (datetime/date/Decimal); ``default=str`` is a defensive backstop so an
-    # unforeseen non-JSON scalar degrades to its string form instead of
-    # raising ``TypeError`` and aborting the load loop mid-batch.
-    token = json.dumps(
-        cursor_data, separators=(",", ":"), default=str
-    ).encode("utf-8")
+    # ``encode_value`` tags every JSON-unsupported scalar the engine presents
+    # as a cursor value (datetime/date/time/Decimal) so it round-trips
+    # losslessly. No ``default=`` fallback: an unforeseen non-JSON type must
+    # fail loud here rather than be silently stringified into a type the next
+    # run cannot restore, which would change the bind in the source filter.
+    token = json.dumps(cursor_data, separators=(",", ":")).encode("utf-8")
     return Cursor(token=token)
 
 

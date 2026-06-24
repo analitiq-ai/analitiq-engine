@@ -624,11 +624,18 @@ class ApiDestinationHandler(BaseDestinationHandler):
         Returns ``(written, failed_record_ids)``. The written count tracks
         records actually sent so a mid-loop chunk failure reports the true
         count instead of 0 — reporting 0 (and RETRYABLE) would re-send the
-        chunks that already landed and duplicate them. A transport failure on
-        a chunk stops the loop and attributes every not-yet-written record id
-        as failed; the shared result path then makes it FATAL. Non-transport
-        (authoring/programming) errors propagate to write_batch and become
-        FATAL there, matching single mode.
+        chunks that already landed and duplicate them.
+
+        Two transport-failure cases differ by whether a chunk already landed:
+        - failure before any chunk succeeded (``written == 0``) re-raises, so
+          write_batch classifies it RETRYABLE like bulk mode — nothing was
+          written, so a retry cannot duplicate;
+        - failure after at least one chunk landed stops the loop and attributes
+          every not-yet-written record id as failed, so the shared result path
+          makes it FATAL and a whole-batch retry cannot re-send the landed
+          chunk.
+        Non-transport (authoring/programming) errors propagate to write_batch
+        and become FATAL there, matching single mode.
         """
         written = 0
 
@@ -637,6 +644,9 @@ class ApiDestinationHandler(BaseDestinationHandler):
             try:
                 await self._send_request(state, self._build_body(state, records=batch))
             except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                if written == 0:
+                    # No chunk landed yet — safe to retry the whole batch.
+                    raise
                 logger.warning(
                     "Failed to write batch chunk at offset %d (%d records): %s: %s",
                     i, len(batch), type(e).__name__, e,

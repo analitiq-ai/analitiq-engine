@@ -110,6 +110,37 @@ class TestEncodeDecode:
         assert decoded["value"] == {"__type__": "decimal", "value": "123.4500"}
         assert decode_value(decoded["value"]) == value
 
+    def test_encode_cursor_with_time(self):
+        """A datetime.time cursor (Time32/Time64 column) is tagged and
+        round-trips, rather than being silently stringified by a default= hook.
+        """
+        from datetime import time
+
+        from src.state.store import decode_value
+
+        value = time(13, 45, 30)
+        cursor = encode_cursor(cursor_field="t", cursor_value=value)
+
+        decoded = json.loads(cursor.token.decode("utf-8"))
+        assert decoded["value"] == {"__type__": "time", "value": value.isoformat()}
+        assert decode_value(decoded["value"]) == value
+
+    def test_encode_cursor_unsupported_type_fails_loud(self):
+        """An unforeseen non-JSON cursor type must raise (no default=str
+        backstop) rather than be silently stringified into a type the next run
+        cannot restore."""
+        with pytest.raises(TypeError):
+            encode_cursor(cursor_field="c", cursor_value=object())
+
+    def test_decode_value_malformed_decimal_raises_value_error(self):
+        """A corrupt decimal tag must raise ValueError (not the uncaught
+        ArithmeticError that Decimal() would), so the tolerant restore callers
+        degrade a corrupt checkpoint to a full re-scan."""
+        from src.state.store import decode_value
+
+        with pytest.raises(ValueError, match="malformed decimal"):
+            decode_value({"__type__": "decimal", "value": "not-a-number"})
+
 
 class TestComputeMaxCursor:
     """Tests for compute_max_cursor function."""

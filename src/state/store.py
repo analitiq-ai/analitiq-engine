@@ -14,10 +14,11 @@ cursor arrives as a ``datetime`` — which JSON cannot represent and which the
 source rebinds verbatim into ``cursor_field >= ?`` with no cast. asyncpg infers
 that bind as the column's type and rejects a plain string for a timestamp
 param, so a reloaded timestamp cursor must come back as a ``datetime``, not its
-ISO text. ``encode_value``/``decode_value`` tag ``datetime``/``date`` as
-``{"__type__": ..., "value": ...}`` to round-trip them losslessly; JSON-native
-scalars (``int``, ``str``) pass through unchanged. This same tagging travels
-the gRPC cursor token and the durable ``RESUME_STATE`` payload (see
+ISO text. ``encode_value``/``decode_value`` tag ``datetime``/``date``/``time``/
+``Decimal`` as ``{"__type__": ..., "value": ...}`` to round-trip them
+losslessly; JSON-native scalars (``int``, ``str``) pass through unchanged. This
+same tagging travels the gRPC cursor token and the durable ``RESUME_STATE``
+payload (see
 ``src/grpc/cursor.py`` and ``parse_resume_state``), so the type is carried
 end-to-end and never guessed from a string's shape — a ``str`` cursor whose
 value looks like a date stays a ``str``.
@@ -43,8 +44,8 @@ import contextlib
 import json
 import logging
 import os
-from datetime import date, datetime
-from decimal import Decimal
+from datetime import date, datetime, time
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Dict, Optional, Set
 
@@ -186,32 +187,40 @@ class CursorStore:
 
 
 def encode_value(value: Any) -> Any:
-    """Tag a ``datetime``/``date``/``Decimal`` so JSON can round-trip its type.
+    """Tag a ``datetime``/``date``/``time``/``Decimal`` so JSON round-trips it.
 
     Shared by the on-disk checkpoint, the worker cursor-state wire, and the
     gRPC cursor token (``src/grpc/cursor.py``) so every place a cursor is
     serialized carries the type the same way. JSON-native scalars are returned
     unchanged.
 
-    ``Decimal`` is tagged for the same reason ``datetime`` is: a ``NUMERIC`` /
-    ``DECIMAL`` cursor column arrives as a ``Decimal``, which JSON cannot
-    represent and which the source rebinds verbatim into ``cursor_field >= ?``.
-    Tagging round-trips it losslessly; flattening to ``float`` would lose
-    precision and flattening to ``str`` would force the read path to guess the
-    type back.
+    Every JSON-unsupported scalar the engine can present as a cursor value is
+    tagged so it round-trips losslessly into the resume bind: ``datetime`` /
+    ``date`` / ``time`` (timestamp/date/time columns) and ``Decimal`` (a
+    ``NUMERIC`` / ``DECIMAL`` column, which the source rebinds verbatim into
+    ``cursor_field >= ?``). Flattening to ``float`` would lose precision and
+    flattening to ``str`` would force the read path to guess the type back.
     """
     # datetime is a subclass of date, so check it first.
     if isinstance(value, datetime):
         return {_TYPE_KEY: "datetime", _VALUE_KEY: value.isoformat()}
     if isinstance(value, date):
         return {_TYPE_KEY: "date", _VALUE_KEY: value.isoformat()}
+    if isinstance(value, time):
+        return {_TYPE_KEY: "time", _VALUE_KEY: value.isoformat()}
     if isinstance(value, Decimal):
         return {_TYPE_KEY: "decimal", _VALUE_KEY: str(value)}
     return value
 
 
 def decode_value(value: Any) -> Any:
-    """Inverse of :func:`encode_value`; untagged scalars pass through."""
+    """Inverse of :func:`encode_value`; untagged scalars pass through.
+
+    A malformed tagged value raises ``ValueError`` (never an arithmetic or
+    other exception type) so the tolerant restore callers — which catch
+    ``ValueError``/``TypeError`` to degrade a corrupt checkpoint to a full
+    re-scan — handle every tag the same way.
+    """
     if isinstance(value, dict) and _TYPE_KEY in value:
         kind = value[_TYPE_KEY]
         raw = value.get(_VALUE_KEY)
@@ -219,6 +228,17 @@ def decode_value(value: Any) -> Any:
             return datetime.fromisoformat(raw)
         if kind == "date":
             return date.fromisoformat(raw)
+        if kind == "time":
+            return time.fromisoformat(raw)
         if kind == "decimal":
-            return Decimal(raw)
+            # Decimal(raw) raises decimal.InvalidOperation (an ArithmeticError,
+            # not ValueError) on a malformed value; normalize it so a corrupt
+            # decimal checkpoint degrades to a re-scan like a bad datetime would,
+            # instead of escaping the tolerant callers and aborting state load.
+            try:
+                return Decimal(raw)
+            except InvalidOperation as exc:
+                raise ValueError(
+                    f"malformed decimal cursor value {raw!r}"
+                ) from exc
     return value
