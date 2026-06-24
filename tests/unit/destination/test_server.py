@@ -147,6 +147,51 @@ class TestSchemaAckTypeMapError:
 
         assert responses[0].schema_ack.accepted is False
         assert responses[0].schema_ack.message == "Schema configuration failed"
+        # A direct handler returning False with no transport signal is a genuine
+        # schema rejection -> SCHEMA_MISMATCH on the engine side (issue #264).
+        assert responses[0].schema_ack.schema_rejected is True
+
+    @pytest.mark.asyncio
+    async def test_proxy_transport_failure_marks_ack_not_schema_rejected(self):
+        """When the worker proxy reports an inner transport failure
+        (last_schema_rejected=False), the engine-facing SchemaAck must carry
+        schema_rejected=False so a proxied destination outage classifies as
+        DESTINATION_WRITE_FAILED, not SCHEMA_MISMATCH (issue #264)."""
+        handler = MagicMock()
+        handler.configure_schema = AsyncMock(return_value=False)
+        handler.last_schema_rejection = "destination worker channel did not connect"
+        handler.last_schema_rejected = False
+
+        servicer = DestinationServicer(handler, server=MagicMock())
+        responses = []
+        async for resp in servicer.StreamRecords(
+            _iter_once(_schema_request("s6")), context=MagicMock()
+        ):
+            responses.append(resp)
+
+        ack = responses[0].schema_ack
+        assert ack.accepted is False
+        assert ack.schema_rejected is False
+        assert ack.message == "destination worker channel did not connect"
+
+    @pytest.mark.asyncio
+    async def test_deterministic_config_error_is_genuine_schema_rejection(self):
+        """A deterministic config error caught into the SchemaAck is the
+        destination evaluating and refusing the schema -> schema_rejected=True."""
+        handler = MagicMock()
+        handler.configure_schema = AsyncMock(
+            side_effect=UnmappedTypeError("pg", "forward", "MONEY")
+        )
+
+        servicer = DestinationServicer(handler, server=MagicMock())
+        responses = []
+        async for resp in servicer.StreamRecords(
+            _iter_once(_schema_request("s7")), context=MagicMock()
+        ):
+            responses.append(resp)
+
+        assert responses[0].schema_ack.accepted is False
+        assert responses[0].schema_ack.schema_rejected is True
 
     @pytest.mark.asyncio
     async def test_generic_exception_still_aborts_stream(self):

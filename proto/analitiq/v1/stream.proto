@@ -137,4 +137,14 @@ message SchemaAck {
   string stream_id = 1;
   bool accepted = 2;
   string message = 3;  // Error message if not accepted
+
+  // Meaningful only when accepted=false. True iff this is a genuine schema
+  // rejection (the destination evaluated the schema and refused it); false iff
+  // the NACK stands in for a transport/handshake failure that never reached a
+  // schema verdict. The destination worker proxy converts an inner worker
+  // transport failure into an outer NACK, so without this flag a proxied
+  // destination outage is indistinguishable from a real schema mismatch. The
+  // engine reads it to classify DESTINATION_WRITE_FAILED vs SCHEMA_MISMATCH
+  // structurally instead of keyword-guessing the message.
+  bool schema_rejected = 4;
 }

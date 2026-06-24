@@ -105,6 +105,66 @@ class TestProxyConfigureSchema:
         assert schema_config["ack_timeout_seconds"] == 300
         assert schema_config["write_mode"] == "upsert"
 
+    def _spec(self):
+        return SchemaSpec(
+            stream_id="s1",
+            version=1,
+            write_mode=WriteMode.WRITE_MODE_UPSERT,
+            ack_timeout_seconds=300,
+        )
+
+    async def test_inner_schema_nack_forwards_as_genuine_rejection(self):
+        """A real schema NACK from the worker forwards schema_rejected=True so the
+        engine classifies SCHEMA_MISMATCH through the proxy (issue #264)."""
+        proxy = _proxy()
+        proxy._handle = _handle()
+        client = MagicMock()
+        client.connect = AsyncMock(return_value=True)
+        client.start_stream = AsyncMock(return_value=False)
+        client.disconnect = AsyncMock()
+        client.schema_rejection_message = "unsupported write mode"
+        client.schema_rejected = True
+
+        with patch("src.worker.proxy.DestinationGRPCClient", return_value=client):
+            accepted = await proxy.configure_schema(self._spec())
+
+        assert accepted is False
+        assert proxy.last_schema_rejected is True
+        assert proxy.last_schema_rejection == "unsupported write mode"
+
+    async def test_inner_transport_failure_forwards_as_not_schema(self):
+        """An inner worker transport failure (no schema verdict) forwards
+        schema_rejected=False, so a proxied outage is DESTINATION_WRITE_FAILED,
+        not SCHEMA_MISMATCH -- the bug the issue #264 comment calls out."""
+        proxy = _proxy()
+        proxy._handle = _handle()
+        client = MagicMock()
+        client.connect = AsyncMock(return_value=True)
+        client.start_stream = AsyncMock(return_value=False)
+        client.disconnect = AsyncMock()
+        client.schema_rejection_message = "destination closed stream before sending schema ACK"
+        client.schema_rejected = False  # a transport failure never reached a verdict
+
+        with patch("src.worker.proxy.DestinationGRPCClient", return_value=client):
+            accepted = await proxy.configure_schema(self._spec())
+
+        assert accepted is False
+        assert proxy.last_schema_rejected is False
+
+    async def test_worker_channel_down_is_not_schema_rejection(self):
+        """If the UDS channel to the worker never connects, the schema was never
+        evaluated -- a transport failure, schema_rejected=False."""
+        proxy = _proxy()
+        proxy._handle = _handle()
+        client = MagicMock()
+        client.connect = AsyncMock(return_value=False)
+
+        with patch("src.worker.proxy.DestinationGRPCClient", return_value=client):
+            accepted = await proxy.configure_schema(self._spec())
+
+        assert accepted is False
+        assert proxy.last_schema_rejected is False
+
 
 class TestProxyWriteBatch:
     async def test_write_before_configure_is_retryable_not_silent(self):

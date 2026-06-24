@@ -16,9 +16,13 @@ from ..state.circuit_breaker import CircuitBreaker
 from ..state.dead_letter_queue import DeadLetterQueue
 from ..state.error_classification import (
     ErrorCode,
+    FailureStage,
     classify_for_metrics,
+    classify_source_extract,
     customer_message,
-    sanitize_detail,
+    detail_for_code,
+    read_failure_tag,
+    tag_failure,
 )
 from ..state.metrics_storage import emit_metrics_log, create_metrics_record
 from ..state.retry_handler import RetryHandler
@@ -240,9 +244,13 @@ class StreamingEngine:
             stream_dlq = DeadLetterQueue(stream_dlq_path)
 
             if not source_cfg.get("_resolved_source"):
-                raise StreamConfigurationError(
-                    "Missing _resolved_source in source config",
-                    stream_id=stream_id,
+                raise tag_failure(
+                    StreamConfigurationError(
+                        "Missing _resolved_source in source config",
+                        stream_id=stream_id,
+                    ),
+                    code=ErrorCode.CONFIG_INVALID,
+                    stage=FailureStage.CONFIG,
                 )
 
             run_id = self.state_manager.current_run_id or get_or_generate_run_id()
@@ -250,9 +258,13 @@ class StreamingEngine:
             grpc_client = self._create_grpc_client(destination_cfg)
             connected = await grpc_client.connect()
             if not connected:
-                raise StreamProcessingError(
-                    f"Failed to connect to gRPC destination for stream {stream_name}",
-                    stream_id=stream_id,
+                raise tag_failure(
+                    StreamProcessingError(
+                        f"Failed to connect to gRPC destination for stream {stream_name}",
+                        stream_id=stream_id,
+                    ),
+                    code=ErrorCode.DESTINATION_WRITE_FAILED,
+                    stage=FailureStage.DESTINATION_LOAD,
                 )
 
             schema_accepted = await grpc_client.start_stream(
@@ -271,9 +283,19 @@ class StreamingEngine:
                 detail = f": {reason}" if reason else ""
                 if grpc_client.schema_rejected:
                     message = f"Destination rejected schema for stream {stream_name}{detail}"
+                    code = ErrorCode.SCHEMA_MISMATCH
                 else:
                     message = f"Destination handshake failed for stream {stream_name}{detail}"
-                raise StreamProcessingError(message, stream_id=stream_id)
+                    code = ErrorCode.DESTINATION_WRITE_FAILED
+                # schema_rejected is now a structured wire signal (SchemaAck), so
+                # it stays true through the destination worker proxy only for a
+                # genuine schema NACK -- a proxied transport failure tags
+                # DESTINATION_WRITE_FAILED, not SCHEMA_MISMATCH.
+                raise tag_failure(
+                    StreamProcessingError(message, stream_id=stream_id),
+                    code=code,
+                    stage=FailureStage.DESTINATION_LOAD,
+                )
             logger.info(f"Stream {stream_name}: gRPC stream started, schema accepted")
 
             extract_queue = Queue(maxsize=self.buffer_size)
@@ -320,8 +342,14 @@ class StreamingEngine:
                 status = "partial"
                 error_code = ErrorCode.DESTINATION_WRITE_FAILED
                 error_message = customer_message(error_code)
-                stream_failure = stream_metrics.get("dlq_failure_summary")
-                error_detail = sanitize_detail(stream_failure) if stream_failure else None
+                # A partial stream dead-lettered records after exhausting retries.
+                # error_detail carries only allowlisted-safe fields; the
+                # destination failure_summary stays in the DLQ and the logs.
+                error_detail = detail_for_code(
+                    error_code,
+                    stage=FailureStage.DESTINATION_LOAD,
+                    reason="records dead-lettered after retries",
+                )
                 logger.warning(
                     f"Stream {stream_name} completed partially: "
                     f"{stream_metrics['records_failed']} records dead-lettered"
@@ -429,6 +457,17 @@ class StreamingEngine:
                 "Stream %s: Extract stage failed: %s", stream_name, e,
             )
             await queue.put(None)  # Signal end even on error
+            # Tag the failure source-extract so classification is deterministic
+            # and never confused with a destination/transform cause. The code
+            # within source (auth/unreachable/rate) is the one split a tag cannot
+            # make for an opaque driver error. Defer to any deeper tag -- e.g.
+            # the worker's deterministic-config signal preserved in readable.py.
+            if read_failure_tag(e) is None:
+                tag_failure(
+                    e,
+                    code=classify_source_extract(e),
+                    stage=FailureStage.SOURCE_EXTRACT,
+                )
             raise
 
     async def _transform_stage(
@@ -479,6 +518,10 @@ class StreamingEngine:
             await output_queue.put(None)  # Signal end even on error
             self.metrics.increment_batches_failed()
             stream_metrics["batches_failed"] += 1
+            # A transform failure is a mapping/type problem -- the data did not
+            # match the expected schema. Tag it directly; no text inference.
+            if read_failure_tag(e) is None:
+                tag_failure(e, code=ErrorCode.SCHEMA_MISMATCH, stage=FailureStage.TRANSFORM)
             raise
 
     async def _load_stage(
@@ -772,6 +815,14 @@ class StreamingEngine:
                 "Stream %s: gRPC load stage failed: %s", stream_name, e,
             )
             await output_queue.put(None)
+            # A load-stage failure is destination-side by construction; tag it so
+            # a driver/HTTP code in the cause can never be misread as source auth.
+            if read_failure_tag(e) is None:
+                tag_failure(
+                    e,
+                    code=ErrorCode.DESTINATION_WRITE_FAILED,
+                    stage=FailureStage.DESTINATION_LOAD,
+                )
             raise
 
     async def _checkpoint_stage(self, input_queue: Queue, config: Dict[str, Any]):

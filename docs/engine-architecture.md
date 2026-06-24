@@ -186,9 +186,9 @@ except* Exception as eg:
 
 The pipeline-level metrics record (`state.metrics_storage.PipelineMetricsRecord`,
 emitted as `ANALITIQ_METRICS::{"type":"pipeline",...}`) carries a stable,
-machine-readable failure category alongside `status` and the counts. The runner
-classifies the terminating exception at the catch site — the engine is the only
-layer that sees the exception type and the source/destination context — using
+machine-readable failure category alongside `status` and the counts. The engine
+classifies the terminating exception — it is the only layer that sees the
+failure's stage and side at the raise site — using
 `state.error_classification.classify_exception`.
 
 `ErrorCode` is a **published contract**. The control plane forwards it to
@@ -213,28 +213,53 @@ Three error fields appear on the record, with distinct audiences:
 - `error_message` — a short, fixed, per-code human-readable message. Carries no
   exception text, so it cannot leak secrets, driver internals, or stack traces.
   Customer-safe.
-- `error_detail` — the raw exception text with credential-bearing substrings
-  redacted. **Internal-only**: the control plane must not forward it externally.
+- `error_detail` — a structured failure summary built from allowlisted-safe
+  tokens only: stage labels, error codes, and exception *class names* read off
+  the live objects (`stage/CODE:ExceptionType`), never message text. It is safe
+  by construction — no driver internals, query fragments, or credentials can
+  appear, so there is nothing to scrub. **Internal-only** nonetheless: the
+  control plane must not forward it externally. The full message text stays in
+  the engine logs.
 
-Classification matches exception *class names* across the whole chain (cause,
-context, `ExceptionGroup` members, and the engine's `original_error`) plus the
-message text, rather than importing every exception class. This mirrors the
-existing name-based pattern in `cdk.sql.generic._is_fatal_adbc_error` and handles
-the gRPC worker boundary, where the original source exception type collapses to
-`ReadError` / `RuntimeError` but its class name survives as an `error_type:`
-prefix in the message. Rules are evaluated in priority order (local-IO, config,
-schema, destination, then the source-side auth/rate/unreachable buckets), so for
-an aggregated `ExceptionGroup` the dominant cause wins.
+Classification is **structured-first**. The engine stamps a `FailureTag` (a
+definite `(error_code, stage)`) on the exception at the raise site, where it
+already knows the stage and side: the extract / transform / load stage
+boundaries, the destination handshake, and the config phase. `classify_exception`
+reads those tags and uses them verbatim — deterministic, no text matching. For an
+aggregated `ExceptionGroup` (every stream failed) the highest-priority tag across
+the leaves wins, and `error_detail` keeps every per-stream leaf rather than
+collapsing to `All streams failed (N sub-exceptions)`.
 
-The `error_code` enum is the stable, audited contract. The *textual* part of
-classification (un-typed driver/HTTP errors) and `error_detail` credential
-scrubbing are best-effort heuristics over free text: an ambiguous message can
-fall to a neighbouring code or `INTERNAL`, and an exotic secret shape (a PEM
-block, a password-only URL) may slip past the scrubber -- which is why
-`error_detail` is internal-only and never forwarded. The durable fix for both
-tails is structured, engine-side error reporting (tag failures with
-stage/side/category at the raise site; pass only allowlisted fields), tracked as
-a follow-up rather than by widening heuristics here.
+Two structured signals cross process boundaries so the tag survives isolation:
+
+- The source worker's `deterministic` flag (a config/contract error retrying
+  cannot heal) is preserved across the gRPC worker boundary as a `CONFIG_INVALID`
+  tag, so a deterministic source-config error classifies as `CONFIG_INVALID`
+  regardless of the `ReadError`/`RuntimeError` wrapper its type collapses into. A
+  source-side type-map miss stays `SCHEMA_MISMATCH`.
+- `SchemaAck.schema_rejected` carries the destination's transport-vs-schema
+  verdict. The destination worker proxy converts an inner worker transport
+  failure into an outer schema NACK; the flag (forwarded from the inner client)
+  lets the engine tell a genuine schema rejection (`SCHEMA_MISMATCH`) from a
+  proxied destination outage (`DESTINATION_WRITE_FAILED`) without guessing from
+  the message.
+
+The name/phrase heuristics remain in two narrow roles only: the
+**source-extract fine split** (`classify_source_extract`), which picks
+auth-vs-unreachable-vs-rate for an opaque source driver/HTTP error — a split a
+tag genuinely cannot make without inspecting the error — and a defensive
+**fallback** for any exception that reaches the runner with no tag. Because the
+source split runs *only* at the source boundary, a destination port (`host:401`)
+or path can never be misread as source auth: the cross-stage HTTP-code ambiguity
+that earlier whole-chain classification suffered is gone. An opaque source error
+that matches none of the buckets stays `INTERNAL`.
+
+The `error_code` enum is the stable, audited contract. The one residual
+best-effort area is the source-extract fine split above: for an un-typed source
+driver error, auth-vs-unreachable-vs-rate is inferred from its text and can fall
+to a neighbouring code or `INTERNAL`. It is never a secret leak (only class names
+and codes ever reach `error_detail`) and never a cross-stage error (the stage is
+always known from the tag).
 
 ## ConnectionRuntime and Transports
 

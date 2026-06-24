@@ -58,6 +58,13 @@ class WorkerProxyHandler(BaseDestinationHandler):
         # engine-facing ack carries the worker's real reason (issue #231)
         # instead of a generic "Schema configuration failed".
         self.last_schema_rejection: Optional[str] = None
+        # Whether that most recent rejection was a genuine schema NACK from the
+        # worker (True) or an inner transport/handshake failure (False). The
+        # destination service stamps it onto the engine-facing SchemaAck so a
+        # proxied worker outage classifies as DESTINATION_WRITE_FAILED, not
+        # SCHEMA_MISMATCH (issue #264). Defaults True: a returned-False with no
+        # transport cause is a real rejection.
+        self.last_schema_rejected: bool = True
 
     # ------------------------------------------------------------------
     # Contract endpoints registration (kept shell-side AND forwarded via
@@ -140,9 +147,12 @@ class WorkerProxyHandler(BaseDestinationHandler):
 
     async def configure_schema(self, schema_spec: SchemaSpec) -> bool:
         self.last_schema_rejection = None
+        self.last_schema_rejected = True
         if self._handle is None:
             logger.error("%s: configure_schema before connect", self._label)
             self.last_schema_rejection = "destination worker not started"
+            # No worker to evaluate the schema -- a setup/transport failure.
+            self.last_schema_rejected = False
             return False
         stream_id = schema_spec.stream_id
         schema_config = {
@@ -171,6 +181,7 @@ class WorkerProxyHandler(BaseDestinationHandler):
         """
         if self._handle is None:
             logger.error("%s: open_stream before connect", self._label)
+            self.last_schema_rejected = False
             return None
         # The forwarded hop adopts the engine-stamped ack budget as its own
         # wait: the engine is the only real waiter behind this hop, so waiting
@@ -185,6 +196,8 @@ class WorkerProxyHandler(BaseDestinationHandler):
         )
         if not await client.connect(max_connect_retries=3):
             self.last_schema_rejection = "destination worker channel did not connect"
+            # Never reached schema evaluation -- a transport failure.
+            self.last_schema_rejected = False
             return None
         accepted = await client.start_stream(
             run_id="",  # idempotency keys ride each forwarded batch
@@ -193,8 +206,11 @@ class WorkerProxyHandler(BaseDestinationHandler):
         )
         if not accepted:
             # Forward the worker's real rejection reason so the engine-facing
-            # ack is not the generic "Schema configuration failed" (issue #231).
+            # ack is not the generic "Schema configuration failed" (issue #231),
+            # and its transport-vs-schema verdict so a worker outage behind this
+            # proxy is not misread as a schema rejection (issue #264).
             self.last_schema_rejection = client.schema_rejection_message
+            self.last_schema_rejected = client.schema_rejected
             await client.disconnect()
             return None
         return client

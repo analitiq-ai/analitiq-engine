@@ -433,7 +433,13 @@ class DestinationGRPCClient:
                     logger.info(f"Schema accepted for stream {stream_id}")
                     accepted = True
                 else:
-                    self._schema_rejected = True
+                    # Trust the destination's structured verdict: schema_rejected
+                    # is true only when the schema was actually evaluated and
+                    # refused. Through the worker proxy a transport failure
+                    # arrives as a NACK with schema_rejected=false, so reading the
+                    # flag (not assuming "any NACK == schema rejection") keeps a
+                    # proxied destination outage classified DESTINATION_WRITE_FAILED.
+                    self._schema_rejected = response.schema_rejected
                     self._schema_rejection_message = response.message
                     logger.error(f"Schema rejected: {response.message}")
             else:

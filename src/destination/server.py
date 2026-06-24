@@ -228,6 +228,13 @@ class DestinationServicer(DestinationServiceServicer):
                     # stream's outer except, which logs the traceback and
                     # re-raises, failing the RPC with the real error instead
                     # of a generic schema rejection.
+                    #
+                    # Default the transport-vs-schema verdict to "genuine schema
+                    # rejection" (issue #264): every deterministic error caught
+                    # below is the destination evaluating and refusing the schema.
+                    # The try path overrides it -- False when accepted, or the
+                    # proxy's forwarded inner verdict when a worker hop failed.
+                    schema_rejected = True
                     try:
                         if not schema_msg.ack_timeout_seconds:
                             # Every conforming sender stamps its ack budget on
@@ -278,6 +285,15 @@ class DestinationServicer(DestinationServiceServicer):
                                 or "Schema configuration failed"
                             )
                         )
+                        # Distinguish a genuine schema rejection from a proxied
+                        # inner transport failure (issue #264). The proxy records
+                        # which it was; a direct handler has no such attribute and
+                        # returns False only on a real rejection, so default True.
+                        schema_rejected = (
+                            False
+                            if accepted
+                            else bool(getattr(self.handler, "last_schema_rejected", True))
+                        )
                     except (UnmappedTypeError, InvalidTypeMapError) as e:
                         logger.error(
                             "type-map error configuring stream %s: %s",
@@ -317,6 +333,7 @@ class DestinationServicer(DestinationServiceServicer):
                             stream_id=schema_msg.stream_id,
                             accepted=accepted,
                             message=ack_message,
+                            schema_rejected=schema_rejected,
                         )
                     )
 

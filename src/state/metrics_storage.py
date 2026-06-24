@@ -71,8 +71,11 @@ class PipelineMetricsRecord(BaseModel):
     error_detail: Optional[str] = Field(
         default=None,
         description=(
-            "Internal-only raw error text (credential-scrubbed) for engineer "
-            "debugging. The control plane must NOT forward this to external customers."
+            "Internal-only structured failure summary for engineer debugging: "
+            "allowlisted-safe tokens (stage labels, error codes, exception class "
+            "names) only, never message text -- so it carries no driver internals "
+            "or credentials by construction. The control plane must NOT forward "
+            "this to external customers."
         ),
     )
 
@@ -114,7 +117,7 @@ def create_metrics_record(
         status: Execution status (success, failed, partial)
         error_code: Stable, customer-safe failure category if failed
         error_message: Short, customer-safe failure message if failed
-        error_detail: Internal-only raw (scrubbed) error text if failed
+        error_detail: Internal-only structured failure summary (safe tokens) if failed
         pipeline_name: Human-readable pipeline name
 
     Returns:
@@ -178,7 +181,7 @@ def save_pipeline_metrics(
         status: Execution status (success, failed, partial)
         error_code: Stable, customer-safe failure category if failed
         error_message: Short, customer-safe failure message if failed
-        error_detail: Internal-only raw (scrubbed) error text if failed
+        error_detail: Internal-only structured failure summary (safe tokens) if failed
         pipeline_name: Human-readable pipeline name
     """
     record = create_metrics_record(
