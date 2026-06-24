@@ -22,6 +22,7 @@ from cdk.transport_factory import (
     registered_transport_kinds,
     resolve_adbc_spec,
     resolve_http_spec,
+    resolve_mongodb_spec,
     resolve_sqlalchemy_spec,
     resolve_transport_spec,
     unregister_transport_kind,
@@ -154,6 +155,7 @@ class TestTransportKindRegistry:
         assert "sqlalchemy" in kinds
         assert "adbc" in kinds
         assert "http" in kinds
+        assert "mongodb" in kinds
 
     def test_register_rejects_empty_kind(self):
         with pytest.raises(ValueError, match="non-empty string"):
@@ -565,3 +567,83 @@ class TestSqlAlchemyEngineFlavour:
                     }
                 )
         engine.dispose.assert_called_once()
+
+
+class TestMongoDbSpecValidation:
+    def test_missing_dsn_raises_transport_spec_error(self):
+        with pytest.raises(TransportSpecError, match="dsn"):
+            resolve_mongodb_spec({}, resolver=_resolver())
+
+    def test_non_structured_dsn_raises_transport_spec_error(self):
+        with pytest.raises(TransportSpecError, match="structured"):
+            resolve_mongodb_spec(
+                {"dsn": "mongodb://localhost/mydb"},
+                resolver=_resolver(),
+            )
+
+    def test_resolved_payload_pins_mongodb_contract(self):
+        ctx = ResolutionContext(
+            connection={"parameters": {"host": "mongo.example.com", "db": "mydb"}}
+        )
+        spec = {
+            "dsn": {
+                "kind": "url_template",
+                "template": "mongodb://{host}",
+                "bindings": {
+                    "host": {
+                        "value": {"ref": "connection.parameters.host"},
+                        "encoding": "host",
+                    },
+                },
+            },
+            "database": {"ref": "connection.parameters.db"},
+        }
+        resolved = resolve_mongodb_spec(spec, resolver=_resolver(ctx))
+        assert resolved["transport_type"] == "mongodb"
+        assert "mongo.example.com" in resolved["uri"]
+        assert resolved["database"] == "mydb"
+
+    def test_absent_database_resolves_to_none(self):
+        spec = {
+            "dsn": {
+                "kind": "url_template",
+                "template": "mongodb://localhost/test",
+                "bindings": {},
+            },
+        }
+        resolved = resolve_mongodb_spec(spec, resolver=_resolver())
+        assert resolved["database"] is None
+
+
+class TestBuildMongoDbFromSpec:
+    @pytest.mark.asyncio
+    async def test_ping_failure_closes_client_and_reraises(self):
+        import sys
+        from types import ModuleType
+        from unittest.mock import patch
+
+        from cdk.transport_factory import build_mongodb_from_spec
+
+        fake_client = MagicMock()
+        fake_client.admin = MagicMock()
+        fake_client.admin.command = AsyncMock(
+            side_effect=RuntimeError("connection refused")
+        )
+
+        fake_motor_module = ModuleType("motor")
+        fake_asyncio_module = ModuleType("motor.motor_asyncio")
+        fake_asyncio_module.AsyncIOMotorClient = MagicMock(return_value=fake_client)
+
+        with patch.dict(sys.modules, {
+            "motor": fake_motor_module,
+            "motor.motor_asyncio": fake_asyncio_module,
+        }):
+            with pytest.raises(RuntimeError, match="connection refused"):
+                await build_mongodb_from_spec(
+                    {
+                        "transport_type": "mongodb",
+                        "uri": "mongodb://localhost",
+                        "database": None,
+                    }
+                )
+        fake_client.close.assert_called_once()

@@ -15,9 +15,10 @@ Currently registered transport families:
   operations callers run via ``asyncio.to_thread``.
 * ``adbc``       — ADBC DBAPI 2.0 connection for database connectors
   whose dialect has no async SA driver (Snowflake, BigQuery) or wants
-  the Arrow-native bulk path (Postgres). Driver enum closed to the
-  registry in ``_ADBC_DRIVER_MODULES``.
+  the Arrow-native bulk path (Postgres). Driver names validated by the
+  published connector schema's ``AdbcTransport.driver`` enum.
 * ``http``       — ``aiohttp.ClientSession`` for API connectors.
+* ``mongodb``    — ``motor.motor_asyncio.AsyncIOMotorClient`` for nosql connectors.
 
 Plugin packages call :func:`register_transport_kind` at import time to
 add new families.
@@ -40,6 +41,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 if TYPE_CHECKING:
     import aiohttp
+    from motor.motor_asyncio import AsyncIOMotorClient
 
 from cdk._extras import reraise_for_missing_extra
 from cdk.derived_functions import DEFAULT_FUNCTIONS
@@ -752,6 +754,90 @@ async def build_http_from_spec(
 
 
 # ---------------------------------------------------------------------------
+# MongoDB transport
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class MongoDbTransport:
+    """Materialized MongoDB transport carrying a Motor async client.
+
+    ``client`` is an ``AsyncIOMotorClient`` whose connectivity was probed at
+    build time (a ``ping`` fired in ``build_mongodb_from_spec``). Motor manages
+    pooling and reconnection internally — the client itself is not a persistent
+    connection. ``default_database`` is the database name declared in the
+    connector definition; connectors use it when the endpoint document does not
+    override the target database.
+    """
+
+    client: "AsyncIOMotorClient"
+    default_database: Optional[str]
+
+    def __post_init__(self) -> None:
+        if self.default_database is not None and not self.default_database:
+            raise ValueError(
+                "MongoDbTransport.default_database must be non-empty or None"
+            )
+
+
+def resolve_mongodb_spec(
+    spec: Mapping[str, Any], *, resolver: Resolver
+) -> Dict[str, Any]:
+    """Resolve a mongodb transport spec to JSON-safe values (no objects)."""
+    raw_dsn = spec.get("dsn")
+    if not isinstance(raw_dsn, Mapping):
+        raise TransportSpecError(
+            "mongodb transport `dsn` must be the structured "
+            "{kind: url_template, template, bindings} object"
+        )
+    uri = _render_url_template_dsn(raw_dsn, resolver)
+
+    default_database: Optional[str] = None
+    raw_db = spec.get("database")
+    if raw_db is not None:
+        resolved_db = resolver.resolve(raw_db)
+        if isinstance(resolved_db, str) and resolved_db:
+            default_database = resolved_db
+
+    return {
+        "transport_type": "mongodb",
+        "uri": uri,
+        "database": default_database,
+    }
+
+
+async def build_mongodb_from_spec(
+    resolved: Mapping[str, Any], *, sql_dialect: Any = None
+) -> MongoDbTransport:
+    """Build the MongoDB transport from a resolved spec (worker side).
+
+    A ping fires at build time so connectivity problems surface before
+    the pipeline run starts.
+    """
+    try:
+        from motor.motor_asyncio import AsyncIOMotorClient
+    except ImportError as exc:
+        reraise_for_missing_extra(
+            exc,
+            feature="the MongoDB transport (nosql connectors)",
+            extra="mongodb",
+            modules=("motor",),
+        )
+
+    uri = resolved["uri"]
+    default_database = resolved.get("database")
+
+    client = AsyncIOMotorClient(uri, serverSelectionTimeoutMS=10_000)
+    try:
+        await client.admin.command("ping")
+    except Exception:
+        client.close()
+        raise
+
+    return MongoDbTransport(client=client, default_database=default_database)
+
+
+# ---------------------------------------------------------------------------
 # Transport-type registry (closed enum from the connector contract)
 # ---------------------------------------------------------------------------
 
@@ -818,6 +904,9 @@ register_transport_kind(
 )
 register_transport_kind(
     "http", resolve_spec=resolve_http_spec, build_from_spec=build_http_from_spec
+)
+register_transport_kind(
+    "mongodb", resolve_spec=resolve_mongodb_spec, build_from_spec=build_mongodb_from_spec
 )
 
 

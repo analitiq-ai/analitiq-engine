@@ -51,6 +51,7 @@ from cdk.rate_limiter import RateLimiter
 from cdk.transport_factory import (
     AdbcTransport,
     HttpTransport,
+    MongoDbTransport,
     SqlAlchemyTransport,
     build_transport,
     build_transport_from_spec,
@@ -185,6 +186,10 @@ class ConnectionRuntime:
         # hands them a fresh DBAPI connection from the closure baked at
         # materialize time.
         self._adbc_transport: Optional[AdbcTransport] = None
+        # Set when materialize() built a MongoDbTransport. Connectors
+        # access the client via ``mongo_client`` and the configured
+        # default database via ``mongo_default_database``.
+        self._mongo_transport: Optional[MongoDbTransport] = None
 
         # Reference counting for shared ownership across streams
         self._ref_count = 0
@@ -411,6 +416,8 @@ class ConnectionRuntime:
             self._session = transport.session
             self._base_url = transport.base_url
             self._rate_limiter = transport.rate_limiter
+        elif isinstance(transport, MongoDbTransport):
+            self._mongo_transport = transport
         else:  # pragma: no cover — defensive
             raise NotImplementedError(
                 f"Unhandled transport result type: {type(transport).__name__}"
@@ -615,6 +622,26 @@ class ConnectionRuntime:
         return self._rate_limiter
 
     @property
+    def mongo_client(self) -> Any:
+        """Motor ``AsyncIOMotorClient`` for nosql/MongoDB connectors."""
+        if not self._materialized or self._mongo_transport is None:
+            raise RuntimeError(
+                "mongo_client not available: call materialize() first or "
+                "wrong connector_type (expected transport_type='mongodb')"
+            )
+        return self._mongo_transport.client
+
+    @property
+    def mongo_default_database(self) -> Optional[str]:
+        """Default database name from the connector definition, or ``None``."""
+        if not self._materialized or self._mongo_transport is None:
+            raise RuntimeError(
+                "mongo_default_database not available: call materialize() first "
+                "or wrong connector_type"
+            )
+        return self._mongo_transport.default_database
+
+    @property
     def resolved_config(self) -> Dict[str, Any]:
         if not self._materialized:
             raise RuntimeError(
@@ -721,6 +748,14 @@ class ConnectionRuntime:
             # the reference is sufficient. Live DBAPI connections opened
             # via ``open_adbc_connection()`` are owned by their callers.
             self._adbc_transport = None
+            if self._mongo_transport is not None:
+                try:
+                    self._mongo_transport.client.close()
+                except Exception as e:
+                    logger.error(
+                        f"Failed to close MongoDB client for {self._connection_id}: {e}"
+                    )
+                self._mongo_transport = None
 
     # ------------------------------------------------------------------
     # Private helpers

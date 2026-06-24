@@ -25,9 +25,11 @@ def build_worker_registries() -> Tuple[ConnectorRegistry, ConnectorRegistry]:
     # (they only need the spawn helpers, not the handler graph).
     from cdk.sql.generic import GenericSQLConnector
     from src.source.connectors.api import APIConnector
+    from src.source.connectors.mongodb import MongoDbSourceConnector
     from src.destination.connectors import (
         ApiDestinationHandler,
         FileDestinationHandler,
+        MongoDbDestinationHandler,
         StreamDestinationHandler,
     )
 
@@ -35,6 +37,7 @@ def build_worker_registries() -> Tuple[ConnectorRegistry, ConnectorRegistry]:
         source_builtins={
             "database": GenericSQLConnector,
             "api": APIConnector,
+            "nosql": MongoDbSourceConnector,
         },
         destination_builtins={
             "database": GenericSQLConnector,
@@ -42,6 +45,7 @@ def build_worker_registries() -> Tuple[ConnectorRegistry, ConnectorRegistry]:
             "stdout": StreamDestinationHandler,
             "file": FileDestinationHandler,
             "s3": FileDestinationHandler,
+            "nosql": MongoDbDestinationHandler,
         },
         discover=True,
     )

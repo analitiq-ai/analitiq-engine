@@ -14,6 +14,7 @@ from cdk.sql.generic import GenericSQLConnector
 from .stream import StreamDestinationHandler
 from .file import FileDestinationHandler
 from .api import ApiDestinationHandler
+from .mongodb import MongoDbDestinationHandler
 
 
 __all__ = [
@@ -21,4 +22,5 @@ __all__ = [
     "StreamDestinationHandler",
     "FileDestinationHandler",
     "ApiDestinationHandler",
+    "MongoDbDestinationHandler",
 ]
