@@ -163,10 +163,14 @@ def test_destination_write_failed(name, message):
 
 @pytest.mark.parametrize("summary,expected", [
     # A destination batch write that fails with a CONFIG-typed cause (forwarded
-    # in the fatal-ack summary) is a config defect, not a write failure.
+    # in the fatal-ack summary) is a config defect, not a write failure. These
+    # cover write_batch's controlled prefixes (cdk/sql/generic.py).
     ("UnmappedTypeError: no rule for 'geography'", ErrorCode.CONFIG_INVALID),
     ("SchemaConfigurationError: unsupported write mode", ErrorCode.CONFIG_INVALID),
     ("type-map: no reverse rule", ErrorCode.CONFIG_INVALID),
+    ("dialect: upsert not supported", ErrorCode.CONFIG_INVALID),
+    ("write-config: invalid conflict key", ErrorCode.CONFIG_INVALID),
+    ("adbc: missing driver package", ErrorCode.CONFIG_INVALID),
     # A genuine write failure (constraint / permission on the destination) stays
     # a write failure.
     ("duplicate key value violates unique constraint", ErrorCode.DESTINATION_WRITE_FAILED),
@@ -175,6 +179,30 @@ def test_destination_write_failed(name, message):
 def test_destination_write_config_cause_is_config(summary, expected):
     msg = f"Batch 3 fatal failure: {summary}"
     assert classify_exception(_make("StreamProcessingError", message=msg)) is expected
+
+
+@pytest.mark.parametrize("message,expected", [
+    # A source-worker ReadError marked deterministic is a contract/config defect.
+    ("ReadError: offset pagination requires offset.param (worker src-worker:api:s1, deterministic)",
+     ErrorCode.CONFIG_INVALID),
+    # ...unless it carries an auth/rate signal, which wins first.
+    ("ReadError: 403 Forbidden (worker src-worker:api:s1, deterministic)",
+     ErrorCode.SOURCE_AUTH_FAILED),
+    # A non-deterministic (retryable) worker error stays INTERNAL, not config.
+    ("RuntimeError: transient blip (worker src-worker:api:s1)", ErrorCode.INTERNAL),
+])
+def test_deterministic_source_read_error_is_config(message, expected):
+    assert classify_exception(_make("ReadError", base=RuntimeError, message=message)) is expected
+
+
+def test_partial_stream_group_classifies_dominant_cause():
+    # A partial run keeps ALL failed-stream exceptions; classification picks the
+    # dominant across them (config/auth outrank an unclassifiable internal leaf).
+    group = ExceptionGroup("Partial stream failures", [
+        _make("StreamProcessingError", message="Stream processing failed: weird internal thing"),
+        _make("StreamProcessingError", message="Stream processing failed: password authentication failed"),
+    ])
+    assert classify_exception(group) is ErrorCode.SOURCE_AUTH_FAILED
 
 
 @pytest.mark.parametrize("message,expected", [

@@ -261,10 +261,13 @@ _CONFIG_NAMES = frozenset({
 _CONFIG_PHRASES = (
     "secretresolutionerror", "secretnotfounderror", "secretaccessdeniederror",
     "placeholderexpansionerror", "unmappedtypeerror", "invalidtypemaperror",
-    "typemapnotfounderror", "type-map:", "transportspecerror",
+    "typemapnotfounderror", "transportspecerror",
     "adbcconfigurationerror", "unsupporteddialectoperationerror",
     "schemaconfigurationerror", "transformationerror", "configvalidationerror",
     "connectornotregisterederror",
+    # Controlled write_batch fatal-ack summary prefixes (cdk/sql/generic.py):
+    # deterministic destination write-configuration defects.
+    "type-map:", "dialect:", "write-config:", "adbc:",
 )
 
 # Source-system auth failures surface only as driver/HTTP text (this engine has
@@ -379,6 +382,12 @@ def classify_exception(exc: BaseException) -> ErrorCode:
         return ErrorCode.RATE_LIMITED
     if _matches(names, text, _UNREACHABLE_NAMES, _UNREACHABLE_PHRASES):
         return ErrorCode.SOURCE_UNREACHABLE
+    if "ReadError" in names and "deterministic" in text:
+        # A source-worker ReadError marked deterministic is a contract/config
+        # defect (the worker reserves deterministic for non-transient
+        # contract/config failures, e.g. an invalid pagination contract). If it
+        # was not auth/rate/unreachable above, it is a configuration problem.
+        return ErrorCode.CONFIG_INVALID
     return ErrorCode.INTERNAL
 
 

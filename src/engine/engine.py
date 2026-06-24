@@ -182,11 +182,14 @@ class StreamingEngine:
                     logger.error("All streams failed - pipeline failed completely")
                     raise ExceptionGroup("All streams failed", stream_exceptions)
                 else:
-                    # Partial failure - log but allow pipeline to complete.
-                    # Keep the first failed-stream exception so the runner can
-                    # classify the partial run instead of reporting success.
+                    # Partial failure - log but allow pipeline to complete. Keep
+                    # ALL failed-stream exceptions as a group (like the all-failed
+                    # path) so the runner classifies the dominant cause across
+                    # every failure, not just the first.
                     logger.warning(f"Pipeline completed with {len(stream_exceptions)} failed streams out of {len(streams)}")
-                    self._dominant_stream_error = stream_exceptions[0]
+                    self._dominant_stream_error = ExceptionGroup(
+                        "Partial stream failures", stream_exceptions
+                    )
             else:
                 logger.info(f"Pipeline {pipeline_id} completed successfully - all {len(streams)} streams processed")
 
@@ -936,10 +939,11 @@ class StreamingEngine:
         return self._dlq_failure_summary
 
     def get_dominant_stream_error(self) -> Optional[BaseException]:
-        """Representative exception from a stream that failed in a partial run.
+        """The failed-stream exceptions from a partial run, as an ExceptionGroup.
 
         Set when some (not all) streams fail: stream_data logs and returns
-        without raising, so the runner reads this to classify the partial run.
+        without raising, so the runner reads this and classifies the dominant
+        cause across all failed streams to classify the partial run.
         """
         return self._dominant_stream_error
 
