@@ -14,6 +14,12 @@ from typing import Dict, Any, List, Optional
 from src.engine.engine import StreamingEngine
 from src.engine.exceptions import StreamProcessingError
 from src.grpc.generated.analitiq.v1 import AckStatus
+from src.state.error_classification import (
+    ErrorCode,
+    FailureStage,
+    read_failure_tag,
+    tag_failure,
+)
 
 
 @dataclass
@@ -156,6 +162,59 @@ class TestEngineFatalFailureHandling:
         # Assert: exception contains failure info
         assert "fatal failure" in str(exc_info.value).lower()
         assert "Batch 1" in str(exc_info.value)
+
+        # The load stage tags its failure destination-side, so classification is
+        # deterministic and a driver/HTTP code in the cause can never be misread
+        # as source auth (issue #264).
+        tag = read_failure_tag(exc_info.value)
+        assert tag is not None
+        assert tag.code is ErrorCode.DESTINATION_WRITE_FAILED
+        assert tag.stage is FailureStage.DESTINATION_LOAD
+
+    @pytest.mark.asyncio
+    async def test_load_stage_does_not_clobber_a_deeper_tag(
+        self,
+        engine: StreamingEngine,
+        mock_grpc_client: AsyncMock,
+        sample_stream_config: Dict[str, Any],
+        temp_dir: str,
+    ):
+        """The load-stage tag is no-overwrite: a precise inner tag carried by the
+        raised cause survives instead of being relabeled DESTINATION_WRITE_FAILED.
+        This is the deeper-tag gate that keeps a worker's CONFIG_INVALID signal
+        from being clobbered by the coarse outer stage default (issue #264)."""
+        from src.state.dead_letter_queue import DeadLetterQueue
+
+        input_queue = asyncio.Queue()
+        output_queue = asyncio.Queue()
+        await input_queue.put(pa.RecordBatch.from_pylist([{"id": 1}]))
+        await input_queue.put(None)
+
+        inner = tag_failure(
+            RuntimeError("deterministic config error surfaced mid-load"),
+            code=ErrorCode.CONFIG_INVALID,
+            stage=FailureStage.CONFIG,
+        )
+        mock_grpc_client.send_batch = AsyncMock(side_effect=inner)
+
+        stream_dlq = DeadLetterQueue(f"{temp_dir}/dlq")
+        stream_metrics = {"records_processed": 0, "records_failed": 0, "batches_processed": 0, "batches_failed": 0}
+
+        with pytest.raises(RuntimeError) as exc_info:
+            await engine._load_stage(
+                input_queue=input_queue,
+                output_queue=output_queue,
+                grpc_client=mock_grpc_client,
+                config=sample_stream_config,
+                stream_dlq=stream_dlq,
+                run_id="test-run-001",
+                stream_metrics=stream_metrics,
+            )
+
+        tag = read_failure_tag(exc_info.value)
+        assert tag is not None
+        assert tag.code is ErrorCode.CONFIG_INVALID
+        assert tag.stage is FailureStage.CONFIG
 
     @pytest.mark.asyncio
     async def test_load_stage_success_does_not_raise(
@@ -319,10 +378,6 @@ class TestEngineFatalFailureHandling:
         # Assert: send_batch was called multiple times (initial + retries)
         # Initial call + 3 retries (default max_retries=3) = 4 calls
         assert mock_grpc_client.send_batch.call_count == 4
-
-        # The dead-lettered batch's summary is captured as the run's dominant
-        # cause, so the runner can classify the (exception-free) partial run.
-        assert engine.get_dominant_failure() == "Connection timeout"
 
     @pytest.mark.asyncio
     async def test_load_stage_retryable_exhaustion_raises_with_fail_strategy(

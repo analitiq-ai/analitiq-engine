@@ -28,6 +28,12 @@ from cdk.types import CheckpointStore
 from src.grpc import DEFAULT_MAX_MESSAGE_SIZE
 from src.grpc.generated.analitiq.v1.source_service_pb2 import ReadRequest
 from src.grpc.generated.analitiq.v1.source_service_pb2_grpc import SourceServiceStub
+from src.state.error_classification import (
+    ErrorCode,
+    FailureStage,
+    classify_source_extract,
+    tag_failure,
+)
 from src.state.store import decode_cursor_state, encode_cursor_state
 from src.worker.shell import build_bootstrap
 from src.worker.spawn import spawn_worker
@@ -120,9 +126,24 @@ class WorkerReadable:
                     elif kind == "error":
                         err = response.error
                         if err.deterministic:
-                            raise ReadError(
+                            exc = ReadError(
                                 f"{err.error_type}: {err.message} "
                                 f"(worker {label}, deterministic)"
+                            )
+                            # The worker's `deterministic` flag is the structured
+                            # signal that retrying cannot help -- a config/contract
+                            # defect. Preserve it across the boundary as a tag so a
+                            # deterministic source error classifies as CONFIG_INVALID
+                            # regardless of the collapsed wrapper's class name; the
+                            # engine otherwise only sees ReadError text. The original
+                            # connector class survives in the error_type prefix, so
+                            # the source classifier reads it; an opaque one floors to
+                            # CONFIG_INVALID (deterministic == a setup defect).
+                            code = classify_source_extract(exc)
+                            if code is ErrorCode.INTERNAL:
+                                code = ErrorCode.CONFIG_INVALID
+                            raise tag_failure(
+                                exc, code=code, stage=FailureStage.SOURCE_EXTRACT
                             )
                         raise RuntimeError(
                             f"{err.error_type}: {err.message} (worker {label})"

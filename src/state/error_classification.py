@@ -13,47 +13,50 @@ one internal-only value:
   published contract the control plane forwards to external, API-key customers.
 - ``customer_message(code)`` -- a short, fixed, per-code message. It contains no
   exception text at all, so it cannot leak secrets or driver internals.
-- ``sanitize_detail(text)`` -- the raw exception text with credential-bearing
-  substrings redacted. This is for the metrics record's internal-only
-  ``error_detail`` field; the control plane must never forward it externally.
+- ``error_detail`` -- a structured, allowlisted summary built from the failure's
+  stage tags and exception *class names* only (never message text). This is the
+  metrics record's internal-only ``error_detail`` field.
 
-The engine is the right layer to classify: it is the only place that sees the
-exception type and the source/destination context at the failure site. The
-control plane only ever sees free text in logs and cannot classify it after the
-fact safely.
+How classification works (structured-first):
 
-Classification is intentionally import-light. It matches on exception class
-*names* gathered from the whole exception chain (cause, context, group members,
-and the engine's ``original_error`` attribute) plus the message text, rather
-than importing every exception class. This mirrors the existing name-based
-pattern in ``cdk.sql.generic._is_fatal_adbc_error`` and handles the gRPC worker
-boundary, where the original exception type is collapsed to ``ReadError`` /
-``RuntimeError`` but its class name survives as an ``error_type:`` prefix in the
-message.
+The engine knows the failure's stage and side at the raise site -- the extract /
+transform / load stage boundaries, the destination handshake, the config phase.
+Each of those sites stamps the exception with a :class:`FailureTag` (a definite
+``(error_code, stage)``) via :func:`tag_failure`. :func:`classify_exception`
+reads those tags first and uses them verbatim: deterministic, no text matching,
+no cross-stage confusion (a destination HTTP error can never read as source
+auth, because the destination-load boundary tags it ``DESTINATION_WRITE_FAILED``
+outright). For an aggregated ``ExceptionGroup`` the highest-priority tag across
+the leaves wins.
 
-Known limitations (best-effort heuristics over free text):
+The name/phrase heuristics below remain only as:
 
-- ``error_code`` is the stable, audited contract; the textual classification of
-  un-typed driver/HTTP errors is best-effort. An ambiguous message can fall to a
-  neighbouring code or ``INTERNAL`` -- it is never a secret leak, only a coarser
-  label. Known soft spots: a bare HTTP status with no companion word, and a
-  deterministic source-config error that crosses the worker boundary as plain
-  text.
-- ``sanitize_detail`` redacts the common credential shapes (URL userinfo,
-  ``key=value`` / quoted / hyphenated secret keys, Authorization headers) but
-  cannot guarantee completeness over arbitrary free text -- e.g. a multi-line PEM
-  block or a password-only URL form may slip through. ``error_detail`` is
-  internal-only for exactly this reason; the control plane must never forward it.
-  The durable fix for both tails is structured, engine-side error reporting
-  (tagging failures with stage/side/category at the raise site and passing only
-  allowlisted fields), tracked separately.
+1. The within-source-extract fine split. The source side genuinely cannot know
+   auth-vs-unreachable-vs-rate for an opaque driver error without inspecting it;
+   :func:`classify_source_extract` does that one narrow, *source-only* split when
+   the extract boundary tags a stream. There is no cross-stage ambiguity left,
+   because only the source boundary ever runs it.
+2. A defensive fallback (:func:`classify_exception`) for any exception that
+   reaches the runner with no tag at all. It mirrors the existing name-based
+   pattern in ``cdk.sql.generic._is_fatal_adbc_error``.
+
+There is no data-vs-schema mismatch code: the engine performs no schema
+validation (the destination only configures its own table via DDL), so type-map
+misses, mapping/transform errors, and destination schema-configuration failures
+are all configuration defects (``CONFIG_INVALID``).
+
+``error_detail`` carries only allowlisted-safe fields -- stage labels, error
+codes, and exception class names -- so there is nothing to scrub: secrets live
+in driver *message* text, which never enters the detail. The full message stays
+engine-side in the logs (``logger.exception``), not in the metrics record.
 """
 
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from enum import Enum
-from typing import List, Set, Tuple
+from typing import List, Optional, Set, Tuple
 
 
 class ErrorCode(str, Enum):
@@ -72,6 +75,32 @@ class ErrorCode(str, Enum):
     RATE_LIMITED = "RATE_LIMITED"
     CONFIG_INVALID = "CONFIG_INVALID"
     INTERNAL = "INTERNAL"
+
+
+class FailureStage(str, Enum):
+    """The pipeline stage a failure was raised in.
+
+    Stamped on the exception at the raise site (where the engine knows it) so
+    classification is deterministic instead of reverse-engineered from text.
+    """
+
+    CONFIG = "config"
+    SOURCE_EXTRACT = "source_extract"
+    TRANSFORM = "transform"
+    DESTINATION_LOAD = "destination_load"
+
+
+@dataclass(frozen=True)
+class FailureTag:
+    """A definite ``(error_code, stage)`` the engine attached at the raise site.
+
+    Carries no message text -- only the safe, structured signal. Read back by
+    :func:`classify_exception` (for ``error_code``) and :func:`build_error_detail`
+    (for the stage label).
+    """
+
+    code: ErrorCode
+    stage: FailureStage
 
 
 # Short, fixed, customer-facing message per code. These carry no exception text,
@@ -104,17 +133,87 @@ def customer_message(code: ErrorCode) -> str:
     return _CUSTOMER_MESSAGES.get(code, _CUSTOMER_MESSAGES[ErrorCode.INTERNAL])
 
 
-def classify_for_metrics(exc: BaseException) -> Tuple[ErrorCode, str, str]:
+def classify_for_metrics(exc: BaseException) -> Tuple[ErrorCode, str, Optional[str]]:
     """Turn a terminating exception into the three metrics-record error values.
 
     Returns ``(error_code, error_message, error_detail)`` where ``error_code``
     and ``error_message`` are customer-safe and ``error_detail`` is the
-    credential-scrubbed raw text for the internal-only field. Both the runner
-    (pipeline-level) and the engine (stream-level) call this so the values are
-    produced identically wherever a metrics record is built.
+    structured, allowlisted-safe summary for the internal-only field. Both the
+    runner (pipeline-level) and the engine (stream-level) call this so the values
+    are produced identically wherever a metrics record is built.
     """
     code = classify_exception(exc)
-    return code, customer_message(code), sanitize_detail(_detail_text(exc))
+    return code, customer_message(code), build_error_detail(exc)
+
+
+# --------------------------------------------------------------------------- #
+# Structured failure tags
+# --------------------------------------------------------------------------- #
+
+# Attribute name under which a FailureTag rides an exception instance. A single
+# underscore-prefixed attr keeps it out of the way of any connector/driver state.
+_TAG_ATTR = "_analitiq_failure_tag"
+
+
+def tag_failure(exc: BaseException, *, code: ErrorCode, stage: FailureStage) -> BaseException:
+    """Stamp ``exc`` with a :class:`FailureTag` and return it (for ``raise``).
+
+    No-overwrite by construction: if any exception already in ``exc``'s chain
+    carries a tag, this is a no-op, so a precise inner signal (e.g. a worker's
+    deterministic-config tag) is never clobbered by a coarser outer-stage
+    default. The "innermost / most-specific tag wins" rule is enforced here
+    once -- an outer stage boundary can call ``tag_failure`` unconditionally
+    instead of each re-implementing the same ``read_failure_tag(e) is None``
+    guard (and risking a silent clobber if one is forgotten).
+    """
+    if read_failure_tag(exc) is None:
+        setattr(exc, _TAG_ATTR, FailureTag(code=code, stage=stage))
+    return exc
+
+
+# Priority when several leaves of an ExceptionGroup carry different tags: the
+# most specific / most actionable cause wins, mirroring the fallback rule order.
+_CODE_PRIORITY: Tuple[ErrorCode, ...] = (
+    ErrorCode.CONFIG_INVALID,
+    ErrorCode.DESTINATION_WRITE_FAILED,
+    ErrorCode.SOURCE_AUTH_FAILED,
+    ErrorCode.RATE_LIMITED,
+    ErrorCode.SOURCE_UNREACHABLE,
+    ErrorCode.INTERNAL,
+)
+
+# Totality, enforced at import: read_failure_tag ranks tags via
+# _CODE_PRIORITY.index(code), which raises ValueError for an unranked code --
+# inside the failure-reporting path, the worst place for a new exception. Fail
+# loud at startup instead if a future ErrorCode member is added without a rank.
+_unranked = set(ErrorCode) - set(_CODE_PRIORITY)
+if _unranked:
+    raise RuntimeError(
+        f"_CODE_PRIORITY must rank every ErrorCode; missing: {sorted(c.value for c in _unranked)}"
+    )
+
+
+def _iter_tags(exc: BaseException) -> List[FailureTag]:
+    """Every :class:`FailureTag` stamped anywhere in the exception chain."""
+    tags: List[FailureTag] = []
+    for member in _walk_chain(exc):
+        tag = getattr(member, _TAG_ATTR, None)
+        if isinstance(tag, FailureTag):
+            tags.append(tag)
+    return tags
+
+
+def read_failure_tag(exc: BaseException) -> Optional[FailureTag]:
+    """The dominant tag across the chain, or None when nothing is tagged.
+
+    Dominant = the highest-priority code present (so an aggregated group resolves
+    to its most actionable leaf). Used both to classify and to gate outer-stage
+    tagging against an existing inner tag.
+    """
+    tags = _iter_tags(exc)
+    if not tags:
+        return None
+    return min(tags, key=lambda t: _CODE_PRIORITY.index(t.code))
 
 
 # --------------------------------------------------------------------------- #
@@ -159,7 +258,7 @@ def _walk_chain(exc: BaseException) -> List[BaseException]:
 # ``error_type:`` prefix (readable.py: f"{err.error_type}: {err.message} ...").
 # Promote that leading identifier into the name set so the name-based rules
 # (e.g. SecretNotFoundError -> CONFIG_INVALID) fire even though the live type is
-# only the wrapper.
+# only the wrapper. The captured token is a class name -- safe for error_detail.
 _ERROR_TYPE_PREFIX = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:")
 
 
@@ -168,8 +267,8 @@ def _signature(exc: BaseException) -> Tuple[Set[str], str]:
 
     Returns a set of every class name in every chained exception's MRO (plus any
     worker ``error_type:`` prefix promoted from the message) and the lowercased
-    concatenation of their messages. Both feed the classification rules: types
-    are matched precisely by name; driver text and the worker prefix's tail are
+    concatenation of their messages. Both feed the heuristic rules: types are
+    matched precisely by name; driver text and the worker prefix's tail are
     matched in the message.
     """
     names: Set[str] = set()
@@ -185,23 +284,6 @@ def _signature(exc: BaseException) -> Tuple[Set[str], str]:
     return names, " \n ".join(messages).lower()
 
 
-def _detail_text(exc: BaseException) -> str:
-    """Build the internal ``error_detail`` text from the whole chain.
-
-    ``str(exc)`` alone loses information for the most important case: an
-    ``ExceptionGroup`` renders only ``All streams failed (N sub-exceptions)``,
-    dropping every per-stream cause. Join the de-duplicated messages of every
-    chained member (leaves included) so the always-emitted pipeline detail keeps
-    the actual causes. Scrubbing and truncation happen in ``sanitize_detail``.
-    """
-    parts: List[str] = []
-    for member in _walk_chain(exc):
-        message = str(member).strip()
-        if message and message not in parts:
-            parts.append(message)
-    return " | ".join(parts)
-
-
 def is_local_io_error(exc: BaseException) -> bool:
     """True if the chain carries a builtin local-filesystem error.
 
@@ -215,19 +297,16 @@ def is_local_io_error(exc: BaseException) -> bool:
 
 
 # --------------------------------------------------------------------------- #
-# Classification rules
+# Heuristic rules (source-extract fine split + untagged fallback)
 # --------------------------------------------------------------------------- #
 #
 # Each rule names the exception classes (matched anywhere in the chain's MRO)
-# and the message phrases that imply its code. Rules are evaluated in priority
-# order by ``classify_exception``: the first rule that matches wins, so a more
-# specific / more actionable cause takes precedence over a vaguer one. For an
-# aggregated ``ExceptionGroup`` (every stream failed) this yields the dominant
-# cause -- the highest-priority signal present across all leaves.
-#
-# Order: config (setup defect, the root cause when present) -> destination
-# handshake (config vs transport) -> destination write -> source auth -> rate
-# limit -> source unreachable -> internal.
+# and the message phrases that imply its code. These drive two things now:
+# ``classify_source_extract`` (the source-only auth/rate/unreachable split a tag
+# cannot make for an opaque driver error) and ``classify_exception``'s fallback
+# for an untagged exception. Order matters: config (setup defect, the root cause
+# when present) -> destination handshake (config vs transport) -> destination
+# write -> source auth -> rate -> source unreachable -> internal.
 
 # Config / contract / connector-definition / type-map / mapping defects. There
 # is no schema validation in the engine (the destination only configures its own
@@ -354,14 +433,61 @@ def _matches(names: Set[str], text: str, name_set: frozenset, phrases: Tuple[str
     return any(phrase in text for phrase in phrases)
 
 
+def classify_source_extract(exc: BaseException) -> ErrorCode:
+    """Classify a source-extract failure into its concrete source code.
+
+    The extract stage knows the failure is source-side, but auth-vs-unreachable-
+    vs-rate for an opaque driver/HTTP error is only legible from the error
+    itself. This is the one narrow, source-scoped text split; because only the
+    source boundary calls it, a destination port (``host:401``) or path can never
+    reach it, so the HTTP-code ambiguity that plagued whole-chain classification
+    is gone. A deterministic source-config error (a bad endpoint document, a
+    type-map miss) still resolves to CONFIG_INVALID; anything unrecognised stays
+    INTERNAL.
+    """
+    names, text = _signature(exc)
+    if _matches(names, text, _CONFIG_NAMES, _CONFIG_PHRASES):
+        return ErrorCode.CONFIG_INVALID
+    if _matches(names, text, _AUTH_NAMES, _AUTH_PHRASES) or _HTTP_AUTH_STATUS.search(text):
+        return ErrorCode.SOURCE_AUTH_FAILED
+    if _matches(names, text, frozenset(), _RATE_PHRASES) or _HTTP_RATE_STATUS.search(text):
+        return ErrorCode.RATE_LIMITED
+    if _matches(names, text, _UNREACHABLE_NAMES, _UNREACHABLE_PHRASES):
+        return ErrorCode.SOURCE_UNREACHABLE
+    return ErrorCode.INTERNAL
+
+
+def classify_handshake_failure(reason: Optional[str]) -> ErrorCode:
+    """Classify a destination-handshake failure as transport vs config.
+
+    The destination handshake (configure_schema) only prepares the destination's
+    own table via DDL -- it never validates data -- so a failure is either a
+    transport problem (the destination was unreachable mid-handshake ->
+    DESTINATION_WRITE_FAILED) or a destination-config defect (-> CONFIG_INVALID).
+    ``reason`` is the engine/proxy-generated handshake reason (a controlled
+    string, including the inner reason forwarded across the worker proxy), not
+    arbitrary driver text. The engine calls this at the raise site so the tag is
+    definite; the same transport-phrase set backs the untagged fallback in
+    :func:`classify_exception`.
+    """
+    lowered = (reason or "").lower()
+    if any(phrase in lowered for phrase in _HANDSHAKE_TRANSPORT_PHRASES):
+        return ErrorCode.DESTINATION_WRITE_FAILED
+    return ErrorCode.CONFIG_INVALID
+
+
 def classify_exception(exc: BaseException) -> ErrorCode:
     """Classify a terminating pipeline exception into a customer-safe code.
 
-    Inspects the whole exception chain (cause, context, ``ExceptionGroup``
-    members, and the engine's ``original_error``) by class name and message
-    text, then applies the rules in priority order. Returns
-    :attr:`ErrorCode.INTERNAL` when nothing more specific matches.
+    Structured-first: if any stage stamped a :class:`FailureTag`, the dominant
+    tag's code is returned verbatim (deterministic, no text matching). Only an
+    exception that reaches here with no tag at all falls back to the name/phrase
+    heuristics, in priority order, defaulting to :attr:`ErrorCode.INTERNAL`.
     """
+    tag = read_failure_tag(exc)
+    if tag is not None:
+        return tag.code
+
     names, text = _signature(exc)
 
     if names & _LOCAL_IO_NAMES:
@@ -392,71 +518,59 @@ def classify_exception(exc: BaseException) -> ErrorCode:
 
 
 # --------------------------------------------------------------------------- #
-# Detail sanitization (internal-only field)
+# Structured error detail (internal-only field)
 # --------------------------------------------------------------------------- #
 
-# Redact credentials embedded in a connection URL: scheme://user:pass@host -> ***
-# The scheme run is length-bounded so a long alphanumeric run that never reaches
-# "://" cannot be re-scanned from every start position (keeps this linear even
-# when run on untruncated text).
-_URL_CREDENTIALS = re.compile(r"(?P<scheme>[a-zA-Z][a-zA-Z0-9+.\-]{0,40}://)[^/\s:@]+:[^/\s@]+@")
-
-# Redact the whole value of an Authorization header. The value is redacted in
-# full (not just the first token) so multi-token schemes -- e.g. SigV4
-# "AWS4-HMAC-SHA256 Credential=..., Signature=..." -- cannot leak their
-# credential/signature parameters. A quoted value (JSON / dict text) is redacted
-# up to its closing quote so surrounding fields survive; an unquoted header value
-# is redacted to end of line.
-_AUTH_HEADER = re.compile(
-    r"(?i)(?P<head>\bauthorization[\"']?\s*[:=]\s*)"
-    r"(?P<val>\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\r\n]+)"
-)
-
-# Redact key=value / key: value pairs whose key names a secret. Each pattern
-# treats "-" and "_" interchangeably, so header-style ("x-api-key", "X-Auth-
-# Token") and snake_case ("api_key") spellings are both covered. The separator
-# allows an optional closing quote before it so quoted keys are covered too --
-# JSON and Python-dict/repr forms (e.g. {"password": "x"}, 'api-key': 'x') are
-# the dominant shape in driver / pydantic error text.
-_SECRET_KEY_PATTERNS = (
-    r"x[-_]?api[-_]?key", r"api[-_]?key", r"apikey",
-    r"x[-_]?auth[-_]?token", r"auth[-_]?token",
-    r"access[-_]?token", r"refresh[-_]?token", r"id[-_]?token",
-    r"client[-_]?secret", r"secret[-_]?key", r"private[-_]?key",
-    r"access[-_]?key", r"secret[-_]?access[-_]?key",
-    r"password", r"passwd", r"pwd", r"secret", r"token",
-)
-_SECRET_KV = re.compile(
-    r"(?i)\b(?P<key>" + "|".join(_SECRET_KEY_PATTERNS) + r")"
-    r"(?P<sep>[\"']?\s*[=:]\s*)"
-    r"(?P<val>\"[^\"]*\"|'[^']*'|[^\s,;&)]+)"
-)
-
-_REDACTED = "***"
 _MAX_DETAIL_LEN = 2000
 
 
-def sanitize_detail(text: str) -> str:
-    """Redact credential-bearing substrings from raw exception text.
+def build_error_detail(exc: BaseException) -> Optional[str]:
+    """Build the internal ``error_detail`` from allowlisted-safe fields only.
 
-    Defense in depth for the metrics record's internal-only ``error_detail``
-    field: even though the control plane never forwards it externally, scrubbing
-    keeps post-expansion connection values (DSN passwords, tokens, API keys) from
-    sprawling into the metrics store. ``str(exception)`` carries no traceback, so
-    nothing here strips one; the length cap guards against an unusually long
-    message. Customer-facing text uses :func:`customer_message` instead and never
-    passes through here.
+    Walks the whole chain (so an ``ExceptionGroup`` keeps every per-stream leaf,
+    not just ``All streams failed (N sub-exceptions)``) and emits, per member, a
+    ``stage/CODE:ExceptionType`` token where a stage tagged it and the exception
+    class name otherwise.
+
+    Every token is a stage label, an error code, or a live exception class name
+    (``type(member).__name__``) -- developer-chosen identifiers read off the
+    object, never message text. Message text is deliberately excluded: a
+    connector is untrusted AI-authored code, so its message could begin with a
+    secret, and the worker ``error_type:`` prefix is matched only for
+    classification (against a fixed allowlist) and never emitted here. With no
+    free text there is nothing to scrub; the full message lives in the engine
+    logs, not in this record.
     """
-    if not text:
-        return text
-    # Scrub before truncating: a credential whose value runs past the cap would
-    # otherwise lose the trailing "@host" the URL rule needs, leaving the start
-    # of the secret behind. The rules are all linear (the URL scheme run is
-    # length-bounded; the others only advance from an "authorization"/key word),
-    # so running them on untruncated text stays cheap.
-    redacted = _URL_CREDENTIALS.sub(lambda m: f"{m.group('scheme')}{_REDACTED}:{_REDACTED}@", text)
-    redacted = _AUTH_HEADER.sub(lambda m: f"{m.group('head')}{_REDACTED}", redacted)
-    redacted = _SECRET_KV.sub(lambda m: f"{m.group('key')}{m.group('sep')}{_REDACTED}", redacted)
-    if len(redacted) > _MAX_DETAIL_LEN:
-        redacted = redacted[:_MAX_DETAIL_LEN] + "...[truncated]"
-    return redacted
+    tokens: List[str] = []
+    seen: Set[str] = set()
+
+    def add(token: str) -> None:
+        if token and token not in seen:
+            seen.add(token)
+            tokens.append(token)
+
+    for member in _walk_chain(exc):
+        cls = type(member).__name__
+        tag = getattr(member, _TAG_ATTR, None)
+        if isinstance(tag, FailureTag):
+            add(f"{tag.stage.value}/{tag.code.value}:{cls}")
+        else:
+            add(cls)
+
+    if not tokens:
+        return None
+    detail = " | ".join(tokens)
+    if len(detail) > _MAX_DETAIL_LEN:
+        detail = detail[:_MAX_DETAIL_LEN] + "...[truncated]"
+    return detail
+
+
+def detail_for_code(code: ErrorCode, *, stage: FailureStage, reason: str) -> str:
+    """A structured ``error_detail`` for a non-exception failure.
+
+    Used where the run failed without a terminating exception to classify -- a
+    partial run whose batches were dead-lettered. ``reason`` must be a fixed,
+    developer-authored phrase (never connector/driver text), keeping the same
+    allowlisted-safe guarantee as :func:`build_error_detail`.
+    """
+    return f"{stage.value}/{code.value}: {reason}"
