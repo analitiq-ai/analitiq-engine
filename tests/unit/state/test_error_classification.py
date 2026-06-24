@@ -88,6 +88,33 @@ def test_untagged_exception_has_no_tag():
     assert read_failure_tag(RuntimeError("nothing here")) is None
 
 
+def test_tag_failure_does_not_overwrite_an_existing_chain_tag():
+    # The no-overwrite invariant is enforced in tag_failure itself, so an outer
+    # stage boundary calling it cannot clobber a precise inner tag -- "innermost
+    # wins" holds without a guard at every call site.
+    inner = tag_failure(RuntimeError("worker config error"),
+                        code=ErrorCode.CONFIG_INVALID, stage=FailureStage.SOURCE_EXTRACT)
+    # A coarser outer stage tries to tag the same exception: must be a no-op.
+    tag_failure(inner, code=ErrorCode.DESTINATION_WRITE_FAILED, stage=FailureStage.DESTINATION_LOAD)
+    assert read_failure_tag(inner) == FailureTag(
+        code=ErrorCode.CONFIG_INVALID, stage=FailureStage.SOURCE_EXTRACT
+    )
+    # A deeper tag on the cause chain also blocks an outer tag on the wrapper.
+    outer = RuntimeError("outer")
+    outer.__cause__ = tag_failure(RuntimeError("deep"),
+                                  code=ErrorCode.SCHEMA_MISMATCH, stage=FailureStage.TRANSFORM)
+    tag_failure(outer, code=ErrorCode.INTERNAL, stage=FailureStage.DESTINATION_LOAD)
+    assert read_failure_tag(outer).code is ErrorCode.SCHEMA_MISMATCH
+
+
+def test_code_priority_ranks_every_error_code():
+    # read_failure_tag ranks via _CODE_PRIORITY.index(code); a missing member
+    # would raise mid-classification. The import-time guard keeps it total.
+    from src.state.error_classification import _CODE_PRIORITY
+
+    assert set(_CODE_PRIORITY) == set(ErrorCode)
+
+
 # --------------------------------------------------------------------------- #
 # classify_source_extract: the one source-only fine split (issue #264)
 # --------------------------------------------------------------------------- #
@@ -393,6 +420,35 @@ def test_error_detail_includes_stage_and_code_for_tagged():
     assert build_error_detail(exc) == "destination_load/DESTINATION_WRITE_FAILED:StreamProcessingError"
 
 
+def test_error_detail_excludes_message_text_even_on_the_tagged_token_path():
+    # The tagged token is built by interpolation (stage/CODE:ClassName). A secret
+    # in the message must never reach it -- this is the higher-risk path than the
+    # bare-class-name case, since the token format touches exception fields.
+    exc = tag_failure(
+        RuntimeError("Authorization: Bearer leaked-token-xyz dsn=postgres://u:p@h/db"),
+        code=ErrorCode.DESTINATION_WRITE_FAILED,
+        stage=FailureStage.DESTINATION_LOAD,
+    )
+    detail = build_error_detail(exc)
+    assert detail == "destination_load/DESTINATION_WRITE_FAILED:RuntimeError"
+    assert "leaked-token-xyz" not in detail
+    assert "p@h" not in detail
+
+
+def test_error_detail_enumerates_mixed_tagged_and_untagged_group():
+    # The realistic all-streams-failed group is mixed: one stream tagged, one
+    # raised an untagged opaque error. classify picks the dominant tag; detail
+    # keeps the untagged leaf's class name without crashing on its None tag.
+    group = ExceptionGroup("All streams failed", [
+        tag_failure(_make("ReadError"), code=ErrorCode.SOURCE_UNREACHABLE, stage=FailureStage.SOURCE_EXTRACT),
+        _make("ValueError", message="opaque untagged failure"),
+    ])
+    assert classify_exception(group) is ErrorCode.SOURCE_UNREACHABLE
+    detail = build_error_detail(group)
+    assert "source_extract/SOURCE_UNREACHABLE:ReadError" in detail
+    assert "ValueError" in detail
+
+
 def test_error_detail_enumerates_group_leaves_by_tag():
     # A group with distinctly tagged leaves keeps both, not just the summary.
     group = ExceptionGroup("All streams failed", [
@@ -444,8 +500,11 @@ def test_classify_for_metrics_returns_safe_triple():
     code, message, detail = classify_for_metrics(exc)
     assert code is ErrorCode.SOURCE_AUTH_FAILED
     assert message == customer_message(ErrorCode.SOURCE_AUTH_FAILED)
-    # detail is the class name only -- no message text, so no credentials.
+    # detail is the class name only -- no message text, so no credentials. Assert
+    # both the exact shape and, explicitly, that the DSN password never leaks
+    # (the negative guard survives a future token-format change).
     assert detail == "RuntimeError"
+    assert "p@h" not in detail and ":p@" not in detail
 
 
 def test_classify_for_metrics_prefers_tag():

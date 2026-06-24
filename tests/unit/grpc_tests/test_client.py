@@ -1068,6 +1068,42 @@ class TestSendBatchSelfHeal:
         # Params survive the failed start so a retry can still self-heal.
         assert client._stream_params is not None
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("wire_flag", [True, False])
+    async def test_start_stream_reads_schema_rejected_verdict_from_ack(self, wire_flag):
+        """The engine trusts the destination's structured transport-vs-schema
+        verdict off the wire: a NACK carries schema_rejected, and the client
+        echoes it rather than assuming every NACK is a schema rejection. Through
+        the worker proxy a transport failure arrives as schema_rejected=False, so
+        reading the flag is what keeps a proxied outage DESTINATION_WRITE_FAILED
+        instead of SCHEMA_MISMATCH (issue #264)."""
+        import asyncio
+        from src.grpc.generated.analitiq.v1 import SchemaAck
+
+        client = DestinationGRPCClient()
+        client._connected = True
+        client._stub = MagicMock()
+        client._stub.StreamRecords = MagicMock(return_value=MagicMock())
+
+        async def _reader():
+            # start_stream creates _response_queue before starting this task.
+            client._response_queue.put_nowait(
+                SchemaAck(stream_id="s", accepted=False,
+                          schema_rejected=wire_flag, message="nope")
+            )
+            await asyncio.sleep(60)  # stay alive; start_stream consumes one item
+
+        with patch.object(client, "_read_responses", new=_reader), \
+             patch.object(client, "_write_requests", new=AsyncMock()):
+            accepted = await client.start_stream(
+                run_id="r", stream_id="s",
+                schema_config={"write_mode": "upsert", "schema_version": 1},
+            )
+
+        assert accepted is False
+        assert client.schema_rejected is wire_flag
+        assert client.schema_rejection_message == "nope"
+
 
 def _batch_ack(status):
     """Build a BatchAck stand-in for _wait_with_heartbeat return values."""

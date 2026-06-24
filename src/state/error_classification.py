@@ -157,12 +157,16 @@ _TAG_ATTR = "_analitiq_failure_tag"
 def tag_failure(exc: BaseException, *, code: ErrorCode, stage: FailureStage) -> BaseException:
     """Stamp ``exc`` with a :class:`FailureTag` and return it (for ``raise``).
 
-    Never overwrites a tag already present *deeper* in the chain: callers at an
-    outer stage boundary should gate on :func:`read_failure_tag` so a precise
-    inner signal (e.g. a worker's deterministic-config tag) is not clobbered by a
-    coarser outer default.
+    No-overwrite by construction: if any exception already in ``exc``'s chain
+    carries a tag, this is a no-op, so a precise inner signal (e.g. a worker's
+    deterministic-config tag) is never clobbered by a coarser outer-stage
+    default. The "innermost / most-specific tag wins" rule is enforced here
+    once -- an outer stage boundary can call ``tag_failure`` unconditionally
+    instead of each re-implementing the same ``read_failure_tag(e) is None``
+    guard (and risking a silent clobber if one is forgotten).
     """
-    setattr(exc, _TAG_ATTR, FailureTag(code=code, stage=stage))
+    if read_failure_tag(exc) is None:
+        setattr(exc, _TAG_ATTR, FailureTag(code=code, stage=stage))
     return exc
 
 
@@ -177,6 +181,16 @@ _CODE_PRIORITY: Tuple[ErrorCode, ...] = (
     ErrorCode.SOURCE_UNREACHABLE,
     ErrorCode.INTERNAL,
 )
+
+# Totality, enforced at import: read_failure_tag ranks tags via
+# _CODE_PRIORITY.index(code), which raises ValueError for an unranked code --
+# inside the failure-reporting path, the worst place for a new exception. Fail
+# loud at startup instead if a future ErrorCode member is added without a rank.
+_unranked = set(ErrorCode) - set(_CODE_PRIORITY)
+if _unranked:
+    raise RuntimeError(
+        f"_CODE_PRIORITY must rank every ErrorCode; missing: {sorted(c.value for c in _unranked)}"
+    )
 
 
 def _iter_tags(exc: BaseException) -> List[FailureTag]:

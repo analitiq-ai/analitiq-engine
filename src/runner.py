@@ -346,14 +346,10 @@ class PipelineRunner:
         except Exception as e:
             # Classify the terminating exception into a stable, customer-safe
             # code here -- the runner is the catch site that sees the failure
-            # whole. error_message is customer-safe; error_detail keeps the raw
-            # (scrubbed) text for internal debugging only. A failure raised
-            # before config_ready is config loading/parsing, which surfaces as
-            # builtin error types (FileNotFoundError, ValueError, ...) the type
-            # classifier cannot read -- the phase is the reliable signal there.
-            # A builtin local-IO error during config load (e.g. an unreadable
-            # config file) is infra, not bad config, so let the classifier keep
-            # it as INTERNAL rather than forcing CONFIG_INVALID.
+            # whole. error_message is customer-safe; error_detail carries only
+            # allowlisted-safe structured tokens (stage labels, error codes,
+            # exception class names) via classify_for_metrics -- never raw
+            # message text.
             if not config_ready and not is_local_io_error(e):
                 # A failure before config_ready is config loading/parsing, which
                 # surfaces as builtin types (FileNotFoundError, ValueError, ...)

@@ -21,7 +21,6 @@ from ..state.error_classification import (
     classify_source_extract,
     customer_message,
     detail_for_code,
-    read_failure_tag,
     tag_failure,
 )
 from ..state.metrics_storage import emit_metrics_log, create_metrics_record
@@ -94,11 +93,6 @@ class StreamingEngine:
 
         # Metrics tracking with Pydantic validation
         self.metrics = PipelineMetrics()
-
-        # Representative destination failure from a DLQ'd batch. When a run ends
-        # "partial" (records failed but no exception raised, the dlq strategy),
-        # the runner reads this to classify the dominant cause.
-        self._dlq_failure_summary: Optional[str] = None
 
         # Connector code never runs in the engine process: every source read
         # goes through an isolated worker subprocess that owns the connector
@@ -460,14 +454,14 @@ class StreamingEngine:
             # Tag the failure source-extract so classification is deterministic
             # and never confused with a destination/transform cause. The code
             # within source (auth/unreachable/rate) is the one split a tag cannot
-            # make for an opaque driver error. Defer to any deeper tag -- e.g.
-            # the worker's deterministic-config signal preserved in readable.py.
-            if read_failure_tag(e) is None:
-                tag_failure(
-                    e,
-                    code=classify_source_extract(e),
-                    stage=FailureStage.SOURCE_EXTRACT,
-                )
+            # make for an opaque driver error. tag_failure is no-overwrite, so a
+            # deeper tag -- e.g. the worker's deterministic-config signal from
+            # readable.py -- still wins over this coarser source-extract default.
+            tag_failure(
+                e,
+                code=classify_source_extract(e),
+                stage=FailureStage.SOURCE_EXTRACT,
+            )
             raise
 
     async def _transform_stage(
@@ -520,8 +514,8 @@ class StreamingEngine:
             stream_metrics["batches_failed"] += 1
             # A transform failure is a mapping/type problem -- the data did not
             # match the expected schema. Tag it directly; no text inference.
-            if read_failure_tag(e) is None:
-                tag_failure(e, code=ErrorCode.SCHEMA_MISMATCH, stage=FailureStage.TRANSFORM)
+            # tag_failure is no-overwrite, so a deeper tag still wins.
+            tag_failure(e, code=ErrorCode.SCHEMA_MISMATCH, stage=FailureStage.TRANSFORM)
             raise
 
     async def _load_stage(
@@ -739,7 +733,6 @@ class StreamingEngine:
                             stream_metrics["records_failed"] += record_count
                             stream_metrics["batches_failed"] += 1
                             if error_strategy == "dlq":
-                                self._record_dlq_failure(result.failure_summary, stream_metrics)
                                 await stream_dlq.send_batch(
                                     record_dicts, result.failure_summary,
                                     self.pipeline_id, stream_id=stream_id,
@@ -773,7 +766,6 @@ class StreamingEngine:
 
                         # Send entire batch to DLQ with record_ids for correlation
                         if error_strategy == "dlq":
-                            self._record_dlq_failure(result.failure_summary, stream_metrics)
                             await stream_dlq.send_batch(
                                 record_dicts, result.failure_summary,
                                 self.pipeline_id, stream_id=stream_id,
@@ -795,7 +787,6 @@ class StreamingEngine:
                         stream_metrics["records_failed"] += record_count
                         stream_metrics["batches_failed"] += 1
                         if error_strategy == "dlq":
-                            self._record_dlq_failure(f"Unknown ACK status: {result.status}", stream_metrics)
                             await stream_dlq.send_batch(
                                 record_dicts, f"Unknown ACK status: {result.status}",
                                 self.pipeline_id, stream_id=stream_id,
@@ -817,12 +808,12 @@ class StreamingEngine:
             await output_queue.put(None)
             # A load-stage failure is destination-side by construction; tag it so
             # a driver/HTTP code in the cause can never be misread as source auth.
-            if read_failure_tag(e) is None:
-                tag_failure(
-                    e,
-                    code=ErrorCode.DESTINATION_WRITE_FAILED,
-                    stage=FailureStage.DESTINATION_LOAD,
-                )
+            # tag_failure is no-overwrite, so a deeper tag still wins.
+            tag_failure(
+                e,
+                code=ErrorCode.DESTINATION_WRITE_FAILED,
+                stage=FailureStage.DESTINATION_LOAD,
+            )
             raise
 
     async def _checkpoint_stage(self, input_queue: Queue, config: Dict[str, Any]):
@@ -970,29 +961,6 @@ class StreamingEngine:
     def get_metrics(self) -> PipelineMetrics:
         """Get pipeline execution metrics as a validated Pydantic model."""
         return self.metrics
-
-    def get_dominant_failure(self) -> Optional[str]:
-        """Representative destination failure summary from DLQ'd batches, if any.
-
-        Set when a batch is written to the dead-letter queue. The runner uses it
-        to classify a partial run (records failed but no exception); those
-        failures are always destination write rejections.
-        """
-        return self._dlq_failure_summary
-
-    def _record_dlq_failure(self, summary: str, stream_metrics: Dict[str, Any]) -> None:
-        """Keep the first DLQ failure summary, both run-wide and per stream.
-
-        The run-wide value (``_dlq_failure_summary``) is the pipeline's dominant
-        cause for the runner; the per-stream copy in ``stream_metrics`` keeps
-        each stream's own metric record from borrowing another stream's detail.
-        """
-        if not summary:
-            return
-        if self._dlq_failure_summary is None:
-            self._dlq_failure_summary = summary
-        if not stream_metrics.get("dlq_failure_summary"):
-            stream_metrics["dlq_failure_summary"] = summary
 
     def get_state_manager(self) -> StateManager:
         """Get the state manager instance."""
