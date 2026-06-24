@@ -14,6 +14,12 @@ from cdk.contract import Readable
 from ..shared.run_id import get_or_generate_run_id
 from ..state.circuit_breaker import CircuitBreaker
 from ..state.dead_letter_queue import DeadLetterQueue
+from ..state.error_classification import (
+    ErrorCode,
+    classify_for_metrics,
+    customer_message,
+    sanitize_detail,
+)
 from ..state.metrics_storage import emit_metrics_log, create_metrics_record
 from ..state.retry_handler import RetryHandler
 from ..state.state_manager import StateManager
@@ -84,6 +90,17 @@ class StreamingEngine:
 
         # Metrics tracking with Pydantic validation
         self.metrics = PipelineMetrics()
+
+        # Representative destination failure from a DLQ'd batch. When a run ends
+        # "partial" (records failed but no exception raised, the dlq strategy),
+        # the runner reads this to classify the dominant cause.
+        self._dlq_failure_summary: Optional[str] = None
+
+        # Representative exception from a stream that failed while OTHER streams
+        # succeeded (a partial run that stream_data does not re-raise). The
+        # runner classifies it so a partial run with a failed stream is not
+        # reported as success.
+        self._dominant_stream_error: Optional[BaseException] = None
 
         # Connector code never runs in the engine process: every source read
         # goes through an isolated worker subprocess that owns the connector
@@ -165,9 +182,14 @@ class StreamingEngine:
                     logger.error("All streams failed - pipeline failed completely")
                     raise ExceptionGroup("All streams failed", stream_exceptions)
                 else:
-                    # Partial failure - log but allow pipeline to complete
+                    # Partial failure - log but allow pipeline to complete. Keep
+                    # ALL failed-stream exceptions as a group (like the all-failed
+                    # path) so the runner classifies the dominant cause across
+                    # every failure, not just the first.
                     logger.warning(f"Pipeline completed with {len(stream_exceptions)} failed streams out of {len(streams)}")
-                    # Could optionally raise ExceptionGroup based on failure threshold
+                    self._dominant_stream_error = ExceptionGroup(
+                        "Partial stream failures", stream_exceptions
+                    )
             else:
                 logger.info(f"Pipeline {pipeline_id} completed successfully - all {len(streams)} streams processed")
 
@@ -215,7 +237,9 @@ class StreamingEngine:
             "batches_failed": 0,
         }
         status = "success"
+        error_code: Optional[ErrorCode] = None
         error_message: Optional[str] = None
+        error_detail: Optional[str] = None
 
         try:
             source_cfg = stream_config["source"]
@@ -248,8 +272,15 @@ class StreamingEngine:
                 schema_config=destination_cfg,
             )
             if not schema_accepted:
+                # The destination did not accept the stream. configure_schema
+                # only prepares the destination's own table (no schema is
+                # validated), so this is either a destination config defect or a
+                # transport failure; carry the concrete reason so the classifier
+                # can tell them apart and the detail survives into the logs.
+                reason = grpc_client.schema_rejection_message
+                detail = f": {reason}" if reason else ""
                 raise StreamProcessingError(
-                    f"Destination rejected schema for stream {stream_name}",
+                    f"Destination did not accept the stream for {stream_name}{detail}",
                     stream_id=stream_id,
                 )
             logger.info(f"Stream {stream_name}: gRPC stream started, schema accepted")
@@ -291,11 +322,25 @@ class StreamingEngine:
             # Wait for all stream stages to complete
             await asyncio.gather(*tasks)
 
-            logger.info(f"Stream {stream_name} completed successfully")
+            if stream_metrics["records_failed"] > 0:
+                # The dlq strategy dead-letters exhausted batches and completes
+                # without raising; reflect that the stream only partly succeeded
+                # and carry the destination cause rather than reporting success.
+                status = "partial"
+                error_code = ErrorCode.DESTINATION_WRITE_FAILED
+                error_message = customer_message(error_code)
+                stream_failure = stream_metrics.get("dlq_failure_summary")
+                error_detail = sanitize_detail(stream_failure) if stream_failure else None
+                logger.warning(
+                    f"Stream {stream_name} completed partially: "
+                    f"{stream_metrics['records_failed']} records dead-lettered"
+                )
+            else:
+                logger.info(f"Stream {stream_name} completed successfully")
 
         except Exception as e:
             status = "failed"
-            error_message = str(e)
+            error_code, error_message, error_detail = classify_for_metrics(e)
             logger.exception("Stream %s processing failed: %s", stream_name, e)
             # Cancel any running tasks for this stream, then drive them to
             # completion. The source reader releases its runtime in its own
@@ -335,7 +380,9 @@ class StreamingEngine:
                     records_failed=stream_metrics["records_failed"],
                     batches_processed=stream_metrics["batches_processed"],
                     status=status,
+                    error_code=error_code,
                     error_message=error_message,
+                    error_detail=error_detail,
                     pipeline_name=pipeline_name,
                 )
                 if os.getenv("METRICS_ENABLED", "false").lower() == "true":
@@ -658,6 +705,7 @@ class StreamingEngine:
                             stream_metrics["records_failed"] += record_count
                             stream_metrics["batches_failed"] += 1
                             if error_strategy == "dlq":
+                                self._record_dlq_failure(result.failure_summary, stream_metrics)
                                 await stream_dlq.send_batch(
                                     record_dicts, result.failure_summary,
                                     self.pipeline_id, stream_id=stream_id,
@@ -691,6 +739,7 @@ class StreamingEngine:
 
                         # Send entire batch to DLQ with record_ids for correlation
                         if error_strategy == "dlq":
+                            self._record_dlq_failure(result.failure_summary, stream_metrics)
                             await stream_dlq.send_batch(
                                 record_dicts, result.failure_summary,
                                 self.pipeline_id, stream_id=stream_id,
@@ -712,6 +761,7 @@ class StreamingEngine:
                         stream_metrics["records_failed"] += record_count
                         stream_metrics["batches_failed"] += 1
                         if error_strategy == "dlq":
+                            self._record_dlq_failure(f"Unknown ACK status: {result.status}", stream_metrics)
                             await stream_dlq.send_batch(
                                 record_dicts, f"Unknown ACK status: {result.status}",
                                 self.pipeline_id, stream_id=stream_id,
@@ -878,6 +928,38 @@ class StreamingEngine:
     def get_metrics(self) -> PipelineMetrics:
         """Get pipeline execution metrics as a validated Pydantic model."""
         return self.metrics
+
+    def get_dominant_failure(self) -> Optional[str]:
+        """Representative destination failure summary from DLQ'd batches, if any.
+
+        Set when a batch is written to the dead-letter queue. The runner uses it
+        to classify a partial run (records failed but no exception); those
+        failures are always destination write rejections.
+        """
+        return self._dlq_failure_summary
+
+    def get_dominant_stream_error(self) -> Optional[BaseException]:
+        """The failed-stream exceptions from a partial run, as an ExceptionGroup.
+
+        Set when some (not all) streams fail: stream_data logs and returns
+        without raising, so the runner reads this and classifies the dominant
+        cause across all failed streams to classify the partial run.
+        """
+        return self._dominant_stream_error
+
+    def _record_dlq_failure(self, summary: str, stream_metrics: Dict[str, Any]) -> None:
+        """Keep the first DLQ failure summary, both run-wide and per stream.
+
+        The run-wide value (``_dlq_failure_summary``) is the pipeline's dominant
+        cause for the runner; the per-stream copy in ``stream_metrics`` keeps
+        each stream's own metric record from borrowing another stream's detail.
+        """
+        if not summary:
+            return
+        if self._dlq_failure_summary is None:
+            self._dlq_failure_summary = summary
+        if not stream_metrics.get("dlq_failure_summary"):
+            stream_metrics["dlq_failure_summary"] = summary
 
     def get_state_manager(self) -> StateManager:
         """Get the state manager instance."""

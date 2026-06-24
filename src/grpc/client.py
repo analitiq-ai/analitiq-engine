@@ -172,6 +172,15 @@ class DestinationGRPCClient:
         # (end_stream / disconnect). None means no stream was ever started.
         self._stream_params: Optional[Dict[str, Any]] = None
 
+    @property
+    def schema_rejection_message(self) -> Optional[str]:
+        """Reason text from the most recent failed schema handshake, if any.
+
+        The engine surfaces it in the failure it raises when the destination
+        does not accept the stream, so the concrete cause is not lost.
+        """
+        return self._schema_rejection_message
+
     async def connect(
         self,
         max_connect_retries: int = DEFAULT_MAX_RETRIES,

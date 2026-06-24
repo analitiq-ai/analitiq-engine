@@ -182,6 +182,67 @@ except* Exception as eg:
         logger.error("unexpected error: %s", exc)
 ```
 
+## Pipeline Error Codes (customer-safe contract)
+
+The pipeline-level metrics record (`state.metrics_storage.PipelineMetricsRecord`,
+emitted as `ANALITIQ_METRICS::{"type":"pipeline",...}`) carries a stable,
+machine-readable failure category alongside `status` and the counts. The runner
+classifies the terminating exception at the catch site — the engine is the only
+layer that sees the exception type and the source/destination context — using
+`state.error_classification.classify_exception`.
+
+`ErrorCode` is a **published contract**. The control plane forwards it to
+external, API-key customers via the public run-status endpoint, so values are
+stable: add members as new failure semantics appear, never rename or repurpose
+existing ones. Coordinate additions with the control plane's error-code catalog.
+
+| `error_code` | Meaning |
+|---|---|
+| `SOURCE_AUTH_FAILED` | Authentication/credentials to the source were rejected |
+| `SOURCE_UNREACHABLE` | Source could not be reached (offline, DNS, refused, timeout) |
+| `DESTINATION_WRITE_FAILED` | Writing to / reaching the destination failed (incl. a transport-side handshake failure) |
+| `RATE_LIMITED` | Source rate-limited / throttled the request |
+| `CONFIG_INVALID` | Pipeline/connector/connection config invalid — incl. type-map / mapping defects and destination schema-configuration failures |
+| `INTERNAL` | Anything not matched above (treated as an engine-side fault) |
+
+There is deliberately no `SCHEMA_MISMATCH` code: the engine performs no schema
+validation. The destination "schema" handshake (`configure_schema`) only prepares
+the destination's own table via DDL, so a failed handshake is a destination
+*configuration* defect (`CONFIG_INVALID`) or a transport failure
+(`DESTINATION_WRITE_FAILED`) — never a data-vs-schema mismatch. Type-map misses
+and mapping/transform errors are likewise configuration defects.
+
+Three error fields appear on the record, with distinct audiences:
+
+- `error_code` — the enum above. Customer-safe. Set on `failed` (and `partial`
+  where a dominant cause exists); `None` on success.
+- `error_message` — a short, fixed, per-code human-readable message. Carries no
+  exception text, so it cannot leak secrets, driver internals, or stack traces.
+  Customer-safe.
+- `error_detail` — the raw exception text with credential-bearing substrings
+  redacted. **Internal-only**: the control plane must not forward it externally.
+
+Classification matches exception *class names* across the whole chain (cause,
+context, `ExceptionGroup` members, and the engine's `original_error`) plus the
+message text, rather than importing every exception class. This mirrors the
+existing name-based pattern in `cdk.sql.generic._is_fatal_adbc_error` and handles
+the gRPC worker boundary, where the original source exception type collapses to
+`ReadError` / `RuntimeError` but its class name survives as an `error_type:`
+prefix in the message. Rules are evaluated in priority order (local-IO, config,
+destination handshake, destination write, then the source-side
+auth/rate/unreachable buckets), so for an aggregated `ExceptionGroup` the
+dominant cause wins.
+
+The `error_code` enum is the stable, audited contract. The *textual* part of
+classification (un-typed driver/HTTP errors) and `error_detail` credential
+scrubbing are best-effort heuristics over free text: an ambiguous message can
+fall to a neighbouring code or `INTERNAL`, and an exotic secret shape (a PEM
+block, a password-only URL) may slip past the scrubber -- which is why
+`error_detail` is internal-only and never forwarded. The durable fix for both
+tails is structured, engine-side error reporting (tag failures with
+stage/side/category at the raise site; pass only allowlisted fields), tracked as
+a follow-up rather than by widening heuristics here.
+
 ## ConnectionRuntime and Transports
 
 Each connection loaded by `PipelineConfigPrep` becomes a

@@ -21,6 +21,13 @@ from src.models.resolved import ResolvedPipeline, ResolvedStream, ResolvedSource
 from cdk.connection_runtime import ConnectionRuntime
 from .engine.pipeline_config_prep import PipelineConfigPrep
 from .shared.run_id import get_or_generate_run_id
+from .state.error_classification import (
+    ErrorCode,
+    classify_for_metrics,
+    customer_message,
+    is_local_io_error,
+    sanitize_detail,
+)
 from .state.metrics_storage import save_pipeline_metrics
 
 
@@ -250,7 +257,10 @@ class PipelineRunner:
         records_failed = 0
         batches_processed = 0
         status = "failed"
+        error_code: ErrorCode | None = None
         error_message = None
+        error_detail = None
+        config_ready = False
 
         try:
             logger.info("Initializing PipelineConfigPrep...")
@@ -258,6 +268,15 @@ class PipelineRunner:
             pipeline_config, stream_configs, resolved_connections, resolved_endpoints, connectors = (
                 pipeline_config_prep.create_config()
             )
+
+            # Translate the resolved contract into the engine config dict. This
+            # still validates config (e.g. a stream with no destinations), so it
+            # belongs in the config phase. Done immediately after create_config
+            # so the flag below covers config load + translation only -- not the
+            # directory/engine setup that follows, whose failures (a read-only
+            # filesystem, etc.) are runtime, not config, errors.
+            config_dict = _build_config_dict(pipeline_config, stream_configs)
+            config_ready = True
 
             logger.info(f"Starting {pipeline_config.name} (ID: {pipeline_config.pipeline_id})")
 
@@ -286,8 +305,6 @@ class PipelineRunner:
                 retry_delay=error_handling.get("retry_delay_seconds", 5),
             )
 
-            config_dict = _build_config_dict(pipeline_config, stream_configs)
-
             logger.info("Starting pipeline execution...")
             await engine.stream_data(config_dict)
 
@@ -301,21 +318,55 @@ class PipelineRunner:
             records_processed = getattr(metrics, "records_processed", 0)
             batches_processed = getattr(metrics, "batches_processed", 0)
             records_failed = getattr(metrics, "records_failed", 0)
+            streams_failed = getattr(metrics, "streams_failed", 0)
 
             logger.info(f"Records processed: {records_processed}")
             logger.info(f"Batches processed: {batches_processed}")
 
-            if records_failed > 0:
+            # stream_data only raises when ALL streams fail; a partial run (some
+            # streams failed, or records were dead-lettered) returns normally, so
+            # classify the dominant cause here rather than reporting success.
+            stream_error = engine.get_dominant_stream_error()
+            if stream_error is not None:
+                # A stream raised (e.g. a source auth/config failure) while
+                # others succeeded. Classify that exception.
+                status = "partial"
+                error_code, error_message, error_detail = classify_for_metrics(stream_error)
+                logger.warning(f"Partial run: {streams_failed} stream(s) failed [{error_code.value}]")
+            elif records_failed > 0:
                 logger.warning(f"Failed records: {records_failed} (check dead letter queue)")
                 status = "partial"
+                # Records were dead-lettered with no raised exception -- a
+                # destination write rejection. Carry the dominant DLQ cause.
+                error_code = ErrorCode.DESTINATION_WRITE_FAILED
+                error_message = customer_message(error_code)
+                dominant_failure = engine.get_dominant_failure()
+                error_detail = sanitize_detail(dominant_failure) if dominant_failure else None
             else:
                 status = "success"
 
             return True
 
         except Exception as e:
-            error_message = str(e)
-            logger.error(f"Pipeline failed: {error_message}", exc_info=True)
+            # Classify the terminating exception into a stable, customer-safe
+            # code here -- the runner is the catch site that sees the failure
+            # whole. error_message is customer-safe; error_detail keeps the raw
+            # (scrubbed) text for internal debugging only. A failure raised
+            # before config_ready is config loading/parsing, which surfaces as
+            # builtin error types (FileNotFoundError, ValueError, ...) the type
+            # classifier cannot read -- the phase is the reliable signal there.
+            # A builtin local-IO error during config load (e.g. an unreadable
+            # config file) is infra, not bad config, so let the classifier keep
+            # it as INTERNAL rather than forcing CONFIG_INVALID.
+            if not config_ready and not is_local_io_error(e):
+                error_code = ErrorCode.CONFIG_INVALID
+                error_message = customer_message(error_code)
+                error_detail = sanitize_detail(str(e))
+            else:
+                error_code, error_message, error_detail = classify_for_metrics(e)
+            logger.error(
+                f"Pipeline failed [{error_code.value}]: {error_detail}", exc_info=True
+            )
             return False
 
         finally:
@@ -330,7 +381,9 @@ class PipelineRunner:
                     records_failed=records_failed,
                     batches_processed=batches_processed,
                     status=status,
+                    error_code=error_code,
                     error_message=error_message,
+                    error_detail=error_detail,
                     pipeline_name=pipeline_config.name if pipeline_config else None,
                 )
                 logger.info("Emitted pipeline metrics to logs")
