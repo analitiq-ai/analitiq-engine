@@ -133,6 +133,35 @@ class TestSchemaContractCastArrowBatch:
         with pytest.raises(ValueError, match="'amount'.*required"):
             contract.cast_arrow_batch(source)
 
+    def test_cast_arrow_batch_non_nullable_with_null_raises(self):
+        # A None in a non-nullable column must fail loud on the Arrow-batch
+        # path exactly as it does on the from_pylist path — same intent, same
+        # behaviour across build paths. Before the shared guard this null was
+        # silently admitted.
+        schema = {
+            "columns": [{"name": "id", "arrow_type": "Int64", "nullable": False}]
+        }
+        contract = SchemaContract(schema)
+
+        source = pa.RecordBatch.from_pylist([{"id": 1}, {"id": None}])
+        with pytest.raises(ValueError, match="'id' is non-nullable but rows"):
+            contract.cast_arrow_batch(source)
+
+    def test_cast_arrow_batch_overflow_raises(self):
+        # safe=True: an int that overflows the narrower destination width must
+        # fail loud, mirroring the per-row range check from_pylist enforces.
+        # Before this, safe=False let the value saturate silently.
+        schema = {
+            "columns": [{"name": "n", "arrow_type": "Int32", "nullable": True}]
+        }
+        contract = SchemaContract(schema)
+
+        source = pa.record_batch(
+            [pa.array([2**40], type=pa.int64())], names=["n"]
+        )
+        with pytest.raises(ValueError, match="cannot cast"):
+            contract.cast_arrow_batch(source)
+
     def test_cast_arrow_batch_unparseable_timestamp_raises(self):
         schema = {
             "columns": [

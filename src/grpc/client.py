@@ -308,15 +308,26 @@ class DestinationGRPCClient:
             logger.warning("Destination health check failed: %s", e)
             return False
 
-    async def get_capabilities(self) -> Optional[GetCapabilitiesResponse]:
+    async def get_capabilities(self) -> GetCapabilitiesResponse:
         """
         Query destination capabilities.
 
         Returns:
-            GetCapabilitiesResponse or None if failed
+            GetCapabilitiesResponse. A successful GetCapabilities is always a
+            populated response, so the result is never None.
+
+        Raises:
+            ConnectionError: the channel is not connected.
+            grpc.aio.AioRpcError: the GetCapabilities RPC failed.
+
+        Both failure modes raise rather than collapse to None: a None return
+        was indistinguishable from a real (populated) response and let a
+        transport failure read as "destination has no capabilities".
         """
         if not self._stub:
-            return None
+            raise ConnectionError(
+                "cannot query capabilities: not connected to destination"
+            )
 
         try:
             return await self._stub.GetCapabilities(
@@ -325,10 +336,10 @@ class DestinationGRPCClient:
             )
         except grpc.aio.AioRpcError as e:
             logger.error(
-                "Failed to get capabilities: code=%s details=%s",
+                "GetCapabilities RPC failed: code=%s details=%s",
                 e.code(), e.details(), exc_info=True,
             )
-            return None
+            raise
 
     async def start_stream(
         self,

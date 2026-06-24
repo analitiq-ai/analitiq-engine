@@ -142,12 +142,7 @@ class SchemaContract:
                     f"{field.type} from source values "
                     f"(first non-null at row {bad_index}): {e}"
                 ) from e
-            if not field.nullable and array.null_count:
-                null_indices = [i for i, v in enumerate(values) if v is None]
-                raise ValueError(
-                    f"column {field.name!r} is non-nullable but rows "
-                    f"{null_indices} carry None"
-                )
+            self._assert_non_nullable(field, array)
             arrays.append(array)
         return pa.RecordBatch.from_arrays(arrays, schema=self._arrow_schema)
 
@@ -176,21 +171,50 @@ class SchemaContract:
                 arrays.append(pa.nulls(record_batch.num_rows, type=field.type))
                 continue
             if col.type == field.type:
-                arrays.append(col)
-                continue
-            try:
-                arrays.append(pc.cast(col, field.type, safe=False))
-            except (pa.ArrowInvalid, pa.ArrowTypeError, pa.ArrowNotImplementedError) as e:
-                raise ValueError(
-                    f"column {field.name!r}: cannot cast "
-                    f"{col.type} → {field.type}: {e}"
-                ) from e
+                array = col
+            else:
+                try:
+                    # safe=True so an overflow or lossy narrowing fails loud
+                    # here, matching the per-row range checks the from_pylist
+                    # path enforces — the same author intent cannot saturate
+                    # on one build path while it is rejected on the other.
+                    array = pc.cast(col, field.type, safe=True)
+                except (
+                    pa.ArrowInvalid,
+                    pa.ArrowTypeError,
+                    pa.ArrowNotImplementedError,
+                ) as e:
+                    raise ValueError(
+                        f"column {field.name!r}: cannot cast "
+                        f"{col.type} → {field.type}: {e}"
+                    ) from e
+            self._assert_non_nullable(field, array)
+            arrays.append(array)
         return pa.RecordBatch.from_arrays(arrays, schema=self._arrow_schema)
 
     @staticmethod
     def to_dicts(batch: Any) -> List[Dict[str, Any]]:
         """Convert an Arrow ``Table`` or ``RecordBatch`` to dicts."""
         return batch.to_pylist()
+
+    @staticmethod
+    def _assert_non_nullable(field: pa.Field, array: pa.Array) -> None:
+        """Reject ``None`` in a non-nullable column, naming the offending rows.
+
+        Shared by every build path (``from_pylist`` builds arrays from dict
+        rows, ``cast_arrow_batch`` casts an incoming Arrow batch) so a ``None``
+        in a required column fails loud identically regardless of whether the
+        batch arrived as dict rows or as an Arrow batch. Walking the null mask
+        is O(n), but only on the rejection path — the common case short-circuits
+        on ``null_count``.
+        """
+        if field.nullable or not array.null_count:
+            return
+        null_indices = [i for i in range(len(array)) if not array[i].is_valid]
+        raise ValueError(
+            f"column {field.name!r} is non-nullable but rows "
+            f"{null_indices} carry None"
+        )
 
     @staticmethod
     def _build_column(

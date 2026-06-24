@@ -189,6 +189,30 @@ class BaseDestinationHandler(ABC):
         return False
 
     @property
+    def supports_auto_create(self) -> bool:
+        """Whether this destination can create the target relation if absent.
+
+        Auto-create is a relational/DDL capability; the neutral base cannot
+        assume it (an API, file, or stdout destination has no schema to
+        create), so it defaults False. A SQL handler that issues CREATE TABLE
+        overrides this to True. Advertised capability must follow what the
+        handler can actually do, never a constructor literal.
+        """
+        return False
+
+    @property
+    def supports_truncate(self) -> bool:
+        """Whether this destination supports the truncate-insert (full-refresh)
+        write mode.
+
+        Only a destination that can truncate the target before insert
+        advertises ``WRITE_MODE_TRUNCATE_INSERT``; the neutral base cannot, so
+        it defaults False. A SQL handler that issues TRUNCATE overrides this to
+        True.
+        """
+        return False
+
+    @property
     def max_batch_size(self) -> int:
         """Maximum recommended batch size for this destination."""
         return 5000
