@@ -168,6 +168,17 @@ def test_classify_destination_failure_preserves_config_causes(summary, expected)
     assert classify_destination_failure(_make("StreamProcessingError", message=summary)) is expected
 
 
+def test_classify_destination_failure_local_io_is_internal():
+    # The load stage's try also runs engine-owned local I/O (checkpoint save, DLQ
+    # write, metrics). A builtin filesystem error there is infra -> INTERNAL, not
+    # a destination write rejection.
+    from src.state.error_classification import classify_destination_failure
+
+    assert classify_destination_failure(
+        PermissionError("[Errno 13] Permission denied: '/app/state'")
+    ) is ErrorCode.INTERNAL
+
+
 def test_destination_http_code_never_read_as_source_auth():
     # The cross-stage tail: a destination-load failure whose cause text carries a
     # "401" must classify DESTINATION_WRITE_FAILED, because the stage is tagged at

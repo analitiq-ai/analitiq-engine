@@ -497,6 +497,12 @@ def classify_destination_failure(exc: BaseException) -> ErrorCode:
     source-side cause can never reach it.
     """
     names, text = _signature(exc)
+    if names & _LOCAL_IO_NAMES:
+        # The load stage's try also runs engine-owned local I/O (checkpoint
+        # save, DLQ write, metrics emission); a builtin filesystem error there is
+        # an engine/infra fault, not a destination write rejection. Guard it
+        # first, exactly as classify_exception / classify_source_extract do.
+        return ErrorCode.INTERNAL
     if _matches(names, text, _CONFIG_NAMES, _CONFIG_PHRASES):
         return ErrorCode.CONFIG_INVALID
     return ErrorCode.DESTINATION_WRITE_FAILED
