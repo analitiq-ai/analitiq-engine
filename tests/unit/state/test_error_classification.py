@@ -170,13 +170,21 @@ def test_classify_destination_failure_preserves_config_causes(summary, expected)
 
 def test_classify_destination_failure_local_io_is_internal():
     # The load stage's try also runs engine-owned local I/O (checkpoint save, DLQ
-    # write, metrics). A builtin filesystem error there is infra -> INTERNAL, not
-    # a destination write rejection.
+    # write, batch-commit journal, metrics). A builtin filesystem error there is
+    # infra -> INTERNAL, not a destination write rejection -- including a bare
+    # OSError (a full / read-only volume: ENOSPC/EROFS has no dedicated subclass).
     from src.state.error_classification import classify_destination_failure
 
     assert classify_destination_failure(
         PermissionError("[Errno 13] Permission denied: '/app/state'")
     ) is ErrorCode.INTERNAL
+    assert classify_destination_failure(
+        OSError("[Errno 28] No space left on device")
+    ) is ErrorCode.INTERNAL
+    # A network OSError to the destination is a real write failure, not local I/O.
+    assert classify_destination_failure(
+        ConnectionRefusedError("connection refused")
+    ) is ErrorCode.DESTINATION_WRITE_FAILED
 
 
 def test_destination_http_code_never_read_as_source_auth():
@@ -500,6 +508,10 @@ def test_exception_group_detail_enumerates_leaves_by_class_name():
 @pytest.mark.parametrize("exc,expected", [
     (PermissionError("[Errno 13] Permission denied: '/app/connections/c.json'"), True),
     (FileExistsError("exists"), True),
+    # A bare OSError (full / read-only volume) is local infra too.
+    (OSError("[Errno 28] No space left on device"), True),
+    # A network OSError is a remote fault, not local I/O.
+    (ConnectionRefusedError("refused"), False),
     (RuntimeError("Could not find pipelines/manifest.json"), False),
     (ValueError("manifest.json missing required key"), False),
 ])

@@ -290,10 +290,11 @@ def is_local_io_error(exc: BaseException) -> bool:
     Lets the runner keep such a failure as the engine/infra fault it is
     (``INTERNAL``) instead of the config-phase ``CONFIG_INVALID`` default -- e.g.
     an unreadable manifest/connection JSON raises ``PermissionError`` during
-    config load, which is a volume/permissions problem, not a bad config.
+    config load, or a full/read-only volume raises a bare ``OSError``; both are
+    volume/permissions problems, not a bad config.
     """
     names, _ = _signature(exc)
-    return bool(names & _LOCAL_IO_NAMES)
+    return _is_local_filesystem_error(names)
 
 
 # --------------------------------------------------------------------------- #
@@ -427,6 +428,22 @@ _LOCAL_IO_NAMES = frozenset({
 })
 
 
+def _is_local_filesystem_error(names: Set[str]) -> bool:
+    """True for a builtin local-filesystem OSError, excluding network OSErrors.
+
+    The named subclasses in :data:`_LOCAL_IO_NAMES` cover the common cases, but a
+    disk-full / read-only-volume failure (``ENOSPC`` / ``EROFS``) raises a bare
+    ``OSError`` with no dedicated subclass. Match that too -- but never a network
+    OSError, whose connection subclasses live in :data:`_UNREACHABLE_NAMES` and
+    mean a *remote* fault (source unreachable, or a destination write failure),
+    not a local-disk problem. Defined once so every classifier's local-I/O guard
+    treats engine/infra filesystem faults identically.
+    """
+    if names & _LOCAL_IO_NAMES:
+        return True
+    return "OSError" in names and not (names & _UNREACHABLE_NAMES)
+
+
 def _matches(names: Set[str], text: str, name_set: frozenset, phrases: Tuple[str, ...]) -> bool:
     if names & name_set:
         return True
@@ -447,10 +464,11 @@ def classify_source_extract(exc: BaseException) -> ErrorCode:
     bootstrap) is an engine/infra fault and stays INTERNAL, never source auth.
     """
     names, text = _signature(exc)
-    if names & _LOCAL_IO_NAMES:
+    if _is_local_filesystem_error(names):
         # Guard before the "permission denied" auth phrase, exactly as
-        # classify_exception does: a local "[Errno 13] Permission denied" from
-        # the engine's own checkpoint/state I/O is infra, not source auth.
+        # classify_exception does: a local "[Errno 13] Permission denied" (or a
+        # bare OSError from a full/read-only volume) from the engine's own
+        # checkpoint/state I/O is infra, not source auth.
         return ErrorCode.INTERNAL
     if _matches(names, text, _CONFIG_NAMES, _CONFIG_PHRASES):
         return ErrorCode.CONFIG_INVALID
@@ -497,11 +515,14 @@ def classify_destination_failure(exc: BaseException) -> ErrorCode:
     source-side cause can never reach it.
     """
     names, text = _signature(exc)
-    if names & _LOCAL_IO_NAMES:
-        # The load stage's try also runs engine-owned local I/O (checkpoint
-        # save, DLQ write, metrics emission); a builtin filesystem error there is
-        # an engine/infra fault, not a destination write rejection. Guard it
-        # first, exactly as classify_exception / classify_source_extract do.
+    if _is_local_filesystem_error(names):
+        # The load stage's try also runs engine-owned local I/O (checkpoint save,
+        # DLQ write, batch-commit journal, metrics emission); a builtin
+        # filesystem error there is an engine/infra fault, not a destination
+        # write rejection. This is the only classifier that defaults to a
+        # non-INTERNAL code, so the bare-OSError case (a full/read-only volume)
+        # matters most here -- _is_local_filesystem_error catches it while still
+        # letting a network OSError fall through to DESTINATION_WRITE_FAILED.
         return ErrorCode.INTERNAL
     if _matches(names, text, _CONFIG_NAMES, _CONFIG_PHRASES):
         return ErrorCode.CONFIG_INVALID
@@ -522,7 +543,7 @@ def classify_exception(exc: BaseException) -> ErrorCode:
 
     names, text = _signature(exc)
 
-    if names & _LOCAL_IO_NAMES:
+    if _is_local_filesystem_error(names):
         return ErrorCode.INTERNAL
     if _matches(names, text, _CONFIG_NAMES, _CONFIG_PHRASES):
         return ErrorCode.CONFIG_INVALID
