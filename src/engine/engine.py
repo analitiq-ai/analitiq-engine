@@ -17,6 +17,7 @@ from ..state.dead_letter_queue import DeadLetterQueue
 from ..state.error_classification import (
     ErrorCode,
     FailureStage,
+    classify_destination_failure,
     classify_for_metrics,
     classify_handshake_failure,
     classify_source_extract,
@@ -31,7 +32,7 @@ from ..models.metrics import PipelineMetrics
 from .data_transformer import DataTransformer, build_output_schema
 from .exceptions import (
     ConfigurationError, StreamProcessingError, StreamExecutionError,
-    StreamConfigurationError, StageConfigurationError
+    StageConfigurationError
 )
 
 # gRPC imports for destination streaming
@@ -244,20 +245,13 @@ class StreamingEngine:
             source_cfg = stream_config["source"]
             destination_cfg = stream_config["destination"]
 
+            # Resolves the worker-backed Readable; raises a CONFIG_INVALID-tagged
+            # ValueError if the source config was never resolved (the real guard
+            # for a missing _resolved_source).
             source_connector = self._create_source_connector(source_cfg)
 
             stream_dlq_path = f"{self.dlq.dlq_path}/{stream_id}"
             stream_dlq = DeadLetterQueue(stream_dlq_path)
-
-            if not source_cfg.get("_resolved_source"):
-                raise tag_failure(
-                    StreamConfigurationError(
-                        "Missing _resolved_source in source config",
-                        stream_id=stream_id,
-                    ),
-                    code=ErrorCode.CONFIG_INVALID,
-                    stage=FailureStage.CONFIG,
-                )
 
             run_id = self.state_manager.current_run_id or get_or_generate_run_id()
 
@@ -816,10 +810,13 @@ class StreamingEngine:
             await output_queue.put(None)
             # A load-stage failure is destination-side by construction; tag it so
             # a driver/HTTP code in the cause can never be misread as source auth.
-            # tag_failure is no-overwrite, so a deeper tag still wins.
+            # A deterministic destination write-config defect (a type-map/dialect/
+            # write-config/adbc fatal-ack summary) still routes to CONFIG_INVALID
+            # so it stays user-fixable. tag_failure is no-overwrite, so a deeper
+            # tag still wins.
             tag_failure(
                 e,
-                code=ErrorCode.DESTINATION_WRITE_FAILED,
+                code=classify_destination_failure(e),
                 stage=FailureStage.DESTINATION_LOAD,
             )
             raise
@@ -858,7 +855,14 @@ class StreamingEngine:
         """
         resolved_source = config.get("_resolved_source")
         if not resolved_source:
-            raise ValueError("Missing _resolved_source in source config")
+            # The actual raise site for a missing _resolved_source (it runs before
+            # the stream's own guard); tag it so the metrics record carries the
+            # structured config signal instead of falling back to INTERNAL.
+            raise tag_failure(
+                ValueError("Missing _resolved_source in source config"),
+                code=ErrorCode.CONFIG_INVALID,
+                stage=FailureStage.CONFIG,
+            )
         return self._worker_readable
 
     def _create_pipeline_stages(

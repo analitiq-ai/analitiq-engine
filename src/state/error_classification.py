@@ -443,9 +443,15 @@ def classify_source_extract(exc: BaseException) -> ErrorCode:
     reach it, so the HTTP-code ambiguity that plagued whole-chain classification
     is gone. A deterministic source-config error (a bad endpoint document, a
     type-map miss) still resolves to CONFIG_INVALID; anything unrecognised stays
-    INTERNAL.
+    INTERNAL. A builtin local-filesystem error (checkpoint/cursor storage, worker
+    bootstrap) is an engine/infra fault and stays INTERNAL, never source auth.
     """
     names, text = _signature(exc)
+    if names & _LOCAL_IO_NAMES:
+        # Guard before the "permission denied" auth phrase, exactly as
+        # classify_exception does: a local "[Errno 13] Permission denied" from
+        # the engine's own checkpoint/state I/O is infra, not source auth.
+        return ErrorCode.INTERNAL
     if _matches(names, text, _CONFIG_NAMES, _CONFIG_PHRASES):
         return ErrorCode.CONFIG_INVALID
     if _matches(names, text, _AUTH_NAMES, _AUTH_PHRASES) or _HTTP_AUTH_STATUS.search(text):
@@ -474,6 +480,26 @@ def classify_handshake_failure(reason: Optional[str]) -> ErrorCode:
     if any(phrase in lowered for phrase in _HANDSHAKE_TRANSPORT_PHRASES):
         return ErrorCode.DESTINATION_WRITE_FAILED
     return ErrorCode.CONFIG_INVALID
+
+
+def classify_destination_failure(exc: BaseException) -> ErrorCode:
+    """Classify a destination-load failure as config-defect vs write-failure.
+
+    The load stage knows the failure is destination-side, but a deterministic
+    write-configuration defect is user-fixable config, not a generic write
+    failure: the destination forwards it in a fatal-ack ``failure_summary`` with a
+    controlled prefix (``type-map:`` / ``dialect:`` / ``write-config:`` / ``adbc:``
+    from cdk/sql/generic.py) that crosses the gRPC boundary as text, so no typed
+    exception survives to tag it deeper. Check the config rules first -- the same
+    controlled names/prefixes :func:`classify_exception` uses -- and default to
+    DESTINATION_WRITE_FAILED, so a genuine write failure (constraint, permission,
+    transport) still routes there. Only the load boundary calls it, so a
+    source-side cause can never reach it.
+    """
+    names, text = _signature(exc)
+    if _matches(names, text, _CONFIG_NAMES, _CONFIG_PHRASES):
+        return ErrorCode.CONFIG_INVALID
+    return ErrorCode.DESTINATION_WRITE_FAILED
 
 
 def classify_exception(exc: BaseException) -> ErrorCode:

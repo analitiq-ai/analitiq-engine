@@ -136,6 +136,38 @@ def test_classify_source_extract_routes_config():
     ) is ErrorCode.CONFIG_INVALID
 
 
+def test_classify_source_extract_local_io_is_internal_not_auth():
+    # A builtin local filesystem error from the engine's own checkpoint/state I/O
+    # carries "[Errno 13] Permission denied" -- it must stay INTERNAL, never be
+    # read as source auth by the "permission denied" phrase.
+    assert classify_source_extract(
+        PermissionError("[Errno 13] Permission denied: '/app/state'")
+    ) is ErrorCode.INTERNAL
+    # A real source DB permission failure (not a builtin OSError) still routes to auth.
+    assert classify_source_extract(
+        _make("OperationalError", message="FATAL: permission denied for database")
+    ) is ErrorCode.SOURCE_AUTH_FAILED
+
+
+@pytest.mark.parametrize("summary,expected", [
+    # Deterministic destination write-config defects (controlled fatal-ack
+    # prefixes) must stay user-fixable config, not a generic write failure.
+    ("Batch 3 fatal failure: type-map: no reverse rule", ErrorCode.CONFIG_INVALID),
+    ("Batch 3 fatal failure: dialect: upsert not supported", ErrorCode.CONFIG_INVALID),
+    ("Batch 3 fatal failure: write-config: invalid conflict key", ErrorCode.CONFIG_INVALID),
+    ("Batch 3 fatal failure: adbc: missing driver package", ErrorCode.CONFIG_INVALID),
+    ("Batch 3 fatal failure: SchemaConfigurationError: unsupported write mode", ErrorCode.CONFIG_INVALID),
+    # A genuine write failure (constraint / permission / transport) stays a write failure.
+    ("Batch 3 fatal failure: duplicate key value violates unique constraint", ErrorCode.DESTINATION_WRITE_FAILED),
+    ("Batch 3 fatal failure: permission denied for table orders", ErrorCode.DESTINATION_WRITE_FAILED),
+    ("Batch 3 failed after 3 retries: connection reset by peer", ErrorCode.DESTINATION_WRITE_FAILED),
+])
+def test_classify_destination_failure_preserves_config_causes(summary, expected):
+    from src.state.error_classification import classify_destination_failure
+
+    assert classify_destination_failure(_make("StreamProcessingError", message=summary)) is expected
+
+
 def test_destination_http_code_never_read_as_source_auth():
     # The cross-stage tail: a destination-load failure whose cause text carries a
     # "401" must classify DESTINATION_WRITE_FAILED, because the stage is tagged at
