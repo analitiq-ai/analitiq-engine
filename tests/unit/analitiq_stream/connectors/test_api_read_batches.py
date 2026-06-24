@@ -34,7 +34,7 @@ import pytest
 
 from cdk.secrets import InMemorySecretsResolver
 from cdk.connection_runtime import ConnectionRuntime
-from src.source.connectors.api import APIConnector
+from src.source.connectors.api import APIConnector, _extract_next_cursor
 from src.source.connectors.base import ReadError, TransientReadError
 
 # ---------------------------------------------------------------------------
@@ -1284,3 +1284,34 @@ class TestReadBatchesRequestBody:
             {"paging": {"offset": 0, "limit": 2}},
             {"paging": {"offset": 2, "limit": 2}},
         ]
+
+
+class TestExtractNextCursor:
+    """``_extract_next_cursor`` is exercised end-to-end by the cursor-pagination
+    tests above; these pin its edge cases directly, restoring the direct
+    coverage that moved out with the removed dedup-helper test module."""
+
+    @pytest.mark.unit
+    def test_extracts_token_from_body_path(self):
+        assert _extract_next_cursor({"next": "abc"}, "response.body.next") == "abc"
+
+    @pytest.mark.unit
+    def test_non_dict_data_returns_none(self):
+        assert _extract_next_cursor("not-a-dict", "response.body.next") is None
+
+    @pytest.mark.unit
+    def test_none_token_returns_none(self):
+        assert _extract_next_cursor({"next": None}, "response.body.next") is None
+
+    @pytest.mark.unit
+    def test_empty_string_token_returns_none(self):
+        assert _extract_next_cursor({"next": ""}, "response.body.next") is None
+
+    @pytest.mark.unit
+    def test_body_only_ref_returns_none(self):
+        # ``response.body`` with no trailing field can never name a cursor.
+        assert _extract_next_cursor({"next": "abc"}, "response.body") is None
+
+    @pytest.mark.unit
+    def test_integer_token_coerced_to_str(self):
+        assert _extract_next_cursor({"next": 42}, "response.body.next") == "42"
