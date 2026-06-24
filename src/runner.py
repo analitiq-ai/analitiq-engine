@@ -23,10 +23,12 @@ from .engine.pipeline_config_prep import PipelineConfigPrep
 from .shared.run_id import get_or_generate_run_id
 from .state.error_classification import (
     ErrorCode,
+    FailureStage,
     classify_for_metrics,
     customer_message,
+    detail_for_code,
     is_local_io_error,
-    sanitize_detail,
+    tag_failure,
 )
 from .state.metrics_storage import save_pipeline_metrics
 
@@ -337,11 +339,16 @@ class PipelineRunner:
                 logger.warning(f"Failed records: {records_failed} (check dead letter queue)")
                 status = "partial"
                 # Records were dead-lettered with no raised exception -- a
-                # destination write rejection. Carry the dominant DLQ cause.
+                # destination write rejection. error_detail carries only
+                # allowlisted-safe fields; the DLQ failure_summary stays in the
+                # dead-letter queue and the logs.
                 error_code = ErrorCode.DESTINATION_WRITE_FAILED
                 error_message = customer_message(error_code)
-                dominant_failure = engine.get_dominant_failure()
-                error_detail = sanitize_detail(dominant_failure) if dominant_failure else None
+                error_detail = detail_for_code(
+                    error_code,
+                    stage=FailureStage.DESTINATION_LOAD,
+                    reason="records dead-lettered after retries",
+                )
             else:
                 status = "success"
 
@@ -350,20 +357,21 @@ class PipelineRunner:
         except Exception as e:
             # Classify the terminating exception into a stable, customer-safe
             # code here -- the runner is the catch site that sees the failure
-            # whole. error_message is customer-safe; error_detail keeps the raw
-            # (scrubbed) text for internal debugging only. A failure raised
-            # before config_ready is config loading/parsing, which surfaces as
-            # builtin error types (FileNotFoundError, ValueError, ...) the type
-            # classifier cannot read -- the phase is the reliable signal there.
-            # A builtin local-IO error during config load (e.g. an unreadable
-            # config file) is infra, not bad config, so let the classifier keep
-            # it as INTERNAL rather than forcing CONFIG_INVALID.
+            # whole. error_message is customer-safe; error_detail carries only
+            # allowlisted-safe structured tokens (stage labels, error codes,
+            # exception class names) via classify_for_metrics -- never raw
+            # message text.
             if not config_ready and not is_local_io_error(e):
-                error_code = ErrorCode.CONFIG_INVALID
-                error_message = customer_message(error_code)
-                error_detail = sanitize_detail(str(e))
-            else:
-                error_code, error_message, error_detail = classify_for_metrics(e)
+                # A failure before config_ready is config loading/parsing, which
+                # surfaces as builtin types (FileNotFoundError, ValueError, ...)
+                # the classifier cannot read -- the phase is the reliable signal.
+                # Tag it CONFIG_INVALID so classification and the structured
+                # detail are produced uniformly through classify_for_metrics. A
+                # builtin local-IO error during config load (an unreadable config
+                # file) is infra, not bad config, so it is left untagged and the
+                # classifier keeps it INTERNAL.
+                tag_failure(e, code=ErrorCode.CONFIG_INVALID, stage=FailureStage.CONFIG)
+            error_code, error_message, error_detail = classify_for_metrics(e)
             logger.error(
                 f"Pipeline failed [{error_code.value}]: {error_detail}", exc_info=True
             )

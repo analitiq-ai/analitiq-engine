@@ -1,15 +1,18 @@
-"""Unit tests for customer-safe pipeline error classification (issue #258).
+"""Unit tests for customer-safe pipeline error classification (issues #258, #264).
 
-Locks three things the public run-status endpoint depends on:
+Locks the surface the public run-status endpoint depends on:
 
-- ``classify_exception`` maps the real engine/CDK exception hierarchy onto the
-  stable :class:`ErrorCode` enum, including the gRPC worker boundary (where the
-  original type is collapsed but its name survives in the message) and
-  aggregated ``ExceptionGroup``s.
-- ``customer_message`` / the customer-facing ``error_message`` carry no
-  exception text, secrets, or stack traces.
-- ``sanitize_detail`` redacts credential-bearing substrings from the
-  internal-only ``error_detail`` field.
+- Structured-first: a ``FailureTag`` stamped at the raise site drives
+  ``classify_exception`` deterministically and outranks any conflicting text.
+- ``classify_source_extract`` makes the one residual source-only split
+  (auth/unreachable/rate), and ``classify_handshake_failure`` the destination
+  transport-vs-config split, for opaque text the engine controls.
+- The name/phrase heuristics still classify an *untagged* exception (the
+  defensive fallback) across the real engine/CDK hierarchy and the gRPC worker
+  boundary.
+- ``customer_message`` / ``error_message`` carry no exception text.
+- ``build_error_detail`` emits only allowlisted-safe tokens (stage labels, error
+  codes, exception class names) -- never message text, so nothing to scrub.
 """
 
 from __future__ import annotations
@@ -20,11 +23,18 @@ import pytest
 
 from src.state.error_classification import (
     ErrorCode,
+    FailureStage,
+    FailureTag,
+    build_error_detail,
     classify_exception,
     classify_for_metrics,
+    classify_handshake_failure,
+    classify_source_extract,
     customer_message,
+    detail_for_code,
     is_local_io_error,
-    sanitize_detail,
+    read_failure_tag,
+    tag_failure,
 )
 
 pytestmark = pytest.mark.unit
@@ -38,6 +48,166 @@ def _make(name: str, base: type = Exception, message: str = "") -> BaseException
     name exercises the same path as the real one without importing every driver.
     """
     return type(name, (base,), {})(message)
+
+
+# --------------------------------------------------------------------------- #
+# Structured tags: the primary, deterministic path (issue #264)
+# --------------------------------------------------------------------------- #
+
+def test_tag_outranks_conflicting_text():
+    # The message would classify SOURCE_UNREACHABLE by phrase, but a stage tag is
+    # authoritative: the engine knew it was a destination-load failure.
+    exc = _make("RuntimeError", message="connection refused")
+    tag_failure(exc, code=ErrorCode.DESTINATION_WRITE_FAILED, stage=FailureStage.DESTINATION_LOAD)
+    assert classify_exception(exc) is ErrorCode.DESTINATION_WRITE_FAILED
+
+
+def test_tag_survives_wrapping_via_original_error():
+    from src.engine.exceptions import StreamProcessingError
+
+    inner = tag_failure(
+        RuntimeError("opaque driver text"),
+        code=ErrorCode.CONFIG_INVALID,
+        stage=FailureStage.TRANSFORM,
+    )
+    wrapped = StreamProcessingError("Stream processing failed", stream_id="s1", original_error=inner)
+    assert classify_exception(wrapped) is ErrorCode.CONFIG_INVALID
+
+
+def test_tag_failure_does_not_overwrite_an_existing_chain_tag():
+    # The no-overwrite invariant is enforced in tag_failure itself, so an outer
+    # stage boundary calling it cannot clobber a precise inner tag.
+    inner = tag_failure(RuntimeError("worker config error"),
+                        code=ErrorCode.CONFIG_INVALID, stage=FailureStage.SOURCE_EXTRACT)
+    tag_failure(inner, code=ErrorCode.DESTINATION_WRITE_FAILED, stage=FailureStage.DESTINATION_LOAD)
+    assert read_failure_tag(inner) == FailureTag(
+        code=ErrorCode.CONFIG_INVALID, stage=FailureStage.SOURCE_EXTRACT
+    )
+    # A deeper tag on the cause chain also blocks an outer tag on the wrapper.
+    outer = RuntimeError("outer")
+    outer.__cause__ = tag_failure(RuntimeError("deep"),
+                                  code=ErrorCode.SOURCE_UNREACHABLE, stage=FailureStage.SOURCE_EXTRACT)
+    tag_failure(outer, code=ErrorCode.INTERNAL, stage=FailureStage.DESTINATION_LOAD)
+    assert read_failure_tag(outer).code is ErrorCode.SOURCE_UNREACHABLE
+
+
+def test_read_failure_tag_picks_dominant_across_group():
+    g = ExceptionGroup("All streams failed", [
+        tag_failure(RuntimeError("a"), code=ErrorCode.SOURCE_UNREACHABLE, stage=FailureStage.SOURCE_EXTRACT),
+        tag_failure(RuntimeError("b"), code=ErrorCode.CONFIG_INVALID, stage=FailureStage.CONFIG),
+    ])
+    assert read_failure_tag(g) == FailureTag(code=ErrorCode.CONFIG_INVALID, stage=FailureStage.CONFIG)
+    assert classify_exception(g) is ErrorCode.CONFIG_INVALID
+
+
+def test_untagged_exception_has_no_tag():
+    assert read_failure_tag(RuntimeError("nothing here")) is None
+
+
+def test_code_priority_ranks_every_error_code():
+    from src.state.error_classification import _CODE_PRIORITY
+
+    assert set(_CODE_PRIORITY) == set(ErrorCode)
+
+
+# --------------------------------------------------------------------------- #
+# classify_source_extract: the source-only fine split (issue #264)
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("message,expected", [
+    ("password authentication failed for user 'analitiq'", ErrorCode.SOURCE_AUTH_FAILED),
+    ("request returned 401", ErrorCode.SOURCE_AUTH_FAILED),
+    ("upstream rate limit; 429 too many requests", ErrorCode.RATE_LIMITED),
+    ("could not connect to server: Connection refused", ErrorCode.SOURCE_UNREACHABLE),
+    ("some opaque driver failure", ErrorCode.INTERNAL),
+])
+def test_classify_source_extract_splits(message, expected):
+    assert classify_source_extract(_make("RuntimeError", message=message)) is expected
+
+
+def test_classify_source_extract_routes_config():
+    # A deterministic source-config error / type-map miss is a config defect (the
+    # engine validates no data schema).
+    assert classify_source_extract(
+        _make("SecretNotFoundError", message="missing ${password}")
+    ) is ErrorCode.CONFIG_INVALID
+    assert classify_source_extract(
+        _make("UnmappedTypeError", message="no forward rule for geography")
+    ) is ErrorCode.CONFIG_INVALID
+
+
+def test_classify_source_extract_local_io_is_internal_not_auth():
+    # A builtin local filesystem error from the engine's own checkpoint/state I/O
+    # carries "[Errno 13] Permission denied" -- it must stay INTERNAL, never be
+    # read as source auth by the "permission denied" phrase.
+    assert classify_source_extract(
+        PermissionError("[Errno 13] Permission denied: '/app/state'")
+    ) is ErrorCode.INTERNAL
+    # A real source DB permission failure (not a builtin OSError) still routes to auth.
+    assert classify_source_extract(
+        _make("OperationalError", message="FATAL: permission denied for database")
+    ) is ErrorCode.SOURCE_AUTH_FAILED
+
+
+@pytest.mark.parametrize("summary,expected", [
+    # Deterministic destination write-config defects (controlled fatal-ack
+    # prefixes) must stay user-fixable config, not a generic write failure.
+    ("Batch 3 fatal failure: type-map: no reverse rule", ErrorCode.CONFIG_INVALID),
+    ("Batch 3 fatal failure: dialect: upsert not supported", ErrorCode.CONFIG_INVALID),
+    ("Batch 3 fatal failure: write-config: invalid conflict key", ErrorCode.CONFIG_INVALID),
+    ("Batch 3 fatal failure: adbc: missing driver package", ErrorCode.CONFIG_INVALID),
+    ("Batch 3 fatal failure: SchemaConfigurationError: unsupported write mode", ErrorCode.CONFIG_INVALID),
+    # A genuine write failure (constraint / permission / transport) stays a write failure.
+    ("Batch 3 fatal failure: duplicate key value violates unique constraint", ErrorCode.DESTINATION_WRITE_FAILED),
+    ("Batch 3 fatal failure: permission denied for table orders", ErrorCode.DESTINATION_WRITE_FAILED),
+    ("Batch 3 failed after 3 retries: connection reset by peer", ErrorCode.DESTINATION_WRITE_FAILED),
+])
+def test_classify_destination_failure_preserves_config_causes(summary, expected):
+    from src.state.error_classification import classify_destination_failure
+
+    assert classify_destination_failure(_make("StreamProcessingError", message=summary)) is expected
+
+
+def test_classify_destination_failure_local_io_is_internal():
+    # The load stage's try also runs engine-owned local I/O (checkpoint save, DLQ
+    # write, batch-commit journal, metrics). A builtin filesystem error there is
+    # infra -> INTERNAL, not a destination write rejection -- including a bare
+    # OSError (a full / read-only volume: ENOSPC/EROFS has no dedicated subclass).
+    from src.state.error_classification import classify_destination_failure
+
+    assert classify_destination_failure(
+        PermissionError("[Errno 13] Permission denied: '/app/state'")
+    ) is ErrorCode.INTERNAL
+    assert classify_destination_failure(
+        OSError("[Errno 28] No space left on device")
+    ) is ErrorCode.INTERNAL
+    # A network OSError to the destination is a real write failure, not local I/O.
+    assert classify_destination_failure(
+        ConnectionRefusedError("connection refused")
+    ) is ErrorCode.DESTINATION_WRITE_FAILED
+
+
+def test_destination_http_code_never_read_as_source_auth():
+    # The cross-stage tail: a destination-load failure whose cause text carries a
+    # "401" must classify DESTINATION_WRITE_FAILED, because the stage is tagged at
+    # the raise site -- the source split never runs on it.
+    exc = _make("RuntimeError", message="POST https://api.dest/v1 -> 401 from destination")
+    tag_failure(exc, code=ErrorCode.DESTINATION_WRITE_FAILED, stage=FailureStage.DESTINATION_LOAD)
+    assert classify_exception(exc) is ErrorCode.DESTINATION_WRITE_FAILED
+
+
+@pytest.mark.parametrize("reason,expected", [
+    ("destination did not acknowledge the schema within 30s", ErrorCode.DESTINATION_WRITE_FAILED),
+    ("destination closed stream before sending schema ACK", ErrorCode.DESTINATION_WRITE_FAILED),
+    ("destination worker channel did not connect", ErrorCode.DESTINATION_WRITE_FAILED),
+    ("SchemaConfigurationError: unsupported write mode", ErrorCode.CONFIG_INVALID),
+    ("Schema configuration failed", ErrorCode.CONFIG_INVALID),
+    (None, ErrorCode.CONFIG_INVALID),
+])
+def test_classify_handshake_failure_splits_transport_vs_config(reason, expected):
+    # The engine calls this at the handshake raise site so the tag is definite;
+    # the same transport-phrase set backs the untagged fallback.
+    assert classify_handshake_failure(reason) is expected
 
 
 # --------------------------------------------------------------------------- #
@@ -319,21 +489,29 @@ def test_exception_group_picks_dominant_cause():
     assert classify_exception(group) is ErrorCode.SOURCE_UNREACHABLE
 
 
-def test_exception_group_detail_includes_leaf_messages():
-    # str(ExceptionGroup) is only the summary; error_detail must carry the
-    # per-stream causes so the all-streams-failed case is actionable.
+def test_exception_group_detail_enumerates_leaves_by_class_name():
+    # str(ExceptionGroup) is only the summary; build_error_detail must carry every
+    # per-stream leaf so the all-streams-failed case is actionable -- as safe
+    # class-name tokens, never the raw messages.
     group = ExceptionGroup("All streams failed", [
-        _make("StreamProcessingError", message="Stream s1: connection refused at upstream"),
-        _make("StreamProcessingError", message="Stream s2: Batch 4 fatal failure: duplicate key"),
+        _make("ReadError", message="Stream s1: connection refused at upstream"),
+        _make("WriteError", message="Stream s2: Batch 4 fatal failure: duplicate key"),
     ])
     _, _, detail = classify_for_metrics(group)
-    assert "connection refused at upstream" in detail
-    assert "duplicate key" in detail
+    assert "ReadError" in detail
+    assert "WriteError" in detail
+    # The raw messages never enter the detail.
+    assert "connection refused at upstream" not in detail
+    assert "duplicate key" not in detail
 
 
 @pytest.mark.parametrize("exc,expected", [
     (PermissionError("[Errno 13] Permission denied: '/app/connections/c.json'"), True),
     (FileExistsError("exists"), True),
+    # A bare OSError (full / read-only volume) is local infra too.
+    (OSError("[Errno 28] No space left on device"), True),
+    # A network OSError is a remote fault, not local I/O.
+    (ConnectionRefusedError("refused"), False),
     (RuntimeError("Could not find pipelines/manifest.json"), False),
     (ValueError("manifest.json missing required key"), False),
 ])
@@ -379,93 +557,66 @@ def test_customer_message_is_safe_for_every_code():
 
 
 # --------------------------------------------------------------------------- #
-# sanitize_detail
+# build_error_detail: structured, allowlisted-safe, no message text (issue #264)
 # --------------------------------------------------------------------------- #
 
-def test_sanitize_detail_redacts_url_credentials():
-    out = sanitize_detail("could not connect: postgresql://app:s3cr3t@db.host:5432/prod")
-    assert "s3cr3t" not in out
-    assert "app" not in out
-    assert "db.host:5432/prod" in out  # non-secret topology kept
+def test_error_detail_carries_no_message_text():
+    # The raw text holds a DSN with a password; the detail must contain only the
+    # class name -- nothing from the message, so nothing to scrub.
+    exc = _make("RuntimeError", message="postgresql://app:s3cr3t@db.host:5432/prod")
+    detail = build_error_detail(exc)
+    assert detail == "RuntimeError"
+    assert "s3cr3t" not in detail
+    assert "postgresql" not in detail  # scheme prefix is never promoted into detail
 
 
-# The "secret" values below are deliberately fake, low-entropy placeholders so a
-# secret scanner does not flag them; the scrubber keys off the field name, not
-# the value, so realism is irrelevant.
-@pytest.mark.parametrize("raw,secret", [
-    ("auth failed token=fake-token-aa boom", "fake-token-aa"),
-    ("password = 'fake-pw-bb' rejected", "fake-pw-bb"),
-    ('api_key="fake-key-cc" denied', "fake-key-cc"),
-    ("Authorization: Bearer fake-bearer-dd", "fake-bearer-dd"),
-])
-def test_sanitize_detail_redacts_secret_key_values(raw, secret):
-    out = sanitize_detail(raw)
-    assert secret not in out
-    assert "***" in out
-
-
-@pytest.mark.parametrize("raw,secret", [
-    ('{"password": "fake-pw-ee"}', "fake-pw-ee"),       # JSON body
-    ("{'password': 'fake-pw-ff'}", "fake-pw-ff"),       # Python dict repr
-    ("{'api_key': 'fake-key-gg', 'x': 1}", "fake-key-gg"),  # dict among other keys
-    ('"client_secret" : "fake-cs-hh"', "fake-cs-hh"),   # spaced quoted key
-])
-def test_sanitize_detail_redacts_quoted_secret_keys(raw, secret):
-    out = sanitize_detail(raw)
-    assert secret not in out
-    assert "***" in out
-
-
-@pytest.mark.parametrize("raw,secret", [
-    ("X-API-Key: fake-key-ii", "fake-key-ii"),          # header style, hyphenated
-    ('{"api-key": "fake-key-jj"}', "fake-key-jj"),       # hyphenated JSON key
-    ("x-auth-token=fake-token-kk", "fake-token-kk"),     # hyphenated header token
-    ("secret_access_key: fake/value-ll", "value-ll"),
-])
-def test_sanitize_detail_redacts_hyphenated_secret_keys(raw, secret):
-    out = sanitize_detail(raw)
-    assert secret not in out
-    assert "***" in out
-
-
-def test_sanitize_detail_redacts_multitoken_authorization():
-    # SigV4-style headers carry the credential across several space/comma-
-    # separated parameters; the whole value must be redacted, not just the
-    # first token.
-    out = sanitize_detail(
-        "Authorization: AWS4-HMAC-SHA256 Credential=fake-id/x, Signature=fake-sig-mm"
+def test_error_detail_excludes_message_text_even_on_the_tagged_token_path():
+    # The tagged token is built by interpolation (stage/CODE:ClassName). A secret
+    # in the message must never reach it -- the higher-risk path, since the token
+    # format touches exception fields.
+    exc = tag_failure(
+        RuntimeError("Authorization: Bearer leaked-token-xyz dsn=postgres://u:p@h/db"),
+        code=ErrorCode.DESTINATION_WRITE_FAILED,
+        stage=FailureStage.DESTINATION_LOAD,
     )
-    assert "fake-sig-mm" not in out
-    assert "fake-id" not in out
-    assert out == "Authorization: ***"
+    detail = build_error_detail(exc)
+    assert detail == "destination_load/DESTINATION_WRITE_FAILED:RuntimeError"
+    assert "leaked-token-xyz" not in detail
+    assert "p@h" not in detail
 
 
-def test_sanitize_detail_redacts_quoted_authorization_keeps_siblings():
-    out = sanitize_detail('{"Authorization": "Bearer fake-bearer-nn", "user": "keepme"}')
-    assert "fake-bearer-nn" not in out
-    assert "keepme" in out  # sibling field preserved (quoted value stops at quote)
+def test_error_detail_includes_stage_and_code_for_tagged():
+    exc = tag_failure(
+        _make("StreamProcessingError", message="opaque"),
+        code=ErrorCode.DESTINATION_WRITE_FAILED,
+        stage=FailureStage.DESTINATION_LOAD,
+    )
+    assert build_error_detail(exc) == "destination_load/DESTINATION_WRITE_FAILED:StreamProcessingError"
 
 
-def test_sanitize_detail_passes_through_plain_text():
-    assert sanitize_detail("table orders not found") == "table orders not found"
+def test_error_detail_enumerates_mixed_tagged_and_untagged_group():
+    group = ExceptionGroup("All streams failed", [
+        tag_failure(_make("ReadError"), code=ErrorCode.SOURCE_UNREACHABLE, stage=FailureStage.SOURCE_EXTRACT),
+        _make("ValueError", message="opaque untagged failure"),
+    ])
+    assert classify_exception(group) is ErrorCode.SOURCE_UNREACHABLE
+    detail = build_error_detail(group)
+    assert "source_extract/SOURCE_UNREACHABLE:ReadError" in detail
+    assert "ValueError" in detail
 
 
-def test_sanitize_detail_truncates_long_text():
-    out = sanitize_detail("x" * 5000)
-    assert len(out) <= 2100
-    assert out.endswith("...[truncated]")
+def test_error_detail_bounds_length():
+    detail = build_error_detail(RuntimeError("a" * 5000))
+    assert len(detail) <= 2100
 
 
-def test_sanitize_detail_handles_empty():
-    assert sanitize_detail("") == ""
-
-
-def test_sanitize_detail_bounds_long_unbroken_token():
-    # A long unbroken alphanumeric run must be truncated before the regexes run,
-    # so scrubbing stays bounded (no quadratic scan looking for "://").
-    out = sanitize_detail("Authorization: " + "a" * 200000)
-    assert len(out) <= 2100
-    assert "aaaaaaaaaa" not in out  # the token did not survive
+def test_detail_for_code_is_structured_and_safe():
+    out = detail_for_code(
+        ErrorCode.DESTINATION_WRITE_FAILED,
+        stage=FailureStage.DESTINATION_LOAD,
+        reason="records dead-lettered after retries",
+    )
+    assert out == "destination_load/DESTINATION_WRITE_FAILED: records dead-lettered after retries"
 
 
 # --------------------------------------------------------------------------- #
@@ -477,7 +628,20 @@ def test_classify_for_metrics_returns_safe_triple():
     code, message, detail = classify_for_metrics(exc)
     assert code is ErrorCode.SOURCE_AUTH_FAILED
     assert message == customer_message(ErrorCode.SOURCE_AUTH_FAILED)
-    assert "p@h" not in detail and ":p@" not in detail  # raw creds scrubbed in detail
+    # detail is the class name only -- no message text, so no credentials.
+    assert detail == "RuntimeError"
+    assert "p@h" not in detail and ":p@" not in detail
+
+
+def test_classify_for_metrics_prefers_tag():
+    exc = tag_failure(
+        _make("RuntimeError", message="connection refused"),
+        code=ErrorCode.CONFIG_INVALID,
+        stage=FailureStage.CONFIG,
+    )
+    code, message, detail = classify_for_metrics(exc)
+    assert code is ErrorCode.CONFIG_INVALID
+    assert detail == "config/CONFIG_INVALID:RuntimeError"
 
 
 # --------------------------------------------------------------------------- #
@@ -503,7 +667,8 @@ def test_metrics_record_failure_carries_safe_fields():
     )
     assert rec.error_code is ErrorCode.CONFIG_INVALID
     assert rec.error_message == customer_message(ErrorCode.CONFIG_INVALID)
-    assert rec.error_detail == "bad pipeline.json"
+    # Structured, safe: the class name, not the raw "bad pipeline.json" message.
+    assert rec.error_detail == "ConfigValidationError"
 
     # The error_code must serialize as the plain enum string in the emitted line,
     # exactly as emit_metrics_log -> json.dumps(..., default=str) would write it.

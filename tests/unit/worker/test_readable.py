@@ -18,6 +18,7 @@ import pytest
 
 from cdk.sql.exceptions import ReadError
 from src.grpc import DEFAULT_MAX_MESSAGE_SIZE
+from src.state.error_classification import ErrorCode, FailureStage, read_failure_tag
 from src.worker.readable import WorkerReadable
 from src.worker.source_service import _encode_arrow_ipc
 from src.grpc.generated.analitiq.v1.source_service_pb2 import (
@@ -168,6 +169,32 @@ class TestWorkerReadable:
         ]
         with pytest.raises(ReadError, match="UnmappedTypeError.*deterministic"):
             await _run(responses)
+
+    async def test_deterministic_error_carries_structured_tag_across_boundary(self):
+        # The worker's `deterministic` flag is the structured signal that retrying
+        # cannot help. It must survive the gRPC boundary as a FailureTag so the
+        # engine classifies the collapsed ReadError by its real cause, not the
+        # wrapper type. Type-map miss, secret error, and an opaque deterministic
+        # error all floor to CONFIG_INVALID (a setup defect); the connector class
+        # rides the error_type prefix.
+        for error_type, message in [
+            ("UnmappedTypeError", "no rule for FANCYTYPE"),
+            ("SecretNotFoundError", "missing ${password}"),
+            ("RuntimeError", "boom"),
+        ]:
+            responses = [
+                ReadResponse(
+                    error=ReadErrorMsg(
+                        message=message, deterministic=True, error_type=error_type,
+                    )
+                )
+            ]
+            with pytest.raises(ReadError) as exc_info:
+                await _run(responses)
+            tag = read_failure_tag(exc_info.value)
+            assert tag is not None, error_type
+            assert tag.stage is FailureStage.SOURCE_EXTRACT, error_type
+            assert tag.code is ErrorCode.CONFIG_INVALID, error_type
 
     async def test_retryable_error_raises_runtime_error(self):
         responses = [

@@ -16,9 +16,14 @@ from ..state.circuit_breaker import CircuitBreaker
 from ..state.dead_letter_queue import DeadLetterQueue
 from ..state.error_classification import (
     ErrorCode,
+    FailureStage,
+    classify_destination_failure,
     classify_for_metrics,
+    classify_handshake_failure,
+    classify_source_extract,
     customer_message,
-    sanitize_detail,
+    detail_for_code,
+    tag_failure,
 )
 from ..state.metrics_storage import emit_metrics_log, create_metrics_record
 from ..state.retry_handler import RetryHandler
@@ -27,7 +32,7 @@ from ..models.metrics import PipelineMetrics
 from .data_transformer import DataTransformer, build_output_schema
 from .exceptions import (
     ConfigurationError, StreamProcessingError, StreamExecutionError,
-    StreamConfigurationError, StageConfigurationError
+    StageConfigurationError
 )
 
 # gRPC imports for destination streaming
@@ -90,11 +95,6 @@ class StreamingEngine:
 
         # Metrics tracking with Pydantic validation
         self.metrics = PipelineMetrics()
-
-        # Representative destination failure from a DLQ'd batch. When a run ends
-        # "partial" (records failed but no exception raised, the dlq strategy),
-        # the runner reads this to classify the dominant cause.
-        self._dlq_failure_summary: Optional[str] = None
 
         # Representative exception from a stream that failed while OTHER streams
         # succeeded (a partial run that stream_data does not re-raise). The
@@ -245,25 +245,26 @@ class StreamingEngine:
             source_cfg = stream_config["source"]
             destination_cfg = stream_config["destination"]
 
+            # Resolves the worker-backed Readable; raises a CONFIG_INVALID-tagged
+            # ValueError if the source config was never resolved (the real guard
+            # for a missing _resolved_source).
             source_connector = self._create_source_connector(source_cfg)
 
             stream_dlq_path = f"{self.dlq.dlq_path}/{stream_id}"
             stream_dlq = DeadLetterQueue(stream_dlq_path)
-
-            if not source_cfg.get("_resolved_source"):
-                raise StreamConfigurationError(
-                    "Missing _resolved_source in source config",
-                    stream_id=stream_id,
-                )
 
             run_id = self.state_manager.current_run_id or get_or_generate_run_id()
 
             grpc_client = self._create_grpc_client(destination_cfg)
             connected = await grpc_client.connect()
             if not connected:
-                raise StreamProcessingError(
-                    f"Failed to connect to gRPC destination for stream {stream_name}",
-                    stream_id=stream_id,
+                raise tag_failure(
+                    StreamProcessingError(
+                        f"Failed to connect to gRPC destination for stream {stream_name}",
+                        stream_id=stream_id,
+                    ),
+                    code=ErrorCode.DESTINATION_WRITE_FAILED,
+                    stage=FailureStage.DESTINATION_LOAD,
                 )
 
             schema_accepted = await grpc_client.start_stream(
@@ -275,13 +276,20 @@ class StreamingEngine:
                 # The destination did not accept the stream. configure_schema
                 # only prepares the destination's own table (no schema is
                 # validated), so this is either a destination config defect or a
-                # transport failure; carry the concrete reason so the classifier
-                # can tell them apart and the detail survives into the logs.
+                # transport failure. Tag it at the raise site from the concrete
+                # reason (engine/proxy-generated, including the inner reason
+                # forwarded across the worker proxy) so classification is
+                # structural: a transport reason -> DESTINATION_WRITE_FAILED, any
+                # other reason -> CONFIG_INVALID.
                 reason = grpc_client.schema_rejection_message
                 detail = f": {reason}" if reason else ""
-                raise StreamProcessingError(
-                    f"Destination did not accept the stream for {stream_name}{detail}",
-                    stream_id=stream_id,
+                raise tag_failure(
+                    StreamProcessingError(
+                        f"Destination did not accept the stream for {stream_name}{detail}",
+                        stream_id=stream_id,
+                    ),
+                    code=classify_handshake_failure(reason),
+                    stage=FailureStage.DESTINATION_LOAD,
                 )
             logger.info(f"Stream {stream_name}: gRPC stream started, schema accepted")
 
@@ -329,8 +337,14 @@ class StreamingEngine:
                 status = "partial"
                 error_code = ErrorCode.DESTINATION_WRITE_FAILED
                 error_message = customer_message(error_code)
-                stream_failure = stream_metrics.get("dlq_failure_summary")
-                error_detail = sanitize_detail(stream_failure) if stream_failure else None
+                # A partial stream dead-lettered records after exhausting retries.
+                # error_detail carries only allowlisted-safe fields; the
+                # destination failure_summary stays in the DLQ and the logs.
+                error_detail = detail_for_code(
+                    error_code,
+                    stage=FailureStage.DESTINATION_LOAD,
+                    reason="records dead-lettered after retries",
+                )
                 logger.warning(
                     f"Stream {stream_name} completed partially: "
                     f"{stream_metrics['records_failed']} records dead-lettered"
@@ -438,6 +452,17 @@ class StreamingEngine:
                 "Stream %s: Extract stage failed: %s", stream_name, e,
             )
             await queue.put(None)  # Signal end even on error
+            # Tag the failure source-extract so classification is deterministic
+            # and never confused with a destination/transform cause. The code
+            # within source (auth/unreachable/rate/config) is the one split a tag
+            # cannot make for an opaque driver error. tag_failure is no-overwrite,
+            # so a deeper tag -- e.g. the worker's deterministic-config signal
+            # from readable.py -- still wins over this coarser default.
+            tag_failure(
+                e,
+                code=classify_source_extract(e),
+                stage=FailureStage.SOURCE_EXTRACT,
+            )
             raise
 
     async def _transform_stage(
@@ -488,6 +513,11 @@ class StreamingEngine:
             await output_queue.put(None)  # Signal end even on error
             self.metrics.increment_batches_failed()
             stream_metrics["batches_failed"] += 1
+            # A transform failure is a mapping/type problem. The engine validates
+            # no data schema, so this is a configuration defect (CONFIG_INVALID),
+            # not a data-vs-schema mismatch. tag_failure is no-overwrite, so a
+            # deeper tag still wins.
+            tag_failure(e, code=ErrorCode.CONFIG_INVALID, stage=FailureStage.TRANSFORM)
             raise
 
     async def _load_stage(
@@ -705,7 +735,6 @@ class StreamingEngine:
                             stream_metrics["records_failed"] += record_count
                             stream_metrics["batches_failed"] += 1
                             if error_strategy == "dlq":
-                                self._record_dlq_failure(result.failure_summary, stream_metrics)
                                 await stream_dlq.send_batch(
                                     record_dicts, result.failure_summary,
                                     self.pipeline_id, stream_id=stream_id,
@@ -739,7 +768,6 @@ class StreamingEngine:
 
                         # Send entire batch to DLQ with record_ids for correlation
                         if error_strategy == "dlq":
-                            self._record_dlq_failure(result.failure_summary, stream_metrics)
                             await stream_dlq.send_batch(
                                 record_dicts, result.failure_summary,
                                 self.pipeline_id, stream_id=stream_id,
@@ -761,7 +789,6 @@ class StreamingEngine:
                         stream_metrics["records_failed"] += record_count
                         stream_metrics["batches_failed"] += 1
                         if error_strategy == "dlq":
-                            self._record_dlq_failure(f"Unknown ACK status: {result.status}", stream_metrics)
                             await stream_dlq.send_batch(
                                 record_dicts, f"Unknown ACK status: {result.status}",
                                 self.pipeline_id, stream_id=stream_id,
@@ -781,6 +808,17 @@ class StreamingEngine:
                 "Stream %s: gRPC load stage failed: %s", stream_name, e,
             )
             await output_queue.put(None)
+            # A load-stage failure is destination-side by construction; tag it so
+            # a driver/HTTP code in the cause can never be misread as source auth.
+            # A deterministic destination write-config defect (a type-map/dialect/
+            # write-config/adbc fatal-ack summary) still routes to CONFIG_INVALID
+            # so it stays user-fixable. tag_failure is no-overwrite, so a deeper
+            # tag still wins.
+            tag_failure(
+                e,
+                code=classify_destination_failure(e),
+                stage=FailureStage.DESTINATION_LOAD,
+            )
             raise
 
     async def _checkpoint_stage(self, input_queue: Queue, config: Dict[str, Any]):
@@ -817,7 +855,14 @@ class StreamingEngine:
         """
         resolved_source = config.get("_resolved_source")
         if not resolved_source:
-            raise ValueError("Missing _resolved_source in source config")
+            # The actual raise site for a missing _resolved_source (it runs before
+            # the stream's own guard); tag it so the metrics record carries the
+            # structured config signal instead of falling back to INTERNAL.
+            raise tag_failure(
+                ValueError("Missing _resolved_source in source config"),
+                code=ErrorCode.CONFIG_INVALID,
+                stage=FailureStage.CONFIG,
+            )
         return self._worker_readable
 
     def _create_pipeline_stages(
@@ -929,15 +974,6 @@ class StreamingEngine:
         """Get pipeline execution metrics as a validated Pydantic model."""
         return self.metrics
 
-    def get_dominant_failure(self) -> Optional[str]:
-        """Representative destination failure summary from DLQ'd batches, if any.
-
-        Set when a batch is written to the dead-letter queue. The runner uses it
-        to classify a partial run (records failed but no exception); those
-        failures are always destination write rejections.
-        """
-        return self._dlq_failure_summary
-
     def get_dominant_stream_error(self) -> Optional[BaseException]:
         """The failed-stream exceptions from a partial run, as an ExceptionGroup.
 
@@ -946,20 +982,6 @@ class StreamingEngine:
         cause across all failed streams to classify the partial run.
         """
         return self._dominant_stream_error
-
-    def _record_dlq_failure(self, summary: str, stream_metrics: Dict[str, Any]) -> None:
-        """Keep the first DLQ failure summary, both run-wide and per stream.
-
-        The run-wide value (``_dlq_failure_summary``) is the pipeline's dominant
-        cause for the runner; the per-stream copy in ``stream_metrics`` keeps
-        each stream's own metric record from borrowing another stream's detail.
-        """
-        if not summary:
-            return
-        if self._dlq_failure_summary is None:
-            self._dlq_failure_summary = summary
-        if not stream_metrics.get("dlq_failure_summary"):
-            stream_metrics["dlq_failure_summary"] = summary
 
     def get_state_manager(self) -> StateManager:
         """Get the state manager instance."""

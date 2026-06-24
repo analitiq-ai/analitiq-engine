@@ -14,6 +14,12 @@ from typing import Dict, Any, List, Optional
 from src.engine.engine import StreamingEngine
 from src.engine.exceptions import StreamProcessingError
 from src.grpc.generated.analitiq.v1 import AckStatus
+from src.state.error_classification import (
+    ErrorCode,
+    FailureStage,
+    read_failure_tag,
+    tag_failure,
+)
 
 
 @dataclass
@@ -156,6 +162,123 @@ class TestEngineFatalFailureHandling:
         # Assert: exception contains failure info
         assert "fatal failure" in str(exc_info.value).lower()
         assert "Batch 1" in str(exc_info.value)
+
+        # The load stage tags its failure destination-side, so classification is
+        # deterministic and a driver/HTTP code in the cause can never be misread
+        # as source auth (issue #264).
+        tag = read_failure_tag(exc_info.value)
+        assert tag is not None
+        assert tag.code is ErrorCode.DESTINATION_WRITE_FAILED
+        assert tag.stage is FailureStage.DESTINATION_LOAD
+
+    @pytest.mark.asyncio
+    async def test_load_stage_does_not_clobber_a_deeper_tag(
+        self,
+        engine: StreamingEngine,
+        mock_grpc_client: AsyncMock,
+        sample_stream_config: Dict[str, Any],
+        temp_dir: str,
+    ):
+        """The load-stage tag is no-overwrite: a precise inner tag carried by the
+        raised cause survives instead of being relabeled DESTINATION_WRITE_FAILED.
+        This is the deeper-tag gate that keeps a worker's CONFIG_INVALID signal
+        from being clobbered by the coarse outer stage default (issue #264)."""
+        from src.state.dead_letter_queue import DeadLetterQueue
+
+        input_queue = asyncio.Queue()
+        output_queue = asyncio.Queue()
+        await input_queue.put(pa.RecordBatch.from_pylist([{"id": 1}]))
+        await input_queue.put(None)
+
+        inner = tag_failure(
+            RuntimeError("deterministic config error surfaced mid-load"),
+            code=ErrorCode.CONFIG_INVALID,
+            stage=FailureStage.CONFIG,
+        )
+        mock_grpc_client.send_batch = AsyncMock(side_effect=inner)
+
+        stream_dlq = DeadLetterQueue(f"{temp_dir}/dlq")
+        stream_metrics = {"records_processed": 0, "records_failed": 0, "batches_processed": 0, "batches_failed": 0}
+
+        with pytest.raises(RuntimeError) as exc_info:
+            await engine._load_stage(
+                input_queue=input_queue,
+                output_queue=output_queue,
+                grpc_client=mock_grpc_client,
+                config=sample_stream_config,
+                stream_dlq=stream_dlq,
+                run_id="test-run-001",
+                stream_metrics=stream_metrics,
+            )
+
+        tag = read_failure_tag(exc_info.value)
+        assert tag is not None
+        assert tag.code is ErrorCode.CONFIG_INVALID
+        assert tag.stage is FailureStage.CONFIG
+
+    @pytest.mark.asyncio
+    async def test_load_stage_config_cause_fatal_ack_tags_config_not_write(
+        self,
+        engine: StreamingEngine,
+        mock_grpc_client: AsyncMock,
+        sample_stream_config: Dict[str, Any],
+        temp_dir: str,
+    ):
+        """A fatal destination ACK whose summary is a deterministic write-config
+        defect (a controlled type-map/dialect/write-config/adbc prefix) must tag
+        CONFIG_INVALID, not the generic DESTINATION_WRITE_FAILED -- so a
+        user-fixable destination config error is reported as such (issue #264)."""
+        from src.state.dead_letter_queue import DeadLetterQueue
+
+        input_queue = asyncio.Queue()
+        output_queue = asyncio.Queue()
+        await input_queue.put(pa.RecordBatch.from_pylist([{"id": 1}]))
+        await input_queue.put(None)
+
+        fatal_result = MockBatchResult(
+            success=False,
+            status=AckStatus.ACK_STATUS_FATAL_FAILURE,
+            records_written=0,
+            committed_cursor=None,
+            failed_record_ids=[],
+            failure_summary="type-map: no reverse rule for 'geography'",
+        )
+        mock_grpc_client.send_batch = AsyncMock(return_value=fatal_result)
+
+        stream_dlq = DeadLetterQueue(f"{temp_dir}/dlq")
+        stream_metrics = {"records_processed": 0, "records_failed": 0, "batches_processed": 0, "batches_failed": 0}
+
+        with pytest.raises(StreamProcessingError) as exc_info:
+            await engine._load_stage(
+                input_queue=input_queue,
+                output_queue=output_queue,
+                grpc_client=mock_grpc_client,
+                config=sample_stream_config,
+                stream_dlq=stream_dlq,
+                run_id="test-run-001",
+                stream_metrics=stream_metrics,
+            )
+
+        tag = read_failure_tag(exc_info.value)
+        assert tag is not None
+        assert tag.code is ErrorCode.CONFIG_INVALID
+        assert tag.stage is FailureStage.DESTINATION_LOAD
+
+    @pytest.mark.asyncio
+    async def test_missing_resolved_source_raises_config_tagged_error(
+        self,
+        engine: StreamingEngine,
+    ):
+        """_create_source_connector is the real guard for a missing
+        _resolved_source (it runs before the stream's own check), so it must raise
+        a CONFIG_INVALID-tagged error rather than an untagged ValueError that
+        falls back to INTERNAL (issue #264)."""
+        with pytest.raises(ValueError) as exc_info:
+            engine._create_source_connector({})  # no _resolved_source
+        tag = read_failure_tag(exc_info.value)
+        assert tag is not None
+        assert tag.code is ErrorCode.CONFIG_INVALID
+        assert tag.stage is FailureStage.CONFIG
 
     @pytest.mark.asyncio
     async def test_load_stage_success_does_not_raise(
@@ -319,10 +442,6 @@ class TestEngineFatalFailureHandling:
         # Assert: send_batch was called multiple times (initial + retries)
         # Initial call + 3 retries (default max_retries=3) = 4 calls
         assert mock_grpc_client.send_batch.call_count == 4
-
-        # The dead-lettered batch's summary is captured as the run's dominant
-        # cause, so the runner can classify the (exception-free) partial run.
-        assert engine.get_dominant_failure() == "Connection timeout"
 
     @pytest.mark.asyncio
     async def test_load_stage_retryable_exhaustion_raises_with_fail_strategy(
