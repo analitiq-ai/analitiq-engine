@@ -94,12 +94,16 @@ class WorkerProxyHandler(BaseDestinationHandler):
                 f"{self._label}: worker spawned but its channel did not connect"
             )
         self._control = control
-        self._capabilities = await control.get_capabilities()
-        if self._capabilities is None:
+        try:
+            self._capabilities = await control.get_capabilities()
+        except Exception as e:
+            # get_capabilities raises on a transport/RPC failure (it no longer
+            # collapses to None). Tear the spawned worker down before surfacing
+            # so a failed handshake never leaks the subprocess.
             await self._teardown()
             raise ConnectionError(
-                f"{self._label}: worker did not answer GetCapabilities"
-            )
+                f"{self._label}: GetCapabilities failed"
+            ) from e
         logger.info(
             "%s ready (connector_type=%s, upsert=%s)",
             self._label,
@@ -293,6 +297,22 @@ class WorkerProxyHandler(BaseDestinationHandler):
     @property
     def supports_bulk_load(self) -> bool:
         return bool(self._capabilities and self._capabilities.supports_bulk_load)
+
+    @property
+    def supports_auto_create(self) -> bool:
+        return bool(self._capabilities and self._capabilities.supports_auto_create)
+
+    @property
+    def supports_truncate(self) -> bool:
+        # The wire response advertises truncate through the write-mode list,
+        # not a dedicated bool; mirror exactly what the worker advertised so
+        # the proxy and the underlying connector cannot drift.
+        if not self._capabilities:
+            return False
+        return (
+            WriteMode.WRITE_MODE_TRUNCATE_INSERT
+            in self._capabilities.supported_write_modes
+        )
 
     @property
     def max_batch_size(self) -> int:

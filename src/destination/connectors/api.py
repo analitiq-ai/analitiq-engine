@@ -10,7 +10,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Any, Dict, List, Mapping, Optional, Set
+from typing import Any, Dict, List, Mapping, Optional, Set, Tuple
 
 import aiohttp
 import orjson
@@ -443,39 +443,23 @@ class ApiDestinationHandler(BaseDestinationHandler):
         try:
             decode_json_fields(records, state.json_fields)
             if state.batch_mode == self.BATCH_MODE_SINGLE:
-                written = await self._write_single_mode(state, records, record_ids)
+                written, failed_ids = await self._write_single_mode(
+                    state, records, record_ids
+                )
             elif state.batch_mode == self.BATCH_MODE_BULK:
-                written = await self._write_bulk_mode(state, records)
+                written, failed_ids = await self._write_bulk_mode(state, records)
             else:
-                written = await self._write_batch_mode(state, records)
+                written, failed_ids = await self._write_batch_mode(
+                    state, records, record_ids
+                )
 
             logger.info(f"API wrote batch {batch_seq}: {written}/{len(records)} records")
-
-            if written == 0:
-                # All records failed - this is a failure
-                return BatchWriteResult(
-                    status=AckStatus.ACK_STATUS_FATAL_FAILURE,
-                    records_written=0,
-                    failure_summary=f"All {len(records)} records failed to write to API",
-                )
-            elif written < len(records):
-                # Partial success - some records failed
-                # Use FATAL_FAILURE since retrying would duplicate successful
-                # records. No cursor: a failure result must not advance the
-                # checkpoint (the engine DLQs the batch and stops the stream).
-                failed_count = len(records) - written
-                return BatchWriteResult(
-                    status=AckStatus.ACK_STATUS_FATAL_FAILURE,
-                    records_written=written,
-                    failure_summary=f"{failed_count}/{len(records)} records failed to write to API",
-                )
-            else:
-                # All records succeeded
-                return BatchWriteResult(
-                    status=AckStatus.ACK_STATUS_SUCCESS,
-                    records_written=written,
-                    committed_cursor=cursor,
-                )
+            return self._build_write_result(
+                written=written,
+                failed_record_ids=failed_ids,
+                total=len(records),
+                cursor=cursor,
+            )
 
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
             logger.error("Transport error writing to API: %s", e, exc_info=True)
@@ -537,25 +521,58 @@ class ApiDestinationHandler(BaseDestinationHandler):
             )
         return body
 
+    def _build_write_result(
+        self,
+        *,
+        written: int,
+        failed_record_ids: List[str],
+        total: int,
+        cursor: Optional[Cursor],
+    ) -> BatchWriteResult:
+        """One partial-failure verdict shared by every write mode.
+
+        Full success advances the cursor. Any shortfall is FATAL (not
+        RETRYABLE) and carries the failed record ids: the records that did
+        land are already written, so retrying the whole batch would duplicate
+        them. A failure result carries no cursor, so the checkpoint never
+        advances past records that were never written.
+        """
+        if written == total and not failed_record_ids:
+            return BatchWriteResult(
+                status=AckStatus.ACK_STATUS_SUCCESS,
+                records_written=written,
+                committed_cursor=cursor,
+            )
+        failed_count = len(failed_record_ids) or (total - written)
+        return BatchWriteResult(
+            status=AckStatus.ACK_STATUS_FATAL_FAILURE,
+            records_written=written,
+            failed_record_ids=tuple(failed_record_ids),
+            failure_summary=f"{failed_count}/{total} records failed to write to API",
+        )
+
     async def _write_single_mode(
         self,
         state: _StreamState,
         records: List[Dict[str, Any]],
         record_ids: List[str],
-    ) -> int:
-        """Write records one at a time."""
+    ) -> Tuple[int, List[str]]:
+        """Write records one at a time.
+
+        Returns ``(written, failed_record_ids)``. Body construction is
+        data-dependent (a record field can feed a derived function) and
+        transport errors are per-record data issues; both are caught per
+        record so a bad record fails just itself. Authoring and programming
+        errors (TransportSpecError, RuntimeError, KeyError) propagate to
+        write_batch and become FATAL for the whole batch.
+        """
         written = 0
-        failed_ids = []
+        failed_ids: List[str] = []
 
         for i, record in enumerate(records):
             try:
                 body = self._build_body(state, record=record)
             except (TypeError, ValueError) as e:
-                # Body construction is data-dependent (a record field can
-                # feed a derived function); a bad record must not discard
-                # the write counts of records already sent. Authoring and
-                # programming errors (TransportSpecError, RuntimeError,
-                # KeyError) propagate to write_batch and become FATAL.
                 logger.warning(
                     "Failed to build body for record %s: %s: %s",
                     record_ids[i], type(e).__name__, e,
@@ -566,10 +583,6 @@ class ApiDestinationHandler(BaseDestinationHandler):
                 await self._send_request(state, body)
                 written += 1
             except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-                # Transport-level errors are per-record data issues; log
-                # the cause and move on so the batch reports partial
-                # success. Programming errors (KeyError, TypeError, …)
-                # propagate to write_batch where they become FATAL.
                 logger.warning(
                     "Failed to write record %s: %s: %s",
                     record_ids[i], type(e).__name__, e,
@@ -579,27 +592,61 @@ class ApiDestinationHandler(BaseDestinationHandler):
         if failed_ids:
             logger.warning(f"Failed to write {len(failed_ids)} records: {failed_ids[:5]}...")
 
-        return written
+        return written, failed_ids
 
     async def _write_bulk_mode(
         self, state: _StreamState, records: List[Dict[str, Any]]
-    ) -> int:
-        """Write all records in a single request."""
+    ) -> Tuple[int, List[str]]:
+        """Write all records in a single request.
+
+        Returns ``(written, failed_record_ids)``. A 2xx response means the API
+        accepted the whole payload; a non-2xx raises in ``_send_request`` and
+        is handled one level up as a retryable transport failure (nothing was
+        written in a single bulk request, so a retry cannot duplicate).
+
+        Per-item partial failure inside a 2xx body is NOT inspected: the engine
+        is connector-agnostic and no endpoint contract declares where a
+        per-item error array lives, so the response shape is opaque. Detecting
+        it would require a declared response-error contract; until then bulk
+        mode is all-or-nothing at the transport level.
+        """
         await self._send_request(state, self._build_body(state, records=records))
-        return len(records)
+        return len(records), []
 
     async def _write_batch_mode(
-        self, state: _StreamState, records: List[Dict[str, Any]]
-    ) -> int:
-        """Write records in batches."""
+        self,
+        state: _StreamState,
+        records: List[Dict[str, Any]],
+        record_ids: List[str],
+    ) -> Tuple[int, List[str]]:
+        """Write records in fixed-size chunks.
+
+        Returns ``(written, failed_record_ids)``. The written count tracks
+        records actually sent so a mid-loop chunk failure reports the true
+        count instead of 0 — reporting 0 (and RETRYABLE) would re-send the
+        chunks that already landed and duplicate them. A transport failure on
+        a chunk stops the loop and attributes every not-yet-written record id
+        as failed; the shared result path then makes it FATAL. Non-transport
+        (authoring/programming) errors propagate to write_batch and become
+        FATAL there, matching single mode.
+        """
         written = 0
 
         for i in range(0, len(records), state.batch_size):
             batch = records[i : i + state.batch_size]
-            await self._send_request(state, self._build_body(state, records=batch))
+            try:
+                await self._send_request(state, self._build_body(state, records=batch))
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                logger.warning(
+                    "Failed to write batch chunk at offset %d (%d records): %s: %s",
+                    i, len(batch), type(e).__name__, e,
+                )
+                # written == i here: every record from this chunk onward is
+                # unwritten. Attribute them all as failed.
+                return written, list(record_ids[written:])
             written += len(batch)
 
-        return written
+        return written, []
 
     async def _send_request(self, state: _StreamState, data: Any) -> Dict[str, Any]:
         """

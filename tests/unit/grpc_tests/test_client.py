@@ -147,6 +147,44 @@ class TestDestinationGRPCClient:
         assert client._connected is False
 
 
+class TestGetCapabilities:
+    """get_capabilities raises on failure rather than collapsing to None, so a
+    transport failure is never mistaken for a populated empty response."""
+
+    @staticmethod
+    def _rpc_error() -> grpc.aio.AioRpcError:
+        return grpc.aio.AioRpcError(
+            code=grpc.StatusCode.UNAVAILABLE,
+            initial_metadata=grpc.aio.Metadata(),
+            trailing_metadata=grpc.aio.Metadata(),
+            details="destination unreachable",
+        )
+
+    @pytest.mark.asyncio
+    async def test_raises_when_not_connected(self):
+        client = DestinationGRPCClient()  # _stub is None
+        with pytest.raises(ConnectionError, match="not connected"):
+            await client.get_capabilities()
+
+    @pytest.mark.asyncio
+    async def test_raises_on_rpc_error(self):
+        client = DestinationGRPCClient()
+        client._stub = MagicMock()
+        client._stub.GetCapabilities = AsyncMock(side_effect=self._rpc_error())
+        with pytest.raises(grpc.aio.AioRpcError):
+            await client.get_capabilities()
+
+    @pytest.mark.asyncio
+    async def test_returns_response_on_success(self):
+        from src.grpc.generated.analitiq.v1 import GetCapabilitiesResponse
+
+        client = DestinationGRPCClient()
+        client._stub = MagicMock()
+        resp = GetCapabilitiesResponse(connector_type="database")
+        client._stub.GetCapabilities = AsyncMock(return_value=resp)
+        assert await client.get_capabilities() is resp
+
+
 class TestConnectRetryLogLevels:
     """Attempt 1 logs at DEBUG (expected during concurrent startup);
     attempts 2+ log at WARNING.

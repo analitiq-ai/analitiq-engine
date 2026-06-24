@@ -2,6 +2,9 @@
 
 import json
 from datetime import datetime, timezone
+from decimal import Decimal
+
+import pytest
 
 from src.grpc.cursor import (
     compute_max_cursor,
@@ -83,11 +86,29 @@ class TestEncodeDecode:
         decoded = decode_cursor(cursor)
         assert decoded == {}
 
-    def test_decode_invalid_cursor(self):
-        """Test decoding invalid cursor returns empty dict."""
+    def test_decode_invalid_cursor_raises(self):
+        """A non-empty but undecodable token raises rather than returning {}.
+
+        Collapsing a corrupt token to {} would let it overwrite a good
+        watermark with empty/now() state on the next checkpoint; raising keeps
+        the prior durable bookmark untouched.
+        """
         cursor = Cursor(token=b"not valid json")
-        decoded = decode_cursor(cursor)
-        assert decoded == {}
+        with pytest.raises(ValueError, match="undecodable cursor token"):
+            decode_cursor(cursor)
+
+    def test_encode_cursor_with_decimal(self):
+        """A Decimal cursor value is tagged so it round-trips losslessly
+        instead of raising TypeError inside json.dumps and aborting the load.
+        """
+        from src.state.store import decode_value
+
+        value = Decimal("123.4500")
+        cursor = encode_cursor(cursor_field="amount", cursor_value=value)
+
+        decoded = json.loads(cursor.token.decode("utf-8"))
+        assert decoded["value"] == {"__type__": "decimal", "value": "123.4500"}
+        assert decode_value(decoded["value"]) == value
 
 
 class TestComputeMaxCursor:

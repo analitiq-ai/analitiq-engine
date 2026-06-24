@@ -13,11 +13,12 @@ Cursor format (internal to engine):
 }
 
 This is JSON-encoded and stored as bytes for simplicity and debuggability.
-A ``datetime``/``date`` value is tagged via ``encode_value``
+A ``datetime``/``date``/``Decimal`` value is tagged via ``encode_value``
 (``{"__type__": "datetime", "value": ...}``) so its type survives the JSON
 round trip through the destination ACK and into the durable resume state,
-instead of being flattened to an ambiguous ISO string. The destination still
-treats the whole token as opaque, so the tagging is internal to the engine.
+instead of being flattened to an ambiguous ISO string or a lossy float. The
+destination still treats the whole token as opaque, so the tagging is internal
+to the engine.
 """
 
 import json
@@ -63,7 +64,13 @@ def encode_cursor(
             if field in tie_breaker_values
         ]
 
-    token = json.dumps(cursor_data, separators=(",", ":")).encode("utf-8")
+    # ``encode_value`` already tags the types JSON cannot represent
+    # (datetime/date/Decimal); ``default=str`` is a defensive backstop so an
+    # unforeseen non-JSON scalar degrades to its string form instead of
+    # raising ``TypeError`` and aborting the load loop mid-batch.
+    token = json.dumps(
+        cursor_data, separators=(",", ":"), default=str
+    ).encode("utf-8")
     return Cursor(token=token)
 
 
@@ -80,6 +87,12 @@ def decode_cursor(cursor: Cursor) -> Dict[str, Any]:
         - value: cursor value
         - tie_breakers: list of tie-breaker dicts (optional)
         - encoded_at: timestamp when cursor was encoded
+        An empty token (no cursor yet) returns ``{}``.
+
+    Raises:
+        ValueError: the token is non-empty but cannot be decoded (corrupt
+            JSON / bytes). A corrupt cursor must fail loud rather than wipe a
+            good watermark.
     """
     if not cursor.token:
         return {}
@@ -87,8 +100,13 @@ def decode_cursor(cursor: Cursor) -> Dict[str, Any]:
     try:
         return json.loads(cursor.token.decode("utf-8"))
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
-        logger.error(f"Failed to decode cursor: {e}")
-        return {}
+        # A non-empty but undecodable token is a corruption signal, not an
+        # absent cursor. Returning {} here would let it collapse to "no
+        # cursor" and overwrite a good watermark with empty/now() state on the
+        # next checkpoint. Raise so the load stage fails loud and the prior
+        # durable bookmark survives untouched.
+        logger.error("Failed to decode cursor token", exc_info=True)
+        raise ValueError(f"undecodable cursor token: {e}") from e
 
 
 def compute_max_cursor(

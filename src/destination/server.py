@@ -426,13 +426,14 @@ class DestinationServicer(DestinationServiceServicer):
             supported_modes = [WriteMode.WRITE_MODE_INSERT]
             if self.handler.supports_upsert:
                 supported_modes.append(WriteMode.WRITE_MODE_UPSERT)
-            supported_modes.append(WriteMode.WRITE_MODE_TRUNCATE_INSERT)
+            if self.handler.supports_truncate:
+                supported_modes.append(WriteMode.WRITE_MODE_TRUNCATE_INSERT)
 
             return GetCapabilitiesResponse(
                 connector_type=self.handler.connector_type,
                 supported_write_modes=supported_modes,
                 supports_transactions=self.handler.supports_transactions,
-                supports_auto_create=True,
+                supports_auto_create=self.handler.supports_auto_create,
                 supports_upsert=self.handler.supports_upsert,
                 supports_bulk_load=self.handler.supports_bulk_load,
                 max_batch_size=self.handler.max_batch_size,

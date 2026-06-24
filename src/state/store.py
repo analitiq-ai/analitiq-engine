@@ -44,6 +44,7 @@ import json
 import logging
 import os
 from datetime import date, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Dict, Optional, Set
 
@@ -185,18 +186,27 @@ class CursorStore:
 
 
 def encode_value(value: Any) -> Any:
-    """Tag a ``datetime``/``date`` so JSON can round-trip its type.
+    """Tag a ``datetime``/``date``/``Decimal`` so JSON can round-trip its type.
 
     Shared by the on-disk checkpoint, the worker cursor-state wire, and the
     gRPC cursor token (``src/grpc/cursor.py``) so every place a cursor is
     serialized carries the type the same way. JSON-native scalars are returned
     unchanged.
+
+    ``Decimal`` is tagged for the same reason ``datetime`` is: a ``NUMERIC`` /
+    ``DECIMAL`` cursor column arrives as a ``Decimal``, which JSON cannot
+    represent and which the source rebinds verbatim into ``cursor_field >= ?``.
+    Tagging round-trips it losslessly; flattening to ``float`` would lose
+    precision and flattening to ``str`` would force the read path to guess the
+    type back.
     """
     # datetime is a subclass of date, so check it first.
     if isinstance(value, datetime):
         return {_TYPE_KEY: "datetime", _VALUE_KEY: value.isoformat()}
     if isinstance(value, date):
         return {_TYPE_KEY: "date", _VALUE_KEY: value.isoformat()}
+    if isinstance(value, Decimal):
+        return {_TYPE_KEY: "decimal", _VALUE_KEY: str(value)}
     return value
 
 
@@ -209,4 +219,6 @@ def decode_value(value: Any) -> Any:
             return datetime.fromisoformat(raw)
         if kind == "date":
             return date.fromisoformat(raw)
+        if kind == "decimal":
+            return Decimal(raw)
     return value

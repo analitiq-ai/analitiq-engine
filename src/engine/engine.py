@@ -520,6 +520,50 @@ class StreamingEngine:
             tag_failure(e, code=ErrorCode.CONFIG_INVALID, stage=FailureStage.TRANSFORM)
             raise
 
+    def _persist_committed_cursor(
+        self,
+        committed_cursor: Optional[Any],
+        stream_id: str,
+        stream_version: int,
+    ) -> Tuple[Dict[str, Any], Any]:
+        """Checkpoint the destination-acked watermark for one batch.
+
+        Shared by the SUCCESS and ALREADY_COMMITTED ack paths so the watermark
+        is recorded identically regardless of which one runs.
+
+        Returns ``(cursor_data, hwm)`` for metrics emission. An empty/absent
+        cursor (a batch that advanced no watermark — e.g. every row's cursor
+        field was NULL, or a non-incremental stream) returns ``({}, "")`` and
+        writes no checkpoint, leaving any prior bookmark untouched.
+
+        Fails loud when a cursor carries components but no value: persisting a
+        fabricated ``datetime.now()`` there would silently checkpoint
+        wall-clock now as the high-water mark, so the next run would filter
+        from "now" and skip rows.
+        """
+        if committed_cursor is None:
+            return {}, ""
+        state_dict = cursor_to_state_dict(committed_cursor)
+        cursor_data = state_dict.get("cursor", {})
+        if not cursor_data:
+            return {}, ""
+        primary = cursor_data.get("primary", {})
+        if primary.get("value") is None:
+            raise StreamProcessingError(
+                "committed cursor carries no watermark value; refusing to "
+                "checkpoint a fabricated high-water mark",
+                stream_id=stream_id,
+            )
+        hwm = primary["value"]
+        self.state_manager.save_stream_checkpoint(
+            stream_name=stream_id,
+            partition={},
+            cursor=cursor_data,
+            hwm=hwm,
+            stream_version=stream_version,
+        )
+        return cursor_data, hwm
+
     async def _load_stage(
         self,
         input_queue: Queue,
@@ -638,21 +682,9 @@ class StreamingEngine:
 
                     if result.status == AckStatus.ACK_STATUS_SUCCESS:
                         # Batch committed, persist cursor
-                        cursor_data = {}
-                        hwm = ""
-                        if result.committed_cursor:
-                            state_dict = cursor_to_state_dict(result.committed_cursor)
-                            state_stream_name = stream_id
-                            cursor_data = state_dict.get("cursor", {})
-                            primary = cursor_data.get("primary", {})
-                            hwm = primary.get("value", datetime.now(timezone.utc).isoformat())
-                            self.state_manager.save_stream_checkpoint(
-                                stream_name=state_stream_name,
-                                partition={},
-                                cursor=cursor_data,
-                                hwm=hwm,
-                                stream_version=stream_version,
-                            )
+                        cursor_data, hwm = self._persist_committed_cursor(
+                            result.committed_cursor, stream_id, stream_version,
+                        )
                         logger.debug(
                             f"Stream {stream_name}: Batch {batch_seq} committed, "
                             f"{result.records_written} records written"
@@ -691,21 +723,9 @@ class StreamingEngine:
 
                     elif result.status == AckStatus.ACK_STATUS_ALREADY_COMMITTED:
                         # Idempotent replay - batch was already processed
-                        cursor_data = {}
-                        hwm = ""
-                        if result.committed_cursor:
-                            state_dict = cursor_to_state_dict(result.committed_cursor)
-                            state_stream_name = stream_id
-                            cursor_data = state_dict.get("cursor", {})
-                            primary = cursor_data.get("primary", {})
-                            hwm = primary.get("value", datetime.now(timezone.utc).isoformat())
-                            self.state_manager.save_stream_checkpoint(
-                                stream_name=state_stream_name,
-                                partition={},
-                                cursor=cursor_data,
-                                hwm=hwm,
-                                stream_version=stream_version,
-                            )
+                        self._persist_committed_cursor(
+                            result.committed_cursor, stream_id, stream_version,
+                        )
 
                         # Record batch commit for in-run idempotency (prevents re-send on retry)
                         if self.state_manager.commit_tracker:

@@ -58,7 +58,11 @@ class TestProxyConnectFailures:
         handle = _handle()
         control = MagicMock()
         control.connect = AsyncMock(return_value=True)
-        control.get_capabilities = AsyncMock(return_value=None)
+        # get_capabilities now raises on a transport/RPC failure instead of
+        # collapsing to None; the proxy must still tear down and re-raise.
+        control.get_capabilities = AsyncMock(
+            side_effect=ConnectionError("worker channel dropped")
+        )
         control.disconnect = AsyncMock()
         control.send_shutdown = AsyncMock()
 

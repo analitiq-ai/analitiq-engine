@@ -316,9 +316,17 @@ class TestSchemaAckBudget:
 
 
 class TestGetCapabilities:
-    def _make_handler(self, *, supports_upsert: bool) -> MagicMock:
+    def _make_handler(
+        self,
+        *,
+        supports_upsert: bool,
+        supports_truncate: bool = True,
+        supports_auto_create: bool = True,
+    ) -> MagicMock:
         handler = MagicMock()
         handler.supports_upsert = supports_upsert
+        handler.supports_truncate = supports_truncate
+        handler.supports_auto_create = supports_auto_create
         handler.connector_type = "database"
         handler.supports_transactions = True
         handler.supports_bulk_load = False
@@ -355,12 +363,41 @@ class TestGetCapabilities:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("supports_upsert", [True, False])
-    async def test_truncate_insert_always_present(self, supports_upsert: bool):
+    async def test_truncate_insert_present_when_handler_supports_it(
+        self, supports_upsert: bool
+    ):
         servicer = DestinationServicer(
-            self._make_handler(supports_upsert=supports_upsert), server=MagicMock()
+            self._make_handler(supports_upsert=supports_upsert, supports_truncate=True),
+            server=MagicMock(),
         )
         resp = await servicer.GetCapabilities(GetCapabilitiesRequest(), MagicMock())
         assert WriteMode.WRITE_MODE_TRUNCATE_INSERT in resp.supported_write_modes
+
+    @pytest.mark.asyncio
+    async def test_truncate_insert_absent_when_handler_lacks_it(self):
+        """A handler that cannot truncate (API/file/stdout) must not advertise
+        WRITE_MODE_TRUNCATE_INSERT — the capability follows the handler
+        property, never a constructor literal."""
+        servicer = DestinationServicer(
+            self._make_handler(supports_upsert=False, supports_truncate=False),
+            server=MagicMock(),
+        )
+        resp = await servicer.GetCapabilities(GetCapabilitiesRequest(), MagicMock())
+        assert WriteMode.WRITE_MODE_TRUNCATE_INSERT not in resp.supported_write_modes
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("supports_auto_create", [True, False])
+    async def test_auto_create_follows_handler_property(
+        self, supports_auto_create: bool
+    ):
+        servicer = DestinationServicer(
+            self._make_handler(
+                supports_upsert=False, supports_auto_create=supports_auto_create
+            ),
+            server=MagicMock(),
+        )
+        resp = await servicer.GetCapabilities(GetCapabilitiesRequest(), MagicMock())
+        assert resp.supports_auto_create is supports_auto_create
 
     @pytest.mark.asyncio
     async def test_missing_capability_attribute_aborts_with_detail(self):

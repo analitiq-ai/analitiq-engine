@@ -486,6 +486,18 @@ class GenericSQLConnector(BaseDestinationHandler):
         """
         return False
 
+    @property
+    def supports_auto_create(self) -> bool:
+        """SQL destinations create the target table via ``configure_schema``
+        DDL (rendered CREATE TABLE), so auto-create is supported."""
+        return True
+
+    @property
+    def supports_truncate(self) -> bool:
+        """SQL destinations implement truncate-insert (TRUNCATE then ingest),
+        so the full-refresh write mode is supported."""
+        return True
+
     async def connect(self, runtime: ConnectionRuntime) -> None:
         """
         Establish database connection using ConnectionRuntime.
