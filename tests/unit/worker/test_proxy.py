@@ -366,3 +366,31 @@ class TestProxyCapabilities:
         assert proxy.max_batch_size == 500
         # Zero means "worker did not declare" — fall back to the base default.
         assert proxy.max_batch_bytes == 8 * 1024 * 1024
+
+    def test_auto_create_and_truncate_forwarded_from_capabilities(self):
+        proxy = _proxy()
+        # Before connect: both default False, no crash.
+        assert proxy.supports_auto_create is False
+        assert proxy.supports_truncate is False
+        # supports_truncate is derived from the advertised write-mode list, not
+        # a dedicated bool — mirror exactly what the worker advertised.
+        caps = MagicMock(
+            supports_auto_create=True,
+            supported_write_modes=[
+                WriteMode.WRITE_MODE_INSERT,
+                WriteMode.WRITE_MODE_TRUNCATE_INSERT,
+            ],
+        )
+        proxy._capabilities = caps
+        assert proxy.supports_auto_create is True
+        assert proxy.supports_truncate is True
+
+    def test_truncate_absent_and_auto_create_false_when_not_advertised(self):
+        proxy = _proxy()
+        caps = MagicMock(
+            supports_auto_create=False,
+            supported_write_modes=[WriteMode.WRITE_MODE_INSERT],
+        )
+        proxy._capabilities = caps
+        assert proxy.supports_auto_create is False
+        assert proxy.supports_truncate is False

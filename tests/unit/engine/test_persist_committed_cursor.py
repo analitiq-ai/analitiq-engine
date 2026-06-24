@@ -9,6 +9,8 @@ becomes a durable bookmark. It must:
 """
 
 import json
+from datetime import datetime, timezone
+from decimal import Decimal
 from unittest.mock import MagicMock
 
 import pytest
@@ -17,6 +19,7 @@ from src.engine.engine import StreamingEngine
 from src.engine.exceptions import StreamProcessingError
 from src.grpc.cursor import encode_cursor
 from src.grpc.generated.analitiq.v1 import Cursor
+from src.state.store import decode_value
 
 
 def _engine() -> StreamingEngine:
@@ -81,3 +84,32 @@ class TestPersistCommittedCursor:
 
         assert hwm == 0
         engine.state_manager.save_stream_checkpoint.assert_called_once()
+
+    def test_datetime_watermark_is_checkpointed_as_tagged(self):
+        # The realistic incremental case: a timestamp cursor arrives tagged
+        # (`{"__type__": "datetime", ...}`), not a bare scalar. The tagged dict
+        # must not trip the value-less fail-loud guard, and must round-trip
+        # back to the original datetime via decode_value.
+        engine = _engine()
+        dt = datetime(2025, 1, 8, 10, 0, 0, tzinfo=timezone.utc)
+        cursor = encode_cursor("created_at", dt)
+
+        cursor_data, hwm = engine._persist_committed_cursor(cursor, "s1", 1)
+
+        assert hwm == {"__type__": "datetime", "value": dt.isoformat()}
+        engine.state_manager.save_stream_checkpoint.assert_called_once()
+        saved = engine.state_manager.save_stream_checkpoint.call_args.kwargs["cursor"]
+        assert decode_value(saved["primary"]["value"]) == dt
+
+    def test_decimal_watermark_is_checkpointed_as_tagged(self):
+        # Ties the Decimal-tagging change to its consumer: a NUMERIC cursor
+        # round-trips losslessly through the checkpoint.
+        engine = _engine()
+        value = Decimal("123.4500")
+        cursor = encode_cursor("amount", value)
+
+        cursor_data, hwm = engine._persist_committed_cursor(cursor, "s1", 1)
+
+        assert hwm == {"__type__": "decimal", "value": "123.4500"}
+        saved = engine.state_manager.save_stream_checkpoint.call_args.kwargs["cursor"]
+        assert decode_value(saved["primary"]["value"]) == value

@@ -482,6 +482,85 @@ class TestApiHandlerBatchModes:
         assert result.records_written == 3
         assert result.failed_record_ids == ("rec-3", "rec-4")
 
+    @pytest.mark.asyncio
+    async def test_real_write_batch_mode_chunk_failure_reports_unsent_ids(
+        self,
+        api_handler: ApiDestinationHandler,
+    ):
+        """Drive the REAL _write_batch_mode (not a mock): a mid-loop chunk
+        transport failure must report the records actually sent and attribute
+        every record from the failed chunk onward as failed. This is the
+        load-bearing dup-on-retry fix.
+        """
+        import aiohttp
+
+        state = api_handler._streams["test-stream"]
+        state.batch_mode = ApiDestinationHandler.BATCH_MODE_BATCH
+        state.batch_size = 2
+
+        calls = []
+
+        async def _send(state_arg, data):
+            calls.append(data)
+            if len(calls) == 2:  # second chunk (rows 2,3) fails
+                raise aiohttp.ClientConnectionError("chunk down")
+            return {}
+
+        api_handler._send_request = _send
+        records = [{"id": i} for i in range(5)]
+        record_ids = [f"r{i}" for i in range(5)]
+
+        written, failed = await api_handler._write_batch_mode(
+            state, records, record_ids
+        )
+        # First chunk (r0, r1) landed; everything from the failed chunk on fails.
+        assert written == 2
+        assert failed == ["r2", "r3", "r4"]
+        # The third chunk must never be attempted after a chunk fails.
+        assert len(calls) == 2
+
+    @pytest.mark.asyncio
+    async def test_write_batch_chunk_failure_is_fatal_no_cursor_end_to_end(
+        self,
+        api_handler: ApiDestinationHandler,
+        mock_cursor: MagicMock,
+    ):
+        """End-to-end through write_batch: a real batch-mode chunk failure must
+        be FATAL (not RETRYABLE), carry the true written count and the unsent
+        ids, and drop the cursor so the checkpoint cannot advance past records
+        that were never written."""
+        import aiohttp
+
+        api_handler._connected = True
+        api_handler._session = MagicMock()
+        state = api_handler._streams["test-stream"]
+        state.batch_mode = ApiDestinationHandler.BATCH_MODE_BATCH
+        state.batch_size = 2
+
+        calls = []
+
+        async def _send(state_arg, data):
+            calls.append(data)
+            if len(calls) == 2:
+                raise aiohttp.ClientConnectionError("chunk down")
+            return {}
+
+        api_handler._send_request = _send
+
+        result = await api_handler.write_batch(
+            run_id="r",
+            stream_id="test-stream",
+            batch_seq=1,
+            record_batch=_to_record_batch([{"id": i} for i in range(5)]),
+            record_ids=[f"r{i}" for i in range(5)],
+            cursor=mock_cursor,
+        )
+
+        assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+        assert result.records_written == 2
+        assert result.committed_cursor is None
+        assert result.failed_record_ids == ("r2", "r3", "r4")
+
 
 @pytest.mark.unit
 class TestApiHandlerConfigureSchemaModeDispatch:
