@@ -184,6 +184,11 @@ ensure_newline_before_comments = true
 
 [tool.mypy]
 python_version = "3.11"
+# The CDK is a sibling package (cdk/cdk/), consumed in-tree. Put cdk/ on the
+# type-check path so `import cdk` resolves to cdk/cdk (mirrors pytest's
+# pythonpath and Docker's PYTHONPATH=/app/cdk); without it every cdk import
+# reports import-not-found.
+mypy_path = "cdk"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true
@@ -259,8 +264,17 @@ exclude_lines = [
 show_missing = true
 skip_covered = true
 
+# Read by flake8 via the Flake8-pyproject plugin (stock flake8 ignores
+# pyproject.toml). The pre-commit flake8 hook also loads flake8-bugbear and
+# flake8-datetimez, which add the B/DTZ checks selected below.
 [tool.flake8]
 max-line-length = 88
+# E203/W503: black-compatible. B0xx (bugbear defaults) and DTZ (flake8-datetimez,
+# naive datetime.now()/utcnow()) are on by default once the plugins are present;
+# B904 (re-raise without `from` inside except) is opinionated and opt-in, so it
+# is selected explicitly. B904 + the bare-except E722 cover the silent-failure
+# family; DTZ covers the naive-datetime family (issue #265 Part A).
+extend-select = ["B904"]
 extend-ignore = ["E203", "W503"]
 exclude = [
     ".git",
@@ -271,4 +285,18 @@ exclude = [
     "dist",
     ".venv",
     "venv",
+    "src/grpc/generated",
 ]
+
+# Dead-symbol scan (issue #265 Part A, B1 family). vulture is whole-program: it
+# must see every module to know a symbol is unused, so the pre-commit hook runs
+# it across `paths` (not just changed files). vulture_allowlist.py grandfathers
+# the symbols live on `main` today (re-generate with
+# `vulture src cdk/cdk --make-whitelist`); a newly added dead symbol is absent
+# from it and fails the hook. `_fn_*` transform handlers are dispatched by name
+# from a registry, so they read as unused to a static scan.
+[tool.vulture]
+paths = ["src", "cdk/cdk", "vulture_allowlist.py"]
+exclude = ["src/grpc/generated"]
+ignore_names = ["_fn_*"]
+min_confidence = 60

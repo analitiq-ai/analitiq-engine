@@ -16,18 +16,29 @@ repos:
       - id: isort
         args: ["--profile", "black"]
 
-  # Linting
+  # Linting. flake8-bugbear adds B-checks (B904: re-raise without `from`);
+  # flake8-datetimez bans naive datetime.now()/utcnow(); Flake8-pyproject lets
+  # flake8 read its [tool.flake8] config from pyproject.toml (issue #265 A).
   - repo: https://github.com/pycqa/flake8
     rev: 6.0.0
     hooks:
       - id: flake8
-        additional_dependencies: [flake8-docstrings]
+        additional_dependencies:
+          - flake8-docstrings
+          - flake8-bugbear
+          - flake8-datetimez
+          - Flake8-pyproject
 
-  # Type checking
+  # Type checking. The hook checks only the files a commit/PR touches, so it
+  # follows imports silently (report errors in changed files, not in the
+  # ~320 pre-existing errors across untouched modules) and ignores third-party
+  # libs absent from this isolated hook env. `poetry run mypy src/` stays full
+  # and strict. mypy_path=cdk (pyproject) resolves the in-tree cdk package.
   - repo: https://github.com/pre-commit/mirrors-mypy
     rev: v1.5.1
     hooks:
       - id: mypy
+        args: ["--follow-imports=silent", "--ignore-missing-imports"]
         additional_dependencies:
           - types-requests
           - types-PyYAML
@@ -71,7 +82,19 @@ repos:
         exclude: ^(tests/|docs/|examples/)
         additional_dependencies: [toml]
 
-# Global configuration
+  # Dead-symbol scan (issue #265 Part A, B1 family). Whole-program analysis:
+  # pass_filenames=false so vulture scans the full tree from [tool.vulture]
+  # paths (not just changed files); it triggers whenever any Python file
+  # changes. vulture_allowlist.py grandfathers symbols live on main today.
+  - repo: https://github.com/jendrikseipp/vulture
+    rev: v2.11
+    hooks:
+      - id: vulture
+        pass_filenames: false
+
+# Global configuration. vulture_allowlist.py is a generated vulture artifact
+# (intentional redefinitions, no docstrings); vulture reads it via its own
+# [tool.vulture] paths, so exclude it from every other hook.
 exclude: |
   (?x)^(
       \.git/|
@@ -82,5 +105,6 @@ exclude: |
       __pycache__/|
       build/|
       dist/|
-      \.tox/
+      \.tox/|
+      vulture_allowlist\.py
   )$
