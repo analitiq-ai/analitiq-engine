@@ -96,7 +96,11 @@ repos:
         exclude: ^(tests/|docs/|examples/)
         additional_dependencies: [toml]
 
-# Global configuration
+# Global configuration. Generated gRPC stubs are excluded here (not only via
+# [tool.flake8] exclude): pre-commit passes explicit filenames, for which
+# flake8's own `exclude` has no effect, so the hook-level filter is what keeps
+# regenerated *_pb2.py out of flake8/black/isort/mypy. The trailing `.*` is
+# required to match files *inside* the directory.
 exclude: |
   (?x)^(
       \.git/|
@@ -107,5 +111,6 @@ exclude: |
       __pycache__/|
       build/|
       dist/|
-      \.tox/
+      \.tox/|
+      src/grpc/generated/.*
   )$
