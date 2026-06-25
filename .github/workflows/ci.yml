@@ -35,14 +35,15 @@ jobs:
         run: poetry install --no-interaction
 
       - name: Run tests
-        # The connector/pipeline registry (connectors/, pipelines/manifest.json)
-        # is gitignored and absent in CI by design: connector, pipeline, stream,
-        # endpoint and connection shapes are defined by the published contract
-        # schemas, not by sample fixtures maintained in this repo. The few tests
-        # that load a real on-disk registry are skipped here; they run locally
-        # and in Docker where a registry is checked out. Making them
-        # registry-independent (synthetic/contract-based fixtures) is tracked
-        # separately.
+        # These six modules already fail on main independent of this PR (there
+        # was no pytest CI to catch it): some are coupled to the gitignored
+        # on-disk registry (connectors/, pipelines/manifest.json) -- which is
+        # absent by design, since connector/pipeline/stream/endpoint/connection
+        # shapes come from the published contract schemas, not sample fixtures
+        # kept here -- and some are stale tests out of sync with current
+        # signatures (e.g. ConnectionRuntime now requires connector_id). They
+        # cannot gate CI as-is; the ~1740 self-contained tests do. Decoupling
+        # and repairing them is tracked in issue #278.
         run: |
           poetry run pytest \
             --ignore=tests/integration/test_api_connector.py \
@@ -84,9 +85,12 @@ jobs:
             from="${{ github.event.before }}"
             to="${{ github.sha }}"
             # First push of a branch (or a missing parent) has no usable
-            # `before`; fall back to the immediate parent of the new tip.
+            # `before`; fall back to the merge-base with the default branch so
+            # every commit the push introduced is checked, not just the tip.
             if [ -z "$from" ] || ! git cat-file -e "${from}^{commit}" 2>/dev/null; then
-              from="$(git rev-parse "${to}^" 2>/dev/null || echo "$to")"
+              base_ref="origin/${{ github.event.repository.default_branch }}"
+              from="$(git merge-base "$base_ref" "$to" 2>/dev/null \
+                || git rev-parse "${to}^" 2>/dev/null || echo "$to")"
             fi
           fi
           echo "from=$from" >> "$GITHUB_OUTPUT"
