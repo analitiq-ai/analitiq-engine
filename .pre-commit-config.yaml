@@ -16,21 +16,46 @@ repos:
       - id: isort
         args: ["--profile", "black"]
 
-  # Linting
+  # Linting. flake8-bugbear adds B-checks (B904: re-raise without `from`);
+  # flake8-datetimez bans naive datetime.now()/utcnow(); Flake8-pyproject lets
+  # flake8 read its [tool.flake8] config from pyproject.toml (issue #265 A).
   - repo: https://github.com/pycqa/flake8
     rev: 6.0.0
     hooks:
       - id: flake8
-        additional_dependencies: [flake8-docstrings]
+        additional_dependencies:
+          - flake8-docstrings
+          - flake8-bugbear
+          - flake8-datetimez
+          - Flake8-pyproject
 
-  # Type checking
+  # Type checking. The hook checks only the files a commit/PR touches and
+  # follows imports silently, so it reports errors in changed files, not the
+  # pre-existing backlog in untouched modules. The src/cdk third-party deps are
+  # installed into the hook env (rather than passing --ignore-missing-imports)
+  # so a misspelled in-tree import such as `from src.nonexistant import X` is
+  # still flagged. `poetry run mypy src/` stays the full strict run;
+  # mypy_path=cdk (pyproject) resolves the in-tree cdk package for both.
   - repo: https://github.com/pre-commit/mirrors-mypy
     rev: v1.5.1
     hooks:
       - id: mypy
+        args: ["--follow-imports=silent"]
         additional_dependencies:
           - types-requests
           - types-PyYAML
+          - pydantic
+          - sqlalchemy
+          - pyarrow
+          - aiohttp
+          - aiohttp-retry
+          - aiofiles
+          - orjson
+          - jsonschema
+          - python-dotenv
+          - python-dateutil
+          - protobuf
+          - grpcio
         exclude: ^(tests/|docs/)
 
   # Security linting
@@ -71,7 +96,11 @@ repos:
         exclude: ^(tests/|docs/|examples/)
         additional_dependencies: [toml]
 
-# Global configuration
+# Global configuration. Generated gRPC stubs are excluded here (not only via
+# [tool.flake8] exclude): pre-commit passes explicit filenames, for which
+# flake8's own `exclude` has no effect, so the hook-level filter is what keeps
+# regenerated *_pb2.py out of flake8/black/isort/mypy. The trailing `.*` is
+# required to match files *inside* the directory.
 exclude: |
   (?x)^(
       \.git/|
@@ -82,5 +111,6 @@ exclude: |
       __pycache__/|
       build/|
       dist/|
-      \.tox/
+      \.tox/|
+      src/grpc/generated/.*
   )$
