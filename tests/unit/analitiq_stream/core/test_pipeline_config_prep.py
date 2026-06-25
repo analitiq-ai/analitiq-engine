@@ -341,8 +341,8 @@ class TestCreateConfigHappyPath:
         assert pipeline_config.pipeline_id == PIPELINE_ID
         assert pipeline_config.display_name == "Demo Pipeline"
         assert pipeline_config.status == "active"
-        assert pipeline_config.connections["source"] == CONNECTION_SRC_ID
-        assert pipeline_config.connections["destinations"] == [CONNECTION_DST_ID]
+        assert pipeline_config.connections.source == CONNECTION_SRC_ID
+        assert pipeline_config.connections.destinations == [CONNECTION_DST_ID]
 
         assert len(stream_configs) == 1
         stream = stream_configs[0]

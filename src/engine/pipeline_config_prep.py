@@ -59,15 +59,42 @@ from cdk.type_map import (
 )
 from src.models.stream import EndpointRef
 from src.models.resolved import (
+    BatchingConfig,
+    ErrorHandlingConfig,
+    PipelineConnections,
     ResolvedDestination,
     ResolvedPipeline,
     ResolvedSource,
     ResolvedStream,
+    RuntimeConfig,
 )
 from cdk.secrets import LocalFileSecretsResolver, SecretsResolver
 from cdk.connection_runtime import ConnectionRuntime
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_runtime_config(raw: Mapping[str, Any]) -> RuntimeConfig:
+    """Build a typed :class:`RuntimeConfig` from the raw pipeline runtime block.
+
+    Defaults live here, once, instead of being re-stated at every consumer's
+    ``dict.get(key, default)`` call site.
+    """
+    batching = raw.get("batching") or {}
+    error_handling = raw.get("error_handling") or {}
+    return RuntimeConfig(
+        batching=BatchingConfig(
+            batch_size=batching.get("batch_size", 1000),
+            max_concurrent_batches=batching.get("max_concurrent_batches", 3),
+        ),
+        error_handling=ErrorHandlingConfig(
+            strategy=error_handling.get("strategy", "fail"),
+            max_retries=error_handling.get("max_retries", 3),
+            retry_delay_seconds=error_handling.get("retry_delay_seconds", 5),
+        ),
+        buffer_size=raw.get("buffer_size", 5000),
+    )
+
 
 # Matches the endpoint variant name in a $schema URL.
 # The trailing boundary is either "/" or end-of-string so that both
@@ -550,13 +577,13 @@ class PipelineConfigPrep:
             description=pipeline_doc.get("description"),
             status=pipeline_doc.get("status", "draft"),
             tags=pipeline_doc.get("tags") or [],
-            connections={
-                "source": source_id,
-                "destinations": dest_ids,
-            },
+            connections=PipelineConnections(
+                source=source_id,
+                destinations=dest_ids,
+            ),
             schedule=pipeline_doc.get("schedule") or {"type": "manual"},
             engine_config=pipeline_doc.get("engine") or {"vcpu": 1, "memory": 8192},
-            runtime=pipeline_doc.get("runtime") or {},
+            runtime=_parse_runtime_config(pipeline_doc.get("runtime") or {}),
         )
 
         connectors = list(self._loaded_connectors.values())
