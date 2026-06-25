@@ -14,6 +14,8 @@ from typing import Dict, Any, List, Optional
 from src.engine.engine import StreamingEngine
 from src.engine.exceptions import StreamProcessingError
 from src.grpc.generated.analitiq.v1 import AckStatus
+from src.models.resolved import ReplicationConfig, ResolvedSource
+from src.models.stream import EndpointRef
 from src.state.error_classification import (
     ErrorCode,
     FailureStage,
@@ -78,12 +80,26 @@ def sample_stream_config():
         "source": {
             "connector_type": "api",
             "host": "https://api.example.com",
+            # The runner always attaches the typed resolved source; the load
+            # stage reads replication/primary-keys off it.
+            "_resolved_source": ResolvedSource(
+                endpoint_ref=EndpointRef(
+                    scope="connector", connection_id="c", endpoint_id="e"
+                ),
+                connection_ref="conn",
+                runtime=MagicMock(),
+                endpoint_document={},
+                stream_source={},
+                replication=ReplicationConfig(
+                    method="incremental", cursor_field="updated_at"
+                ),
+                primary_keys=["id"],
+            ),
         },
         "destination": {
             "connector_type": "api",
             "host": "https://dest.example.com",
         },
-        "cursor_field": "updated_at",
         "runtime": {
             "error_handling": {
                 "strategy": "dlq",

@@ -62,6 +62,7 @@ from src.models.resolved import (
     BatchingConfig,
     ErrorHandlingConfig,
     PipelineConnections,
+    ReplicationConfig,
     ResolvedDestination,
     ResolvedPipeline,
     ResolvedSource,
@@ -97,6 +98,23 @@ def _parse_runtime_config(raw: Mapping[str, Any]) -> RuntimeConfig:
             retry_delay_seconds=5 if retry_delay is None else retry_delay,
         ),
         buffer_size=raw.get("buffer_size", 5000),
+    )
+
+
+def _parse_replication(raw_source: Mapping[str, Any]) -> Optional[ReplicationConfig]:
+    """Build a typed :class:`ReplicationConfig` from a stream's source block.
+
+    Returns ``None`` when no replication policy is present (full-refresh
+    sources may omit it). ``method`` is contract-required, so it is read
+    directly; the optional cursor/tie-breaker fields default to absent.
+    """
+    raw = raw_source.get("replication")
+    if not raw:
+        return None
+    return ReplicationConfig(
+        method=raw["method"],
+        cursor_field=raw.get("cursor_field"),
+        tie_breaker_fields=raw.get("tie_breaker_fields"),
     )
 
 
@@ -654,6 +672,8 @@ class PipelineConfigPrep:
             runtime=source_runtime,
             endpoint_document=source_endpoint,
             stream_source=dict(raw_source),
+            replication=_parse_replication(raw_source),
+            primary_keys=list(raw_source.get("primary_keys") or []),
         )
 
         # ---- destinations ----

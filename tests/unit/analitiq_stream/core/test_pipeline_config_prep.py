@@ -352,6 +352,8 @@ class TestCreateConfigHappyPath:
         assert stream.source.connection_ref == CONNECTION_SRC_ID
         assert stream.source.runtime is connections[CONNECTION_SRC_ID]
         assert stream.source.endpoint_document["endpoint_id"] == ENDPOINT_SRC
+        assert stream.source.primary_keys == ["id"]
+        assert stream.source.replication is None  # fixture stream omits replication
         assert stream.destinations[0].runtime is connections[CONNECTION_DST_ID]
         assert stream.destinations[0].endpoint_document["endpoint_id"] == ENDPOINT_DST
 
@@ -493,6 +495,30 @@ class TestStreamVersionParsing:
         pipeline_config, _, _, _, _ = prep.create_config()
 
         assert pipeline_config.pipeline_id == PIPELINE_ID
+
+    def test_source_replication_is_typed(self, pipeline_tree: Path) -> None:
+        """A stream source's replication block is parsed into a typed
+        ReplicationConfig on the resolved source (engine-internal view)."""
+        stream_doc = _stream_doc(STREAM_ID)
+        stream_doc["source"]["replication"] = {
+            "method": "incremental",
+            "cursor_field": "updated_at",
+            "tie_breaker_fields": ["id"],
+        }
+        _write_json(
+            pipeline_tree / "pipelines" / PIPELINE_ID / "streams" / f"{STREAM_ID}.json",
+            stream_doc,
+        )
+
+        prep = PipelineConfigPrep()
+        _, stream_configs, _, _, _ = prep.create_config()
+
+        src = stream_configs[0].source
+        assert src.primary_keys == ["id"]
+        assert src.replication is not None
+        assert src.replication.method == "incremental"
+        assert src.replication.cursor_field == "updated_at"
+        assert src.replication.tie_breaker_fields == ["id"]
 
 
 # ---------------------------------------------------------------------------

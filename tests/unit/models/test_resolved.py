@@ -4,11 +4,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from src.engine.pipeline_config_prep import _parse_runtime_config
+from src.engine.pipeline_config_prep import _parse_replication, _parse_runtime_config
 from src.models.resolved import (
     BatchingConfig,
     ErrorHandlingConfig,
     PipelineConnections,
+    ReplicationConfig,
     ResolvedPipeline,
     ResolvedStream,
     RuntimeConfig,
@@ -190,3 +191,59 @@ class TestParseRuntimeConfig:
     def test_skip_strategy_parses(self):
         cfg = _parse_runtime_config({"error_handling": {"strategy": "skip"}})
         assert cfg.error_handling.strategy == "skip"
+
+
+class TestReplicationConfig:
+    @pytest.mark.parametrize("method", ["full_refresh", "incremental"])
+    def test_accepts_every_contract_method(self, method):
+        assert ReplicationConfig(method=method).method == method
+
+    def test_rejects_unknown_method(self):
+        with pytest.raises(ValueError, match="Unknown replication method"):
+            ReplicationConfig(method="cdc")
+
+    def test_optional_fields_default_absent(self):
+        cfg = ReplicationConfig(method="full_refresh")
+        assert cfg.cursor_field is None
+        assert cfg.tie_breaker_fields is None
+
+    def test_holds_cursor_and_tie_breakers(self):
+        cfg = ReplicationConfig(
+            method="incremental",
+            cursor_field="updated_at",
+            tie_breaker_fields=["id", "seq"],
+        )
+        assert cfg.cursor_field == "updated_at"
+        assert cfg.tie_breaker_fields == ["id", "seq"]
+
+
+class TestParseReplication:
+    def test_absent_replication_yields_none(self):
+        assert _parse_replication({"primary_keys": ["id"]}) is None
+
+    def test_null_replication_yields_none(self):
+        assert _parse_replication({"replication": None}) is None
+
+    def test_incremental_block_is_typed(self):
+        cfg = _parse_replication(
+            {
+                "replication": {
+                    "method": "incremental",
+                    "cursor_field": "updated_at",
+                    "tie_breaker_fields": ["id"],
+                }
+            }
+        )
+        assert cfg.method == "incremental"
+        assert cfg.cursor_field == "updated_at"
+        assert cfg.tie_breaker_fields == ["id"]
+
+    def test_full_refresh_without_cursor(self):
+        cfg = _parse_replication({"replication": {"method": "full_refresh"}})
+        assert cfg.method == "full_refresh"
+        assert cfg.cursor_field is None
+
+    def test_missing_method_fails_loud(self):
+        # method is contract-required; a malformed block must not pass silently.
+        with pytest.raises(KeyError):
+            _parse_replication({"replication": {"cursor_field": "updated_at"}})
