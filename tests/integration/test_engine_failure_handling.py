@@ -353,6 +353,69 @@ class TestEngineFatalFailureHandling:
         assert end_marker is None
 
     @pytest.mark.asyncio
+    async def test_load_stage_full_refresh_skips_cursor(
+        self,
+        engine: StreamingEngine,
+        mock_grpc_client: AsyncMock,
+        sample_stream_config: Dict[str, Any],
+        temp_dir: str,
+    ):
+        """A full-refresh stream (replication=None) completes without computing
+        a cursor; send_batch receives cursor=None (the typed else-None branch)."""
+        from src.state.dead_letter_queue import DeadLetterQueue
+
+        input_queue = asyncio.Queue()
+        output_queue = asyncio.Queue()
+        await input_queue.put(pa.RecordBatch.from_pylist([{"id": 1}]))
+        await input_queue.put(None)
+
+        success_result = MockBatchResult(
+            success=True,
+            status=AckStatus.ACK_STATUS_SUCCESS,
+            records_written=1,
+            committed_cursor=None,
+            failed_record_ids=[],
+            failure_summary="",
+        )
+        mock_grpc_client.send_batch = AsyncMock(return_value=success_result)
+
+        # Full-refresh: typed resolved source with no replication policy. Copy
+        # the source sub-dict so the shared fixture object is not mutated.
+        config = dict(sample_stream_config)
+        config["source"] = dict(sample_stream_config["source"])
+        config["source"]["_resolved_source"] = ResolvedSource(
+            endpoint_ref=EndpointRef(
+                scope="connector", connection_id="c", endpoint_id="e"
+            ),
+            connection_ref="conn",
+            runtime=MagicMock(),
+            endpoint_document={},
+            stream_source={},
+            replication=None,
+            primary_keys=["id"],
+        )
+
+        stream_dlq = DeadLetterQueue(f"{temp_dir}/dlq")
+        stream_metrics = {"records_processed": 0, "records_failed": 0, "batches_processed": 0, "batches_failed": 0}
+
+        with patch.dict("os.environ", {"METRICS_ENABLED": "false"}):
+            await engine._load_stage(
+                input_queue=input_queue,
+                output_queue=output_queue,
+                grpc_client=mock_grpc_client,
+                config=config,
+                stream_dlq=stream_dlq,
+                run_id="test-run-001",
+                stream_metrics=stream_metrics,
+            )
+
+        # No cursor computed for a full-refresh stream.
+        assert mock_grpc_client.send_batch.await_args.kwargs["cursor"] is None
+        # Batch still forwarded downstream, followed by the end marker.
+        assert await output_queue.get() is not None
+        assert await output_queue.get() is None
+
+    @pytest.mark.asyncio
     async def test_load_stage_checkpoint_threads_stream_version(
         self,
         engine: StreamingEngine,
