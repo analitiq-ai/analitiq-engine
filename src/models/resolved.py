@@ -82,7 +82,7 @@ class ResolvedStream:
         return self.destinations[0]
 
 
-@dataclass
+@dataclass(frozen=True)
 class BatchingConfig:
     """Batch sizing for the engine's producer/consumer loop."""
 
@@ -99,11 +99,13 @@ class BatchingConfig:
             )
 
 
-# The engine branches on exactly these two strategies (src/engine/engine.py).
-_VALID_ERROR_STRATEGIES = frozenset({"fail", "dlq"})
+# The published pipeline contract's error-handling strategy enum. Kept in sync
+# with the contract rather than narrowed to what the engine branches on today,
+# so a contract-valid pipeline is never rejected at this boundary.
+_VALID_ERROR_STRATEGIES = frozenset({"fail", "dlq", "skip"})
 
 
-@dataclass
+@dataclass(frozen=True)
 class ErrorHandlingConfig:
     """Fault-handling policy for a pipeline run."""
 
@@ -128,7 +130,7 @@ class ErrorHandlingConfig:
             )
 
 
-@dataclass
+@dataclass(frozen=True)
 class RuntimeConfig:
     """Pipeline runtime tuning.
 
@@ -166,7 +168,7 @@ class RuntimeConfig:
         }
 
 
-@dataclass
+@dataclass(frozen=True)
 class PipelineConnections:
     """Connection-id wiring: source connection and destination connections."""
 

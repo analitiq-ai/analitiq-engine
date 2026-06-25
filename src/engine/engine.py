@@ -764,6 +764,19 @@ class StreamingEngine:
                                     f"Batch {batch_seq} failed after {max_retries} "
                                     f"retries: {result.failure_summary}"
                                 )
+                            elif error_strategy == "skip":
+                                logger.warning(
+                                    f"Stream {stream_name}: Batch {batch_seq} skipped "
+                                    f"after {max_retries} retries; {record_count} "
+                                    f"records dropped: {result.failure_summary}"
+                                )
+                            else:
+                                # Strategy is contract-validated upstream to
+                                # {fail, dlq, skip}; an unhandled value must fail
+                                # loud, never silently complete a failed batch.
+                                raise StreamProcessingError(
+                                    f"Unhandled error strategy {error_strategy!r}"
+                                )
                             break
 
                         # Exponential backoff

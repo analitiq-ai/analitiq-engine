@@ -39,8 +39,11 @@ class TestErrorHandlingConfig:
         assert cfg.max_retries == 3
         assert cfg.retry_delay_seconds == 5
 
-    def test_accepts_dlq_strategy(self):
-        assert ErrorHandlingConfig(strategy="dlq").strategy == "dlq"
+    @pytest.mark.parametrize("strategy", ["fail", "dlq", "skip"])
+    def test_accepts_every_contract_strategy(self, strategy):
+        # Must mirror the published pipeline contract enum exactly, so a
+        # contract-valid pipeline is never rejected at this boundary.
+        assert ErrorHandlingConfig(strategy=strategy).strategy == strategy
 
     def test_rejects_unknown_strategy(self):
         with pytest.raises(ValueError, match="Unknown error strategy"):
@@ -83,6 +86,18 @@ class TestRuntimeConfig:
             },
             "buffer_size": 4096,
         }
+
+    def test_to_dict_matches_engine_strategy_accessor(self):
+        # Guards the wire contract: the engine reads the strategy via
+        # (runtime).get("error_handling").get("strategy") at engine.py:611-613.
+        # If to_dict()'s keys ever drift, the engine would silently default to
+        # "fail"; assert through the exact accessor the engine uses.
+        runtime = RuntimeConfig(error_handling=ErrorHandlingConfig(strategy="skip"))
+        runtime_dict = runtime.to_dict()
+        strategy = (
+            (runtime_dict.get("error_handling") or {}).get("strategy", "fail")
+        )
+        assert strategy == "skip"
 
 
 class TestPipelineConnections:
@@ -165,3 +180,13 @@ class TestParseRuntimeConfig:
     def test_invalid_value_fails_loud(self):
         with pytest.raises(ValueError, match="Unknown error strategy"):
             _parse_runtime_config({"error_handling": {"strategy": "nope"}})
+
+    def test_null_retry_delay_normalizes_to_default(self):
+        # The contract allows retry_delay_seconds: null; it must not crash the
+        # typed int field, it normalizes to the default.
+        cfg = _parse_runtime_config({"error_handling": {"retry_delay_seconds": None}})
+        assert cfg.error_handling.retry_delay_seconds == 5
+
+    def test_skip_strategy_parses(self):
+        cfg = _parse_runtime_config({"error_handling": {"strategy": "skip"}})
+        assert cfg.error_handling.strategy == "skip"

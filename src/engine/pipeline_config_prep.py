@@ -82,6 +82,10 @@ def _parse_runtime_config(raw: Mapping[str, Any]) -> RuntimeConfig:
     """
     batching = raw.get("batching") or {}
     error_handling = raw.get("error_handling") or {}
+    # The contract allows retry_delay_seconds: null (and treats an omitted key
+    # the same); normalise both to the default here so the typed int field never
+    # has to carry None.
+    retry_delay = error_handling.get("retry_delay_seconds")
     return RuntimeConfig(
         batching=BatchingConfig(
             batch_size=batching.get("batch_size", 1000),
@@ -90,7 +94,7 @@ def _parse_runtime_config(raw: Mapping[str, Any]) -> RuntimeConfig:
         error_handling=ErrorHandlingConfig(
             strategy=error_handling.get("strategy", "fail"),
             max_retries=error_handling.get("max_retries", 3),
-            retry_delay_seconds=error_handling.get("retry_delay_seconds", 5),
+            retry_delay_seconds=5 if retry_delay is None else retry_delay,
         ),
         buffer_size=raw.get("buffer_size", 5000),
     )

@@ -13,6 +13,7 @@ from src.runner import (
 )
 from src.models.resolved import (
     BatchingConfig,
+    ErrorHandlingConfig,
     PipelineConnections,
     ResolvedDestination,
     ResolvedPipeline,
@@ -309,9 +310,16 @@ class TestBuildConfigDict:
 
     def test_runtime_propagated(self):
         pipeline = _make_pipeline(
-            runtime=RuntimeConfig(batching=BatchingConfig(batch_size=500))
+            runtime=RuntimeConfig(
+                batching=BatchingConfig(batch_size=500),
+                error_handling=ErrorHandlingConfig(strategy="dlq"),
+                buffer_size=2048,
+            )
         )
 
         result = _build_config_dict(pipeline, [])
 
+        # Assert exactly the keys the engine reads back off the runtime dict.
         assert result["runtime"]["batching"]["batch_size"] == 500
+        assert result["runtime"]["error_handling"]["strategy"] == "dlq"
+        assert result["runtime"]["buffer_size"] == 2048
