@@ -601,17 +601,15 @@ class StreamingEngine:
         stream_id = config["stream_id"]
         stream_version = config.get("stream_version", 1)
 
-        # Source-side contract dict carries replication and primary-key
-        # metadata. Record IDs hash the source primary key (stable across
-        # the pipeline); cursor field comes from the same replication
-        # block the source connector uses.
-        stream_source = (config.get("source") or {}).get("stream_source") or {}
-        replication = stream_source.get("replication") or {}
-        cursor_field = replication.get("cursor_field")
-        if isinstance(cursor_field, list):
-            cursor_field = cursor_field[0] if cursor_field else None
-        tie_breaker_fields = replication.get("tie_breaker_fields")
-        primary_key_fields = list(stream_source.get("primary_keys") or [])
+        # Typed source-read policy (parsed once in PipelineConfigPrep). Record
+        # IDs hash the source primary key (stable across the pipeline); the
+        # cursor field comes from the same replication policy the connector
+        # uses. cursor_field is a contract string|null, so no list handling.
+        resolved_source = config["source"]["_resolved_source"]
+        replication = resolved_source.replication
+        cursor_field = replication.cursor_field if replication else None
+        tie_breaker_fields = replication.tie_breaker_fields if replication else None
+        primary_key_fields = list(resolved_source.primary_keys)
 
         logger.info(f"Stream {stream_name}: Starting gRPC load stage")
 

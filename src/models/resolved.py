@@ -18,15 +18,55 @@ from cdk.connection_runtime import ConnectionRuntime
 from src.models.stream import EndpointRef
 
 
+# Mirrors the published stream contract's replication-method enum.
+_VALID_REPLICATION_METHODS = frozenset({"full_refresh", "incremental"})
+
+
+@dataclass(frozen=True)
+class ReplicationConfig:
+    """Source replication policy, mirroring the published stream contract.
+
+    ``safety_window_seconds`` is intentionally not carried: the engine never
+    reads it (it travels to the connector inside the ``stream_source`` wire
+    document), so there is nothing to type here.
+    """
+
+    method: str
+    cursor_field: Optional[str] = None
+    tie_breaker_fields: Optional[List[str]] = None
+
+    def __post_init__(self) -> None:
+        if self.method not in _VALID_REPLICATION_METHODS:
+            raise ValueError(
+                f"Unknown replication method {self.method!r}; "
+                f"expected one of {sorted(_VALID_REPLICATION_METHODS)}"
+            )
+        # The contract defines cursor_field as string|null. Fail loud at this
+        # boundary if anything else slips through (e.g. a legacy list), rather
+        # than letting it reach compute_max_cursor as an opaque TypeError.
+        if self.cursor_field is not None and not isinstance(self.cursor_field, str):
+            raise ValueError(
+                "cursor_field must be a string or None; the contract forbids a "
+                f"list, got {type(self.cursor_field).__name__}"
+            )
+
+
 @dataclass
 class ResolvedSource:
-    """Source side of a resolved stream — runtime object and contract docs."""
+    """Source side of a resolved stream — runtime object and contract docs.
+
+    ``replication`` and ``primary_keys`` are the engine-internal typed view of
+    the source-read policy (parsed from ``stream_source``); the raw
+    ``stream_source`` document still travels to the connector unchanged.
+    """
 
     endpoint_ref: EndpointRef
     connection_ref: str
     runtime: ConnectionRuntime
     endpoint_document: Dict[str, Any]
     stream_source: Dict[str, Any]
+    replication: Optional[ReplicationConfig] = None
+    primary_keys: List[str] = field(default_factory=list)
 
     def to_source_config(self) -> Dict[str, Any]:
         """JSON-safe source config dict for the worker bootstrap.
