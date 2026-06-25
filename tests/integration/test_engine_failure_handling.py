@@ -530,7 +530,7 @@ class TestEngineFatalFailureHandling:
         config["runtime"] = {"error_handling": {"strategy": "skip"}}
         engine.retry_delay = 0.01
 
-        stream_metrics = {"records_processed": 0, "records_failed": 0, "batches_processed": 0, "batches_failed": 0}
+        stream_metrics = {"records_processed": 0, "records_failed": 0, "records_skipped": 0, "batches_processed": 0, "batches_failed": 0}
 
         # Must NOT raise.
         await engine._load_stage(
@@ -543,9 +543,12 @@ class TestEngineFatalFailureHandling:
             stream_metrics=stream_metrics,
         )
 
-        # Skipped: not dead-lettered, but counted as a failed batch.
+        # Skipped: not dead-lettered, but counted as failed AND tracked as
+        # skipped (distinct from DLQ'd) so partial-run reporting stays honest.
         assert await stream_dlq.get_failed_records() == []
         assert stream_metrics["batches_failed"] == 1
+        assert stream_metrics["records_skipped"] == 1
+        assert stream_metrics["records_failed"] == 1
 
     @pytest.mark.asyncio
     async def test_load_stage_unhandled_strategy_raises(
