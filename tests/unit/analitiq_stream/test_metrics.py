@@ -120,20 +120,23 @@ class TestPipelineMetrics:
         
         # Add some metrics
         metrics.increment_records_processed(100)
+        metrics.increment_records_skipped(7)
         metrics.increment_batches_failed(5)
         metrics.increment_streams_processed(3)
-        
+
         # Verify metrics are not zero
         assert metrics.total_records > 0
+        assert metrics.records_skipped > 0
         assert metrics.total_batches > 0
         assert metrics.total_streams > 0
-        
+
         # Reset metrics
         metrics.reset()
-        
+
         # Verify all metrics are back to zero
         assert metrics.records_processed == 0
         assert metrics.records_failed == 0
+        assert metrics.records_skipped == 0
         assert metrics.batches_processed == 0
         assert metrics.batches_failed == 0
         assert metrics.streams_processed == 0

@@ -195,6 +195,7 @@ class PipelineMetrics(BaseModel):
         current_time = datetime.now(timezone.utc)
         object.__setattr__(self, 'records_processed', 0)
         object.__setattr__(self, 'records_failed', 0)
+        object.__setattr__(self, 'records_skipped', 0)
         object.__setattr__(self, 'batches_processed', 0)
         object.__setattr__(self, 'batches_failed', 0)
         object.__setattr__(self, 'streams_processed', 0)
