@@ -1,5 +1,7 @@
 """Unit tests for DataTransformer - assignments format only."""
 
+from datetime import datetime, timedelta
+
 import pytest
 
 from src.engine.data_transformer import DataTransformer
@@ -741,6 +743,25 @@ class TestDataTransformer:
         }
         with pytest.raises(TransformationError, match=r"now.*version 99"):
             await transformer.apply_transformations(batch, config)
+
+    @pytest.mark.asyncio
+    async def test_fn_now_returns_tz_aware_utc(self, transformer):
+        """The 'now' function returns a tz-aware UTC datetime, not a naive
+        local value. Naive timestamps flow into Arrow timestamp columns and
+        corrupt time-based queries and incremental sync."""
+        batch = [{}]
+        config = {
+            "mapping": {
+                "assignments": [
+                    _assignment("out", expr={"op": "fn", "name": "now", "version": 1, "args": []})
+                ]
+            }
+        }
+        result = await transformer.apply_transformations(batch, config)
+        out = result[0]["out"]
+        assert isinstance(out, datetime)
+        assert out.tzinfo is not None
+        assert out.utcoffset() == timedelta(0)
 
     @pytest.mark.asyncio
     async def test_unregistered_version_error_names_function_and_version(self, transformer):
