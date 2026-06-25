@@ -620,7 +620,7 @@ class GenericSQLConnector(BaseDestinationHandler):
         if cancelled is not None:
             raise cancelled
 
-    async def finalize_run(self) -> None:
+    async def finalize_run(self, *, succeeded: bool) -> None:
         """Run-completion hook: prune this handler's idempotency-ledger rows.
 
         Called from the destination server's ``Shutdown`` handler while the
@@ -628,14 +628,25 @@ class GenericSQLConnector(BaseDestinationHandler):
         worker process is torn down (SIGTERM) before a disconnect-time
         cleanup could finish.
 
+        Prunes only when ``succeeded`` is ``True``. A failed/aborted run may be
+        resumed with the same ``run_id``; deleting its ``_batch_commits`` rows
+        would let the resume re-ingest already-written batches (duplicates in
+        ``insert`` mode), so the ledger is left intact for any non-successful
+        outcome.
+
         ``_batch_commits`` is a within-run retry/resume ledger -- it is only
         ever read with the current ``run_id`` (a later run uses a different
-        id; a resume reuses the same one). Once a run is tearing down its
-        rows are dead weight, so prune per ``(schema, run_id)`` seen during
-        writes to bound the table's growth. Best-effort: a prune failure is
-        logged and swallowed (leftover rows are read only by their own run)
-        and must never fail the run's teardown.
+        id; a resume reuses the same one). On a successful run its rows are
+        dead weight, so prune per ``(schema, run_id)`` seen during writes to
+        bound the table's growth. Best-effort: a prune failure is logged and
+        swallowed (leftover rows are read only by their own run) and must
+        never fail the run's teardown.
         """
+        if not succeeded:
+            # Failed/aborted run: keep the ledger so a resume (same run_id) can
+            # still skip already-committed batches.
+            self._committed_runs.clear()
+            return
         run_id_col = self.dialect.quote_ident("run_id")
         for schema_name, run_id in sorted(self._committed_runs):
             qualified = self.dialect.quote_qualified(

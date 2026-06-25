@@ -106,7 +106,7 @@ class BaseDestinationHandler(ABC):
         """
         pass
 
-    async def finalize_run(self) -> None:
+    async def finalize_run(self, *, succeeded: bool) -> None:
         """Run-completion hook, invoked from the destination server's
         ``Shutdown`` handler while the handler is still connected.
 
@@ -114,7 +114,12 @@ class BaseDestinationHandler(ABC):
         run connection-bound cleanup, so anything needing the live connection
         at end-of-run belongs here. Default is a no-op; handlers with
         run-scoped state to release (e.g. a SQL connector pruning its
-        idempotency ledger) override it. Best-effort: the server logs and
+        idempotency ledger) override it.
+
+        ``succeeded`` is the engine's terminal-run outcome: ``True`` only when
+        the pipeline finished successfully. Cleanup that would break a resume
+        of a failed run (e.g. pruning the idempotency ledger) must run only
+        when ``succeeded`` is ``True``. Best-effort: the server logs and
         swallows any error so teardown never fails.
         """
         return None

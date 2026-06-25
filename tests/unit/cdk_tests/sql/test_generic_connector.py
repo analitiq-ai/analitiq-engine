@@ -721,7 +721,7 @@ class TestPruneCommittedRuns:
             (sql, params)
         )
 
-        await connector.finalize_run()
+        await connector.finalize_run(succeeded=True)
 
         assert len(executed) == 2
         for sql, params in executed:
@@ -754,7 +754,7 @@ class TestPruneCommittedRuns:
         sync_engine.begin = MagicMock(return_value=cm)
         connector._sync_engine = sync_engine
 
-        await connector.finalize_run()
+        await connector.finalize_run(succeeded=True)
 
         assert len(executed) == 1
         sql, params = executed[0]
@@ -775,5 +775,23 @@ class TestPruneCommittedRuns:
         connector._execute_adbc_dml_sync = boom
 
         # Best-effort: a prune failure must not propagate out of teardown.
-        await connector.finalize_run()
+        await connector.finalize_run(succeeded=True)
+        assert connector._committed_runs == set()
+
+    @pytest.mark.asyncio
+    async def test_does_not_prune_on_failed_run(self):
+        # A failed/aborted run keeps its ledger so a resume (same run_id) can
+        # still skip already-committed batches -- no DELETE is issued.
+        connector = GenericSQLConnector()
+        connector._adbc_only = True
+        connector._committed_runs = {("public", "run-1")}
+
+        executed: List[Tuple[str, Tuple[Any, ...]]] = []
+        connector._execute_adbc_dml_sync = lambda sql, params: executed.append(
+            (sql, params)
+        )
+
+        await connector.finalize_run(succeeded=False)
+
+        assert executed == []  # ledger left intact
         assert connector._committed_runs == set()

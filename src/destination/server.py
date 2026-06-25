@@ -53,6 +53,12 @@ logger = logging.getLogger(__name__)
 # Default configuration from environment
 DEFAULT_GRPC_PORT = int(os.getenv("GRPC_PORT", "50051"))
 
+# Shutdown reason that marks a terminal, fully-successful run -- the only case
+# where the destination prunes its idempotency ledger. Any other reason
+# (failure, abort, generic teardown) leaves the ledger intact so a resumed run
+# can still skip already-committed batches.
+SHUTDOWN_REASON_SUCCESS = "pipeline_completed"
+
 # A destination SQL statement is cancelled before the sender's gRPC ack
 # timeout, so the database returns the cancelled statement instead of the
 # engine abandoning the handshake with a bare "ACK timeout" (issue #231).
@@ -468,9 +474,12 @@ class DestinationServicer(DestinationServiceServicer):
         # connection-dependent cleanup (e.g. pruning the idempotency ledger)
         # must happen here, not at disconnect. finalize_run is a no-op on the
         # base handler; only handlers that need it (SQL connectors) override.
+        # The reason carries the terminal-run outcome: cleanup that would break
+        # a resume of a failed run runs only when the run actually succeeded.
         # Best-effort: a failure must not block the shutdown ack.
+        succeeded = request.reason == SHUTDOWN_REASON_SUCCESS
         try:
-            await self.handler.finalize_run()
+            await self.handler.finalize_run(succeeded=succeeded)
         except Exception:
             logger.warning(
                 "handler finalize_run failed during shutdown", exc_info=True

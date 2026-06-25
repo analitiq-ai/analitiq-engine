@@ -625,7 +625,7 @@ class TestShutdownFinalizeRun:
     """
 
     @pytest.mark.asyncio
-    async def test_finalizes_then_signals_shutdown(self):
+    async def test_success_reason_finalizes_with_succeeded_true(self):
         handler = MagicMock()
         handler.finalize_run = AsyncMock()
         server = MagicMock()
@@ -635,7 +635,22 @@ class TestShutdownFinalizeRun:
             MagicMock(reason="pipeline_completed"), MagicMock()
         )
 
-        handler.finalize_run.assert_awaited_once()
+        handler.finalize_run.assert_awaited_once_with(succeeded=True)
+        server.signal_shutdown.assert_called_once()
+        assert ack.acknowledged is True
+
+    @pytest.mark.asyncio
+    async def test_non_success_reason_finalizes_with_succeeded_false(self):
+        # A failed/aborted (or generic teardown) reason must not signal success,
+        # so the handler keeps its ledger for a possible resume.
+        handler = MagicMock()
+        handler.finalize_run = AsyncMock()
+        server = MagicMock()
+        servicer = DestinationServicer(handler, server=server)
+
+        ack = await servicer.Shutdown(MagicMock(reason="pipeline_failed"), MagicMock())
+
+        handler.finalize_run.assert_awaited_once_with(succeeded=False)
         server.signal_shutdown.assert_called_once()
         assert ack.acknowledged is True
 
