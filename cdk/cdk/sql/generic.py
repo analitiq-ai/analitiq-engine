@@ -1313,7 +1313,11 @@ class GenericSQLConnector(BaseDestinationHandler):
                 batch_seq=batch_seq,
                 committed_cursor=cursor_bytes,
                 records_written=records_written,
-                committed_at=datetime.now(timezone.utc),
+                # The committed_at ledger column is a naive Timestamp
+                # (Timestamp(MICROSECOND) -> TIMESTAMP, not TIMESTAMPTZ), so
+                # bind a naive UTC value; a tz-aware datetime can be rejected
+                # by strict drivers (e.g. asyncpg) binding to a naive column.
+                committed_at=datetime.now(timezone.utc).replace(tzinfo=None),
             )
         )
 

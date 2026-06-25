@@ -8,6 +8,7 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+AWS_BATCH_JOB_ID_VAR = "AWS_BATCH_JOB_ID"
 RUN_ID_VAR = "RUN_ID"
 
 
@@ -19,11 +20,15 @@ def _generate_run_id() -> str:
 
 def get_or_generate_run_id() -> str:
     """Get existing run_id or generate new one."""
-    # The control plane sets RUN_ID from whatever scheduler it uses; fall
-    # back to a locally generated id only when it is unset or blank.
+    # Check if RUN_ID already set and non-empty
     existing = os.environ.get(RUN_ID_VAR, "").strip()
     if existing:
         return existing
+
+    # Use AWS Batch job ID in cloud (non-empty check)
+    batch_job_id = os.environ.get(AWS_BATCH_JOB_ID_VAR, "").strip()
+    if batch_job_id:
+        return batch_job_id
 
     return _generate_run_id()
 
