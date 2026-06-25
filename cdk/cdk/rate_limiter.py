@@ -5,7 +5,7 @@ source API connectors and destination API handlers.
 """
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List
 
 
@@ -47,7 +47,7 @@ class RateLimiter:
         """
         while True:
             async with self.lock:
-                now = datetime.now().timestamp()
+                now = datetime.now(timezone.utc).timestamp()
 
                 # Clean up old requests outside the time window
                 self.requests = [
