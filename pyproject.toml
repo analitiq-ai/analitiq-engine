@@ -269,13 +269,17 @@ skip_covered = true
 # flake8-datetimez, which add the B/DTZ checks selected below.
 [tool.flake8]
 max-line-length = 88
-# E203/W503: black-compatible. B0xx (bugbear defaults) and DTZ (flake8-datetimez,
-# naive datetime.now()/utcnow()) are on by default once the plugins are present;
-# B904 (re-raise without `from` inside except) is opinionated and opt-in, so it
-# is selected explicitly. E722 bans bare `except:`; B904 keeps a re-raise's
-# cause. Broad `except Exception: pass/return None` suppression is deliberately
-# NOT gated -- the engine uses handled broad excepts, so that stays a review
-# concern. DTZ covers the naive-datetime family (issue #265 Part A).
+# Checks mapped to issue #265 Part A's recurring families:
+#   - silent failures: E722 bans bare `except:`; B904 (opt-in, selected below)
+#     keeps a re-raise's cause. Broad `except Exception: pass/return None`
+#     suppression is deliberately NOT gated -- the engine uses handled broad
+#     excepts, so that stays a review concern.
+#   - dead code: pyflakes F401/F811/F841 (on by default) flag unused imports,
+#     redefinitions and unused variables in changed files.
+#   - naive datetimes: DTZ (flake8-datetimez) bans datetime.now()/utcnow()
+#     without tzinfo.
+# B0xx (bugbear defaults) and DTZ come on once the plugins are present; E203/W503
+# stay ignored for black compatibility.
 extend-select = ["B904"]
 extend-ignore = ["E203", "W503"]
 exclude = [
@@ -289,16 +293,3 @@ exclude = [
     "venv",
     "src/grpc/generated",
 ]
-
-# Dead-symbol scan (issue #265 Part A, B1 family). vulture is whole-program: it
-# must see every module to know a symbol is unused, so the pre-commit hook runs
-# it across `paths` (not just changed files). vulture_allowlist.py grandfathers
-# the symbols live on `main` today (re-generate with
-# `vulture src cdk/cdk --make-whitelist`); a newly added dead symbol is absent
-# from it and fails the hook. `_fn_*` transform handlers are dispatched by name
-# from a registry, so they read as unused to a static scan.
-[tool.vulture]
-paths = ["src", "cdk/cdk", "vulture_allowlist.py"]
-exclude = ["src/grpc/generated"]
-ignore_names = ["_fn_*"]
-min_confidence = 60

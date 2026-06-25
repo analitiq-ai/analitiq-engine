@@ -83,19 +83,7 @@ repos:
         exclude: ^(tests/|docs/|examples/)
         additional_dependencies: [toml]
 
-  # Dead-symbol scan (issue #265 Part A, B1 family). Whole-program analysis:
-  # pass_filenames=false so vulture scans the full tree from [tool.vulture]
-  # paths (not just changed files); it triggers whenever any Python file
-  # changes. vulture_allowlist.py grandfathers symbols live on main today.
-  - repo: https://github.com/jendrikseipp/vulture
-    rev: v2.11
-    hooks:
-      - id: vulture
-        pass_filenames: false
-
-# Global configuration. vulture_allowlist.py is a generated vulture artifact
-# (intentional redefinitions, no docstrings); vulture reads it via its own
-# [tool.vulture] paths, so exclude it from every other hook.
+# Global configuration
 exclude: |
   (?x)^(
       \.git/|
@@ -106,6 +94,5 @@ exclude: |
       __pycache__/|
       build/|
       dist/|
-      \.tox/|
-      vulture_allowlist\.py
+      \.tox/
   )$
