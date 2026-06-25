@@ -202,6 +202,12 @@ class TestReplicationConfig:
         with pytest.raises(ValueError, match="Unknown replication method"):
             ReplicationConfig(method="cdc")
 
+    def test_rejects_non_string_cursor_field(self):
+        # The contract is string|null; a legacy list must fail loud here, not
+        # reach compute_max_cursor as an opaque TypeError.
+        with pytest.raises(ValueError, match="cursor_field must be a string or None"):
+            ReplicationConfig(method="incremental", cursor_field=["updated_at"])
+
     def test_optional_fields_default_absent(self):
         cfg = ReplicationConfig(method="full_refresh")
         assert cfg.cursor_field is None

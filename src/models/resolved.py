@@ -41,6 +41,14 @@ class ReplicationConfig:
                 f"Unknown replication method {self.method!r}; "
                 f"expected one of {sorted(_VALID_REPLICATION_METHODS)}"
             )
+        # The contract defines cursor_field as string|null. Fail loud at this
+        # boundary if anything else slips through (e.g. a legacy list), rather
+        # than letting it reach compute_max_cursor as an opaque TypeError.
+        if self.cursor_field is not None and not isinstance(self.cursor_field, str):
+            raise ValueError(
+                "cursor_field must be a string or None; the contract forbids a "
+                f"list, got {type(self.cursor_field).__name__}"
+            )
 
 
 @dataclass
