@@ -5,7 +5,7 @@ Storage backends handle writing files to different storage systems
 """
 
 from abc import ABC, abstractmethod
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 
@@ -157,7 +157,7 @@ class BaseStorageBackend(ABC):
         Returns:
             Constructed file path
         """
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
 
         if partition_template:
             # Replace partition placeholders

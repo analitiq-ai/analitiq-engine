@@ -7,7 +7,7 @@ allowing the handler to detect and skip duplicate batches.
 import json
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from ..storage.base import BaseStorageBackend
@@ -26,7 +26,9 @@ class BatchCommit:
     records_written: int
     cursor_bytes: bytes
     file_path: str
-    committed_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    committed_at: str = field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""

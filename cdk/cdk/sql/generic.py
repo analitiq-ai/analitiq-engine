@@ -30,7 +30,7 @@ import logging
 import threading
 from contextlib import AsyncExitStack, nullcontext
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Dict, List, Literal, Mapping, Optional, Tuple
 
 import pyarrow as pa
@@ -1313,7 +1313,7 @@ class GenericSQLConnector(BaseDestinationHandler):
                 batch_seq=batch_seq,
                 committed_cursor=cursor_bytes,
                 records_written=records_written,
-                committed_at=datetime.utcnow(),
+                committed_at=datetime.now(timezone.utc),
             )
         )
 

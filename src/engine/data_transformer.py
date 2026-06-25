@@ -6,7 +6,7 @@ Supports assignment-based mapping (per MAPPING_AND_TRANSFORMATIONS.md).
 import asyncio
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -436,8 +436,8 @@ class AssignmentTransformer:
         )
 
     async def _fn_now(self, value: Any = None) -> datetime:
-        """Return current datetime."""
-        return datetime.now()
+        """Return current datetime (tz-aware UTC)."""
+        return datetime.now(timezone.utc)
 
     async def _fn_default(self, value: Any, default_value: Any = None) -> Any:
         """Return default if value is None."""
