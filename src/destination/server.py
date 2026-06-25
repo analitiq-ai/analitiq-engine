@@ -463,6 +463,19 @@ class DestinationServicer(DestinationServiceServicer):
     ) -> ShutdownAck:
         """Handle shutdown request from engine."""
         logger.info(f"Received shutdown request: reason={request.reason}")
+        # Let the handler finalize the run while it is still connected --
+        # the worker process is SIGTERM'd shortly after this acks, so any
+        # connection-dependent cleanup (e.g. pruning the idempotency ledger)
+        # must happen here, not at disconnect. Optional: only handlers that
+        # need it (SQL connectors) implement finalize_run. Best-effort.
+        finalize = getattr(self.handler, "finalize_run", None)
+        if finalize is not None:
+            try:
+                await finalize()
+            except Exception:
+                logger.warning(
+                    "handler finalize_run failed during shutdown", exc_info=True
+                )
         self._server.signal_shutdown()
         return ShutdownAck(acknowledged=True, message="Shutting down")
 

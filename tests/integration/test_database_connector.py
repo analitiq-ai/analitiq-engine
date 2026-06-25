@@ -95,7 +95,7 @@ def _read_config(table_name: str):
         },
         "stream_source": {
             "filters": [],
-            "replication": {"method": "incremental", "cursor_field": ["id"]},
+            "replication": {"method": "incremental", "cursor_field": "id"},
         },
     }
 

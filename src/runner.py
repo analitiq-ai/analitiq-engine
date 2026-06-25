@@ -80,7 +80,10 @@ def _build_config_dict(
         "pipeline_id": pipeline_config.pipeline_id,
         "name": pipeline_config.display_name or pipeline_config.pipeline_id,
         "streams": streams,
-        "runtime": pipeline_config.runtime.to_dict(),
+        # The typed RuntimeConfig flows through the engine internals; it never
+        # crosses to the worker (only source_config is serialised there), so no
+        # dict conversion is needed.
+        "runtime": pipeline_config.runtime,
     }
 
 

@@ -616,3 +616,49 @@ class TestServerUdsBind:
         finally:
             await server.stop(grace_period=0)
             shutil.rmtree(workdir, ignore_errors=True)
+
+
+class TestShutdownFinalizeRun:
+    """Shutdown runs the handler's optional finalize_run hook (e.g. pruning the
+    idempotency ledger) while still connected -- the worker is SIGTERM'd right
+    after, so this is the last reliable point for connection-dependent cleanup.
+    """
+
+    @pytest.mark.asyncio
+    async def test_finalizes_then_signals_shutdown(self):
+        handler = MagicMock()
+        handler.finalize_run = AsyncMock()
+        server = MagicMock()
+        servicer = DestinationServicer(handler, server=server)
+
+        ack = await servicer.Shutdown(
+            MagicMock(reason="pipeline_completed"), MagicMock()
+        )
+
+        handler.finalize_run.assert_awaited_once()
+        server.signal_shutdown.assert_called_once()
+        assert ack.acknowledged is True
+
+    @pytest.mark.asyncio
+    async def test_handler_without_finalize_run_still_acks(self):
+        # The shell's proxy handler has no finalize_run; Shutdown must still work.
+        handler = MagicMock(spec=[])
+        server = MagicMock()
+        servicer = DestinationServicer(handler, server=server)
+
+        ack = await servicer.Shutdown(MagicMock(reason="x"), MagicMock())
+
+        server.signal_shutdown.assert_called_once()
+        assert ack.acknowledged is True
+
+    @pytest.mark.asyncio
+    async def test_finalize_failure_does_not_block_shutdown(self):
+        handler = MagicMock()
+        handler.finalize_run = AsyncMock(side_effect=RuntimeError("prune failed"))
+        server = MagicMock()
+        servicer = DestinationServicer(handler, server=server)
+
+        ack = await servicer.Shutdown(MagicMock(reason="x"), MagicMock())
+
+        server.signal_shutdown.assert_called_once()
+        assert ack.acknowledged is True

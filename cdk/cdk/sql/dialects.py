@@ -34,7 +34,7 @@ named binds on the SQLAlchemy path.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from .exceptions import UnsupportedDialectOperationError
 
@@ -48,6 +48,13 @@ class SqlDialect:
 
     #: Dialect identifier (the connector package sets its own).
     name: str = "ansi"
+    #: SQLAlchemy registry name used to compile read-path SQL, when it differs
+    #: from ``name`` because the system needs a specific driver *flavour*
+    #: (e.g. Redshift's ``redshift.redshift_connector`` instead of the
+    #: psycopg2-shaped default). ``None`` means "use ``name``" — the common
+    #: case for systems whose registered SA dialect name equals ``name``.
+    #: This keeps the driver-flavour quirk in the connector, not the engine.
+    sqlalchemy_registry_name: Optional[str] = None
     #: Identifier quote character. ANSI double-quote by default; backtick for
     #: MySQL/MariaDB and BigQuery (where ``"..."`` is a string literal).
     quote_char: str = '"'

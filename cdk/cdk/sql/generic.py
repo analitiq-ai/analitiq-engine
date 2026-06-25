@@ -302,6 +302,10 @@ class GenericSQLConnector(BaseDestinationHandler):
         # on shared mutable fields.
         self._streams: Dict[str, _StreamState] = {}
 
+        # ``(schema_name, run_id)`` pairs this handler wrote ledger rows for,
+        # pruned from ``_batch_commits`` at disconnect (run completion).
+        self._committed_runs: set = set()
+
         # Serializes CREATE TABLE statements across streams. Even when each
         # stream owns its own SQLAlchemy ``MetaData``, two concurrent
         # ``create_all`` calls can still race the database's catalog
@@ -604,6 +608,61 @@ class GenericSQLConnector(BaseDestinationHandler):
         logger.info("GenericSQLConnector disconnected")
         if cancelled is not None:
             raise cancelled
+
+    async def finalize_run(self) -> None:
+        """Run-completion hook: prune this handler's idempotency-ledger rows.
+
+        Called from the destination server's ``Shutdown`` handler while the
+        connection is still open -- NOT from ``disconnect``, because the
+        worker process is torn down (SIGTERM) before a disconnect-time
+        cleanup could finish.
+
+        ``_batch_commits`` is a within-run retry/resume ledger -- it is only
+        ever read with the current ``run_id`` (a later run uses a different
+        id; a resume reuses the same one). Once a run is tearing down its
+        rows are dead weight, so prune per ``(schema, run_id)`` seen during
+        writes to bound the table's growth. Best-effort: a prune failure is
+        logged and swallowed (leftover rows are read only by their own run)
+        and must never fail the run's teardown.
+        """
+        run_id_col = self.dialect.quote_ident("run_id")
+        for schema_name, run_id in sorted(self._committed_runs):
+            qualified = self.dialect.quote_qualified(
+                schema_name, self.BATCH_COMMITS_TABLE
+            )
+            try:
+                if self._adbc_only:
+                    await asyncio.to_thread(
+                        self._execute_adbc_dml_sync,
+                        f"DELETE FROM {qualified} WHERE {run_id_col} = ?",
+                        (run_id,),
+                    )
+                elif self._sync_engine is not None:
+                    await asyncio.to_thread(
+                        self._prune_run_on_sync_engine, qualified, run_id_col, run_id
+                    )
+                elif self._engine is not None:
+                    stmt = text(
+                        f"DELETE FROM {qualified} WHERE {run_id_col} = :run_id"
+                    )
+                    async with self._engine.begin() as conn:
+                        await conn.execute(stmt, {"run_id": run_id})
+            except Exception:
+                logger.warning(
+                    "Failed to prune _batch_commits for run %s in schema %s; "
+                    "leftover ledger rows are harmless (read only by their own run)",
+                    run_id,
+                    schema_name,
+                    exc_info=True,
+                )
+        self._committed_runs.clear()
+
+    def _prune_run_on_sync_engine(
+        self, qualified: str, run_id_col: str, run_id: str
+    ) -> None:
+        stmt = text(f"DELETE FROM {qualified} WHERE {run_id_col} = :run_id")
+        with self._sync_engine.begin() as conn:
+            conn.execute(stmt, {"run_id": run_id})
 
     async def configure_schema(self, schema_spec: SchemaSpec) -> bool:
         """Configure the destination from the preloaded contract endpoint.
@@ -982,6 +1041,10 @@ class GenericSQLConnector(BaseDestinationHandler):
                 records_written=0,
                 failure_summary="Schema not configured",
             )
+
+        # Remember the run so its within-run ledger rows are pruned at
+        # disconnect. The ledger is only ever read with the current run_id.
+        self._committed_runs.add((state.schema_name, run_id))
 
         try:
             # One deadline for the whole SQLAlchemy attempt - the idempotency
@@ -2245,9 +2308,9 @@ class GenericSQLConnector(BaseDestinationHandler):
             filters = self._build_filters(stream_source.get("filters") or [])
 
             replication = stream_source.get("replication") or {}
+            # cursor_field is a contract string|null (validated upstream), so no
+            # list normalization is needed.
             cursor_field = replication.get("cursor_field")
-            if isinstance(cursor_field, list):
-                cursor_field = cursor_field[0] if cursor_field else None
             replication_method = replication.get("method", "full_refresh")
 
             # Stream-declared page ordering (the contract's
@@ -2336,6 +2399,7 @@ class GenericSQLConnector(BaseDestinationHandler):
 
             builder = QueryBuilder(
                 driver,
+                registry_name=self.dialect.sqlalchemy_registry_name,
                 paging_order_fallback=self.dialect.paging_order_fallback,
             )
 
@@ -2494,6 +2558,7 @@ class GenericSQLConnector(BaseDestinationHandler):
         builder = QueryBuilder(
             driver,
             paramstyle="qmark",
+            registry_name=self.dialect.sqlalchemy_registry_name,
             quote_identifiers=True,
             inline_paging=True,
         )

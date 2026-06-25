@@ -103,7 +103,7 @@ class AdbcReader:
             try:
                 cursor.close()
             except Exception:
-                logger.debug("ADBC cursor close failed", exc_info=True)
+                logger.warning("ADBC cursor close failed", exc_info=True)
         if table.num_rows == 0:
             return []
         return table.to_batches()

@@ -29,6 +29,7 @@ from ..state.metrics_storage import emit_metrics_log, create_metrics_record
 from ..state.retry_handler import RetryHandler
 from ..state.state_manager import StateManager
 from ..models.metrics import PipelineMetrics
+from ..models.resolved import RuntimeConfig
 from .data_transformer import DataTransformer, build_output_schema
 from .exceptions import (
     ConfigurationError, StreamProcessingError, StreamExecutionError,
@@ -311,7 +312,7 @@ class StreamingEngine:
                 "source": source_cfg,
                 "destination": destination_cfg,
                 "mapping": stream_config.get("mapping") or {},
-                "runtime": pipeline_config.get("runtime") or {},
+                "runtime": pipeline_config.get("runtime") or RuntimeConfig(),
             }
 
             # Start pipeline stages for this stream
@@ -616,9 +617,7 @@ class StreamingEngine:
         batch_seq = 0
         max_retries = self.max_retries
         retry_base_delay = self.retry_delay
-        error_strategy = (
-            (config.get("runtime") or {}).get("error_handling") or {}
-        ).get("strategy", "fail")
+        error_strategy = config["runtime"].error_handling.strategy
 
         try:
             while True:

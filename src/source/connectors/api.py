@@ -183,9 +183,9 @@ class APIConnector(BaseConnector):
 
         replication_block = stream_source.get("replication") or {}
         replication_method = replication_block.get("method", "full_refresh")
+        # cursor_field is a contract string|null (validated upstream), so no
+        # list normalization is needed.
         cursor_field = replication_block.get("cursor_field")
-        if isinstance(cursor_field, list):
-            cursor_field = cursor_field[0] if cursor_field else None
         safety_window = replication_block.get("safety_window_seconds")
 
         # Build the param value table from the declared ``params`` block:
