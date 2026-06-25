@@ -2,17 +2,22 @@
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Any, AsyncIterator, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict
+
+if TYPE_CHECKING:
+    from cdk.connection_runtime import ConnectionRuntime
 
 logger = logging.getLogger(__name__)
 
 
 class BaseConnector(ABC):
-    """
-    Abstract base class for all data connectors.
+    """Shared lifecycle, metrics, and schema-prep helpers for in-engine connectors.
 
-    Defines the interface that all connectors must implement for
-    reading from and writing to data sources.
+    The connector I/O contract is the published ``Readable`` / ``Writable``
+    protocols in ``cdk.contract`` -- subclasses implement those directly. This
+    base only carries the cross-cutting machinery (connect/disconnect lifecycle,
+    metrics, schema preparation, context-manager support); it does not redeclare
+    the read/write contract, which would be a second grammar free to drift.
     """
 
     def __init__(self, name: str = None):
@@ -46,43 +51,6 @@ class BaseConnector(ABC):
     @abstractmethod
     async def disconnect(self):
         """Close connection to the data source."""
-        pass
-
-
-    @abstractmethod
-    async def read_batches(
-        self,
-        config: Dict[str, Any],
-        *,
-        state_manager: "StateManager",
-        stream_name: str,
-        partition: Optional[Dict[str, Any]] = None,
-        batch_size: int = 1000
-    ) -> AsyncIterator[List[Dict[str, Any]]]:
-        """
-        Read data in batches from the source with state management.
-
-        Args:
-            config: Read configuration
-            state_manager: State manager for incremental replication
-            stream_name: Name of the stream for state tracking
-            partition: Optional partition identifier for sharded streams
-            batch_size: Number of records per batch
-
-        Yields:
-            Batches of records as dictionaries
-        """
-        pass
-
-    @abstractmethod
-    async def write_batch(self, batch: List[Dict[str, Any]], config: Dict[str, Any]):
-        """
-        Write a batch of records to the destination.
-
-        Args:
-            batch: List of records to write
-            config: Write configuration
-        """
         pass
 
     async def prepare_schema(self, schema: Dict[str, Any], config: Dict[str, Any]):

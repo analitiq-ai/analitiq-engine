@@ -233,6 +233,7 @@ class StreamingEngine:
         stream_metrics = {
             "records_processed": 0,
             "records_failed": 0,
+            "records_skipped": 0,
             "batches_processed": 0,
             "batches_failed": 0,
         }
@@ -331,23 +332,32 @@ class StreamingEngine:
             await asyncio.gather(*tasks)
 
             if stream_metrics["records_failed"] > 0:
-                # The dlq strategy dead-letters exhausted batches and completes
-                # without raising; reflect that the stream only partly succeeded
+                # The dlq/skip strategies complete the stream without raising
+                # after exhausting retries; reflect that it only partly succeeded
                 # and carry the destination cause rather than reporting success.
                 status = "partial"
                 error_code = ErrorCode.DESTINATION_WRITE_FAILED
                 error_message = customer_message(error_code)
-                # A partial stream dead-lettered records after exhausting retries.
-                # error_detail carries only allowlisted-safe fields; the
-                # destination failure_summary stays in the DLQ and the logs.
+                # 'skip' drops exhausted batches without a DLQ entry, so those
+                # records are NOT recoverable; do not imply dead-lettering. The
+                # 'partial' path is only reached via the dlq/skip break, so a
+                # non-zero skip count means the strategy was skip. error_detail
+                # carries only allowlisted-safe fields; the destination
+                # failure_summary stays in the DLQ (when used) and the logs.
+                if stream_metrics["records_skipped"] > 0:
+                    reason = "records skipped (dropped) after retries"
+                    action = "skipped (dropped)"
+                else:
+                    reason = "records dead-lettered after retries"
+                    action = "dead-lettered"
                 error_detail = detail_for_code(
                     error_code,
                     stage=FailureStage.DESTINATION_LOAD,
-                    reason="records dead-lettered after retries",
+                    reason=reason,
                 )
                 logger.warning(
                     f"Stream {stream_name} completed partially: "
-                    f"{stream_metrics['records_failed']} records dead-lettered"
+                    f"{stream_metrics['records_failed']} records {action}"
                 )
             else:
                 logger.info(f"Stream {stream_name} completed successfully")
@@ -763,6 +773,25 @@ class StreamingEngine:
                                 raise StreamProcessingError(
                                     f"Batch {batch_seq} failed after {max_retries} "
                                     f"retries: {result.failure_summary}"
+                                )
+                            elif error_strategy == "skip":
+                                # Skipped batches are dropped, NOT dead-lettered,
+                                # so track them separately from DLQ'd records (at
+                                # both stream and pipeline level) to keep the
+                                # partial-run reporting honest.
+                                stream_metrics["records_skipped"] += record_count
+                                self.metrics.increment_records_skipped(record_count)
+                                logger.warning(
+                                    f"Stream {stream_name}: Batch {batch_seq} skipped "
+                                    f"after {max_retries} retries; {record_count} "
+                                    f"records dropped: {result.failure_summary}"
+                                )
+                            else:
+                                # Strategy is contract-validated upstream to
+                                # {fail, dlq, skip}; an unhandled value must fail
+                                # loud, never silently complete a failed batch.
+                                raise StreamProcessingError(
+                                    f"Unhandled error strategy {error_strategy!r}"
                                 )
                             break
 

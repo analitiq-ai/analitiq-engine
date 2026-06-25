@@ -80,7 +80,7 @@ def _build_config_dict(
         "pipeline_id": pipeline_config.pipeline_id,
         "name": pipeline_config.display_name or pipeline_config.pipeline_id,
         "streams": streams,
-        "runtime": pipeline_config.runtime,
+        "runtime": pipeline_config.runtime.to_dict(),
     }
 
 
@@ -289,22 +289,16 @@ class PipelineRunner:
             state_dir.mkdir(parents=True, exist_ok=True)
             dlq_dir.mkdir(parents=True, exist_ok=True)
 
-            # Extract runtime tuning parameters
+            # Runtime tuning parameters (typed; defaults resolved in the parser).
             runtime = pipeline_config.runtime
-            batching = runtime.get("batching") or {"batch_size": 1000, "max_concurrent_batches": 3}
-            error_handling = runtime.get("error_handling") or {
-                "max_retries": 3,
-                "retry_delay_seconds": 5,
-            }
-
             engine = StreamingEngine(
                 pipeline_id=pipeline_config.pipeline_id,
-                batch_size=batching.get("batch_size", 1000),
-                max_concurrent_batches=batching.get("max_concurrent_batches", 3),
-                buffer_size=runtime.get("buffer_size", 5000),
+                batch_size=runtime.batching.batch_size,
+                max_concurrent_batches=runtime.batching.max_concurrent_batches,
+                buffer_size=runtime.buffer_size,
                 dlq_path=str(dlq_dir),
-                max_retries=error_handling.get("max_retries", 3),
-                retry_delay=error_handling.get("retry_delay_seconds", 5),
+                max_retries=runtime.error_handling.max_retries,
+                retry_delay=runtime.error_handling.retry_delay_seconds,
             )
 
             logger.info("Starting pipeline execution...")
@@ -336,18 +330,28 @@ class PipelineRunner:
                 error_code, error_message, error_detail = classify_for_metrics(stream_error)
                 logger.warning(f"Partial run: {streams_failed} stream(s) failed [{error_code.value}]")
             elif records_failed > 0:
-                logger.warning(f"Failed records: {records_failed} (check dead letter queue)")
                 status = "partial"
-                # Records were dead-lettered with no raised exception -- a
-                # destination write rejection. error_detail carries only
-                # allowlisted-safe fields; the DLQ failure_summary stays in the
-                # dead-letter queue and the logs.
+                # A destination write rejection completed without a raised
+                # exception. error_detail carries only allowlisted-safe fields;
+                # any DLQ failure_summary stays in the dead-letter queue and logs.
                 error_code = ErrorCode.DESTINATION_WRITE_FAILED
                 error_message = customer_message(error_code)
+                # 'skip' drops exhausted batches without a DLQ entry, so those
+                # records are NOT recoverable; do not point operators at the DLQ.
+                if getattr(metrics, "records_skipped", 0) > 0:
+                    logger.warning(
+                        f"Skipped {records_failed} records (dropped, not dead-lettered)"
+                    )
+                    reason = "records skipped (dropped) after retries"
+                else:
+                    logger.warning(
+                        f"Failed records: {records_failed} (check dead letter queue)"
+                    )
+                    reason = "records dead-lettered after retries"
                 error_detail = detail_for_code(
                     error_code,
                     stage=FailureStage.DESTINATION_LOAD,
-                    reason="records dead-lettered after retries",
+                    reason=reason,
                 )
             else:
                 status = "success"

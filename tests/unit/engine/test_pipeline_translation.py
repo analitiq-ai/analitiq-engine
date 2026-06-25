@@ -12,10 +12,14 @@ from src.runner import (
     _translate_source_config,
 )
 from src.models.resolved import (
+    BatchingConfig,
+    ErrorHandlingConfig,
+    PipelineConnections,
     ResolvedDestination,
     ResolvedPipeline,
     ResolvedSource,
     ResolvedStream,
+    RuntimeConfig,
 )
 from src.models.stream import EndpointRef
 
@@ -74,14 +78,17 @@ def _make_stream(
     )
 
 
-def _make_pipeline(pipeline_id="test-pipeline", display_name=None, streams=None):
+def _make_pipeline(
+    pipeline_id="test-pipeline", display_name=None, streams=None, runtime=None
+):
     return ResolvedPipeline(
         pipeline_id=pipeline_id,
         name="Test Pipeline",
         display_name=display_name,
         description=None,
         status="active",
-        runtime={},
+        connections=PipelineConnections(source="src-conn", destinations=["dst-conn"]),
+        runtime=runtime or RuntimeConfig(),
     )
 
 
@@ -302,9 +309,17 @@ class TestBuildConfigDict:
         assert assignments[0]["value"]["kind"] == "expr"
 
     def test_runtime_propagated(self):
-        pipeline = _make_pipeline()
-        pipeline.runtime["batching"] = {"batch_size": 500}
+        pipeline = _make_pipeline(
+            runtime=RuntimeConfig(
+                batching=BatchingConfig(batch_size=500),
+                error_handling=ErrorHandlingConfig(strategy="dlq"),
+                buffer_size=2048,
+            )
+        )
 
         result = _build_config_dict(pipeline, [])
 
+        # Assert exactly the keys the engine reads back off the runtime dict.
         assert result["runtime"]["batching"]["batch_size"] == 500
+        assert result["runtime"]["error_handling"]["strategy"] == "dlq"
+        assert result["runtime"]["buffer_size"] == 2048

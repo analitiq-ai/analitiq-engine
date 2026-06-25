@@ -341,8 +341,8 @@ class TestCreateConfigHappyPath:
         assert pipeline_config.pipeline_id == PIPELINE_ID
         assert pipeline_config.display_name == "Demo Pipeline"
         assert pipeline_config.status == "active"
-        assert pipeline_config.connections["source"] == CONNECTION_SRC_ID
-        assert pipeline_config.connections["destinations"] == [CONNECTION_DST_ID]
+        assert pipeline_config.connections.source == CONNECTION_SRC_ID
+        assert pipeline_config.connections.destinations == [CONNECTION_DST_ID]
 
         assert len(stream_configs) == 1
         stream = stream_configs[0]
@@ -476,6 +476,23 @@ class TestStreamVersionParsing:
             prep.create_config()
         message = str(exc.value)
         assert f"{STREAM_ID}_v1" in message and f"{STREAM_ID}_v2" in message
+
+    def test_omitted_pipeline_id_falls_back_to_manifest_id(
+        self, pipeline_tree: Path
+    ) -> None:
+        """pipeline_id is nullable in the contract; an authored pipeline.json
+        that omits it must resolve to the manifest/env id (the executable
+        identity), not be rejected by ResolvedPipeline's non-empty guard."""
+        pipeline_doc = _pipeline_doc()
+        pipeline_doc.pop("pipeline_id", None)
+        _write_json(
+            pipeline_tree / "pipelines" / PIPELINE_ID / "pipeline.json", pipeline_doc
+        )
+
+        prep = PipelineConfigPrep()
+        pipeline_config, _, _, _, _ = prep.create_config()
+
+        assert pipeline_config.pipeline_id == PIPELINE_ID
 
 
 # ---------------------------------------------------------------------------

@@ -101,7 +101,7 @@ pipelines with `status: "active"` are executable.
       "buffer_size": 5000,
       "batching": { "batch_size": 200, "max_concurrent_batches": 3 },
       "logging": { "log_level": "INFO", "metrics_enabled": true },
-      "error_handling": { "strategy": "dlq", "max_retries": 3, "retry_delay": 5 }
+      "error_handling": { "strategy": "dlq", "max_retries": 3, "retry_delay_seconds": 5 }
     }
   },
   "streams": []

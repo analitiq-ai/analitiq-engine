@@ -26,9 +26,14 @@ class PipelineMetrics(BaseModel):
         description="Total number of records successfully processed"
     )
     records_failed: int = Field(
-        default=0, 
-        ge=0, 
+        default=0,
+        ge=0,
         description="Total number of records that failed processing"
+    )
+    records_skipped: int = Field(
+        default=0,
+        ge=0,
+        description="Records dropped by the 'skip' error strategy (not dead-lettered)"
     )
     batches_processed: int = Field(
         default=0, 
@@ -145,7 +150,14 @@ class PipelineMetrics(BaseModel):
             raise ValueError("Count must be non-negative")
         object.__setattr__(self, 'records_failed', self.records_failed + count)
         self._update_timestamp()
-    
+
+    def increment_records_skipped(self, count: int = 1) -> None:
+        """Increment the count of skipped (dropped, not dead-lettered) records."""
+        if count < 0:
+            raise ValueError("Count must be non-negative")
+        object.__setattr__(self, 'records_skipped', self.records_skipped + count)
+        self._update_timestamp()
+
     def increment_batches_processed(self, count: int = 1) -> None:
         """Increment the count of successfully processed batches."""
         if count < 0:
@@ -183,6 +195,7 @@ class PipelineMetrics(BaseModel):
         current_time = datetime.now(timezone.utc)
         object.__setattr__(self, 'records_processed', 0)
         object.__setattr__(self, 'records_failed', 0)
+        object.__setattr__(self, 'records_skipped', 0)
         object.__setattr__(self, 'batches_processed', 0)
         object.__setattr__(self, 'batches_failed', 0)
         object.__setattr__(self, 'streams_processed', 0)

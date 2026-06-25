@@ -59,15 +59,46 @@ from cdk.type_map import (
 )
 from src.models.stream import EndpointRef
 from src.models.resolved import (
+    BatchingConfig,
+    ErrorHandlingConfig,
+    PipelineConnections,
     ResolvedDestination,
     ResolvedPipeline,
     ResolvedSource,
     ResolvedStream,
+    RuntimeConfig,
 )
 from cdk.secrets import LocalFileSecretsResolver, SecretsResolver
 from cdk.connection_runtime import ConnectionRuntime
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_runtime_config(raw: Mapping[str, Any]) -> RuntimeConfig:
+    """Build a typed :class:`RuntimeConfig` from the raw pipeline runtime block.
+
+    Defaults live here, once, instead of being re-stated at every consumer's
+    ``dict.get(key, default)`` call site.
+    """
+    batching = raw.get("batching") or {}
+    error_handling = raw.get("error_handling") or {}
+    # The contract allows retry_delay_seconds: null (and treats an omitted key
+    # the same); normalise both to the default here so the typed int field never
+    # has to carry None.
+    retry_delay = error_handling.get("retry_delay_seconds")
+    return RuntimeConfig(
+        batching=BatchingConfig(
+            batch_size=batching.get("batch_size", 1000),
+            max_concurrent_batches=batching.get("max_concurrent_batches", 3),
+        ),
+        error_handling=ErrorHandlingConfig(
+            strategy=error_handling.get("strategy", "fail"),
+            max_retries=error_handling.get("max_retries", 3),
+            retry_delay_seconds=5 if retry_delay is None else retry_delay,
+        ),
+        buffer_size=raw.get("buffer_size", 5000),
+    )
+
 
 # Matches the endpoint variant name in a $schema URL.
 # The trailing boundary is either "/" or end-of-string so that both
@@ -541,7 +572,11 @@ class PipelineConfigPrep:
                 self._build_stream_config(record, stream_version)
             )
 
-        pipeline_id = pipeline_doc.get("pipeline_id")
+        # pipeline_id is nullable in the contract: an authored pipeline.json may
+        # omit it and rely on the manifest for executable identity. Fall back to
+        # the manifest/env id (always present) so a schema-valid omitted id is
+        # honored rather than rejected by ResolvedPipeline's guard.
+        pipeline_id = pipeline_doc.get("pipeline_id") or self.pipeline_id_input
         display_name = pipeline_doc.get("display_name")
         pipeline = ResolvedPipeline(
             pipeline_id=pipeline_id,
@@ -550,13 +585,13 @@ class PipelineConfigPrep:
             description=pipeline_doc.get("description"),
             status=pipeline_doc.get("status", "draft"),
             tags=pipeline_doc.get("tags") or [],
-            connections={
-                "source": source_id,
-                "destinations": dest_ids,
-            },
+            connections=PipelineConnections(
+                source=source_id,
+                destinations=dest_ids,
+            ),
             schedule=pipeline_doc.get("schedule") or {"type": "manual"},
             engine_config=pipeline_doc.get("engine") or {"vcpu": 1, "memory": 8192},
-            runtime=pipeline_doc.get("runtime") or {},
+            runtime=_parse_runtime_config(pipeline_doc.get("runtime") or {}),
         )
 
         connectors = list(self._loaded_connectors.values())
