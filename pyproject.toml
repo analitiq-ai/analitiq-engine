@@ -272,8 +272,10 @@ max-line-length = 88
 # E203/W503: black-compatible. B0xx (bugbear defaults) and DTZ (flake8-datetimez,
 # naive datetime.now()/utcnow()) are on by default once the plugins are present;
 # B904 (re-raise without `from` inside except) is opinionated and opt-in, so it
-# is selected explicitly. B904 + the bare-except E722 cover the silent-failure
-# family; DTZ covers the naive-datetime family (issue #265 Part A).
+# is selected explicitly. E722 bans bare `except:`; B904 keeps a re-raise's
+# cause. Broad `except Exception: pass/return None` suppression is deliberately
+# NOT gated -- the engine uses handled broad excepts, so that stays a review
+# concern. DTZ covers the naive-datetime family (issue #265 Part A).
 extend-select = ["B904"]
 extend-ignore = ["E203", "W503"]
 exclude = [

@@ -30,10 +30,11 @@ repos:
           - Flake8-pyproject
 
   # Type checking. The hook checks only the files a commit/PR touches, so it
-  # follows imports silently (report errors in changed files, not in the
-  # ~320 pre-existing errors across untouched modules) and ignores third-party
-  # libs absent from this isolated hook env. `poetry run mypy src/` stays full
-  # and strict. mypy_path=cdk (pyproject) resolves the in-tree cdk package.
+  # follows imports silently (report errors in changed files, not the large
+  # pre-existing type-error backlog in untouched modules) and ignores
+  # third-party libs absent from this isolated hook env. `poetry run mypy src/`
+  # stays full and strict. mypy_path=cdk (pyproject) resolves the in-tree cdk
+  # package for that full run.
   - repo: https://github.com/pre-commit/mirrors-mypy
     rev: v1.5.1
     hooks:

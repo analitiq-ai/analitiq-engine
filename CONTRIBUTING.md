@@ -37,9 +37,10 @@ The `ci` workflow runs on every push and pull request:
 - **pytest** over the whole suite.
 - **pre-commit** (black, isort, flake8 with bugbear + datetimez, mypy, bandit,
   pydocstyle, vulture) over the files the change touches. A PR that introduces a
-  bare/broad swallow, a dead symbol, a naive `datetime.now()`/`utcnow()`, or a
-  new type/style error fails the gate. Pre-existing findings in untouched
-  modules are not retroactively blocked; clean them as you edit those files.
+  bare `except:`, an unchained re-raise, a dead symbol, a naive
+  `datetime.now()`/`utcnow()`, or a new type/style error fails the gate.
+  Pre-existing findings in untouched modules are not retroactively blocked;
+  clean them as you edit those files.
 
 ## Coding Guidelines
 
