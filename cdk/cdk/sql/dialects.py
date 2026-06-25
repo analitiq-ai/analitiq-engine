@@ -54,6 +54,8 @@ class SqlDialect:
     #: psycopg2-shaped default). ``None`` means "use ``name``" — the common
     #: case for systems whose registered SA dialect name equals ``name``.
     #: This keeps the driver-flavour quirk in the connector, not the engine.
+    #: Ignored for built-in dialects (postgresql/mysql/mssql/sqlite), which
+    #: the QueryBuilder resolves by ``name`` before consulting this field.
     sqlalchemy_registry_name: Optional[str] = None
     #: Identifier quote character. ANSI double-quote by default; backtick for
     #: MySQL/MariaDB and BigQuery (where ``"..."`` is a string literal).

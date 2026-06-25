@@ -106,6 +106,19 @@ class BaseDestinationHandler(ABC):
         """
         pass
 
+    async def finalize_run(self) -> None:
+        """Run-completion hook, invoked from the destination server's
+        ``Shutdown`` handler while the handler is still connected.
+
+        The worker process is torn down (SIGTERM) before ``disconnect`` could
+        run connection-bound cleanup, so anything needing the live connection
+        at end-of-run belongs here. Default is a no-op; handlers with
+        run-scoped state to release (e.g. a SQL connector pruning its
+        idempotency ledger) override it. Best-effort: the server logs and
+        swallows any error so teardown never fails.
+        """
+        return None
+
     @abstractmethod
     async def configure_schema(self, schema_spec: SchemaSpec) -> bool:
         """

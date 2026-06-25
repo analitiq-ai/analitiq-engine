@@ -16,7 +16,7 @@ the thin control-plane delegators:
 from __future__ import annotations
 
 from typing import Any, List, Tuple
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pyarrow as pa
 import pytest
@@ -731,6 +731,36 @@ class TestPruneCommittedRuns:
             assert len(params) == 1  # keyed by run_id only
         assert {params[0] for _, params in executed} == {"run-1", "run-2"}
         # Cleared so a second disconnect is a no-op.
+        assert connector._committed_runs == set()
+
+    @pytest.mark.asyncio
+    async def test_prunes_via_sync_engine(self):
+        # Sync-driver connectors (e.g. redshift_connector) take the
+        # _sync_engine branch; assert it issues the run-scoped DELETE.
+        connector = GenericSQLConnector()
+        connector._adbc_only = False
+        connector._engine = None
+        connector._committed_runs = {("public", "run-1")}
+
+        executed: List[Tuple[str, Any]] = []
+        conn = MagicMock()
+        conn.execute = MagicMock(
+            side_effect=lambda stmt, params: executed.append((str(stmt), params))
+        )
+        cm = MagicMock()
+        cm.__enter__ = MagicMock(return_value=conn)
+        cm.__exit__ = MagicMock(return_value=False)
+        sync_engine = MagicMock()
+        sync_engine.begin = MagicMock(return_value=cm)
+        connector._sync_engine = sync_engine
+
+        await connector.finalize_run()
+
+        assert len(executed) == 1
+        sql, params = executed[0]
+        assert "DELETE FROM" in sql
+        assert connector.BATCH_COMMITS_TABLE in sql
+        assert params == {"run_id": "run-1"}
         assert connector._committed_runs == set()
 
     @pytest.mark.asyncio

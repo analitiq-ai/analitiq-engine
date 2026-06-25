@@ -31,7 +31,17 @@ import threading
 from contextlib import AsyncExitStack, nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, AsyncIterator, Dict, List, Literal, Mapping, Optional, Tuple
+from typing import (
+    Any,
+    AsyncIterator,
+    Dict,
+    List,
+    Literal,
+    Mapping,
+    Optional,
+    Set,
+    Tuple,
+)
 
 import pyarrow as pa
 from sqlalchemy import MetaData, Table, text
@@ -303,8 +313,9 @@ class GenericSQLConnector(BaseDestinationHandler):
         self._streams: Dict[str, _StreamState] = {}
 
         # ``(schema_name, run_id)`` pairs this handler wrote ledger rows for,
-        # pruned from ``_batch_commits`` at disconnect (run completion).
-        self._committed_runs: set = set()
+        # pruned from ``_batch_commits`` at run completion (the server's
+        # ``Shutdown`` hook -> ``finalize_run``), not at disconnect.
+        self._committed_runs: Set[Tuple[str, str]] = set()
 
         # Serializes CREATE TABLE statements across streams. Even when each
         # stream owns its own SQLAlchemy ``MetaData``, two concurrent
@@ -1042,8 +1053,9 @@ class GenericSQLConnector(BaseDestinationHandler):
                 failure_summary="Schema not configured",
             )
 
-        # Remember the run so its within-run ledger rows are pruned at
-        # disconnect. The ledger is only ever read with the current run_id.
+        # Remember the run so its within-run ledger rows are pruned at run
+        # completion (finalize_run). The ledger is only ever read with the
+        # current run_id.
         self._committed_runs.add((state.schema_name, run_id))
 
         try:
