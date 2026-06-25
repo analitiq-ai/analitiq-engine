@@ -544,11 +544,13 @@ class TestEngineFatalFailureHandling:
         )
 
         # Skipped: not dead-lettered, but counted as failed AND tracked as
-        # skipped (distinct from DLQ'd) so partial-run reporting stays honest.
+        # skipped (distinct from DLQ'd) at both stream and pipeline level so
+        # partial-run reporting stays honest.
         assert await stream_dlq.get_failed_records() == []
         assert stream_metrics["batches_failed"] == 1
         assert stream_metrics["records_skipped"] == 1
         assert stream_metrics["records_failed"] == 1
+        assert engine.get_metrics().records_skipped == 1
 
     @pytest.mark.asyncio
     async def test_load_stage_unhandled_strategy_raises(

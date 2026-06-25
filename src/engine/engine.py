@@ -776,9 +776,11 @@ class StreamingEngine:
                                 )
                             elif error_strategy == "skip":
                                 # Skipped batches are dropped, NOT dead-lettered,
-                                # so track them separately from DLQ'd records to
-                                # keep the partial-run reporting honest.
+                                # so track them separately from DLQ'd records (at
+                                # both stream and pipeline level) to keep the
+                                # partial-run reporting honest.
                                 stream_metrics["records_skipped"] += record_count
+                                self.metrics.increment_records_skipped(record_count)
                                 logger.warning(
                                     f"Stream {stream_name}: Batch {batch_seq} skipped "
                                     f"after {max_retries} retries; {record_count} "

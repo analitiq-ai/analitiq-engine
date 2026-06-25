@@ -330,18 +330,28 @@ class PipelineRunner:
                 error_code, error_message, error_detail = classify_for_metrics(stream_error)
                 logger.warning(f"Partial run: {streams_failed} stream(s) failed [{error_code.value}]")
             elif records_failed > 0:
-                logger.warning(f"Failed records: {records_failed} (check dead letter queue)")
                 status = "partial"
-                # Records were dead-lettered with no raised exception -- a
-                # destination write rejection. error_detail carries only
-                # allowlisted-safe fields; the DLQ failure_summary stays in the
-                # dead-letter queue and the logs.
+                # A destination write rejection completed without a raised
+                # exception. error_detail carries only allowlisted-safe fields;
+                # any DLQ failure_summary stays in the dead-letter queue and logs.
                 error_code = ErrorCode.DESTINATION_WRITE_FAILED
                 error_message = customer_message(error_code)
+                # 'skip' drops exhausted batches without a DLQ entry, so those
+                # records are NOT recoverable; do not point operators at the DLQ.
+                if getattr(metrics, "records_skipped", 0) > 0:
+                    logger.warning(
+                        f"Skipped {records_failed} records (dropped, not dead-lettered)"
+                    )
+                    reason = "records skipped (dropped) after retries"
+                else:
+                    logger.warning(
+                        f"Failed records: {records_failed} (check dead letter queue)"
+                    )
+                    reason = "records dead-lettered after retries"
                 error_detail = detail_for_code(
                     error_code,
                     stage=FailureStage.DESTINATION_LOAD,
-                    reason="records dead-lettered after retries",
+                    reason=reason,
                 )
             else:
                 status = "success"

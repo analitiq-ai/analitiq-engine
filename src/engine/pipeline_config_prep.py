@@ -572,7 +572,11 @@ class PipelineConfigPrep:
                 self._build_stream_config(record, stream_version)
             )
 
-        pipeline_id = pipeline_doc.get("pipeline_id")
+        # pipeline_id is nullable in the contract: an authored pipeline.json may
+        # omit it and rely on the manifest for executable identity. Fall back to
+        # the manifest/env id (always present) so a schema-valid omitted id is
+        # honored rather than rejected by ResolvedPipeline's guard.
+        pipeline_id = pipeline_doc.get("pipeline_id") or self.pipeline_id_input
         display_name = pipeline_doc.get("display_name")
         pipeline = ResolvedPipeline(
             pipeline_id=pipeline_id,
