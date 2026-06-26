@@ -54,11 +54,13 @@ repos:
           - types-PyYAML
           - pydantic
           - sqlalchemy
-          # Pinned to the project's pyarrow (pyproject: ^12.0.0). Newer pyarrow
-          # ships py.typed with incomplete pyarrow.compute stubs, which would
-          # raise attr-defined on pc.strptime/pc.assume_timezone that resolve
-          # fine at the pinned version; matching keeps hook == `poetry run mypy`.
-          - pyarrow==12.0.1
+          # pyarrow is intentionally NOT installed here. Its compute functions
+          # (pc.strptime, pc.assume_timezone) are generated dynamically and
+          # absent from newer pyarrow's stubs, so installing it raises
+          # attr-defined; pinning an older wheel-less version source-builds and
+          # breaks on CI's Python 3.12. The [tool.mypy] pyarrow.* override
+          # (ignore_missing_imports) makes it Any instead, matching
+          # `poetry run mypy` (the project's pyarrow 12 ships no py.typed).
           - aiohttp
           - aiohttp-retry
           - aiofiles

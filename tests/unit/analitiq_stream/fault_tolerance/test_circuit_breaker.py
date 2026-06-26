@@ -240,16 +240,16 @@ class TestDatabaseCircuitBreaker:
     @pytest.mark.asyncio
     async def test_database_circuit_breaker_db_specific_errors(self):
         """Test database circuit breaker handles DB errors."""
+        # The engine pins no DB drivers; skip where psycopg2 is not installed.
+        psycopg2 = pytest.importorskip("psycopg2")
         db_cb = DatabaseCircuitBreaker()
 
         async def db_connection_error():
-            import psycopg2
-
             raise psycopg2.OperationalError("Connection failed")
 
         # Should count DB errors toward threshold
         for _i in range(5):
-            with pytest.raises(Exception, match="Connection failed"):
+            with pytest.raises(psycopg2.OperationalError, match="Connection failed"):
                 await db_cb.call(db_connection_error)
 
         assert db_cb.state == CircuitState.OPEN
