@@ -220,7 +220,11 @@ Placeholders are expanded at connection time (late-binding) — not at config lo
 | `DESTINATION_GRPC_PORT` | `50051` | gRPC port (engine mode) |
 | `GRPC_PORT` | `50051` | gRPC listen port (destination mode) |
 | `DESTINATION_INDEX` | `0` | Which destination from the pipeline config |
-| `RESUME_STATE` | | Durable incremental cursors to resume from, as JSON `{stream_id: cursor}`, where a `datetime`/`date` cursor is the tagged `{"__type__": ..., "value": ...}` form (the same shape the on-disk checkpoint uses). Injected by the deployment from whatever it harvested off the prior run's emitted state; lets an incremental stream resume on a fresh container whose local `state/` is empty. See [engine-architecture.md](docs/engine-architecture.md). |
+
+Durable incremental cursors resume from the `state/resume.json` file rather
+than an environment variable: the deployment delivers it in the config bundle
+and a local run writes it itself at the end of a run. See
+[engine-architecture.md](docs/engine-architecture.md#incremental-state-restore).
 
 </details>
 

@@ -15,7 +15,12 @@ from datetime import date, datetime, timezone
 
 import pytest
 
-from src.state.store import CursorStore, parse_resume_state
+from src.state.store import (
+    CursorStore,
+    load_resume_file,
+    parse_resume_state,
+    write_resume_file,
+)
 
 _PIPELINE = "pipe-1"
 _STREAM = "stream-1"
@@ -148,15 +153,15 @@ def test_distinct_failing_paths_each_warn(tmp_path, caplog):
 
 
 class TestParseResumeState:
-    """Decoding the durable RESUME_STATE env payload a fresh container restores from.
+    """Decoding the resume-state payload a fresh container restores from.
 
-    On Fargate the local ``state/`` directory is empty, so this injected map is
-    the only bookmark an incremental stream can resume from. Each value carries
-    its type the same way the on-disk checkpoint does: a ``datetime``/``date`` is
-    the tagged ``{"__type__": ..., "value": ...}`` form and decodes back to the
-    real type (asyncpg rejects a string for a timestamp bind); a JSON-native
-    ``int``/``str`` passes through untouched -- a string is never coerced from
-    its shape.
+    On Fargate the local per-stream ``state/`` checkpoints are empty, so the
+    delivered resume file is the only bookmark an incremental stream can resume
+    from. Each value carries its type the same way the on-disk checkpoint does:
+    a ``datetime``/``date`` is the tagged ``{"__type__": ..., "value": ...}``
+    form and decodes back to the real type (asyncpg rejects a string for a
+    timestamp bind); a JSON-native ``int``/``str`` passes through untouched -- a
+    string is never coerced from its shape.
     """
 
     @pytest.mark.parametrize("raw", [None, ""])
@@ -243,3 +248,58 @@ class TestParseResumeState:
             restored = parse_resume_state(json.dumps(payload))
         assert restored == {"good": 100}
         assert any("unreadable" in r.message for r in caplog.records)
+
+
+class TestResumeFile:
+    """The on-disk resume file a local run writes and every run reads.
+
+    A local run writes the consolidated ``{stream_id: cursor}`` map at the end of
+    a run; the cloud deployment delivers the byte-identical file in the config
+    bundle. Both are read back the same way, so write_resume_file and
+    load_resume_file must round-trip the tagged-value contract and degrade a
+    missing/unreadable file to an empty mapping (a full re-scan) rather than
+    crashing the run.
+    """
+
+    def test_round_trips_numeric_and_timestamp_cursors(self, tmp_path):
+        path = tmp_path / "resume.json"
+        ts = datetime(2024, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+        write_resume_file(path, {"orders": 100, "events": ts})
+
+        # The timestamp is tagged on disk, so it comes back a datetime, not a
+        # string -- the same shape the deployment-delivered file uses.
+        on_disk = json.loads(path.read_text())
+        assert on_disk == {
+            "orders": 100,
+            "events": {"__type__": "datetime", "value": ts.isoformat()},
+        }
+        assert load_resume_file(path) == {"orders": 100, "events": ts}
+
+    def test_missing_file_is_empty(self, tmp_path):
+        assert load_resume_file(tmp_path / "absent.json") == {}
+
+    def test_write_creates_parent_directory(self, tmp_path):
+        path = tmp_path / "nested" / "dir" / "resume.json"
+        write_resume_file(path, {"orders": 5})
+        assert load_resume_file(path) == {"orders": 5}
+
+    def test_unreadable_file_degrades_to_empty_loudly(self, tmp_path, caplog):
+        # A directory in place of the file makes read_text raise OSError; it must
+        # degrade to a full re-scan, not crash StateManager construction.
+        path = tmp_path / "resume.json"
+        path.mkdir()
+        with caplog.at_level(logging.WARNING, logger="src.state.store"):
+            assert load_resume_file(path) == {}
+        assert any("unreadable" in r.message for r in caplog.records)
+
+    def test_write_failure_does_not_raise(self, tmp_path, caplog):
+        # A path whose parent cannot be created (a file sits where a dir must go)
+        # must warn and move on, never abort an otherwise-successful run.
+        blocker = tmp_path / "blocker"
+        blocker.write_text("not a dir")
+        path = blocker / "resume.json"
+        with caplog.at_level(logging.WARNING, logger="src.state.store"):
+            write_resume_file(path, {"orders": 1})  # must not raise
+        assert any(
+            "failed to write resume-state file" in r.message for r in caplog.records
+        )

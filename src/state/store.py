@@ -17,8 +17,8 @@ param, so a reloaded timestamp cursor must come back as a ``datetime``, not its
 ISO text. ``encode_value``/``decode_value`` tag ``datetime``/``date``/``time``/
 ``Decimal`` as ``{"__type__": ..., "value": ...}`` to round-trip them
 losslessly; JSON-native scalars (``int``, ``str``) pass through unchanged. This
-same tagging travels the gRPC cursor token and the durable ``RESUME_STATE``
-payload (see
+same tagging travels the gRPC cursor token and the durable resume-state file
+(see
 ``src/grpc/cursor.py`` and ``parse_resume_state``), so the type is carried
 end-to-end and never guessed from a string's shape — a ``str`` cursor whose
 value looks like a date stays a ``str``.
@@ -56,17 +56,20 @@ _VALUE_KEY = "value"
 
 
 def parse_resume_state(raw: str | None) -> dict[str, Any]:
-    """Decode the durable resume-state env payload into per-stream cursors.
+    """Decode a resume-state JSON payload into per-stream cursors.
 
     The engine emits its cursor checkpoints as ``ANALITIQ_STATE`` log lines
     (see :mod:`src.state.state_emission`); the deployment harvests those into
-    durable storage and re-injects them on the next run as the ``RESUME_STATE``
-    environment variable -- a JSON object mapping ``stream_id`` to the
-    high-water-mark cursor value. A fresh container's local ``state/``
-    directory is empty, so this injected value is the only bookmark an
-    incremental stream can resume from. Reading it here keeps the engine
-    cloud-agnostic: it consumes a resolved value the same way it consumes any
-    other secret/config input, and never reaches for cloud storage itself.
+    durable storage and delivers them back on the next run as a resume-state
+    file inside the config bundle (``state/resume.json``) -- a JSON object
+    mapping ``stream_id`` to the high-water-mark cursor value. A
+    fresh container's local ``state/`` directory is otherwise empty, so this
+    delivered file is the only bookmark an incremental stream can resume from.
+    A local run produces the same file itself at the end of a run (see
+    :func:`write_resume_file`), so the restore path is identical in both
+    environments. Reading a local file here keeps the engine cloud-agnostic: it
+    consumes a resolved value the same way it consumes any other config input,
+    and never reaches for cloud storage itself.
 
     Each value carries its type the same way the on-disk checkpoint does: a
     ``datetime``/``date`` is the tagged ``{"__type__": ..., "value": ...}`` form
@@ -86,14 +89,14 @@ def parse_resume_state(raw: str | None) -> dict[str, Any]:
         decoded = json.loads(raw)
     except ValueError as exc:
         logger.warning(
-            "RESUME_STATE is not valid JSON (%s); incremental streams resume "
+            "resume state is not valid JSON (%s); incremental streams resume "
             "with a full re-scan",
             exc,
         )
         return {}
     if not isinstance(decoded, dict):
         logger.warning(
-            "RESUME_STATE must be a JSON object {stream_id: cursor}; got %s; "
+            "resume state must be a JSON object {stream_id: cursor}; got %s; "
             "incremental streams resume with a full re-scan",
             type(decoded).__name__,
         )
@@ -108,12 +111,67 @@ def parse_resume_state(raw: str | None) -> dict[str, Any]:
             # the stream so it resumes with a full re-scan -- loudly -- exactly
             # as CursorStore.get does for an unreadable on-disk checkpoint.
             logger.warning(
-                "RESUME_STATE cursor for stream %r is unreadable (%s); that "
+                "resume-state cursor for stream %r is unreadable (%s); that "
                 "stream resumes with a full re-scan",
                 stream_id,
                 exc,
             )
     return restored
+
+
+def load_resume_file(path: Path) -> dict[str, Any]:
+    """Read the resume-state file and decode it into per-stream cursors.
+
+    The resume file is delivered in the config bundle (cloud) or written by the
+    previous local run (see :func:`write_resume_file`). An absent file is the
+    normal first-run case and yields an empty mapping; an unreadable file
+    degrades to a full re-scan -- loudly -- like every other resume-state defect
+    (see :func:`parse_resume_state`), rather than aborting the run.
+    """
+    if not path.exists():
+        return {}
+    try:
+        raw = path.read_text()
+    except OSError as exc:
+        logger.warning(
+            "resume-state file %s is unreadable (%s); incremental streams "
+            "resume with a full re-scan",
+            path,
+            exc,
+        )
+        return {}
+    return parse_resume_state(raw)
+
+
+def write_resume_file(path: Path, cursors: dict[str, Any]) -> None:
+    """Atomically write per-stream cursors as the resume-state file.
+
+    The map is ``{stream_id: cursor}`` with each value tagged by
+    :func:`encode_value`, the exact shape :func:`parse_resume_state` decodes and
+    the cloud deployment delivers -- so a local run's output and a cloud-injected
+    file are byte-for-byte the same contract. Writing it lets the next local run
+    resume without re-reading the per-stream checkpoints.
+
+    A write failure must not abort an otherwise-successful run, so an
+    ``OSError`` degrades to a full re-scan on the next run -- loudly -- exactly
+    as :meth:`CursorStore.set` does for a per-stream checkpoint.
+    """
+    encoded = {stream_id: encode_value(value) for stream_id, value in cursors.items()}
+    tmp = path.parent / f"{path.name}.tmp"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps(encoded, default=str))
+        # Atomic swap so a concurrent/next-run reader never sees a torn file.
+        os.replace(tmp, path)
+    except OSError as exc:
+        with contextlib.suppress(OSError):
+            tmp.unlink(missing_ok=True)
+        logger.warning(
+            "failed to write resume-state file %s (%s); the next run resumes "
+            "from the per-stream checkpoints instead",
+            path,
+            exc,
+        )
 
 
 def encode_cursor_state(cursor: dict[str, Any]) -> dict[str, Any]:

@@ -92,18 +92,26 @@ external log/metrics shipper is a deployment concern, not an engine concern.
 
 ### Incremental state restore
 
-An incremental stream's resume cursor is written two ways: to the local
-`state/{pipeline_id}/{stream_id}.json` checkpoint, and to an
-`ANALITIQ_STATE` stdout log line the external shipper harvests into durable
-storage. On a fresh container (each task starts with an empty `state/`) the
-local checkpoint is gone, so restore reads the `RESUME_STATE` environment
-variable instead — a JSON object `{stream_id: cursor}` the deployment
-injects from whatever it harvested off the prior run. `StateManager` seeds
-its cursor cache from it at startup (`src/state/store.py:parse_resume_state`,
-`src/state/state_manager.py`). This keeps restore symmetric with emission:
-the engine never reaches for cloud storage itself, it only consumes a
-resolved value the deployment supplies — exactly as it does for secrets and
-config.
+An incremental stream's resume cursor is written three ways: to the local
+per-stream `state/{pipeline_id}/{stream_id}.json` checkpoint (every commit, for
+in-run/crash recovery), to an `ANALITIQ_STATE` stdout log line the external
+shipper harvests into durable storage (cloud), and — once the pipeline finishes
+— to a consolidated `state/resume.json` file, a JSON object
+`{stream_id: cursor}` (`StateManager.write_resume_snapshot`). It sits at the top
+of `state/` rather than beside the per-stream checkpoints so a stream named
+`resume` can never collide with it.
+
+Restore reads that single `resume.json` at startup
+(`src/state/store.py:load_resume_file`, `src/state/state_manager.py`), and its
+seeded value wins over any stale per-stream checkpoint left on disk. The two
+delivery paths converge on the same file: in the cloud each task starts with an
+empty `state/`, so the deployment delivers `resume.json` in the config bundle
+from whatever it harvested off the prior run; locally there is no deployment, so
+the engine's own end-of-run `resume.json` is what the next run reads. Either
+way the engine only reads a resolved local file and never reaches for cloud
+storage — exactly as it does for secrets and config. Delivering the cursors in
+the bundle (not an env var) also keeps a high-stream-count pipeline clear of the
+AWS Batch/ECS task-override size cap.
 
 Each cursor carries its type. A `datetime`/`date` travels as a tagged
 `{"__type__": ..., "value": ...}` value — the same form the on-disk checkpoint

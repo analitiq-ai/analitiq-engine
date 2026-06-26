@@ -4,13 +4,14 @@ import json
 import logging
 import os
 import threading
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
 from ..shared.run_id import get_or_generate_run_id
 from .batch_commit_tracker import BatchCommitTracker
 from .state_emission import emit_state_log
-from .store import CursorStore, parse_resume_state
+from .store import CursorStore, load_resume_file, write_resume_file
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,12 @@ class StateManager:
         self.pipeline_id = pipeline_id
         self.base_dir = Path(base_dir)
         self.pipeline_dir = self.base_dir / pipeline_id
+        # The consolidated resume bookmark: the cloud deployment delivers it in
+        # the config bundle, a local run writes it at the end (write_resume_snapshot).
+        # It sits at the top of state/ (not beside the per-stream checkpoints,
+        # which own the state/{pipeline_id}/{stream_id}.json namespace) so a
+        # stream named "resume" can never collide with it.
+        self._resume_path = self.base_dir / "resume.json"
 
         # Thread safety
         self.lock = threading.RLock()
@@ -50,17 +57,21 @@ class StateManager:
         self._restore_durable_cursors()
 
     def _restore_durable_cursors(self) -> None:
-        """Seed the cursor cache from the injected durable resume state.
+        """Seed the cursor cache from the delivered resume-state file.
 
-        The on-disk ``state/`` checkpoint is wiped on a fresh container, so
+        The per-stream ``state/`` checkpoints are wiped on a fresh container, so
         without this an incremental stream would find no bookmark on re-run
-        and full-rescan the source. The deployment re-injects the cursors it
-        harvested from the prior run's emitted state as the ``RESUME_STATE``
-        env var; we decode it into the same ``{"cursor": <value>}`` shape
+        and full-rescan the source. The deployment delivers the cursors it
+        harvested from the prior run's emitted state as ``state/resume.json``
+        in the config bundle (a local run writes the same file itself, see
+        :meth:`write_resume_snapshot`); we decode it into the same
+        ``{"cursor": <value>}`` shape
         :meth:`get_cursor` returns, keyed by ``stream_id`` with the empty
-        partition the engine reads with.
+        partition the engine reads with. The seeded value wins over any stale
+        per-stream checkpoint left on disk, since the delivered file is the
+        authoritative bookmark.
         """
-        restored = parse_resume_state(os.environ.get("RESUME_STATE"))
+        restored = load_resume_file(self._resume_path)
         seeded = 0
         for stream_id, value in restored.items():
             if value is None:
@@ -69,9 +80,41 @@ class StateManager:
             seeded += 1
         if seeded:
             logger.info(
-                "restored durable cursor state for %d stream(s) from RESUME_STATE",
+                "restored durable cursor state for %d stream(s) from %s",
                 seeded,
+                self._resume_path,
             )
+
+    def write_resume_snapshot(self, stream_ids: Iterable[str]) -> None:
+        """Persist the run's resume cursors as the consolidated resume file.
+
+        Called once the pipeline finishes so the next local run resumes from the
+        same ``state/resume.json`` the cloud deployment delivers, instead of
+        re-reading the per-stream checkpoints. Each stream's current
+        cursor is taken from the in-run cache, falling back to its on-disk
+        checkpoint; a stream with no cursor yet is omitted (nothing to resume).
+        In the cloud the durable channel stays the emitted ``ANALITIQ_STATE``
+        log lines, so this file is a harmless local artifact there.
+        """
+        snapshot: dict[str, Any] = {}
+        with self.lock:
+            for stream_id in stream_ids:
+                cursor = self._current_cursor(stream_id)
+                if cursor is not None:
+                    snapshot[stream_id] = cursor
+        write_resume_file(self._resume_path, snapshot)
+
+    def _current_cursor(self, stream_id: str) -> Any | None:
+        """Latest cursor value for a stream: in-run cache, then on-disk checkpoint.
+
+        Mirrors :meth:`get_cursor`'s resolution (cache wins over disk) but
+        returns the bare cursor value for the empty partition the engine reads
+        with, for building the resume snapshot.
+        """
+        cached = self._cursors.get(self._cursor_key(stream_id, {}))
+        if cached is not None:
+            return cached.get("cursor")
+        return self._cursor_store.get(self.pipeline_id, stream_id)
 
     def init_commit_tracker(self, run_id: str) -> None:
         """Initialize batch commit tracker for the current run."""
