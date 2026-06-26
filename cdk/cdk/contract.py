@@ -14,8 +14,9 @@ this module is cheap and creates no cycle back into the transport stack.
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, AsyncIterator, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from .types import BatchWriteResult, CheckpointStore, Cursor, SchemaSpec
 
@@ -47,14 +48,14 @@ class ColumnDef:
 # ---- DISCOVER (control-plane reads; implemented in a later phase) ----------
 @runtime_checkable
 class Discoverable(Protocol):
-    async def list_schemas(self, runtime: "ConnectionRuntime") -> list[str]: ...
+    async def list_schemas(self, runtime: ConnectionRuntime) -> list[str]:
+        ...
 
-    async def list_tables(
-        self, runtime: "ConnectionRuntime", schema: str
-    ) -> list[str]: ...
+    async def list_tables(self, runtime: ConnectionRuntime, schema: str) -> list[str]:
+        ...
 
     async def list_columns(
-        self, runtime: "ConnectionRuntime", schema: str, table: str
+        self, runtime: ConnectionRuntime, schema: str, table: str
     ) -> tuple[list[ColumnDef], list[str]]:  # (columns, primary_keys)
         ...
 
@@ -64,46 +65,57 @@ class Discoverable(Protocol):
 class TableCreator(Protocol):
     async def create_table(
         self,
-        runtime: "ConnectionRuntime",
+        runtime: ConnectionRuntime,
         schema: str,
         table: str,
         columns: list[ColumnDef],
         primary_keys: list[str],
-    ) -> None: ...
+    ) -> None:
+        ...
 
 
 # ---- READ (engine source) --------------------------------------------------
 @runtime_checkable
 class Readable(Protocol):
-    async def read_batches(
+    # Not `async def`: implementors are async generators, so calling
+    # read_batches returns the AsyncIterator directly. Declaring it `async def`
+    # would type the call as Coroutine[..., AsyncIterator], breaking
+    # `async for` at the call sites and the structural match for WorkerReadable.
+    def read_batches(
         self,
-        runtime: "ConnectionRuntime",
+        runtime: ConnectionRuntime,
         config: dict[str, Any],
         *,
         checkpoint: CheckpointStore,
         stream_name: str,
         partition: dict[str, Any] | None = None,
         batch_size: int = 1000,
-    ) -> AsyncIterator["pa.RecordBatch"]: ...
+    ) -> AsyncIterator[pa.RecordBatch]:
+        ...
 
 
 # ---- WRITE (engine destination) --------------------------------------------
 @runtime_checkable
 class Writable(Protocol):
-    async def connect(self, runtime: "ConnectionRuntime") -> None: ...
+    async def connect(self, runtime: ConnectionRuntime) -> None:
+        ...
 
-    async def configure_schema(self, schema_spec: SchemaSpec) -> bool: ...
+    async def configure_schema(self, schema_spec: SchemaSpec) -> bool:
+        ...
 
     async def write_batch(
         self,
         run_id: str,
         stream_id: str,
         batch_seq: int,
-        record_batch: "pa.RecordBatch",
+        record_batch: pa.RecordBatch,
         record_ids: list[str],
         cursor: Cursor,
-    ) -> BatchWriteResult: ...
+    ) -> BatchWriteResult:
+        ...
 
-    async def disconnect(self) -> None: ...
+    async def disconnect(self) -> None:
+        ...
 
-    async def health_check(self) -> bool: ...
+    async def health_check(self) -> bool:
+        ...

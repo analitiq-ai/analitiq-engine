@@ -5,9 +5,10 @@ SQL injection protection through proper identifier quoting and value parameteriz
 """
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Union
 
 from sqlalchemy import (
     Column,
@@ -26,20 +27,19 @@ from sqlalchemy.engine import Dialect as SADialect
 from sqlalchemy.sql import Select
 from sqlalchemy.sql.elements import quoted_name
 
-
 # Parameters returned by build_select_query: positional list for
 # paramstyles that bind by index (qmark, format, numeric, numeric_dollar)
 # and a name->value dict for named paramstyles (named, pyformat).
 # Snowflake / BigQuery dialects compile to named/pyformat by default;
 # their drivers consume dicts.
-ParamsLike = Union[List[Any], Dict[str, Any]]
+ParamsLike = Union[list[Any], dict[str, Any]]
 
 logger = logging.getLogger(__name__)
 
 
 def _positional_params(
-    positiontup: List[str], bind_params: Dict[str, Any]
-) -> List[Any]:
+    positiontup: list[str], bind_params: dict[str, Any]
+) -> list[Any]:
     """Map an ordered positional bind-name tuple to its values.
 
     ``positiontup`` is SA's ordered list of bind names for a positional
@@ -59,6 +59,7 @@ def _positional_params(
 
 class FilterOperator(Enum):
     """Supported filter operators."""
+
     EQ = "="
     NE = "!="
     GT = ">"
@@ -76,36 +77,34 @@ class FilterOperator(Enum):
 @dataclass
 class Filter:
     """Structured filter definition."""
+
     field: str
     op: str
     value: Any = None
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "Filter":
+    def from_dict(cls, data: dict[str, Any]) -> "Filter":
         """Create Filter from dictionary."""
-        return cls(
-            field=data["field"],
-            op=data.get("op", "="),
-            value=data.get("value")
-        )
+        return cls(field=data["field"], op=data.get("op", "="), value=data.get("value"))
 
 
 @dataclass
 class QueryConfig:
     """Configuration for query building."""
-    schema_name: Optional[str] = None
-    table_name: str = ""
-    columns: List[str] = None
-    filters: List[Filter] = None
-    cursor_field: Optional[str] = None
-    cursor_value: Optional[Any] = None
-    cursor_mode: str = "inclusive"
-    order_by: Optional[str] = None
-    order_direction: str = "asc"
-    limit: Optional[int] = None
-    offset: Optional[int] = None
 
-    def __post_init__(self):
+    schema_name: str | None = None
+    table_name: str = ""
+    columns: list[str] | None = None
+    filters: list[Filter] | None = None
+    cursor_field: str | None = None
+    cursor_value: Any | None = None
+    cursor_mode: str = "inclusive"
+    order_by: str | None = None
+    order_direction: str = "asc"
+    limit: int | None = None
+    offset: int | None = None
+
+    def __post_init__(self) -> None:
         if self.columns is None:
             self.columns = ["*"]
         if self.filters is None:
@@ -120,7 +119,7 @@ class QueryConfig:
 # ``postgresql.dialect()`` would emit ``%(name)s`` and require a manual
 # conversion pass that drifts out of sync whenever SQLAlchemy adds new
 # bound parameters (limit / offset being the obvious case).
-_BUILTIN_DIALECT_FACTORIES: Dict[str, Callable[[], SADialect]] = {
+_BUILTIN_DIALECT_FACTORIES: dict[str, Callable[[], SADialect]] = {
     "postgresql": _asyncpg_dialect,
     "postgres": _asyncpg_dialect,
     "mysql": mysql.dialect,
@@ -132,8 +131,8 @@ _BUILTIN_DIALECT_FACTORIES: Dict[str, Callable[[], SADialect]] = {
 
 def _get_sqlalchemy_dialect(
     dialect: str,
-    paramstyle: Optional[str] = None,
-    registry_name: Optional[str] = None,
+    paramstyle: str | None = None,
+    registry_name: str | None = None,
 ) -> SADialect:
     """Resolve a dialect string to a SQLAlchemy dialect instance.
 
@@ -159,7 +158,7 @@ def _get_sqlalchemy_dialect(
     registered — i.e. the connector's SQLAlchemy dialect package is missing.
     """
     dialect_lower = dialect.lower()
-    kwargs: Dict[str, Any] = {}
+    kwargs: dict[str, Any] = {}
     if paramstyle is not None:
         kwargs["paramstyle"] = paramstyle
 
@@ -167,6 +166,7 @@ def _get_sqlalchemy_dialect(
     if factory is not None:
         if paramstyle is not None and _is_postgresql_dialect(dialect_lower):
             from sqlalchemy.dialects import postgresql
+
             return postgresql.dialect(**kwargs)
         return factory(**kwargs)
 
@@ -184,7 +184,8 @@ def _get_sqlalchemy_dialect(
             f"SQLAlchemy dialect {name!r} (for {dialect!r}) is not registered; "
             f"install the connector's SQLAlchemy dialect package."
         ) from exc
-    return cls(**kwargs)
+    dialect_instance: SADialect = cls(**kwargs)
+    return dialect_instance
 
 
 def _is_postgresql_dialect(dialect: str) -> bool:
@@ -228,11 +229,11 @@ class QueryBuilder:
         self,
         dialect: str,
         *,
-        paramstyle: Optional[str] = None,
-        registry_name: Optional[str] = None,
+        paramstyle: str | None = None,
+        registry_name: str | None = None,
         quote_identifiers: bool = False,
         inline_paging: bool = False,
-        paging_order_fallback: Optional[Callable[[], Optional[str]]] = None,
+        paging_order_fallback: Callable[[], str | None] | None = None,
     ):
         """Initialize query builder with specified dialect.
 
@@ -282,7 +283,7 @@ class QueryBuilder:
             return literal_column(str(int(value)))
         return value
 
-    def build_select_query(self, config: QueryConfig) -> Tuple[str, ParamsLike]:
+    def build_select_query(self, config: QueryConfig) -> tuple[str, ParamsLike]:
         """Build a SELECT query from configuration.
 
         Returns ``(sql, params)`` where ``params`` is either:
@@ -312,11 +313,11 @@ class QueryBuilder:
             query = select(*columns).select_from(table)
 
         # Collect parameters
-        params = []
+        params: list[Any] = []
 
         # Apply filters
         conditions = []
-        for filter_def in config.filters:
+        for filter_def in config.filters or []:
             condition, filter_params = self._build_filter_condition(
                 filter_def, len(params)
             )
@@ -329,7 +330,7 @@ class QueryBuilder:
                 config.cursor_field,
                 config.cursor_value,
                 config.cursor_mode,
-                len(params)
+                len(params),
             )
             conditions.append(cursor_condition)
             params.extend(cursor_params)
@@ -365,7 +366,7 @@ class QueryBuilder:
 
     def _build_filter_condition(
         self, filter_def: Filter, param_offset: int
-    ) -> Tuple[Any, List[Any]]:
+    ) -> tuple[Any, list[Any]]:
         """Build a single filter condition.
 
         Args:
@@ -381,7 +382,9 @@ class QueryBuilder:
                 set, so an unmapped operator fails loudly instead.
         """
         field = filter_def.field
-        op_str = filter_def.op.lower() if isinstance(filter_def.op, str) else filter_def.op
+        op_str = (
+            filter_def.op.lower() if isinstance(filter_def.op, str) else filter_def.op
+        )
         value = filter_def.value
 
         # Map string operator to enum
@@ -415,6 +418,7 @@ class QueryBuilder:
                 return col.ilike(value), [value]
             else:
                 from sqlalchemy import func
+
                 return func.lower(col).like(func.lower(value)), [value]
         elif op == FilterOperator.EQ:
             return col == value, [value]
@@ -434,12 +438,8 @@ class QueryBuilder:
         raise ValueError(f"Filter operator {op!r} has no condition builder")
 
     def _build_cursor_condition(
-        self,
-        cursor_field: str,
-        cursor_value: Any,
-        cursor_mode: str,
-        param_offset: int
-    ) -> Tuple[Any, List[Any]]:
+        self, cursor_field: str, cursor_value: Any, cursor_mode: str, param_offset: int
+    ) -> tuple[Any, list[Any]]:
         """Build cursor-based condition for incremental reads.
 
         Args:
@@ -459,8 +459,8 @@ class QueryBuilder:
             return col > cursor_value, [cursor_value]
 
     def _compile_query(
-        self, query: Select, params: List[Any]
-    ) -> Tuple[str, List[Any]]:
+        self, query: Select, params: list[Any]
+    ) -> tuple[str, ParamsLike]:
         """Compile SQLAlchemy query to string with parameters.
 
         Args:
@@ -468,7 +468,8 @@ class QueryBuilder:
             params: List of parameter values
 
         Returns:
-            Tuple of (query_string, params_list)
+            Tuple of (query_string, params) where params is a positional
+            list or a name->value dict depending on the dialect paramstyle.
         """
         # MSSQL's default dialect compiles to ``:name`` (named paramstyle),
         # but aioodbc / pyodbc DBAPI drivers consume ``?`` (qmark) and
@@ -482,13 +483,14 @@ class QueryBuilder:
         # via ``exec_driver_sql`` (which bypasses SA's bind expansion) and
         # the ADBC path via ``cursor.execute`` -- so an unexpanded
         # ``__[POSTCOMPILE_...]`` marker would otherwise reach the driver.
-        compile_kwargs: Dict[str, Any] = {
+        compile_kwargs: dict[str, Any] = {
             "literal_binds": False,
             "render_postcompile": True,
         }
         sa_dialect = self._sa_dialect
         if sa_dialect.name == "mssql":
             from sqlalchemy.dialects import mssql as _mssql
+
             sa_dialect = _mssql.dialect(paramstyle="qmark")
 
         compiled = query.compile(dialect=sa_dialect, compile_kwargs=compile_kwargs)
@@ -500,13 +502,13 @@ class QueryBuilder:
         # named/pyformat it's None -- iterating would TypeError.
         # Snowflake / BigQuery dialects fall into the named bucket,
         # so callers must accept the dict form too.
-        params: ParamsLike
+        out_params: ParamsLike
         if compiled.positiontup is not None:
-            params = _positional_params(compiled.positiontup, compiled.params)
+            out_params = _positional_params(compiled.positiontup, compiled.params)
         else:
-            params = dict(compiled.params)
+            out_params = dict(compiled.params)
 
         logger.debug(f"Compiled query: {query_str}")
-        logger.debug(f"Parameters: {params}")
+        logger.debug(f"Parameters: {out_params}")
 
-        return query_str, params
+        return query_str, out_params

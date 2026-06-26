@@ -1,6 +1,4 @@
-"""
-Secrets resolver implementations.
-"""
+"""Secrets resolver implementations."""
 
 from cdk.secrets.resolvers.local import LocalFileSecretsResolver
 from cdk.secrets.resolvers.memory import InMemorySecretsResolver

@@ -4,7 +4,6 @@ import pytest
 
 from src.destination.formatters.csv import CsvFormatter
 
-
 RECORDS = [
     {"id": 1, "name": "Alice", "active": True},
     {"id": 2, "name": "Bob", "active": False},

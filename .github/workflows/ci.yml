@@ -54,13 +54,14 @@ jobs:
             --ignore=tests/unit/cdk_tests/sql/test_discovery.py
 
   lint:
-    name: pre-commit (changed files)
+    name: pre-commit (all files)
     runs-on: ubuntu-latest
     steps:
+      # The whole tree passes the strict stack (black, isort, flake8 +bugbear
+      # +datetimez, mypy, pydocstyle, bandit), so the gate runs on all files
+      # rather than only the PR diff -- this locks the cleaned state in and
+      # fails any reintroduced violation anywhere, not just in touched files.
       - uses: actions/checkout@v4
-        with:
-          # Full history so the changed-file range can be diffed.
-          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
@@ -75,30 +76,5 @@ jobs:
           path: ~/.cache/pre-commit
           key: pre-commit-${{ runner.os }}-${{ hashFiles('.pre-commit-config.yaml') }}
 
-      - name: Resolve changed-file range
-        id: range
-        run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            from="${{ github.event.pull_request.base.sha }}"
-            to="${{ github.event.pull_request.head.sha }}"
-          else
-            from="${{ github.event.before }}"
-            to="${{ github.sha }}"
-            # First push of a branch (or a missing parent) has no usable
-            # `before`; fall back to the merge-base with the default branch so
-            # every commit the push introduced is checked, not just the tip.
-            if [ -z "$from" ] || ! git cat-file -e "${from}^{commit}" 2>/dev/null; then
-              base_ref="origin/${{ github.event.repository.default_branch }}"
-              from="$(git merge-base "$base_ref" "$to" 2>/dev/null \
-                || git rev-parse "${to}^" 2>/dev/null || echo "$to")"
-            fi
-          fi
-          echo "from=$from" >> "$GITHUB_OUTPUT"
-          echo "to=$to" >> "$GITHUB_OUTPUT"
-
-      - name: Run pre-commit on changed files
-        run: |
-          pre-commit run \
-            --from-ref "${{ steps.range.outputs.from }}" \
-            --to-ref "${{ steps.range.outputs.to }}" \
-            --show-diff-on-failure
+      - name: Run pre-commit on all files
+        run: pre-commit run --all-files --show-diff-on-failure

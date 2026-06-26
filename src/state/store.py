@@ -47,7 +47,7 @@ import os
 from datetime import date, datetime, time
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Dict, Optional, Set
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +55,7 @@ _TYPE_KEY = "__type__"
 _VALUE_KEY = "value"
 
 
-def parse_resume_state(raw: Optional[str]) -> Dict[str, Any]:
+def parse_resume_state(raw: str | None) -> dict[str, Any]:
     """Decode the durable resume-state env payload into per-stream cursors.
 
     The engine emits its cursor checkpoints as ``ANALITIQ_STATE`` log lines
@@ -98,7 +98,7 @@ def parse_resume_state(raw: Optional[str]) -> Dict[str, Any]:
             type(decoded).__name__,
         )
         return {}
-    restored: Dict[str, Any] = {}
+    restored: dict[str, Any] = {}
     for stream_id, value in decoded.items():
         try:
             restored[str(stream_id)] = decode_value(value)
@@ -116,7 +116,7 @@ def parse_resume_state(raw: Optional[str]) -> Dict[str, Any]:
     return restored
 
 
-def encode_cursor_state(cursor: Dict[str, Any]) -> Dict[str, Any]:
+def encode_cursor_state(cursor: dict[str, Any]) -> dict[str, Any]:
     """JSON-safe form of a cursor-state dict (tags ``datetime``/``date``).
 
     The worker wire protocol relays cursor saves as JSON; this applies the
@@ -126,7 +126,7 @@ def encode_cursor_state(cursor: Dict[str, Any]) -> Dict[str, Any]:
     return {key: encode_value(value) for key, value in cursor.items()}
 
 
-def decode_cursor_state(cursor: Dict[str, Any]) -> Dict[str, Any]:
+def decode_cursor_state(cursor: dict[str, Any]) -> dict[str, Any]:
     """Inverse of :func:`encode_cursor_state`."""
     return {key: decode_value(value) for key, value in cursor.items()}
 
@@ -134,7 +134,7 @@ def decode_cursor_state(cursor: Dict[str, Any]) -> Dict[str, Any]:
 class CursorStore:
     def __init__(self, root: Path) -> None:
         self._root = root
-        self._write_failures_warned: Set[Path] = set()
+        self._write_failures_warned: set[Path] = set()
 
     def _path(self, pipeline_id: str, stream_id: str) -> Path:
         return self._root / pipeline_id / f"{stream_id}.json"
@@ -224,6 +224,8 @@ def decode_value(value: Any) -> Any:
     if isinstance(value, dict) and _TYPE_KEY in value:
         kind = value[_TYPE_KEY]
         raw = value.get(_VALUE_KEY)
+        if not isinstance(raw, str):
+            raise ValueError(f"malformed tagged cursor value {value!r}")
         if kind == "datetime":
             return datetime.fromisoformat(raw)
         if kind == "date":
@@ -238,7 +240,5 @@ def decode_value(value: Any) -> Any:
             try:
                 return Decimal(raw)
             except InvalidOperation as exc:
-                raise ValueError(
-                    f"malformed decimal cursor value {raw!r}"
-                ) from exc
+                raise ValueError(f"malformed decimal cursor value {raw!r}") from exc
     return value

@@ -84,9 +84,7 @@ async def _write(handler, *, seq: int = 1, rows=None, token: bytes = b"tok"):
         run_id="r1",
         stream_id="s1",
         batch_seq=seq,
-        record_batch=_batch(
-            rows if rows is not None else [{"id": 1, "name": "a"}]
-        ),
+        record_batch=_batch(rows if rows is not None else [{"id": 1, "name": "a"}]),
         record_ids=[],
         cursor=Cursor(token=token),
     )
@@ -135,9 +133,7 @@ class TestSyncEngineWritePath:
         try:
             handler = _connected_handler(engine, write_mode="truncate_insert")
             await _write(handler, seq=1, rows=[{"id": 1, "name": "old"}])
-            result = await _write(
-                handler, seq=2, rows=[{"id": 7, "name": "new"}]
-            )
+            result = await _write(handler, seq=2, rows=[{"id": 7, "name": "new"}])
             assert result.status == AckStatus.ACK_STATUS_SUCCESS
             with engine.connect() as conn:
                 rows = conn.exec_driver_sql("SELECT id, name FROM events").all()
@@ -165,9 +161,7 @@ class TestSyncEngineWritePath:
         try:
             handler = _connected_handler(engine)
             await _write(handler, seq=1, rows=[{"id": 1, "name": "a"}])
-            result = await _write(
-                handler, seq=2, rows=[{"id": 1, "name": "dupe"}]
-            )
+            result = await _write(handler, seq=2, rows=[{"id": 1, "name": "dupe"}])
             assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
             assert _count(engine, "events") == 1
             assert _count(engine, "_batch_commits") == 1
@@ -198,7 +192,9 @@ class TestSyncEngineDdl:
 
             table, commits = await asyncio.to_thread(
                 handler._ddl_and_reflect_on_sync_engine,
-                state, TARGET_DDL, COMMITS_DDL,
+                state,
+                TARGET_DDL,
+                COMMITS_DDL,
             )
             assert {c.name for c in table.columns} == {"id", "name"}
             assert "batch_seq" in {c.name for c in commits.columns}
@@ -241,9 +237,9 @@ class TestSyncEngineReadPath:
             }
             connector = GenericSQLConnector()
             out = []
-            with patch(
-                "cdk.sql.generic.materialize_runtime", new=AsyncMock()
-            ), patch("cdk.sql.generic.SchemaContract") as sc:
+            with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()), patch(
+                "cdk.sql.generic.SchemaContract"
+            ) as sc:
                 sc.return_value.from_pylist.side_effect = lambda rows: rows
                 async for batch in connector.read_batches(
                     runtime,
@@ -278,9 +274,7 @@ class _SyncWriteRuntime:
 
     @property
     def engine(self):
-        raise RuntimeError(
-            "engine not available: sync-only transport; use sync_engine"
-        )
+        raise RuntimeError("engine not available: sync-only transport; use sync_engine")
 
 
 class _StubTypeMapper:
@@ -372,7 +366,8 @@ class TestSyncEngineStatementTimeout:
             handler = _connected_handler(engine)
             handler.set_statement_timeout(5.0)
             with patch.object(
-                handler, "_write_batch_on_sync_engine",
+                handler,
+                "_write_batch_on_sync_engine",
                 side_effect=TimeoutError(),
             ):
                 result = await _write(handler)
@@ -391,9 +386,7 @@ class TestSyncEngineStatementTimeout:
             handler = _connected_handler(engine)
             with caplog.at_level(logging.WARNING, logger="cdk.sql.generic"):
                 handler.set_statement_timeout(2.0)
-            assert any(
-                "cannot be enforced" in r.getMessage() for r in caplog.records
-            )
+            assert any("cannot be enforced" in r.getMessage() for r in caplog.records)
         finally:
             engine.dispose()
 

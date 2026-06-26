@@ -12,11 +12,10 @@ typed fields rather than ``_runtime`` / ``_endpoint`` magic dict keys.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from cdk.connection_runtime import ConnectionRuntime
 from src.models.stream import EndpointRef
-
 
 # Mirrors the published stream contract's replication-method enum.
 _VALID_REPLICATION_METHODS = frozenset({"full_refresh", "incremental"})
@@ -32,8 +31,8 @@ class ReplicationConfig:
     """
 
     method: str
-    cursor_field: Optional[str] = None
-    tie_breaker_fields: Optional[List[str]] = None
+    cursor_field: str | None = None
+    tie_breaker_fields: list[str] | None = None
 
     def __post_init__(self) -> None:
         if self.method not in _VALID_REPLICATION_METHODS:
@@ -63,12 +62,12 @@ class ResolvedSource:
     endpoint_ref: EndpointRef
     connection_ref: str
     runtime: ConnectionRuntime
-    endpoint_document: Dict[str, Any]
-    stream_source: Dict[str, Any]
-    replication: Optional[ReplicationConfig] = None
-    primary_keys: List[str] = field(default_factory=list)
+    endpoint_document: dict[str, Any]
+    stream_source: dict[str, Any]
+    replication: ReplicationConfig | None = None
+    primary_keys: list[str] = field(default_factory=list)
 
-    def to_source_config(self) -> Dict[str, Any]:
+    def to_source_config(self) -> dict[str, Any]:
         """JSON-safe source config dict for the worker bootstrap.
 
         Returns only the contract documents; the ``ConnectionRuntime``
@@ -90,8 +89,8 @@ class ResolvedDestination:
     endpoint_ref: EndpointRef
     connection_ref: str
     runtime: ConnectionRuntime
-    endpoint_document: Dict[str, Any]
-    write: Dict[str, Any]
+    endpoint_document: dict[str, Any]
+    write: dict[str, Any]
 
 
 @dataclass
@@ -100,15 +99,15 @@ class ResolvedStream:
 
     stream_id: str
     stream_version: int
-    pipeline_id: Optional[str]
-    display_name: Optional[str]
-    description: Optional[str]
+    pipeline_id: str | None
+    display_name: str | None
+    description: str | None
     status: str
     is_enabled: bool
-    tags: List[str]
+    tags: list[str]
     source: ResolvedSource
-    destinations: List[ResolvedDestination]
-    mapping: Dict[str, Any]
+    destinations: list[ResolvedDestination]
+    mapping: dict[str, Any]
 
     def __post_init__(self) -> None:
         if not self.stream_id:
@@ -116,9 +115,7 @@ class ResolvedStream:
 
     def primary_destination(self) -> ResolvedDestination:
         if not self.destinations:
-            raise ValueError(
-                f"Stream {self.stream_id!r} has no destinations"
-            )
+            raise ValueError(f"Stream {self.stream_id!r} has no destinations")
         return self.destinations[0]
 
 
@@ -193,7 +190,7 @@ class PipelineConnections:
     """Connection-id wiring: source connection and destination connections."""
 
     source: str
-    destinations: List[str] = field(default_factory=list)
+    destinations: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not self.source:
@@ -211,13 +208,13 @@ class ResolvedPipeline:
 
     pipeline_id: str
     name: str
-    display_name: Optional[str]
-    description: Optional[str]
+    display_name: str | None
+    description: str | None
     status: str
     connections: PipelineConnections
-    tags: List[str] = field(default_factory=list)
-    schedule: Dict[str, Any] = field(default_factory=dict)
-    engine_config: Dict[str, Any] = field(default_factory=dict)
+    tags: list[str] = field(default_factory=list)
+    schedule: dict[str, Any] = field(default_factory=dict)
+    engine_config: dict[str, Any] = field(default_factory=dict)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
 
     def __post_init__(self) -> None:

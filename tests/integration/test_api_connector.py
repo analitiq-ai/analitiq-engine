@@ -1,16 +1,16 @@
 """Comprehensive tests for API connector functionality."""
 
-import asyncio
-import pytest
 from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock, patch
-from aiohttp import ClientTimeout, TCPConnector, ClientSession
+from unittest.mock import AsyncMock, MagicMock
 
-from src.source.connectors.api import APIConnector
-from cdk.rate_limiter import RateLimiter
-from src.source.connectors.base import ConnectionError, ReadError
+import pytest
+from aiohttp import ClientSession
+
 from cdk.connection_runtime import ConnectionRuntime
+from cdk.rate_limiter import RateLimiter
 from cdk.secrets.resolvers.memory import InMemorySecretsResolver
+from src.source.connectors.api import APIConnector
+from src.source.connectors.base import ConnectionError
 from src.state.state_manager import StateManager
 
 
@@ -30,6 +30,7 @@ def connector():
     """Create API connector instance."""
     return APIConnector("TestAPI")
 
+
 @pytest.fixture
 def valid_connection_config():
     """Valid connection configuration."""
@@ -42,6 +43,7 @@ def valid_connection_config():
             "max_connections_per_host": 2,
         },
     }
+
 
 @pytest.fixture
 def valid_read_config():
@@ -57,6 +59,7 @@ def valid_read_config():
         "tie_breaker_fields": ["id"],
     }
 
+
 @pytest.fixture
 def mock_state_manager():
     """Mock state manager."""
@@ -64,6 +67,7 @@ def mock_state_manager():
     manager.get_partition_state.return_value = None
     manager.get_run_info.return_value = {}
     return manager
+
 
 @pytest.fixture
 def mock_session():
@@ -75,9 +79,11 @@ def mock_session():
 
 class TestConnection:
     """Test connection management."""
-    
+
     @pytest.mark.asyncio
-    async def test_connect_adopts_materialized_runtime(self, connector, valid_connection_config):
+    async def test_connect_adopts_materialized_runtime(
+        self, connector, valid_connection_config
+    ):
         """Connector.connect adopts an already-materialized runtime's session.
 
         The runtime owns transport materialization; the connector just
@@ -129,7 +135,7 @@ class TestConnection:
 
         with pytest.raises(ConnectionError, match="API connection failed"):
             await connector.connect(runtime)
-    
+
     @pytest.mark.asyncio
     async def test_disconnect(self, connector, mock_session):
         """Test API disconnection."""
@@ -142,17 +148,16 @@ class TestConnection:
 
         mock_runtime.close.assert_called_once()
         assert connector.is_connected is False
-    
+
     @pytest.mark.asyncio
     async def test_disconnect_no_session(self, connector):
         """Test disconnection when no session exists."""
         connector.session = None
-        
+
         await connector.disconnect()
-        
+
         # Should not raise an error
         assert connector.session is None
-
 
 
 class TestWriteOperations:
@@ -167,7 +172,7 @@ class TestWriteOperations:
 
 class TestUtilityMethods:
     """Test utility and helper methods."""
-    
+
     def test_supports_capabilities(self, connector):
         """Test connector capability flags."""
         assert connector.supports_incremental_read() is True
@@ -176,51 +181,53 @@ class TestUtilityMethods:
 
 class TestRateLimiter:
     """Test rate limiter functionality."""
-    
+
     def test_rate_limiter_init(self):
         """Test rate limiter initialization."""
         limiter = RateLimiter(max_requests=10, time_window=60)
-        
+
         assert limiter.max_requests == 10
         assert limiter.time_window == 60
         assert limiter.requests == []
-    
+
     def test_rate_limiter_invalid_params(self):
         """Test rate limiter with invalid parameters."""
         with pytest.raises(ValueError, match="max_requests must be positive"):
             RateLimiter(max_requests=0, time_window=60)
-        
+
         with pytest.raises(ValueError, match="time_window must be positive"):
             RateLimiter(max_requests=10, time_window=0)
-    
+
     @pytest.mark.asyncio
     async def test_rate_limiter_acquire_within_limit(self):
         """Test acquiring permits within rate limit."""
         limiter = RateLimiter(max_requests=5, time_window=60)
-        
+
         # Should not block when under limit
         for _ in range(3):
             await limiter.acquire()
-        
+
         assert len(limiter.requests) == 3
-    
+
     @pytest.mark.asyncio
     async def test_rate_limiter_acquire_at_limit(self):
         """Test behavior when reaching rate limit."""
         limiter = RateLimiter(max_requests=2, time_window=1)
-        
+
         # Fill up the rate limit
         await limiter.acquire()
         await limiter.acquire()
-        
+
         assert len(limiter.requests) == 2
-        
+
         # Test that we can inspect the rate limit state
-        # In a real scenario, the next acquire would wait, but we'll just verify the limiter tracks requests correctly
-        current_time = datetime.now().timestamp()
-        limiter.requests = [current_time - 0.5, current_time - 0.3]  # Two recent requests
-        
+        # In a real scenario, the next acquire would wait, but we'll just
+        # verify the limiter tracks requests correctly
+        current_time = datetime.now(tz=timezone.utc).timestamp()
+        limiter.requests = [
+            current_time - 0.5,
+            current_time - 0.3,
+        ]  # Two recent requests
+
         # Verify the limiter has the expected state
         assert len(limiter.requests) == 2
-
-

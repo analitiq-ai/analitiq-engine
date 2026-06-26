@@ -95,9 +95,7 @@ class TestResolveTransportSpec:
         connector = {
             "connector_id": "demo",
             "default_transport": "api",
-            "transports": {
-                "api": {"transport_type": "http", "base_url": "https://x"}
-            },
+            "transports": {"api": {"transport_type": "http", "base_url": "https://x"}},
         }
         ctx = ResolutionContext(connector=connector)
         with pytest.raises(KeyError, match="not in declared transports"):
@@ -111,9 +109,7 @@ class TestResolveTransportSpec:
     def test_no_default_transport_rejected(self):
         connector = {
             "connector_id": "demo",
-            "transports": {
-                "api": {"transport_type": "http", "base_url": "https://x"}
-            },
+            "transports": {"api": {"transport_type": "http", "base_url": "https://x"}},
         }
         ctx = ResolutionContext(connector=connector)
         with pytest.raises(TransportSpecError, match="default_transport not declared"):
@@ -164,7 +160,9 @@ class TestTransportKindRegistry:
     def test_register_rejects_non_string_kind(self):
         with pytest.raises(ValueError, match="non-empty string"):
             register_transport_kind(
-                42, resolve_spec=MagicMock(), build_from_spec=AsyncMock()  # type: ignore[arg-type]
+                42,  # type: ignore[arg-type]
+                resolve_spec=MagicMock(),
+                build_from_spec=AsyncMock(),
             )
 
     def test_register_rejects_non_callable_phases(self):
@@ -172,11 +170,15 @@ class TestTransportKindRegistry:
         # near the registration site, not deep in build_transport.
         with pytest.raises(TypeError, match="callable"):
             register_transport_kind(
-                "test_bad", resolve_spec=None, build_from_spec=AsyncMock()  # type: ignore[arg-type]
+                "test_bad",
+                resolve_spec=None,  # type: ignore[arg-type]
+                build_from_spec=AsyncMock(),
             )
         with pytest.raises(TypeError, match="callable"):
             register_transport_kind(
-                "test_bad", resolve_spec=MagicMock(), build_from_spec="nope"  # type: ignore[arg-type]
+                "test_bad",
+                resolve_spec=MagicMock(),
+                build_from_spec="nope",  # type: ignore[arg-type]
             )
 
     def test_re_registering_existing_kind_rejected(self):
@@ -262,9 +264,7 @@ class TestSQLAlchemySpecValidation:
                 resolver=_resolver(),
             )
 
-    @pytest.mark.parametrize(
-        "dsn", [None, "postgresql+asyncpg://user:pw@host/db"]
-    )
+    @pytest.mark.parametrize("dsn", [None, "postgresql+asyncpg://user:pw@host/db"])
     def test_non_structured_dsn_raises_transport_spec_error(self, dsn):
         # A missing dsn and a legacy flat-string dsn hit the same branch:
         # the contract requires the structured object.
@@ -275,9 +275,7 @@ class TestSQLAlchemySpecValidation:
             resolve_sqlalchemy_spec(spec, resolver=_resolver())
 
     def test_non_object_options_raises_transport_spec_error(self):
-        with pytest.raises(
-            TransportSpecError, match=r"`options` must be an object"
-        ):
+        with pytest.raises(TransportSpecError, match=r"`options` must be an object"):
             resolve_sqlalchemy_spec(
                 {
                     "driver": "postgresql+asyncpg",
@@ -325,8 +323,7 @@ class TestSQLAlchemySpecValidation:
             "transport_type": "sqlalchemy",
             "driver": "postgresql+asyncpg",
             "dsn": (
-                "postgresql+asyncpg://user:p%40ss%2Fword"
-                "@db.example.test:5432/app"
+                "postgresql+asyncpg://user:p%40ss%2Fword" "@db.example.test:5432/app"
             ),
             "tls": None,
             "engine_kwargs": {
@@ -430,9 +427,7 @@ class TestHttpSpecValidation:
         [{"max_requests": 10}, {"time_window_seconds": 60}],
         ids=["max_requests_only", "time_window_only"],
     )
-    def test_rate_limit_missing_one_field_raises_transport_spec_error(
-        self, rate_limit
-    ):
+    def test_rate_limit_missing_one_field_raises_transport_spec_error(self, rate_limit):
         with pytest.raises(TransportSpecError, match="both"):
             resolve_http_spec(
                 {
@@ -443,9 +438,7 @@ class TestHttpSpecValidation:
             )
 
     def test_non_object_headers_raises_transport_spec_error(self):
-        with pytest.raises(
-            TransportSpecError, match=r"`headers` must be an object"
-        ):
+        with pytest.raises(TransportSpecError, match=r"`headers` must be an object"):
             resolve_http_spec(
                 {
                     "base_url": "https://api.example.com",
@@ -455,9 +448,7 @@ class TestHttpSpecValidation:
             )
 
     def test_non_object_rate_limit_raises_transport_spec_error(self):
-        with pytest.raises(
-            TransportSpecError, match=r"`rate_limit` must be an object"
-        ):
+        with pytest.raises(TransportSpecError, match=r"`rate_limit` must be an object"):
             resolve_http_spec(
                 {
                     "base_url": "https://api.example.com",
@@ -551,9 +542,7 @@ class TestSqlAlchemyEngineFlavour:
 
         engine = MagicMock()
         engine.connect = MagicMock(side_effect=RuntimeError("probe failed"))
-        with patch(
-            "cdk.transport_factory.create_engine", return_value=engine
-        ):
+        with patch("cdk.transport_factory.create_engine", return_value=engine):
             with pytest.raises(RuntimeError, match="probe failed"):
                 await build_sqlalchemy_from_spec(
                     {

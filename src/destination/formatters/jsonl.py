@@ -5,7 +5,7 @@ It's ideal for streaming and append operations.
 """
 
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from .base import BaseFormatter
 
@@ -38,8 +38,8 @@ class JsonLinesFormatter(BaseFormatter):
 
     def serialize_batch(
         self,
-        records: List[Dict[str, Any]],
-        schema: Optional[Dict[str, Any]] = None,
+        records: list[dict[str, Any]],
+        schema: dict[str, Any] | None = None,
     ) -> bytes:
         """
         Serialize a batch of records to JSONL format.

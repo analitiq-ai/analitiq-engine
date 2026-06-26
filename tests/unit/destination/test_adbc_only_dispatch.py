@@ -25,14 +25,13 @@ import pytest
 from cdk.sql import generic as database_module
 from cdk.sql.dialects import SqlDialect
 from cdk.sql.generic import (
+    _FATAL_ADBC_ERROR_NAMES,
     AdbcCommitRecordError,
     AdbcConfigurationError,
     GenericSQLConnector,
-    _FATAL_ADBC_ERROR_NAMES,
     _is_fatal_adbc_error,
     _reclassify_as_fatal,
 )
-
 
 # --- fixture dialects + connector (stand in for a connector package) --------
 
@@ -133,12 +132,14 @@ class TestFatalClassifier:
         assert not _is_fatal_adbc_error(RuntimeError("transient"))
 
     def test_set_kept_in_sync(self):
-        assert _FATAL_ADBC_ERROR_NAMES == frozenset({
-            "ProgrammingError",
-            "NotSupportedError",
-            "IntegrityError",
-            "DataError",
-        })
+        assert _FATAL_ADBC_ERROR_NAMES == frozenset(
+            {
+                "ProgrammingError",
+                "NotSupportedError",
+                "IntegrityError",
+                "DataError",
+            }
+        )
 
 
 class TestReclassify:
@@ -159,7 +160,8 @@ class TestAdbcCommitRecordError:
 
     def test_truncate_insert_message_is_idempotent(self):
         err = AdbcCommitRecordError(
-            RuntimeError("commit failed"), "truncate_insert",
+            RuntimeError("commit failed"),
+            "truncate_insert",
         )
         assert "idempotent" in str(err)
         assert err.write_mode == "truncate_insert"
@@ -204,8 +206,12 @@ class TestUnsupportedHooksAreFatal:
         h = GenericSQLConnector()  # carries the ANSI-neutral base dialect
         with pytest.raises(CreateTableError) as exc:
             build_create_table_sql(
-                h.dialect, read_only, "public", "t",
-                [ColumnDef("id", "Int64")], [],
+                h.dialect,
+                read_only,
+                "public",
+                "t",
+                [ColumnDef("id", "Int64")],
+                [],
             )
         assert isinstance(exc.value.__cause__, InvalidTypeMapError)
 
@@ -255,17 +261,18 @@ class TestStageTokenUniqueness:
         # Mirror the construction at the call site so a regression in
         # either location is caught here.
         import hashlib
-        return "b" + hashlib.sha256(
-            f"{run_id}|{stream_id}|{batch_seq}".encode("utf-8")
-        ).hexdigest()[:16]
+
+        return (
+            "b"
+            + hashlib.sha256(f"{run_id}|{stream_id}|{batch_seq}".encode()).hexdigest()[
+                :16
+            ]
+        )
 
     def test_distinct_across_batch_seq_with_uuid_stream_id(self):
         run_id = "20260527T120000Z-a1b2c3d4"
         stream_id = "2ac5e363-ec12-49f7-a8b2-b3782cf6af59"
-        tokens = {
-            self._build_token(run_id, stream_id, bs)
-            for bs in (0, 1, 100, 9999)
-        }
+        tokens = {self._build_token(run_id, stream_id, bs) for bs in (0, 1, 100, 9999)}
         assert len(tokens) == 4, f"stage token collided across batch_seq: {tokens}"
 
     def test_distinct_across_stream_ids(self):
@@ -285,9 +292,9 @@ class TestStageTokenUniqueness:
         assert len(token) == 17  # "b" + 16 hex digits
         for table_name in ("wise_transfers", "public_transfers", "orders"):
             stage_name = f"_analitiq_stage_{table_name}_{token}"
-            assert len(stage_name) <= 63, (
-                f"stage name {stage_name!r} exceeds Postgres NAMEDATALEN"
-            )
+            assert (
+                len(stage_name) <= 63
+            ), f"stage name {stage_name!r} exceeds Postgres NAMEDATALEN"
 
 
 class TestCommitCollisionHandling:
@@ -297,14 +304,21 @@ class TestCommitCollisionHandling:
 
     def _state(self, write_mode):
         from cdk.sql.generic import _StreamState
-        return _StreamState(schema_name="analytics", table_name="t", write_mode=write_mode)
+
+        return _StreamState(
+            schema_name="analytics", table_name="t", write_mode=write_mode
+        )
 
     def test_insert_mode_raises(self):
         h = GenericSQLConnector()
         cause = RuntimeError("collision")
         with pytest.raises(AdbcCommitRecordError) as exc:
             h._handle_commit_collision(
-                self._state("insert"), "r", "s", 1, cause,
+                self._state("insert"),
+                "r",
+                "s",
+                1,
+                cause,
             )
         assert exc.value.write_mode == "insert"
         assert exc.value.__cause__ is cause
@@ -312,13 +326,21 @@ class TestCommitCollisionHandling:
     def test_upsert_mode_returns_silently(self):
         h = GenericSQLConnector()
         h._handle_commit_collision(
-            self._state("upsert"), "r", "s", 1, RuntimeError("collision"),
+            self._state("upsert"),
+            "r",
+            "s",
+            1,
+            RuntimeError("collision"),
         )
 
     def test_truncate_insert_mode_returns_silently(self):
         h = GenericSQLConnector()
         h._handle_commit_collision(
-            self._state("truncate_insert"), "r", "s", 1, RuntimeError("collision"),
+            self._state("truncate_insert"),
+            "r",
+            "s",
+            1,
+            RuntimeError("collision"),
         )
 
 
@@ -331,6 +353,7 @@ class TestRecordBatchCommitViaAdbc:
 
     def _state(self, write_mode="insert"):
         from cdk.sql.generic import _StreamState
+
         return _StreamState(
             schema_name="analytics", table_name="t", write_mode=write_mode
         )
@@ -344,12 +367,15 @@ class TestRecordBatchCommitViaAdbc:
             captured["params"] = params
             return -1
 
-        monkeypatch.setattr(
-            GenericSQLConnector, "_execute_adbc_dml_sync", fake_execute
-        )
+        monkeypatch.setattr(GenericSQLConnector, "_execute_adbc_dml_sync", fake_execute)
         h = GenericSQLConnector()
         await h._record_batch_commit_via_adbc(
-            self._state(), "r", "s", 3, b"cur", 7,
+            self._state(),
+            "r",
+            "s",
+            3,
+            b"cur",
+            7,
         )
         assert captured["sql"].startswith("INSERT INTO")
         assert '"_batch_commits"' in captured["sql"]
@@ -370,13 +396,16 @@ class TestRecordBatchCommitViaAdbc:
             wrapped.__cause__ = IntegrityError("dup pk")
             raise wrapped
 
-        monkeypatch.setattr(
-            GenericSQLConnector, "_execute_adbc_dml_sync", fake_execute
-        )
+        monkeypatch.setattr(GenericSQLConnector, "_execute_adbc_dml_sync", fake_execute)
         h = GenericSQLConnector()
         # truncate_insert collision → idempotent → returns silently.
         await h._record_batch_commit_via_adbc(
-            self._state("truncate_insert"), "r", "s", 1, b"cur", 1,
+            self._state("truncate_insert"),
+            "r",
+            "s",
+            1,
+            b"cur",
+            1,
         )
 
     @pytest.mark.asyncio
@@ -389,13 +418,16 @@ class TestRecordBatchCommitViaAdbc:
             wrapped.__cause__ = IntegrityError("dup pk")
             raise wrapped
 
-        monkeypatch.setattr(
-            GenericSQLConnector, "_execute_adbc_dml_sync", fake_execute
-        )
+        monkeypatch.setattr(GenericSQLConnector, "_execute_adbc_dml_sync", fake_execute)
         h = GenericSQLConnector()
         with pytest.raises(AdbcCommitRecordError) as exc:
             await h._record_batch_commit_via_adbc(
-                self._state("insert"), "r", "s", 1, b"cur", 1,
+                self._state("insert"),
+                "r",
+                "s",
+                1,
+                b"cur",
+                1,
             )
         assert exc.value.write_mode == "insert"
 
@@ -410,13 +442,16 @@ class TestRecordBatchCommitViaAdbc:
             wrapped.__cause__ = _ProgrammingError("bad sql")
             raise wrapped
 
-        monkeypatch.setattr(
-            GenericSQLConnector, "_execute_adbc_dml_sync", fake_execute
-        )
+        monkeypatch.setattr(GenericSQLConnector, "_execute_adbc_dml_sync", fake_execute)
         h = GenericSQLConnector()
         with pytest.raises(AdbcConfigurationError):
             await h._record_batch_commit_via_adbc(
-                self._state("insert"), "r", "s", 1, b"cur", 1,
+                self._state("insert"),
+                "r",
+                "s",
+                1,
+                b"cur",
+                1,
             )
 
 
@@ -431,30 +466,28 @@ class TestIntegrityErrorMroDetection:
         # Locally-defined class with the right name → direct match.
         class IntegrityError(Exception):
             pass
+
         exc = IntegrityError()
-        assert any(
-            cls.__name__ == "IntegrityError" for cls in type(exc).__mro__
-        )
+        assert any(cls.__name__ == "IntegrityError" for cls in type(exc).__mro__)
 
     def test_subclassed_integrity_error_detected(self):
         # A driver wrapping IntegrityError in its own subclass — must
         # still trigger collision handling, NOT be re-raised as fatal.
         class IntegrityError(Exception):
             pass
+
         class MyDriverIntegrityError(IntegrityError):
             pass
+
         exc = MyDriverIntegrityError()
-        assert any(
-            cls.__name__ == "IntegrityError" for cls in type(exc).__mro__
-        )
+        assert any(cls.__name__ == "IntegrityError" for cls in type(exc).__mro__)
 
     def test_unrelated_exception_not_detected(self):
         class ProgrammingError(Exception):
             pass
+
         exc = ProgrammingError()
-        assert not any(
-            cls.__name__ == "IntegrityError" for cls in type(exc).__mro__
-        )
+        assert not any(cls.__name__ == "IntegrityError" for cls in type(exc).__mro__)
 
 
 class TestAdbcModeReset:
@@ -514,11 +547,15 @@ class TestAdbcIngestSchemaNormalization:
                 captured["mode"] = mode
                 captured["db_schema_name"] = db_schema_name
 
-            def close(self): pass
+            def close(self):
+                pass
 
         class _FakeConn:
-            def cursor(self): return _FakeCursor()
-            def commit(self): pass
+            def cursor(self):
+                return _FakeCursor()
+
+            def commit(self):
+                pass
 
         return _FakeConn(), captured
 
@@ -527,9 +564,11 @@ class TestAdbcIngestSchemaNormalization:
         h._adbc_only = True
         h._adbc_conn, captured = self._captured_ingest()
         import pyarrow as pa
+
         h._adbc_only_ingest_sync(
             pa.record_batch([pa.array([1])], names=["id"]),
-            "public", "orders",
+            "public",
+            "orders",
         )
         assert captured["db_schema_name"] == "PUBLIC"
 
@@ -539,9 +578,11 @@ class TestAdbcIngestSchemaNormalization:
         h._adbc_only = True
         h._adbc_conn, captured = self._captured_ingest()
         import pyarrow as pa
+
         h._adbc_only_ingest_sync(
             pa.record_batch([pa.array([1])], names=["id"]),
-            "analytics", "orders",
+            "analytics",
+            "orders",
         )
         assert captured["db_schema_name"] == "analytics"
 
@@ -550,9 +591,11 @@ class TestAdbcIngestSchemaNormalization:
         h._adbc_only = True
         h._adbc_conn, captured = self._captured_ingest()
         import pyarrow as pa
+
         h._adbc_only_ingest_sync(
             pa.record_batch([pa.array([1])], names=["id"]),
-            "", "orders",
+            "",
+            "orders",
         )
         assert captured["db_schema_name"] is None
 
@@ -698,7 +741,9 @@ class TestAdbcDdlBuilders:
 
         class _TypeMapperStub:
             def to_arrow_type(self, native: str) -> str:
-                return {"BIGINT": "Int64", "TIMESTAMP": "Timestamp(MICROSECOND)"}[native]
+                return {"BIGINT": "Int64", "TIMESTAMP": "Timestamp(MICROSECOND)"}[
+                    native
+                ]
 
         state = _StreamState(
             schema_name="analytics",
@@ -706,7 +751,11 @@ class TestAdbcDdlBuilders:
             endpoint_document={
                 "columns": [
                     {"name": "id", "native_type": "BIGINT", "nullable": False},
-                    {"name": "_synced_at", "native_type": "TIMESTAMP", "nullable": True},
+                    {
+                        "name": "_synced_at",
+                        "native_type": "TIMESTAMP",
+                        "nullable": True,
+                    },
                 ],
             },
             primary_keys=["id"],
@@ -780,8 +829,7 @@ class TestDisconnectClosesAdbc:
             await handler.disconnect()
 
         errors = [
-            r for r in caplog.records
-            if "Failed to close ADBC connection" in r.message
+            r for r in caplog.records if "Failed to close ADBC connection" in r.message
         ]
         assert errors and errors[0].levelno == logging.ERROR
         assert errors[0].exc_info is not None
@@ -807,7 +855,8 @@ class TestDisconnectClosesAdbc:
             await handler.disconnect()
 
         errors = [
-            r for r in caplog.records
+            r
+            for r in caplog.records
             if "Failed to close SQLAlchemy runtime" in r.message
         ]
         assert errors and errors[0].levelno == logging.ERROR

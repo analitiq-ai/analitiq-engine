@@ -15,8 +15,9 @@ module evaluates.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Mapping, Optional
+from typing import Any
 
 from cdk.exceptions import TransportSpecError, UnresolvedValueError
 
@@ -68,7 +69,9 @@ class ResolutionContext:
         never absorb a typo'd scope.
         """
         if not dotted_path or not isinstance(dotted_path, str):
-            raise TransportSpecError(f"Resolution path must be a non-empty string, got {dotted_path!r}")
+            raise TransportSpecError(
+                f"Resolution path must be a non-empty string, got {dotted_path!r}"
+            )
         parts = dotted_path.split(".")
         head, *rest = parts
         if head not in self._SCOPES:
@@ -99,7 +102,7 @@ class ResolutionContext:
             cursor = cursor[segment]
         return cursor
 
-    def with_runtime(self, runtime: Mapping[str, Any]) -> "ResolutionContext":
+    def with_runtime(self, runtime: Mapping[str, Any]) -> ResolutionContext:
         """Return a copy with ``runtime`` replaced — useful per-invocation."""
         return ResolutionContext(
             connector=self.connector,
@@ -141,17 +144,19 @@ class Resolver:
 
     @classmethod
     def is_expression_node(cls, value: Any) -> bool:
-        """True when ``value`` is a dict carrying an expression marker."""
-        return isinstance(value, Mapping) and not cls._EXPR_KEYS.isdisjoint(value.keys())
+        """Return True when ``value`` is a dict carrying an expression marker."""
+        return isinstance(value, Mapping) and not cls._EXPR_KEYS.isdisjoint(
+            value.keys()
+        )
 
     def __init__(
         self,
         context: ResolutionContext,
         *,
-        functions: Optional[Mapping[str, DerivedFunction]] = None,
+        functions: Mapping[str, DerivedFunction] | None = None,
     ) -> None:
         self._ctx = context
-        self._functions: Dict[str, DerivedFunction] = dict(functions or {})
+        self._functions: dict[str, DerivedFunction] = dict(functions or {})
 
     @property
     def context(self) -> ResolutionContext:
@@ -214,7 +219,7 @@ class Resolver:
                 )
             return resolved
         if isinstance(value, Mapping):
-            resolved_dict: Dict[str, Any] = {}
+            resolved_dict: dict[str, Any] = {}
             for key, child in value.items():
                 if self.is_expression_node(child):
                     resolved = self._resolve_node_for_request(child)
@@ -306,7 +311,9 @@ class Resolver:
 
     def _resolve_ref(self, path: Any) -> Any:
         if not isinstance(path, str):
-            raise TransportSpecError(f"`ref` must be a string, got {type(path).__name__}")
+            raise TransportSpecError(
+                f"`ref` must be a string, got {type(path).__name__}"
+            )
         return self._ctx.lookup(path)
 
     def _resolve_template(self, template: Any, *, lenient: bool = False) -> str:
@@ -320,7 +327,9 @@ class Resolver:
         both modes.
         """
         if not isinstance(template, str):
-            raise TransportSpecError(f"`template` must be a string, got {type(template).__name__}")
+            raise TransportSpecError(
+                f"`template` must be a string, got {type(template).__name__}"
+            )
         out: list[str] = []
         i = 0
         n = len(template)
@@ -332,7 +341,9 @@ class Resolver:
             out.append(template[i:j])
             k = template.find("}", j + 2)
             if k < 0:
-                raise TransportSpecError(f"Unterminated ${{...}} placeholder in template: {template!r}")
+                raise TransportSpecError(
+                    f"Unterminated ${{...}} placeholder in template: {template!r}"
+                )
             path = template[j + 2 : k]
             try:
                 value = self._ctx.lookup(path)
@@ -343,7 +354,8 @@ class Resolver:
             if value is None:
                 if not lenient:
                     raise UnresolvedValueError(
-                        f"Template substitution {path!r} resolved to None in {template!r}"
+                        f"Template substitution {path!r} resolved to None "
+                        f"in {template!r}"
                     )
                 logger.warning("value-expression: unresolved placeholder ${%s}", path)
                 i = k + 1
@@ -365,7 +377,9 @@ class Resolver:
     def _resolve_function(self, node: Mapping[str, Any]) -> Any:
         name = node.get("function")
         if not isinstance(name, str) or not name:
-            raise TransportSpecError(f"`function` field must name a registered function: {node!r}")
+            raise TransportSpecError(
+                f"`function` field must name a registered function: {node!r}"
+            )
         fn = self._functions.get(name)
         if fn is None:
             # A typo'd function name is an authoring defect against the

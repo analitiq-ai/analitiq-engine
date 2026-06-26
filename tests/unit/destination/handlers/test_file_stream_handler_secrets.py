@@ -1,7 +1,8 @@
 """Tests that file and stream handlers do not retain secrets after connect()."""
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 from cdk.connection_runtime import ConnectionRuntime
 from src.destination.connectors.file import FileDestinationHandler
@@ -42,8 +43,14 @@ class TestFileHandlerSecretRetention:
         mock_manifest.load = AsyncMock()
 
         with (
-            patch("src.destination.connectors.file.get_storage_backend", return_value=mock_storage),
-            patch("src.destination.connectors.file.ManifestTracker", return_value=mock_manifest),
+            patch(
+                "src.destination.connectors.file.get_storage_backend",
+                return_value=mock_storage,
+            ),
+            patch(
+                "src.destination.connectors.file.ManifestTracker",
+                return_value=mock_manifest,
+            ),
         ):
             await handler.connect(runtime)
 
@@ -61,8 +68,14 @@ class TestFileHandlerSecretRetention:
         mock_manifest.load = AsyncMock()
 
         with (
-            patch("src.destination.connectors.file.get_storage_backend", return_value=mock_storage),
-            patch("src.destination.connectors.file.ManifestTracker", return_value=mock_manifest),
+            patch(
+                "src.destination.connectors.file.get_storage_backend",
+                return_value=mock_storage,
+            ),
+            patch(
+                "src.destination.connectors.file.ManifestTracker",
+                return_value=mock_manifest,
+            ),
         ):
             await handler.connect(runtime)
 
@@ -79,13 +92,18 @@ class TestFileHandlerSecretRetention:
         mock_manifest.load = AsyncMock()
 
         with (
-            patch("src.destination.connectors.file.get_storage_backend", return_value=mock_storage),
-            patch("src.destination.connectors.file.ManifestTracker", return_value=mock_manifest),
+            patch(
+                "src.destination.connectors.file.get_storage_backend",
+                return_value=mock_storage,
+            ),
+            patch(
+                "src.destination.connectors.file.ManifestTracker",
+                return_value=mock_manifest,
+            ),
         ):
             await handler.connect(runtime)
 
         assert runtime._resolved_config is None
-
 
     @pytest.mark.asyncio
     async def test_secrets_scrubbed_on_connect_failure(self):
@@ -95,7 +113,10 @@ class TestFileHandlerSecretRetention:
         mock_storage = AsyncMock()
         mock_storage.connect.side_effect = ValueError("path invalid")
 
-        with patch("src.destination.connectors.file.get_storage_backend", return_value=mock_storage):
+        with patch(
+            "src.destination.connectors.file.get_storage_backend",
+            return_value=mock_storage,
+        ):
             with pytest.raises(ValueError, match="path invalid"):
                 await handler.connect(runtime)
 
@@ -125,7 +146,10 @@ class TestFileHandlerSecretRetention:
                 "src.destination.connectors.file.get_storage_backend",
                 return_value=mock_storage,
             ) as get_backend,
-            patch("src.destination.connectors.file.ManifestTracker", return_value=mock_manifest),
+            patch(
+                "src.destination.connectors.file.ManifestTracker",
+                return_value=mock_manifest,
+            ),
         ):
             await handler.connect(runtime)
 
@@ -150,14 +174,25 @@ class TestFileHandlerSecretRetention:
         mock_formatter.content_type = "application/jsonl"
 
         with (
-            patch("src.destination.connectors.file.get_storage_backend", return_value=mock_storage),
-            patch("src.destination.connectors.file.ManifestTracker", return_value=mock_manifest),
-            patch("src.destination.connectors.file.get_formatter", return_value=mock_formatter),
+            patch(
+                "src.destination.connectors.file.get_storage_backend",
+                return_value=mock_storage,
+            ),
+            patch(
+                "src.destination.connectors.file.ManifestTracker",
+                return_value=mock_manifest,
+            ),
+            patch(
+                "src.destination.connectors.file.get_formatter",
+                return_value=mock_formatter,
+            ),
         ):
             await handler.connect(runtime)
 
             import pyarrow as pa
+
             from src.grpc.generated.analitiq.v1 import Cursor
+
             result = await handler.write_batch(
                 run_id="run-1",
                 stream_id="stream-1",
@@ -226,7 +261,10 @@ class TestStreamHandlerSecretRetention:
         )
         handler = StreamDestinationHandler()
 
-        with patch("src.destination.connectors.stream.get_formatter", side_effect=ValueError("unknown format")):
+        with patch(
+            "src.destination.connectors.stream.get_formatter",
+            side_effect=ValueError("unknown format"),
+        ):
             with pytest.raises(ValueError, match="unknown format"):
                 await handler.connect(runtime)
 

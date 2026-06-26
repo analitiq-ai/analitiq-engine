@@ -1,7 +1,8 @@
 """API fixtures for integration tests."""
 
-import pytest
 from unittest.mock import AsyncMock, Mock
+
+import pytest
 from aioresponses import aioresponses
 
 
@@ -53,12 +54,8 @@ def sample_api_response():
                 "id": 123,
                 "name": "Test Record",
                 "created_at": "2025-08-19T10:30:00Z",
-                "status": "active"
+                "status": "active",
             }
         ],
-        "pagination": {
-            "page": 1,
-            "per_page": 100,
-            "total": 1
-        }
+        "pagination": {"page": 1, "per_page": 100, "total": 1},
     }

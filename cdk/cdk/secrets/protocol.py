@@ -5,7 +5,7 @@ Defines the interface that all secrets resolvers must implement.
 """
 
 from abc import ABC, abstractmethod
-from typing import Dict, Optional
+from types import TracebackType
 
 
 class SecretsResolver(ABC):
@@ -28,8 +28,8 @@ class SecretsResolver(ABC):
         self,
         connection_id: str,
         *,
-        keys: Optional[list[str]] = None,
-    ) -> Dict[str, str]:
+        keys: list[str] | None = None,
+    ) -> dict[str, str]:
         """
         Resolve secrets for a connection.
 
@@ -60,6 +60,11 @@ class SecretsResolver(ABC):
         """Async context manager entry."""
         return self
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
         """Async context manager exit."""
         await self.close()

@@ -7,10 +7,9 @@ Reads secrets from JSON files in a local directory.
 import json
 import logging
 from pathlib import Path
-from typing import Dict, Optional
 
-from cdk.secrets.protocol import SecretsResolver
 from cdk.secrets.exceptions import SecretNotFoundError, SecretResolutionError
+from cdk.secrets.protocol import SecretsResolver
 
 logger = logging.getLogger(__name__)
 
@@ -49,8 +48,8 @@ class LocalFileSecretsResolver(SecretsResolver):
         self,
         connection_id: str,
         *,
-        keys: Optional[list[str]] = None,
-    ) -> Dict[str, str]:
+        keys: list[str] | None = None,
+    ) -> dict[str, str]:
         """
         Resolve secrets for a connection from local files.
 
@@ -100,22 +99,22 @@ class LocalFileSecretsResolver(SecretsResolver):
             raise SecretResolutionError(
                 f"Invalid JSON in secrets file {secrets_path}: {e}",
                 connection_id=connection_id,
-            )
+            ) from e
         except PermissionError as e:
             raise SecretResolutionError(
                 f"Permission denied reading secrets file {secrets_path}: {e}",
                 connection_id=connection_id,
-            )
+            ) from e
         except OSError as e:
             raise SecretResolutionError(
                 f"Error reading secrets file {secrets_path}: {e}",
                 connection_id=connection_id,
-            )
+            ) from e
 
     def _find_secrets_file(
         self,
         connection_id: str,
-    ) -> Optional[Path]:
+    ) -> Path | None:
         """
         Find the secrets file for a connection.
 
@@ -147,5 +146,5 @@ class LocalFileSecretsResolver(SecretsResolver):
         pass
 
     def __repr__(self) -> str:
-        """String representation."""
+        """Return the string representation."""
         return f"LocalFileSecretsResolver({self._secrets_dir})"

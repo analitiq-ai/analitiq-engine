@@ -12,7 +12,6 @@ import pytest
 from cdk.exceptions import TransportSpecError
 from cdk.resolver import ResolutionContext, Resolver
 
-
 # ---------------------------------------------------------------------------
 # ResolutionContext.lookup
 # ---------------------------------------------------------------------------
@@ -86,9 +85,9 @@ class TestResolverRefAndLiteral:
     def test_literal_returns_value_unchanged(self):
         ctx = ResolutionContext()
         # Even structures that look like other expressions are returned verbatim.
-        assert Resolver(ctx).resolve(
-            {"literal": {"ref": "scope.path"}}
-        ) == {"ref": "scope.path"}
+        assert Resolver(ctx).resolve({"literal": {"ref": "scope.path"}}) == {
+            "ref": "scope.path"
+        }
 
     def test_literal_with_sibling_keys_rejected(self):
         ctx = ResolutionContext()
@@ -98,9 +97,7 @@ class TestResolverRefAndLiteral:
 
 class TestResolverTemplate:
     def test_template_substitutes_scalars(self):
-        ctx = ResolutionContext(
-            connection={"parameters": {"host": "h", "port": 5432}}
-        )
+        ctx = ResolutionContext(connection={"parameters": {"host": "h", "port": 5432}})
         out = Resolver(ctx).resolve(
             {"template": "${connection.parameters.host}:${connection.parameters.port}"}
         )
@@ -108,7 +105,10 @@ class TestResolverTemplate:
 
     def test_template_no_placeholders_returns_string_as_is(self):
         ctx = ResolutionContext()
-        assert Resolver(ctx).resolve({"template": "https://api.example.com"}) == "https://api.example.com"
+        assert (
+            Resolver(ctx).resolve({"template": "https://api.example.com"})
+            == "https://api.example.com"
+        )
 
     def test_template_must_be_string(self):
         ctx = ResolutionContext()
@@ -123,9 +123,7 @@ class TestResolverTemplate:
     def test_template_placeholder_resolving_to_none_raises(self):
         ctx = ResolutionContext(connection={"parameters": {"host": None}})
         with pytest.raises(KeyError, match="resolved to None"):
-            Resolver(ctx).resolve(
-                {"template": "${connection.parameters.host}"}
-            )
+            Resolver(ctx).resolve({"template": "${connection.parameters.host}"})
 
     def test_template_falsy_scalars_are_substituted(self):
         ctx = ResolutionContext(
@@ -143,9 +141,7 @@ class TestResolverTemplate:
             connection={"parameters": {"headers": {"Authorization": "Bearer t"}}}
         )
         with pytest.raises(TransportSpecError, match="only scalars"):
-            Resolver(ctx).resolve(
-                {"template": "${connection.parameters.headers}"}
-            )
+            Resolver(ctx).resolve({"template": "${connection.parameters.headers}"})
 
 
 # ---------------------------------------------------------------------------
@@ -172,9 +168,7 @@ class TestResolverFunctions:
         # which the per-request drop policy would absorb as missing data.
         ctx = ResolutionContext()
         with pytest.raises(TransportSpecError, match="Unknown derived function"):
-            Resolver(ctx, functions={}).resolve(
-                {"function": "no_such", "input": "x"}
-            )
+            Resolver(ctx, functions={}).resolve({"function": "no_such", "input": "x"})
 
     def test_function_with_unexpected_sibling_key_rejected(self):
         # Sibling key that is not another expression marker (those are
@@ -223,9 +217,7 @@ class TestResolverMarkerDiscipline:
     def test_ref_with_extra_sibling_rejected(self):
         ctx = ResolutionContext(connection={"parameters": {"host": "h"}})
         with pytest.raises(TransportSpecError, match="must be the only key"):
-            Resolver(ctx).resolve(
-                {"ref": "connection.parameters.host", "extra": 1}
-            )
+            Resolver(ctx).resolve({"ref": "connection.parameters.host", "extra": 1})
 
     def test_template_with_extra_sibling_rejected(self):
         ctx = ResolutionContext()
@@ -254,9 +246,7 @@ class TestResolverStructuralRecursion:
 
     def test_list_elements_are_resolved(self):
         ctx = ResolutionContext(secrets={"token": "abc"})
-        out = Resolver(ctx).resolve(
-            [{"template": "Bearer ${secrets.token}"}, "static"]
-        )
+        out = Resolver(ctx).resolve([{"template": "Bearer ${secrets.token}"}, "static"])
         assert out == ["Bearer abc", "static"]
 
     def test_bare_strings_are_literals(self):
@@ -322,7 +312,10 @@ class TestResolveForRequestExpressionForms:
         out = r.resolve_for_request(
             {
                 "filters": [
-                    {"field": "region", "value": {"ref": "connection.parameters.region"}},
+                    {
+                        "field": "region",
+                        "value": {"ref": "connection.parameters.region"},
+                    },
                 ],
                 "page": 1,
             }
@@ -445,7 +438,11 @@ class TestResolveForRequestTemplateLeniency:
         r = _request_resolver(connection={"parameters": {"org": "acme"}})
         with caplog.at_level("WARNING"):
             out = r.resolve_for_request(
-                {"template": "${connection.parameters.org}/${connection.parameters.gone}"}
+                {
+                    "template": (
+                        "${connection.parameters.org}/" "${connection.parameters.gone}"
+                    )
+                }
             )
         assert out == "acme/"
         assert "unresolved placeholder" in caplog.text
@@ -466,7 +463,10 @@ class TestResolveForRequestTemplateLeniency:
                 "auth": {
                     "function": "base64_encode",
                     "input": {
-                        "template": "${connection.parameters.user}:${connection.parameters.gone}"
+                        "template": (
+                            "${connection.parameters.user}:"
+                            "${connection.parameters.gone}"
+                        )
                     },
                 }
             }

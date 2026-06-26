@@ -29,6 +29,21 @@ from .destination_service_pb2_grpc import (
     add_DestinationServiceServicer_to_server,
 )
 
+from .source_service_pb2 import (
+    ReadRequest,
+    ReadResponse,
+    ReadBatchChunk,
+    ReadComplete,
+    ReadError,
+    CursorSave,
+)
+
+from .source_service_pb2_grpc import (
+    SourceServiceStub,
+    SourceServiceServicer,
+    add_SourceServiceServicer_to_server,
+)
+
 __all__ = [
     # stream.proto messages
     "PayloadFormat",
@@ -49,8 +64,18 @@ __all__ = [
     "GetCapabilitiesResponse",
     "ShutdownRequest",
     "ShutdownAck",
-    # gRPC service
+    # source_service.proto messages
+    "ReadRequest",
+    "ReadResponse",
+    "ReadBatchChunk",
+    "ReadComplete",
+    "ReadError",
+    "CursorSave",
+    # gRPC services
     "DestinationServiceStub",
     "DestinationServiceServicer",
     "add_DestinationServiceServicer_to_server",
+    "SourceServiceStub",
+    "SourceServiceServicer",
+    "add_SourceServiceServicer_to_server",
 ]

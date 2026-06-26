@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any
 
 from src.config.exceptions import ConnectionConfigError, ConnectorNotFoundError
 from src.config.utils import load_json_file
@@ -20,14 +20,14 @@ from src.config.utils import load_json_file
 logger = logging.getLogger(__name__)
 
 
-def load_connection_file(path: Path) -> Dict[str, Any]:
+def load_connection_file(path: Path) -> dict[str, Any]:
     """Read and JSON-parse a connection.json. Raises with file context on bad JSON."""
     if not path.is_file():
         raise FileNotFoundError(f"connection.json not found: {path}")
     return load_json_file(path)
 
 
-def load_connection(connection_id: str, connections_dir: Path) -> Dict[str, Any]:
+def load_connection(connection_id: str, connections_dir: Path) -> dict[str, Any]:
     """Load a connection configuration by ``connection_id`` (= directory name).
 
     Args:
@@ -63,7 +63,7 @@ def load_connection(connection_id: str, connections_dir: Path) -> Dict[str, Any]
 
 def load_connector_definition(
     connector_id: str, connectors_dir: Path
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Load a connector definition by ``connector_id``.
 
     Connector directories may be named either ``{connector_id}`` or
@@ -88,7 +88,6 @@ def load_connector_definition(
     raise ConnectorNotFoundError(
         connector_id,
         detail=(
-            f"Connector definition not found at {candidates[0]} "
-            f"or {candidates[1]}"
+            f"Connector definition not found at {candidates[0]} " f"or {candidates[1]}"
         ),
     )

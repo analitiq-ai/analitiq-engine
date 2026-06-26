@@ -15,18 +15,18 @@ from __future__ import annotations
 import io
 import json
 import logging
+from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any, AsyncIterator, Dict, Optional
+from typing import Any
 
-import grpc
 import pyarrow as pa
 
+import grpc
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.sql.exceptions import ReadError
 from cdk.types import CheckpointStore
-
 from src.grpc import DEFAULT_MAX_MESSAGE_SIZE
-from src.grpc.generated.analitiq.v1.source_service_pb2 import ReadRequest
+from src.grpc.generated.analitiq.v1 import ReadRequest
 from src.grpc.generated.analitiq.v1.source_service_pb2_grpc import SourceServiceStub
 from src.state.error_classification import (
     ErrorCode,
@@ -59,11 +59,11 @@ class WorkerReadable:
     async def read_batches(
         self,
         runtime: ConnectionRuntime,
-        config: Dict[str, Any],
+        config: dict[str, Any],
         *,
         checkpoint: CheckpointStore,
         stream_name: str,
-        partition: Optional[Dict[str, Any]] = None,
+        partition: dict[str, Any] | None = None,
         batch_size: int = 1000,
     ) -> AsyncIterator[pa.RecordBatch]:
         partition = partition or {}
@@ -103,9 +103,7 @@ class WorkerReadable:
                     # back from the store as a datetime and must survive
                     # the JSON hop as one.
                     initial_cursor_json=(
-                        json.dumps(
-                            encode_cursor_state(initial_cursor), default=str
-                        )
+                        json.dumps(encode_cursor_state(initial_cursor), default=str)
                         if initial_cursor
                         else ""
                     ),

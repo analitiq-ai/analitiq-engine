@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Dict
+from typing import Any
 
 
 class WriteMode(str, Enum):
@@ -58,7 +58,8 @@ class EndpointRef:
     def __post_init__(self) -> None:
         if self.scope not in self._VALID_SCOPES:
             raise ValueError(
-                f"EndpointRef.scope must be one of {self._VALID_SCOPES}, got {self.scope!r}"
+                f"EndpointRef.scope must be one of {self._VALID_SCOPES}, "
+                f"got {self.scope!r}"
             )
         if not self.connection_id:
             raise ValueError("EndpointRef.connection_id cannot be empty")
@@ -69,7 +70,7 @@ class EndpointRef:
         return f"{self.scope}:{self.connection_id}/{self.endpoint_id}"
 
     @classmethod
-    def from_dict(cls, data: Any) -> "EndpointRef":
+    def from_dict(cls, data: Any) -> EndpointRef:
         """Validate and construct from a dict (or pass-through if already typed).
 
         Accepts ``x-*`` extension keys verbatim per the stream contract —
@@ -85,9 +86,7 @@ class EndpointRef:
                 f"extensions), got {type(data).__name__}"
             )
         required = {"scope", "connection_id", "endpoint_id"}
-        unknown = {
-            k for k in set(data) - required if not k.startswith("x-")
-        }
+        unknown = {k for k in set(data) - required if not k.startswith("x-")}
         if unknown:
             raise ValueError(
                 f"endpoint_ref has unknown keys {sorted(unknown)}; allowed: "
@@ -95,16 +94,14 @@ class EndpointRef:
             )
         missing = required - set(data)
         if missing:
-            raise ValueError(
-                f"endpoint_ref is missing required keys {sorted(missing)}"
-            )
+            raise ValueError(f"endpoint_ref is missing required keys {sorted(missing)}")
         return cls(
             scope=data["scope"],
             connection_id=data["connection_id"],
             endpoint_id=data["endpoint_id"],
         )
 
-    def to_dict(self) -> Dict[str, str]:
+    def to_dict(self) -> dict[str, str]:
         return {
             "scope": self.scope,
             "connection_id": self.connection_id,

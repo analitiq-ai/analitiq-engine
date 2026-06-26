@@ -131,9 +131,9 @@ class TestListTables:
             mapper=pg_mapper,
             responder=_route({"tables": [{"table_name": "orders"}]}),
         )
-        assert await list_tables(
-            runtime, "public", dialect=_UpperSchemaDialect()
-        ) == ["orders"]
+        assert await list_tables(runtime, "public", dialect=_UpperSchemaDialect()) == [
+            "orders"
+        ]
         _, params = runtime.connections[-1].executed[-1]
         assert params == ["PUBLIC"]
 
@@ -145,9 +145,9 @@ class TestListTables:
             "structural",
             responder=_route({"tables": [{"table_name": "orders"}]}),
         )
-        assert await list_tables(
-            runtime, "ds", dialect=_StructuralFromDialect()
-        ) == ["orders"]
+        assert await list_tables(runtime, "ds", dialect=_StructuralFromDialect()) == [
+            "orders"
+        ]
         sql, params = runtime.connections[-1].executed[-1]
         assert '"ds".information_schema.tables' in sql
         assert params == []
@@ -163,15 +163,26 @@ class TestListColumns:
                 {
                     "pks": [{"column_name": "id"}],
                     "columns": [
-                        {"column_name": "id", "data_type": "bigint",
-                         "is_nullable": "NO"},
-                        {"column_name": "name", "data_type": "character varying",
-                         "is_nullable": "YES"},
-                        {"column_name": "amount", "data_type": "numeric",
-                         "is_nullable": "YES"},
-                        {"column_name": "created",
-                         "data_type": "timestamp with time zone",
-                         "is_nullable": "NO"},
+                        {
+                            "column_name": "id",
+                            "data_type": "bigint",
+                            "is_nullable": "NO",
+                        },
+                        {
+                            "column_name": "name",
+                            "data_type": "character varying",
+                            "is_nullable": "YES",
+                        },
+                        {
+                            "column_name": "amount",
+                            "data_type": "numeric",
+                            "is_nullable": "YES",
+                        },
+                        {
+                            "column_name": "created",
+                            "data_type": "timestamp with time zone",
+                            "is_nullable": "NO",
+                        },
                     ],
                 }
             ),
@@ -185,8 +196,10 @@ class TestListColumns:
             ColumnDef("name", "Utf8", nullable=True, primary_key=False),
             ColumnDef("amount", "Decimal128(38, 9)", nullable=True, primary_key=False),
             ColumnDef(
-                "created", "Timestamp(MICROSECOND, UTC)",
-                nullable=False, primary_key=False,
+                "created",
+                "Timestamp(MICROSECOND, UTC)",
+                nullable=False,
+                primary_key=False,
             ),
         ]
 
@@ -199,12 +212,17 @@ class TestListColumns:
                 {
                     "pks": [{"column_name": "a"}, {"column_name": "b"}],
                     "columns": [
-                        {"column_name": "a", "data_type": "integer",
-                         "is_nullable": "YES"},
-                        {"column_name": "b", "data_type": "integer",
-                         "is_nullable": "YES"},
-                        {"column_name": "c", "data_type": "text",
-                         "is_nullable": "YES"},
+                        {
+                            "column_name": "a",
+                            "data_type": "integer",
+                            "is_nullable": "YES",
+                        },
+                        {
+                            "column_name": "b",
+                            "data_type": "integer",
+                            "is_nullable": "YES",
+                        },
+                        {"column_name": "c", "data_type": "text", "is_nullable": "YES"},
                     ],
                 }
             ),
@@ -224,8 +242,11 @@ class TestListColumns:
                 {
                     "pks": [],
                     "columns": [
-                        {"column_name": "shape", "data_type": "geometry",
-                         "is_nullable": "YES"},
+                        {
+                            "column_name": "shape",
+                            "data_type": "geometry",
+                            "is_nullable": "YES",
+                        },
                     ],
                 }
             ),
@@ -262,8 +283,11 @@ class TestNormalizingDialectDiscovery:
                 {
                     "pks": [{"COLUMN_NAME": "ID"}],
                     "columns": [
-                        {"COLUMN_NAME": "ID", "DATA_TYPE": "NUMBER",
-                         "IS_NULLABLE": "NO"},
+                        {
+                            "COLUMN_NAME": "ID",
+                            "DATA_TYPE": "NUMBER",
+                            "IS_NULLABLE": "NO",
+                        },
                     ],
                 }
             ),
@@ -276,7 +300,7 @@ class TestNormalizingDialectDiscovery:
             ColumnDef("ID", "Decimal128(38, 0)", nullable=False, primary_key=True)
         ]
         # Both the PK query and the column query bound the normalized schema.
-        for sql, params in runtime.connections[-1].executed:
+        for _sql, params in runtime.connections[-1].executed:
             assert params[0] == "PUBLIC"
 
 
@@ -289,9 +313,9 @@ class TestStructuralFromDiscovery:
             "structural",
             responder=_route({"tables": [{"table_name": "orders"}]}),
         )
-        assert await list_tables(
-            runtime, "ds", dialect=_StructuralFromDialect()
-        ) == ["orders"]
+        assert await list_tables(runtime, "ds", dialect=_StructuralFromDialect()) == [
+            "orders"
+        ]
         sql, params = runtime.connections[-1].executed[-1]
         assert '"ds".information_schema.tables' in sql
         assert params == []

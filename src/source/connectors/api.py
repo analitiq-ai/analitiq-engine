@@ -29,19 +29,23 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import AsyncIterator, Callable
 from datetime import timezone
-from typing import Any, AsyncIterator, Callable, Dict, List, Optional
+from typing import Any
 
+import aiohttp
 import pyarrow as pa
 
-from .base import BaseConnector, ConnectionError, ReadError, TransientReadError
-from cdk.schema_contract import SchemaContract
 from cdk.connection_runtime import ConnectionRuntime
+from cdk.rate_limiter import RateLimiter
 from cdk.request_binding import bind_param_refs, resolve_param_defaults
 from cdk.resolver import Resolver
+from cdk.schema_contract import SchemaContract
 from cdk.types import CheckpointStore
-from ...shared.http_utils import join_url
+
 from ...shared.dict_path import walk_path
+from ...shared.http_utils import join_url
+from .base import BaseConnector, ConnectionError, ReadError, TransientReadError
 
 logger = logging.getLogger(__name__)
 
@@ -56,11 +60,11 @@ class APIConnector(BaseConnector):
     def __init__(self, name: str = "APIConnector"):
         super().__init__(name)
         self._runtime: ConnectionRuntime | None = None
-        self.session = None
-        self.base_url = None
-        self.rate_limiter = None
+        self.session: aiohttp.ClientSession | None = None
+        self.base_url: str | None = None
+        self.rate_limiter: RateLimiter | None = None
 
-    async def connect(self, runtime: ConnectionRuntime):
+    async def connect(self, runtime: ConnectionRuntime) -> None:
         try:
             self._runtime = runtime
             runtime.acquire()
@@ -74,7 +78,7 @@ class APIConnector(BaseConnector):
             logger.error("Failed to connect to API: %s", e)
             raise ConnectionError(f"API connection failed: {e}") from e
 
-    async def disconnect(self):
+    async def disconnect(self) -> None:
         if self._runtime:
             await self._runtime.close()
             # Brief courtesy delay so aiohttp's transports finish closing. It
@@ -99,11 +103,11 @@ class APIConnector(BaseConnector):
     async def read_batches(
         self,
         runtime: ConnectionRuntime,
-        config: Dict[str, Any],
+        config: dict[str, Any],
         *,
         checkpoint: CheckpointStore,
         stream_name: str,
-        partition: Optional[Dict[str, Any]] = None,
+        partition: dict[str, Any] | None = None,
         batch_size: int = 1000,
     ) -> AsyncIterator[pa.RecordBatch]:
         """Read upstream records as Arrow batches.
@@ -136,21 +140,25 @@ class APIConnector(BaseConnector):
 
     async def _read_batches_impl(
         self,
-        config: Dict[str, Any],
+        config: dict[str, Any],
         *,
         checkpoint: CheckpointStore,
         stream_name: str,
-        partition: Optional[Dict[str, Any]] = None,
+        partition: dict[str, Any] | None = None,
         batch_size: int = 1000,
     ) -> AsyncIterator[pa.RecordBatch]:
         if partition is None:
             partition = {}
 
+        if self._runtime is None or self.base_url is None:
+            raise ReadError(
+                "APIConnector: read attempted before connect() materialized "
+                "the runtime"
+            )
+
         endpoint_doc = config.get("endpoint_document")
         if not endpoint_doc:
-            raise ReadError(
-                "APIConnector: source config missing 'endpoint_document'"
-            )
+            raise ReadError("APIConnector: source config missing 'endpoint_document'")
         stream_source = config.get("stream_source") or {}
         endpoint_ref = stream_source.get("endpoint_ref")
         if not endpoint_ref:
@@ -158,9 +166,10 @@ class APIConnector(BaseConnector):
                 "APIConnector: stream_source missing 'endpoint_ref'; "
                 "the source contract requires it to declare per-field types"
             )
-        read_spec = ((endpoint_doc.get("operations") or {}).get("read") or {})
+        read_spec = (endpoint_doc.get("operations") or {}).get("read") or {}
         records_items_schema = self._resolve_records_items_schema(
-            endpoint_doc, read_spec,
+            endpoint_doc,
+            read_spec,
         )
         schema_contract = SchemaContract(records_items_schema)
         request = read_spec.get("request") or {}
@@ -168,7 +177,8 @@ class APIConnector(BaseConnector):
         method = (request.get("method") or "GET").upper()
         if not isinstance(path, str) or not path:
             raise ReadError(
-                f"endpoint {endpoint_doc.get('endpoint_id')!r}: operations.read.request.path is required"
+                f"endpoint {endpoint_doc.get('endpoint_id')!r}: "
+                f"operations.read.request.path is required"
             )
         full_url = join_url(self.base_url, path)
 
@@ -221,8 +231,8 @@ class APIConnector(BaseConnector):
         raw_body = request.get("body")
 
         def build_request(
-            page_params: Dict[str, Any],
-        ) -> tuple[Dict[str, Any], Any]:
+            page_params: dict[str, Any],
+        ) -> tuple[dict[str, Any], Any]:
             query = {
                 name: value
                 for name, value in page_params.items()
@@ -269,14 +279,17 @@ class APIConnector(BaseConnector):
                     logger.debug(
                         "stream %r: last record has no %r value; "
                         "cursor not advanced for batch %d",
-                        stream_name, cursor_field, batch_count,
+                        stream_name,
+                        cursor_field,
+                        batch_count,
                     )
 
     @staticmethod
     def _resolve_records_items_schema(
-        endpoint_doc: Dict[str, Any], read_spec: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        """Walk operations.read.response.schema via records.ref to the per-record items block.
+        endpoint_doc: dict[str, Any],
+        read_spec: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Walk operations.read.response.schema via records.ref to per-record items.
 
         Accepted records.ref forms: ``response.body`` and
         ``response.body.<field>[.<field>...]``.
@@ -284,18 +297,20 @@ class APIConnector(BaseConnector):
         endpoint_id = endpoint_doc.get("endpoint_id")
         response_block = read_spec.get("response") or {}
         response_schema = response_block.get("schema") or {}
-        records_ref = (response_block.get("records") or {}).get(
-            "ref", "response.body"
-        )
+        records_ref = (response_block.get("records") or {}).get("ref", "response.body")
 
         if records_ref == "response.body":
             node = response_schema
         elif records_ref.startswith("response.body."):
             node = response_schema
-            for field in records_ref[len("response.body."):].split("."):
+            for field in records_ref[len("response.body.") :].split("."):
                 properties = node.get("properties") if isinstance(node, dict) else None
                 if not isinstance(properties, dict) or field not in properties:
-                    available = sorted(properties.keys()) if isinstance(properties, dict) else []
+                    available = (
+                        sorted(properties.keys())
+                        if isinstance(properties, dict)
+                        else []
+                    )
                     raise ReadError(
                         f"endpoint {endpoint_id!r}: records.ref "
                         f"{records_ref!r} references field {field!r} that is "
@@ -320,10 +335,10 @@ class APIConnector(BaseConnector):
 
     def _build_base_params(
         self,
-        read_spec: Dict[str, Any],
+        read_spec: dict[str, Any],
         resolver: Resolver,
-        stream_filters: List[Dict[str, Any]],
-    ) -> tuple[Dict[str, Any], Dict[str, str]]:
+        stream_filters: list[dict[str, Any]],
+    ) -> tuple[dict[str, Any], dict[str, str]]:
         """Resolve declared param defaults and apply stream filter overrides.
 
         Defaults resolve through the full value-expression grammar
@@ -338,7 +353,7 @@ class APIConnector(BaseConnector):
         ``in`` location. Params declared ``controlled_by`` pagination or
         replication are left out of the defaults so their loops set them.
         """
-        placements: Dict[str, str] = {}
+        placements: dict[str, str] = {}
         declared = read_spec.get("params") or {}
         for name, decl in declared.items():
             if not isinstance(decl, dict):
@@ -346,7 +361,8 @@ class APIConnector(BaseConnector):
             placements[name] = decl.get("in") or "query"
 
         uncontrolled = {
-            n: d for n, d in declared.items()
+            n: d
+            for n, d in declared.items()
             if isinstance(d, dict) and not d.get("controlled_by")
         }
         param_values = resolve_param_defaults(uncontrolled, resolver)
@@ -366,13 +382,13 @@ class APIConnector(BaseConnector):
 
     async def _apply_incremental_replication(
         self,
-        params: Dict[str, Any],
-        read_spec: Dict[str, Any],
+        params: dict[str, Any],
+        read_spec: dict[str, Any],
         checkpoint: CheckpointStore,
         stream_name: str,
-        partition: Dict[str, Any],
-        cursor_field: Optional[str],
-        safety_window_seconds: Optional[int],
+        partition: dict[str, Any],
+        cursor_field: str | None,
+        safety_window_seconds: int | None,
     ) -> None:
         if not cursor_field:
             return
@@ -414,13 +430,13 @@ class APIConnector(BaseConnector):
 
     @staticmethod
     def _compute_effective_start(cursor: Any, safety_window_seconds: int) -> str:
-        from datetime import timedelta
+        from datetime import datetime, timedelta
 
         from dateutil.parser import isoparse
 
         cursor_str = str(cursor)
         try:
-            cursor_dt = isoparse(cursor_str)
+            cursor_dt: datetime = isoparse(cursor_str)
         except (ValueError, TypeError):
             try:
                 cursor_id = int(cursor_str)
@@ -444,16 +460,18 @@ class APIConnector(BaseConnector):
         *,
         full_url: str,
         method: str,
-        base_params: Dict[str, Any],
-        pagination: Dict[str, Any],
+        base_params: dict[str, Any],
+        pagination: dict[str, Any],
         batch_size: int,
         records_ref: str,
-        build_request: Callable[[Dict[str, Any]], tuple[Dict[str, Any], Any]],
-    ) -> AsyncIterator[List[Dict[str, Any]]]:
-        """Drive the pagination loop, materializing each page request via
-        ``build_request``: it maps the page's full param table to the
-        ``(query_params, body)`` actually sent, applying declared param
-        placement and per-page body binding."""
+        build_request: Callable[[dict[str, Any]], tuple[dict[str, Any], Any]],
+    ) -> AsyncIterator[list[dict[str, Any]]]:
+        """Drive the pagination loop, building each page request.
+
+        Each page request is built via ``build_request``: it maps the page's
+        full param table to the ``(query_params, body)`` actually sent,
+        applying declared param placement and per-page body binding.
+        """
         p_type = pagination.get("type")
         if not p_type:
             query, body = build_request(dict(base_params))
@@ -519,7 +537,7 @@ class APIConnector(BaseConnector):
                 or cursor_block.get("response_field")
                 or "next_cursor"
             )
-            cursor_token: Optional[str] = None
+            cursor_token: str | None = None
             while True:
                 params = dict(base_params)
                 if cursor_token:
@@ -545,7 +563,7 @@ class APIConnector(BaseConnector):
                 raise ReadError(
                     "keyset pagination requires keyset.from_record (record field)"
                 )
-            last_key: Optional[str] = None
+            last_key: str | None = None
             while True:
                 params = dict(base_params)
                 if last_key:
@@ -572,11 +590,11 @@ class APIConnector(BaseConnector):
         self,
         url: str,
         method: str,
-        params: Dict[str, Any],
+        params: dict[str, Any],
         records_ref: str,
         *,
         body: Any = None,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         _, records = await self._request_payload(
             url, method, params, records_ref, body=body
         )
@@ -586,15 +604,20 @@ class APIConnector(BaseConnector):
         self,
         url: str,
         method: str,
-        params: Dict[str, Any],
+        params: dict[str, Any],
         records_ref: str,
         *,
         body: Any = None,
-    ) -> tuple[Any, List[Dict[str, Any]]]:
+    ) -> tuple[Any, list[dict[str, Any]]]:
+        if self.session is None:
+            raise ReadError(
+                "APIConnector: HTTP request attempted before connect() opened "
+                "the session"
+            )
         if self.rate_limiter:
             await self.rate_limiter.acquire()
         logger.debug("API %s %s params=%s", method, url, params)
-        request_kwargs: Dict[str, Any] = {"params": params}
+        request_kwargs: dict[str, Any] = {"params": params}
         if body is not None:
             # Resolved ``operations.read.request.body``; only sent when the
             # endpoint declares one, so plain GET reads stay body-less.
@@ -603,7 +626,9 @@ class APIConnector(BaseConnector):
             if response.status != 200:
                 error_text = await response.text()
                 body_snippet = error_text[:500]
-                logger.error("API %d %s %s: %s", response.status, method, url, body_snippet)
+                logger.error(
+                    "API %d %s %s: %s", response.status, method, url, body_snippet
+                )
                 detail = (
                     f"API request failed: {method} {url} -> status {response.status}; "
                     f"params={params}; body[:500]={body_snippet!r}"
@@ -625,7 +650,9 @@ class APIConnector(BaseConnector):
     # Base interface stubs
     # ------------------------------------------------------------------
 
-    async def write_batch(self, batch: List[Dict[str, Any]], config: Dict[str, Any]):
+    async def write_batch(
+        self, batch: list[dict[str, Any]], config: dict[str, Any]
+    ) -> None:
         raise NotImplementedError("Source connector is read-only")
 
     def supports_incremental_read(self) -> bool:
@@ -640,7 +667,7 @@ class APIConnector(BaseConnector):
 # ----------------------------------------------------------------------
 
 
-def _extract_records(data: Any, records_ref: str) -> List[Dict[str, Any]]:
+def _extract_records(data: Any, records_ref: str) -> list[dict[str, Any]]:
     """Pull records out of a response body according to ``records_ref``.
 
     The ref is expressed as ``response.body[.<dotted.path>]`` per the
@@ -664,7 +691,7 @@ def _extract_records(data: Any, records_ref: str) -> List[Dict[str, Any]]:
     return []
 
 
-def _extract_next_cursor(data: Any, response_field_ref: str) -> Optional[str]:
+def _extract_next_cursor(data: Any, response_field_ref: str) -> str | None:
     """Walk a ``response.body[.<dotted.path>]`` ref to a string cursor."""
     if not isinstance(data, dict):
         return None

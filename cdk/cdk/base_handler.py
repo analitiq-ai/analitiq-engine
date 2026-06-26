@@ -6,7 +6,8 @@ delegates all data operations to these handlers.
 """
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any, List, Mapping, Optional
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any
 
 import pyarrow as pa
 
@@ -70,11 +71,11 @@ class BaseDestinationHandler(ABC):
         """
         _ = stream_endpoints  # no-op default
 
-    def set_statement_timeout(self, seconds: Optional[float]) -> None:
-        """Bound each destination statement to *seconds*, cancelling one that
-        blocks so the engine surfaces the real reason instead of a bare gRPC
-        ACK timeout (issue #231).
+    def set_statement_timeout(self, seconds: float | None) -> None:
+        """Bound each destination statement to *seconds*.
 
+        Cancelling a statement that blocks lets the engine surface the real
+        reason instead of a bare gRPC ACK timeout (issue #231).
         Called by the destination servicer on every schema handshake, before
         ``configure_schema``, with a value derived from the ack budget the
         sender stamped into the schema message (issue #234) — the bound
@@ -107,14 +108,14 @@ class BaseDestinationHandler(ABC):
         pass
 
     async def finalize_run(self, *, succeeded: bool) -> None:
-        """Run-completion hook, invoked from the destination server's
-        ``Shutdown`` handler while the handler is still connected.
+        """Release run-scoped state at the end of a run.
 
-        The worker process is torn down (SIGTERM) before ``disconnect`` could
-        run connection-bound cleanup, so anything needing the live connection
-        at end-of-run belongs here. Default is a no-op; handlers with
-        run-scoped state to release (e.g. a SQL connector pruning its
-        idempotency ledger) override it.
+        Invoked from the destination server's ``Shutdown`` handler while the
+        handler is still connected. The worker process is torn down (SIGTERM)
+        before ``disconnect`` could run connection-bound cleanup, so anything
+        needing the live connection at end-of-run belongs here. Default is a
+        no-op; handlers with run-scoped state to release (e.g. a SQL connector
+        pruning its idempotency ledger) override it.
 
         ``succeeded`` is the engine's terminal-run outcome: ``True`` only when
         the pipeline finished successfully. Cleanup that would break a resume
@@ -150,7 +151,7 @@ class BaseDestinationHandler(ABC):
         stream_id: str,
         batch_seq: int,
         record_batch: pa.RecordBatch,
-        record_ids: List[str],
+        record_ids: list[str],
         cursor: Cursor,
     ) -> BatchWriteResult:
         """Write a batch of records to the destination.
@@ -220,8 +221,7 @@ class BaseDestinationHandler(ABC):
 
     @property
     def supports_truncate(self) -> bool:
-        """Whether this destination supports the truncate-insert (full-refresh)
-        write mode.
+        """Report whether the truncate-insert (full-refresh) mode is supported.
 
         Only a destination that can truncate the target before insert
         advertises ``WRITE_MODE_TRUNCATE_INSERT``; the neutral base cannot, so

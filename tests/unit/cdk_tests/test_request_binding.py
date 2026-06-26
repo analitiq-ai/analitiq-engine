@@ -11,7 +11,11 @@ from __future__ import annotations
 
 import pytest
 
-from cdk.request_binding import bind_param_refs, bind_record_inputs, resolve_param_defaults
+from cdk.request_binding import (
+    bind_param_refs,
+    bind_record_inputs,
+    resolve_param_defaults,
+)
 
 
 class TestBindParamRefs:
@@ -32,9 +36,7 @@ class TestBindParamRefs:
         assert bind_param_refs(spec, {"search": "abc"}) == spec
 
     def test_binds_inside_lists(self):
-        out = bind_param_refs(
-            {"filters": [{"from_param": "a"}, "static"]}, {"a": 1}
-        )
+        out = bind_param_refs({"filters": [{"from_param": "a"}, "static"]}, {"a": 1})
         assert out == {"filters": [{"literal": 1}, "static"]}
 
     def test_siblings_next_to_marker_raise(self):
@@ -76,7 +78,12 @@ class TestBindRecordInputs:
 
     def test_binds_inside_function_inputs(self):
         out = bind_record_inputs(
-            {"token": {"function": "base64_encode", "input": {"from_input": "record.id"}}},
+            {
+                "token": {
+                    "function": "base64_encode",
+                    "input": {"from_input": "record.id"},
+                }
+            },
             record={"id": "abc"},
         )
         assert out == {

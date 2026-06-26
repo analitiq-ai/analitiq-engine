@@ -4,7 +4,6 @@ import logging
 import os
 import uuid
 from datetime import datetime, timezone
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +49,6 @@ def initialize_run_id() -> str:
     return run_id
 
 
-def get_run_id() -> Optional[str]:
+def get_run_id() -> str | None:
     """Get current run_id from environment."""
     return os.environ.get(RUN_ID_VAR)

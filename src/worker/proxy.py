@@ -14,15 +14,15 @@ the worker received its resolved values once, at launch, on stdin.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any
 
 import pyarrow as pa
 
 from cdk.base_handler import BaseDestinationHandler, BatchWriteResult
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.types import SUCCESS_STATUSES, AckStatus, Cursor, SchemaSpec, WriteMode
-
 from src.destination.server import SHUTDOWN_REASON_SUCCESS
 from src.grpc.client import DestinationGRPCClient
 from src.grpc.generated.analitiq.v1 import Cursor as ProtoCursor
@@ -44,21 +44,21 @@ class WorkerProxyHandler(BaseDestinationHandler):
     def __init__(self, *, connectors_dir: Path, connections_dir: Path) -> None:
         self._connectors_dir = connectors_dir
         self._connections_dir = connections_dir
-        self._endpoint_refs: Dict[str, Any] = {}
-        self._stream_endpoints: Dict[str, Any] = {}
-        self._handle: Optional[WorkerHandle] = None
-        self._control: Optional[DestinationGRPCClient] = None
+        self._endpoint_refs: dict[str, Any] = {}
+        self._stream_endpoints: dict[str, Any] = {}
+        self._handle: WorkerHandle | None = None
+        self._control: DestinationGRPCClient | None = None
         # One forwarded StreamRecords stream per stream_id. The client caches
         # its own start_stream params and self-heals after a transport teardown,
         # so the proxy no longer tracks schema config for rebuilds.
-        self._streams: Dict[str, DestinationGRPCClient] = {}
-        self._capabilities: Optional[Any] = None
+        self._streams: dict[str, DestinationGRPCClient] = {}
+        self._capabilities: Any | None = None
         self._label = "dest-worker"
         # Reason the most recent configure_schema returned False, forwarded
         # from the worker's SchemaAck. The destination service reads it so the
         # engine-facing ack carries the worker's real reason (issue #231)
         # instead of a generic "Schema configuration failed".
-        self.last_schema_rejection: Optional[str] = None
+        self.last_schema_rejection: str | None = None
         # Terminal-run outcome, set by ``finalize_run`` (called from the shell
         # server's Shutdown handler) and forwarded to the worker at teardown so
         # the worker only prunes its idempotency ledger on a successful run.
@@ -108,9 +108,7 @@ class WorkerProxyHandler(BaseDestinationHandler):
             # collapses to None). Tear the spawned worker down before surfacing
             # so a failed handshake never leaks the subprocess.
             await self._teardown()
-            raise ConnectionError(
-                f"{self._label}: GetCapabilities failed"
-            ) from e
+            raise ConnectionError(f"{self._label}: GetCapabilities failed") from e
         logger.info(
             "%s ready (connector_type=%s, upsert=%s)",
             self._label,
@@ -132,7 +130,9 @@ class WorkerProxyHandler(BaseDestinationHandler):
                 await client.disconnect()
             except Exception:
                 logger.warning(
-                    "%s: stream client %s close failed", self._label, stream_id,
+                    "%s: stream client %s close failed",
+                    self._label,
+                    stream_id,
                     exc_info=True,
                 )
         self._streams.clear()
@@ -145,7 +145,9 @@ class WorkerProxyHandler(BaseDestinationHandler):
             try:
                 await self._control.send_shutdown(reason=reason)
             except Exception:
-                logger.debug("%s: worker shutdown rpc failed", self._label, exc_info=True)
+                logger.debug(
+                    "%s: worker shutdown rpc failed", self._label, exc_info=True
+                )
             try:
                 await self._control.disconnect()
             except Exception:
@@ -183,8 +185,8 @@ class WorkerProxyHandler(BaseDestinationHandler):
         return True
 
     async def _open_stream(
-        self, stream_id: str, schema_config: Dict[str, Any]
-    ) -> Optional[DestinationGRPCClient]:
+        self, stream_id: str, schema_config: dict[str, Any]
+    ) -> DestinationGRPCClient | None:
         """Open a fresh forwarded StreamRecords stream and send its schema.
 
         Returns the connected client, or None if the worker channel did not
@@ -226,7 +228,7 @@ class WorkerProxyHandler(BaseDestinationHandler):
         stream_id: str,
         batch_seq: int,
         record_batch: pa.RecordBatch,
-        record_ids: List[str],
+        record_ids: list[str],
         cursor: Cursor,
     ) -> BatchWriteResult:
         client = self._streams.get(stream_id)
@@ -300,7 +302,8 @@ class WorkerProxyHandler(BaseDestinationHandler):
     @property
     def connector_type(self) -> str:
         if self._capabilities is not None:
-            return self._capabilities.connector_type
+            connector_type: str = self._capabilities.connector_type
+            return connector_type
         return "unknown"
 
     @property
@@ -334,11 +337,13 @@ class WorkerProxyHandler(BaseDestinationHandler):
     @property
     def max_batch_size(self) -> int:
         if self._capabilities is not None and self._capabilities.max_batch_size:
-            return self._capabilities.max_batch_size
+            max_batch_size: int = self._capabilities.max_batch_size
+            return max_batch_size
         return super().max_batch_size
 
     @property
     def max_batch_bytes(self) -> int:
         if self._capabilities is not None and self._capabilities.max_batch_bytes:
-            return self._capabilities.max_batch_bytes
+            max_batch_bytes: int = self._capabilities.max_batch_bytes
+            return max_batch_bytes
         return super().max_batch_bytes

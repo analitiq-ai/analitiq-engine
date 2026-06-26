@@ -93,9 +93,7 @@ class TestBuildWiresTlsThroughDialect:
             captured["dsn"] = dsn
             captured["connect_args"] = connect_args
             engine = MagicMock()
-            engine.connect = MagicMock(
-                side_effect=RuntimeError("stop before probe")
-            )
+            engine.connect = MagicMock(side_effect=RuntimeError("stop before probe"))
             engine.dispose = AsyncMock()
             return engine
 
@@ -156,7 +154,9 @@ class TestBuildWiresTlsThroughDialect:
             )
 
     def test_base_dialect_hook_is_unsupported(self):
-        with pytest.raises(UnsupportedDialectOperationError, match="build_tls_connect_arg"):
+        with pytest.raises(
+            UnsupportedDialectOperationError, match="build_tls_connect_arg"
+        ):
             SqlDialect().build_tls_connect_arg("require", None)
 
 
@@ -190,9 +190,7 @@ class _MultiArgDialect(SqlDialect):
 class TestTlsConnectArgsMapping:
     def test_default_wraps_singular_under_ssl_key(self):
         d = _FixtureDialect()
-        assert d.build_tls_connect_args("require", "PEM") == {
-            "ssl": "ssl<require:PEM>"
-        }
+        assert d.build_tls_connect_args("require", "PEM") == {"ssl": "ssl<require:PEM>"}
 
     def test_default_omits_key_when_singular_returns_none(self):
         assert _FixtureDialect().build_tls_connect_args("off", None) == {}
@@ -217,9 +215,7 @@ class TestTlsConnectArgsMapping:
             engine.dispose = MagicMock()
             return engine
 
-        with patch(
-            "cdk.transport_factory.create_engine", side_effect=fake_create
-        ):
+        with patch("cdk.transport_factory.create_engine", side_effect=fake_create):
             with pytest.raises(RuntimeError, match="stop"):
                 await build_sqlalchemy_from_spec(
                     {

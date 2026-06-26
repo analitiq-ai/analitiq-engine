@@ -34,7 +34,9 @@ class FakeEntryPoint:
 
 
 def _patch_entry_points(monkeypatch, by_group):
-    monkeypatch.setattr(reg, "_entry_points", lambda group: tuple(by_group.get(group, ())))
+    monkeypatch.setattr(
+        reg, "_entry_points", lambda group: tuple(by_group.get(group, ()))
+    )
 
 
 class TestResolution:
@@ -115,8 +117,12 @@ class TestEntryPointDiscovery:
     def test_discovers_and_registers_by_connector_id(self, monkeypatch):
         _patch_entry_points(
             monkeypatch,
-            {"grp": [FakeEntryPoint("postgres", lambda: _Postgres),
-                     FakeEntryPoint("mysql", lambda: _Mysql)]},
+            {
+                "grp": [
+                    FakeEntryPoint("postgres", lambda: _Postgres),
+                    FakeEntryPoint("mysql", lambda: _Mysql),
+                ]
+            },
         )
         r = ConnectorRegistry("source")
         r.register_default("database", _Generic)
@@ -131,8 +137,12 @@ class TestEntryPointDiscovery:
 
         _patch_entry_points(
             monkeypatch,
-            {"grp": [FakeEntryPoint("broken", boom),
-                     FakeEntryPoint("mysql", lambda: _Mysql)]},
+            {
+                "grp": [
+                    FakeEntryPoint("broken", boom),
+                    FakeEntryPoint("mysql", lambda: _Mysql),
+                ]
+            },
         )
         r = ConnectorRegistry("source")
         r.discover_entry_points("grp")  # must not raise
@@ -169,8 +179,11 @@ class TestBuildRegistries:
 
     def test_discover_disabled(self, monkeypatch):
         _patch_entry_points(
-            monkeypatch, {reg.SOURCE_GROUP: [FakeEntryPoint("postgres", lambda: _Postgres)]}
+            monkeypatch,
+            {reg.SOURCE_GROUP: [FakeEntryPoint("postgres", lambda: _Postgres)]},
         )
-        source, _ = build_registries(source_builtins={"database": _Generic}, discover=False)
+        source, _ = build_registries(
+            source_builtins={"database": _Generic}, discover=False
+        )
         assert source.connector_ids() == []  # entry point NOT pulled in
         assert source.resolve("database", "postgres") is _Generic

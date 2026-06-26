@@ -10,30 +10,28 @@ inverted at runtime — inverting would be lossy and ambiguous.
 
 from __future__ import annotations
 
-from typing import Any, Mapping, Pattern
+import re
+from collections.abc import Mapping
+from re import Pattern
+from typing import Any
 
-from .exceptions import (
-    InvalidTypeMapError,
-    UnmappedTypeError,
-)
+from .exceptions import InvalidTypeMapError, UnmappedTypeError
 from .rules import (
+    _SUBSTITUTION_TOKEN,
     TypeMapRule,
     WriteTypeMapRule,
-    _SUBSTITUTION_TOKEN,
     normalize_canonical_type,
     normalize_native_type,
 )
 
-import re
-
 
 class TypeMapper:
-    """Deterministic native → canonical matcher for a connector's type-map.
+    r"""Deterministic native → canonical matcher for a connector's type-map.
 
     Built from a list of :class:`TypeMapRule` instances. Rule order is
     authoritative: the author controls specificity by placing narrower
     rules above broader ones (e.g. ``TINYINT(1) → Boolean`` above
-    ``^TINYINT(\\(\\d+\\))?$ → Int8``). Instances are immutable and safe
+    ``^TINYINT(\(\d+\))?$ → Int8``). Instances are immutable and safe
     to cache per ``(slug, version)``.
     """
 
@@ -69,13 +67,15 @@ class TypeMapper:
         self._write_rules: tuple[WriteTypeMapRule, ...] = tuple(write_rules or ())
         self._write_compiled: list[Pattern[str] | None] = []
         self._exact_canonical: list[str | None] = []
-        for rule in self._write_rules:
-            if rule.match == "exact":
-                self._exact_canonical.append(normalize_canonical_type(rule.canonical))
+        for write_rule in self._write_rules:
+            if write_rule.match == "exact":
+                self._exact_canonical.append(
+                    normalize_canonical_type(write_rule.canonical)
+                )
                 self._write_compiled.append(None)
             else:
                 self._exact_canonical.append(None)
-                self._write_compiled.append(rule.compile_pattern())
+                self._write_compiled.append(write_rule.compile_pattern())
 
     @property
     def connector_slug(self) -> str:
@@ -94,7 +94,7 @@ class TypeMapper:
         return bool(self._write_rules)
 
     @classmethod
-    def compose(cls, primary: "TypeMapper", fallback: "TypeMapper") -> "TypeMapper":
+    def compose(cls, primary: TypeMapper, fallback: TypeMapper) -> TypeMapper:
         """Return a new mapper where *primary* rules take precedence per-type.
 
         Implemented by concatenating *primary*'s rules before *fallback*'s

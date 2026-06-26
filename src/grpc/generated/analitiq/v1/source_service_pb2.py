@@ -12,7 +12,6 @@ from google.protobuf.internal import builder as _builder
 _sym_db = _symbol_database.Default()
 
 
-from . import stream_pb2 as analitiq_dot_v1_dot_stream__pb2
 
 
 DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n analitiq/v1/source_service.proto\x12\x0b\x61nalitiq.v1\x1a\x18\x61nalitiq/v1/stream.proto\"k\n\x0bReadRequest\x12\x13\n\x0bstream_name\x18\x01 \x01(\t\x12\x16\n\x0epartition_json\x18\x02 \x01(\t\x12\x12\n\nbatch_size\x18\x03 \x01(\r\x12\x1b\n\x13initial_cursor_json\x18\x04 \x01(\t\"c\n\x0eReadBatchChunk\x12*\n\x06\x66ormat\x18\x01 \x01(\x0e\x32\x1a.analitiq.v1.PayloadFormat\x12\x0f\n\x07payload\x18\x02 \x01(\x0c\x12\x14\n\x0crecord_count\x18\x03 \x01(\r\"!\n\nCursorSave\x12\x13\n\x0b\x63ursor_json\x18\x01 \x01(\t\"G\n\tReadError\x12\x0f\n\x07message\x18\x01 \x01(\t\x12\x15\n\rdeterministic\x18\x02 \x01(\x08\x12\x12\n\nerror_type\x18\x03 \x01(\t\"<\n\x0cReadComplete\x12\x15\n\rtotal_records\x18\x01 \x01(\x04\x12\x15\n\rtotal_batches\x18\x02 \x01(\x04\"\xcf\x01\n\x0cReadResponse\x12,\n\x05\x62\x61tch\x18\x01 \x01(\x0b\x32\x1b.analitiq.v1.ReadBatchChunkH\x00\x12.\n\x0b\x63ursor_save\x18\x02 \x01(\x0b\x32\x17.analitiq.v1.CursorSaveH\x00\x12\'\n\x05\x65rror\x18\x03 \x01(\x0b\x32\x16.analitiq.v1.ReadErrorH\x00\x12-\n\x08\x63omplete\x18\x04 \x01(\x0b\x32\x19.analitiq.v1.ReadCompleteH\x00\x42\t\n\x07message2T\n\rSourceService\x12\x43\n\nReadStream\x12\x18.analitiq.v1.ReadRequest\x1a\x19.analitiq.v1.ReadResponse0\x01\x42\x13\n\x0f\x63om.analitiq.v1P\x01\x62\x06proto3')
