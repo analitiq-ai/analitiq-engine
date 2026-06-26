@@ -184,6 +184,11 @@ ensure_newline_before_comments = true
 
 [tool.mypy]
 python_version = "3.11"
+# The CDK is a sibling package (cdk/cdk/), consumed in-tree. Put cdk/ on the
+# type-check path so `import cdk` resolves to cdk/cdk (mirrors pytest's
+# pythonpath and Docker's PYTHONPATH=/app/cdk); without it every cdk import
+# reports import-not-found.
+mypy_path = "cdk"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true
@@ -259,8 +264,23 @@ exclude_lines = [
 show_missing = true
 skip_covered = true
 
+# Read by flake8 via the Flake8-pyproject plugin (stock flake8 ignores
+# pyproject.toml). The pre-commit flake8 hook also loads flake8-bugbear and
+# flake8-datetimez, which add the B/DTZ checks selected below.
 [tool.flake8]
 max-line-length = 88
+# Checks mapped to issue #265 Part A's recurring families:
+#   - silent failures: E722 bans bare `except:`; B904 (opt-in, selected below)
+#     keeps a re-raise's cause. Broad `except Exception: pass/return None`
+#     suppression is deliberately NOT gated -- the engine uses handled broad
+#     excepts, so that stays a review concern.
+#   - dead code: pyflakes F401/F811/F841 (on by default) flag unused imports,
+#     redefinitions and unused variables in changed files.
+#   - naive datetimes: DTZ (flake8-datetimez) bans datetime.now()/utcnow()
+#     without tzinfo.
+# B0xx (bugbear defaults) and DTZ come on once the plugins are present; E203/W503
+# stay ignored for black compatibility.
+extend-select = ["B904"]
 extend-ignore = ["E203", "W503"]
 exclude = [
     ".git",
@@ -271,4 +291,5 @@ exclude = [
     "dist",
     ".venv",
     "venv",
+    "src/grpc/generated",
 ]
