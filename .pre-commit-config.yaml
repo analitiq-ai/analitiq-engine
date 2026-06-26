@@ -1,6 +1,15 @@
 # Pre-commit configuration for Analitiq Stream
 # Install with: poetry run pre-commit install
 
+# This is a Python 3.11 project (pyproject `python = "^3.11"`; mypy and black
+# both target py311). Pin every hook to 3.11 so the gate does not run on a
+# runner's incidental newer interpreter: on 3.12, PEP 701 retokenizes f-string
+# internals, and flake8 6.0.0's pycodestyle then misreads `;`/`not in`/`:`
+# inside f-string literals as E702/E713/E231. Pinning keeps CI == local == the
+# project interpreter.
+default_language_version:
+  python: python3.11
+
 repos:
   # Code formatting
   - repo: https://github.com/psf/black
