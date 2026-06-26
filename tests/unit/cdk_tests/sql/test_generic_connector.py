@@ -16,7 +16,7 @@ the thin control-plane delegators:
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pyarrow as pa
 import pytest
@@ -117,7 +117,7 @@ class TestReadGuards:
             "cdk.sql.generic.SchemaContract"
         ):
             config = _endpoint_config(
-                replication={"method": "incremental", "cursor_field": ["deleted_at"]},
+                replication={"method": "incremental", "cursor_field": "deleted_at"},
             )
             with pytest.raises(ReadError, match="cursor_field 'deleted_at'"):
                 await _drain(connector, runtime, config, _checkpoint())
@@ -150,7 +150,7 @@ class TestReadGuards:
         ), patch("cdk.sql.generic.SchemaContract") as sc:
             sc.return_value.cast_arrow_batch.side_effect = lambda b: b
             config = _endpoint_config(
-                replication={"method": "incremental", "cursor_field": ["updated_at"]},
+                replication={"method": "incremental", "cursor_field": "updated_at"},
             )
             config["stream_source"]["selected_columns"] = ["*"]
             batches = await _drain(connector, runtime, config, _checkpoint())
@@ -170,7 +170,7 @@ class TestReadGuards:
             "cdk.sql.generic.SchemaContract"
         ):
             config = _endpoint_config(
-                replication={"method": "incremental", "cursor_field": ["modified_ts"]},
+                replication={"method": "incremental", "cursor_field": "modified_ts"},
             )
             config["stream_source"]["selected_columns"] = ["*"]
             with pytest.raises(ReadError, match="cursor_field 'modified_ts'"):
@@ -235,7 +235,7 @@ class TestReadAdbcBranch:
             sc.return_value.cast_arrow_batch.side_effect = lambda b: b
             config = _endpoint_config(
                 filters=[{"field": "status", "operator": "eq", "value": "active"}],
-                replication={"method": "incremental", "cursor_field": ["updated_at"]},
+                replication={"method": "incremental", "cursor_field": "updated_at"},
             )
             await _drain(connector, runtime, config, checkpoint)
 
@@ -290,7 +290,7 @@ class TestReadAdbcBranch:
         ), patch("cdk.sql.generic.SchemaContract") as sc:
             sc.return_value.cast_arrow_batch.side_effect = lambda b: b
             config = _endpoint_config(
-                replication={"method": "incremental", "cursor_field": ["updated_at"]},
+                replication={"method": "incremental", "cursor_field": "updated_at"},
             )
             await _drain(connector, runtime, config, checkpoint)
 
@@ -374,7 +374,7 @@ class TestReadAdbcBranchPaging:
             "cdk.sql.generic.SchemaContract"
         ):
             config = _endpoint_config(
-                replication={"method": "incremental", "cursor_field": ["updated_at"]},
+                replication={"method": "incremental", "cursor_field": "updated_at"},
                 database_pagination={"type": "offset", "order_by_field": "id"},
             )
             with pytest.raises(ReadError, match="conflicts with"):
@@ -395,7 +395,7 @@ class TestReadAdbcBranchPaging:
         ), patch("cdk.sql.generic.SchemaContract") as sc:
             sc.return_value.cast_arrow_batch.side_effect = lambda b: b
             config = _endpoint_config(
-                replication={"method": "incremental", "cursor_field": ["updated_at"]},
+                replication={"method": "incremental", "cursor_field": "updated_at"},
                 database_pagination={
                     "type": "offset",
                     "order_by_field": "updated_at",
@@ -482,7 +482,7 @@ class TestReadAdbcBranchPaging:
             sc.return_value.cast_arrow_batch.side_effect = lambda b: b
             config = _endpoint_config(
                 filters=[{"field": "status", "operator": "eq", "value": "active"}],
-                replication={"method": "incremental", "cursor_field": ["updated_at"]},
+                replication={"method": "incremental", "cursor_field": "updated_at"},
             )
             await _drain(connector, runtime, config, checkpoint, batch_size=2)
 
@@ -629,7 +629,7 @@ class TestReadSqlAlchemyBranch:
         ), patch("cdk.sql.generic.SchemaContract") as sc:
             sc.return_value.from_pylist.side_effect = lambda rows: rows
             config = _endpoint_config(
-                replication={"method": "incremental", "cursor_field": ["updated_at"]},
+                replication={"method": "incremental", "cursor_field": "updated_at"},
             )
             await _drain(
                 connector, runtime, config, _checkpoint(cursor={"cursor": "2024-01-02"})
@@ -704,3 +704,94 @@ class TestControlPlaneDelegators:
         ct.assert_awaited_once_with(
             runtime, "public", "orders", [], [], dialect=dialect
         )
+
+
+class TestPruneCommittedRuns:
+    """The within-run _batch_commits ledger is pruned per (schema, run_id) at
+    disconnect so it cannot grow unbounded."""
+
+    @pytest.mark.asyncio
+    async def test_prunes_each_run_keyed_by_run_id(self):
+        connector = GenericSQLConnector()
+        connector._adbc_only = True
+        connector._committed_runs = {("public", "run-1"), ("public", "run-2")}
+
+        executed: list[tuple[str, tuple[Any, ...]]] = []
+        connector._execute_adbc_dml_sync = lambda sql, params: executed.append(
+            (sql, params)
+        )
+
+        await connector.finalize_run(succeeded=True)
+
+        assert len(executed) == 2
+        for sql, params in executed:
+            assert sql.startswith("DELETE FROM")
+            assert connector.BATCH_COMMITS_TABLE in sql
+            assert "run_id" in sql
+            assert len(params) == 1  # keyed by run_id only
+        assert {params[0] for _, params in executed} == {"run-1", "run-2"}
+        # Cleared so a second disconnect is a no-op.
+        assert connector._committed_runs == set()
+
+    @pytest.mark.asyncio
+    async def test_prunes_via_sync_engine(self):
+        # Sync-driver connectors (e.g. redshift_connector) take the
+        # _sync_engine branch; assert it issues the run-scoped DELETE.
+        connector = GenericSQLConnector()
+        connector._adbc_only = False
+        connector._engine = None
+        connector._committed_runs = {("public", "run-1")}
+
+        executed: list[tuple[str, Any]] = []
+        conn = MagicMock()
+        conn.execute = MagicMock(
+            side_effect=lambda stmt, params: executed.append((str(stmt), params))
+        )
+        cm = MagicMock()
+        cm.__enter__ = MagicMock(return_value=conn)
+        cm.__exit__ = MagicMock(return_value=False)
+        sync_engine = MagicMock()
+        sync_engine.begin = MagicMock(return_value=cm)
+        connector._sync_engine = sync_engine
+
+        await connector.finalize_run(succeeded=True)
+
+        assert len(executed) == 1
+        sql, params = executed[0]
+        assert "DELETE FROM" in sql
+        assert connector.BATCH_COMMITS_TABLE in sql
+        assert params == {"run_id": "run-1"}
+        assert connector._committed_runs == set()
+
+    @pytest.mark.asyncio
+    async def test_prune_failure_is_swallowed(self):
+        connector = GenericSQLConnector()
+        connector._adbc_only = True
+        connector._committed_runs = {("public", "run-1")}
+
+        def boom(sql, params):
+            raise RuntimeError("delete failed")
+
+        connector._execute_adbc_dml_sync = boom
+
+        # Best-effort: a prune failure must not propagate out of teardown.
+        await connector.finalize_run(succeeded=True)
+        assert connector._committed_runs == set()
+
+    @pytest.mark.asyncio
+    async def test_does_not_prune_on_failed_run(self):
+        # A failed/aborted run keeps its ledger so a resume (same run_id) can
+        # still skip already-committed batches -- no DELETE is issued.
+        connector = GenericSQLConnector()
+        connector._adbc_only = True
+        connector._committed_runs = {("public", "run-1")}
+
+        executed: list[tuple[str, tuple[Any, ...]]] = []
+        connector._execute_adbc_dml_sync = lambda sql, params: executed.append(
+            (sql, params)
+        )
+
+        await connector.finalize_run(succeeded=False)
+
+        assert executed == []  # ledger left intact
+        assert connector._committed_runs == set()

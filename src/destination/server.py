@@ -56,6 +56,12 @@ logger = logging.getLogger(__name__)
 # Default configuration from environment
 DEFAULT_GRPC_PORT = int(os.getenv("GRPC_PORT", "50051"))
 
+# Shutdown reason that marks a terminal, fully-successful run -- the only case
+# where the destination prunes its idempotency ledger. Any other reason
+# (failure, abort, generic teardown) leaves the ledger intact so a resumed run
+# can still skip already-committed batches.
+SHUTDOWN_REASON_SUCCESS = "pipeline_completed"
+
 # A destination SQL statement is cancelled before the sender's gRPC ack
 # timeout, so the database returns the cancelled statement instead of the
 # engine abandoning the handshake with a bare "ACK timeout" (issue #231).
@@ -466,7 +472,27 @@ class DestinationServicer(DestinationServiceServicer):
     ) -> ShutdownAck:
         """Handle shutdown request from engine."""
         logger.info(f"Received shutdown request: reason={request.reason}")
-        self._server.signal_shutdown()
+        # Let the handler finalize the run while it is still connected -- the
+        # worker process is SIGTERM'd shortly after this acks, so any
+        # connection-dependent cleanup (e.g. pruning the idempotency ledger)
+        # must happen here, not at disconnect. finalize_run is a no-op on the
+        # base handler; only handlers that need it (SQL connectors) override.
+        # The reason carries the terminal-run outcome: cleanup that would break
+        # a resume of a failed run runs only when the run actually succeeded.
+        # Best-effort: a failure must not block the shutdown ack.
+        succeeded = request.reason == SHUTDOWN_REASON_SUCCESS
+        try:
+            await self.handler.finalize_run(succeeded=succeeded)
+        except Exception:
+            logger.warning("handler finalize_run failed during shutdown", exc_info=True)
+        finally:
+            # Always signal shutdown -- even if finalize_run raised or the
+            # handler was cancelled (the client's send_shutdown deadline can
+            # fire while the ledger prune is still running). CancelledError is
+            # not an Exception, so without this finally a cancelled finalize
+            # would skip signaling and leave the server running after the
+            # engine has finished.
+            self._server.signal_shutdown()
         return ShutdownAck(acknowledged=True, message="Shutting down")
 
     @staticmethod

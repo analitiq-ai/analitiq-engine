@@ -334,7 +334,9 @@ class TestBuildConfigDict:
 
         result = _build_config_dict(pipeline, [])
 
-        # Assert exactly the keys the engine reads back off the runtime dict.
-        assert result["runtime"]["batching"]["batch_size"] == 500
-        assert result["runtime"]["error_handling"]["strategy"] == "dlq"
-        assert result["runtime"]["buffer_size"] == 2048
+        # The typed RuntimeConfig is threaded through unchanged (no dict
+        # conversion); the engine reads attributes off it.
+        runtime = result["runtime"]
+        assert runtime.batching.batch_size == 500
+        assert runtime.error_handling.strategy == "dlq"
+        assert runtime.buffer_size == 2048

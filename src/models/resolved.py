@@ -184,26 +184,6 @@ class RuntimeConfig:
         if self.buffer_size <= 0:
             raise ValueError(f"buffer_size must be positive, got {self.buffer_size}")
 
-    def to_dict(self) -> dict[str, Any]:
-        """Serialise to the JSON-safe shape carried in the worker-boundary config.
-
-        The engine's stages still read ``runtime`` as a dict (threading the
-        typed model through them is tracked separately); this is the single
-        conversion point back to that contract shape.
-        """
-        return {
-            "batching": {
-                "batch_size": self.batching.batch_size,
-                "max_concurrent_batches": self.batching.max_concurrent_batches,
-            },
-            "error_handling": {
-                "strategy": self.error_handling.strategy,
-                "max_retries": self.error_handling.max_retries,
-                "retry_delay_seconds": self.error_handling.retry_delay_seconds,
-            },
-            "buffer_size": self.buffer_size,
-        }
-
 
 @dataclass(frozen=True)
 class PipelineConnections:

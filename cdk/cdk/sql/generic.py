@@ -303,6 +303,11 @@ class GenericSQLConnector(BaseDestinationHandler):
         # on shared mutable fields.
         self._streams: dict[str, _StreamState] = {}
 
+        # ``(schema_name, run_id)`` pairs this handler wrote ledger rows for,
+        # pruned from ``_batch_commits`` at run completion (the server's
+        # ``Shutdown`` hook -> ``finalize_run``), not at disconnect.
+        self._committed_runs: set[tuple[str, str]] = set()
+
         # Serializes CREATE TABLE statements across streams. Even when each
         # stream owns its own SQLAlchemy ``MetaData``, two concurrent
         # ``create_all`` calls can still race the database's catalog
@@ -636,6 +641,75 @@ class GenericSQLConnector(BaseDestinationHandler):
         logger.info("GenericSQLConnector disconnected")
         if cancelled is not None:
             raise cancelled
+
+    async def finalize_run(self, *, succeeded: bool) -> None:
+        """Run-completion hook: prune this handler's idempotency-ledger rows.
+
+        Called from the destination server's ``Shutdown`` handler while the
+        connection is still open -- NOT from ``disconnect``, because the
+        worker process is torn down (SIGTERM) before a disconnect-time
+        cleanup could finish.
+
+        Prunes only when ``succeeded`` is ``True``. A failed/aborted run may be
+        resumed with the same ``run_id``; deleting its ``_batch_commits`` rows
+        would let the resume re-ingest already-written batches (duplicates in
+        ``insert`` mode), so the ledger is left intact for any non-successful
+        outcome.
+
+        ``_batch_commits`` is a within-run retry/resume ledger -- it is only
+        ever read with the current ``run_id`` (a later run uses a different
+        id; a resume reuses the same one). On a successful run its rows are
+        dead weight, so prune per ``(schema, run_id)`` seen during writes to
+        bound the table's growth. Best-effort: a prune failure is logged and
+        swallowed (leftover rows are read only by their own run) and must
+        never fail the run's teardown.
+        """
+        if not succeeded:
+            # Failed/aborted run: keep the ledger so a resume (same run_id) can
+            # still skip already-committed batches.
+            self._committed_runs.clear()
+            return
+        run_id_col = self.dialect.quote_ident("run_id")
+        for schema_name, run_id in sorted(self._committed_runs):
+            qualified = self.dialect.quote_qualified(
+                schema_name, self.BATCH_COMMITS_TABLE
+            )
+            try:
+                if self._adbc_only:
+                    await asyncio.to_thread(
+                        self._execute_adbc_dml_sync,
+                        f"DELETE FROM {qualified} WHERE {run_id_col} = ?",  # nosec B608
+                        (run_id,),
+                    )
+                elif self._sync_engine is not None:
+                    await asyncio.to_thread(
+                        self._prune_run_on_sync_engine, qualified, run_id_col, run_id
+                    )
+                elif self._engine is not None:
+                    stmt = text(
+                        f"DELETE FROM {qualified} "  # nosec B608
+                        f"WHERE {run_id_col} = :run_id"
+                    )
+                    async with self._engine.begin() as conn:
+                        await conn.execute(stmt, {"run_id": run_id})
+            except Exception:
+                logger.warning(
+                    "Failed to prune _batch_commits for run %s in schema %s; "
+                    "leftover ledger rows are harmless (read only by their own run)",
+                    run_id,
+                    schema_name,
+                    exc_info=True,
+                )
+        self._committed_runs.clear()
+
+    def _prune_run_on_sync_engine(
+        self, qualified: str, run_id_col: str, run_id: str
+    ) -> None:
+        stmt = text(
+            f"DELETE FROM {qualified} WHERE {run_id_col} = :run_id"  # nosec B608
+        )
+        with self._require_sync_engine().begin() as conn:
+            conn.execute(stmt, {"run_id": run_id})
 
     async def configure_schema(self, schema_spec: SchemaSpec) -> bool:
         """Configure the destination from the preloaded contract endpoint.
@@ -1018,6 +1092,11 @@ class GenericSQLConnector(BaseDestinationHandler):
                 records_written=0,
                 failure_summary="Schema not configured",
             )
+
+        # Remember the run so its within-run ledger rows are pruned at run
+        # completion (finalize_run). The ledger is only ever read with the
+        # current run_id.
+        self._committed_runs.add((state.schema_name, run_id))
 
         try:
             # One deadline for the whole SQLAlchemy attempt - the idempotency
@@ -2299,9 +2378,9 @@ class GenericSQLConnector(BaseDestinationHandler):
             filters = self._build_filters(stream_source.get("filters") or [])
 
             replication = stream_source.get("replication") or {}
+            # cursor_field is a contract string|null (validated upstream), so no
+            # list normalization is needed.
             cursor_field = replication.get("cursor_field")
-            if isinstance(cursor_field, list):
-                cursor_field = cursor_field[0] if cursor_field else None
             replication_method = replication.get("method", "full_refresh")
 
             # Stream-declared page ordering (the contract's
@@ -2390,6 +2469,7 @@ class GenericSQLConnector(BaseDestinationHandler):
 
             builder = QueryBuilder(
                 driver,
+                registry_name=self.dialect.sqlalchemy_registry_name,
                 paging_order_fallback=self.dialect.paging_order_fallback,
             )
 
@@ -2559,6 +2639,7 @@ class GenericSQLConnector(BaseDestinationHandler):
         builder = QueryBuilder(
             driver,
             paramstyle="qmark",
+            registry_name=self.dialect.sqlalchemy_registry_name,
             quote_identifiers=True,
             inline_paging=True,
         )

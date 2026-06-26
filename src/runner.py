@@ -84,7 +84,10 @@ def _build_config_dict(
         "pipeline_id": pipeline_config.pipeline_id,
         "name": pipeline_config.display_name or pipeline_config.pipeline_id,
         "streams": streams,
-        "runtime": pipeline_config.runtime.to_dict(),
+        # The typed RuntimeConfig flows through the engine internals; it never
+        # crosses to the worker (only source_config is serialised there), so no
+        # dict conversion is needed.
+        "runtime": pipeline_config.runtime,
     }
 
 
@@ -258,6 +261,13 @@ class PipelineRunner:
         if not pipeline_id:
             raise ValueError("PIPELINE_ID environment variable is required")
         self.pipeline_id: str = pipeline_id
+        # Terminal run status ("success" | "partial" | "failed"), set in run()'s
+        # finally. Callers read it to decide ledger pruning: only a fully
+        # "success" run prunes. A "partial" run (some streams failed or records
+        # were dead-lettered) still returns True for exit-code purposes but must
+        # keep the ledger so a resume with the same RUN_ID skips committed
+        # batches.
+        self.status: str = "failed"
 
     async def run(self) -> bool:
         """Execute the pipeline. Returns True on success, False on failure."""
@@ -403,6 +413,10 @@ class PipelineRunner:
             return False
 
         finally:
+            # Publish the terminal status for callers (e.g. ledger pruning keys
+            # off "success" vs "partial"). On the exception path status stays
+            # "failed"; on the normal path it is "success" or "partial".
+            self.status = status
             end_time = datetime.now(timezone.utc)
             try:
                 save_pipeline_metrics(

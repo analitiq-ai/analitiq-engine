@@ -22,6 +22,7 @@ from ..grpc.client import (
 from ..grpc.cursor import compute_max_cursor, cursor_to_state_dict
 from ..grpc.generated.analitiq.v1 import AckStatus
 from ..models.metrics import PipelineMetrics
+from ..models.resolved import RuntimeConfig
 from ..shared.run_id import get_or_generate_run_id
 from ..state.circuit_breaker import CircuitBreaker
 from ..state.dead_letter_queue import DeadLetterQueue
@@ -115,7 +116,13 @@ class StreamingEngine:
         )
 
     async def stream_data(self, pipeline_config: dict[str, Any]) -> None:
-        """Process all streams concurrently with state management."""
+        """Process all streams concurrently with state management.
+
+        ``pipeline_config`` is the runner-assembled config dict; its
+        ``runtime`` entry is a typed ``RuntimeConfig`` (the engine's internal
+        contract since the typed-boundary refactor), not a raw mapping. Stages
+        read it through attribute access, so a dict here is a caller bug.
+        """
         pipeline_id = pipeline_config["pipeline_id"]
         streams = pipeline_config.get("streams", {})
 
@@ -317,7 +324,7 @@ class StreamingEngine:
                 "source": source_cfg,
                 "destination": destination_cfg,
                 "mapping": stream_config.get("mapping") or {},
-                "runtime": pipeline_config.get("runtime") or {},
+                "runtime": pipeline_config.get("runtime") or RuntimeConfig(),
             }
 
             # Start pipeline stages for this stream
@@ -652,9 +659,7 @@ class StreamingEngine:
         batch_seq = 0
         max_retries = self.max_retries
         retry_base_delay = self.retry_delay
-        error_strategy = (
-            (config.get("runtime") or {}).get("error_handling") or {}
-        ).get("strategy", "fail")
+        error_strategy = config["runtime"].error_handling.strategy
 
         try:
             while True:

@@ -4,7 +4,6 @@ Supports multiple database dialects (PostgreSQL, MySQL, etc.) and provides
 SQL injection protection through proper identifier quoting and value parameterization.
 """
 
-import importlib
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -112,23 +111,6 @@ class QueryConfig:
             self.filters = []
 
 
-# Third-party SQLAlchemy dialects loaded on demand. Each entry names the
-# importable module (whose import registers the dialect) and the registry
-# name to resolve. The registry name pins the DRIVER FLAVOUR of the
-# dialect when it matters for compiled paramstyle — mirroring how the
-# builtin postgres entry pins the asyncpg flavour. Redshift resolves the
-# ``redshift_connector`` flavour: the registry default is psycopg2-shaped
-# and compiles ``%(name)s`` named params, which redshift_connector
-# rejects ("Only %s and %% are supported in the query").
-_LAZY_DIALECT_PACKAGES: dict[str, tuple] = {
-    "snowflake": ("snowflake.sqlalchemy", "snowflake"),
-    "bigquery": ("sqlalchemy_bigquery", "bigquery"),
-    "redshift": ("sqlalchemy_redshift.dialect", "redshift.redshift_connector"),
-    "duckdb": ("duckdb_engine", "duckdb"),
-    "clickhouse": ("clickhouse_sqlalchemy", "clickhouse"),
-}
-
-
 # Built-in SQLAlchemy dialect factories. ``postgresql``/``postgres`` and
 # ``mysql``/``mariadb`` are aliases — same SA dialect underneath.
 #
@@ -147,14 +129,21 @@ _BUILTIN_DIALECT_FACTORIES: dict[str, Callable[[], SADialect]] = {
 }
 
 
-def _get_sqlalchemy_dialect(dialect: str, paramstyle: str | None = None) -> SADialect:
+def _get_sqlalchemy_dialect(
+    dialect: str,
+    paramstyle: str | None = None,
+    registry_name: str | None = None,
+) -> SADialect:
     """Resolve a dialect string to a SQLAlchemy dialect instance.
 
     Built-in dialects (postgresql, mysql, mssql, sqlite) resolve directly.
-    Third-party dialects (snowflake, bigquery, redshift, duckdb,
-    clickhouse) are loaded by importing the package that registers them
-    with SQLAlchemy's dialect registry; this lets the engine compile SQL
-    for those dialects without forcing the package into the base install.
+    Any other dialect is resolved through SQLAlchemy's dialect registry by
+    ``registry_name`` (falling back to ``dialect``): the connector ships the
+    SA dialect package, which registers itself via the ``sqlalchemy.dialects``
+    entry-point group, so ``registry.load(name)`` finds it once the connector
+    is installed. The engine pins no dialect packages and keeps no per-system
+    table — the driver *flavour* (e.g. Redshift's ``redshift.redshift_connector``)
+    lives on the connector's ``SqlDialect.sqlalchemy_registry_name``.
 
     ``paramstyle`` forces the dialect's bind-parameter style at
     construction (so ``dialect.positional`` is set consistently). The
@@ -165,8 +154,8 @@ def _get_sqlalchemy_dialect(dialect: str, paramstyle: str | None = None) -> SADi
     asyncpg driver understands, whereas the ADBC libpq driver wants bare
     ``?`` placeholders.
 
-    Raises ``ValueError`` for unknown dialects and ``ImportError`` (with
-    actionable text) when a third-party dialect package is missing.
+    Raises ``ImportError`` (with actionable text) when the dialect is not
+    registered — i.e. the connector's SQLAlchemy dialect package is missing.
     """
     dialect_lower = dialect.lower()
     kwargs: dict[str, Any] = {}
@@ -181,26 +170,20 @@ def _get_sqlalchemy_dialect(dialect: str, paramstyle: str | None = None) -> SADi
             return postgresql.dialect(**kwargs)
         return factory(**kwargs)
 
-    entry = _LAZY_DIALECT_PACKAGES.get(dialect_lower)
-    if entry is None:
-        raise ValueError(f"Unsupported dialect: {dialect}")
-    package, registry_name = entry
-
-    try:
-        importlib.import_module(package)
-    except ImportError as exc:
-        raise ImportError(
-            f"SQLAlchemy dialect for {dialect!r} requires the "
-            f"{package!r} package, which is not installed in this "
-            f"environment."
-        ) from exc
-
-    # The package's import side effect registers the dialect; resolve
-    # it via SQLAlchemy's URL machinery so we don't hard-code each
-    # third-party dialect's module path.
+    # Resolve through SQLAlchemy's registry. The connector's SqlDialect names
+    # the flavour via ``sqlalchemy_registry_name`` when it differs from the
+    # base dialect string; otherwise the dialect string itself is the name.
     from sqlalchemy.dialects import registry
+    from sqlalchemy.exc import NoSuchModuleError
 
-    cls = registry.load(registry_name)
+    name = registry_name or dialect_lower
+    try:
+        cls = registry.load(name)
+    except NoSuchModuleError as exc:
+        raise ImportError(
+            f"SQLAlchemy dialect {name!r} (for {dialect!r}) is not registered; "
+            f"install the connector's SQLAlchemy dialect package."
+        ) from exc
     dialect_instance: SADialect = cls(**kwargs)
     return dialect_instance
 
@@ -247,6 +230,7 @@ class QueryBuilder:
         dialect: str,
         *,
         paramstyle: str | None = None,
+        registry_name: str | None = None,
         quote_identifiers: bool = False,
         inline_paging: bool = False,
         paging_order_fallback: Callable[[], str | None] | None = None,
@@ -258,6 +242,10 @@ class QueryBuilder:
             paramstyle: Force the dialect's bind-parameter style (the
                 ADBC-only path passes ``"qmark"``); ``None`` keeps the
                 driver's native style.
+            registry_name: SQLAlchemy registry name for a non-builtin dialect
+                when its driver flavour differs from ``dialect`` (the
+                connector's ``SqlDialect.sqlalchemy_registry_name``); ``None``
+                resolves by the dialect string.
             quote_identifiers: Force quoting of every table/column/schema
                 name. The ADBC destination quotes all identifiers, so the
                 ADBC source must too: Snowflake folds unquoted names to
@@ -281,7 +269,9 @@ class QueryBuilder:
         self._quote_identifiers = quote_identifiers
         self._inline_paging = inline_paging
         self._paging_order_fallback = paging_order_fallback
-        self._sa_dialect = _get_sqlalchemy_dialect(dialect, paramstyle=paramstyle)
+        self._sa_dialect = _get_sqlalchemy_dialect(
+            dialect, paramstyle=paramstyle, registry_name=registry_name
+        )
 
     def _ident(self, name: str) -> Any:
         """Wrap *name* so SQLAlchemy quotes it when ``quote_identifiers``."""
@@ -522,63 +512,3 @@ class QueryBuilder:
         logger.debug(f"Parameters: {out_params}")
 
         return query_str, out_params
-
-
-def build_select_query(
-    dialect: str,
-    schema_name: str | None,
-    table_name: str,
-    config: dict[str, Any],
-    cursor_value: Any | None = None,
-) -> tuple[str, ParamsLike]:
-    """Build a SELECT query.
-
-    Args:
-        dialect: Database dialect string from config
-            (e.g., 'postgresql', 'postgres', 'mysql')
-        schema_name: Database schema name
-        table_name: Table name
-        config: Query configuration dictionary containing:
-            - columns: List of column names or ["*"]
-            - filters: List of filter dicts with field, op, value
-            - cursor_field: Field for incremental cursor
-            - cursor_value: Current cursor value (can also be passed directly)
-            - cursor_mode: 'inclusive' or 'exclusive'
-            - order_by: Field to order by
-            - order_direction: 'asc' or 'desc'
-            - limit: Max rows to return
-            - offset: Rows to skip
-        cursor_value: Override cursor value from config
-
-    Returns:
-        Tuple of (query_string, params) where params is a positional list
-        or a name->value dict depending on the dialect paramstyle.
-    """
-    builder = QueryBuilder(dialect)
-
-    # Parse filters from config
-    filters = []
-    for f in config.get("filters", []):
-        if isinstance(f, Filter):
-            filters.append(f)
-        elif isinstance(f, dict):
-            filters.append(Filter.from_dict(f))
-
-    # Build query config
-    query_config = QueryConfig(
-        schema_name=schema_name,
-        table_name=table_name,
-        columns=config.get("columns", ["*"]),
-        filters=filters,
-        cursor_field=config.get("cursor_field"),
-        cursor_value=cursor_value
-        if cursor_value is not None
-        else config.get("cursor_value"),
-        cursor_mode=config.get("cursor_mode", "inclusive"),
-        order_by=config.get("order_by"),
-        order_direction=config.get("order_direction", "asc"),
-        limit=config.get("limit"),
-        offset=config.get("offset"),
-    )
-
-    return builder.build_select_query(query_config)

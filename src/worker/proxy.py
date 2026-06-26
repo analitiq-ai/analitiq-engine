@@ -23,6 +23,7 @@ import pyarrow as pa
 from cdk.base_handler import BaseDestinationHandler, BatchWriteResult
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.types import SUCCESS_STATUSES, AckStatus, Cursor, SchemaSpec, WriteMode
+from src.destination.server import SHUTDOWN_REASON_SUCCESS
 from src.grpc.client import DestinationGRPCClient
 from src.grpc.generated.analitiq.v1 import Cursor as ProtoCursor
 from src.worker.shell import build_bootstrap
@@ -58,6 +59,12 @@ class WorkerProxyHandler(BaseDestinationHandler):
         # engine-facing ack carries the worker's real reason (issue #231)
         # instead of a generic "Schema configuration failed".
         self.last_schema_rejection: str | None = None
+        # Terminal-run outcome, set by ``finalize_run`` (called from the shell
+        # server's Shutdown handler) and forwarded to the worker at teardown so
+        # the worker only prunes its idempotency ledger on a successful run.
+        # Defaults to False so an abnormal teardown (no Shutdown received)
+        # leaves the ledger intact.
+        self._run_succeeded = False
 
     # ------------------------------------------------------------------
     # Contract endpoints registration (kept shell-side AND forwarded via
@@ -109,6 +116,11 @@ class WorkerProxyHandler(BaseDestinationHandler):
             self._capabilities.supports_upsert,
         )
 
+    async def finalize_run(self, *, succeeded: bool) -> None:
+        # The shell has no ledger of its own; just record the outcome so
+        # ``_teardown`` can forward it to the worker, which does the pruning.
+        self._run_succeeded = succeeded
+
     async def disconnect(self) -> None:
         await self._teardown()
 
@@ -125,8 +137,13 @@ class WorkerProxyHandler(BaseDestinationHandler):
                 )
         self._streams.clear()
         if self._control is not None:
+            # Forward the terminal-run outcome as the worker's shutdown reason
+            # so it prunes its idempotency ledger only on a successful run.
+            reason = (
+                SHUTDOWN_REASON_SUCCESS if self._run_succeeded else "shell_disconnect"
+            )
             try:
-                await self._control.send_shutdown(reason="shell_disconnect")
+                await self._control.send_shutdown(reason=reason)
             except Exception:
                 logger.debug(
                     "%s: worker shutdown rpc failed", self._label, exc_info=True

@@ -15,7 +15,12 @@ import pytest
 from src.engine.engine import StreamingEngine
 from src.engine.exceptions import StreamProcessingError
 from src.grpc.generated.analitiq.v1 import AckStatus
-from src.models.resolved import ReplicationConfig, ResolvedSource
+from src.models.resolved import (
+    ErrorHandlingConfig,
+    ReplicationConfig,
+    ResolvedSource,
+    RuntimeConfig,
+)
 from src.models.stream import EndpointRef
 from src.state.error_classification import (
     ErrorCode,
@@ -102,13 +107,11 @@ def sample_stream_config():
             "connector_type": "api",
             "host": "https://dest.example.com",
         },
-        "runtime": {
-            "error_handling": {
-                "strategy": "dlq",
-                "max_retries": 3,
-                "retry_delay": 1,
-            },
-        },
+        "runtime": RuntimeConfig(
+            error_handling=ErrorHandlingConfig(
+                strategy="dlq", max_retries=3, retry_delay_seconds=1
+            ),
+        ),
     }
 
 
@@ -595,7 +598,9 @@ class TestEngineFatalFailureHandling:
         stream_dlq = DeadLetterQueue(f"{temp_dir}/dlq")
 
         config = dict(sample_stream_config)
-        config["runtime"] = {"error_handling": {"strategy": "fail"}}
+        config["runtime"] = RuntimeConfig(
+            error_handling=ErrorHandlingConfig(strategy="fail")
+        )
         engine.retry_delay = 0.01
 
         stream_metrics = {
@@ -651,7 +656,9 @@ class TestEngineFatalFailureHandling:
         stream_dlq = DeadLetterQueue(f"{temp_dir}/dlq")
 
         config = dict(sample_stream_config)
-        config["runtime"] = {"error_handling": {"strategy": "skip"}}
+        config["runtime"] = RuntimeConfig(
+            error_handling=ErrorHandlingConfig(strategy="skip")
+        )
         engine.retry_delay = 0.01
 
         stream_metrics = {
@@ -714,7 +721,13 @@ class TestEngineFatalFailureHandling:
         stream_dlq = DeadLetterQueue(f"{temp_dir}/dlq")
 
         config = dict(sample_stream_config)
-        config["runtime"] = {"error_handling": {"strategy": "bogus"}}
+        # ErrorHandlingConfig validates the strategy enum at construction, so a
+        # bogus value can only reach the engine if that typed boundary were
+        # bypassed. Force it (frozen-bypass) to prove the load stage's defensive
+        # `else: raise` still fails loud rather than silently completing.
+        runtime = RuntimeConfig(error_handling=ErrorHandlingConfig(strategy="fail"))
+        object.__setattr__(runtime.error_handling, "strategy", "bogus")
+        config["runtime"] = runtime
         engine.retry_delay = 0.01
 
         stream_metrics = {

@@ -65,25 +65,38 @@ async def run_engine_mode() -> bool:
     from src.runner import PipelineRunner
 
     success = False
+    fully_successful = False
     try:
         runner = PipelineRunner()
         success = await runner.run()
+        # run() returns True for both "success" and "partial" runs (a partial
+        # run exits 0). Pruning keys off the stricter status: only a fully
+        # successful run prunes the ledger.
+        fully_successful = runner.status == "success"
     except Exception as e:
         logger.error(f"Engine failed: {e}", exc_info=True)
     finally:
-        # Always send shutdown to destination after pipeline completes
-        await _send_shutdown_to_destination()
+        # Always send shutdown to destination after pipeline completes; the
+        # outcome is carried so the destination prunes its idempotency ledger
+        # only on a FULLY successful run. A partial run (some streams failed or
+        # records were dead-lettered) must NOT prune -- a resume with the same
+        # RUN_ID still needs the ledger to skip already-committed batches.
+        await _send_shutdown_to_destination(fully_successful)
 
     return success
 
 
-async def _send_shutdown_to_destination() -> None:
+async def _send_shutdown_to_destination(succeeded: bool) -> None:
     """
     Send shutdown signal to destination container.
 
     This signals the destination gRPC server to shut down gracefully,
-    allowing both engine and destination containers to exit cleanly.
+    allowing both engine and destination containers to exit cleanly. The
+    ``succeeded`` flag is carried as the shutdown reason so the destination
+    prunes its idempotency ledger only on a fully successful run.
     """
+    from src.destination.server import SHUTDOWN_REASON_SUCCESS
+
     grpc_host = os.getenv("DESTINATION_GRPC_HOST")
     if not grpc_host:
         logger.debug("No DESTINATION_GRPC_HOST set, skipping shutdown signal")
@@ -100,7 +113,8 @@ async def _send_shutdown_to_destination() -> None:
     try:
         connected = await client.connect(max_connect_retries=1, retry_delay_seconds=1.0)
         if connected:
-            await client.send_shutdown("pipeline_completed")
+            reason = SHUTDOWN_REASON_SUCCESS if succeeded else "pipeline_failed"
+            await client.send_shutdown(reason)
         else:
             logger.warning("Could not connect to destination to send shutdown signal")
     except Exception as e:

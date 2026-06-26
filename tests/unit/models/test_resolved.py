@@ -70,33 +70,15 @@ class TestRuntimeConfig:
         with pytest.raises(ValueError, match="buffer_size must be positive"):
             RuntimeConfig(buffer_size=0)
 
-    def test_to_dict_round_trips_nested_shape(self):
+    def test_composes_typed_sub_configs(self):
         cfg = RuntimeConfig(
-            batching=BatchingConfig(batch_size=250, max_concurrent_batches=7),
-            error_handling=ErrorHandlingConfig(
-                strategy="dlq", max_retries=1, retry_delay_seconds=2
-            ),
+            batching=BatchingConfig(batch_size=250),
+            error_handling=ErrorHandlingConfig(strategy="dlq"),
             buffer_size=4096,
         )
-        assert cfg.to_dict() == {
-            "batching": {"batch_size": 250, "max_concurrent_batches": 7},
-            "error_handling": {
-                "strategy": "dlq",
-                "max_retries": 1,
-                "retry_delay_seconds": 2,
-            },
-            "buffer_size": 4096,
-        }
-
-    def test_to_dict_matches_engine_strategy_accessor(self):
-        # Guards the wire contract: the engine reads the strategy via
-        # (runtime).get("error_handling").get("strategy") at engine.py:611-613.
-        # If to_dict()'s keys ever drift, the engine would silently default to
-        # "fail"; assert through the exact accessor the engine uses.
-        runtime = RuntimeConfig(error_handling=ErrorHandlingConfig(strategy="skip"))
-        runtime_dict = runtime.to_dict()
-        strategy = (runtime_dict.get("error_handling") or {}).get("strategy", "fail")
-        assert strategy == "skip"
+        assert cfg.batching.batch_size == 250
+        assert cfg.error_handling.strategy == "dlq"
+        assert cfg.buffer_size == 4096
 
 
 class TestPipelineConnections:
