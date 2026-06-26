@@ -116,7 +116,13 @@ class StreamingEngine:
         )
 
     async def stream_data(self, pipeline_config: dict[str, Any]) -> None:
-        """Process all streams concurrently with state management."""
+        """Process all streams concurrently with state management.
+
+        ``pipeline_config`` is the runner-assembled config dict; its
+        ``runtime`` entry is a typed ``RuntimeConfig`` (the engine's internal
+        contract since the typed-boundary refactor), not a raw mapping. Stages
+        read it through attribute access, so a dict here is a caller bug.
+        """
         pipeline_id = pipeline_config["pipeline_id"]
         streams = pipeline_config.get("streams", {})
 

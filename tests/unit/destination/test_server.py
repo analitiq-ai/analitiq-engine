@@ -9,6 +9,7 @@ or drops the prefix would ship silently without this test.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from unittest.mock import AsyncMock, MagicMock
 
@@ -661,3 +662,19 @@ class TestShutdownFinalizeRun:
 
         server.signal_shutdown.assert_called_once()
         assert ack.acknowledged is True
+
+    @pytest.mark.asyncio
+    async def test_finalize_cancelled_still_signals_shutdown(self):
+        # The client's send_shutdown deadline can fire while the prune is still
+        # running, cancelling this handler. CancelledError is not an Exception,
+        # so without the finally signal_shutdown would be skipped and the server
+        # would keep running after the engine has finished.
+        handler = MagicMock()
+        handler.finalize_run = AsyncMock(side_effect=asyncio.CancelledError())
+        server = MagicMock()
+        servicer = DestinationServicer(handler, server=server)
+
+        with pytest.raises(asyncio.CancelledError):
+            await servicer.Shutdown(MagicMock(reason="pipeline_completed"), MagicMock())
+
+        server.signal_shutdown.assert_called_once()

@@ -485,7 +485,14 @@ class DestinationServicer(DestinationServiceServicer):
             await self.handler.finalize_run(succeeded=succeeded)
         except Exception:
             logger.warning("handler finalize_run failed during shutdown", exc_info=True)
-        self._server.signal_shutdown()
+        finally:
+            # Always signal shutdown -- even if finalize_run raised or the
+            # handler was cancelled (the client's send_shutdown deadline can
+            # fire while the ledger prune is still running). CancelledError is
+            # not an Exception, so without this finally a cancelled finalize
+            # would skip signaling and leave the server running after the
+            # engine has finished.
+            self._server.signal_shutdown()
         return ShutdownAck(acknowledged=True, message="Shutting down")
 
     @staticmethod

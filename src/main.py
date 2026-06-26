@@ -65,16 +65,23 @@ async def run_engine_mode() -> bool:
     from src.runner import PipelineRunner
 
     success = False
+    fully_successful = False
     try:
         runner = PipelineRunner()
         success = await runner.run()
+        # run() returns True for both "success" and "partial" runs (a partial
+        # run exits 0). Pruning keys off the stricter status: only a fully
+        # successful run prunes the ledger.
+        fully_successful = runner.status == "success"
     except Exception as e:
         logger.error(f"Engine failed: {e}", exc_info=True)
     finally:
         # Always send shutdown to destination after pipeline completes; the
         # outcome is carried so the destination prunes its idempotency ledger
-        # only on a successful run (a failed run may be resumed).
-        await _send_shutdown_to_destination(success)
+        # only on a FULLY successful run. A partial run (some streams failed or
+        # records were dead-lettered) must NOT prune -- a resume with the same
+        # RUN_ID still needs the ledger to skip already-committed batches.
+        await _send_shutdown_to_destination(fully_successful)
 
     return success
 
