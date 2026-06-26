@@ -18,16 +18,16 @@ import pytest
 
 from cdk.sql.exceptions import ReadError
 from src.grpc import DEFAULT_MAX_MESSAGE_SIZE
-from src.state.error_classification import ErrorCode, FailureStage, read_failure_tag
-from src.worker.readable import WorkerReadable
-from src.worker.source_service import _encode_arrow_ipc
 from src.grpc.generated.analitiq.v1.source_service_pb2 import (
     CursorSave,
     ReadBatchChunk,
     ReadComplete,
-    ReadError as ReadErrorMsg,
-    ReadResponse,
 )
+from src.grpc.generated.analitiq.v1.source_service_pb2 import ReadError as ReadErrorMsg
+from src.grpc.generated.analitiq.v1.source_service_pb2 import ReadResponse
+from src.state.error_classification import ErrorCode, FailureStage, read_failure_tag
+from src.worker.readable import WorkerReadable
+from src.worker.source_service import _encode_arrow_ipc
 
 
 class _FakeCheckpoint:
@@ -142,9 +142,7 @@ class TestWorkerReadable:
 
         # Outbound: the initial datetime cursor is tagged, not str()-ed.
         sent = json.loads(captured_requests[0].initial_cursor_json)
-        assert sent == {
-            "cursor": {"__type__": "datetime", "value": ts.isoformat()}
-        }
+        assert sent == {"cursor": {"__type__": "datetime", "value": ts.isoformat()}}
         # Inbound: the relayed save lands in the store as a datetime again.
         assert checkpoint.saved == [{"cursor": ts}]
         assert isinstance(checkpoint.saved[0]["cursor"], datetime)
@@ -185,7 +183,9 @@ class TestWorkerReadable:
             responses = [
                 ReadResponse(
                     error=ReadErrorMsg(
-                        message=message, deterministic=True, error_type=error_type,
+                        message=message,
+                        deterministic=True,
+                        error_type=error_type,
                     )
                 )
             ]
@@ -237,7 +237,9 @@ class TestWorkerReadable:
         with (
             patch("src.worker.readable.build_bootstrap", AsyncMock(return_value={})),
             patch("src.worker.readable.spawn_worker", AsyncMock(return_value=handle)),
-            patch("src.worker.readable.grpc.aio.insecure_channel", return_value=channel),
+            patch(
+                "src.worker.readable.grpc.aio.insecure_channel", return_value=channel
+            ),
             patch("src.worker.readable.SourceServiceStub", return_value=stub),
         ):
             with pytest.raises(RuntimeError):

@@ -19,12 +19,16 @@ repos:
   # Linting. flake8-bugbear adds B-checks (B904: re-raise without `from`);
   # flake8-datetimez bans naive datetime.now()/utcnow(); Flake8-pyproject lets
   # flake8 read its [tool.flake8] config from pyproject.toml (issue #265 A).
+  # Docstring (D-code) enforcement is intentionally NOT bundled here: the
+  # dedicated pydocstyle hook below is the single source for it and honors
+  # [tool.pydocstyle] (which the flake8-docstrings plugin would ignore, so
+  # bundling it would re-impose the missing-docstring mandate the project opted
+  # out of). Define-once: docstring policy lives in one place.
   - repo: https://github.com/pycqa/flake8
     rev: 6.0.0
     hooks:
       - id: flake8
         additional_dependencies:
-          - flake8-docstrings
           - flake8-bugbear
           - flake8-datetimez
           - Flake8-pyproject
@@ -37,7 +41,11 @@ repos:
   # still flagged. `poetry run mypy src/` stays the full strict run;
   # mypy_path=cdk (pyproject) resolves the in-tree cdk package for both.
   - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.5.1
+    # Pinned to match the project's own mypy (pyproject dev dep mypy = "^1.5.0"
+    # resolves to 1.17.x); an older hook version emits different error codes
+    # (import vs import-untyped) and stale unreachable/decorator false
+    # positives, so the hook and `poetry run mypy src/` would disagree.
+    rev: v1.17.1
     hooks:
       - id: mypy
         args: ["--follow-imports=silent"]
@@ -46,7 +54,11 @@ repos:
           - types-PyYAML
           - pydantic
           - sqlalchemy
-          - pyarrow
+          # Pinned to the project's pyarrow (pyproject: ^12.0.0). Newer pyarrow
+          # ships py.typed with incomplete pyarrow.compute stubs, which would
+          # raise attr-defined on pc.strptime/pc.assume_timezone that resolve
+          # fine at the pinned version; matching keeps hook == `poetry run mypy`.
+          - pyarrow==12.0.1
           - aiohttp
           - aiohttp-retry
           - aiofiles
@@ -58,12 +70,17 @@ repos:
           - grpcio
         exclude: ^(tests/|docs/)
 
-  # Security linting
+  # Security linting. Config lives in [tool.bandit] in pyproject.toml (read via
+  # the toml extra); the old INI-format .bandit file is not valid for bandit's
+  # -c flag, which expects YAML/TOML. pbr is pinned because bandit imports
+  # stevedore, which needs pbr at runtime (a bare install can resolve without
+  # it and then crash on import).
   - repo: https://github.com/PyCQA/bandit
     rev: 1.7.5
     hooks:
       - id: bandit
-        args: ["-c", ".bandit"]
+        args: ["-c", "pyproject.toml"]
+        additional_dependencies: ["bandit[toml]", "pbr"]
         exclude: ^tests/
 
   # General pre-commit hooks

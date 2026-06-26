@@ -73,9 +73,7 @@ class TestParseBootstrap:
         with pytest.raises(ValueError, match="bootstrap.role"):
             parse_bootstrap(_minimal_raw(role=role))
 
-    @pytest.mark.parametrize(
-        "key", ["kind", "connector_id", "uds_path", "connection"]
-    )
+    @pytest.mark.parametrize("key", ["kind", "connector_id", "uds_path", "connection"])
     def test_missing_required_field_rejected(self, key):
         raw = _minimal_raw()
         del raw[key]

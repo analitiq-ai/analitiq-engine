@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import IntEnum, StrEnum
-from typing import Any, Optional, Protocol, Tuple, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 
 class AckStatus(IntEnum):
@@ -28,10 +28,10 @@ class AckStatus(IntEnum):
     """
 
     ACK_STATUS_UNSPECIFIED = 0
-    ACK_STATUS_SUCCESS = 1            # All records written, cursor advanced
+    ACK_STATUS_SUCCESS = 1  # All records written, cursor advanced
     ACK_STATUS_ALREADY_COMMITTED = 2  # Idempotent replay, batch already committed
     ACK_STATUS_RETRYABLE_FAILURE = 3  # No commit occurred, safe to retry whole batch
-    ACK_STATUS_FATAL_FAILURE = 4      # No commit occurred, do not retry, send to DLQ
+    ACK_STATUS_FATAL_FAILURE = 4  # No commit occurred, do not retry, send to DLQ
 
 
 class WriteMode(IntEnum):
@@ -44,8 +44,8 @@ class WriteMode(IntEnum):
     """
 
     WRITE_MODE_UNSPECIFIED = 0
-    WRITE_MODE_INSERT = 1            # Insert only, fail on conflict
-    WRITE_MODE_UPSERT = 2            # Upsert (insert or update on conflict)
+    WRITE_MODE_INSERT = 1  # Insert only, fail on conflict
+    WRITE_MODE_UPSERT = 2  # Upsert (insert or update on conflict)
     WRITE_MODE_TRUNCATE_INSERT = 3  # Truncate table before insert (full refresh)
 
 
@@ -108,8 +108,8 @@ class BatchWriteResult:
 
     status: AckStatus
     records_written: int
-    committed_cursor: Optional[Cursor] = None
-    failed_record_ids: Tuple[str, ...] = ()
+    committed_cursor: Cursor | None = None
+    failed_record_ids: tuple[str, ...] = ()
     failure_summary: str = ""
 
     def __post_init__(self) -> None:
@@ -126,9 +126,7 @@ class BatchWriteResult:
         # Accept any iterable but store a tuple, so the frozen result is
         # immutable all the way down (a list binding would still allow
         # in-place mutation).
-        object.__setattr__(
-            self, "failed_record_ids", tuple(self.failed_record_ids)
-        )
+        object.__setattr__(self, "failed_record_ids", tuple(self.failed_record_ids))
 
     @property
     def success(self) -> bool:
@@ -162,11 +160,13 @@ class CheckpointStore(Protocol):
 
     async def get_cursor(
         self, stream_name: str, partition: dict[str, Any] | None = None
-    ) -> dict[str, Any] | None: ...
+    ) -> dict[str, Any] | None:
+        ...
 
     async def save_cursor(
         self,
         stream_name: str,
         partition: dict[str, Any] | None,
         cursor: dict[str, Any],
-    ) -> None: ...
+    ) -> None:
+        ...

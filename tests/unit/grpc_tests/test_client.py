@@ -1,14 +1,11 @@
 """Unit tests for gRPC client."""
 
-import grpc
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from src.grpc.client import (
-    DestinationGRPCClient,
-    BatchResult,
-    generate_record_id,
-)
+import pytest
+
+import grpc
+from src.grpc.client import BatchResult, DestinationGRPCClient, generate_record_id
 from src.grpc.generated.analitiq.v1 import AckStatus
 
 
@@ -206,9 +203,9 @@ class TestConnectRetryLogLevels:
         mock_stub = MagicMock()
         mock_stub.HealthCheck = AsyncMock(side_effect=self._unavailable_error())
 
-        with patch("src.grpc.client.grpc_aio.insecure_channel"), \
-             patch("src.grpc.client.DestinationServiceStub", return_value=mock_stub), \
-             patch("src.grpc.client.logger") as mock_logger:
+        with patch("src.grpc.client.grpc_aio.insecure_channel"), patch(
+            "src.grpc.client.DestinationServiceStub", return_value=mock_stub
+        ), patch("src.grpc.client.logger") as mock_logger:
             result = await client.connect(
                 max_connect_retries=1,
                 retry_delay_seconds=0.0,
@@ -229,9 +226,9 @@ class TestConnectRetryLogLevels:
         mock_stub = MagicMock()
         mock_stub.HealthCheck = AsyncMock(side_effect=self._unavailable_error())
 
-        with patch("src.grpc.client.grpc_aio.insecure_channel"), \
-             patch("src.grpc.client.DestinationServiceStub", return_value=mock_stub), \
-             patch("src.grpc.client.logger") as mock_logger:
+        with patch("src.grpc.client.grpc_aio.insecure_channel"), patch(
+            "src.grpc.client.DestinationServiceStub", return_value=mock_stub
+        ), patch("src.grpc.client.logger") as mock_logger:
             result = await client.connect(
                 max_connect_retries=3,
                 retry_delay_seconds=0.0,
@@ -270,9 +267,9 @@ class TestConnectRetryLogLevels:
             side_effect=[self._unavailable_error(), serving]
         )
 
-        with patch("src.grpc.client.grpc_aio.insecure_channel"), \
-             patch("src.grpc.client.DestinationServiceStub", return_value=mock_stub), \
-             patch("src.grpc.client.logger") as mock_logger:
+        with patch("src.grpc.client.grpc_aio.insecure_channel"), patch(
+            "src.grpc.client.DestinationServiceStub", return_value=mock_stub
+        ), patch("src.grpc.client.logger") as mock_logger:
             result = await client.connect(
                 max_connect_retries=3,
                 retry_delay_seconds=0.0,
@@ -300,9 +297,9 @@ class TestConnectRetryLogLevels:
         mock_stub = MagicMock()
         mock_stub.HealthCheck = AsyncMock(return_value=not_serving)
 
-        with patch("src.grpc.client.grpc_aio.insecure_channel"), \
-             patch("src.grpc.client.DestinationServiceStub", return_value=mock_stub), \
-             patch("src.grpc.client.logger") as mock_logger:
+        with patch("src.grpc.client.grpc_aio.insecure_channel"), patch(
+            "src.grpc.client.DestinationServiceStub", return_value=mock_stub
+        ), patch("src.grpc.client.logger") as mock_logger:
             result = await client.connect(
                 max_connect_retries=1,
                 retry_delay_seconds=0.0,
@@ -326,6 +323,7 @@ class TestClientPayloadEncoding:
         decodes them together.
         """
         import io
+
         import pyarrow as pa
 
         batch = pa.RecordBatch.from_pylist(
@@ -386,8 +384,7 @@ class TestClientSchemaBuilder:
         client = DestinationGRPCClient(timeout_seconds=300)
         schema_msg = client._build_schema_message(
             "s",
-            {"write_mode": "upsert", "schema_version": 1,
-             "ack_timeout_seconds": 30},
+            {"write_mode": "upsert", "schema_version": 1, "ack_timeout_seconds": 30},
         )
         assert schema_msg.ack_timeout_seconds == 30
 
@@ -398,8 +395,7 @@ class TestClientSchemaBuilder:
         client = DestinationGRPCClient(timeout_seconds=30)
         schema_msg = client._build_schema_message(
             "s",
-            {"write_mode": "upsert", "schema_version": 1,
-             "ack_timeout_seconds": 300},
+            {"write_mode": "upsert", "schema_version": 1, "ack_timeout_seconds": 300},
         )
         assert schema_msg.ack_timeout_seconds == 30
 
@@ -417,6 +413,7 @@ class TestStreamTaskFailurePropagation:
     @pytest.mark.asyncio
     async def test_writer_exception_surfaces_as_fatal(self):
         import asyncio
+
         import pyarrow as pa
 
         from src.grpc.client import _STREAM_TASK_FAILED
@@ -453,6 +450,7 @@ class TestStreamTaskFailurePropagation:
         actionable message — not 'NoneType: None' — so operators can
         distinguish premature peer close from in-task errors."""
         import asyncio
+
         import pyarrow as pa
 
         from src.grpc.client import _STREAM_TASK_FAILED
@@ -552,6 +550,7 @@ class TestAckTimeoutAndTeardown:
         pushing onto a zombie stream.
         """
         import asyncio
+
         import pyarrow as pa
 
         from src.grpc.generated.analitiq.v1 import Cursor
@@ -597,6 +596,7 @@ class TestAckTimeoutAndTeardown:
         failure_summary — this is how the 'Too many pings' RPC error surfaces.
         """
         import asyncio
+
         import pyarrow as pa
 
         from src.grpc.generated.analitiq.v1 import Cursor
@@ -655,7 +655,7 @@ class TestAckTimeoutAndTeardown:
 
     @pytest.mark.asyncio
     async def test_wait_with_heartbeat_raises_timeout_on_empty_queue(self):
-        """_wait_with_heartbeat raises asyncio.TimeoutError when self.timeout expires."""
+        """_wait_with_heartbeat raises asyncio.TimeoutError when timeout expires."""
         import asyncio
 
         client = DestinationGRPCClient()
@@ -693,15 +693,17 @@ class TestAckTimeoutAndTeardown:
             client._response_queue.put_nowait(sentinel)
             return await original_wait(fs, timeout=1.0)
 
-        with patch("src.grpc.client.asyncio.wait", patched_wait), \
-             patch("src.grpc.client.logger") as mock_logger:
+        with patch("src.grpc.client.asyncio.wait", patched_wait), patch(
+            "src.grpc.client.logger"
+        ) as mock_logger:
             result = await client._wait_with_heartbeat(batch_seq=7)
 
         assert result is sentinel
         # logger.info("Still waiting for ACK batch=%d ...", batch_seq, ...)
         # The format string and numeric args are separate positional args.
         heartbeat_calls = [
-            c for c in mock_logger.info.call_args_list
+            c
+            for c in mock_logger.info.call_args_list
             if c.args and "Still waiting" in c.args[0]
         ]
         assert heartbeat_calls, "Expected at least one heartbeat INFO log"
@@ -730,14 +732,15 @@ class TestAckTimeoutAndTeardown:
         mock_stub = MagicMock()
         mock_stub.HealthCheck = AsyncMock(return_value=serving)
 
-        with patch("src.grpc.client.grpc_aio.insecure_channel", side_effect=fake_channel), \
-             patch("src.grpc.client.DestinationServiceStub", return_value=mock_stub):
+        with patch(
+            "src.grpc.client.grpc_aio.insecure_channel", side_effect=fake_channel
+        ), patch("src.grpc.client.DestinationServiceStub", return_value=mock_stub):
             await client.connect(max_connect_retries=1)
 
         keepalive_keys = {k for k, _ in captured_options if "keepalive" in k.lower()}
-        assert not keepalive_keys, (
-            f"Channel must not use keepalive options; found: {keepalive_keys}"
-        )
+        assert (
+            not keepalive_keys
+        ), f"Channel must not use keepalive options; found: {keepalive_keys}"
 
     @pytest.mark.asyncio
     async def test_ack_timeout_surfaces_task_failure_set_during_grace(self):
@@ -749,6 +752,7 @@ class TestAckTimeoutAndTeardown:
         cause (e.g. 'Too many pings') finishes just after the ACK timeout fires.
         """
         import asyncio
+
         import pyarrow as pa
 
         from src.grpc.generated.analitiq.v1 import Cursor
@@ -803,6 +807,7 @@ class TestAckTimeoutAndTeardown:
         leak the raw error past the BatchResult contract.
         """
         import asyncio
+
         import pyarrow as pa
 
         from src.grpc.generated.analitiq.v1 import Cursor
@@ -927,6 +932,7 @@ class TestSendBatchSelfHeal:
         reconnects and re-runs start_stream with the cached params, then
         sends successfully."""
         import asyncio
+
         import pyarrow as pa
 
         from src.grpc.generated.analitiq.v1 import AckStatus, Cursor
@@ -951,15 +957,13 @@ class TestSendBatchSelfHeal:
             client._connected = True
             return True
 
-        with patch.object(client, "connect", connect_mock), \
-             patch.object(client, "start_stream", side_effect=fake_start_stream), \
-             patch.object(
-                 client, "_request_queue", new=asyncio.Queue()
-             ), \
-             patch.object(
-                 client, "_wait_with_heartbeat",
-                 AsyncMock(return_value=_batch_ack(AckStatus.ACK_STATUS_SUCCESS)),
-             ):
+        with patch.object(client, "connect", connect_mock), patch.object(
+            client, "start_stream", side_effect=fake_start_stream
+        ), patch.object(client, "_request_queue", new=asyncio.Queue()), patch.object(
+            client,
+            "_wait_with_heartbeat",
+            AsyncMock(return_value=_batch_ack(AckStatus.ACK_STATUS_SUCCESS)),
+        ):
             result = await client.send_batch(
                 run_id="run-1",
                 stream_id="s1",
@@ -1014,6 +1018,7 @@ class TestSendBatchSelfHeal:
         """A deliberate end_stream drops cached params so a later send_batch
         raises rather than resurrecting an ended stream."""
         import asyncio
+
         import pyarrow as pa
 
         from src.grpc.generated.analitiq.v1 import Cursor
@@ -1087,12 +1092,9 @@ class TestSendBatchSelfHeal:
         client._stub = MagicMock()
         client._stub.StreamRecords = MagicMock(return_value=MagicMock())
 
-        with patch.object(
-                 client, "_read_responses", new=AsyncMock()
-             ), \
-             patch.object(
-                 client, "_write_requests", new=AsyncMock()
-             ):
+        with patch.object(client, "_read_responses", new=AsyncMock()), patch.object(
+            client, "_write_requests", new=AsyncMock()
+        ):
             accepted = await client.start_stream(
                 run_id="r",
                 stream_id="s",

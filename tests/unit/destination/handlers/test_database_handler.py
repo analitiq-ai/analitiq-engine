@@ -6,12 +6,12 @@ mocked :class:`SqlAlchemyTransport`.
 """
 
 import ssl
-
-import pytest
 from unittest.mock import AsyncMock, patch
 
-from cdk.sql.generic import GenericSQLConnector
+import pytest
+
 from cdk.connection_runtime import ConnectionRuntime
+from cdk.sql.generic import GenericSQLConnector
 from cdk.transport_factory import SqlAlchemyTransport
 
 
@@ -154,7 +154,9 @@ class TestDatabaseHandlerConnect:
         in ConnectionError so callers get user-facing context rather than a
         raw internal exception."""
         runtime = _make_runtime(base_config)
-        with _patch_transport(side_effect=ValueError("DSN must resolve to a non-empty string")):
+        with _patch_transport(
+            side_effect=ValueError("DSN must resolve to a non-empty string")
+        ):
             with pytest.raises(ConnectionError, match="Database connection failed"):
                 await handler.connect(runtime)
         assert handler._connected is False
@@ -184,7 +186,9 @@ class TestDatabaseHandlerConnect:
         # Reset resolver to return empty dict — sqlite has no secrets.
         runtime._resolver.resolve = AsyncMock(return_value={})
         transport = SqlAlchemyTransport(
-            engine=AsyncMock(), driver="sqlite+aiosqlite", dialect="sqlite",
+            engine=AsyncMock(),
+            driver="sqlite+aiosqlite",
+            dialect="sqlite",
             is_async=True,
         )
         with patch(
@@ -215,9 +219,7 @@ class TestDatabaseHandlerURLEncoding:
         }
         runtime = _make_runtime(config)
         # Override the resolver to return a tricky password.
-        runtime._resolver.resolve = AsyncMock(
-            return_value={"password": "a@b#c%/d:e"}
-        )
+        runtime._resolver.resolve = AsyncMock(return_value={"password": "a@b#c%/d:e"})
         with _patch_transport():
             await handler.connect(runtime)
         assert handler._connected is True

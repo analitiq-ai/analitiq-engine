@@ -3,7 +3,8 @@
 import asyncio
 import logging
 import random
-from typing import Any, Callable, Optional, Tuple, Type
+from collections.abc import Callable
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +27,7 @@ class RetryHandler:
         max_delay: float = 60.0,
         backoff_multiplier: float = 2.0,
         jitter: bool = True,
-        retryable_exceptions: Optional[Tuple[Type[Exception], ...]] = None,
+        retryable_exceptions: tuple[type[Exception], ...] | None = None,
     ):
         """
         Initialize retry handler.
@@ -47,7 +48,7 @@ class RetryHandler:
         self.retryable_exceptions = retryable_exceptions or (Exception,)
 
         # Metrics
-        self.retry_counts = {}
+        self.retry_counts: dict[str, dict[str, int]] = {}
         self.total_retries = 0
         self.attempt_count = 0  # Track current attempt count
 
@@ -58,7 +59,7 @@ class RetryHandler:
 
         if self.jitter:
             # Add decorrelated jitter (recommended for distributed systems)
-            delay = random.uniform(self.base_delay, delay)
+            delay = random.uniform(self.base_delay, delay)  # nosec B311
 
         return delay
 
@@ -66,7 +67,9 @@ class RetryHandler:
         """Determine if an exception should trigger a retry."""
         return isinstance(exception, self.retryable_exceptions)
 
-    async def execute_with_retry(self, func: Callable, *args, **kwargs) -> Any:
+    async def execute_with_retry(
+        self, func: Callable[..., Any], *args: Any, **kwargs: Any
+    ) -> Any:
         """
         Execute a function with retry logic.
 
@@ -121,7 +124,8 @@ class RetryHandler:
                 # Calculate delay and wait
                 delay = self._calculate_delay(attempt)
                 logger.warning(
-                    f"Attempt {attempt + 1}/{self.max_retries + 1} failed for {func_name}: {str(e)}. Retrying in {delay:.2f}s"
+                    f"Attempt {attempt + 1}/{self.max_retries + 1} failed for "
+                    f"{func_name}: {str(e)}. Retrying in {delay:.2f}s"
                 )
 
                 await asyncio.sleep(delay)
@@ -130,7 +134,7 @@ class RetryHandler:
         if last_exception:
             raise last_exception
 
-    def _update_metrics(self, func_name: str, attempts: int, success: bool):
+    def _update_metrics(self, func_name: str, attempts: int, success: bool) -> None:
         """Update retry metrics."""
         if func_name not in self.retry_counts:
             self.retry_counts[func_name] = {
@@ -147,14 +151,14 @@ class RetryHandler:
         else:
             self.retry_counts[func_name]["failures"] += 1
 
-    def get_metrics(self) -> dict:
+    def get_metrics(self) -> dict[str, Any]:
         """Get retry metrics."""
         return {
             "total_retries": self.total_retries,
             "function_metrics": self.retry_counts.copy(),
         }
 
-    def reset_metrics(self):
+    def reset_metrics(self) -> None:
         """Reset retry metrics."""
         self.retry_counts = {}
         self.total_retries = 0
@@ -164,7 +168,9 @@ class RetryHandler:
 class ExponentialBackoffRetry(RetryHandler):
     """Specialized retry handler with exponential backoff."""
 
-    def __init__(self, max_retries: int = 5, base_delay: float = 0.5, multiplier: float = 2.0):
+    def __init__(
+        self, max_retries: int = 5, base_delay: float = 0.5, multiplier: float = 2.0
+    ):
         super().__init__(
             max_retries=max_retries,
             base_delay=base_delay,
@@ -190,7 +196,7 @@ class LinearBackoffRetry(RetryHandler):
 class APIRetry(RetryHandler):
     """Specialized retry handler for API operations."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         import aiohttp
 
         # Define API-specific retryable exceptions

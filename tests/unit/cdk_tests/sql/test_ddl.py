@@ -84,7 +84,12 @@ class TestBuildAnsi:
     def test_if_not_exists_toggle(self, pg_mapper):
         columns = [ColumnDef("id", "Int64")]
         ddl = build_create_table_sql(
-            SqlDialect(), pg_mapper, "", "t", columns, [],
+            SqlDialect(),
+            pg_mapper,
+            "",
+            "t",
+            columns,
+            [],
             if_not_exists=False,
         )
         assert ddl.startswith('CREATE TABLE "t" (')
@@ -101,7 +106,11 @@ class TestBuildBacktickNotEnforced:
             ColumnDef("name", "Utf8"),
         ]
         ddl = build_create_table_sql(
-            _BacktickNotEnforcedDialect(), mapper, "ds", "orders", columns,
+            _BacktickNotEnforcedDialect(),
+            mapper,
+            "ds",
+            "orders",
+            columns,
             ["id", "region"],
         )
         assert ddl == (
@@ -117,9 +126,7 @@ class TestBuildBacktickNotEnforced:
 class TestBuildErrors:
     def test_empty_columns_raises(self, pg_mapper):
         with pytest.raises(CreateTableError, match="at least one column"):
-            build_create_table_sql(
-                SqlDialect(), pg_mapper, "public", "t", [], []
-            )
+            build_create_table_sql(SqlDialect(), pg_mapper, "public", "t", [], [])
 
     def test_primary_key_not_in_columns_raises(self, pg_mapper):
         columns = [ColumnDef("id", "Int64")]
@@ -132,9 +139,7 @@ class TestBuildErrors:
         # A canonical the write-map cannot render to forces the reverse miss.
         columns = [ColumnDef("weird", "LargeList")]
         with pytest.raises(CreateTableError) as exc:
-            build_create_table_sql(
-                SqlDialect(), pg_mapper, "public", "t", columns, []
-            )
+            build_create_table_sql(SqlDialect(), pg_mapper, "public", "t", columns, [])
         assert "weird" in str(exc.value)
         assert isinstance(exc.value.__cause__, UnmappedTypeError)
 
@@ -183,8 +188,13 @@ class TestCreateTableExecution:
         runtime = FakeAdbcRuntime("bigquery", mapper=None)
         mapper = _StubMapper({"Int64": "INT64"})
         await create_table(
-            runtime, "ds", "t", [ColumnDef("id", "Int64")], [],
-            dialect=_BacktickNotEnforcedDialect(), type_mapper=mapper,
+            runtime,
+            "ds",
+            "t",
+            [ColumnDef("id", "Int64")],
+            [],
+            dialect=_BacktickNotEnforcedDialect(),
+            type_mapper=mapper,
         )
         executed = runtime.connections[-1].executed[-1][0]
         assert "`ds`.`t`" in executed

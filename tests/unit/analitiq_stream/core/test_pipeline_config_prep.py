@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any
 
 import pytest
 
@@ -29,7 +29,7 @@ from src.engine.pipeline_config_prep import PipelineConfigPrep, _split_stream_re
 # ---------------------------------------------------------------------------
 
 
-_PERMISSIVE_SCHEMA: Dict[str, Any] = {
+_PERMISSIVE_SCHEMA: dict[str, Any] = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
 }
@@ -81,9 +81,7 @@ def real_schema_mirror(monkeypatch: pytest.MonkeyPatch) -> Path:
     contracts fails loudly instead of slipping through the permissive
     ``type: "object"`` mirror (#96).
     """
-    monkeypatch.setenv(
-        "ANALITIQ_SCHEMA_BASE_URL", _VENDORED_SCHEMAS_DIR.as_uri()
-    )
+    monkeypatch.setenv("ANALITIQ_SCHEMA_BASE_URL", _VENDORED_SCHEMAS_DIR.as_uri())
     return _VENDORED_SCHEMAS_DIR
 
 
@@ -110,7 +108,7 @@ def _write_json(path: Path, payload: Any) -> None:
     path.write_text(json.dumps(payload))
 
 
-def _connector_doc() -> Dict[str, Any]:
+def _connector_doc() -> dict[str, Any]:
     return {
         "$schema": "https://schemas.analitiq.ai/connector/latest.json",
         "kind": "api",
@@ -129,7 +127,7 @@ def _connector_doc() -> Dict[str, Any]:
     }
 
 
-def _connection_doc(connection_id: str) -> Dict[str, Any]:
+def _connection_doc(connection_id: str) -> dict[str, Any]:
     return {
         "$schema": "https://schemas.analitiq.ai/connection/latest.json",
         "connection_id": connection_id,
@@ -139,7 +137,7 @@ def _connection_doc(connection_id: str) -> Dict[str, Any]:
     }
 
 
-def _endpoint_doc(endpoint_id: str) -> Dict[str, Any]:
+def _endpoint_doc(endpoint_id: str) -> dict[str, Any]:
     return {
         "$schema": "https://schemas.analitiq.ai/api-endpoint/latest.json",
         "endpoint_id": endpoint_id,
@@ -180,7 +178,7 @@ def _connection_type_map_rules() -> list:
     ]
 
 
-def _stream_doc(stream_id: str, *, dst_scope: str = "connector") -> Dict[str, Any]:
+def _stream_doc(stream_id: str, *, dst_scope: str = "connector") -> dict[str, Any]:
     return {
         "$schema": "https://schemas.analitiq.ai/stream/latest.json",
         "stream_id": stream_id,
@@ -209,7 +207,7 @@ def _stream_doc(stream_id: str, *, dst_scope: str = "connector") -> Dict[str, An
     }
 
 
-def _pipeline_doc() -> Dict[str, Any]:
+def _pipeline_doc() -> dict[str, Any]:
     return {
         "$schema": "https://schemas.analitiq.ai/pipeline/latest.json",
         "pipeline_id": PIPELINE_ID,
@@ -224,7 +222,7 @@ def _pipeline_doc() -> Dict[str, Any]:
     }
 
 
-def _manifest(status: str = "active") -> Dict[str, Any]:
+def _manifest(status: str = "active") -> dict[str, Any]:
     return {
         "pipelines": [
             {
@@ -294,9 +292,7 @@ def _build_tree(
         private_doc = _endpoint_doc(ENDPOINT_DST)
         private_doc["description"] = "connection-scoped private endpoint"
         _write_json(dst_definition / "endpoints" / f"{ENDPOINT_DST}.json", private_doc)
-        _write_json(
-            dst_definition / "type-map-read.json", _connection_type_map_rules()
-        )
+        _write_json(dst_definition / "type-map-read.json", _connection_type_map_rules())
     for endpoint_id in connector_endpoints:
         _write_json(
             root
@@ -396,9 +392,9 @@ class TestCreateConfigHappyPath:
         assert "_runtime" not in source_config.get("stream_source", {})
         # Must be JSON-serialisable (no ConnectionRuntime objects inside)
         for v in source_config.values():
-            assert not isinstance(v, ConnectionRuntime), (
-                f"to_source_config() must not embed ConnectionRuntime; got {type(v)}"
-            )
+            assert not isinstance(
+                v, ConnectionRuntime
+            ), f"to_source_config() must not embed ConnectionRuntime; got {type(v)}"
         json.dumps(source_config)  # raises if not serialisable
 
 
@@ -623,11 +619,7 @@ class TestCreateConfigErrorPaths:
         else:
             del stream_doc["destinations"][0]["endpoint_ref"]
         _write_json(
-            pipeline_tree
-            / "pipelines"
-            / PIPELINE_ID
-            / "streams"
-            / f"{STREAM_ID}.json",
+            pipeline_tree / "pipelines" / PIPELINE_ID / "streams" / f"{STREAM_ID}.json",
             stream_doc,
         )
         prep = PipelineConfigPrep()
@@ -637,9 +629,7 @@ class TestCreateConfigErrorPaths:
             prep.create_config()
 
     @pytest.mark.parametrize("kind", ["", None])
-    def test_unusable_connector_kind_rejected(
-        self, pipeline_tree: Path, kind
-    ) -> None:
+    def test_unusable_connector_kind_rejected(self, pipeline_tree: Path, kind) -> None:
         """A connector document whose ``kind`` is missing or empty must
         fail loudly naming the connector."""
         connector_doc = _connector_doc()
@@ -701,9 +691,7 @@ class TestEndpointSchemaDispatch:
     instead of a hard-coded two-branch check, so non-built-in endpoint kinds
     fail at schema validation rather than at URL parsing (#165)."""
 
-    def test_missing_endpoint_path_segment_rejected(
-        self, pipeline_tree: Path
-    ) -> None:
+    def test_missing_endpoint_path_segment_rejected(self, pipeline_tree: Path) -> None:
         """An endpoint whose $schema URL has no *-endpoint path segment must
         raise with a message pointing to the problem."""
         bad_endpoint = _endpoint_doc(ENDPOINT_SRC)
@@ -745,9 +733,9 @@ class TestEndpointSchemaDispatch:
         correctly; failure comes from schema validation (unknown kind), not
         from the URL-parsing step — confirming the extraction succeeded."""
         bad_endpoint = _endpoint_doc(ENDPOINT_SRC)
-        bad_endpoint["$schema"] = (
-            "https://schemas.analitiq.ai/nosql-endpoint/latest.json"
-        )
+        bad_endpoint[
+            "$schema"
+        ] = "https://schemas.analitiq.ai/nosql-endpoint/latest.json"
         _write_json(
             pipeline_tree
             / "connectors"
@@ -794,9 +782,7 @@ class TestEndpointSchemaDispatch:
         trailing slash) must still have its kind extracted correctly."""
         bad_endpoint = _endpoint_doc(ENDPOINT_SRC)
         # No trailing slash — regex must still match via the (?:/|$) boundary.
-        bad_endpoint["$schema"] = (
-            "https://schemas.analitiq.ai/nosql-endpoint"
-        )
+        bad_endpoint["$schema"] = "https://schemas.analitiq.ai/nosql-endpoint"
         _write_json(
             pipeline_tree
             / "connectors"

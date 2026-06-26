@@ -17,31 +17,39 @@ import pytest
 
 from cdk.sql.exceptions import ReadError
 from cdk.type_map import UnmappedTypeError
-from src.source.connectors.base import (
-    ReadError as ApiReadError,
-    TransientReadError as ApiTransientReadError,
-)
+from src.grpc.generated.analitiq.v1.source_service_pb2 import ReadRequest
+from src.source.connectors.base import ReadError as ApiReadError
+from src.source.connectors.base import TransientReadError as ApiTransientReadError
 from src.state.store import decode_cursor_state
 from src.worker.readable import _decode_arrow_ipc
 from src.worker.source_service import (
     SourceWorkerServicer,
-    _RelayCheckpoint,
     _encode_arrow_ipc,
+    _RelayCheckpoint,
 )
-from src.grpc.generated.analitiq.v1.source_service_pb2 import ReadRequest
 
 
 class _FakeReadable:
     """A Readable that yields canned batches and drives the checkpoint."""
 
-    def __init__(self, batches, *, cursor_values=None, error=None, trailing_cursor=None):
+    def __init__(
+        self, batches, *, cursor_values=None, error=None, trailing_cursor=None
+    ):
         self._batches = batches
         self._cursor_values = cursor_values or []
         self._error = error
         self._trailing_cursor = trailing_cursor
 
-    async def read_batches(self, runtime, config, *, checkpoint, stream_name,
-                           partition=None, batch_size=1000):
+    async def read_batches(
+        self,
+        runtime,
+        config,
+        *,
+        checkpoint,
+        stream_name,
+        partition=None,
+        batch_size=1000,
+    ):
         for i, batch in enumerate(self._batches):
             yield batch
             if i < len(self._cursor_values):
@@ -86,9 +94,7 @@ class TestArrowIpcRoundTrip:
         assert decoded.equals(batch)
 
     def test_empty_batch_round_trip(self):
-        batch = pa.RecordBatch.from_pylist(
-            [], schema=pa.schema([("id", pa.int64())])
-        )
+        batch = pa.RecordBatch.from_pylist([], schema=pa.schema([("id", pa.int64())]))
         decoded = _decode_arrow_ipc(_encode_arrow_ipc(batch))
         assert decoded.num_rows == 0
         assert decoded.schema == batch.schema
@@ -121,8 +127,16 @@ class TestReadStream:
         captured = {}
 
         class _CursorProbe(_FakeReadable):
-            async def read_batches(self, runtime, config, *, checkpoint,
-                                   stream_name, partition=None, batch_size=1000):
+            async def read_batches(
+                self,
+                runtime,
+                config,
+                *,
+                checkpoint,
+                stream_name,
+                partition=None,
+                batch_size=1000,
+            ):
                 captured["initial"] = await checkpoint.get_cursor(stream_name)
                 return
                 yield  # pragma: no cover — makes this an async generator
@@ -184,16 +198,12 @@ class TestReadStream:
         assert "complete" not in kinds
 
     async def test_trailing_cursor_save_after_generator_end(self):
-        readable = _FakeReadable(
-            [_batch([{"id": 1}])], trailing_cursor="final"
-        )
+        readable = _FakeReadable([_batch([{"id": 1}])], trailing_cursor="final")
         servicer = SourceWorkerServicer(readable, MagicMock(), {})
         responses = await _collect(servicer)
         kinds = [r.WhichOneof("message") for r in responses]
         assert kinds == ["batch", "cursor_save", "complete"]
-        assert json.loads(responses[1].cursor_save.cursor_json) == {
-            "cursor": "final"
-        }
+        assert json.loads(responses[1].cursor_save.cursor_json) == {"cursor": "final"}
 
     async def test_datetime_cursor_survives_the_json_relay(self):
         # Database timestamp cursors arrive as datetime objects; plain
@@ -206,9 +216,7 @@ class TestReadStream:
 
         kinds = [r.WhichOneof("message") for r in responses]
         assert kinds == ["batch", "cursor_save", "complete"]
-        relayed = decode_cursor_state(
-            json.loads(responses[1].cursor_save.cursor_json)
-        )
+        relayed = decode_cursor_state(json.loads(responses[1].cursor_save.cursor_json))
         assert relayed == {"cursor": ts}
         assert isinstance(relayed["cursor"], datetime)
 
@@ -217,8 +225,16 @@ class TestReadStream:
         captured = {}
 
         class _CursorProbe(_FakeReadable):
-            async def read_batches(self, runtime, config, *, checkpoint,
-                                   stream_name, partition=None, batch_size=1000):
+            async def read_batches(
+                self,
+                runtime,
+                config,
+                *,
+                checkpoint,
+                stream_name,
+                partition=None,
+                batch_size=1000,
+            ):
                 captured["initial"] = await checkpoint.get_cursor(stream_name)
                 return
                 yield  # pragma: no cover — makes this an async generator

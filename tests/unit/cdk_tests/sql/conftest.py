@@ -10,8 +10,9 @@ canonical<->native round-trip is exercised end to end, not against a stub.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import Any
 
 import pyarrow as pa
 import pytest
@@ -22,7 +23,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[4]
 _CONNECTORS_DIR = _REPO_ROOT / "connectors"
 
 # A responder maps an executed (sql, params) to the rows the cursor returns.
-Responder = Callable[[str, Sequence[Any]], List[Dict[str, Any]]]
+Responder = Callable[[str, Sequence[Any]], list[dict[str, Any]]]
 
 
 @pytest.fixture
@@ -46,9 +47,9 @@ def bq_mapper():
 class FakeArrowCursor:
     """DBAPI cursor whose ``fetch_arrow_table`` returns canned rows."""
 
-    def __init__(self, conn: "FakeAdbcConnection") -> None:
+    def __init__(self, conn: FakeAdbcConnection) -> None:
         self._conn = conn
-        self._rows: List[Dict[str, Any]] = []
+        self._rows: list[dict[str, Any]] = []
 
     def execute(self, sql: str, params: Sequence[Any] = ()) -> None:
         self._conn.executed.append((sql, list(params)))
@@ -67,11 +68,11 @@ class FakeAdbcConnection:
     """In-memory DBAPI connection recording statements, commits, rollbacks."""
 
     def __init__(
-        self, responder: Optional[Responder], fail_execute: Optional[Exception]
+        self, responder: Responder | None, fail_execute: Exception | None
     ) -> None:
         self.responder = responder
         self.fail_execute = fail_execute
-        self.executed: List[tuple[str, List[Any]]] = []
+        self.executed: list[tuple[str, list[Any]]] = []
         self.commits = 0
         self.rollbacks = 0
         self.closed = False
@@ -103,8 +104,8 @@ class FakeAdbcRuntime:
         driver: str,
         *,
         mapper: Any = None,
-        responder: Optional[Responder] = None,
-        fail_execute: Optional[Exception] = None,
+        responder: Responder | None = None,
+        fail_execute: Exception | None = None,
     ) -> None:
         self.driver = driver
         self.is_adbc = True
@@ -112,7 +113,7 @@ class FakeAdbcRuntime:
         self._mapper = mapper
         self._responder = responder
         self._fail_execute = fail_execute
-        self.connections: List[FakeAdbcConnection] = []
+        self.connections: list[FakeAdbcConnection] = []
 
     @property
     def connector_type_mapper(self) -> Any:
@@ -134,15 +135,15 @@ class FakeAdbcRuntime:
 
 
 class _FakeMappings:
-    def __init__(self, rows: List[Dict[str, Any]]) -> None:
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
         self._rows = rows
 
-    def all(self) -> List[Dict[str, Any]]:
+    def all(self) -> list[dict[str, Any]]:
         return self._rows
 
 
 class FakeResult:
-    def __init__(self, rows: List[Dict[str, Any]]) -> None:
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
         self._rows = rows
 
     def mappings(self) -> _FakeMappings:
@@ -154,23 +155,23 @@ class FakeResult:
 
 
 class FakeAsyncConnection:
-    def __init__(self, engine: "FakeAsyncEngine") -> None:
+    def __init__(self, engine: FakeAsyncEngine) -> None:
         self._engine = engine
 
-    async def __aenter__(self) -> "FakeAsyncConnection":
+    async def __aenter__(self) -> FakeAsyncConnection:
         return self
 
     async def __aexit__(self, *exc: Any) -> bool:
         return False
 
-    async def execute(self, clause: Any, binds: Optional[Dict[str, Any]] = None):
+    async def execute(self, clause: Any, binds: dict[str, Any] | None = None):
         self._engine.executed.append((str(clause), binds))
         if self._engine.fail is not None:
             raise self._engine.fail
         return FakeResult(self._engine.rows)
 
     async def exec_driver_sql(
-        self, sql: str, params: Optional[Sequence[Any]] = None
+        self, sql: str, params: Sequence[Any] | None = None
     ) -> None:
         self._engine.executed.append((sql, params))
         if self._engine.fail is not None:
@@ -180,12 +181,12 @@ class FakeAsyncConnection:
 class FakeAsyncEngine:
     def __init__(
         self,
-        rows: Optional[List[Dict[str, Any]]] = None,
-        fail: Optional[Exception] = None,
+        rows: list[dict[str, Any]] | None = None,
+        fail: Exception | None = None,
     ) -> None:
         self.rows = rows or []
         self.fail = fail
-        self.executed: List[tuple[str, Any]] = []
+        self.executed: list[tuple[str, Any]] = []
 
     def connect(self) -> FakeAsyncConnection:  # used by acquire_connection
         return FakeAsyncConnection(self)
@@ -202,8 +203,8 @@ class FakeSaRuntime:
         driver: str = "postgresql",
         *,
         mapper: Any = None,
-        rows: Optional[List[Dict[str, Any]]] = None,
-        fail: Optional[Exception] = None,
+        rows: list[dict[str, Any]] | None = None,
+        fail: Exception | None = None,
     ) -> None:
         self.driver = driver
         self.is_adbc = False

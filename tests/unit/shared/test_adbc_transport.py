@@ -18,21 +18,25 @@ from __future__ import annotations
 
 import pytest
 
-from cdk.exceptions import TransportSpecError
 from cdk.derived_functions import DEFAULT_FUNCTIONS
+from cdk.exceptions import TransportSpecError
 from cdk.resolver import ResolutionContext, Resolver
 from cdk.transport_factory import (
     _adbc_dbapi_module_path,
     _resolve_db_kwargs,
     build_adbc_from_spec,
-    resolve_adbc_spec,
     registered_transport_kinds,
+    resolve_adbc_spec,
 )
 
 
 def _resolver() -> Resolver:
     ctx = ResolutionContext(
-        connector={}, connection={}, secrets={}, auth={}, runtime={},
+        connector={},
+        connection={},
+        secrets={},
+        auth={},
+        runtime={},
     )
     return Resolver(ctx, functions=DEFAULT_FUNCTIONS)
 

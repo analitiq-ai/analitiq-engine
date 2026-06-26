@@ -47,7 +47,7 @@ def test_emitted_at_stamped_on_every_category(caplog, category, marker):
     with caplog.at_level(logging.INFO, logger="src.state.log_emitter"):
         emit_log(category, {"k": "v"})
 
-    (got_marker, payload), = _emitted_records(caplog)
+    ((got_marker, payload),) = _emitted_records(caplog)
     assert got_marker == marker
     parsed = datetime.fromisoformat(payload["emitted_at"])
     assert parsed.tzinfo is not None  # timezone-aware UTC
@@ -102,7 +102,7 @@ def test_caller_field_named_emitted_at_is_overridden_by_envelope(caplog):
     with caplog.at_level(logging.INFO, logger="src.state.log_emitter"):
         emit_log("state", {"emitted_at": "not-a-timestamp"})
 
-    (_, payload), = _emitted_records(caplog)
+    ((_, payload),) = _emitted_records(caplog)
     assert payload["emitted_at"] != "not-a-timestamp"
     datetime.fromisoformat(payload["emitted_at"])  # raises if not ISO-8601
 
@@ -113,7 +113,7 @@ def test_emitted_at_survives_unserialisable_payload(caplog):
     with caplog.at_level(logging.INFO, logger="src.state.log_emitter"):
         emit_log("state", {("tuple", "key"): 1})  # non-str key -> json.dumps raises
 
-    (_, payload), = _emitted_records(caplog)
+    ((_, payload),) = _emitted_records(caplog)
     assert "error" in payload
     datetime.fromisoformat(payload["emitted_at"])  # raises if not ISO-8601
 
@@ -126,7 +126,7 @@ def test_run_id_stamped_on_every_record(monkeypatch, caplog, category):
     with caplog.at_level(logging.INFO, logger="src.state.log_emitter"):
         emit_log(category, {"k": "v"})
 
-    (_, payload), = _emitted_records(caplog)
+    ((_, payload),) = _emitted_records(caplog)
     assert payload["run_id"] == "run-xyz"
 
 
@@ -137,7 +137,7 @@ def test_caller_run_id_overrides_ambient_default(monkeypatch, caplog):
     with caplog.at_level(logging.INFO, logger="src.state.log_emitter"):
         emit_log("metrics", {"run_id": "caller-run"})
 
-    (_, payload), = _emitted_records(caplog)
+    ((_, payload),) = _emitted_records(caplog)
     assert payload["run_id"] == "caller-run"
 
 
@@ -148,7 +148,7 @@ def test_invocation_id_present_when_env_set(monkeypatch, caplog):
     with caplog.at_level(logging.INFO, logger="src.state.log_emitter"):
         emit_log("state", {"k": "v"})
 
-    (_, payload), = _emitted_records(caplog)
+    ((_, payload),) = _emitted_records(caplog)
     assert payload["invocation_id"] == "inv-123"
 
 
@@ -159,7 +159,7 @@ def test_invocation_id_omitted_when_env_absent(monkeypatch, caplog):
     with caplog.at_level(logging.INFO, logger="src.state.log_emitter"):
         emit_log("state", {"k": "v"})
 
-    (_, payload), = _emitted_records(caplog)
+    ((_, payload),) = _emitted_records(caplog)
     assert "invocation_id" not in payload
 
 
@@ -169,7 +169,7 @@ def test_blank_invocation_id_is_treated_as_absent(monkeypatch, caplog):
     with caplog.at_level(logging.INFO, logger="src.state.log_emitter"):
         emit_log("state", {"k": "v"})
 
-    (_, payload), = _emitted_records(caplog)
+    ((_, payload),) = _emitted_records(caplog)
     assert "invocation_id" not in payload
 
 
@@ -181,7 +181,7 @@ def test_run_identity_present_in_error_fallback(monkeypatch, caplog):
     with caplog.at_level(logging.INFO, logger="src.state.log_emitter"):
         emit_log("state", {("tuple", "key"): 1})  # non-str key -> json.dumps raises
 
-    (_, payload), = _emitted_records(caplog)
+    ((_, payload),) = _emitted_records(caplog)
     assert "error" in payload
     assert payload["run_id"] == "run-xyz"
     assert payload["invocation_id"] == "inv-123"

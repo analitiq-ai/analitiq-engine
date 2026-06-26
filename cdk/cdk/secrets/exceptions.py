@@ -1,6 +1,4 @@
-"""
-Exceptions for secrets resolution.
-"""
+"""Exceptions for secrets resolution."""
 
 
 class SecretResolutionError(Exception):

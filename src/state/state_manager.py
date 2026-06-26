@@ -5,7 +5,7 @@ import logging
 import os
 import threading
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 from ..shared.run_id import get_or_generate_run_id
 from .batch_commit_tracker import BatchCommitTracker
@@ -37,15 +37,15 @@ class StateManager:
         self.lock = threading.RLock()
 
         # Current run ID (from env var RUN_ID if available)
-        self.current_run_id: Optional[str] = os.environ.get("RUN_ID")
+        self.current_run_id: str | None = os.environ.get("RUN_ID")
 
         # In-run batch commit tracker (initialized by init_commit_tracker)
-        self._commit_tracker: Optional[BatchCommitTracker] = None
+        self._commit_tracker: BatchCommitTracker | None = None
 
         # In-run cursor cache keyed by (stream_name, partition_key). Backed by
         # an on-disk checkpoint so a fresh process resumes from where the last
         # run left off instead of re-scanning the whole source.
-        self._cursors: Dict[str, Dict[str, Any]] = {}
+        self._cursors: dict[str, dict[str, Any]] = {}
         self._cursor_store = CursorStore(self.base_dir)
         self._restore_durable_cursors()
 
@@ -81,11 +81,11 @@ class StateManager:
         )
 
     @property
-    def commit_tracker(self) -> Optional[BatchCommitTracker]:
+    def commit_tracker(self) -> BatchCommitTracker | None:
         """Get the batch commit tracker (if initialized)."""
         return self._commit_tracker
 
-    def start_run(self, config: Dict[str, Any], run_id: Optional[str] = None) -> str:
+    def start_run(self, config: dict[str, Any], run_id: str | None = None) -> str:
         """
         Start a new pipeline run.
 
@@ -106,14 +106,14 @@ class StateManager:
     def save_stream_checkpoint(
         self,
         stream_name: str,
-        partition: Dict[str, Any],
-        cursor: Dict[str, Any],
+        partition: dict[str, Any],
+        cursor: dict[str, Any],
         hwm: str,
         stream_version: int,
-        page_state: Optional[Dict[str, Any]] = None,
-        http_conditionals: Optional[Dict[str, Any]] = None,
-        stats: Optional[Dict[str, Any]] = None,
-    ):
+        page_state: dict[str, Any] | None = None,
+        http_conditionals: dict[str, Any] | None = None,
+        stats: dict[str, Any] | None = None,
+    ) -> None:
         """
         Emit checkpoint for a specific stream to structured logs.
 
@@ -145,14 +145,14 @@ class StateManager:
         )
 
     @staticmethod
-    def _cursor_key(stream_name: str, partition: Dict[str, Any]) -> str:
+    def _cursor_key(stream_name: str, partition: dict[str, Any]) -> str:
         """Build a deterministic key from stream name and partition dict."""
         suffix = json.dumps(partition, sort_keys=True) if partition else "{}"
         return f"{stream_name}::{suffix}"
 
     async def get_cursor(
-        self, stream_name: str, partition: Optional[Dict[str, Any]] = None
-    ) -> Optional[Dict[str, Any]]:
+        self, stream_name: str, partition: dict[str, Any] | None = None
+    ) -> dict[str, Any] | None:
         """Return the last saved cursor for a stream/partition, or None.
 
         Falls back to the on-disk checkpoint when the in-run cache is empty so
@@ -173,8 +173,8 @@ class StateManager:
     async def save_cursor(
         self,
         stream_name: str,
-        partition: Optional[Dict[str, Any]],
-        cursor: Dict[str, Any],
+        partition: dict[str, Any] | None,
+        cursor: dict[str, Any],
     ) -> None:
         """Persist cursor state for a stream/partition.
 
@@ -188,6 +188,6 @@ class StateManager:
             self._cursors[key] = cursor
             self._cursor_store.set(self.pipeline_id, stream_name, cursor.get("cursor"))
 
-    def get_run_info(self) -> Dict[str, Any]:
+    def get_run_info(self) -> dict[str, Any]:
         """Get current run information."""
         return {"run_id": self.current_run_id} if self.current_run_id else {}

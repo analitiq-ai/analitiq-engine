@@ -15,7 +15,8 @@ Adding a new function requires:
 from __future__ import annotations
 
 import base64 as _base64
-from typing import Any, Mapping
+from collections.abc import Mapping
+from typing import Any
 from urllib.parse import quote as _url_quote
 
 from .exceptions import UnresolvedValueError
@@ -85,8 +86,8 @@ def basic_auth_function(node: Mapping[str, Any], resolver: Resolver) -> str:
     if username is None:
         username = ""
     if password is None:
-        password = ""
-    raw = f"{username}:{password}".encode("utf-8")
+        password = ""  # nosec B105
+    raw = f"{username}:{password}".encode()
     return _base64.b64encode(raw).decode("ascii")
 
 

@@ -8,10 +8,9 @@ import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any
 
 from ..storage.base import BaseStorageBackend
-
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +29,7 @@ class BatchCommit:
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
         return {
             "run_id": self.run_id,
@@ -43,7 +42,7 @@ class BatchCommit:
         }
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "BatchCommit":
+    def from_dict(cls, data: dict[str, Any]) -> "BatchCommit":
         """Create from dictionary."""
         return cls(
             run_id=data["run_id"],
@@ -98,7 +97,7 @@ class ManifestTracker:
         self._storage = storage
         self._base_path = base_path
         self._manifest_path = f"{base_path}/{self.MANIFEST_FILENAME}"
-        self._commits: Dict[str, BatchCommit] = {}
+        self._commits: dict[str, BatchCommit] = {}
         self._loaded = False
 
     def _make_key(self, run_id: str, stream_id: str, batch_seq: int) -> str:
@@ -152,7 +151,7 @@ class ManifestTracker:
         run_id: str,
         stream_id: str,
         batch_seq: int,
-    ) -> Optional[BatchCommit]:
+    ) -> BatchCommit | None:
         """
         Check if a batch has already been committed.
 

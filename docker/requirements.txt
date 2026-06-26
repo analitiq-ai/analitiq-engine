@@ -4,48 +4,26 @@
 # Core async and concurrency
 aiofiles>=23.0.0
 
-# Database drivers are NOT baked into the engine. Each connector package
-# ships its own driver (requirements.txt / package dependencies) and is
-# installed by docker/entrypoint.sh when the connector is attached.
-# setuptools is the connector packages' build backend; baking it in lets
-# the entrypoint build them with --no-build-isolation (no per-install
-# network fetch of build dependencies).
-setuptools>=69
-
 # API connectors
 aiohttp>=3.8.0
 aiohttp-retry>=2.8.3
 
-# Data processing and validation
-pydantic>=2.0.0
-jsonschema>=4.0.0
-
 # Retry and fault tolerance
 backoff>=2.0.0
-
-# Logging and monitoring
-structlog>=23.0.0
-prometheus-client>=0.17.0
-
-# Configuration and utilities
-python-dotenv>=1.0.0
-python-dateutil>=2.9.0
 click>=8.0.0
-pyyaml>=6.0.0
-
-# Fast JSON serialization (used by models)
-orjson>=3.9.0
 
 # gRPC for destination streaming
 grpcio>=1.60.0
 grpcio-tools>=1.60.0
-protobuf>=4.25.0
+jsonschema>=4.0.0
 
 # Serialization formats for gRPC payloads
 msgpack>=1.0.0
 
-# SQLAlchemy for database abstraction
-sqlalchemy[asyncio]>=2.0.0
+# Fast JSON serialization (used by models)
+orjson>=3.9.0
+prometheus-client>=0.17.0
+protobuf>=4.25.0
 
 # Optional dependencies for specific use cases
 # Install with: pip install "analitiq-stream[kafka]" etc.
@@ -54,7 +32,7 @@ sqlalchemy[asyncio]>=2.0.0
 # kafka-python>=2.0.0
 # aiokafka>=0.8.0
 
-# For cloud storage connectors  
+# For cloud storage connectors
 # boto3>=1.26.0
 # azure-storage-blob>=12.0.0
 # google-cloud-storage>=2.0.0
@@ -63,6 +41,28 @@ sqlalchemy[asyncio]>=2.0.0
 # pandas>=2.0.0
 # numpy>=1.24.0
 pyarrow>=12.0.0
+
+# Data processing and validation
+pydantic>=2.0.0
+python-dateutil>=2.9.0
+
+# Configuration and utilities
+python-dotenv>=1.0.0
+pyyaml>=6.0.0
+
+# Database drivers are NOT baked into the engine. Each connector package
+# ships its own driver (requirements.txt / package dependencies) and is
+# installed by docker/entrypoint.sh when the connector is attached.
+# setuptools is the connector packages' build backend; baking it in lets
+# the entrypoint build them with --no-build-isolation (no per-install
+# network fetch of build dependencies).
+setuptools>=69
+
+# SQLAlchemy for database abstraction
+sqlalchemy[asyncio]>=2.0.0
+
+# Logging and monitoring
+structlog>=23.0.0
 
 # For NoSQL databases
 # motor>=3.0.0

@@ -95,9 +95,7 @@ class TestRuntimeConfig:
         # "fail"; assert through the exact accessor the engine uses.
         runtime = RuntimeConfig(error_handling=ErrorHandlingConfig(strategy="skip"))
         runtime_dict = runtime.to_dict()
-        strategy = (
-            (runtime_dict.get("error_handling") or {}).get("strategy", "fail")
-        )
+        strategy = (runtime_dict.get("error_handling") or {}).get("strategy", "fail")
         assert strategy == "skip"
 
 

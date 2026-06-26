@@ -7,11 +7,7 @@ from its module: the run-id lifecycle (this file), plus ``dict_path`` and
 ``http_utils``.
 """
 
-from .run_id import (
-    get_or_generate_run_id,
-    get_run_id,
-    initialize_run_id,
-)
+from .run_id import get_or_generate_run_id, get_run_id, initialize_run_id
 
 __all__ = [
     "get_run_id",

@@ -17,7 +17,6 @@ import pytest
 from cdk.sql.dialects import SqlDialect
 from cdk.sql.exceptions import UnsupportedDialectOperationError
 
-
 # --- fixture dialects (stand in for connector-package dialects) -------------
 
 
@@ -70,12 +69,8 @@ class TestQuoting:
             _BacktickDialect().quote_ident("we`ird")
 
     def test_qualified_name(self):
-        assert SqlDialect().quote_qualified("public", "orders") == (
-            '"public"."orders"'
-        )
-        assert _BacktickDialect().quote_qualified("ds", "orders") == (
-            "`ds`.`orders`"
-        )
+        assert SqlDialect().quote_qualified("public", "orders") == ('"public"."orders"')
+        assert _BacktickDialect().quote_qualified("ds", "orders") == ("`ds`.`orders`")
 
     def test_qualified_name_without_schema(self):
         assert SqlDialect().quote_qualified("", "orders") == '"orders"'
@@ -163,9 +158,7 @@ class TestDiscoveryQueries:
         assert sql.count("?") == 2
 
     def test_primary_keys_query_normalizes_schema(self):
-        _, params = _UpperNormalizingDialect().primary_keys_query(
-            "public", "orders"
-        )
+        _, params = _UpperNormalizingDialect().primary_keys_query("public", "orders")
         assert params == ["PUBLIC", "orders"]
 
 
@@ -234,9 +227,7 @@ class TestRenderColumnType:
 
     def test_base_passes_params_through(self):
         mapper = _RecordingMapper("VARCHAR(255)")
-        out = SqlDialect().render_column_type(
-            "Utf8", mapper, params={"length": 255}
-        )
+        out = SqlDialect().render_column_type("Utf8", mapper, params={"length": 255})
         assert out == "VARCHAR(255)"
         assert mapper.calls == [("Utf8", {"length": 255})]
 

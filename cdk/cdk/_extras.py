@@ -15,7 +15,8 @@ not the extra's own package is somebody else's problem and is re-raised as-is.
 
 from __future__ import annotations
 
-from typing import NoReturn, Sequence
+from collections.abc import Sequence
+from typing import NoReturn
 
 
 class MissingExtraError(ImportError):
@@ -30,10 +31,11 @@ class MissingExtraError(ImportError):
 def reraise_for_missing_extra(
     exc: ImportError, *, feature: str, extra: str, modules: Sequence[str]
 ) -> NoReturn:
-    """Re-raise ``exc`` as a :class:`MissingExtraError` iff the extra's own
-    top-level package is the thing that is absent; otherwise re-raise ``exc``
-    unchanged.
+    """Re-raise ``exc`` as a :class:`MissingExtraError`, or unchanged.
 
+    The :class:`MissingExtraError` is raised iff the extra's own top-level
+    package is the thing that is absent; otherwise ``exc`` is re-raised
+    unchanged.
     ``feature`` names what the caller was reaching for (e.g.
     ``"cdk.sql.AdbcReader"``); ``extra`` is the extra name (``"arrow"``);
     ``modules`` is the set of top-level package names that extra provides.

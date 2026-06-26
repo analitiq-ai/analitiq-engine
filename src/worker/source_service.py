@@ -12,30 +12,26 @@ from __future__ import annotations
 import io
 import json
 import logging
-from typing import Any, AsyncIterator, Dict, List, Optional
+from collections.abc import AsyncIterator
+from typing import Any
 
-import grpc
 import pyarrow as pa
 
+import grpc
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.sql.exceptions import ReadError, UnsupportedDialectOperationError
 from cdk.type_map import InvalidTypeMapError, UnmappedTypeError
-
-from src.source.connectors.base import ReadError as ApiReadError
-from src.state.store import decode_cursor_state, encode_cursor_state
-
-from src.grpc.generated.analitiq.v1.source_service_pb2 import (
+from src.grpc.generated.analitiq.v1 import (
     CursorSave,
+    PayloadFormat,
     ReadBatchChunk,
     ReadComplete,
-    ReadError as ReadErrorMsg,
-    ReadRequest,
-    ReadResponse,
 )
-from src.grpc.generated.analitiq.v1.source_service_pb2_grpc import (
-    SourceServiceServicer,
-)
-from src.grpc.generated.analitiq.v1.stream_pb2 import PayloadFormat
+from src.grpc.generated.analitiq.v1 import ReadError as ReadErrorMsg
+from src.grpc.generated.analitiq.v1 import ReadRequest, ReadResponse
+from src.grpc.generated.analitiq.v1.source_service_pb2_grpc import SourceServiceServicer
+from src.source.connectors.base import ReadError as ApiReadError
+from src.state.store import decode_cursor_state, encode_cursor_state
 
 logger = logging.getLogger(__name__)
 
@@ -65,25 +61,25 @@ class _RelayCheckpoint:
     connector made them.
     """
 
-    def __init__(self, initial: Optional[Dict[str, Any]]) -> None:
+    def __init__(self, initial: dict[str, Any] | None) -> None:
         self._initial = initial
-        self.pending: List[Dict[str, Any]] = []
+        self.pending: list[dict[str, Any]] = []
 
     async def get_cursor(
-        self, stream_name: str, partition: Optional[Dict[str, Any]] = None
-    ) -> Optional[Dict[str, Any]]:
+        self, stream_name: str, partition: dict[str, Any] | None = None
+    ) -> dict[str, Any] | None:
         return self._initial
 
     async def save_cursor(
         self,
         stream_name: str,
-        partition: Optional[Dict[str, Any]],
-        cursor: Dict[str, Any],
+        partition: dict[str, Any] | None,
+        cursor: dict[str, Any],
     ) -> None:
         self.pending.append(cursor)
 
 
-def _cursor_json(cursor: Dict[str, Any]) -> str:
+def _cursor_json(cursor: dict[str, Any]) -> str:
     """Serialize a cursor-state dict for the wire.
 
     Tagged encoding round-trips ``datetime``/``date`` losslessly;
@@ -107,7 +103,7 @@ class SourceWorkerServicer(SourceServiceServicer):
         self,
         readable: Any,
         runtime: ConnectionRuntime,
-        source_config: Dict[str, Any],
+        source_config: dict[str, Any],
     ) -> None:
         self._readable = readable
         self._runtime = runtime
@@ -123,9 +119,7 @@ class SourceWorkerServicer(SourceServiceServicer):
             if request.initial_cursor_json
             else None
         )
-        partition = (
-            json.loads(request.partition_json) if request.partition_json else {}
-        )
+        partition = json.loads(request.partition_json) if request.partition_json else {}
         relay = _RelayCheckpoint(initial)
         total_records = 0
         total_batches = 0
@@ -158,7 +152,9 @@ class SourceWorkerServicer(SourceServiceServicer):
                         cursor_save=CursorSave(cursor_json=_cursor_json(cursor))
                     )
                 relay.pending.clear()
-        except Exception as exc:  # noqa: BLE001 — every failure crosses as a typed event
+        except (
+            Exception
+        ) as exc:  # noqa: BLE001 — every failure crosses as a typed event
             deterministic = isinstance(exc, _DETERMINISTIC_READ_ERRORS)
             logger.error(
                 "source worker read failed (%s, deterministic=%s): %s",
@@ -177,9 +173,7 @@ class SourceWorkerServicer(SourceServiceServicer):
             return
         # Trailing saves after the generator finished (e.g. final checkpoint).
         for cursor in relay.pending:
-            yield ReadResponse(
-                cursor_save=CursorSave(cursor_json=_cursor_json(cursor))
-            )
+            yield ReadResponse(cursor_save=CursorSave(cursor_json=_cursor_json(cursor)))
         relay.pending.clear()
         yield ReadResponse(
             complete=ReadComplete(

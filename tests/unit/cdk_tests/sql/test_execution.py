@@ -14,11 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 from cdk.sql.exceptions import CreateTableError, DiscoveryError
-from cdk.sql.execution import (
-    _qmark_to_named,
-    execute_ddl,
-    fetch_rows,
-)
+from cdk.sql.execution import _qmark_to_named, execute_ddl, fetch_rows
 
 from .conftest import FakeAdbcRuntime, FakeSaRuntime
 
@@ -54,14 +50,14 @@ class TestAdbcFetch:
         runtime = _runtime(
             responder=lambda sql, params: rows if params == ["arg"] else []
         )
-        out = await fetch_rows(runtime, "SELECT schema_name FROM x WHERE y = ?", ["arg"])
+        out = await fetch_rows(
+            runtime, "SELECT schema_name FROM x WHERE y = ?", ["arg"]
+        )
         assert out == rows
         # One connection opened, the statement ran with the params, conn closed.
         assert len(runtime.connections) == 1
         conn = runtime.connections[0]
-        assert conn.executed == [
-            ("SELECT schema_name FROM x WHERE y = ?", ["arg"])
-        ]
+        assert conn.executed == [("SELECT schema_name FROM x WHERE y = ?", ["arg"])]
         assert conn.closed is True
 
     @pytest.mark.asyncio
@@ -139,7 +135,9 @@ class TestSqlAlchemyRealDriver:
         from sqlalchemy.ext.asyncio import create_async_engine
 
         engine = create_async_engine("sqlite+aiosqlite:///:memory:")
-        runtime = SimpleNamespace(is_adbc=False, is_sync_sqlalchemy=False, engine=engine)
+        runtime = SimpleNamespace(
+            is_adbc=False, is_sync_sqlalchemy=False, engine=engine
+        )
         try:
             await execute_ddl(runtime, "CREATE TABLE t (id INTEGER, label TEXT)")
             # A bound parameter survives the ? -> :_p0 rewrite into the driver.

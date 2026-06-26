@@ -7,20 +7,16 @@ It does not implement idempotency since stdout is not persistent.
 import errno
 import logging
 import sys
-from typing import Any, Dict, List
+from typing import Any
 
 import pyarrow as pa
 
 from cdk.base_handler import BaseDestinationHandler, BatchWriteResult
+from cdk.connection_runtime import ConnectionRuntime
+from cdk.types import AckStatus, Cursor, SchemaSpec
+
 from ..formatters import get_formatter
 from ..formatters.base import BaseFormatter
-from cdk.types import (
-    AckStatus,
-    Cursor,
-    SchemaSpec,
-)
-from cdk.connection_runtime import ConnectionRuntime
-
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +38,7 @@ class StreamDestinationHandler(BaseDestinationHandler):
         """Initialize the stream handler."""
         self._runtime: ConnectionRuntime | None = None
         self._formatter: BaseFormatter | None = None
-        self._config: Dict[str, Any] = {}
+        self._config: dict[str, Any] = {}
         self._connected: bool = False
 
     @property
@@ -123,7 +119,9 @@ class StreamDestinationHandler(BaseDestinationHandler):
         Returns:
             Always True
         """
-        logger.info("StreamDestinationHandler: Schema accepted (no configuration needed)")
+        logger.info(
+            "StreamDestinationHandler: Schema accepted (no configuration needed)"
+        )
         return True
 
     async def write_batch(
@@ -132,7 +130,7 @@ class StreamDestinationHandler(BaseDestinationHandler):
         stream_id: str,
         batch_seq: int,
         record_batch: pa.RecordBatch,
-        record_ids: List[str],
+        record_ids: list[str],
         cursor: Cursor,
     ) -> BatchWriteResult:
         """Write an Arrow record batch to stdout.
@@ -176,6 +174,9 @@ class StreamDestinationHandler(BaseDestinationHandler):
         except OSError as e:
             # Closed/broken stdout (EPIPE), permissions, disk-full on a
             # redirected stream — none are recoverable by retry.
+            errno_code = (
+                errno.errorcode.get(e.errno, e.errno) if e.errno is not None else None
+            )
             fatal_errnos = {errno.EPIPE, errno.ENOSPC, errno.EACCES, errno.EBADF}
             status = (
                 AckStatus.ACK_STATUS_FATAL_FAILURE
@@ -184,13 +185,16 @@ class StreamDestinationHandler(BaseDestinationHandler):
             )
             logger.error(
                 "%s I/O error writing to stdout: %s",
-                "Fatal" if status == AckStatus.ACK_STATUS_FATAL_FAILURE else "Retryable",
-                e, exc_info=True,
+                "Fatal"
+                if status == AckStatus.ACK_STATUS_FATAL_FAILURE
+                else "Retryable",
+                e,
+                exc_info=True,
             )
             return BatchWriteResult(
                 status=status,
                 records_written=0,
-                failure_summary=f"OSError[{errno.errorcode.get(e.errno, e.errno)}]: {e}",
+                failure_summary=(f"OSError[{errno_code}]: {e}"),
             )
         except Exception as e:
             logger.error("Fatal error writing to stdout: %s", e, exc_info=True)
@@ -216,6 +220,8 @@ class StreamDestinationHandler(BaseDestinationHandler):
         except (ValueError, OSError) as e:
             logger.warning(
                 "stdout health check failed: %s: %s",
-                type(e).__name__, e, exc_info=True,
+                type(e).__name__,
+                e,
+                exc_info=True,
             )
             return False

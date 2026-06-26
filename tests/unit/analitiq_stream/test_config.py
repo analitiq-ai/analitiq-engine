@@ -3,13 +3,17 @@
 import pytest
 
 from src.config import (
-    validate_artifact,
-    resolve_endpoint_ref,
     load_connection,
     load_connector_definition,
+    resolve_endpoint_ref,
+    validate_artifact,
 )
 from src.config.endpoint_resolver import ConnectionLookup
-from src.config.exceptions import EndpointNotFoundError, ConnectorNotFoundError, ConnectionConfigError
+from src.config.exceptions import (
+    ConnectionConfigError,
+    ConnectorNotFoundError,
+    EndpointNotFoundError,
+)
 from src.models.stream import EndpointRef
 
 
@@ -80,6 +84,7 @@ class TestConnectionConfigValidator:
     @pytest.mark.unit
     def test_valid_connection_passes(self):
         from src.config.schema_validator import _load_schema
+
         schema = _load_schema("connection")
         required = schema.get("required", [])
         # Build a minimal connection that satisfies the published schema.
@@ -97,7 +102,7 @@ class TestConnectionConfigValidator:
 
     @pytest.mark.unit
     def test_invalid_connection_raises(self):
-        with pytest.raises(Exception):
+        with pytest.raises(ValueError):
             validate_artifact("connection", {})
 
 
@@ -106,18 +111,26 @@ class TestEndpointRefModel:
 
     @pytest.mark.unit
     def test_from_dict_connector(self):
-        ref = EndpointRef.from_dict({
-            "scope": "connector", "connection_id": "pipedrive", "endpoint_id": "deals",
-        })
+        ref = EndpointRef.from_dict(
+            {
+                "scope": "connector",
+                "connection_id": "pipedrive",
+                "endpoint_id": "deals",
+            }
+        )
         assert ref.scope == "connector"
         assert ref.connection_id == "pipedrive"
         assert ref.endpoint_id == "deals"
 
     @pytest.mark.unit
     def test_from_dict_connection(self):
-        ref = EndpointRef.from_dict({
-            "scope": "connection", "connection_id": "prod-postgres", "endpoint_id": "public_users",
-        })
+        ref = EndpointRef.from_dict(
+            {
+                "scope": "connection",
+                "connection_id": "prod-postgres",
+                "endpoint_id": "public_users",
+            }
+        )
         assert ref.scope == "connection"
         assert ref.connection_id == "prod-postgres"
         assert ref.endpoint_id == "public_users"
@@ -130,9 +143,13 @@ class TestEndpointRefModel:
     @pytest.mark.unit
     def test_invalid_scope_raises(self):
         with pytest.raises(ValueError, match="scope"):
-            EndpointRef.from_dict({
-                "scope": "unknown", "connection_id": "x", "endpoint_id": "y",
-            })
+            EndpointRef.from_dict(
+                {
+                    "scope": "unknown",
+                    "connection_id": "x",
+                    "endpoint_id": "y",
+                }
+            )
 
     @pytest.mark.unit
     def test_missing_keys_raises(self):
@@ -142,36 +159,51 @@ class TestEndpointRefModel:
     @pytest.mark.unit
     def test_unknown_keys_raises(self):
         with pytest.raises(ValueError, match="unknown keys"):
-            EndpointRef.from_dict({
-                "scope": "connector", "connection_id": "x", "endpoint_id": "y", "extra": "z",
-            })
+            EndpointRef.from_dict(
+                {
+                    "scope": "connector",
+                    "connection_id": "x",
+                    "endpoint_id": "y",
+                    "extra": "z",
+                }
+            )
 
     @pytest.mark.unit
     def test_x_extension_keys_are_accepted(self):
         """The stream contract allows ``x-*`` extension metadata
         alongside the required fields."""
-        ref = EndpointRef.from_dict({
-            "scope": "connector",
-            "connection_id": "x",
-            "endpoint_id": "y",
-            "x-owner": "platform",
-            "x-tags": ["wise", "transfers"],
-        })
+        ref = EndpointRef.from_dict(
+            {
+                "scope": "connector",
+                "connection_id": "x",
+                "endpoint_id": "y",
+                "x-owner": "platform",
+                "x-tags": ["wise", "transfers"],
+            }
+        )
         assert ref.connection_id == "x"
 
     @pytest.mark.unit
     def test_empty_connection_id_raises(self):
         with pytest.raises(ValueError, match="connection_id cannot be empty"):
-            EndpointRef.from_dict({
-                "scope": "connector", "connection_id": "", "endpoint_id": "y",
-            })
+            EndpointRef.from_dict(
+                {
+                    "scope": "connector",
+                    "connection_id": "",
+                    "endpoint_id": "y",
+                }
+            )
 
     @pytest.mark.unit
     def test_empty_endpoint_id_raises(self):
         with pytest.raises(ValueError, match="endpoint_id cannot be empty"):
-            EndpointRef.from_dict({
-                "scope": "connector", "connection_id": "x", "endpoint_id": "",
-            })
+            EndpointRef.from_dict(
+                {
+                    "scope": "connector",
+                    "connection_id": "x",
+                    "endpoint_id": "",
+                }
+            )
 
     @pytest.mark.unit
     def test_non_dict_input_raises(self):
@@ -207,18 +239,30 @@ class TestBatchWriteResultInvariant:
         from cdk.base_handler import BatchWriteResult
         from src.grpc.generated.analitiq.v1 import AckStatus
 
-        assert BatchWriteResult(
-            status=AckStatus.ACK_STATUS_SUCCESS, records_written=3
-        ).success is True
-        assert BatchWriteResult(
-            status=AckStatus.ACK_STATUS_FATAL_FAILURE, records_written=0
-        ).success is False
-        assert BatchWriteResult(
-            status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE, records_written=0
-        ).success is False
-        assert BatchWriteResult(
-            status=AckStatus.ACK_STATUS_ALREADY_COMMITTED, records_written=5
-        ).success is True
+        assert (
+            BatchWriteResult(
+                status=AckStatus.ACK_STATUS_SUCCESS, records_written=3
+            ).success
+            is True
+        )
+        assert (
+            BatchWriteResult(
+                status=AckStatus.ACK_STATUS_FATAL_FAILURE, records_written=0
+            ).success
+            is False
+        )
+        assert (
+            BatchWriteResult(
+                status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE, records_written=0
+            ).success
+            is False
+        )
+        assert (
+            BatchWriteResult(
+                status=AckStatus.ACK_STATUS_ALREADY_COMMITTED, records_written=5
+            ).success
+            is True
+        )
 
     @pytest.mark.unit
     def test_success_is_not_constructor_kwarg(self):
@@ -240,19 +284,16 @@ class TestBatchWriteResultInvariant:
         from src.grpc.generated.analitiq.v1 import AckStatus
 
         with pytest.raises(ValueError, match="non-negative"):
-            BatchWriteResult(
-                status=AckStatus.ACK_STATUS_SUCCESS, records_written=-1
-            )
+            BatchWriteResult(status=AckStatus.ACK_STATUS_SUCCESS, records_written=-1)
 
     @pytest.mark.unit
     def test_frozen_rejects_mutation(self):
         from dataclasses import FrozenInstanceError
+
         from cdk.base_handler import BatchWriteResult
         from src.grpc.generated.analitiq.v1 import AckStatus
 
-        r = BatchWriteResult(
-            status=AckStatus.ACK_STATUS_SUCCESS, records_written=1
-        )
+        r = BatchWriteResult(status=AckStatus.ACK_STATUS_SUCCESS, records_written=1)
         with pytest.raises(FrozenInstanceError):
             r.records_written = 99  # type: ignore[misc]
 
@@ -326,9 +367,9 @@ class TestEnumWireAlignment:
         # Proto enums are protobuf ``EnumTypeWrapper`` (not iterable): names via
         # ``.keys()``, value via ``getattr``/attribute access (returns the int).
         for member in CdkAckStatus:
-            assert int(member) == getattr(ProtoAckStatus, member.name), (
-                f"AckStatus.{member.name} drifted from proto"
-            )
+            assert int(member) == getattr(
+                ProtoAckStatus, member.name
+            ), f"AckStatus.{member.name} drifted from proto"
         # Both enums enumerate the same member names — neither side has an
         # extra value the other lacks.
         assert {m.name for m in CdkAckStatus} == set(ProtoAckStatus.keys())
@@ -339,9 +380,9 @@ class TestEnumWireAlignment:
         from src.grpc.generated.analitiq.v1 import WriteMode as ProtoWriteMode
 
         for member in CdkWriteMode:
-            assert int(member) == getattr(ProtoWriteMode, member.name), (
-                f"WriteMode.{member.name} drifted from proto"
-            )
+            assert int(member) == getattr(
+                ProtoWriteMode, member.name
+            ), f"WriteMode.{member.name} drifted from proto"
         assert {m.name for m in CdkWriteMode} == set(ProtoWriteMode.keys())
 
 
@@ -363,7 +404,10 @@ class TestEndpointRefResolver:
         endpoint_file = endpoint_dir / "transfers.json"
         endpoint_file.write_text('{"endpoint": "/v1/transfers", "method": "GET"}')
 
-        paths = {"connectors": tmp_path / "connectors", "connections": tmp_path / "connections"}
+        paths = {
+            "connectors": tmp_path / "connectors",
+            "connections": tmp_path / "connections",
+        }
         result = resolve_endpoint_ref(
             {"scope": "connector", "connection_id": "wise", "endpoint_id": "transfers"},
             paths,
@@ -379,9 +423,16 @@ class TestEndpointRefResolver:
         endpoint_file = endpoint_dir / "public_users.json"
         endpoint_file.write_text('{"endpoint": "public/users", "method": "DATABASE"}')
 
-        paths = {"connectors": tmp_path / "connectors", "connections": tmp_path / "connections"}
+        paths = {
+            "connectors": tmp_path / "connectors",
+            "connections": tmp_path / "connections",
+        }
         result = resolve_endpoint_ref(
-            {"scope": "connection", "connection_id": "prod-pg", "endpoint_id": "public_users"},
+            {
+                "scope": "connection",
+                "connection_id": "prod-pg",
+                "endpoint_id": "public_users",
+            },
             paths,
             lookup,
         )
@@ -393,17 +444,29 @@ class TestEndpointRefResolver:
         endpoint_dir.mkdir(parents=True)
         (endpoint_dir / "transfers.json").write_text('{"endpoint": "/v1/transfers"}')
 
-        paths = {"connectors": tmp_path / "connectors", "connections": tmp_path / "connections"}
-        ref = EndpointRef(scope="connector", connection_id="wise", endpoint_id="transfers")
+        paths = {
+            "connectors": tmp_path / "connectors",
+            "connections": tmp_path / "connections",
+        }
+        ref = EndpointRef(
+            scope="connector", connection_id="wise", endpoint_id="transfers"
+        )
         assert resolve_endpoint_ref(ref, paths, lookup)["endpoint"] == "/v1/transfers"
 
     @pytest.mark.unit
     def test_resolve_missing_endpoint_raises(self, tmp_path, lookup):
         """Test that missing endpoint file raises EndpointNotFoundError."""
-        paths = {"connectors": tmp_path / "connectors", "connections": tmp_path / "connections"}
+        paths = {
+            "connectors": tmp_path / "connectors",
+            "connections": tmp_path / "connections",
+        }
         with pytest.raises(EndpointNotFoundError):
             resolve_endpoint_ref(
-                {"scope": "connector", "connection_id": "wise", "endpoint_id": "nonexistent"},
+                {
+                    "scope": "connector",
+                    "connection_id": "wise",
+                    "endpoint_id": "nonexistent",
+                },
                 paths,
                 lookup,
             )

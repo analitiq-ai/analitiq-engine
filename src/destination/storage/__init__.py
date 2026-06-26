@@ -8,7 +8,7 @@ __all__ = ["BaseStorageBackend", "LocalFileStorage"]
 
 def get_storage_backend(storage_type: str) -> BaseStorageBackend:
     """
-    Factory function to get storage backend by type.
+    Get storage backend by type.
 
     Args:
         storage_type: Storage type (local, s3, file)

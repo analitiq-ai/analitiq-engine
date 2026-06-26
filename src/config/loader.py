@@ -8,7 +8,7 @@ development and cloud deployments (after config fetcher populates local files).
 
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from src.config.exceptions import (
     ConfigNotFoundError,
@@ -40,8 +40,8 @@ class PathBasedConfigLoader:
             base_path: Base directory for resolving relative paths
         """
         self.base_path = Path(base_path)
-        self._connectors_path: Optional[Path] = None
-        self._streams_path: Optional[Path] = None
+        self._connectors_path: Path | None = None
+        self._streams_path: Path | None = None
 
     @property
     def connectors_path(self) -> Path:
@@ -73,7 +73,7 @@ class PathBasedConfigLoader:
             p = (self.base_path / p).resolve()
         self._streams_path = p
 
-    def _load_json(self, path: Path) -> Dict[str, Any]:
+    def _load_json(self, path: Path) -> dict[str, Any]:
         """
         Load JSON file.
 
@@ -93,11 +93,11 @@ class PathBasedConfigLoader:
         try:
             return load_json_file(path, ConfigValidationError)
         except PermissionError:
-            raise ConfigNotFoundError(f"Permission denied: {path}")
+            raise ConfigNotFoundError(f"Permission denied: {path}") from None
         except OSError as e:
-            raise ConfigNotFoundError(f"Error reading {path}: {e}")
+            raise ConfigNotFoundError(f"Error reading {path}: {e}") from e
 
-    def load_pipeline(self, pipeline_path: str | Path) -> Tuple[Dict[str, Any], Path]:
+    def load_pipeline(self, pipeline_path: str | Path) -> tuple[dict[str, Any], Path]:
         """
         Load pipeline configuration and extract path settings.
 
@@ -124,7 +124,9 @@ class PathBasedConfigLoader:
                 # Resolve relative to pipeline file's directory
                 connectors_path = (path.parent / connectors_path).resolve()
             self._connectors_path = Path(connectors_path)
-            logger.debug(f"Using connectors path from pipeline: {self._connectors_path}")
+            logger.debug(
+                f"Using connectors path from pipeline: {self._connectors_path}"
+            )
 
         # Extract streams_path from pipeline config
         if "streams_path" in pipeline:
@@ -140,7 +142,7 @@ class PathBasedConfigLoader:
         logger.info(f"Loaded pipeline from {path}")
         return pipeline, path
 
-    def load_connector(self, connector_name: str) -> Dict[str, Any]:
+    def load_connector(self, connector_name: str) -> dict[str, Any]:
         """
         Load connector template from connectors/{name}/connector.json.
 
@@ -156,15 +158,14 @@ class PathBasedConfigLoader:
         connector_path = self.connectors_path / connector_name / "connector.json"
         if not connector_path.exists():
             raise ConnectorNotFoundError(
-                connector_name,
-                f"Expected at: {connector_path}"
+                connector_name, f"Expected at: {connector_path}"
             )
 
         connector = self._load_json(connector_path)
         logger.debug(f"Loaded connector template: {connector_name}")
         return connector
 
-    def load_endpoint(self, endpoint_ref: str) -> Dict[str, Any]:
+    def load_endpoint(self, endpoint_ref: str) -> dict[str, Any]:
         """
         Load endpoint from path relative to connectors directory.
 
@@ -179,16 +180,15 @@ class PathBasedConfigLoader:
         """
         endpoint_path = self.connectors_path / endpoint_ref
         if not endpoint_path.exists():
-            raise EndpointNotFoundError(
-                endpoint_ref,
-                f"Expected at: {endpoint_path}"
-            )
+            raise EndpointNotFoundError(endpoint_ref, f"Expected at: {endpoint_path}")
 
         endpoint = self._load_json(endpoint_path)
         logger.debug(f"Loaded endpoint: {endpoint_ref}")
         return endpoint
 
-    def load_credentials(self, credentials_path: str, base: Optional[Path] = None) -> Dict[str, Any]:
+    def load_credentials(
+        self, credentials_path: str, base: Path | None = None
+    ) -> dict[str, Any]:
         """
         Load credentials from specified path.
 
@@ -219,7 +219,7 @@ class PathBasedConfigLoader:
 
         return self._load_json(path)
 
-    def load_streams(self, pipeline_id: str) -> List[Dict[str, Any]]:
+    def load_streams(self, pipeline_id: str) -> list[dict[str, Any]]:
         """
         Load all stream configurations for a pipeline.
 
@@ -229,7 +229,7 @@ class PathBasedConfigLoader:
         Returns:
             List of stream configuration dictionaries
         """
-        streams: List[Dict[str, Any]] = []
+        streams: list[dict[str, Any]] = []
 
         if not self.streams_path.exists():
             logger.warning(f"Streams directory does not exist: {self.streams_path}")
@@ -246,7 +246,7 @@ class PathBasedConfigLoader:
         logger.info(f"Loaded {len(streams)} streams for pipeline {pipeline_id}")
         return streams
 
-    def list_available_connectors(self) -> List[str]:
+    def list_available_connectors(self) -> list[str]:
         """
         List all available connectors.
 
@@ -264,5 +264,5 @@ class PathBasedConfigLoader:
         return sorted(connectors)
 
     def __repr__(self) -> str:
-        """String representation."""
+        """Return the string representation."""
         return f"PathBasedConfigLoader({self.base_path})"

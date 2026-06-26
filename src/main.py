@@ -35,7 +35,7 @@ import asyncio
 import logging
 import os
 import sys
-from typing import Any, Dict
+from typing import Any
 
 from src.models.stream import WriteMode
 
@@ -44,7 +44,7 @@ log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
     level=getattr(logging, log_level, logging.INFO),
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)]
+    handlers=[logging.StreamHandler(sys.stdout)],
 )
 logger = logging.getLogger(__name__)
 
@@ -106,7 +106,9 @@ async def _send_shutdown_to_destination() -> None:
     except Exception as e:
         logger.warning(
             "Failed to send shutdown signal: %s: %s",
-            type(e).__name__, e, exc_info=True,
+            type(e).__name__,
+            e,
+            exc_info=True,
         )
     finally:
         await client.disconnect()
@@ -145,7 +147,13 @@ async def run_destination_mode() -> None:
     # Load configuration using PipelineConfigPrep (same as engine)
     logger.info("Loading pipeline configuration via PipelineConfigPrep")
     config_prep = PipelineConfigPrep()
-    pipeline_config, stream_configs, resolved_connections, resolved_endpoints, _connectors = config_prep.create_config()
+    (
+        pipeline_config,
+        stream_configs,
+        resolved_connections,
+        resolved_endpoints,
+        _connectors,
+    ) = config_prep.create_config()
 
     # Get destination connection from pipeline config
     destinations = pipeline_config.connections.destinations
@@ -163,11 +171,16 @@ async def run_destination_mode() -> None:
     # Get the connection id for the selected destination
     dest_connection_id = destinations[destination_index]
 
-    logger.info(f"Using destination index {destination_index}: connection_id={dest_connection_id}")
+    logger.info(
+        f"Using destination index {destination_index}: "
+        f"connection_id={dest_connection_id}"
+    )
 
     # Get ConnectionRuntime for selected destination
     if dest_connection_id not in resolved_connections:
-        logger.error(f"Connection '{dest_connection_id}' not found in resolved connections")
+        logger.error(
+            f"Connection '{dest_connection_id}' not found in resolved connections"
+        )
         sys.exit(1)
 
     runtime = resolved_connections[dest_connection_id]
@@ -183,8 +196,8 @@ async def run_destination_mode() -> None:
     #     document. Engine and destination both load these via
     #     PipelineConfigPrep, so handlers read schema details from this
     #     map instead of unpacking them off the wire.
-    endpoint_refs: Dict[str, Dict[str, Any]] = {}
-    stream_endpoints: Dict[str, Dict[str, Any]] = {}
+    endpoint_refs: dict[str, dict[str, Any]] = {}
+    stream_endpoints: dict[str, dict[str, Any]] = {}
     for stream in stream_configs:
         for dest in stream.destinations:
             if dest.connection_ref != dest_connection_id:
@@ -246,13 +259,14 @@ async def run_destination_mode() -> None:
 
 async def main() -> int:
     """
-    Main entrypoint - dispatch based on RUN_MODE.
+    Dispatch based on RUN_MODE (main entrypoint).
 
     Returns:
         Exit code (0 for success, 1 for failure)
     """
     # Initialize run_id if not already set (cloud_entrypoint sets it first)
     from src.shared.run_id import initialize_run_id
+
     initialize_run_id()
 
     logger.info("=" * 60)

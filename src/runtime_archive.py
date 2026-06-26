@@ -5,17 +5,16 @@ from __future__ import annotations
 import argparse
 import os
 import shutil
-import subprocess
+import subprocess  # nosec B404
 import sys
 import tarfile
 import tempfile
 import urllib.error
 import urllib.request
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator, Sequence
 from urllib.parse import urlparse, urlsplit, urlunsplit
-
 
 REQUIRED_FILES = ("pipelines/manifest.json",)
 
@@ -55,7 +54,6 @@ def hydrate_archive(archive_path: Path | str, destination: Path | str = ".") -> 
     engine reads during normal local execution, including
     ``pipelines/manifest.json``.
     """
-
     target_dir = Path(destination).expanduser().resolve()
     target_dir.mkdir(parents=True, exist_ok=True)
 
@@ -68,7 +66,6 @@ def hydrate_archive(archive_path: Path | str, destination: Path | str = ".") -> 
 @contextmanager
 def _local_archive(archive_path: Path | str) -> Iterator[Path]:
     """Yield a local path to the archive, downloading it first when it is a URL."""
-
     if _is_remote_url(archive_path):
         url = str(archive_path)
         handle, tmp_name = tempfile.mkstemp(suffix=".tar")
@@ -105,7 +102,7 @@ def _download_archive(url: str, destination: Path) -> None:
     # lives in the query string, and these messages reach the container logs.
     safe_url = _redact_url(url)
     try:
-        with urllib.request.urlopen(  # noqa: S310 - scheme allowlisted above
+        with urllib.request.urlopen(  # noqa: S310 # nosec B310
             url, timeout=_DOWNLOAD_TIMEOUT_SECONDS
         ) as response, destination.open("wb") as out_file:
             shutil.copyfileobj(response, out_file)
@@ -133,7 +130,9 @@ def _extract_tar_safely(archive_path: Path, destination: Path) -> None:
             members = archive.getmembers()
             for member in members:
                 _validate_member(member, destination)
-            archive.extractall(destination, members=members, filter="data")
+            archive.extractall(  # nosec B202
+                destination, members=members, filter="data"
+            )
     except tarfile.TarError as exc:
         raise RuntimeArchiveError(
             f"Invalid runtime archive {archive_path}: {exc}"
@@ -225,7 +224,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         if not exec_command:
             raise RuntimeArchiveError("The run command requires a command after '--'")
 
-        return subprocess.call(exec_command, cwd=destination, env=os.environ.copy())
+        return subprocess.call(  # nosec B603
+            exec_command, cwd=destination, env=os.environ.copy()
+        )
     except RuntimeArchiveError as exc:
         print(f"runtime archive error: {exc}", file=sys.stderr)
         return 2

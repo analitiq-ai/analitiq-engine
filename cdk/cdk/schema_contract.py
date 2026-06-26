@@ -5,7 +5,7 @@ import logging
 import math
 from datetime import date, datetime, time
 from decimal import Decimal
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -25,20 +25,20 @@ _JSON_ARROW_TYPE: str = "Json"
 # (float64) above these silently overflows to +/-inf when stored in the
 # narrower Arrow array, so it must be rejected per-row instead. float64
 # needs no entry: math.isfinite already covers it.
-_FLOAT_MAX_BY_BIT_WIDTH: Dict[int, float] = {
+_FLOAT_MAX_BY_BIT_WIDTH: dict[int, float] = {
     16: 65504.0,
     32: math.ldexp(2 - 2**-23, 127),  # 3.4028234663852886e+38
 }
 
 
-def _is_json_field(field_def: Dict[str, Any]) -> bool:
+def _is_json_field(field_def: dict[str, Any]) -> bool:
     return field_def.get("arrow_type") == _JSON_ARROW_TYPE
 
 
 class SchemaContract:
     """Arrow schema mapping for a connector endpoint."""
 
-    def __init__(self, endpoint_schema: Dict[str, Any]) -> None:
+    def __init__(self, endpoint_schema: dict[str, Any]) -> None:
         if "columns" in endpoint_schema:
             field_defs = endpoint_schema.get("columns") or []
             if not field_defs:
@@ -46,9 +46,7 @@ class SchemaContract:
                     "SchemaContract: 'columns' is present but empty; the "
                     "contract must declare every column"
                 )
-            self._arrow_schema, self._field_defs = self._schema_from_columns(
-                field_defs
-            )
+            self._arrow_schema, self._field_defs = self._schema_from_columns(field_defs)
         elif "properties" in endpoint_schema:
             properties = endpoint_schema.get("properties") or {}
             if not properties:
@@ -67,11 +65,12 @@ class SchemaContract:
                 f"endpoint); got keys {sorted(endpoint_schema.keys())!r}"
             )
 
-        self._column_types: Dict[str, str] = {
+        self._column_types: dict[str, str] = {
             f.name: str(f.type) for f in self._arrow_schema
         }
         logger.debug(
-            "Built schema contract with %d fields", len(self._arrow_schema),
+            "Built schema contract with %d fields",
+            len(self._arrow_schema),
         )
 
     @property
@@ -79,16 +78,14 @@ class SchemaContract:
         return self._arrow_schema
 
     @property
-    def column_types(self) -> Dict[str, str]:
+    def column_types(self) -> dict[str, str]:
         return self._column_types
 
     @property
     def json_columns(self) -> set:
         return {n for n, defn in self._field_defs.items() if _is_json_field(defn)}
 
-    def to_db_records(
-        self, record_batch: pa.RecordBatch
-    ) -> List[Dict[str, Any]]:
+    def to_db_records(self, record_batch: pa.RecordBatch) -> list[dict[str, Any]]:
         """Materialise a batch for a SQL destination.
 
         JSON columns stay as wire-format strings (their Arrow shape is
@@ -98,11 +95,12 @@ class SchemaContract:
         handle them uniformly across dialects.
         """
         record_batch = self.cast_arrow_batch(record_batch)
-        return record_batch.to_pylist()
+        records: list[dict[str, Any]] = record_batch.to_pylist()
+        return records
 
     def decode_json_columns(
-        self, records: List[Dict[str, Any]]
-    ) -> List[Dict[str, Any]]:
+        self, records: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
         """Parse JSON-encoded string values into Python dict/list.
 
         Available for callers that need decoded objects (e.g. an API
@@ -116,12 +114,12 @@ class SchemaContract:
         """
         return decode_json_fields(records, self.json_columns)
 
-    def from_pylist(self, records: List[Dict[str, Any]]) -> pa.RecordBatch:
+    def from_pylist(self, records: list[dict[str, Any]]) -> pa.RecordBatch:
         """Build a record batch from dict rows using this endpoint's schema."""
         if not records:
             return pa.RecordBatch.from_pylist([], schema=self._arrow_schema)
 
-        arrays: List[pa.Array] = []
+        arrays: list[pa.Array] = []
         for field in self._arrow_schema:
             values = [r.get(field.name) for r in records]
             field_def = self._field_defs.get(field.name) or {}
@@ -155,7 +153,7 @@ class SchemaContract:
             name: record_batch.column(i)
             for i, name in enumerate(record_batch.schema.names)
         }
-        arrays: List[pa.Array] = []
+        arrays: list[pa.Array] = []
         for field in self._arrow_schema:
             col = existing.get(field.name)
             if col is None:
@@ -193,9 +191,10 @@ class SchemaContract:
         return pa.RecordBatch.from_arrays(arrays, schema=self._arrow_schema)
 
     @staticmethod
-    def to_dicts(batch: Any) -> List[Dict[str, Any]]:
+    def to_dicts(batch: Any) -> list[dict[str, Any]]:
         """Convert an Arrow ``Table`` or ``RecordBatch`` to dicts."""
-        return batch.to_pylist()
+        rows: list[dict[str, Any]] = batch.to_pylist()
+        return rows
 
     @staticmethod
     def _assert_non_nullable(field: pa.Field, array: pa.Array) -> None:
@@ -219,8 +218,8 @@ class SchemaContract:
     @staticmethod
     def _build_column(
         field: pa.Field,
-        values: List[Any],
-        field_def: Dict[str, Any],
+        values: list[Any],
+        field_def: dict[str, Any],
     ) -> pa.Array:
         source_format = field_def.get("source_format")
         if all(v is None for v in values):
@@ -238,7 +237,7 @@ class SchemaContract:
             # the source author can locate the bad value, rather than
             # letting a string round-trip through the decoder where
             # ``json.loads`` would raise far from the source.
-            serialized: List[Any] = []
+            serialized: list[Any] = []
             for row, v in enumerate(values):
                 if v is None:
                     serialized.append(None)
@@ -263,9 +262,8 @@ class SchemaContract:
                         f"source_format only applies to string inputs"
                     )
             string_col = pa.array(values, type=pa.string())
-            unit = (
-                getattr(field.type, "unit", None)
-                or ("us" if pa.types.is_timestamp(field.type) else "s")
+            unit = getattr(field.type, "unit", None) or (
+                "us" if pa.types.is_timestamp(field.type) else "s"
             )
             parsed = pc.strptime(string_col, format=source_format, unit=unit)
             if parsed.type == field.type:
@@ -276,9 +274,7 @@ class SchemaContract:
             return pc.cast(parsed, field.type, safe=False)
 
         if pa.types.is_decimal(field.type):
-            converted = [
-                None if v is None else Decimal(str(v)) for v in values
-            ]
+            converted = [None if v is None else Decimal(str(v)) for v in values]
             return pa.array(converted, type=field.type)
 
         if (
@@ -294,9 +290,7 @@ class SchemaContract:
         return pa.array(values, type=field.type)
 
     @staticmethod
-    def _build_temporal_from_strings(
-        field: pa.Field, values: List[Any]
-    ) -> pa.Array:
+    def _build_temporal_from_strings(field: pa.Field, values: list[Any]) -> pa.Array:
         """Parse ISO-8601 strings into a timestamp / date / time column.
 
         Triggered for JSON-Schema ``format: date-time | date | time`` fields
@@ -309,7 +303,7 @@ class SchemaContract:
         is_date = pa.types.is_date(field.type)
         tz = getattr(field.type, "tz", None) if is_ts else None
 
-        parsed: List[Any] = []
+        parsed: list[Any] = []
         for row, v in enumerate(values):
             if v is None:
                 parsed.append(None)
@@ -339,9 +333,7 @@ class SchemaContract:
         return pa.array(parsed, type=field.type)
 
     @staticmethod
-    def _build_numeric_column(
-        field: pa.Field, values: List[Any]
-    ) -> pa.Array:
+    def _build_numeric_column(field: pa.Field, values: list[Any]) -> pa.Array:
         """Build an integer or float column, validating every value per row.
 
         Handles every integer/float column, whether the source carries
@@ -375,7 +367,7 @@ class SchemaContract:
         else:
             float_max = _FLOAT_MAX_BY_BIT_WIDTH.get(field.type.bit_width)
 
-        converted: List[Any] = []
+        converted: list[Any] = []
         for row, v in enumerate(values):
             if v is None:
                 converted.append(None)
@@ -432,10 +424,10 @@ class SchemaContract:
 
     @staticmethod
     def _schema_from_columns(
-        columns: List[Dict[str, Any]],
-    ) -> tuple[pa.Schema, Dict[str, Dict[str, Any]]]:
+        columns: list[dict[str, Any]],
+    ) -> tuple[pa.Schema, dict[str, dict[str, Any]]]:
         fields = []
-        defs: Dict[str, Dict[str, Any]] = {}
+        defs: dict[str, dict[str, Any]] = {}
         for index, col in enumerate(columns):
             name = col.get("name")
             if not name:
@@ -451,20 +443,19 @@ class SchemaContract:
 
     @staticmethod
     def _schema_from_properties(
-        properties: Dict[str, Any], required: set,
-    ) -> tuple[pa.Schema, Dict[str, Dict[str, Any]]]:
+        properties: dict[str, Any],
+        required: set,
+    ) -> tuple[pa.Schema, dict[str, dict[str, Any]]]:
         fields = []
-        defs: Dict[str, Dict[str, Any]] = {}
+        defs: dict[str, dict[str, Any]] = {}
         for name, prop in properties.items():
             arrow_type = SchemaContract._require_arrow_type(prop, name)
-            fields.append(
-                pa.field(name, arrow_type, nullable=name not in required)
-            )
+            fields.append(pa.field(name, arrow_type, nullable=name not in required))
             defs[name] = prop
         return pa.schema(fields), defs
 
     @staticmethod
-    def _require_arrow_type(field_def: Dict[str, Any], name: str) -> pa.DataType:
+    def _require_arrow_type(field_def: dict[str, Any], name: str) -> pa.DataType:
         if not field_def.get("arrow_type"):
             raise ValueError(
                 f"field {name!r} has no 'arrow_type' declaration; "

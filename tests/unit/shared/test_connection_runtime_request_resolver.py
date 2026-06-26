@@ -36,14 +36,10 @@ class TestRequestResolverScopes:
         resolver = _runtime().request_resolver()
         assert resolver.resolve({"ref": "connection.parameters.region"}) == "eu"
         assert resolver.resolve({"ref": "connection.selections.org"}) == "acme"
-        assert (
-            resolver.resolve({"ref": "connection.discovered.account_id"}) == "a-1"
-        )
+        assert resolver.resolve({"ref": "connection.discovered.account_id"}) == "a-1"
 
     def test_runtime_scope_carries_connection_id_and_caller_values(self):
-        resolver = _runtime().request_resolver(
-            runtime_values={"batch_size": 500}
-        )
+        resolver = _runtime().request_resolver(runtime_values={"batch_size": 500})
         assert resolver.resolve({"ref": "runtime.connection_id"}) == "conn-1"
         assert resolver.resolve({"ref": "runtime.batch_size"}) == 500
 

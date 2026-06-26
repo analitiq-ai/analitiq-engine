@@ -11,8 +11,9 @@ import json
 import logging
 import os
 import threading
+from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
-from typing import Any, Mapping, Optional
+from typing import Any
 
 from src.shared.run_id import get_run_id
 
@@ -33,7 +34,7 @@ MARKERS: dict[str, str] = {
 # Process-local monotonic guard for ``emitted_at``. Emissions can come from
 # several threads, so the clamp is taken under a lock.
 _emit_lock = threading.Lock()
-_last_emitted_at: Optional[datetime] = None
+_last_emitted_at: datetime | None = None
 
 
 def _next_emitted_at() -> str:

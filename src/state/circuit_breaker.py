@@ -3,8 +3,10 @@
 import asyncio
 import logging
 import time
+from collections.abc import Callable
+from datetime import datetime
 from enum import Enum
-from typing import Any, Callable, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -33,9 +35,10 @@ class CircuitBreaker:
         failure_threshold: int = 5,
         recovery_timeout: int = 60,
         success_threshold: int = 2,
-        expected_exception: type = Exception,
-        name: Optional[str] = None,
-    ):
+        expected_exception: type[BaseException]
+        | tuple[type[BaseException], ...] = Exception,
+        name: str | None = None,
+    ) -> None:
         """
         Initialize circuit breaker.
 
@@ -59,7 +62,9 @@ class CircuitBreaker:
         # State tracking
         self.state = CircuitState.CLOSED
         self.failure_count = 0
-        self.last_failure_time = None
+        # Engine code stores a float (time.time()); tests inject a datetime,
+        # which _should_attempt_reset normalizes via its .timestamp().
+        self.last_failure_time: float | datetime | None = None
         self.success_count = 0
 
         # Metrics
@@ -72,7 +77,7 @@ class CircuitBreaker:
             CircuitState.HALF_OPEN: 0,
         }
 
-    async def call(self, func: Callable, *args, **kwargs) -> Any:
+    async def call(self, func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
         """
         Execute a function through the circuit breaker.
 
@@ -108,12 +113,13 @@ class CircuitBreaker:
             self._on_success()
             return result
 
-        except self.expected_exception as e:
+        except self.expected_exception:
             # Expected failure - handle state transitions
             self._on_failure()
             raise
-        except BaseException as e:
-            # Handle exceptions that don't inherit from Exception (like aiohttp.ClientTimeout)
+        except BaseException:
+            # Handle exceptions that don't inherit from Exception
+            # (like aiohttp.ClientTimeout)
             # For circuit breaker purposes, treat all failures the same
             self._on_failure()
             raise
@@ -124,21 +130,21 @@ class CircuitBreaker:
             return True
 
         # Handle both datetime objects and timestamps
-        if hasattr(self.last_failure_time, 'timestamp'):
+        if hasattr(self.last_failure_time, "timestamp"):
             last_time = self.last_failure_time.timestamp()
         else:
             last_time = self.last_failure_time
 
         return time.time() - last_time >= self.recovery_timeout
 
-    def _transition_to_half_open(self):
+    def _transition_to_half_open(self) -> None:
         """Transition circuit to half-open state."""
         logger.info(f"Circuit breaker {self.name} transitioning to HALF_OPEN")
         self.state = CircuitState.HALF_OPEN
         self.state_transitions[CircuitState.HALF_OPEN] += 1
         self.success_count = 0
 
-    def _on_success(self):
+    def _on_success(self) -> None:
         """Handle successful function execution."""
         self.total_successes += 1
 
@@ -152,7 +158,7 @@ class CircuitBreaker:
             # Only reset on explicit reset or after opening/closing cycle
             pass
 
-    def _on_failure(self):
+    def _on_failure(self) -> None:
         """Handle failed function execution."""
         self.total_failures += 1
         self.failure_count += 1
@@ -166,7 +172,7 @@ class CircuitBreaker:
             if self.failure_count >= self.failure_threshold:
                 self._open_circuit()
 
-    def _open_circuit(self):
+    def _open_circuit(self) -> None:
         """Open the circuit breaker."""
         logger.warning(
             f"Circuit breaker {self.name} opening due to {self.failure_count} failures"
@@ -174,7 +180,7 @@ class CircuitBreaker:
         self.state = CircuitState.OPEN
         self.state_transitions[CircuitState.OPEN] += 1
 
-    def _close_circuit(self):
+    def _close_circuit(self) -> None:
         """Close the circuit breaker."""
         logger.info(f"Circuit breaker {self.name} closing - service recovered")
         self.state = CircuitState.CLOSED
@@ -186,7 +192,7 @@ class CircuitBreaker:
         """Get current circuit state."""
         return self.state
 
-    def get_metrics(self) -> dict:
+    def get_metrics(self) -> dict[str, Any]:
         """Get circuit breaker metrics."""
         return {
             "name": self.name,
@@ -201,7 +207,7 @@ class CircuitBreaker:
             },
         }
 
-    def reset(self):
+    def reset(self) -> None:
         """Reset circuit breaker to initial state."""
         logger.info(f"Resetting circuit breaker {self.name}")
         self.state = CircuitState.CLOSED
@@ -219,35 +225,33 @@ class CircuitBreaker:
             CircuitState.HALF_OPEN: 0,
         }
 
-    def force_open(self):
+    def force_open(self) -> None:
         """Force circuit breaker to open state."""
         logger.warning(f"Forcing circuit breaker {self.name} to open state")
         self.state = CircuitState.OPEN
         self.last_failure_time = time.time()
 
-    def force_close(self):
+    def force_close(self) -> None:
         """Force circuit breaker to closed state."""
         logger.info(f"Forcing circuit breaker {self.name} to closed state")
         self.state = CircuitState.CLOSED
         self.failure_count = 0
 
-    def _record_failure(self):
+    def _record_failure(self) -> None:
         """Record a failure for testing purposes."""
         self._on_failure()
 
-    def _record_success(self):
+    def _record_success(self) -> None:
         """Record a success for testing purposes."""
         self._on_success()
 
     def _is_call_allowed(self) -> bool:
         """Check if a call is allowed based on current circuit state."""
-        if self.state == CircuitState.CLOSED:
-            return True
-        elif self.state == CircuitState.OPEN:
+        if self.state == CircuitState.OPEN:
             return self._should_attempt_reset()
-        elif self.state == CircuitState.HALF_OPEN:
-            return True
-        return False
+        # CLOSED and HALF_OPEN both allow the call; CircuitState has no
+        # other members, so this covers every state.
+        return True
 
 
 class CircuitBreakerOpenError(Exception):
@@ -271,11 +275,20 @@ class DatabaseCircuitBreaker(CircuitBreaker):
 class APICircuitBreaker(CircuitBreaker):
     """Specialized circuit breaker for API operations."""
 
-    def __init__(self, name: str = "APICircuitBreaker"):
+    def __init__(self, name: str = "APICircuitBreaker") -> None:
+        api_exceptions: tuple[type[BaseException], ...]
         try:
             import aiohttp
-            # Include specific aiohttp exceptions that inherit from Exception or BaseException
-            api_exceptions = (aiohttp.ClientError, ConnectionError, TimeoutError, OSError, Exception)
+
+            # Include specific aiohttp exceptions that inherit from
+            # Exception or BaseException
+            api_exceptions = (
+                aiohttp.ClientError,
+                ConnectionError,
+                TimeoutError,
+                OSError,
+                Exception,
+            )
         except ImportError:
             api_exceptions = (ConnectionError, TimeoutError, OSError, Exception)
 

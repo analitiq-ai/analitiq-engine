@@ -89,6 +89,7 @@ async def postgres_driver():
     postgres_url = os.getenv("TEST_POSTGRES_URL")
     if postgres_url:
         import urllib.parse
+
         parsed = urllib.parse.urlparse(postgres_url)
         parameters = {
             "host": parsed.hostname or "localhost",
@@ -127,9 +128,7 @@ def mock_database_connector():
     connector = AsyncMock()
     connector.connect = AsyncMock()
     connector.disconnect = AsyncMock()
-    connector.read_batches = AsyncMock(
-        return_value=iter([[{"id": 1, "data": "test"}]])
-    )
+    connector.read_batches = AsyncMock(return_value=iter([[{"id": 1, "data": "test"}]]))
     connector.write_batch = AsyncMock()
     connector.supports_incremental_read = Mock(return_value=True)
     connector.health_check = AsyncMock(return_value=True)

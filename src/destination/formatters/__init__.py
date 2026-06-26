@@ -1,8 +1,10 @@
 """Formatters for serializing records to different output formats."""
 
+from collections.abc import Callable
+
 from .base import BaseFormatter
-from .jsonl import JsonLinesFormatter
 from .csv import CsvFormatter
+from .jsonl import JsonLinesFormatter
 from .parquet import ParquetFormatter
 
 __all__ = [
@@ -16,7 +18,7 @@ __all__ = [
 
 def get_formatter(format_type: str) -> BaseFormatter:
     """
-    Factory function to get formatter by format type.
+    Get formatter by format type.
 
     Args:
         format_type: Format type (jsonl, csv, parquet)
@@ -27,7 +29,7 @@ def get_formatter(format_type: str) -> BaseFormatter:
     Raises:
         ValueError: If format type is not supported
     """
-    formatters = {
+    formatters: dict[str, Callable[[], BaseFormatter]] = {
         "jsonl": JsonLinesFormatter,
         "json": JsonLinesFormatter,  # Alias
         "csv": CsvFormatter,
@@ -38,8 +40,7 @@ def get_formatter(format_type: str) -> BaseFormatter:
     if formatter_class is None:
         supported = ", ".join(sorted(formatters.keys()))
         raise ValueError(
-            f"Unsupported format type: {format_type}. "
-            f"Supported types: {supported}"
+            f"Unsupported format type: {format_type}. " f"Supported types: {supported}"
         )
 
     return formatter_class()

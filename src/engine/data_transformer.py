@@ -8,14 +8,15 @@ import json
 import logging
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import pyarrow as pa
 
-from .exceptions import TransformationError
-from ..shared.dict_path import walk_path
 from cdk.type_map.arrow import resolve_arrow_type
 from cdk.type_map.exceptions import InvalidTypeMapError
+
+from ..shared.dict_path import walk_path
+from .exceptions import TransformationError
 
 logger = logging.getLogger(__name__)
 
@@ -30,32 +31,33 @@ class AssignmentTransformer:
     - validate: {rules: [...], on_error: str}
     """
 
-    # Never add a new key for an existing version — register new behaviour under a new version int.
+    # Never add a new key for an existing version — register new behaviour
+    # under a new version int.
     FUNCTION_CATALOG: dict[str, dict[int, str]] = {
-        "iso_to_date":      {1: "_fn_iso_to_date"},
-        "iso_to_datetime":  {1: "_fn_iso_to_datetime"},
+        "iso_to_date": {1: "_fn_iso_to_date"},
+        "iso_to_datetime": {1: "_fn_iso_to_datetime"},
         "iso_to_timestamp": {1: "_fn_iso_to_timestamp"},
-        "trim":             {1: "_fn_trim"},
-        "lower":            {1: "_fn_lower"},
-        "upper":            {1: "_fn_upper"},
-        "to_int":           {1: "_fn_to_int"},
-        "to_float":         {1: "_fn_to_float"},
-        "to_string":        {1: "_fn_to_string"},
-        "abs":              {1: "_fn_abs"},
-        "now":              {1: "_fn_now"},
-        "default":          {1: "_fn_default"},
-        "coalesce":         {1: "_fn_coalesce"},
+        "trim": {1: "_fn_trim"},
+        "lower": {1: "_fn_lower"},
+        "upper": {1: "_fn_upper"},
+        "to_int": {1: "_fn_to_int"},
+        "to_float": {1: "_fn_to_float"},
+        "to_string": {1: "_fn_to_string"},
+        "abs": {1: "_fn_abs"},
+        "now": {1: "_fn_now"},
+        "default": {1: "_fn_default"},
+        "coalesce": {1: "_fn_coalesce"},
     }
 
-    def __init__(self):
+    def __init__(self) -> None:
         pass
 
     async def transform_record(
         self,
-        record: Dict[str, Any],
-        assignments: List[Dict[str, Any]],
-        default_on_error: str = "dlq"
-    ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+        record: dict[str, Any],
+        assignments: list[dict[str, Any]],
+        default_on_error: str = "dlq",
+    ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
         """
         Transform a single record using assignment rules.
 
@@ -67,8 +69,8 @@ class AssignmentTransformer:
         Returns:
             Tuple of (transformed_record, errors)
         """
-        result = {}
-        errors = []
+        result: dict[str, Any] = {}
+        errors: list[dict[str, Any]] = []
 
         for assignment in assignments:
             try:
@@ -84,15 +86,19 @@ class AssignmentTransformer:
 
                 # Validate if rules specified
                 if validate:
-                    validation_error = self._validate_value(value, validate.get("rules", []), target_path)
+                    validation_error = self._validate_value(
+                        value, validate.get("rules", []), target_path
+                    )
                     if validation_error:
                         on_error = validate.get("on_error", default_on_error)
-                        errors.append({
-                            "field": ".".join(target_path),
-                            "error": validation_error,
-                            "action": on_error,
-                            "value": value,
-                        })
+                        errors.append(
+                            {
+                                "field": ".".join(target_path),
+                                "error": validation_error,
+                                "action": on_error,
+                                "value": value,
+                            }
+                        )
                         if on_error == "skip_record":
                             return None, errors
                         elif on_error == "default_value":
@@ -103,30 +109,36 @@ class AssignmentTransformer:
 
                 # Check nullability
                 if value is None and not nullable:
-                    errors.append({
-                        "field": ".".join(target_path),
-                        "error": "Value is null but field is not nullable",
-                        "action": default_on_error,
-                    })
+                    errors.append(
+                        {
+                            "field": ".".join(target_path),
+                            "error": "Value is null but field is not nullable",
+                            "action": default_on_error,
+                        }
+                    )
                     continue
 
                 self._set_nested_value(result, target_path, value)
 
             except TransformationError as e:
-                field_path = ".".join(assignment.get("target", {}).get("path", ["unknown"]))
-                errors.append({
-                    "field": field_path,
-                    "error": str(e),
-                    "action": default_on_error,
-                })
+                field_path = ".".join(
+                    assignment.get("target", {}).get("path", ["unknown"])
+                )
+                errors.append(
+                    {
+                        "field": field_path,
+                        "error": str(e),
+                        "action": default_on_error,
+                    }
+                )
 
         return result, errors
 
     async def _evaluate_value(
         self,
-        record: Dict[str, Any],
-        partial_result: Dict[str, Any],
-        value_spec: Dict[str, Any]
+        record: dict[str, Any],
+        partial_result: dict[str, Any],
+        value_spec: dict[str, Any],
     ) -> Any:
         """Evaluate a value specification (const or expr)."""
         kind = value_spec.get("kind", "expr")
@@ -143,9 +155,9 @@ class AssignmentTransformer:
 
     async def _evaluate_expression(
         self,
-        record: Dict[str, Any],
-        partial_result: Dict[str, Any],
-        expr: Dict[str, Any]
+        record: dict[str, Any],
+        partial_result: dict[str, Any],
+        expr: dict[str, Any],
     ) -> Any:
         """Evaluate an expression AST node."""
         op = expr.get("op")
@@ -161,7 +173,9 @@ class AssignmentTransformer:
             case "pipe":
                 args = expr.get("args", [])
                 if not args:
-                    raise TransformationError(f"pipe expression requires at least 1 arg, got {len(args)}")
+                    raise TransformationError(
+                        f"pipe expression requires at least 1 arg, got {len(args)}"
+                    )
                 # First arg is the initial value, rest are functions to apply
                 value = await self._evaluate_expression(record, partial_result, args[0])
                 for fn_expr in args[1:]:
@@ -174,7 +188,7 @@ class AssignmentTransformer:
                     None,  # No input value directly
                     expr.get("name"),
                     expr.get("version", 1),
-                    expr.get("args", [])
+                    expr.get("args", []),
                 )
 
             case "if":
@@ -183,16 +197,24 @@ class AssignmentTransformer:
                     raise TransformationError(
                         f"if expression requires 3 args, got {len(args)}"
                     )
-                condition = await self._evaluate_expression(record, partial_result, args[0])
+                condition = await self._evaluate_expression(
+                    record, partial_result, args[0]
+                )
                 if condition:
-                    return await self._evaluate_expression(record, partial_result, args[1])
+                    return await self._evaluate_expression(
+                        record, partial_result, args[1]
+                    )
                 else:
-                    return await self._evaluate_expression(record, partial_result, args[2])
+                    return await self._evaluate_expression(
+                        record, partial_result, args[2]
+                    )
 
             case "eq":
                 args = expr.get("args", [])
                 if len(args) != 2:
-                    raise TransformationError(f"eq expression requires 2 args, got {len(args)}")
+                    raise TransformationError(
+                        f"eq expression requires 2 args, got {len(args)}"
+                    )
                 left = await self._evaluate_expression(record, partial_result, args[0])
                 right = await self._evaluate_expression(record, partial_result, args[1])
                 return left == right
@@ -200,7 +222,9 @@ class AssignmentTransformer:
             case "neq":
                 args = expr.get("args", [])
                 if len(args) != 2:
-                    raise TransformationError(f"neq expression requires 2 args, got {len(args)}")
+                    raise TransformationError(
+                        f"neq expression requires 2 args, got {len(args)}"
+                    )
                 left = await self._evaluate_expression(record, partial_result, args[0])
                 right = await self._evaluate_expression(record, partial_result, args[1])
                 return left != right
@@ -208,7 +232,9 @@ class AssignmentTransformer:
             case "gt" | "gte" | "lt" | "lte":
                 args = expr.get("args", [])
                 if len(args) != 2:
-                    raise TransformationError(f"{op} expression requires 2 args, got {len(args)}")
+                    raise TransformationError(
+                        f"{op} expression requires 2 args, got {len(args)}"
+                    )
                 left = await self._evaluate_expression(record, partial_result, args[0])
                 right = await self._evaluate_expression(record, partial_result, args[1])
                 # Comparing incompatible operand types (e.g. a null field
@@ -226,7 +252,8 @@ class AssignmentTransformer:
                             return left <= right
                         case _:
                             raise TransformationError(
-                                f"comparison op {op!r} has no implementation — this is an engine defect"
+                                f"comparison op {op!r} has no implementation — "
+                                f"this is an engine defect"
                             )
                 except TypeError as exc:
                     raise TransformationError(
@@ -236,7 +263,9 @@ class AssignmentTransformer:
             case "and":
                 args = expr.get("args", [])
                 if not args:
-                    raise TransformationError("and expression requires at least 1 arg, got 0")
+                    raise TransformationError(
+                        "and expression requires at least 1 arg, got 0"
+                    )
                 for arg in args:
                     if not await self._evaluate_expression(record, partial_result, arg):
                         return False
@@ -245,7 +274,9 @@ class AssignmentTransformer:
             case "or":
                 args = expr.get("args", [])
                 if not args:
-                    raise TransformationError("or expression requires at least 1 arg, got 0")
+                    raise TransformationError(
+                        "or expression requires at least 1 arg, got 0"
+                    )
                 for arg in args:
                     if await self._evaluate_expression(record, partial_result, arg):
                         return True
@@ -257,12 +288,16 @@ class AssignmentTransformer:
                     raise TransformationError(
                         f"not expression requires 1 arg, got {len(args)}"
                     )
-                return not await self._evaluate_expression(record, partial_result, args[0])
+                return not await self._evaluate_expression(
+                    record, partial_result, args[0]
+                )
 
             case "concat":
                 args = expr.get("args", [])
                 if not args:
-                    raise TransformationError("concat expression requires at least 1 arg, got 0")
+                    raise TransformationError(
+                        "concat expression requires at least 1 arg, got 0"
+                    )
                 parts = []
                 for arg in args:
                     val = await self._evaluate_expression(record, partial_result, arg)
@@ -273,7 +308,9 @@ class AssignmentTransformer:
             case "coalesce":
                 args = expr.get("args", [])
                 if not args:
-                    raise TransformationError("coalesce expression requires at least 1 arg, got 0")
+                    raise TransformationError(
+                        "coalesce expression requires at least 1 arg, got 0"
+                    )
                 for arg in args:
                     val = await self._evaluate_expression(record, partial_result, arg)
                     if val is not None:
@@ -283,7 +320,9 @@ class AssignmentTransformer:
             case _:
                 raise TransformationError(f"Unknown expression op: {op!r}")
 
-    async def _apply_function_expression(self, value: Any, fn_expr: Dict[str, Any]) -> Any:
+    async def _apply_function_expression(
+        self, value: Any, fn_expr: dict[str, Any]
+    ) -> Any:
         """Apply a function expression to a value (used in pipe)."""
         op = fn_expr.get("op")
 
@@ -292,17 +331,13 @@ class AssignmentTransformer:
                 value,
                 fn_expr.get("name"),
                 fn_expr.get("version", 1),
-                fn_expr.get("args", [])
+                fn_expr.get("args", []),
             )
         else:
             raise TransformationError(f"Expected fn op in pipe stage, got: {op!r}")
 
     async def _apply_function(
-        self,
-        value: Any,
-        name: str,
-        version: int,
-        args: List[Any]
+        self, value: Any, name: str | None, version: int, args: list[Any]
     ) -> Any:
         if not name:
             raise TransformationError(
@@ -323,7 +358,8 @@ class AssignmentTransformer:
         method = getattr(self, fn_name, None)
         if method is None:
             raise TransformationError(
-                f"FUNCTION_CATALOG entry for {name!r} v{version} references missing method {fn_name!r}"
+                f"FUNCTION_CATALOG entry for {name!r} v{version} references "
+                f"missing method {fn_name!r}"
             )
         # A wrong argument count for the function (an authoring error in the
         # mapping) surfaces as TypeError from the call; route it through the
@@ -336,26 +372,29 @@ class AssignmentTransformer:
             ) from exc
 
     # Function implementations
-    async def _fn_iso_to_date(self, value: Any) -> Optional[str]:
-        """Convert ISO string to date string (YYYY-MM-DD). Raises on
-        unparseable input — previously returned the raw string unchanged,
-        which passed a non-date value into typed date columns and surfaced
-        as a destination connector write error rather than a transformation
-        error."""
+    async def _fn_iso_to_date(self, value: Any) -> str | None:
+        """Convert ISO string to date string (YYYY-MM-DD).
+
+        Raises on unparseable input — previously returned the raw string
+        unchanged, which passed a non-date value into typed date columns and
+        surfaced as a destination connector write error rather than a
+        transformation error.
+        """
         if value is None:
             return None
         try:
             dt = datetime.fromisoformat(str(value))
-            return dt.strftime('%Y-%m-%d')
+            return dt.strftime("%Y-%m-%d")
         except (ValueError, TypeError) as e:
-            raise TransformationError(
-                f"iso_to_date failed for {value!r}: {e}"
-            ) from e
+            raise TransformationError(f"iso_to_date failed for {value!r}: {e}") from e
 
-    async def _fn_iso_to_datetime(self, value: Any) -> Optional[datetime]:
-        """Convert ISO string to datetime object. Raises on unparseable
-        input — a ``datetime.now()`` fallback would silently fabricate
-        timestamps and corrupt time-based queries and incremental sync."""
+    async def _fn_iso_to_datetime(self, value: Any) -> datetime | None:
+        """Convert ISO string to datetime object.
+
+        Raises on unparseable input — a ``datetime.now()`` fallback would
+        silently fabricate timestamps and corrupt time-based queries and
+        incremental sync.
+        """
         if value is None:
             return None
         try:
@@ -365,34 +404,35 @@ class AssignmentTransformer:
                 f"iso_to_datetime failed for {value!r}: {e}"
             ) from e
 
-    async def _fn_iso_to_timestamp(self, value: Any) -> Optional[datetime]:
+    async def _fn_iso_to_timestamp(self, value: Any) -> datetime | None:
         """Alias for iso_to_datetime."""
         return await self._fn_iso_to_datetime(value)
 
-    async def _fn_trim(self, value: Any) -> Optional[str]:
+    async def _fn_trim(self, value: Any) -> str | None:
         """Trim whitespace from string."""
         if value is None:
             return None
         return str(value).strip()
 
-    async def _fn_lower(self, value: Any) -> Optional[str]:
+    async def _fn_lower(self, value: Any) -> str | None:
         """Convert to lowercase."""
         if value is None:
             return None
         return str(value).lower()
 
-    async def _fn_upper(self, value: Any) -> Optional[str]:
+    async def _fn_upper(self, value: Any) -> str | None:
         """Convert to uppercase."""
         if value is None:
             return None
         return str(value).upper()
 
-    async def _fn_to_int(self, value: Any) -> Optional[int]:
+    async def _fn_to_int(self, value: Any) -> int | None:
         """Convert to integer via int(float(value)). None passes through.
 
         Decimal strings and floats are truncated toward zero ("3.9" → 3).
         Raises TransformationError on unparseable input — silently returning
-        None would mask mis-configured pipelines with no DLQ entry."""
+        None would mask mis-configured pipelines with no DLQ entry.
+        """
         if value is None:
             return None
         try:
@@ -402,21 +442,23 @@ class AssignmentTransformer:
                 f"to_int: cannot convert {value!r} ({type(value).__name__}) to int: {e}"
             ) from e
 
-    async def _fn_to_float(self, value: Any) -> Optional[float]:
+    async def _fn_to_float(self, value: Any) -> float | None:
         """Convert to float. None passes through.
 
         Raises TransformationError on unparseable input — same rationale as
-        _fn_to_int; silently returning None masks mis-configured pipelines."""
+        _fn_to_int; silently returning None masks mis-configured pipelines.
+        """
         if value is None:
             return None
         try:
             return float(value)
         except (ValueError, TypeError, OverflowError) as e:
             raise TransformationError(
-                f"to_float: cannot convert {value!r} ({type(value).__name__}) to float: {e}"
+                f"to_float: cannot convert {value!r} "
+                f"({type(value).__name__}) to float: {e}"
             ) from e
 
-    async def _fn_to_string(self, value: Any) -> Optional[str]:
+    async def _fn_to_string(self, value: Any) -> str | None:
         """Convert to string. None passes through."""
         if value is None:
             return None
@@ -426,13 +468,16 @@ class AssignmentTransformer:
         """Absolute value. None passes through.
 
         Raises TransformationError for non-numeric input — silently returning
-        the value unchanged would mask mis-configured pipelines with no DLQ entry."""
+        the value unchanged would mask mis-configured pipelines with no DLQ
+        entry.
+        """
         if value is None:
             return None
         if isinstance(value, (int, float, Decimal)):
             return abs(value)
         raise TransformationError(
-            f"abs: cannot apply to {value!r} ({type(value).__name__}); expected int, float, or Decimal"
+            f"abs: cannot apply to {value!r} ({type(value).__name__}); "
+            f"expected int, float, or Decimal"
         )
 
     async def _fn_now(self, value: Any = None) -> datetime:
@@ -452,11 +497,13 @@ class AssignmentTransformer:
                 return alt
         return None
 
-    def _get_nested_value(self, record: Dict[str, Any], path: List[str]) -> Any:
-        """Return the value at *path* in *record*, or ``None`` if any step is missing."""
+    def _get_nested_value(self, record: dict[str, Any], path: list[str]) -> Any:
+        """Return value at *path* in *record*, or ``None`` if any step is missing."""
         return walk_path(record, path)
 
-    def _set_nested_value(self, result: Dict[str, Any], path: List[str], value: Any) -> None:
+    def _set_nested_value(
+        self, result: dict[str, Any], path: list[str], value: Any
+    ) -> None:
         """Set value at nested path."""
         if not path:
             return
@@ -469,11 +516,8 @@ class AssignmentTransformer:
         current[path[-1]] = value
 
     def _validate_value(
-        self,
-        value: Any,
-        rules: List[Dict[str, Any]],
-        field_path: List[str]
-    ) -> Optional[str]:
+        self, value: Any, rules: list[dict[str, Any]], field_path: list[str]
+    ) -> str | None:
         """Validate value against rules. Returns error message or None."""
         for rule in rules:
             rule_type = rule.get("type")
@@ -481,20 +525,25 @@ class AssignmentTransformer:
             match rule_type:
                 case "not_null" | "required":
                     if value is None:
-                        return rule.get("message", "Value cannot be null")
+                        return _rule_message(rule, "Value cannot be null")
 
                 case "min_length":
                     min_len = rule.get("value", 0)
                     if value is not None and len(str(value)) < min_len:
-                        return rule.get("message", f"Value must be at least {min_len} characters")
+                        return _rule_message(
+                            rule, f"Value must be at least {min_len} characters"
+                        )
 
                 case "max_length":
                     max_len = rule.get("value", 0)
                     if value is not None and len(str(value)) > max_len:
-                        return rule.get("message", f"Value must be at most {max_len} characters")
+                        return _rule_message(
+                            rule, f"Value must be at most {max_len} characters"
+                        )
 
                 case "pattern":
                     import re
+
                     pattern = rule.get("value", "")
                     if value is not None:
                         # A malformed regex in the stream config is an authoring
@@ -503,10 +552,11 @@ class AssignmentTransformer:
                             is_match = re.match(pattern, str(value))
                         except re.error as exc:
                             raise TransformationError(
-                                f"pattern validation rule has invalid regex {pattern!r}: {exc}"
+                                f"pattern validation rule has invalid regex "
+                                f"{pattern!r}: {exc}"
                             ) from exc
                         if not is_match:
-                            return rule.get("message", "Value does not match pattern")
+                            return _rule_message(rule, "Value does not match pattern")
 
                 case "range":
                     min_val = rule.get("min")
@@ -516,33 +566,48 @@ class AssignmentTransformer:
                         # type is bad record data: route it per-record.
                         try:
                             if min_val is not None and value < min_val:
-                                return rule.get("message", f"Value must be >= {min_val}")
+                                return _rule_message(
+                                    rule, f"Value must be >= {min_val}"
+                                )
                             if max_val is not None and value > max_val:
-                                return rule.get("message", f"Value must be <= {max_val}")
+                                return _rule_message(
+                                    rule, f"Value must be <= {max_val}"
+                                )
                         except TypeError as exc:
                             raise TransformationError(
-                                f"range validation cannot compare {value!r} with bounds "
-                                f"min={min_val!r} max={max_val!r}: {exc}"
+                                f"range validation cannot compare {value!r} "
+                                f"with bounds min={min_val!r} max={max_val!r}: "
+                                f"{exc}"
                             ) from exc
 
                 case "in_list":
                     allowed = rule.get("value", [])
                     if value is not None and value not in allowed:
-                        return rule.get("message", f"Value must be one of: {allowed}")
+                        return _rule_message(rule, f"Value must be one of: {allowed}")
 
         return None
+
+
+def _rule_message(rule: dict[str, Any], default: str) -> str:
+    """Return the rule's ``message`` as a string, or ``default`` if absent.
+
+    The contract types ``message`` as a string; coercing here keeps the
+    validator's return type ``str | None`` even when a config supplies a
+    non-string message.
+    """
+    message = rule.get("message")
+    return default if message is None else str(message)
+
 
 class DataTransformer:
     """Apply contract mapping assignments to a batch of records."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.assignment_transformer = AssignmentTransformer()
 
     async def apply_transformations(
-        self,
-        batch: List[Dict[str, Any]],
-        config: Dict[str, Any]
-    ) -> List[Dict[str, Any]]:
+        self, batch: list[dict[str, Any]], config: dict[str, Any]
+    ) -> list[dict[str, Any]]:
         """
         Apply assignment-based transformations to batch.
 
@@ -572,10 +637,8 @@ class DataTransformer:
         return batch
 
     async def _apply_assignment_transformations(
-        self,
-        batch: List[Dict[str, Any]],
-        assignments: List[Dict[str, Any]]
-    ) -> List[Dict[str, Any]]:
+        self, batch: list[dict[str, Any]], assignments: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
         """Apply assignment-based transformations.
 
         Any per-record transform error fails the whole batch. Silently
@@ -589,8 +652,8 @@ class DataTransformer:
         accept them. Destination handlers reverse this at the write
         boundary.
         """
-        kept: List[tuple[int, Dict[str, Any]]] = []
-        all_errors: List[Dict[str, Any]] = []
+        kept: list[tuple[int, dict[str, Any]]] = []
+        all_errors: list[dict[str, Any]] = []
 
         for source_row, record in enumerate(batch):
             await asyncio.sleep(0)  # Yield for async safety
@@ -621,15 +684,17 @@ class DataTransformer:
                             # is ``get`` from a Json source column.
                             continue
                         if not isinstance(value, (dict, list)):
-                            all_errors.append({
-                                "field": col,
-                                "row": source_row,
-                                "error": (
-                                    f"Json target requires dict/list/str/None, "
-                                    f"got {type(value).__name__}"
-                                ),
-                                "action": "dlq",
-                            })
+                            all_errors.append(
+                                {
+                                    "field": col,
+                                    "row": source_row,
+                                    "error": (
+                                        f"Json target requires dict/list/str/None, "
+                                        f"got {type(value).__name__}"
+                                    ),
+                                    "action": "dlq",
+                                }
+                            )
                             continue
                         try:
                             record[col] = json.dumps(value)
@@ -638,12 +703,17 @@ class DataTransformer:
                             # Decimal, UUID, …) join the per-record error
                             # stream so they follow the same DLQ / retry
                             # policy as every other transform failure.
-                            all_errors.append({
-                                "field": col,
-                                "row": source_row,
-                                "error": f"Json target value is not JSON-serializable: {exc}",
-                                "action": "dlq",
-                            })
+                            all_errors.append(
+                                {
+                                    "field": col,
+                                    "row": source_row,
+                                    "error": (
+                                        "Json target value is not "
+                                        f"JSON-serializable: {exc}"
+                                    ),
+                                    "action": "dlq",
+                                }
+                            )
 
         if all_errors:
             summary = "; ".join(
@@ -660,7 +730,7 @@ class DataTransformer:
         return [record for _, record in kept]
 
 
-def _json_target_names(assignments: List[Dict[str, Any]]) -> set:
+def _json_target_names(assignments: list[dict[str, Any]]) -> set:
     """Target column names whose ``target.arrow_type`` is ``"Json"``."""
     names: set = set()
     for a in assignments:
@@ -685,7 +755,7 @@ def _normalize_path(path: Any) -> str:
 
 
 def build_output_schema(
-    assignments: List[Dict[str, Any]],
+    assignments: list[dict[str, Any]],
 ) -> pa.Schema:
     """Build the post-transform Arrow schema from a stream's assignments.
 
@@ -693,7 +763,7 @@ def build_output_schema(
     ``target.properties`` map, or ``arrow_type: "List"`` with
     ``target.items`` — :func:`resolve_arrow_type` handles the recursion.
     """
-    fields: List[pa.Field] = []
+    fields: list[pa.Field] = []
     for index, assignment in enumerate(assignments):
         target = assignment.get("target") or {}
         target_name = _normalize_path(target.get("path"))

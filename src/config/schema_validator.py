@@ -25,12 +25,17 @@ import logging
 import os
 import urllib.error
 import urllib.request
+from collections.abc import Iterable
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Dict, Iterable
+from typing import Any
 
-from jsonschema import Draft202012Validator
-from jsonschema.exceptions import ValidationError
+from jsonschema import (  # type: ignore[import-untyped]  # types-jsonschema absent
+    Draft202012Validator,
+)
+from jsonschema.exceptions import (  # type: ignore[import-untyped]  # stubs absent
+    ValidationError,
+)
 
 from src.config.utils import load_json_file
 
@@ -70,25 +75,29 @@ class ContractValidationError(ValueError):
 
 
 def _schema_base_url() -> str:
-    return (os.getenv("ANALITIQ_SCHEMA_BASE_URL") or _DEFAULT_SCHEMA_BASE_URL).rstrip("/")
+    return (os.getenv("ANALITIQ_SCHEMA_BASE_URL") or _DEFAULT_SCHEMA_BASE_URL).rstrip(
+        "/"
+    )
 
 
 @lru_cache(maxsize=None)
-def _load_schema(kind: str) -> Dict[str, Any]:
+def _load_schema(kind: str) -> dict[str, Any]:
     if kind not in ARTIFACT_KINDS:
         raise ValueError(
             f"Unknown artifact kind {kind!r}; expected one of {ARTIFACT_KINDS}"
         )
     url = f"{_schema_base_url()}/{kind}/latest.json"
     try:
-        with urllib.request.urlopen(url, timeout=_FETCH_TIMEOUT_SECONDS) as response:
+        with urllib.request.urlopen(  # nosec B310
+            url, timeout=_FETCH_TIMEOUT_SECONDS
+        ) as response:
             payload = response.read()
     except urllib.error.URLError as err:
         raise RuntimeError(
             f"Could not fetch {kind!r} schema from {url}: {err}"
         ) from err
     try:
-        schema = json.loads(payload)
+        schema: dict[str, Any] = json.loads(payload)
     except json.JSONDecodeError as err:
         raise RuntimeError(
             f"Schema fetched from {url} is not valid JSON: {err}"
@@ -97,7 +106,7 @@ def _load_schema(kind: str) -> Dict[str, Any]:
     return schema
 
 
-def validate(kind: str, document: Dict[str, Any], *, source: str = "<inline>") -> None:
+def validate(kind: str, document: dict[str, Any], *, source: str = "<inline>") -> None:
     """Validate ``document`` against the schema for ``kind``.
 
     Raises :class:`ContractValidationError` on failure. The ``source``
@@ -123,8 +132,8 @@ def validate(kind: str, document: Dict[str, Any], *, source: str = "<inline>") -
     logger.debug("Schema %r validated %s", kind, source)
 
 
-def validate_file(kind: str, path: Path) -> Dict[str, Any]:
-    """Convenience: read a JSON file, validate it, and return the parsed dict."""
+def validate_file(kind: str, path: Path) -> dict[str, Any]:
+    """Read a JSON file, validate it, and return the parsed dict."""
     if not path.is_file():
         raise FileNotFoundError(f"Artifact not found: {path}")
     document = load_json_file(path)

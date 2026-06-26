@@ -1,6 +1,4 @@
-"""
-Exceptions for configuration loading.
-"""
+"""Exceptions for configuration loading."""
 
 
 class ConfigError(Exception):
@@ -42,7 +40,7 @@ class ConnectorNotFoundError(ConfigError):
 class EndpointNotFoundError(ConfigError):
     """Raised when an endpoint is not found."""
 
-    def __init__(self, endpoint_ref, detail: str = ""):
+    def __init__(self, endpoint_ref: object, detail: str = ""):
         self.endpoint_ref = endpoint_ref
         message = f"Endpoint not found: {endpoint_ref}"
         if detail:

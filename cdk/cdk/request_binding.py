@@ -30,7 +30,8 @@ sibling keys next to the marker) is an authoring error and raises.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Mapping, Optional
+from collections.abc import Mapping
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +41,7 @@ def resolve_param_defaults(
     resolver: Any,
     *,
     context: str = "param",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Resolve ``default`` expressions for each declared param.
 
     Iterates *params_spec*, skips non-dict entries and those without a
@@ -56,7 +57,7 @@ def resolve_param_defaults(
     *context* is the label used in warning messages (e.g. ``"param"`` for
     read params, ``"write param"`` for destination write params).
     """
-    values: Dict[str, Any] = {}
+    values: dict[str, Any] = {}
     for name, decl in params_spec.items():
         if not isinstance(decl, dict) or "default" not in decl:
             continue
@@ -122,8 +123,8 @@ def collect_from_input_selectors(spec: Any) -> set:
 def bind_record_inputs(
     spec: Any,
     *,
-    record: Optional[Dict[str, Any]] = None,
-    records: Optional[List[Dict[str, Any]]] = None,
+    record: dict[str, Any] | None = None,
+    records: list[dict[str, Any]] | None = None,
 ) -> Any:
     """Replace ``{"from_input": ...}`` nodes with the in-flight record data.
 
@@ -148,16 +149,15 @@ def bind_record_inputs(
         }
     if isinstance(spec, list):
         return [
-            bind_record_inputs(item, record=record, records=records)
-            for item in spec
+            bind_record_inputs(item, record=record, records=records) for item in spec
         ]
     return spec
 
 
 def _record_input_value(
     selector: Any,
-    record: Optional[Dict[str, Any]],
-    records: Optional[List[Dict[str, Any]]],
+    record: dict[str, Any] | None,
+    records: list[dict[str, Any]] | None,
 ) -> Any:
     """Resolve one ``from_input`` selector against the in-flight data."""
     if not isinstance(selector, str) or not selector:
@@ -178,7 +178,7 @@ def _record_input_value(
         if selector == "record":
             return record
         cursor: Any = record
-        for segment in selector[len("record."):].split("."):
+        for segment in selector[len("record.") :].split("."):
             if not isinstance(cursor, Mapping) or segment not in cursor:
                 return None
             cursor = cursor[segment]
