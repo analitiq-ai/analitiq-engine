@@ -35,9 +35,7 @@ class TestBuildOutputSchemaNested:
                 },
                 "value": {
                     "kind": "const",
-                    "const": {
-                        "value": {"id": "123456", "objectName": "CheckAccount"}
-                    },
+                    "const": {"value": {"id": "123456", "objectName": "CheckAccount"}},
                 },
             }
         ]
@@ -104,7 +102,8 @@ class TestDictConstantsEndToEnd:
     async def test_dict_constant_passes_through(self):
         translated = [_translate_assignment(a) for a in self.CONTRACT_ASSIGNMENTS]
         record, errors = await AssignmentTransformer().transform_record(
-            record={"id": "row-1"}, assignments=translated,
+            record={"id": "row-1"},
+            assignments=translated,
         )
         assert errors == []
         assert record == {
@@ -126,25 +125,30 @@ class TestDictConstantsEndToEnd:
         message would mention both errors; correct behavior surfaces
         only the original transform error."""
         from datetime import datetime as _dt
+
         from src.engine.exceptions import TransformationError
 
         translated = [
-            _translate_assignment({
-                "target": {
-                    "path": "required",
-                    "arrow_type": "Utf8",
-                    "nullable": False,
-                },
-                "value": {"expression": {"op": "get", "path": "missing_field"}},
-            }),
-            _translate_assignment({
-                "target": {
-                    "path": "metadata",
-                    "arrow_type": "Json",
-                    "nullable": True,
-                },
-                "value": {"expression": {"op": "get", "path": "blob"}},
-            }),
+            _translate_assignment(
+                {
+                    "target": {
+                        "path": "required",
+                        "arrow_type": "Utf8",
+                        "nullable": False,
+                    },
+                    "value": {"expression": {"op": "get", "path": "missing_field"}},
+                }
+            ),
+            _translate_assignment(
+                {
+                    "target": {
+                        "path": "metadata",
+                        "arrow_type": "Json",
+                        "nullable": True,
+                    },
+                    "value": {"expression": {"op": "get", "path": "blob"}},
+                }
+            ),
         ]
         batch = [
             {"missing_field": None, "blob": _dt(2026, 5, 12)},
@@ -152,7 +156,8 @@ class TestDictConstantsEndToEnd:
         ]
         with pytest.raises(TransformationError) as exc_info:
             await DataTransformer().apply_transformations(
-                batch, {"mapping": {"assignments": translated}},
+                batch,
+                {"mapping": {"assignments": translated}},
             )
         # The first-class (transform) error must surface; the json-encode
         # secondary error must NOT — that's the load-bearing property.
@@ -165,25 +170,30 @@ class TestDictConstantsEndToEnd:
         source-row index in the dumps-step error must point at the
         ORIGINAL batch position, not the post-filter slot."""
         from datetime import datetime as _dt
+
         from src.engine.exceptions import TransformationError
 
         translated = [
-            _translate_assignment({
-                "target": {
-                    "path": "id",
-                    "arrow_type": "Utf8",
-                    "nullable": True,
-                },
-                "value": {"expression": {"op": "get", "path": "id"}},
-            }),
-            _translate_assignment({
-                "target": {
-                    "path": "metadata",
-                    "arrow_type": "Json",
-                    "nullable": True,
-                },
-                "value": {"expression": {"op": "get", "path": "blob"}},
-            }),
+            _translate_assignment(
+                {
+                    "target": {
+                        "path": "id",
+                        "arrow_type": "Utf8",
+                        "nullable": True,
+                    },
+                    "value": {"expression": {"op": "get", "path": "id"}},
+                }
+            ),
+            _translate_assignment(
+                {
+                    "target": {
+                        "path": "metadata",
+                        "arrow_type": "Json",
+                        "nullable": True,
+                    },
+                    "value": {"expression": {"op": "get", "path": "blob"}},
+                }
+            ),
         ]
         # Patch the assignment transformer to drop the second record so
         # the post-filter index for the third record is 1 while its
@@ -197,7 +207,8 @@ class TestDictConstantsEndToEnd:
                 return None, errors
             return result, errors
 
-        transformer.assignment_transformer.transform_record = _selective  # type: ignore[assignment]
+        at = transformer.assignment_transformer
+        at.transform_record = _selective  # type: ignore[assignment]
 
         batch = [
             {"id": "r0", "blob": {"ok": 1}},
@@ -206,7 +217,8 @@ class TestDictConstantsEndToEnd:
         ]
         with pytest.raises(TransformationError, match=r"\(row 2\)") as exc_info:
             await transformer.apply_transformations(
-                batch, {"mapping": {"assignments": translated}},
+                batch,
+                {"mapping": {"assignments": translated}},
             )
         msg = str(exc_info.value)
         assert "got datetime" in msg
@@ -223,20 +235,23 @@ class TestDictConstantsEndToEnd:
         from src.engine.exceptions import TransformationError
 
         translated = [
-            _translate_assignment({
-                "target": {
-                    "path": "metadata",
-                    "arrow_type": "Json",
-                    "nullable": True,
-                },
-                "value": {
-                    "expression": {"op": "get", "path": "bad_field"},
-                },
-            })
+            _translate_assignment(
+                {
+                    "target": {
+                        "path": "metadata",
+                        "arrow_type": "Json",
+                        "nullable": True,
+                    },
+                    "value": {
+                        "expression": {"op": "get", "path": "bad_field"},
+                    },
+                }
+            )
         ]
         with pytest.raises(TransformationError, match="dict/list/str/None"):
             await DataTransformer().apply_transformations(
-                [{"bad_field": 42}], {"mapping": {"assignments": translated}},
+                [{"bad_field": 42}],
+                {"mapping": {"assignments": translated}},
             )
 
     @pytest.mark.asyncio
@@ -246,16 +261,18 @@ class TestDictConstantsEndToEnd:
         the transformer unchanged so the destination's
         ``decode_json_columns`` can reverse it."""
         translated = [
-            _translate_assignment({
-                "target": {
-                    "path": "metadata",
-                    "arrow_type": "Json",
-                    "nullable": True,
-                },
-                "value": {
-                    "expression": {"op": "get", "path": "upstream_blob"},
-                },
-            })
+            _translate_assignment(
+                {
+                    "target": {
+                        "path": "metadata",
+                        "arrow_type": "Json",
+                        "nullable": True,
+                    },
+                    "value": {
+                        "expression": {"op": "get", "path": "upstream_blob"},
+                    },
+                }
+            )
         ]
         out = await DataTransformer().apply_transformations(
             [{"upstream_blob": '{"k": "v"}'}],
@@ -289,7 +306,8 @@ class TestDictConstantsEndToEnd:
         ]
         translated = [_translate_assignment(a) for a in contract]
         pylist = await DataTransformer().apply_transformations(
-            [{"id": "r1"}], {"mapping": {"assignments": translated}},
+            [{"id": "r1"}],
+            {"mapping": {"assignments": translated}},
         )
         # After transform the dict has been serialized to a JSON string so
         # pa.large_string can hold it.
@@ -306,7 +324,8 @@ class TestDictConstantsEndToEnd:
         survives intact and the output column type is ``pa.struct``."""
         translated = [_translate_assignment(a) for a in self.CONTRACT_ASSIGNMENTS]
         pylist = await DataTransformer().apply_transformations(
-            [{"id": "r1"}, {"id": "r2"}], {"mapping": {"assignments": translated}},
+            [{"id": "r1"}, {"id": "r2"}],
+            {"mapping": {"assignments": translated}},
         )
         schema = build_output_schema(translated)
         batch = pa.RecordBatch.from_pylist(pylist, schema=schema)
@@ -445,7 +464,10 @@ class TestAssignmentTransformerBadInputs:
     @pytest.mark.asyncio
     async def test_unknown_function_name_errors(self):
         assignment = self._assignment(
-            {"kind": "expr", "expr": {"op": "fn", "name": "iso_to_dat", "version": 1, "args": []}}
+            {
+                "kind": "expr",
+                "expr": {"op": "fn", "name": "iso_to_dat", "version": 1, "args": []},
+            }
         )
         _, errors = await AssignmentTransformer().transform_record(
             record={}, assignments=[assignment]
@@ -507,7 +529,9 @@ class TestAssignmentTransformerBadInputs:
     @pytest.mark.asyncio
     async def test_error_isolated_per_assignment(self):
         """A bad first assignment produces an error entry but the second assignment
-        still runs — transform_record continues accumulating rather than short-circuiting."""
+        still runs — transform_record keeps accumulating rather than
+        short-circuiting.
+        """
         assignments = [
             self._assignment({"kind": "expr", "expr": {"op": "frobnicate"}}),
             {
@@ -524,7 +548,7 @@ class TestAssignmentTransformerBadInputs:
 
 
 class TestComparisonOpArgCount:
-    """Comparison ops must raise TransformationError (not silently return False) on wrong arg count."""
+    """Comparison ops raise TransformationError (not False) on wrong arg count."""
 
     @staticmethod
     def _assignment(op, args):
@@ -552,26 +576,34 @@ class TestComparisonOpArgCount:
         assert f"{op} expression requires 2 args, got 1" in errors[0]["error"]
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("op,a,b,expected", [
-        ("eq",  1, 1, True),
-        ("eq",  1, 2, False),
-        ("neq", 1, 2, True),
-        ("neq", 1, 1, False),
-        ("gt",  2, 1, True),
-        ("gt",  1, 2, False),
-        ("gte", 1, 1, True),
-        ("gte", 0, 1, False),
-        ("lt",  1, 2, True),
-        ("lt",  2, 1, False),
-        ("lte", 1, 1, True),
-        ("lte", 2, 1, False),
-    ])
+    @pytest.mark.parametrize(
+        "op,a,b,expected",
+        [
+            ("eq", 1, 1, True),
+            ("eq", 1, 2, False),
+            ("neq", 1, 2, True),
+            ("neq", 1, 1, False),
+            ("gt", 2, 1, True),
+            ("gt", 1, 2, False),
+            ("gte", 1, 1, True),
+            ("gte", 0, 1, False),
+            ("lt", 1, 2, True),
+            ("lt", 2, 1, False),
+            ("lte", 1, 1, True),
+            ("lte", 2, 1, False),
+        ],
+    )
     async def test_two_args_returns_correct_boolean(self, op, a, b, expected):
-        assignment = self._assignment(op, [
-            {"op": "const", "value": a},
-            {"op": "const", "value": b},
-        ])
-        result, errors = await AssignmentTransformer().transform_record({}, [assignment])
+        assignment = self._assignment(
+            op,
+            [
+                {"op": "const", "value": a},
+                {"op": "const", "value": b},
+            ],
+        )
+        result, errors = await AssignmentTransformer().transform_record(
+            {}, [assignment]
+        )
         assert errors == []
         assert result == {"result": expected}
 
@@ -635,7 +667,11 @@ class TestFnAbs:
         from src.engine.exceptions import TransformationError
 
         assignment = {
-            "target": {"path": ["magnitude"], "arrow_type": "Float64", "nullable": True},
+            "target": {
+                "path": ["magnitude"],
+                "arrow_type": "Float64",
+                "nullable": True,
+            },
             "value": {
                 "kind": "expr",
                 "expr": {
@@ -749,10 +785,15 @@ class TestNotExpressionArgCount:
     @pytest.mark.asyncio
     async def test_two_args_produces_error_entry(self):
         _, errors = await AssignmentTransformer().transform_record(
-            record={}, assignments=[self._not_assignment([
-                {"op": "const", "value": True},
-                {"op": "const", "value": False},
-            ])]
+            record={},
+            assignments=[
+                self._not_assignment(
+                    [
+                        {"op": "const", "value": True},
+                        {"op": "const", "value": False},
+                    ]
+                )
+            ],
         )
         assert errors, "expected an error for not with two args"
         assert "not" in errors[0]["error"]
@@ -761,7 +802,8 @@ class TestNotExpressionArgCount:
     @pytest.mark.asyncio
     async def test_one_true_arg_returns_false(self):
         result, errors = await AssignmentTransformer().transform_record(
-            record={}, assignments=[self._not_assignment([{"op": "const", "value": True}])]
+            record={},
+            assignments=[self._not_assignment([{"op": "const", "value": True}])],
         )
         assert not errors
         assert result["out"] is False
@@ -769,7 +811,8 @@ class TestNotExpressionArgCount:
     @pytest.mark.asyncio
     async def test_one_false_arg_returns_true(self):
         result, errors = await AssignmentTransformer().transform_record(
-            record={}, assignments=[self._not_assignment([{"op": "const", "value": False}])]
+            record={},
+            assignments=[self._not_assignment([{"op": "const", "value": False}])],
         )
         assert not errors
         assert result["out"] is True
@@ -799,7 +842,10 @@ class TestPipeExpressionArgCount:
     @pytest.mark.asyncio
     async def test_single_arg_returns_value(self):
         assignment = self._assignment(
-            {"kind": "expr", "expr": {"op": "pipe", "args": [{"op": "const", "value": "hello"}]}}
+            {
+                "kind": "expr",
+                "expr": {"op": "pipe", "args": [{"op": "const", "value": "hello"}]},
+            }
         )
         result, errors = await AssignmentTransformer().transform_record(
             record={}, assignments=[assignment]
@@ -864,6 +910,7 @@ class TestIfExpressionArgCount:
     @pytest.mark.asyncio
     async def test_arity_error_type_is_transformation_error(self):
         from src.engine.exceptions import TransformationError
+
         t = AssignmentTransformer()
         with pytest.raises(TransformationError, match="if.*3.*got 0"):
             await t._evaluate_expression({}, {}, {"op": "if", "args": []})
@@ -976,7 +1023,9 @@ class TestTransformRecordExceptionBoundary:
         async def _inject_defect(record, assignments, **kwargs):
             raise RuntimeError("unexpected engine bug")
 
-        with patch.object(dt.assignment_transformer, "transform_record", _inject_defect):
+        with patch.object(
+            dt.assignment_transformer, "transform_record", _inject_defect
+        ):
             with pytest.raises(RuntimeError, match="unexpected engine bug"):
                 await dt.apply_transformations([{"x": 1}], config)
 
@@ -1054,7 +1103,10 @@ class TestNarrowedBoundaryDataErrors:
         assignment = {
             "target": {"path": ["out"], "type": "string", "nullable": True},
             "value": {"kind": "const", "const": {"value": "abc"}},
-            "validate": {"rules": [{"type": "pattern", "value": "["}], "on_error": "dlq"},
+            "validate": {
+                "rules": [{"type": "pattern", "value": "["}],
+                "on_error": "dlq",
+            },
         }
         _, errors = await AssignmentTransformer().transform_record(
             record={}, assignments=[assignment]

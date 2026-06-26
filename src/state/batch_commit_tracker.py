@@ -14,7 +14,7 @@ import logging
 import threading
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +28,7 @@ class BatchCommitRecord:
     batch_seq: int
     committed_at: str
     record_count: int = 0
-    cursor: Optional[Dict[str, Any]] = None
+    cursor: dict[str, Any] | None = None
 
 
 class BatchCommitTracker:
@@ -48,7 +48,7 @@ class BatchCommitTracker:
         self._file = self._dir / f"{run_id}.jsonl"
         self._lock = threading.RLock()
         self._committed: set[tuple[str, int]] = set()
-        self._records: Dict[tuple[str, int], BatchCommitRecord] = {}
+        self._records: dict[tuple[str, int], BatchCommitRecord] = {}
         self._load()
 
     @property
@@ -92,10 +92,11 @@ class BatchCommitTracker:
 
     def check_committed(
         self, *, stream_id: str, batch_seq: int
-    ) -> Optional[BatchCommitRecord]:
-        """Return the recorded commit if ``(stream_id, batch_seq)`` is already
-        committed in this run, or ``None`` otherwise.
+    ) -> BatchCommitRecord | None:
+        """Return the recorded commit for a batch, or ``None``.
 
+        The commit is returned when ``(stream_id, batch_seq)`` is already
+        committed in this run.
         The engine uses the truthy return value as a "skip duplicate" signal,
         so we intentionally return the record (or ``None``) rather than a
         plain boolean.
@@ -105,7 +106,9 @@ class BatchCommitTracker:
 
     # Back-compat alias — older internal callers used ``is_committed``.
     def is_committed(self, stream_id: str, batch_seq: int) -> bool:
-        return self.check_committed(stream_id=stream_id, batch_seq=batch_seq) is not None
+        return (
+            self.check_committed(stream_id=stream_id, batch_seq=batch_seq) is not None
+        )
 
     def record_commit(
         self,
@@ -114,12 +117,12 @@ class BatchCommitTracker:
         batch_seq: int,
         records_written: int = 0,
         cursor_bytes: bytes = b"",
-        committed_at: Optional[str] = None,
+        committed_at: str | None = None,
     ) -> BatchCommitRecord:
         """Persist a successful batch commit so retries can detect it."""
         from datetime import datetime, timezone
 
-        cursor_payload: Optional[Dict[str, Any]] = None
+        cursor_payload: dict[str, Any] | None = None
         if cursor_bytes:
             try:
                 cursor_payload = json.loads(cursor_bytes.decode("utf-8"))
@@ -142,6 +145,6 @@ class BatchCommitTracker:
             self._records[(stream_id, batch_seq)] = record
         return record
 
-    def list_committed(self) -> List[tuple[str, int]]:
+    def list_committed(self) -> list[tuple[str, int]]:
         with self._lock:
             return sorted(self._committed)

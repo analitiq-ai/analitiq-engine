@@ -35,12 +35,18 @@ poetry run pre-commit run --all-files   # run on the whole tree on demand
 The `ci` workflow runs on every push and pull request:
 
 - **pytest** over the whole suite.
-- **pre-commit** (black, isort, flake8 with bugbear + datetimez, mypy, bandit,
-  pydocstyle) over the files the change touches. A PR that introduces a bare
-  `except:`, an unchained re-raise, an unused import/variable, a naive
-  `datetime.now()`/`utcnow()`, or a new type/style error fails the gate.
-  Pre-existing findings in untouched modules are not retroactively blocked;
-  clean them as you edit those files.
+- **pre-commit** (black, isort, flake8 with bugbear + datetimez, mypy,
+  pydocstyle, bandit) over **all files**. A bare `except:`, an unchained
+  re-raise, an unused import/variable, a naive `datetime.now()`/`utcnow()`, a
+  type error, a docstring-style violation, or a flagged security pattern fails
+  the gate anywhere in the tree -- not only in the files a PR touches. The whole
+  repository is kept clean, so any reintroduced violation fails CI.
+
+Run `poetry run pre-commit run --all-files` locally before pushing to catch
+everything the gate checks. mypy is pinned to the project's own version in both
+`pyproject.toml` (dev dep) and the pre-commit hook, so `poetry run mypy src/`
+and the gate agree. Docstring presence is not mandated (only style, via
+`[tool.pydocstyle]`); bandit reads `[tool.bandit]`.
 
 ## Coding Guidelines
 

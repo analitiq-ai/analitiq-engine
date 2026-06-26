@@ -8,12 +8,13 @@ which only :func:`resolve_arrow_type` has access to.
 from __future__ import annotations
 
 import re
-from typing import Any, Final, Mapping, Pattern
+from collections.abc import Callable, Mapping
+from re import Pattern
+from typing import Any, Final
 
 import pyarrow as pa
 
 from .exceptions import InvalidTypeMapError
-
 
 _PARAM_SPLIT: Final[Pattern[str]] = re.compile(r"\s*,\s*")
 
@@ -138,9 +139,7 @@ def resolve_arrow_type(spec: Mapping[str, Any], where: str = "field") -> pa.Data
     """
     arrow_type = spec.get("arrow_type")
     if not arrow_type:
-        raise InvalidTypeMapError(
-            f"{where}: missing 'arrow_type' declaration"
-        )
+        raise InvalidTypeMapError(f"{where}: missing 'arrow_type' declaration")
     if arrow_type == "Object":
         sub = spec.get("properties")
         if not isinstance(sub, dict) or not sub:
@@ -168,9 +167,7 @@ def resolve_arrow_type(spec: Mapping[str, Any], where: str = "field") -> pa.Data
     return parse_arrow_type(arrow_type)
 
 
-def _require_unit(
-    args: tuple[str, ...], head: str, allowed: tuple[str, ...]
-) -> str:
+def _require_unit(args: tuple[str, ...], head: str, allowed: tuple[str, ...]) -> str:
     if len(args) != 1:
         raise InvalidTypeMapError(
             f"{head}{args} requires exactly one unit from {allowed}"
@@ -199,12 +196,12 @@ def _parse_timestamp(args: tuple[str, ...]) -> pa.DataType:
 
 
 def _parse_decimal(
-    args: tuple[str, ...], factory, head: str
+    args: tuple[str, ...],
+    factory: Callable[[int, int], pa.DataType],
+    head: str,
 ) -> pa.DataType:
     if len(args) != 2:
-        raise InvalidTypeMapError(
-            f"{head} requires (precision, scale); got {args}"
-        )
+        raise InvalidTypeMapError(f"{head} requires (precision, scale); got {args}")
     try:
         precision = int(args[0])
         scale = int(args[1])

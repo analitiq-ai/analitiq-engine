@@ -14,7 +14,7 @@ Exercises:
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 import pytest
@@ -448,7 +448,7 @@ class TestCursorBoundOperator:
         # Restore reconstructs a timestamp to a datetime precisely so the bind
         # is not a string (asyncpg rejects a string for a timestamp param);
         # the builder must pass that datetime through to params untouched.
-        value = datetime(2024, 6, 1, 12, 0, 0)
+        value = datetime(2024, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
         _, params = self._cursor_sql("exclusive", value=value)
         assert params == [value]
         assert isinstance(params[0], datetime)

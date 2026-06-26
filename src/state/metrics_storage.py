@@ -13,8 +13,8 @@ CloudWatch extraction query:
 """
 
 import logging
-from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -28,7 +28,8 @@ class PipelineMetricsRecord(BaseModel):
     """
     Metrics record for a single pipeline execution.
 
-    This schema is designed for structured log queries with the following considerations:
+    This schema is designed for structured log queries with the following
+    considerations:
     - All fields are flat (no nested objects) for easy querying
     - Timestamps are ISO 8601 strings
     - Numeric fields use appropriate types for aggregation
@@ -37,38 +38,52 @@ class PipelineMetricsRecord(BaseModel):
     # Identifiers
     run_id: str = Field(..., description="Unique identifier for this pipeline run")
     pipeline_id: str = Field(..., description="Pipeline identifier")
-    pipeline_name: Optional[str] = Field(default=None, description="Human-readable pipeline name")
+    pipeline_name: str | None = Field(
+        default=None, description="Human-readable pipeline name"
+    )
 
     # Timing
     start_time: str = Field(..., description="Pipeline start time (ISO 8601)")
     end_time: str = Field(..., description="Pipeline end time (ISO 8601)")
-    duration_seconds: float = Field(..., ge=0, description="Total execution duration in seconds")
+    duration_seconds: float = Field(
+        ..., ge=0, description="Total execution duration in seconds"
+    )
 
     # Record counts
-    records_processed: int = Field(default=0, ge=0, description="Number of records successfully processed")
-    records_failed: int = Field(default=0, ge=0, description="Number of records that failed processing")
-    records_total: int = Field(default=0, ge=0, description="Total records attempted (processed + failed)")
+    records_processed: int = Field(
+        default=0, ge=0, description="Number of records successfully processed"
+    )
+    records_failed: int = Field(
+        default=0, ge=0, description="Number of records that failed processing"
+    )
+    records_total: int = Field(
+        default=0, ge=0, description="Total records attempted (processed + failed)"
+    )
 
     # Batch metrics
-    batches_processed: int = Field(default=0, ge=0, description="Number of batches processed")
+    batches_processed: int = Field(
+        default=0, ge=0, description="Number of batches processed"
+    )
 
     # Status
-    status: str = Field(..., description="Pipeline execution status: success, failed, partial")
-    error_code: Optional[ErrorCode] = Field(
+    status: str = Field(
+        ..., description="Pipeline execution status: success, failed, partial"
+    )
+    error_code: ErrorCode | None = Field(
         default=None,
         description=(
             "Stable, customer-safe failure category (published contract). Set on "
             "failed (and partial where a dominant cause exists); None on success."
         ),
     )
-    error_message: Optional[str] = Field(
+    error_message: str | None = Field(
         default=None,
         description=(
             "Short, customer-safe failure message. Carries no exception text, "
             "secrets, driver internals, or stack traces; safe to expose externally."
         ),
     )
-    error_detail: Optional[str] = Field(
+    error_detail: str | None = Field(
         default=None,
         description=(
             "Internal-only structured failure summary for engineer debugging: "
@@ -80,11 +95,12 @@ class PipelineMetricsRecord(BaseModel):
     )
 
     # Performance metrics
-    records_per_second: Optional[float] = Field(default=None, ge=0, description="Processing throughput")
+    records_per_second: float | None = Field(
+        default=None, ge=0, description="Processing throughput"
+    )
 
 
-
-def emit_metrics_log(data: Dict[str, Any]) -> None:
+def emit_metrics_log(data: dict[str, Any]) -> None:
     """Emit metrics as structured JSON log with marker for extraction."""
     emit_log("metrics", data)
 
@@ -98,13 +114,13 @@ def create_metrics_record(
     records_failed: int = 0,
     batches_processed: int = 0,
     status: str = "success",
-    error_code: Optional[ErrorCode] = None,
-    error_message: Optional[str] = None,
-    error_detail: Optional[str] = None,
-    pipeline_name: Optional[str] = None,
+    error_code: ErrorCode | None = None,
+    error_message: str | None = None,
+    error_detail: str | None = None,
+    pipeline_name: str | None = None,
 ) -> PipelineMetricsRecord:
     """
-    Factory function to create a metrics record from pipeline execution data.
+    Create a metrics record from pipeline execution data.
 
     Args:
         run_id: Unique run identifier
@@ -159,10 +175,10 @@ def save_pipeline_metrics(
     records_failed: int = 0,
     batches_processed: int = 0,
     status: str = "success",
-    error_code: Optional[ErrorCode] = None,
-    error_message: Optional[str] = None,
-    error_detail: Optional[str] = None,
-    pipeline_name: Optional[str] = None,
+    error_code: ErrorCode | None = None,
+    error_message: str | None = None,
+    error_detail: str | None = None,
+    pipeline_name: str | None = None,
 ) -> None:
     """
     Emit pipeline metrics to logs.
@@ -199,7 +215,9 @@ def save_pipeline_metrics(
         pipeline_name=pipeline_name,
     )
 
-    emit_metrics_log({
-        "type": "pipeline",
-        **record.model_dump(),
-    })
+    emit_metrics_log(
+        {
+            "type": "pipeline",
+            **record.model_dump(),
+        }
+    )

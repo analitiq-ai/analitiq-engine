@@ -24,7 +24,7 @@ to the engine.
 import json
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from src.state.store import encode_value
 
@@ -36,8 +36,8 @@ logger = logging.getLogger(__name__)
 def encode_cursor(
     cursor_field: str,
     cursor_value: Any,
-    tie_breaker_fields: Optional[List[str]] = None,
-    tie_breaker_values: Optional[Dict[str, Any]] = None,
+    tie_breaker_fields: list[str] | None = None,
+    tie_breaker_values: dict[str, Any] | None = None,
 ) -> Cursor:
     """
     Encode cursor information into an opaque Cursor message.
@@ -73,7 +73,7 @@ def encode_cursor(
     return Cursor(token=token)
 
 
-def decode_cursor(cursor: Cursor) -> Dict[str, Any]:
+def decode_cursor(cursor: Cursor) -> dict[str, Any]:
     """
     Decode an opaque Cursor message back to its components.
 
@@ -97,7 +97,8 @@ def decode_cursor(cursor: Cursor) -> Dict[str, Any]:
         return {}
 
     try:
-        return json.loads(cursor.token.decode("utf-8"))
+        decoded: dict[str, Any] = json.loads(cursor.token.decode("utf-8"))
+        return decoded
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
         # A non-empty but undecodable token is a corruption signal, not an
         # absent cursor. Returning {} here would let it collapse to "no
@@ -109,9 +110,9 @@ def decode_cursor(cursor: Cursor) -> Dict[str, Any]:
 
 
 def compute_max_cursor(
-    batch: List[Dict[str, Any]],
+    batch: list[dict[str, Any]],
     cursor_field: str,
-    tie_breaker_fields: Optional[List[str]] = None,
+    tie_breaker_fields: list[str] | None = None,
 ) -> Cursor:
     """Compute the maximum cursor value from a batch of records.
 
@@ -132,7 +133,7 @@ def compute_max_cursor(
     if not batch:
         return Cursor(token=b"")
 
-    max_record = None
+    max_record: dict[str, Any] | None = None
     max_cursor_value = None
 
     for record in batch:
@@ -147,7 +148,9 @@ def compute_max_cursor(
             max_cursor_value = cursor_value
             max_record = record
         elif (
-            _compare_values(cursor_value, max_cursor_value) == 0 and tie_breaker_fields
+            max_record is not None
+            and _compare_values(cursor_value, max_cursor_value) == 0
+            and tie_breaker_fields
         ):
             # Same cursor value, compare tie-breakers
             if _compare_tie_breakers(record, max_record, tie_breaker_fields) > 0:
@@ -170,7 +173,7 @@ def compute_max_cursor(
     )
 
 
-def cursor_to_state_dict(cursor: Cursor) -> Dict[str, Any]:
+def cursor_to_state_dict(cursor: Cursor) -> dict[str, Any]:
     """
     Convert a Cursor to a state dictionary for persistence.
 
@@ -186,7 +189,7 @@ def cursor_to_state_dict(cursor: Cursor) -> Dict[str, Any]:
     if not decoded:
         return {}
 
-    state = {
+    state: dict[str, Any] = {
         "cursor": {
             "primary": {
                 "field": decoded.get("field"),
@@ -238,9 +241,9 @@ def _compare_values(a: Any, b: Any) -> int:
 
 
 def _compare_tie_breakers(
-    record_a: Dict[str, Any],
-    record_b: Dict[str, Any],
-    tie_breaker_fields: List[str],
+    record_a: dict[str, Any],
+    record_b: dict[str, Any],
+    tie_breaker_fields: list[str],
 ) -> int:
     """
     Compare two records by tie-breaker fields.

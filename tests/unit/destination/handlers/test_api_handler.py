@@ -6,22 +6,22 @@ document's ``operations.write.<mode>`` block selects the path / method
 / batching for the stream's write_mode).
 """
 
-import pytest
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock
+
 import pyarrow as pa
-from unittest.mock import AsyncMock, MagicMock, patch
-from typing import Dict, Any, List
+import pytest
 
 from src.destination.connectors.api import (
-    ApiDestinationHandler,
     _API_WRITE_MODE_KEYS,
+    ApiDestinationHandler,
     _StreamState,
 )
-from cdk.base_handler import BatchWriteResult
 from src.grpc.generated.analitiq.v1 import AckStatus, SchemaMessage, WriteMode
 
 
-def _to_record_batch(records: List[Dict[str, Any]]) -> pa.RecordBatch:
-    """Helper: build an Arrow batch from sample dicts for the new write_batch contract."""
+def _to_record_batch(records: list[dict[str, Any]]) -> pa.RecordBatch:
+    """Build an Arrow batch from sample dicts for the new write_batch contract."""
     return pa.RecordBatch.from_pylist(records)
 
 
@@ -74,8 +74,8 @@ class TestApiHandlerWriteBatchFailures:
         self,
         api_handler: ApiDestinationHandler,
         mock_cursor: MagicMock,
-        sample_records: List[Dict[str, Any]],
-        sample_record_ids: List[str],
+        sample_records: list[dict[str, Any]],
+        sample_record_ids: list[str],
     ):
         """
         Test that when ALL records fail to write, handler returns FATAL_FAILURE.
@@ -114,8 +114,8 @@ class TestApiHandlerWriteBatchFailures:
         self,
         api_handler: ApiDestinationHandler,
         mock_cursor: MagicMock,
-        sample_records: List[Dict[str, Any]],
-        sample_record_ids: List[str],
+        sample_records: list[dict[str, Any]],
+        sample_record_ids: list[str],
     ):
         """
         Test that when SOME records fail, handler returns FATAL_FAILURE.
@@ -156,8 +156,8 @@ class TestApiHandlerWriteBatchFailures:
         self,
         api_handler: ApiDestinationHandler,
         mock_cursor: MagicMock,
-        sample_records: List[Dict[str, Any]],
-        sample_record_ids: List[str],
+        sample_records: list[dict[str, Any]],
+        sample_record_ids: list[str],
     ):
         """Test that when ALL records succeed, handler returns SUCCESS."""
         # Setup
@@ -214,8 +214,8 @@ class TestApiHandlerWriteBatchFailures:
         self,
         api_handler: ApiDestinationHandler,
         mock_cursor: MagicMock,
-        sample_records: List[Dict[str, Any]],
-        sample_record_ids: List[str],
+        sample_records: list[dict[str, Any]],
+        sample_record_ids: list[str],
     ):
         """Test that disconnected handler returns RETRYABLE_FAILURE."""
         # Setup: handler not connected
@@ -242,8 +242,8 @@ class TestApiHandlerWriteBatchFailures:
         self,
         api_handler: ApiDestinationHandler,
         mock_cursor: MagicMock,
-        sample_records: List[Dict[str, Any]],
-        sample_record_ids: List[str],
+        sample_records: list[dict[str, Any]],
+        sample_record_ids: list[str],
     ):
         """Transport-level errors are transient — classify as RETRYABLE."""
         import aiohttp
@@ -273,8 +273,8 @@ class TestApiHandlerWriteBatchFailures:
         self,
         api_handler: ApiDestinationHandler,
         mock_cursor: MagicMock,
-        sample_records: List[Dict[str, Any]],
-        sample_record_ids: List[str],
+        sample_records: list[dict[str, Any]],
+        sample_record_ids: list[str],
     ):
         """Non-transport exceptions (programming bugs, type errors) are
         deterministic — retrying achieves nothing. Classify as FATAL so
@@ -320,6 +320,7 @@ class TestApiHandlerWriteSingleMode:
         record_ids = ["rec-1", "rec-2", "rec-3"]
 
         call_count = 0
+
         async def mock_send_request(state, data):
             nonlocal call_count
             call_count += 1
@@ -424,7 +425,9 @@ class TestApiHandlerBatchModes:
 
         api_handler._connected = True
         api_handler._session = MagicMock()
-        api_handler._streams["test-stream"].batch_mode = ApiDestinationHandler.BATCH_MODE_BULK
+        api_handler._streams[
+            "test-stream"
+        ].batch_mode = ApiDestinationHandler.BATCH_MODE_BULK
 
         records = [{"id": i} for i in range(5)]
         record_ids = [f"rec-{i}" for i in range(5)]
@@ -455,16 +458,16 @@ class TestApiHandlerBatchModes:
         # Setup
         api_handler._connected = True
         api_handler._session = MagicMock()
-        api_handler._streams["test-stream"].batch_mode = ApiDestinationHandler.BATCH_MODE_BATCH
+        api_handler._streams[
+            "test-stream"
+        ].batch_mode = ApiDestinationHandler.BATCH_MODE_BATCH
         api_handler._streams["test-stream"].batch_size = 2
 
         records = [{"id": i} for i in range(5)]
         record_ids = [f"rec-{i}" for i in range(5)]
 
         # Mock: 3 of 5 written; the unsent tail comes back as failed ids
-        api_handler._write_batch_mode = AsyncMock(
-            return_value=(3, ["rec-3", "rec-4"])
-        )
+        api_handler._write_batch_mode = AsyncMock(return_value=(3, ["rec-3", "rec-4"]))
 
         # Execute
         result = await api_handler.write_batch(
@@ -624,11 +627,17 @@ class TestApiHandlerConfigureSchemaModeDispatch:
     the preloaded API endpoint document, matching the stream's write_mode."""
 
     def _endpoint_doc(self, *, modes=("insert", "upsert")):
-        operations: Dict[str, Any] = {"write": {}}
+        operations: dict[str, Any] = {"write": {}}
         for mode in modes:
             operations["write"][mode] = {
-                "request": {"method": "PATCH" if mode == "upsert" else "POST", "path": f"/v1/{mode}"},
-                "batching": {"mode": "batch" if mode == "upsert" else "single", "size": 50},
+                "request": {
+                    "method": "PATCH" if mode == "upsert" else "POST",
+                    "path": f"/v1/{mode}",
+                },
+                "batching": {
+                    "mode": "batch" if mode == "upsert" else "single",
+                    "size": 50,
+                },
             }
         return {"operations": operations}
 
@@ -719,10 +728,14 @@ class TestApiHandlerConfigureSchemaModeDispatch:
             {"s1": self._endpoint_doc(), "s2": self._endpoint_doc()}
         )
         await handler.configure_schema(
-            SchemaMessage(stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT)
+            SchemaMessage(
+                stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT
+            )
         )
         await handler.configure_schema(
-            SchemaMessage(stream_id="s2", version=1, write_mode=WriteMode.WRITE_MODE_UPSERT)
+            SchemaMessage(
+                stream_id="s2", version=1, write_mode=WriteMode.WRITE_MODE_UPSERT
+            )
         )
         assert handler._streams["s1"].endpoint == "/v1/insert"
         assert handler._streams["s2"].endpoint == "/v1/upsert"
@@ -741,7 +754,7 @@ class TestApiHandlerSupportsUpsert:
     hardcoded value. This is what ``GetCapabilities`` advertises."""
 
     def _doc(self, *, modes):
-        write: Dict[str, Any] = {}
+        write: dict[str, Any] = {}
         for mode in modes:
             write[mode] = {"request": {"method": "POST", "path": f"/v1/{mode}"}}
         return {"operations": {"write": write}}
@@ -784,7 +797,9 @@ class TestApiHandlerSupportsUpsert:
             {"operations": "write"},  # operations not a mapping
             {"operations": {"write": "upsert"}},  # write not a mapping
             {"operations": {"write": {"upsert": "/v1/upsert"}}},  # block not a mapping
-            {"operations": {"write": {"upsert": {"request": "/v1/upsert"}}}},  # request not a mapping
+            {
+                "operations": {"write": {"upsert": {"request": "/v1/upsert"}}}
+            },  # request not a mapping
         ],
     )
     def test_malformed_contract_returns_false_not_raises(self, handler, doc):
@@ -828,7 +843,9 @@ class TestApiHandlerJsonFields:
         handler._session = MagicMock()
         handler.set_stream_endpoints({"s1": self._doc_with_json_field()})
         ok = await handler.configure_schema(
-            SchemaMessage(stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT)
+            SchemaMessage(
+                stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT
+            )
         )
         assert ok is True
         assert handler._streams["s1"].json_fields == {"metadata"}
@@ -844,7 +861,9 @@ class TestApiHandlerJsonFields:
         handler._session = MagicMock()
         handler.set_stream_endpoints({"s1": self._doc_with_json_field()})
         await handler.configure_schema(
-            SchemaMessage(stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT)
+            SchemaMessage(
+                stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT
+            )
         )
 
         # Wire batch — metadata is the JSON-encoded string produced by the
@@ -900,7 +919,9 @@ class TestApiHandlerJsonFields:
         }
         handler.set_stream_endpoints({"s1": doc})
         ok = await handler.configure_schema(
-            SchemaMessage(stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT)
+            SchemaMessage(
+                stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT
+            )
         )
         assert ok is True
         assert handler._streams["s1"].json_fields == {"metadata"}
@@ -916,6 +937,7 @@ class TestApiHandlerJsonFields:
         """
         from datetime import datetime, timezone
         from decimal import Decimal
+
         import orjson
 
         from src.destination.connectors.api import _orjson_default
@@ -935,14 +957,18 @@ class TestApiHandlerJsonFields:
         }
         handler.set_stream_endpoints({"s1": doc})
         await handler.configure_schema(
-            SchemaMessage(stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT)
+            SchemaMessage(
+                stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT
+            )
         )
 
-        batch_schema = pa.schema([
-            pa.field("id", pa.int64()),
-            pa.field("created", pa.timestamp("us", tz="UTC")),
-            pa.field("amount", pa.decimal128(18, 4)),
-        ])
+        batch_schema = pa.schema(
+            [
+                pa.field("id", pa.int64()),
+                pa.field("created", pa.timestamp("us", tz="UTC")),
+                pa.field("amount", pa.decimal128(18, 4)),
+            ]
+        )
         batch = pa.RecordBatch.from_arrays(
             [
                 pa.array([1], type=pa.int64()),
@@ -994,7 +1020,9 @@ class TestApiHandlerJsonFields:
         handler._session = MagicMock()
         handler.set_stream_endpoints({"s1": self._doc_with_json_field()})
         await handler.configure_schema(
-            SchemaMessage(stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT)
+            SchemaMessage(
+                stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT
+            )
         )
 
         batch = pa.RecordBatch.from_pylist(
@@ -1013,6 +1041,7 @@ class TestApiHandlerJsonFields:
         assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
         assert "metadata" in (result.failure_summary or "")
 
+
 @pytest.mark.unit
 class TestOrjsonDefault:
     """The default-hook is the only seam where Decimal and bytes reach
@@ -1021,6 +1050,7 @@ class TestOrjsonDefault:
 
     def test_decimal_becomes_canonical_string(self):
         from decimal import Decimal
+
         from src.destination.connectors.api import _orjson_default
 
         assert _orjson_default(Decimal("42.5000")) == "42.5000"
@@ -1028,6 +1058,7 @@ class TestOrjsonDefault:
 
     def test_bytes_become_base64(self):
         import base64
+
         from src.destination.connectors.api import _orjson_default
 
         out = _orjson_default(b"hello")
@@ -1051,6 +1082,7 @@ class TestOrjsonDefault:
         no Arrow-level recursion needed to handle nested Decimals."""
         from datetime import datetime, timezone
         from decimal import Decimal
+
         import orjson
 
         from src.destination.connectors.api import _orjson_default
@@ -1109,7 +1141,9 @@ class TestApiHandlerBodySpec:
         body = {"data": {"from_input": "record"}}
         handler.set_stream_endpoints({"s1": self._doc_with_body(body)})
         ok = await handler.configure_schema(
-            SchemaMessage(stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT)
+            SchemaMessage(
+                stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT
+            )
         )
         assert ok is True
         assert handler._streams["s1"].body_spec == body
@@ -1167,7 +1201,10 @@ class TestApiHandlerBodySpec:
         handler = self._handler_with_resolver()
         state = _StreamState(
             endpoint="/v1/things",
-            body_spec={"id": {"from_input": "record.id"}, "x": {"from_input": "record.nope"}},
+            body_spec={
+                "id": {"from_input": "record.id"},
+                "x": {"from_input": "record.nope"},
+            },
         )
         body = handler._build_body(state, record={"id": 3})
         assert body == {"id": 3}
@@ -1374,7 +1411,9 @@ class TestApiHandlerBodySpec:
             }
         )
         ok = await handler.configure_schema(
-            SchemaMessage(stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT)
+            SchemaMessage(
+                stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT
+            )
         )
         assert ok is False
         assert "s1" not in handler._streams
@@ -1391,7 +1430,9 @@ class TestApiHandlerBodySpec:
             }
         )
         ok = await handler.configure_schema(
-            SchemaMessage(stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT)
+            SchemaMessage(
+                stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT
+            )
         )
         assert ok is False
 
@@ -1403,7 +1444,9 @@ class TestApiHandlerBodySpec:
         handler = self._handler_with_resolver()
         handler._streams["s1"] = _StreamState(
             endpoint="/v1/things",
-            body_spec={"items": {"from_input": "records"}},  # single mode sends one record
+            body_spec={
+                "items": {"from_input": "records"}
+            },  # single mode sends one record
         )
         result = await handler.write_batch(
             run_id="run",

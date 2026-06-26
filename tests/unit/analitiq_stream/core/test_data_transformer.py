@@ -10,7 +10,10 @@ from src.engine.exceptions import TransformationError
 
 def _assignment(target_path, expr=None, const=None, nullable=True):
     """Build an assignment dict in transformer shape."""
-    target = {"path": target_path if isinstance(target_path, list) else [target_path], "nullable": nullable}
+    target = {
+        "path": target_path if isinstance(target_path, list) else [target_path],
+        "nullable": nullable,
+    }
     if const is not None:
         value = {"kind": "const", "const": {"value": const}}
     else:
@@ -35,12 +38,18 @@ def _pipe(source_path, fn_name):
 
 
 def _const(value):
-    """Build an expression-level const node (op: "const") for use inside _comparison or expr= arguments."""
+    """Build an expression-level const node (op: "const").
+
+    For use inside _comparison or expr= arguments.
+    """
     return {"op": "const", "value": value}
 
 
 def _comparison(op, left, right):
-    """Build a binary comparison expression; left and right are raw Python values wrapped as const nodes."""
+    """Build a binary comparison expression.
+
+    left and right are raw Python values wrapped as const nodes.
+    """
     return {"op": op, "args": [_const(left), _const(right)]}
 
 
@@ -128,8 +137,12 @@ class TestDataTransformer:
         config = {
             "mapping": {
                 "assignments": [
-                    _assignment("payment_reference", expr=_get(["details", "reference"])),
-                    _assignment("merchant_name", expr=_get(["details", "merchant", "name"])),
+                    _assignment(
+                        "payment_reference", expr=_get(["details", "reference"])
+                    ),
+                    _assignment(
+                        "merchant_name", expr=_get(["details", "merchant", "name"])
+                    ),
                 ]
             }
         }
@@ -201,10 +214,16 @@ class TestDataTransformer:
         config = {
             "mapping": {
                 "assignments": [
-                    _assignment("should_be_none", nullable=True,
-                                expr=_get(["missing", "nested", "field"])),
-                    _assignment("also_none", nullable=True,
-                                expr=_get(["details", "missing_field"])),
+                    _assignment(
+                        "should_be_none",
+                        nullable=True,
+                        expr=_get(["missing", "nested", "field"]),
+                    ),
+                    _assignment(
+                        "also_none",
+                        nullable=True,
+                        expr=_get(["details", "missing_field"]),
+                    ),
                 ]
             }
         }
@@ -232,7 +251,11 @@ class TestDataTransformer:
         """_fn_to_int raises on non-numeric input (#183); the batch wrapper
         surfaces it as TransformationError for engine DLQ routing."""
         batch = [{"val": "abc"}]
-        config = {"mapping": {"assignments": [_assignment("out", expr=_pipe("val", "to_int"))]}}
+        config = {
+            "mapping": {
+                "assignments": [_assignment("out", expr=_pipe("val", "to_int"))]
+            }
+        }
         with pytest.raises(TransformationError, match="to_int"):
             await transformer.apply_transformations(batch, config)
 
@@ -241,15 +264,20 @@ class TestDataTransformer:
         """_fn_to_float raises on non-numeric input (#183); the batch wrapper
         surfaces it as TransformationError for engine DLQ routing."""
         batch = [{"val": "xyz"}]
-        config = {"mapping": {"assignments": [_assignment("out", expr=_pipe("val", "to_float"))]}}
+        config = {
+            "mapping": {
+                "assignments": [_assignment("out", expr=_pipe("val", "to_float"))]
+            }
+        }
         with pytest.raises(TransformationError, match="to_float"):
             await transformer.apply_transformations(batch, config)
 
     @pytest.mark.asyncio
     async def test_legacy_keys_emit_warning(self, transformer, sample_batch):
-        """apply_transformations warns and returns batch unchanged when legacy keys are present."""
-        from unittest.mock import patch
+        """Warns and returns the batch unchanged when legacy keys are present."""
         import sys
+        from unittest.mock import patch
+
         _mod = sys.modules[DataTransformer.__module__]
 
         config = {"mapping": {"field_mappings": {"id": "transaction_id"}}}
@@ -261,9 +289,10 @@ class TestDataTransformer:
 
     @pytest.mark.asyncio
     async def test_legacy_keys_warn_even_with_assignments_present(self, transformer):
-        """The legacy-key warning fires even when valid assignments accompany the stray keys."""
-        from unittest.mock import patch
+        """The legacy-key warning fires even when valid assignments are present."""
         import sys
+        from unittest.mock import patch
+
         _mod = sys.modules[DataTransformer.__module__]
 
         batch = [{"id": 1}]
@@ -324,7 +353,10 @@ class TestDataTransformer:
 
     @pytest.mark.asyncio
     async def test_gt_returns_correct_result(self, transformer):
-        """gt returns True when left is strictly greater than right, False otherwise (equal included)."""
+        """gt returns True when left is strictly greater than right.
+
+        False otherwise (equal included).
+        """
         batch = [{}]
         config = {
             "mapping": {
@@ -358,7 +390,10 @@ class TestDataTransformer:
 
     @pytest.mark.asyncio
     async def test_lt_returns_correct_result(self, transformer):
-        """lt returns True when left is strictly less than right, False otherwise (equal included)."""
+        """lt returns True when left is strictly less than right.
+
+        False otherwise (equal included).
+        """
         batch = [{}]
         config = {
             "mapping": {
@@ -402,12 +437,17 @@ class TestDataTransformer:
                     ]
                 }
             }
-            with pytest.raises(TransformationError, match=f"{op} expression requires 2 args"):
+            with pytest.raises(
+                TransformationError, match=f"{op} expression requires 2 args"
+            ):
                 await transformer.apply_transformations(batch, config)
 
     @pytest.mark.asyncio
     async def test_comparison_op_incompatible_types_raises(self, transformer):
-        """Operands of incompatible types raise TransformationError naming the operator and both operands."""
+        """Incompatible operand types raise TransformationError.
+
+        The error names the operator and both operands.
+        """
         batch = [{}]
         for op in ("gt", "gte", "lt", "lte"):
             config = {
@@ -417,7 +457,9 @@ class TestDataTransformer:
                     ]
                 }
             }
-            with pytest.raises(TransformationError, match=f"{op} expression cannot compare"):
+            with pytest.raises(
+                TransformationError, match=f"{op} expression cannot compare"
+            ):
                 await transformer.apply_transformations(batch, config)
 
     @pytest.mark.asyncio
@@ -427,10 +469,17 @@ class TestDataTransformer:
         config = {
             "mapping": {
                 "assignments": [
-                    _assignment("out", expr={
-                        "op": "concat",
-                        "args": [_get("first"), {"op": "const", "value": " "}, _get("second")],
-                    })
+                    _assignment(
+                        "out",
+                        expr={
+                            "op": "concat",
+                            "args": [
+                                _get("first"),
+                                {"op": "const", "value": " "},
+                                _get("second"),
+                            ],
+                        },
+                    )
                 ]
             }
         }
@@ -444,10 +493,13 @@ class TestDataTransformer:
         config = {
             "mapping": {
                 "assignments": [
-                    _assignment("out", expr={
-                        "op": "concat",
-                        "args": [_get("a"), _get("b"), _get("c")],
-                    })
+                    _assignment(
+                        "out",
+                        expr={
+                            "op": "concat",
+                            "args": [_get("a"), _get("b"), _get("c")],
+                        },
+                    )
                 ]
             }
         }
@@ -456,16 +508,19 @@ class TestDataTransformer:
 
     @pytest.mark.asyncio
     async def test_concat_empty_args_raises(self, transformer):
-        """Zero args is always a builder bug; raises rather than silently returning empty string."""
+        """Zero args is always a builder bug.
+
+        Raises rather than silently returning an empty string.
+        """
         batch = [{"x": 1}]
         config = {
             "mapping": {
-                "assignments": [
-                    _assignment("out", expr={"op": "concat", "args": []})
-                ]
+                "assignments": [_assignment("out", expr={"op": "concat", "args": []})]
             }
         }
-        with pytest.raises(TransformationError, match="concat.*requires at least 1 arg"):
+        with pytest.raises(
+            TransformationError, match="concat.*requires at least 1 arg"
+        ):
             await transformer.apply_transformations(batch, config)
 
     @pytest.mark.asyncio
@@ -475,10 +530,13 @@ class TestDataTransformer:
         config = {
             "mapping": {
                 "assignments": [
-                    _assignment("out", expr={
-                        "op": "coalesce",
-                        "args": [_get("a"), _get("b"), _get("c")],
-                    })
+                    _assignment(
+                        "out",
+                        expr={
+                            "op": "coalesce",
+                            "args": [_get("a"), _get("b"), _get("c")],
+                        },
+                    )
                 ]
             }
         }
@@ -487,15 +545,21 @@ class TestDataTransformer:
 
     @pytest.mark.asyncio
     async def test_coalesce_all_none_returns_none(self, transformer):
-        """All-None args is legitimate — None propagates to the nullable check downstream."""
+        """All-None args is legitimate.
+
+        None propagates to the nullable check downstream.
+        """
         batch = [{"a": None, "b": None}]
         config = {
             "mapping": {
                 "assignments": [
-                    _assignment("out", expr={
-                        "op": "coalesce",
-                        "args": [_get("a"), _get("b")],
-                    })
+                    _assignment(
+                        "out",
+                        expr={
+                            "op": "coalesce",
+                            "args": [_get("a"), _get("b")],
+                        },
+                    )
                 ]
             }
         }
@@ -504,21 +568,27 @@ class TestDataTransformer:
 
     @pytest.mark.asyncio
     async def test_coalesce_empty_args_raises(self, transformer):
-        """Zero args has no meaningful return value; raises rather than silently producing None."""
+        """Zero args has no meaningful return value.
+
+        Raises rather than silently producing None.
+        """
         batch = [{"x": 1}]
         config = {
             "mapping": {
-                "assignments": [
-                    _assignment("out", expr={"op": "coalesce", "args": []})
-                ]
+                "assignments": [_assignment("out", expr={"op": "coalesce", "args": []})]
             }
         }
-        with pytest.raises(TransformationError, match="coalesce.*requires at least 1 arg"):
+        with pytest.raises(
+            TransformationError, match="coalesce.*requires at least 1 arg"
+        ):
             await transformer.apply_transformations(batch, config)
 
     @pytest.mark.asyncio
     async def test_and_empty_args_raises(self, transformer):
-        """Empty args list would silently return True, masking a misconfigured filter; guard raises instead."""
+        """Empty args list would silently return True, masking a misconfigured filter.
+
+        The guard raises instead.
+        """
         batch = [{"x": 1}]
         config = {
             "mapping": {
@@ -527,7 +597,9 @@ class TestDataTransformer:
                 ]
             }
         }
-        with pytest.raises(TransformationError, match="and expression requires at least 1 arg"):
+        with pytest.raises(
+            TransformationError, match="and expression requires at least 1 arg"
+        ):
             await transformer.apply_transformations(batch, config)
 
     @pytest.mark.asyncio
@@ -541,12 +613,17 @@ class TestDataTransformer:
                 ]
             }
         }
-        with pytest.raises(TransformationError, match="and expression requires at least 1 arg"):
+        with pytest.raises(
+            TransformationError, match="and expression requires at least 1 arg"
+        ):
             await transformer.apply_transformations(batch, config)
 
     @pytest.mark.asyncio
     async def test_or_empty_args_raises(self, transformer):
-        """Empty args list would silently return False, blocking every record; guard raises instead."""
+        """Empty args list would silently return False, blocking every record.
+
+        The guard raises instead.
+        """
         batch = [{"x": 1}]
         config = {
             "mapping": {
@@ -555,7 +632,9 @@ class TestDataTransformer:
                 ]
             }
         }
-        with pytest.raises(TransformationError, match="or expression requires at least 1 arg"):
+        with pytest.raises(
+            TransformationError, match="or expression requires at least 1 arg"
+        ):
             await transformer.apply_transformations(batch, config)
 
     @pytest.mark.asyncio
@@ -569,7 +648,9 @@ class TestDataTransformer:
                 ]
             }
         }
-        with pytest.raises(TransformationError, match="or expression requires at least 1 arg"):
+        with pytest.raises(
+            TransformationError, match="or expression requires at least 1 arg"
+        ):
             await transformer.apply_transformations(batch, config)
 
     @pytest.mark.asyncio
@@ -578,7 +659,11 @@ class TestDataTransformer:
         true_expr = {"op": "get", "path": ["a"]}
         config = {
             "mapping": {
-                "assignments": [_assignment("out", expr={"op": "and", "args": [true_expr, true_expr]})]
+                "assignments": [
+                    _assignment(
+                        "out", expr={"op": "and", "args": [true_expr, true_expr]}
+                    )
+                ]
             }
         }
         result = await transformer.apply_transformations(batch, config)
@@ -589,10 +674,18 @@ class TestDataTransformer:
         batch = [{"a": True, "b": False}]
         config = {
             "mapping": {
-                "assignments": [_assignment("out", expr={"op": "and", "args": [
-                    {"op": "get", "path": ["a"]},
-                    {"op": "get", "path": ["b"]},
-                ]})]
+                "assignments": [
+                    _assignment(
+                        "out",
+                        expr={
+                            "op": "and",
+                            "args": [
+                                {"op": "get", "path": ["a"]},
+                                {"op": "get", "path": ["b"]},
+                            ],
+                        },
+                    )
+                ]
             }
         }
         result = await transformer.apply_transformations(batch, config)
@@ -603,10 +696,18 @@ class TestDataTransformer:
         batch = [{"a": True, "b": False}]
         config = {
             "mapping": {
-                "assignments": [_assignment("out", expr={"op": "or", "args": [
-                    {"op": "get", "path": ["b"]},
-                    {"op": "get", "path": ["a"]},
-                ]})]
+                "assignments": [
+                    _assignment(
+                        "out",
+                        expr={
+                            "op": "or",
+                            "args": [
+                                {"op": "get", "path": ["b"]},
+                                {"op": "get", "path": ["a"]},
+                            ],
+                        },
+                    )
+                ]
             }
         }
         result = await transformer.apply_transformations(batch, config)
@@ -618,7 +719,11 @@ class TestDataTransformer:
         false_expr = {"op": "get", "path": ["b"]}
         config = {
             "mapping": {
-                "assignments": [_assignment("out", expr={"op": "or", "args": [false_expr, false_expr]})]
+                "assignments": [
+                    _assignment(
+                        "out", expr={"op": "or", "args": [false_expr, false_expr]}
+                    )
+                ]
             }
         }
         result = await transformer.apply_transformations(batch, config)
@@ -635,13 +740,16 @@ class TestDataTransformer:
         config = {
             "mapping": {
                 "assignments": [
-                    _assignment("out", expr={
-                        "op": "pipe",
-                        "args": [
-                            {"op": "get", "path": ["val"]},
-                            {"op": "fn", "name": "trim", "version": 1, "args": []},
-                        ],
-                    })
+                    _assignment(
+                        "out",
+                        expr={
+                            "op": "pipe",
+                            "args": [
+                                {"op": "get", "path": ["val"]},
+                                {"op": "fn", "name": "trim", "version": 1, "args": []},
+                            ],
+                        },
+                    )
                 ]
             }
         }
@@ -656,13 +764,16 @@ class TestDataTransformer:
         config = {
             "mapping": {
                 "assignments": [
-                    _assignment("out", expr={
-                        "op": "pipe",
-                        "args": [
-                            {"op": "get", "path": ["val"]},
-                            {"op": "fn", "name": "trim", "version": 99, "args": []},
-                        ],
-                    })
+                    _assignment(
+                        "out",
+                        expr={
+                            "op": "pipe",
+                            "args": [
+                                {"op": "get", "path": ["val"]},
+                                {"op": "fn", "name": "trim", "version": 99, "args": []},
+                            ],
+                        },
+                    )
                 ]
             }
         }
@@ -670,28 +781,39 @@ class TestDataTransformer:
             await transformer.apply_transformations(batch, config)
 
     @pytest.mark.asyncio
-    async def test_unregistered_version_error_names_available_versions(self, transformer):
+    async def test_unregistered_version_error_names_available_versions(
+        self, transformer
+    ):
         """The error message for an unregistered version includes the list of
         registered versions so the pipeline author knows what to pin to."""
         from src.engine.data_transformer import AssignmentTransformer
+
         at = AssignmentTransformer()
         with pytest.raises(TransformationError, match=r"\[1\]"):
             await at._apply_function("x", "trim", 99, [])
 
     @pytest.mark.asyncio
     async def test_unknown_function_still_raises(self, transformer):
-        """Calling a function name not in FUNCTION_CATALOG still raises TransformationError."""
+        """A function name not in FUNCTION_CATALOG still raises TransformationError."""
         batch = [{"val": "x"}]
         config = {
             "mapping": {
                 "assignments": [
-                    _assignment("out", expr={
-                        "op": "pipe",
-                        "args": [
-                            {"op": "get", "path": ["val"]},
-                            {"op": "fn", "name": "nonexistent_fn", "version": 1, "args": []},
-                        ],
-                    })
+                    _assignment(
+                        "out",
+                        expr={
+                            "op": "pipe",
+                            "args": [
+                                {"op": "get", "path": ["val"]},
+                                {
+                                    "op": "fn",
+                                    "name": "nonexistent_fn",
+                                    "version": 1,
+                                    "args": [],
+                                },
+                            ],
+                        },
+                    )
                 ]
             }
         }
@@ -700,10 +822,16 @@ class TestDataTransformer:
 
     @pytest.mark.asyncio
     async def test_all_catalog_entries_are_version_dicts(self):
-        """Every FUNCTION_CATALOG entry is a dict[int, str] (not the old {version, fn} shape)."""
+        """Every FUNCTION_CATALOG entry is a dict[int, str].
+
+        (Not the old {version, fn} shape.)
+        """
         from src.engine.data_transformer import AssignmentTransformer
+
         for name, versions in AssignmentTransformer.FUNCTION_CATALOG.items():
-            assert isinstance(versions, dict), f"{name}: expected dict, got {type(versions)}"
+            assert isinstance(
+                versions, dict
+            ), f"{name}: expected dict, got {type(versions)}"
             for ver, fn_name in versions.items():
                 assert isinstance(ver, int), f"{name}: key {ver!r} is not int"
                 assert isinstance(fn_name, str), f"{name}: value {fn_name!r} is not str"
@@ -716,13 +844,20 @@ class TestDataTransformer:
         config = {
             "mapping": {
                 "assignments": [
-                    _assignment("out", expr={
-                        "op": "pipe",
-                        "args": [
-                            {"op": "get", "path": ["val"]},
-                            {"op": "fn", "name": "trim", "args": []},  # no "version" key
-                        ],
-                    })
+                    _assignment(
+                        "out",
+                        expr={
+                            "op": "pipe",
+                            "args": [
+                                {"op": "get", "path": ["val"]},
+                                {
+                                    "op": "fn",
+                                    "name": "trim",
+                                    "args": [],
+                                },  # no "version" key
+                            ],
+                        },
+                    )
                 ]
             }
         }
@@ -731,13 +866,18 @@ class TestDataTransformer:
 
     @pytest.mark.asyncio
     async def test_fn_op_direct_version_dispatch(self, transformer):
-        """The standalone 'fn' op (not inside pipe, used by e.g. 'now') dispatches by version.
-        Unregistered version raises TransformationError naming the function."""
+        """The standalone 'fn' op (not inside pipe, e.g. 'now') dispatches by version.
+
+        An unregistered version raises TransformationError naming the function.
+        """
         batch = [{}]
         config = {
             "mapping": {
                 "assignments": [
-                    _assignment("out", expr={"op": "fn", "name": "now", "version": 99, "args": []})
+                    _assignment(
+                        "out",
+                        expr={"op": "fn", "name": "now", "version": 99, "args": []},
+                    )
                 ]
             }
         }
@@ -753,7 +893,10 @@ class TestDataTransformer:
         config = {
             "mapping": {
                 "assignments": [
-                    _assignment("out", expr={"op": "fn", "name": "now", "version": 1, "args": []})
+                    _assignment(
+                        "out",
+                        expr={"op": "fn", "name": "now", "version": 1, "args": []},
+                    )
                 ]
             }
         }
@@ -764,19 +907,24 @@ class TestDataTransformer:
         assert out.utcoffset() == timedelta(0)
 
     @pytest.mark.asyncio
-    async def test_unregistered_version_error_names_function_and_version(self, transformer):
-        """Error for an unregistered version names the function AND the requested version."""
+    async def test_unregistered_version_error_names_function_and_version(
+        self, transformer
+    ):
+        """Error for an unregistered version names the function and the version."""
         batch = [{"val": "x"}]
         config = {
             "mapping": {
                 "assignments": [
-                    _assignment("out", expr={
-                        "op": "pipe",
-                        "args": [
-                            {"op": "get", "path": ["val"]},
-                            {"op": "fn", "name": "trim", "version": 99, "args": []},
-                        ],
-                    })
+                    _assignment(
+                        "out",
+                        expr={
+                            "op": "pipe",
+                            "args": [
+                                {"op": "get", "path": ["val"]},
+                                {"op": "fn", "name": "trim", "version": 99, "args": []},
+                            ],
+                        },
+                    )
                 ]
             }
         }

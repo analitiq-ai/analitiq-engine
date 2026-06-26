@@ -31,10 +31,12 @@ import importlib
 import logging
 import ssl as _ssl
 import urllib.parse
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, Mapping, Optional
+from typing import TYPE_CHECKING, Any, Union
 
-from sqlalchemy import create_engine, text as _sa_text
+from sqlalchemy import create_engine
+from sqlalchemy import text as _sa_text
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
@@ -44,11 +46,10 @@ if TYPE_CHECKING:
 from cdk._extras import reraise_for_missing_extra
 from cdk.derived_functions import DEFAULT_FUNCTIONS
 from cdk.exceptions import TransportSpecError, UnresolvedValueError
-from cdk.resolver import ResolutionContext, Resolver
 from cdk.rate_limiter import RateLimiter
+from cdk.resolver import ResolutionContext, Resolver
 
 logger = logging.getLogger(__name__)
-
 
 
 # ---------------------------------------------------------------------------
@@ -59,7 +60,7 @@ logger = logging.getLogger(__name__)
 # Encodings declared by the connector contract for each DSN binding. The
 # engine never invents URL syntax — it applies the declared encoding to
 # the resolved value and substitutes into the connector-authored template.
-_ENCODING_QUOTES: Dict[str, str] = {
+_ENCODING_QUOTES: dict[str, str] = {
     # ``raw`` keeps numeric and pass-through values unchanged.
     "raw": "",
     # Hostnames already use a permitted character set; do not re-encode
@@ -78,21 +79,23 @@ _ENCODING_QUOTES: Dict[str, str] = {
 }
 
 
-def _render_url_template_dsn(
-    dsn_spec: Mapping[str, Any], resolver: Resolver
-) -> str:
+def _render_url_template_dsn(dsn_spec: Mapping[str, Any], resolver: Resolver) -> str:
     """Render a connector-authored ``dsn.url_template`` recipe.
 
     The recipe has shape::
 
-        {
-          "kind": "url_template",
-          "template": "postgresql+asyncpg://{username}:{password}@{host}:{port}/{database}",
-          "bindings": {
-            "username": {"value": {"ref": "connection.parameters.username"}, "encoding": "url_userinfo"},
-            ...
-          }
+      {
+        "kind": "url_template",
+        "template":
+          "postgresql+asyncpg://{username}:{password}@{host}:{port}/{database}",
+        "bindings": {
+          "username": {
+            "value": {"ref": "connection.parameters.username"},
+            "encoding": "url_userinfo"
+          },
+          ...
         }
+      }
 
     Each ``bindings[name].value`` is resolved through the active
     :class:`Resolver`; the result is converted to a string using the
@@ -115,7 +118,7 @@ def _render_url_template_dsn(
     if not isinstance(raw_bindings, Mapping):
         raise TransportSpecError("dsn.bindings must be an object")
 
-    rendered: Dict[str, str] = {}
+    rendered: dict[str, str] = {}
     for name, entry in raw_bindings.items():
         if not isinstance(entry, Mapping):
             raise TransportSpecError(
@@ -176,8 +179,8 @@ def _apply_encoding(encoding: str, value: Any, *, binding: str) -> str:
 
 
 def _resolve_tls_mode(
-    tls_spec: Optional[Mapping[str, Any]], resolver: Resolver
-) -> tuple[Optional[str], Optional[str]]:
+    tls_spec: Mapping[str, Any] | None, resolver: Resolver
+) -> tuple[str | None, str | None]:
     """Resolve ``tls.mode`` and ``tls.ca_certificate`` to their stored values.
 
     Returns ``(mode, ca_pem)``. Neither value is validated against any
@@ -201,7 +204,7 @@ def _resolve_tls_mode(
             f"tls.mode must resolve to a string, got {type(mode).__name__}"
         )
 
-    ca_value: Optional[str] = None
+    ca_value: str | None = None
     raw_ca = tls_spec.get("ca_certificate")
     if raw_ca is not None:
         try:
@@ -226,14 +229,13 @@ def ca_ssl_context(ca_pem: str, *, check_hostname: bool) -> _ssl.SSLContext:
     return ctx
 
 
-
 # ---------------------------------------------------------------------------
 # Spec resolution
 # ---------------------------------------------------------------------------
 
 
-def _deep_merge(base: Mapping[str, Any], override: Mapping[str, Any]) -> Dict[str, Any]:
-    out: Dict[str, Any] = {k: copy.deepcopy(v) for k, v in base.items()}
+def _deep_merge(base: Mapping[str, Any], override: Mapping[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {k: copy.deepcopy(v) for k, v in base.items()}
     for k, v in override.items():
         if k in out and isinstance(out[k], dict) and isinstance(v, Mapping):
             out[k] = _deep_merge(out[k], v)
@@ -243,7 +245,7 @@ def _deep_merge(base: Mapping[str, Any], override: Mapping[str, Any]) -> Dict[st
 
 
 def _select_transport(
-    connector: Mapping[str, Any], transport_ref: Optional[str]
+    connector: Mapping[str, Any], transport_ref: str | None
 ) -> tuple[str, Mapping[str, Any]]:
     """Pick the ``transports[ref]`` block, applying ``transport_defaults``."""
     transports = connector.get("transports") or {}
@@ -291,7 +293,7 @@ class SqlAlchemyTransport:
 
 def resolve_sqlalchemy_spec(
     spec: Mapping[str, Any], *, resolver: Resolver
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Resolve a sqlalchemy transport spec to JSON-safe values (no objects).
 
     Output carries everything the worker-side build needs: the rendered
@@ -317,7 +319,7 @@ def resolve_sqlalchemy_spec(
     options = spec.get("options") or {}
     if not isinstance(options, Mapping):
         raise TransportSpecError("sqlalchemy transport `options` must be an object")
-    engine_kwargs: Dict[str, Any] = {}
+    engine_kwargs: dict[str, Any] = {}
     if "pool_size" in options:
         engine_kwargs["pool_size"] = int(options["pool_size"])
     if "max_overflow" in options:
@@ -379,7 +381,7 @@ async def build_sqlalchemy_from_spec(
     loudly.
     """
     driver = resolved["driver"]
-    connect_args: Dict[str, Any] = {}
+    connect_args: dict[str, Any] = {}
     tls = resolved.get("tls")
     if tls is not None and tls.get("mode") is not None:
         if sql_dialect is None:
@@ -395,16 +397,18 @@ async def build_sqlalchemy_from_spec(
     dsn = resolved["dsn"]
     engine_kwargs = dict(resolved.get("engine_kwargs") or {})
     is_async = _dialect_is_async(dsn)
+    engine: AsyncEngine | Engine
     if is_async:
-        engine: AsyncEngine | Engine = create_async_engine(
+        async_engine = create_async_engine(
             dsn, connect_args=connect_args, **engine_kwargs
         )
         try:
-            async with engine.connect() as conn:
+            async with async_engine.connect() as conn:
                 await conn.execute(_sa_text("SELECT 1"))
         except Exception:
-            await engine.dispose()
+            await async_engine.dispose()
             raise
+        engine = async_engine
     else:
         engine = await asyncio.to_thread(
             _build_and_probe_sync_engine, dsn, connect_args, engine_kwargs
@@ -471,8 +475,8 @@ class AdbcTransport:
 
 
 def _resolve_db_kwargs(
-    raw: Optional[Mapping[str, Any]], resolver: Resolver
-) -> Dict[str, Any]:
+    raw: Mapping[str, Any] | None, resolver: Resolver
+) -> dict[str, Any]:
     """Resolve the optional ``db_kwargs`` block into ADBC option strings.
 
     Each value goes through the resolver so secrets and connection
@@ -504,7 +508,7 @@ def _resolve_db_kwargs(
         return {}
     if not isinstance(raw, Mapping):
         raise TransportSpecError("adbc transport `db_kwargs` must be an object")
-    out: Dict[str, Any] = {}
+    out: dict[str, Any] = {}
     for name, value in raw.items():
         try:
             resolved = resolver.resolve(value)
@@ -547,9 +551,7 @@ def _as_adbc_option_value(name: str, value: Any) -> str:
     )
 
 
-def resolve_adbc_spec(
-    spec: Mapping[str, Any], *, resolver: Resolver
-) -> Dict[str, Any]:
+def resolve_adbc_spec(spec: Mapping[str, Any], *, resolver: Resolver) -> dict[str, Any]:
     """Resolve an adbc transport spec to JSON-safe values (no objects).
 
     The spec shape matches ``AdbcTransport`` in the published connector
@@ -564,7 +566,7 @@ def resolve_adbc_spec(
     driver = driver.lower()
 
     raw_dsn = spec.get("dsn")
-    uri: Optional[str] = None
+    uri: str | None = None
     if raw_dsn is not None:
         if not isinstance(raw_dsn, Mapping):
             raise TransportSpecError(
@@ -655,13 +657,11 @@ class HttpTransport:
 
     session: aiohttp.ClientSession
     base_url: str
-    headers: Dict[str, str]
-    rate_limiter: Optional[RateLimiter] = None
+    headers: dict[str, str]
+    rate_limiter: RateLimiter | None = None
 
 
-def resolve_http_spec(
-    spec: Mapping[str, Any], *, resolver: Resolver
-) -> Dict[str, Any]:
+def resolve_http_spec(spec: Mapping[str, Any], *, resolver: Resolver) -> dict[str, Any]:
     """Resolve an http transport spec to JSON-safe values (no objects)."""
     raw_base = spec.get("base_url")
     if raw_base is None:
@@ -676,7 +676,7 @@ def resolve_http_spec(
     raw_headers = spec.get("headers") or {}
     if not isinstance(raw_headers, Mapping):
         raise TransportSpecError("http transport `headers` must be an object")
-    headers: Dict[str, str] = {}
+    headers: dict[str, str] = {}
     for name, value in raw_headers.items():
         resolved = resolver.resolve(value)
         if resolved is None:
@@ -688,7 +688,7 @@ def resolve_http_spec(
         timeout_seconds = 30
 
     raw_rate_limit = spec.get("rate_limit") or {}
-    rate_limit: Optional[Dict[str, int]] = None
+    rate_limit: dict[str, int] | None = None
     if raw_rate_limit:
         if not isinstance(raw_rate_limit, Mapping):
             raise TransportSpecError("http transport `rate_limit` must be an object")
@@ -733,7 +733,7 @@ async def build_http_from_spec(
     headers = dict(resolved.get("headers") or {})
     timeout = aiohttp.ClientTimeout(total=float(resolved["timeout_seconds"]))
 
-    rate_limiter: Optional[RateLimiter] = None
+    rate_limiter: RateLimiter | None = None
     rl = resolved.get("rate_limit")
     if rl:
         rate_limiter = RateLimiter(
@@ -742,7 +742,9 @@ async def build_http_from_spec(
         )
 
     connector = aiohttp.TCPConnector(limit=100, limit_per_host=10)
-    session = aiohttp.ClientSession(timeout=timeout, connector=connector, headers=headers)
+    session = aiohttp.ClientSession(
+        timeout=timeout, connector=connector, headers=headers
+    )
     return HttpTransport(
         session=session,
         base_url=resolved["base_url"],
@@ -756,6 +758,18 @@ async def build_http_from_spec(
 # ---------------------------------------------------------------------------
 
 
+# A built transport. The three families share no base class; callers
+# isinstance-narrow this union to wire the concrete objects.
+Transport = Union[SqlAlchemyTransport, AdbcTransport, HttpTransport]
+
+# Phase callables: the resolve phase is sync and yields a JSON-safe dict;
+# the build phase is async and yields a live transport. Both take keyword
+# arguments only beyond the leading positional, so the signature is left
+# open (``...``) — the registry validates callability at registration.
+ResolveSpec = Callable[..., dict[str, Any]]
+BuildFromSpec = Callable[..., Awaitable[Transport]]
+
+
 @dataclass(frozen=True)
 class TransportKind:
     """A registered transport type: its resolve and build phases.
@@ -767,15 +781,18 @@ class TransportKind:
     connector executes and constructs the live transport objects.
     """
 
-    resolve_spec: Any
-    build_from_spec: Any
+    resolve_spec: ResolveSpec
+    build_from_spec: BuildFromSpec
 
 
-_TRANSPORT_KINDS: Dict[str, TransportKind] = {}
+_TRANSPORT_KINDS: dict[str, TransportKind] = {}
 
 
 def register_transport_kind(
-    transport_type: str, *, resolve_spec: Any, build_from_spec: Any
+    transport_type: str,
+    *,
+    resolve_spec: ResolveSpec,
+    build_from_spec: BuildFromSpec,
 ) -> None:
     """Register the resolve/build pair for a connector ``transport_type``."""
     if not isinstance(transport_type, str) or not transport_type:
@@ -829,9 +846,9 @@ register_transport_kind(
 def resolve_transport_spec(
     connector: Mapping[str, Any],
     *,
-    transport_ref: Optional[str] = None,
+    transport_ref: str | None = None,
     context: ResolutionContext,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Resolve a connector's transport into a JSON-safe spec (trusted side).
 
     The output contains rendered/resolved values only (DSN with secrets in
@@ -858,7 +875,7 @@ def resolve_transport_spec(
 
 async def build_transport_from_spec(
     resolved: Mapping[str, Any], *, sql_dialect: Any = None
-):
+) -> Transport:
     """Build a live transport from a resolved spec (connector side)."""
     transport_type = resolved.get("transport_type")
     kind = _TRANSPORT_KINDS.get(transport_type or "")
@@ -873,10 +890,10 @@ async def build_transport_from_spec(
 async def build_transport(
     connector: Mapping[str, Any],
     *,
-    transport_ref: Optional[str] = None,
+    transport_ref: str | None = None,
     context: ResolutionContext,
     sql_dialect: Any = None,
-):
+) -> Transport:
     """Resolve and build in one step (in-process path: control-plane, tests)."""
     resolved = resolve_transport_spec(
         connector, transport_ref=transport_ref, context=context

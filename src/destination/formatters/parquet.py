@@ -4,7 +4,7 @@ Parquet is a columnar storage format optimized for analytics workloads.
 Requires pyarrow: poetry install -E analytics
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from .base import BaseFormatter
 
@@ -50,12 +50,12 @@ class ParquetFormatter(BaseFormatter):
             raise ImportError(
                 "ParquetFormatter requires pyarrow. "
                 "Install with: poetry install -E analytics"
-            )
+            ) from None
 
     def serialize_batch(
         self,
-        records: List[Dict[str, Any]],
-        schema: Optional[Dict[str, Any]] = None,
+        records: list[dict[str, Any]],
+        schema: dict[str, Any] | None = None,
     ) -> bytes:
         """
         Serialize a batch of records to Parquet format.
@@ -97,9 +97,10 @@ class ParquetFormatter(BaseFormatter):
             version=version,
         )
 
-        return buffer.getvalue().to_pybytes()
+        data: bytes = buffer.getvalue().to_pybytes()
+        return data
 
-    def _prepare_records(self, records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _prepare_records(self, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """
         Prepare records for Parquet conversion.
 

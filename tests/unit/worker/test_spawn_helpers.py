@@ -76,7 +76,9 @@ class _ExitedProcess(SimpleNamespace):
 class TestWaitReady:
     async def test_raises_when_worker_exits_before_ready(self, tmp_path):
         proc = _ExitedProcess(returncode=3)
-        with pytest.raises(RuntimeError, match=r"exited before becoming ready \(exit=3\)"):
+        with pytest.raises(
+            RuntimeError, match=r"exited before becoming ready \(exit=3\)"
+        ):
             await _wait_ready(str(tmp_path / "worker.sock"), proc, timeout=5)
 
     async def test_raises_timeout_when_socket_never_appears(self, tmp_path):

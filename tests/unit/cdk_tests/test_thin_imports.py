@@ -57,9 +57,7 @@ def _run(body: str) -> subprocess.CompletedProcess:
     script = _BLOCK + textwrap.dedent(body)
     env = dict(os.environ)
     existing = env.get("PYTHONPATH", "")
-    env["PYTHONPATH"] = (
-        f"{_CDK_SRC}{os.pathsep}{existing}" if existing else _CDK_SRC
-    )
+    env["PYTHONPATH"] = f"{_CDK_SRC}{os.pathsep}{existing}" if existing else _CDK_SRC
     return subprocess.run(
         [sys.executable, "-c", script],
         capture_output=True,
@@ -226,7 +224,9 @@ class TestReraiseForMissingExtra:
         original = ModuleNotFoundError("No module named 'pyarrow'", name="pyarrow")
         with pytest.raises(MissingExtraError) as ei:
             reraise_for_missing_extra(
-                original, feature="cdk.sql.AdbcReader", extra="arrow",
+                original,
+                feature="cdk.sql.AdbcReader",
+                extra="arrow",
                 modules=("pyarrow",),
             )
         msg = str(ei.value)
@@ -239,11 +239,14 @@ class TestReraiseForMissingExtra:
 
         # pyarrow imported fine, but a transitive dep of it did not.
         original = ModuleNotFoundError(
-            "No module named 'some_transitive_dep'", name="some_transitive_dep",
+            "No module named 'some_transitive_dep'",
+            name="some_transitive_dep",
         )
         with pytest.raises(ModuleNotFoundError) as ei:
             reraise_for_missing_extra(
-                original, feature="cdk.sql.AdbcReader", extra="arrow",
+                original,
+                feature="cdk.sql.AdbcReader",
+                extra="arrow",
                 modules=("pyarrow",),
             )
         # Same object, NOT re-wrapped as MissingExtraError.
@@ -257,11 +260,14 @@ class TestReraiseForMissingExtra:
         from cdk._extras import MissingExtraError, reraise_for_missing_extra
 
         original = ModuleNotFoundError(
-            "No module named 'pyarrow.lib'", name="pyarrow.lib",
+            "No module named 'pyarrow.lib'",
+            name="pyarrow.lib",
         )
         with pytest.raises(ModuleNotFoundError) as ei:
             reraise_for_missing_extra(
-                original, feature="cdk.sql.AdbcReader", extra="arrow",
+                original,
+                feature="cdk.sql.AdbcReader",
+                extra="arrow",
                 modules=("pyarrow",),
             )
         assert ei.value is original
@@ -276,6 +282,7 @@ class TestHttpTransportLazyAiohttp:
 
     async def test_build_http_transport_succeeds_with_aiohttp(self):
         import aiohttp
+
         from cdk.transport_factory import HttpTransport, build_http_from_spec
 
         transport = await build_http_from_spec(
@@ -295,7 +302,8 @@ class TestHttpTransportLazyAiohttp:
             await transport.session.close()
 
     async def test_build_http_transport_names_api_extra_when_aiohttp_absent(
-        self, monkeypatch,
+        self,
+        monkeypatch,
     ):
         from cdk._extras import MissingExtraError
         from cdk.transport_factory import build_http_from_spec

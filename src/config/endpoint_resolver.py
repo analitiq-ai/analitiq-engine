@@ -19,9 +19,10 @@ via :class:`ConnectionLookup`.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Mapping, Union
+from typing import Any, Union
 
 from src.config.exceptions import EndpointNotFoundError
 from src.config.utils import load_json_file
@@ -49,9 +50,7 @@ class ConnectionLookup:
 
     def connector_id_for(self, connection_id: str) -> str:
         if connection_id not in self.connector_id_by_id:
-            raise KeyError(
-                f"Connection {connection_id!r} has no connector_id mapping"
-            )
+            raise KeyError(f"Connection {connection_id!r} has no connector_id mapping")
         return self.connector_id_by_id[connection_id]
 
 
@@ -74,8 +73,16 @@ def resolve_endpoint_path(
         # candidate order so a project consistent with one form works for
         # both connector loading and endpoint resolution.
         candidates = [
-            paths["connectors"] / connector_id / "definition" / "endpoints" / f"{parsed.endpoint_id}.json",
-            paths["connectors"] / f"connector-{connector_id}" / "definition" / "endpoints" / f"{parsed.endpoint_id}.json",
+            paths["connectors"]
+            / connector_id
+            / "definition"
+            / "endpoints"
+            / f"{parsed.endpoint_id}.json",
+            paths["connectors"]
+            / f"connector-{connector_id}"
+            / "definition"
+            / "endpoints"
+            / f"{parsed.endpoint_id}.json",
         ]
         for candidate in candidates:
             if candidate.is_file():
@@ -97,9 +104,7 @@ def resolve_endpoint_path(
         raise ValueError(f"Unknown endpoint scope: {parsed.scope!r}")
 
     if not file_path.is_file():
-        raise EndpointNotFoundError(
-            parsed, detail=f"File not found: {file_path}"
-        )
+        raise EndpointNotFoundError(parsed, detail=f"File not found: {file_path}")
     return file_path
 
 
@@ -107,7 +112,7 @@ def resolve_endpoint_ref(
     ref: EndpointRefInput,
     paths: Mapping[str, Path],
     lookup: ConnectionLookup,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Resolve an endpoint reference and return the parsed endpoint document."""
     parsed = _coerce(ref)
     file_path = resolve_endpoint_path(parsed, paths, lookup)

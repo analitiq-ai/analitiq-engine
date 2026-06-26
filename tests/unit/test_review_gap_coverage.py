@@ -7,9 +7,9 @@ discoverable from the test output.
 from __future__ import annotations
 
 import asyncio
-import pytest
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 
 # --------------------------------------------------------------------------- #
 # Gap #12: _write_conflict_keys threads end-to-end through configure_schema   #
@@ -24,9 +24,7 @@ class TestWriteConflictKeysWiring:
 
     @pytest.mark.asyncio
     async def test_conflict_keys_consumed_verbatim(self):
-        from cdk.sql.generic import (
-            GenericSQLConnector,
-        )
+        from cdk.sql.generic import GenericSQLConnector
         from cdk.type_map import TypeMapper
         from cdk.type_map.rules import parse_rules
 
@@ -50,8 +48,18 @@ class TestWriteConflictKeysWiring:
             "s1": {
                 "database_object": {"name": "orders", "schema": "public"},
                 "columns": [
-                    {"name": "tenant_id", "native_type": "BIGINT", "arrow_type": "Int64", "nullable": False},
-                    {"name": "id", "native_type": "BIGINT", "arrow_type": "Int64", "nullable": False},
+                    {
+                        "name": "tenant_id",
+                        "native_type": "BIGINT",
+                        "arrow_type": "Int64",
+                        "nullable": False,
+                    },
+                    {
+                        "name": "id",
+                        "native_type": "BIGINT",
+                        "arrow_type": "Int64",
+                        "nullable": False,
+                    },
                 ],
                 "primary_keys": ["id"],
                 "_write_conflict_keys": ["tenant_id", "id"],
@@ -60,8 +68,11 @@ class TestWriteConflictKeysWiring:
         handler._ensure_tables_exist = AsyncMock()
 
         from src.grpc.generated.analitiq.v1 import SchemaMessage, WriteMode
+
         msg = SchemaMessage(
-            stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_UPSERT,
+            stream_id="s1",
+            version=1,
+            write_mode=WriteMode.WRITE_MODE_UPSERT,
         )
         ok = await handler.configure_schema(msg)
 
@@ -70,10 +81,10 @@ class TestWriteConflictKeysWiring:
         assert handler._streams["s1"].primary_keys == ["id"]
 
     @pytest.mark.asyncio
-    async def test_absent_write_conflict_keys_yields_empty_no_primary_keys_fallback(self):
-        from cdk.sql.generic import (
-            GenericSQLConnector,
-        )
+    async def test_absent_write_conflict_keys_yields_empty_no_primary_keys_fallback(
+        self,
+    ):
+        from cdk.sql.generic import GenericSQLConnector
         from cdk.type_map import TypeMapper
         from cdk.type_map.rules import parse_rules
 
@@ -96,15 +107,25 @@ class TestWriteConflictKeysWiring:
         handler._stream_endpoints = {
             "s1": {
                 "database_object": {"name": "orders", "schema": "public"},
-                "columns": [{"name": "id", "native_type": "BIGINT", "arrow_type": "Int64", "nullable": False}],
+                "columns": [
+                    {
+                        "name": "id",
+                        "native_type": "BIGINT",
+                        "arrow_type": "Int64",
+                        "nullable": False,
+                    }
+                ],
                 "primary_keys": ["id"],
             },
         }
         handler._ensure_tables_exist = AsyncMock()
 
         from src.grpc.generated.analitiq.v1 import SchemaMessage, WriteMode
+
         msg = SchemaMessage(
-            stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_UPSERT,
+            stream_id="s1",
+            version=1,
+            write_mode=WriteMode.WRITE_MODE_UPSERT,
         )
         await handler.configure_schema(msg)
 
@@ -144,11 +165,14 @@ class TestServerConfigureSchemaDeterministicErrors:
     than crashing the stream with a generic 'configuration failed'."""
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("exc", [
-        KeyError("database_object"),
-        TypeError("expected dict"),
-        ValueError("malformed columns"),
-    ])
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            KeyError("database_object"),
+            TypeError("expected dict"),
+            ValueError("malformed columns"),
+        ],
+    )
     async def test_deterministic_exception_in_schema_ack(self, exc):
         from src.destination.server import DestinationServicer
 
@@ -157,10 +181,15 @@ class TestServerConfigureSchemaDeterministicErrors:
         servicer = DestinationServicer(handler, MagicMock())
 
         from src.grpc.generated.analitiq.v1 import (
-            SchemaMessage, StreamRequest, WriteMode,
+            SchemaMessage,
+            StreamRequest,
+            WriteMode,
         )
+
         schema_msg = SchemaMessage(
-            stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_UPSERT,
+            stream_id="s1",
+            version=1,
+            write_mode=WriteMode.WRITE_MODE_UPSERT,
             ack_timeout_seconds=30,
         )
         request = StreamRequest(schema=schema_msg)
@@ -205,6 +234,7 @@ class TestStartStreamStateReset:
         # Make start_stream's schema-ack wait complete immediately via a
         # task that fails — we only care about the pre-send reset.
         import asyncio as _asyncio
+
         original_create_task = _asyncio.create_task
 
         def _capture_create_task(coro, name=None):
@@ -254,6 +284,7 @@ class TestIsoTimestampStrictRaise:
     @pytest.mark.asyncio
     async def test_fn_iso_to_datetime_parses_valid_input(self):
         from datetime import datetime
+
         from src.engine.data_transformer import AssignmentTransformer
 
         t = AssignmentTransformer()

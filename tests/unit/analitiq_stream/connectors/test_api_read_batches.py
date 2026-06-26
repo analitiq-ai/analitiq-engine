@@ -26,14 +26,14 @@ an async context manager that yields a stub response.
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pyarrow as pa
 import pytest
 
-from cdk.secrets import InMemorySecretsResolver
 from cdk.connection_runtime import ConnectionRuntime
+from cdk.secrets import InMemorySecretsResolver
 from src.source.connectors.api import APIConnector, _extract_next_cursor
 from src.source.connectors.base import ReadError, TransientReadError
 
@@ -49,7 +49,7 @@ class _FakeResponse:
         self.status = status
         self._body = body
 
-    async def __aenter__(self) -> "_FakeResponse":
+    async def __aenter__(self) -> _FakeResponse:
         return self
 
     async def __aexit__(self, *_exc) -> None:
@@ -70,14 +70,16 @@ class _FakeSession:
     tests can assert on the URL + params actually sent.
     """
 
-    def __init__(self, responses: List[_FakeResponse]):
+    def __init__(self, responses: list[_FakeResponse]):
         self._responses = list(responses)
-        self.calls: List[Tuple[str, str, Dict[str, Any]]] = []
+        self.calls: list[tuple[str, str, dict[str, Any]]] = []
         # JSON body per request (None when the connector sent none),
         # parallel to ``calls``.
-        self.bodies: List[Any] = []
+        self.bodies: list[Any] = []
 
-    def request(self, method: str, url: str, *, params: Dict[str, Any], json: Any = None):
+    def request(
+        self, method: str, url: str, *, params: dict[str, Any], json: Any = None
+    ):
         self.calls.append((method, url, dict(params)))
         self.bodies.append(json)
         if not self._responses:
@@ -86,7 +88,7 @@ class _FakeSession:
 
 
 def _runtime_with_session(
-    session: _FakeSession, *, parameters: Optional[Dict[str, Any]] = None
+    session: _FakeSession, *, parameters: dict[str, Any] | None = None
 ) -> ConnectionRuntime:
     """Build a ``ConnectionRuntime`` whose transport is already
     materialized with ``session`` so ``connect()`` adopts it.
@@ -106,10 +108,10 @@ def _runtime_with_session(
 
 
 def _endpoint_doc_with_records(
-    pagination: Optional[Dict[str, Any]] = None,
-    replication: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    read_block: Dict[str, Any] = {
+    pagination: dict[str, Any] | None = None,
+    replication: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    read_block: dict[str, Any] = {
         "request": {"method": "GET", "path": "/items"},
         "response": {
             "schema": {
@@ -144,10 +146,10 @@ def _endpoint_doc_with_records(
 def _stream_source(
     *,
     replication_method: str = "full_refresh",
-    cursor_field: Optional[str] = None,
-    safety_window: Optional[int] = None,
-) -> Dict[str, Any]:
-    block: Dict[str, Any] = {
+    cursor_field: str | None = None,
+    safety_window: int | None = None,
+) -> dict[str, Any]:
+    block: dict[str, Any] = {
         "endpoint_ref": {
             "scope": "connector",
             "connection_id": "test-conn",
@@ -167,19 +169,19 @@ async def _consume(
     connector: APIConnector,
     runtime: ConnectionRuntime,
     *,
-    config: Dict[str, Any],
+    config: dict[str, Any],
     state_manager: Any,
     stream_name: str,
-    partition: Optional[Dict[str, Any]] = None,
+    partition: dict[str, Any] | None = None,
     batch_size: int = 1000,
-) -> List[pa.RecordBatch]:
+) -> list[pa.RecordBatch]:
     """Drive ``read_batches`` with the runtime it now owns.
 
     ``read_batches`` connects and disconnects internally, so callers pass the
     runtime directly (no prior ``connect()``); ``state_manager`` is forwarded as
     the ``checkpoint`` argument.
     """
-    batches: List[pa.RecordBatch] = []
+    batches: list[pa.RecordBatch] = []
     async for batch in connector.read_batches(
         runtime,
         config,
@@ -249,8 +251,8 @@ class TestReadBatchesNoPagination:
 
 
 def _endpoint_doc_with_ref(
-    records_ref: str, response_schema: Dict[str, Any]
-) -> Dict[str, Any]:
+    records_ref: str, response_schema: dict[str, Any]
+) -> dict[str, Any]:
     """Endpoint document with an explicit ``records.ref`` + response schema."""
     return {
         "$schema": "https://schemas.analitiq.ai/api-endpoint/latest.json",
@@ -267,7 +269,7 @@ def _endpoint_doc_with_ref(
     }
 
 
-_RECORD_ITEMS_SCHEMA: Dict[str, Any] = {
+_RECORD_ITEMS_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "id": {"type": "integer", "arrow_type": "Int64"},
@@ -365,9 +367,9 @@ class TestReadBatchesRecordsRefShapes:
         connector = APIConnector("test")
 
         endpoint = _endpoint_doc_with_records()
-        endpoint["operations"]["read"]["response"]["records"]["ref"] = (
-            "response.body.does_not_exist"
-        )
+        endpoint["operations"]["read"]["response"]["records"][
+            "ref"
+        ] = "response.body.does_not_exist"
         with pytest.raises(
             ReadError,
             match=r"does_not_exist.*not declared under properties.*"
@@ -873,9 +875,7 @@ class TestReadBatchesParamDefaults:
         session = _FakeSession(
             [_FakeResponse(status=200, body={"records": [{"id": 1, "name": "a"}]})]
         )
-        runtime = _runtime_with_session(
-            session, parameters={"api_token": "tok-123"}
-        )
+        runtime = _runtime_with_session(session, parameters={"api_token": "tok-123"})
         connector = APIConnector("test")
 
         endpoint = _endpoint_doc_with_records()
@@ -979,7 +979,9 @@ class TestReadBatchesParamDefaults:
                 "type": "string",
                 "required": False,
                 "default": {
-                    "template": "${connection.parameters.org}/${connection.parameters.gone}"
+                    "template": (
+                        "${connection.parameters.org}/" "${connection.parameters.gone}"
+                    )
                 },
             },
         }

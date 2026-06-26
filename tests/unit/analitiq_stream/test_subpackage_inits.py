@@ -12,7 +12,7 @@ class TestEnginePackageInit:
         from src import engine
 
         # Check __all__ exports if defined
-        if hasattr(engine, '__all__'):
+        if hasattr(engine, "__all__"):
             for export in engine.__all__:
                 assert hasattr(engine, export)
 
@@ -33,7 +33,7 @@ class TestSourceConnectorsPackageInit:
         import src.source.connectors as connectors
 
         # Check if __all__ is defined
-        if hasattr(connectors, '__all__'):
+        if hasattr(connectors, "__all__"):
             for export in connectors.__all__:
                 assert hasattr(connectors, export)
 
@@ -62,7 +62,7 @@ class TestStatePackageInit:
         import src.state as state
 
         # Check if __all__ is defined
-        if hasattr(state, '__all__'):
+        if hasattr(state, "__all__"):
             for export in state.__all__:
                 assert hasattr(state, export)
 
@@ -70,8 +70,10 @@ class TestStatePackageInit:
     def test_state_modules(self):
         """Test that state modules are accessible."""
         from src.state import (
-            circuit_breaker, dead_letter_queue, retry_handler,
-            state_manager
+            circuit_breaker,
+            dead_letter_queue,
+            retry_handler,
+            state_manager,
         )
 
         assert circuit_breaker is not None
@@ -89,7 +91,7 @@ class TestDestinationConnectorsPackageInit:
         import src.destination.connectors as connectors
 
         # Check if __all__ is defined
-        if hasattr(connectors, '__all__'):
+        if hasattr(connectors, "__all__"):
             for export in connectors.__all__:
                 assert hasattr(connectors, export)
 
@@ -120,8 +122,8 @@ class TestDestinationConnectorsPackageInit:
     def test_worker_source_registry_resolves_builtin_kinds(self):
         """The worker's source registry serves the builtin source kinds."""
         from cdk.registry import ConnectorNotRegisteredError
-        from src.source.connectors.api import APIConnector
         from src.destination.connectors import GenericSQLConnector
+        from src.source.connectors.api import APIConnector
         from src.worker import build_worker_registries
 
         registry, _ = build_worker_registries()
@@ -142,7 +144,7 @@ class TestSharedPackageInit:
         from src import shared
 
         # Check __all__ exports if defined
-        if hasattr(shared, '__all__'):
+        if hasattr(shared, "__all__"):
             for export in shared.__all__:
                 assert hasattr(shared, export)
 
@@ -155,11 +157,7 @@ class TestSharedPackageInit:
         carved out (ADR §4); what remains in ``src.shared`` is the engine-only
         run-id lifecycle.
         """
-        from src.shared import (
-            get_or_generate_run_id,
-            get_run_id,
-            initialize_run_id,
-        )
+        from src.shared import get_or_generate_run_id, get_run_id, initialize_run_id
 
         for obj in (
             get_run_id,

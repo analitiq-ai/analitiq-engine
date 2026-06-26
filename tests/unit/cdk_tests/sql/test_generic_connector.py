@@ -15,7 +15,7 @@ the thin control-plane delegators:
 
 from __future__ import annotations
 
-from typing import Any, List, Tuple
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pyarrow as pa
@@ -42,11 +42,11 @@ class _FakeRuntime:
 class _RecordingReader:
     """Fake AdbcReader: records SQL/params, returns one page then drains."""
 
-    def __init__(self, pages: List[List[pa.RecordBatch]]) -> None:
+    def __init__(self, pages: list[list[pa.RecordBatch]]) -> None:
         self._pages = pages
-        self.calls: List[Tuple[str, Any]] = []
+        self.calls: list[tuple[str, Any]] = []
 
-    async def fetch_page(self, sql: str, params: Any = ()) -> List[pa.RecordBatch]:
+    async def fetch_page(self, sql: str, params: Any = ()) -> list[pa.RecordBatch]:
         self.calls.append((sql, list(params)))
         return self._pages.pop(0) if self._pages else []
 

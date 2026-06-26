@@ -40,9 +40,7 @@ class TestReadTypeMapPayloads:
         )
         _write_definition(connections / "my-pg", rules=_RULES)
 
-        payloads = read_type_map_payloads(
-            connectors, "postgres", connections, "my-pg"
-        )
+        payloads = read_type_map_payloads(connectors, "postgres", connections, "my-pg")
         assert payloads["connector"] == {
             "rules": _RULES,
             "write_rules": _WRITE_RULES,
@@ -55,9 +53,7 @@ class TestReadTypeMapPayloads:
         _write_definition(connectors / "connector-postgres", rules=_RULES)
         connections.mkdir()
 
-        payloads = read_type_map_payloads(
-            connectors, "postgres", connections, "my-pg"
-        )
+        payloads = read_type_map_payloads(connectors, "postgres", connections, "my-pg")
         assert payloads["connector"] == {"rules": _RULES, "write_rules": None}
         assert payloads["connection"] is None
 

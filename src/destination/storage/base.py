@@ -6,7 +6,7 @@ Storage backends handle writing files to different storage systems
 
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any
 
 
 class BaseStorageBackend(ABC):
@@ -20,7 +20,7 @@ class BaseStorageBackend(ABC):
 
     def __init__(self) -> None:
         """Initialize the storage backend."""
-        self._config: Dict[str, Any] = {}
+        self._config: dict[str, Any] = {}
         self._connected: bool = False
 
     @property
@@ -35,7 +35,7 @@ class BaseStorageBackend(ABC):
         pass
 
     @abstractmethod
-    async def connect(self, config: Dict[str, Any]) -> None:
+    async def connect(self, config: dict[str, Any]) -> None:
         """
         Initialize storage connection/credentials.
 
@@ -61,7 +61,7 @@ class BaseStorageBackend(ABC):
         self,
         path: str,
         data: bytes,
-        content_type: Optional[str] = None,
+        content_type: str | None = None,
     ) -> str:
         """
         Write data to a file at the specified path.
@@ -138,7 +138,7 @@ class BaseStorageBackend(ABC):
         stream_id: str,
         batch_seq: int,
         extension: str,
-        partition_template: Optional[str] = None,
+        partition_template: str | None = None,
     ) -> str:
         """
         Build a file path with optional partitioning.

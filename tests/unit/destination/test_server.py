@@ -9,18 +9,17 @@ or drops the prefix would ship silently without this test.
 
 from __future__ import annotations
 
-import io
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
 from unittest.mock import AsyncMock, MagicMock
 
 import pyarrow as pa
 import pytest
 
-from src.destination.connectors.api import ApiDestinationHandler
-from src.destination.server import DestinationServicer
 from cdk.base_handler import BatchWriteResult
 from cdk.type_map import InvalidTypeMapError, UnmappedTypeError
 from cdk.types import Cursor as CdkCursor
+from src.destination.connectors.api import ApiDestinationHandler
+from src.destination.server import DestinationServicer
 from src.grpc.generated.analitiq.v1 import (
     AckStatus,
     Cursor,
@@ -66,9 +65,7 @@ def _arrow_ipc(batch: pa.RecordBatch) -> bytes:
     return sink.getvalue().to_pybytes()
 
 
-def _batch_request(
-    *, stream_id: str = "s1", token: bytes = b""
-) -> StreamRequest:
+def _batch_request(*, stream_id: str = "s1", token: bytes = b"") -> StreamRequest:
     batch = pa.RecordBatch.from_pydict({"id": [1]})
     return StreamRequest(
         batch=RecordBatch(
@@ -476,9 +473,7 @@ class TestWireToCdkTranslation:
 
         async for _ in servicer.StreamRecords(
             _iter_once(
-                _schema_request(
-                    "s9", version=7, write_mode=WriteMode.WRITE_MODE_UPSERT
-                )
+                _schema_request("s9", version=7, write_mode=WriteMode.WRITE_MODE_UPSERT)
             ),
             context=MagicMock(),
         ):
@@ -564,7 +559,8 @@ class TestServerPingProtection:
     async def test_server_options_include_ping_protection(self):
         """grpc.http2.min_ping_interval_without_data_ms and
         grpc.http2.max_ping_strikes must be present in the server options."""
-        from unittest.mock import patch, MagicMock
+        from unittest.mock import MagicMock, patch
+
         from src.destination.server import DestinationGRPCServer
 
         captured_options = []
@@ -572,6 +568,7 @@ class TestServerPingProtection:
         class _FakeServer:
             def add_insecure_port(self, addr):
                 pass
+
             async def start(self):
                 pass
 
@@ -582,8 +579,9 @@ class TestServerPingProtection:
         handler = MagicMock()
         server = DestinationGRPCServer(handler, port=9999)
 
-        with patch("src.destination.server.grpc_aio.server", side_effect=fake_grpc_server), \
-             patch("src.destination.server.add_DestinationServiceServicer_to_server"):
+        with patch(
+            "src.destination.server.grpc_aio.server", side_effect=fake_grpc_server
+        ), patch("src.destination.server.add_DestinationServiceServicer_to_server"):
             await server.start()
 
         option_map = dict(captured_options)
@@ -607,9 +605,7 @@ class TestServerUdsBind:
         # that on macOS, so build a short one the way spawn_worker does.
         workdir = Path(tempfile.mkdtemp(prefix="uds-test-", dir="/tmp"))
         sock = workdir / "worker.sock"
-        server = DestinationGRPCServer(
-            handler=MagicMock(), address=f"unix:{sock}"
-        )
+        server = DestinationGRPCServer(handler=MagicMock(), address=f"unix:{sock}")
         await server.start()
         try:
             assert sock.exists()

@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import logging
 from importlib import metadata
-from typing import Dict, List, Optional, Tuple, Type
 
 logger = logging.getLogger(__name__)
 
@@ -63,8 +62,8 @@ class ConnectorNotRegisteredError(KeyError):
         connector_id: str,
         *,
         role: str,
-        available_kinds: List[str],
-        available_connector_ids: List[str],
+        available_kinds: list[str],
+        available_connector_ids: list[str],
     ) -> None:
         self.kind = kind
         self.connector_id = connector_id
@@ -83,8 +82,8 @@ class ConnectorRegistry:
 
     def __init__(self, role: str) -> None:
         self._role = role
-        self._defaults: Dict[str, Type] = {}
-        self._specific: Dict[str, Type] = {}
+        self._defaults: dict[str, type] = {}
+        self._specific: dict[str, type] = {}
 
     @property
     def role(self) -> str:
@@ -94,7 +93,7 @@ class ConnectorRegistry:
     # Registration
     # ------------------------------------------------------------------
 
-    def register_default(self, kind: str, cls: Type, *, override: bool = False) -> None:
+    def register_default(self, kind: str, cls: type, *, override: bool = False) -> None:
         """Register the generic fallback class for *kind*.
 
         Raises ``ValueError`` on a duplicate kind unless ``override`` is set,
@@ -111,7 +110,7 @@ class ConnectorRegistry:
             )
         self._defaults[key] = cls
 
-    def register(self, connector_id: str, cls: Type, *, override: bool = False) -> None:
+    def register(self, connector_id: str, cls: type, *, override: bool = False) -> None:
         """Register *cls* as the concrete class for *connector_id*.
 
         Raises ``ValueError`` on a duplicate connector_id unless ``override``
@@ -132,7 +131,7 @@ class ConnectorRegistry:
     # Resolution
     # ------------------------------------------------------------------
 
-    def resolve(self, kind: str, connector_id: str) -> Type:
+    def resolve(self, kind: str, connector_id: str) -> type:
         """Resolve the class for (*kind*, *connector_id*).
 
         The connector's own class wins when its package is installed;
@@ -154,15 +153,15 @@ class ConnectorRegistry:
             available_connector_ids=self.connector_ids(),
         )
 
-    def create(self, kind: str, connector_id: str):
+    def create(self, kind: str, connector_id: str) -> object:
         """Instantiate the connector for (*kind*, *connector_id*)."""
         return self.resolve(kind, connector_id)()
 
-    def kinds(self) -> List[str]:
+    def kinds(self) -> list[str]:
         """Kinds with a registered generic default."""
         return sorted(self._defaults)
 
-    def connector_ids(self) -> List[str]:
+    def connector_ids(self) -> list[str]:
         """connector_ids with a registered concrete class."""
         return sorted(self._specific)
 
@@ -200,7 +199,7 @@ class ConnectorRegistry:
                 )
 
 
-def _entry_points(group: str) -> Tuple[metadata.EntryPoint, ...]:
+def _entry_points(group: str) -> tuple[metadata.EntryPoint, ...]:
     """Return the entry points for *group* across importlib.metadata versions."""
     eps = metadata.entry_points()
     # Python 3.10+ returns a SelectableGroups supporting select(group=...);
@@ -208,15 +207,15 @@ def _entry_points(group: str) -> Tuple[metadata.EntryPoint, ...]:
     select = getattr(eps, "select", None)
     if select is not None:
         return tuple(select(group=group))
-    return tuple(eps.get(group, ()))  # type: ignore[union-attr]
+    return tuple(eps.get(group, ()))
 
 
 def build_registries(
     *,
-    source_builtins: Optional[Dict[str, Type]] = None,
-    destination_builtins: Optional[Dict[str, Type]] = None,
+    source_builtins: dict[str, type] | None = None,
+    destination_builtins: dict[str, type] | None = None,
     discover: bool = True,
-) -> Tuple[ConnectorRegistry, ConnectorRegistry]:
+) -> tuple[ConnectorRegistry, ConnectorRegistry]:
     """Build the (source, destination) registries.
 
     Built-ins are the **kind defaults** (always available), registered first;

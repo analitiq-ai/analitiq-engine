@@ -8,9 +8,10 @@ import asyncio
 import base64
 import json
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Any, Dict, List, Mapping, Optional, Set, Tuple
+from typing import Any
 
 import aiohttp
 import orjson
@@ -18,7 +19,9 @@ import pyarrow as pa
 from aiohttp_retry import ExponentialRetry, RetryClient
 
 from cdk.base_handler import BaseDestinationHandler, BatchWriteResult
+from cdk.connection_runtime import ConnectionRuntime
 from cdk.json_utils import decode_json_fields
+from cdk.rate_limiter import RateLimiter
 from cdk.request_binding import (
     bind_param_refs,
     bind_record_inputs,
@@ -26,15 +29,9 @@ from cdk.request_binding import (
     resolve_param_defaults,
 )
 from cdk.resolver import Resolver
-from cdk.types import (
-    AckStatus,
-    Cursor,
-    SchemaSpec,
-)
-from cdk.connection_runtime import ConnectionRuntime
-from ...shared.http_utils import join_url
-from cdk.rate_limiter import RateLimiter
+from cdk.types import AckStatus, Cursor, SchemaSpec
 
+from ...shared.http_utils import join_url
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +40,7 @@ logger = logging.getLogger(__name__)
 # api-endpoint contract's ``operations.write`` is a closed map keyed by
 # mode name (v1 keys: ``insert``, ``upsert``); the destination handler
 # must dispatch to the block matching the stream's write_mode.
-_API_WRITE_MODE_KEYS: Dict[int, str] = {
+_API_WRITE_MODE_KEYS: dict[int, str] = {
     1: "insert",
     2: "upsert",
 }
@@ -51,10 +48,10 @@ _API_WRITE_MODE_KEYS: Dict[int, str] = {
 
 def _endpoint_write_mode_block(
     endpoint_doc: Mapping[str, Any], mode_key: str
-) -> Optional[Dict[str, Any]]:
-    """Return the ``operations.write.<mode_key>`` block when it is a usable
-    request definition, else ``None``.
+) -> dict[str, Any] | None:
+    """Return the ``operations.write.<mode_key>`` block, or ``None``.
 
+    The block is returned when it is a usable request definition.
     A block is usable when it is a dict carrying a truthy ``request.path``.
     This is the single acceptance predicate for an API write mode:
     ``supports_upsert`` (capability advertisement) and ``configure_schema``
@@ -77,7 +74,7 @@ def _endpoint_write_mode_block(
 
 
 def _orjson_default(obj: Any) -> Any:
-    """orjson default-hook for types it does not natively serialise.
+    """Serialise types that orjson does not natively handle (default-hook).
 
     orjson handles ``datetime`` / ``date`` / ``time`` / ``UUID`` /
     dataclasses / enums / numpy scalars directly — only ``Decimal`` and
@@ -95,7 +92,7 @@ def _orjson_default(obj: Any) -> Any:
     )
 
 
-def _collect_json_fields(mode_block: Mapping[str, Any]) -> Set[str]:
+def _collect_json_fields(mode_block: Mapping[str, Any]) -> set[str]:
     """Body field names declared with ``arrow_type: "Json"``.
 
     Handles both shapes the api-endpoint contract permits:
@@ -103,7 +100,7 @@ def _collect_json_fields(mode_block: Mapping[str, Any]) -> Set[str]:
     flat ``input.schema.columns`` array.
     """
     schema = (mode_block.get("input") or {}).get("schema") or {}
-    names: Set[str] = set()
+    names: set[str] = set()
     for name, prop in (schema.get("properties") or {}).items():
         if isinstance(prop, dict) and prop.get("arrow_type") == "Json":
             names.add(name)
@@ -135,17 +132,17 @@ class _StreamState:
     # the handler must ``json.loads`` them before aiohttp serializes the
     # body, otherwise the API receives a quoted string instead of a
     # nested object.
-    json_fields: Set[str] = field(default_factory=set)
+    json_fields: set[str] = field(default_factory=set)
     # ``operations.write.<mode>.request.body`` from the endpoint document,
     # or ``None`` when the endpoint declares no body template. When set,
     # the request body is built by binding ``from_param`` nodes to the
     # declared write params and ``from_input`` nodes to the in-flight
     # record(s), then resolving value expressions; when absent the
     # record(s) are the body, unchanged.
-    body_spec: Optional[Any] = None
+    body_spec: Any | None = None
     # ``operations.write.<mode>.params`` — declared write params whose
     # resolved defaults feed body ``{"from_param": ...}`` bindings.
-    params_spec: Dict[str, Any] = field(default_factory=dict)
+    params_spec: dict[str, Any] = field(default_factory=dict)
 
 
 class ApiDestinationHandler(BaseDestinationHandler):
@@ -182,7 +179,7 @@ class ApiDestinationHandler(BaseDestinationHandler):
         """Initialize the API handler."""
         self._runtime: ConnectionRuntime | None = None
         self._session: RetryClient | None = None
-        self._config: Dict[str, Any] = {}
+        self._config: dict[str, Any] = {}
         self._connected: bool = False
 
         # Connection settings
@@ -200,12 +197,12 @@ class ApiDestinationHandler(BaseDestinationHandler):
         # Per-stream endpoint settings derived from the contract document
         # at configure_schema() time. Keyed by stream_id so concurrent
         # streams sharing this handler do not race shared state.
-        self._streams: Dict[str, _StreamState] = {}
+        self._streams: dict[str, _StreamState] = {}
 
         # stream_id -> contract API endpoint document. Populated by
         # set_stream_endpoints() at startup so configure_schema() can read
         # operations.write.<mode>.* directly from the contract.
-        self._stream_endpoints: Dict[str, Dict[str, Any]] = {}
+        self._stream_endpoints: dict[str, dict[str, Any]] = {}
 
         # HTTP statuses that trigger retry with exponential backoff; the
         # attempt count comes from ``runtime.raw_config["max_retries"]`` at
@@ -216,9 +213,10 @@ class ApiDestinationHandler(BaseDestinationHandler):
     def set_stream_endpoints(
         self, stream_endpoints: Mapping[str, Mapping[str, Any]]
     ) -> None:
-        """Register stream_id → contract API endpoint document. The handler
-        reads ``operations.write.<mode>.request.{path,method}`` and
-        optional ``operations.write.<mode>.batching`` from the document
+        """Register stream_id to its contract API endpoint document.
+
+        The handler reads ``operations.write.<mode>.request.{path,method}``
+        and optional ``operations.write.<mode>.batching`` from the document
         at ``configure_schema`` time, where ``<mode>`` matches the
         stream's ``write.mode``.
         """
@@ -233,14 +231,15 @@ class ApiDestinationHandler(BaseDestinationHandler):
 
     @property
     def supports_transactions(self) -> bool:
-        """APIs don't support transactions."""
+        """Report that this connector does not support transactions."""
         return False
 
     @property
     def supports_upsert(self) -> bool:
-        """True when any registered endpoint declares an upsert write
-        operation (``operations.write.upsert``) in its contract.
+        """Report whether any registered endpoint declares an upsert write.
 
+        The capability is declared via ``operations.write.upsert`` in the
+        endpoint's contract.
         Upsert capability is contract-driven, never hardcoded: the
         api-endpoint document owns whether an endpoint can upsert.
         ``GetCapabilities`` advertises a single connector-wide boolean,
@@ -256,7 +255,7 @@ class ApiDestinationHandler(BaseDestinationHandler):
 
     @property
     def supports_bulk_load(self) -> bool:
-        """APIs support bulk mode."""
+        """Report that this connector supports bulk mode."""
         return True
 
     async def connect(self, runtime: ConnectionRuntime) -> None:
@@ -295,7 +294,8 @@ class ApiDestinationHandler(BaseDestinationHandler):
         if self._session:
             await self._session.close()
         if self._runtime:
-            # runtime.close() is idempotent — safe even if RetryClient already closed the session
+            # runtime.close() is idempotent — safe even if RetryClient
+            # already closed the session
             await self._runtime.close()
         self._connected = False
         logger.info("ApiDestinationHandler disconnected")
@@ -333,9 +333,7 @@ class ApiDestinationHandler(BaseDestinationHandler):
         if mode_block is None:
             operations = endpoint_doc.get("operations")
             write = operations.get("write") if isinstance(operations, Mapping) else None
-            available = (
-                sorted(write.keys()) if isinstance(write, Mapping) else None
-            )
+            available = sorted(write.keys()) if isinstance(write, Mapping) else None
             logger.error(
                 "API endpoint document for stream %r does not define a usable "
                 "operations.write.%s block (needs a dict with a truthy "
@@ -402,7 +400,7 @@ class ApiDestinationHandler(BaseDestinationHandler):
         stream_id: str,
         batch_seq: int,
         record_batch: pa.RecordBatch,
-        record_ids: List[str],
+        record_ids: list[str],
         cursor: Cursor,
     ) -> BatchWriteResult:
         """Write an Arrow record batch to the API.
@@ -453,7 +451,9 @@ class ApiDestinationHandler(BaseDestinationHandler):
                     state, records, record_ids
                 )
 
-            logger.info(f"API wrote batch {batch_seq}: {written}/{len(records)} records")
+            logger.info(
+                f"API wrote batch {batch_seq}: {written}/{len(records)} records"
+            )
             return self._build_write_result(
                 written=written,
                 failed_record_ids=failed_ids,
@@ -476,10 +476,10 @@ class ApiDestinationHandler(BaseDestinationHandler):
                 failure_summary=f"{type(e).__name__}: {e}",
             )
 
-    def _resolve_write_params(self, state: _StreamState) -> Dict[str, Any]:
-        """Resolve declared write-param defaults into a value table for
-        body ``{"from_param": ...}`` bindings.
+    def _resolve_write_params(self, state: _StreamState) -> dict[str, Any]:
+        """Resolve declared write-param defaults into a value table.
 
+        The table feeds body ``{"from_param": ...}`` bindings.
         Write params are request-construction inputs, not stream filters;
         defaults resolve through the request-time grammar and an
         unresolved default simply leaves the param out of the table (its
@@ -493,8 +493,8 @@ class ApiDestinationHandler(BaseDestinationHandler):
         self,
         state: _StreamState,
         *,
-        record: Optional[Dict[str, Any]] = None,
-        records: Optional[List[Dict[str, Any]]] = None,
+        record: dict[str, Any] | None = None,
+        records: list[dict[str, Any]] | None = None,
     ) -> Any:
         """Build one request body for the in-flight record(s).
 
@@ -525,9 +525,9 @@ class ApiDestinationHandler(BaseDestinationHandler):
         self,
         *,
         written: int,
-        failed_record_ids: List[str],
+        failed_record_ids: list[str],
         total: int,
-        cursor: Optional[Cursor],
+        cursor: Cursor | None,
     ) -> BatchWriteResult:
         """One partial-failure verdict shared by every write mode.
 
@@ -554,9 +554,9 @@ class ApiDestinationHandler(BaseDestinationHandler):
     async def _write_single_mode(
         self,
         state: _StreamState,
-        records: List[Dict[str, Any]],
-        record_ids: List[str],
-    ) -> Tuple[int, List[str]]:
+        records: list[dict[str, Any]],
+        record_ids: list[str],
+    ) -> tuple[int, list[str]]:
         """Write records one at a time.
 
         Returns ``(written, failed_record_ids)``. Body construction is
@@ -567,7 +567,7 @@ class ApiDestinationHandler(BaseDestinationHandler):
         write_batch and become FATAL for the whole batch.
         """
         written = 0
-        failed_ids: List[str] = []
+        failed_ids: list[str] = []
 
         for i, record in enumerate(records):
             try:
@@ -575,7 +575,9 @@ class ApiDestinationHandler(BaseDestinationHandler):
             except (TypeError, ValueError) as e:
                 logger.warning(
                     "Failed to build body for record %s: %s: %s",
-                    record_ids[i], type(e).__name__, e,
+                    record_ids[i],
+                    type(e).__name__,
+                    e,
                 )
                 failed_ids.append(record_ids[i])
                 continue
@@ -585,18 +587,22 @@ class ApiDestinationHandler(BaseDestinationHandler):
             except (aiohttp.ClientError, asyncio.TimeoutError) as e:
                 logger.warning(
                     "Failed to write record %s: %s: %s",
-                    record_ids[i], type(e).__name__, e,
+                    record_ids[i],
+                    type(e).__name__,
+                    e,
                 )
                 failed_ids.append(record_ids[i])
 
         if failed_ids:
-            logger.warning(f"Failed to write {len(failed_ids)} records: {failed_ids[:5]}...")
+            logger.warning(
+                f"Failed to write {len(failed_ids)} records: {failed_ids[:5]}..."
+            )
 
         return written, failed_ids
 
     async def _write_bulk_mode(
-        self, state: _StreamState, records: List[Dict[str, Any]]
-    ) -> Tuple[int, List[str]]:
+        self, state: _StreamState, records: list[dict[str, Any]]
+    ) -> tuple[int, list[str]]:
         """Write all records in a single request.
 
         Returns ``(written, failed_record_ids)``. A 2xx response means the API
@@ -616,9 +622,9 @@ class ApiDestinationHandler(BaseDestinationHandler):
     async def _write_batch_mode(
         self,
         state: _StreamState,
-        records: List[Dict[str, Any]],
-        record_ids: List[str],
-    ) -> Tuple[int, List[str]]:
+        records: list[dict[str, Any]],
+        record_ids: list[str],
+    ) -> tuple[int, list[str]]:
         """Write records in fixed-size chunks.
 
         Returns ``(written, failed_record_ids)``. The written count tracks
@@ -649,7 +655,10 @@ class ApiDestinationHandler(BaseDestinationHandler):
                     raise
                 logger.warning(
                     "Failed to write batch chunk at offset %d (%d records): %s: %s",
-                    i, len(batch), type(e).__name__, e,
+                    i,
+                    len(batch),
+                    type(e).__name__,
+                    e,
                 )
                 # written == i here: every record from this chunk onward is
                 # unwritten. Attribute them all as failed.
@@ -658,7 +667,7 @@ class ApiDestinationHandler(BaseDestinationHandler):
 
         return written, []
 
-    async def _send_request(self, state: _StreamState, data: Any) -> Dict[str, Any]:
+    async def _send_request(self, state: _StreamState, data: Any) -> dict[str, Any]:
         """
         Send HTTP request with rate limiting.
 
@@ -708,12 +717,17 @@ class ApiDestinationHandler(BaseDestinationHandler):
                 )
 
             try:
-                return await response.json(content_type=None)
-            except (json.JSONDecodeError, aiohttp.ContentTypeError, UnicodeDecodeError) as err:
-                body = (await response.text())[:500]
+                payload: dict[str, Any] = await response.json(content_type=None)
+                return payload
+            except (
+                json.JSONDecodeError,
+                aiohttp.ContentTypeError,
+                UnicodeDecodeError,
+            ) as err:
+                body_snippet = (await response.text())[:500]
                 raise aiohttp.ClientPayloadError(
                     f"API returned status {response.status} with non-JSON body: "
-                    f"{err}; body[:500]={body!r}"
+                    f"{err}; body[:500]={body_snippet!r}"
                 ) from err
 
     async def health_check(self) -> bool:
@@ -733,6 +747,8 @@ class ApiDestinationHandler(BaseDestinationHandler):
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
             logger.warning(
                 "API health check failed: %s: %s",
-                type(e).__name__, e, exc_info=True,
+                type(e).__name__,
+                e,
+                exc_info=True,
             )
             return False

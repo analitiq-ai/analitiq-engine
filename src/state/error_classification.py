@@ -56,7 +56,6 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from enum import Enum
-from typing import List, Optional, Set, Tuple
 
 
 class ErrorCode(str, Enum):
@@ -113,18 +112,12 @@ _CUSTOMER_MESSAGES: dict[ErrorCode, str] = {
         "The source system could not be reached. It may be offline or unreachable "
         "from the engine."
     ),
-    ErrorCode.DESTINATION_WRITE_FAILED: (
-        "Writing to the destination system failed."
-    ),
+    ErrorCode.DESTINATION_WRITE_FAILED: ("Writing to the destination system failed."),
     ErrorCode.RATE_LIMITED: (
         "The source system rate-limited the request. Try again later."
     ),
-    ErrorCode.CONFIG_INVALID: (
-        "The pipeline configuration is invalid or incomplete."
-    ),
-    ErrorCode.INTERNAL: (
-        "The pipeline failed due to an internal error."
-    ),
+    ErrorCode.CONFIG_INVALID: ("The pipeline configuration is invalid or incomplete."),
+    ErrorCode.INTERNAL: ("The pipeline failed due to an internal error."),
 }
 
 
@@ -133,7 +126,7 @@ def customer_message(code: ErrorCode) -> str:
     return _CUSTOMER_MESSAGES.get(code, _CUSTOMER_MESSAGES[ErrorCode.INTERNAL])
 
 
-def classify_for_metrics(exc: BaseException) -> Tuple[ErrorCode, str, Optional[str]]:
+def classify_for_metrics(exc: BaseException) -> tuple[ErrorCode, str, str | None]:
     """Turn a terminating exception into the three metrics-record error values.
 
     Returns ``(error_code, error_message, error_detail)`` where ``error_code``
@@ -155,7 +148,9 @@ def classify_for_metrics(exc: BaseException) -> Tuple[ErrorCode, str, Optional[s
 _TAG_ATTR = "_analitiq_failure_tag"
 
 
-def tag_failure(exc: BaseException, *, code: ErrorCode, stage: FailureStage) -> BaseException:
+def tag_failure(
+    exc: BaseException, *, code: ErrorCode, stage: FailureStage
+) -> BaseException:
     """Stamp ``exc`` with a :class:`FailureTag` and return it (for ``raise``).
 
     No-overwrite by construction: if any exception already in ``exc``'s chain
@@ -173,7 +168,7 @@ def tag_failure(exc: BaseException, *, code: ErrorCode, stage: FailureStage) -> 
 
 # Priority when several leaves of an ExceptionGroup carry different tags: the
 # most specific / most actionable cause wins, mirroring the fallback rule order.
-_CODE_PRIORITY: Tuple[ErrorCode, ...] = (
+_CODE_PRIORITY: tuple[ErrorCode, ...] = (
     ErrorCode.CONFIG_INVALID,
     ErrorCode.DESTINATION_WRITE_FAILED,
     ErrorCode.SOURCE_AUTH_FAILED,
@@ -189,13 +184,14 @@ _CODE_PRIORITY: Tuple[ErrorCode, ...] = (
 _unranked = set(ErrorCode) - set(_CODE_PRIORITY)
 if _unranked:
     raise RuntimeError(
-        f"_CODE_PRIORITY must rank every ErrorCode; missing: {sorted(c.value for c in _unranked)}"
+        f"_CODE_PRIORITY must rank every ErrorCode; "
+        f"missing: {sorted(c.value for c in _unranked)}"
     )
 
 
-def _iter_tags(exc: BaseException) -> List[FailureTag]:
+def _iter_tags(exc: BaseException) -> list[FailureTag]:
     """Every :class:`FailureTag` stamped anywhere in the exception chain."""
-    tags: List[FailureTag] = []
+    tags: list[FailureTag] = []
     for member in _walk_chain(exc):
         tag = getattr(member, _TAG_ATTR, None)
         if isinstance(tag, FailureTag):
@@ -203,8 +199,8 @@ def _iter_tags(exc: BaseException) -> List[FailureTag]:
     return tags
 
 
-def read_failure_tag(exc: BaseException) -> Optional[FailureTag]:
-    """The dominant tag across the chain, or None when nothing is tagged.
+def read_failure_tag(exc: BaseException) -> FailureTag | None:
+    """Return the dominant tag across the chain, or None when nothing is tagged.
 
     Dominant = the highest-priority code present (so an aggregated group resolves
     to its most actionable leaf). Used both to classify and to gate outer-stage
@@ -224,7 +220,7 @@ def read_failure_tag(exc: BaseException) -> Optional[FailureTag]:
 _MAX_CHAIN_DEPTH = 50
 
 
-def _walk_chain(exc: BaseException) -> List[BaseException]:
+def _walk_chain(exc: BaseException) -> list[BaseException]:
     """Flatten an exception and everything it carries into a list.
 
     Follows ``__cause__`` / ``__context__``, the members of an
@@ -232,16 +228,16 @@ def _walk_chain(exc: BaseException) -> List[BaseException]:
     (``StreamProcessingError`` wraps the underlying driver error there). A
     seen-set on object identity plus a depth cap guard against cycles.
     """
-    seen: Set[int] = set()
-    out: List[BaseException] = []
-    stack: List[Tuple[BaseException, int]] = [(exc, 0)]
+    seen: set[int] = set()
+    out: list[BaseException] = []
+    stack: list[tuple[BaseException, int]] = [(exc, 0)]
     while stack:
         current, depth = stack.pop()
         if current is None or id(current) in seen or depth > _MAX_CHAIN_DEPTH:
             continue
         seen.add(id(current))
         out.append(current)
-        nested: List[BaseException] = []
+        nested: list[BaseException] = []
         if isinstance(current, BaseExceptionGroup):
             nested.extend(current.exceptions)
         for attr in ("original_error", "__cause__", "__context__"):
@@ -262,7 +258,7 @@ def _walk_chain(exc: BaseException) -> List[BaseException]:
 _ERROR_TYPE_PREFIX = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:")
 
 
-def _signature(exc: BaseException) -> Tuple[Set[str], str]:
+def _signature(exc: BaseException) -> tuple[set[str], str]:
     """Collect the class names and message text across the whole chain.
 
     Returns a set of every class name in every chained exception's MRO (plus any
@@ -271,8 +267,8 @@ def _signature(exc: BaseException) -> Tuple[Set[str], str]:
     matched precisely by name; driver text and the worker prefix's tail are
     matched in the message.
     """
-    names: Set[str] = set()
-    messages: List[str] = []
+    names: set[str] = set()
+    messages: list[str] = []
     for member in _walk_chain(exc):
         for klass in type(member).__mro__:
             names.add(klass.__name__)
@@ -285,7 +281,7 @@ def _signature(exc: BaseException) -> Tuple[Set[str], str]:
 
 
 def is_local_io_error(exc: BaseException) -> bool:
-    """True if the chain carries a builtin local-filesystem error.
+    """Return True if the chain carries a builtin local-filesystem error.
 
     Lets the runner keep such a failure as the engine/infra fault it is
     (``INTERNAL``) instead of the config-phase ``CONFIG_INVALID`` default -- e.g.
@@ -315,22 +311,40 @@ def is_local_io_error(exc: BaseException) -> bool:
 # schema-configuration failures are all configuration defects, not a data-vs-
 # schema mismatch -- they live here. ``TypeMapError`` covers UnmappedTypeError /
 # InvalidTypeMapError / TypeMapNotFoundError.
-_CONFIG_NAMES = frozenset({
-    "ConfigError", "ConfigNotFoundError", "ConfigValidationError",
-    "ConnectorNotFoundError", "EndpointNotFoundError", "ConnectionConfigError",
-    "ContractValidationError", "ConfigurationError", "StreamConfigurationError",
-    "PipelineValidationError", "StageConfigurationError",
-    "TransportSpecError", "TypeMapError", "InvalidTypeMapError",
-    "TypeMapNotFoundError", "UnmappedTypeError", "UnsupportedDialectOperationError",
-    "AdbcConfigurationError", "ConnectorNotRegisteredError",
-    "UnresolvedValueError", "SchemaError", "SchemaConfigurationError",
-    "TransformationError",
-    # Secret resolution (missing/denied/malformed credentials, placeholder
-    # expansion) is config/setup, not source-system auth -- match the base so
-    # every subclass routes to CONFIG_INVALID.
-    "SecretResolutionError", "SecretNotFoundError", "SecretAccessDeniedError",
-    "PlaceholderExpansionError",
-})
+_CONFIG_NAMES = frozenset(
+    {
+        "ConfigError",
+        "ConfigNotFoundError",
+        "ConfigValidationError",
+        "ConnectorNotFoundError",
+        "EndpointNotFoundError",
+        "ConnectionConfigError",
+        "ContractValidationError",
+        "ConfigurationError",
+        "StreamConfigurationError",
+        "PipelineValidationError",
+        "StageConfigurationError",
+        "TransportSpecError",
+        "TypeMapError",
+        "InvalidTypeMapError",
+        "TypeMapNotFoundError",
+        "UnmappedTypeError",
+        "UnsupportedDialectOperationError",
+        "AdbcConfigurationError",
+        "ConnectorNotRegisteredError",
+        "UnresolvedValueError",
+        "SchemaError",
+        "SchemaConfigurationError",
+        "TransformationError",
+        # Secret resolution (missing/denied/malformed credentials, placeholder
+        # expansion) is config/setup, not source-system auth -- match the base so
+        # every subclass routes to CONFIG_INVALID.
+        "SecretResolutionError",
+        "SecretNotFoundError",
+        "SecretAccessDeniedError",
+        "PlaceholderExpansionError",
+    }
+)
 
 # Config-exception class names that survive only as text across a process
 # boundary (forwarded as "{TypeName}: ..." in a worker prefix, a destination
@@ -339,29 +353,50 @@ _CONFIG_NAMES = frozenset({
 # classified as CONFIG_INVALID wherever it surfaces. These are our own
 # controlled class names, not arbitrary driver text.
 _CONFIG_PHRASES = (
-    "secretresolutionerror", "secretnotfounderror", "secretaccessdeniederror",
-    "placeholderexpansionerror", "unmappedtypeerror", "invalidtypemaperror",
-    "typemapnotfounderror", "transportspecerror",
-    "adbcconfigurationerror", "unsupporteddialectoperationerror",
-    "schemaconfigurationerror", "transformationerror", "configvalidationerror",
+    "secretresolutionerror",
+    "secretnotfounderror",
+    "secretaccessdeniederror",
+    "placeholderexpansionerror",
+    "unmappedtypeerror",
+    "invalidtypemaperror",
+    "typemapnotfounderror",
+    "transportspecerror",
+    "adbcconfigurationerror",
+    "unsupporteddialectoperationerror",
+    "schemaconfigurationerror",
+    "transformationerror",
+    "configvalidationerror",
     "connectornotregisterederror",
     # Controlled write_batch fatal-ack summary prefixes (cdk/sql/generic.py):
     # deterministic destination write-configuration defects.
-    "type-map:", "dialect:", "write-config:", "adbc:",
+    "type-map:",
+    "dialect:",
+    "write-config:",
+    "adbc:",
 )
 
 # Source-system auth failures surface only as driver/HTTP text (this engine has
 # no typed source-auth exception; secret-store errors are config, see above).
-_AUTH_NAMES = frozenset()
+_AUTH_NAMES: frozenset[str] = frozenset()
 _AUTH_PHRASES = (
-    "authentication failed", "password authentication failed",
-    "permission denied", "access denied", "access is denied",
-    "invalid credentials", "login failed", "unauthorized", "not authorized",
+    "authentication failed",
+    "password authentication failed",
+    "permission denied",
+    "access denied",
+    "access is denied",
+    "invalid credentials",
+    "login failed",
+    "unauthorized",
+    "not authorized",
     "forbidden",
 )
 
 _RATE_PHRASES = (
-    "rate limit", "rate-limit", "ratelimit", "too many requests", "throttl",
+    "rate limit",
+    "rate-limit",
+    "ratelimit",
+    "too many requests",
+    "throttl",
 )
 
 # HTTP status codes: the digits must not be adjacent to a word char or "/", so a
@@ -372,17 +407,32 @@ _RATE_PHRASES = (
 _HTTP_AUTH_STATUS = re.compile(r"(?<![\w/])40[13](?![\w/])")
 _HTTP_RATE_STATUS = re.compile(r"(?<![\w/])429(?![\w/])")
 
-_UNREACHABLE_NAMES = frozenset({
-    "ConnectionError", "ConnectionRefusedError", "ConnectionResetError",
-    "ConnectionAbortedError", "TimeoutError", "CircuitBreakerOpenError",
-    "gaierror",
-})
+_UNREACHABLE_NAMES = frozenset(
+    {
+        "ConnectionError",
+        "ConnectionRefusedError",
+        "ConnectionResetError",
+        "ConnectionAbortedError",
+        "TimeoutError",
+        "CircuitBreakerOpenError",
+        "gaierror",
+    }
+)
 _UNREACHABLE_PHRASES = (
-    "connection refused", "could not connect", "failed to connect",
-    "could not translate host name", "name or service not known",
-    "temporary failure in name resolution", "getaddrinfo", "no route to host",
-    "network is unreachable", "connection reset", "connection timed out",
-    "timed out", "unreachable", "host is down",
+    "connection refused",
+    "could not connect",
+    "failed to connect",
+    "could not translate host name",
+    "name or service not known",
+    "temporary failure in name resolution",
+    "getaddrinfo",
+    "no route to host",
+    "network is unreachable",
+    "connection reset",
+    "connection timed out",
+    "timed out",
+    "unreachable",
+    "host is down",
 )
 
 # The destination "schema" handshake (configure_schema) only prepares the
@@ -396,8 +446,12 @@ _UNREACHABLE_PHRASES = (
 # configuration defect -> CONFIG_INVALID.
 _HANDSHAKE_MARKER = "did not accept the stream"
 _HANDSHAKE_TRANSPORT_PHRASES = (
-    "before schema ack", "before sending schema ack", "closed stream",
-    "did not acknowledge the schema", "channel did not connect", "did not connect",
+    "before schema ack",
+    "before sending schema ack",
+    "closed stream",
+    "did not acknowledge the schema",
+    "channel did not connect",
+    "did not connect",
 )
 
 # PEP-249 driver names (ProgrammingError / IntegrityError / NotSupportedError)
@@ -407,29 +461,43 @@ _HANDSHAKE_TRANSPORT_PHRASES = (
 # the phrases below) or is recorded as the DLQ dominant cause. A live driver
 # exception in the chain therefore comes from the source worker, so routing those
 # names to the destination would mislabel source read failures.
-_DESTINATION_NAMES = frozenset({
-    "WriteError", "CreateTableError", "AdbcCommitRecordError",
-})
+_DESTINATION_NAMES = frozenset(
+    {
+        "WriteError",
+        "CreateTableError",
+        "AdbcCommitRecordError",
+    }
+)
 _DESTINATION_PHRASES = (
     "failed to connect to grpc destination",
-    "write to destination", "destination write", "load stage",
+    "write to destination",
+    "destination write",
+    "load stage",
     # Load-stage wrappers from the engine (_load_stage) around a destination
     # ack failure; the wrapper text itself is the destination signal.
-    "fatal failure", "retries:", "unknown ack status",
+    "fatal failure",
+    "retries:",
+    "unknown ack status",
 )
 
 # Builtin filesystem errors are a local engine/infra fault, never a source or
 # destination failure. They are matched by type so a local "[Errno 13]
 # Permission denied" from creating the state/deadletter directories is not read
 # as source auth by the "permission denied" phrase below.
-_LOCAL_IO_NAMES = frozenset({
-    "PermissionError", "FileExistsError", "IsADirectoryError",
-    "NotADirectoryError", "InterruptedError", "BlockingIOError",
-})
+_LOCAL_IO_NAMES = frozenset(
+    {
+        "PermissionError",
+        "FileExistsError",
+        "IsADirectoryError",
+        "NotADirectoryError",
+        "InterruptedError",
+        "BlockingIOError",
+    }
+)
 
 
-def _is_local_filesystem_error(names: Set[str]) -> bool:
-    """True for a builtin local-filesystem OSError, excluding network OSErrors.
+def _is_local_filesystem_error(names: set[str]) -> bool:
+    """Return True for a builtin local-filesystem OSError, excluding network ones.
 
     The named subclasses in :data:`_LOCAL_IO_NAMES` cover the common cases, but a
     disk-full / read-only-volume failure (``ENOSPC`` / ``EROFS``) raises a bare
@@ -444,7 +512,9 @@ def _is_local_filesystem_error(names: Set[str]) -> bool:
     return "OSError" in names and not (names & _UNREACHABLE_NAMES)
 
 
-def _matches(names: Set[str], text: str, name_set: frozenset, phrases: Tuple[str, ...]) -> bool:
+def _matches(
+    names: set[str], text: str, name_set: frozenset, phrases: tuple[str, ...]
+) -> bool:
     if names & name_set:
         return True
     return any(phrase in text for phrase in phrases)
@@ -472,16 +542,20 @@ def classify_source_extract(exc: BaseException) -> ErrorCode:
         return ErrorCode.INTERNAL
     if _matches(names, text, _CONFIG_NAMES, _CONFIG_PHRASES):
         return ErrorCode.CONFIG_INVALID
-    if _matches(names, text, _AUTH_NAMES, _AUTH_PHRASES) or _HTTP_AUTH_STATUS.search(text):
+    if _matches(names, text, _AUTH_NAMES, _AUTH_PHRASES) or _HTTP_AUTH_STATUS.search(
+        text
+    ):
         return ErrorCode.SOURCE_AUTH_FAILED
-    if _matches(names, text, frozenset(), _RATE_PHRASES) or _HTTP_RATE_STATUS.search(text):
+    if _matches(names, text, frozenset(), _RATE_PHRASES) or _HTTP_RATE_STATUS.search(
+        text
+    ):
         return ErrorCode.RATE_LIMITED
     if _matches(names, text, _UNREACHABLE_NAMES, _UNREACHABLE_PHRASES):
         return ErrorCode.SOURCE_UNREACHABLE
     return ErrorCode.INTERNAL
 
 
-def classify_handshake_failure(reason: Optional[str]) -> ErrorCode:
+def classify_handshake_failure(reason: str | None) -> ErrorCode:
     """Classify a destination-handshake failure as transport vs config.
 
     The destination handshake (configure_schema) only prepares the destination's
@@ -555,9 +629,13 @@ def classify_exception(exc: BaseException) -> ErrorCode:
         return ErrorCode.CONFIG_INVALID
     if _matches(names, text, _DESTINATION_NAMES, _DESTINATION_PHRASES):
         return ErrorCode.DESTINATION_WRITE_FAILED
-    if _matches(names, text, _AUTH_NAMES, _AUTH_PHRASES) or _HTTP_AUTH_STATUS.search(text):
+    if _matches(names, text, _AUTH_NAMES, _AUTH_PHRASES) or _HTTP_AUTH_STATUS.search(
+        text
+    ):
         return ErrorCode.SOURCE_AUTH_FAILED
-    if _matches(names, text, frozenset(), _RATE_PHRASES) or _HTTP_RATE_STATUS.search(text):
+    if _matches(names, text, frozenset(), _RATE_PHRASES) or _HTTP_RATE_STATUS.search(
+        text
+    ):
         return ErrorCode.RATE_LIMITED
     if _matches(names, text, _UNREACHABLE_NAMES, _UNREACHABLE_PHRASES):
         return ErrorCode.SOURCE_UNREACHABLE
@@ -577,7 +655,7 @@ def classify_exception(exc: BaseException) -> ErrorCode:
 _MAX_DETAIL_LEN = 2000
 
 
-def build_error_detail(exc: BaseException) -> Optional[str]:
+def build_error_detail(exc: BaseException) -> str | None:
     """Build the internal ``error_detail`` from allowlisted-safe fields only.
 
     Walks the whole chain (so an ``ExceptionGroup`` keeps every per-stream leaf,
@@ -594,8 +672,8 @@ def build_error_detail(exc: BaseException) -> Optional[str]:
     free text there is nothing to scrub; the full message lives in the engine
     logs, not in this record.
     """
-    tokens: List[str] = []
-    seen: Set[str] = set()
+    tokens: list[str] = []
+    seen: set[str] = set()
 
     def add(token: str) -> None:
         if token and token not in seen:
@@ -619,7 +697,7 @@ def build_error_detail(exc: BaseException) -> Optional[str]:
 
 
 def detail_for_code(code: ErrorCode, *, stage: FailureStage, reason: str) -> str:
-    """A structured ``error_detail`` for a non-exception failure.
+    """Build a structured ``error_detail`` for a non-exception failure.
 
     Used where the run failed without a terminating exception to classify -- a
     partial run whose batches were dead-lettered. ``reason`` must be a fixed,

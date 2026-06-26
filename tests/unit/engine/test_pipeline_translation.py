@@ -4,13 +4,6 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from src.runner import (
-    _build_config_dict,
-    _build_destination_config,
-    _translate_api_source,
-    _translate_database_source,
-    _translate_source_config,
-)
 from src.models.resolved import (
     BatchingConfig,
     ErrorHandlingConfig,
@@ -22,10 +15,19 @@ from src.models.resolved import (
     RuntimeConfig,
 )
 from src.models.stream import EndpointRef
+from src.runner import (
+    _build_config_dict,
+    _build_destination_config,
+    _translate_api_source,
+    _translate_database_source,
+    _translate_source_config,
+)
 
 
 def _make_endpoint_ref(scope="connector", connection_id="conn", endpoint_id="ep"):
-    return EndpointRef(scope=scope, connection_id=connection_id, endpoint_id=endpoint_id)
+    return EndpointRef(
+        scope=scope, connection_id=connection_id, endpoint_id=endpoint_id
+    )
 
 
 def _make_runtime(connector_type="database"):
@@ -47,7 +49,9 @@ def _make_source(connector_type="database", stream_source=None, endpoint_documen
 
 
 def _make_destination(write=None):
-    ref = _make_endpoint_ref(scope="connection", connection_id="dest", endpoint_id="orders")
+    ref = _make_endpoint_ref(
+        scope="connection", connection_id="dest", endpoint_id="orders"
+    )
     rt = _make_runtime("database")
     return ResolvedDestination(
         endpoint_ref=ref,
@@ -121,7 +125,10 @@ class TestTranslateDatabaseSource:
         assert result["stream_source"] is stream_source
 
     def test_passes_documents_through_verbatim(self):
-        endpoint = {"primary_keys": ["id"], "filters": [{"field": "active", "value": True}]}
+        endpoint = {
+            "primary_keys": ["id"],
+            "filters": [{"field": "active", "value": True}],
+        }
         source = _make_source(endpoint_document=endpoint)
 
         result = _translate_database_source(source, endpoint)
@@ -134,7 +141,11 @@ class TestTranslateApiSource:
         filters = [{"field": "status", "op": "eq", "value": "active"}]
         stream_source = {"filters": filters, "replication": {}}
         endpoint = {"operations": {"read": {"request": {"path": "/invoices"}}}}
-        source = _make_source(connector_type="api", stream_source=stream_source, endpoint_document=endpoint)
+        source = _make_source(
+            connector_type="api",
+            stream_source=stream_source,
+            endpoint_document=endpoint,
+        )
         rt = source.runtime
 
         result = _translate_api_source(source, endpoint, rt)
@@ -146,7 +157,11 @@ class TestTranslateApiSource:
     def test_empty_filters_when_absent(self):
         stream_source = {}
         endpoint = {}
-        source = _make_source(connector_type="api", stream_source=stream_source, endpoint_document=endpoint)
+        source = _make_source(
+            connector_type="api",
+            stream_source=stream_source,
+            endpoint_document=endpoint,
+        )
 
         result = _translate_api_source(source, endpoint, source.runtime)
 
@@ -208,7 +223,7 @@ class TestTranslateSourceConfig:
 
     @pytest.mark.parametrize("kind", ["nosql", "graphql", "file", "sftp", "custom-db"])
     def test_non_built_in_kind_never_raises(self, kind):
-        """Regression guard: _translate_source_config must not raise for unknown kinds."""
+        """Regression guard: _translate_source_config never raises on unknown kinds."""
         source = _make_source(connector_type=kind)
         result = _translate_source_config(
             stream=_make_stream(),

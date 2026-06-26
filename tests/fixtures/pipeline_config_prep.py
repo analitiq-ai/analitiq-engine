@@ -1,7 +1,7 @@
 """Fixtures for PipelineConfigPrep testing."""
 
+
 import pytest
-from typing import Dict, Any
 
 
 @pytest.fixture
@@ -68,7 +68,7 @@ def sample_database_host_config():
                 "max_overflow": 20,
                 "pool_timeout": 30,
                 "pool_recycle": 3600,
-                "pool_pre_ping": True
+                "pool_pre_ping": True,
             },
             "query_timeout": 300,
             "statement_timeout": 600,
@@ -85,11 +85,9 @@ def sample_wise_endpoint_config():
         "query_params": {
             "status": "outgoing_payment_sent,funds_converted",
             "limit": 1000,
-            "offset": 0
+            "offset": 0,
         },
-        "path_params": {
-            "profile_id": "${WISE_PROFILE_ID}"
-        },
+        "path_params": {"profile_id": "${WISE_PROFILE_ID}"},
         "endpoint_schema": {
             "$schema": "https://json-schema.org/draft/2020-12/schema",
             "title": "Wise Transfers Response",
@@ -97,26 +95,21 @@ def sample_wise_endpoint_config():
             "items": {
                 "type": "object",
                 "properties": {
-                    "id": {
-                        "type": "integer",
-                        "description": "Transfer ID"
-                    },
+                    "id": {"type": "integer", "description": "Transfer ID"},
                     "created": {
                         "type": "string",
                         "format": "date-time",
-                        "description": "Creation timestamp"
+                        "description": "Creation timestamp",
                     },
-                    "targetValue": {
-                        "type": "number",
-                        "description": "Transfer amount"
-                    },
-                    "targetCurrency": {
-                        "type": "string",
-                        "pattern": "^[A-Z]{3}$"
-                    },
+                    "targetValue": {"type": "number", "description": "Transfer amount"},
+                    "targetCurrency": {"type": "string", "pattern": "^[A-Z]{3}$"},
                     "status": {
                         "type": "string",
-                        "enum": ["outgoing_payment_sent", "funds_converted", "cancelled"]
+                        "enum": [
+                            "outgoing_payment_sent",
+                            "funds_converted",
+                            "cancelled",
+                        ],
                     },
                     "details": {
                         "type": "object",
@@ -124,22 +117,20 @@ def sample_wise_endpoint_config():
                             "reference": {"type": "string"},
                             "merchant": {
                                 "type": "object",
-                                "properties": {
-                                    "name": {"type": "string"}
-                                }
-                            }
-                        }
-                    }
+                                "properties": {"name": {"type": "string"}},
+                            },
+                        },
+                    },
                 },
-                "required": ["id", "created", "targetValue", "status"]
-            }
+                "required": ["id", "created", "targetValue", "status"],
+            },
         },
         "pagination": {
             "type": "offset",
             "limit_param": "limit",
             "offset_param": "offset",
-            "max_limit": 1000
-        }
+            "max_limit": 1000,
+        },
     }
 
 
@@ -149,9 +140,7 @@ def sample_sevdesk_endpoint_config():
     return {
         "endpoint": "/api/v1/CheckAccountTransaction",
         "method": "POST",
-        "headers": {
-            "Content-Type": "application/json"
-        },
+        "headers": {"Content-Type": "application/json"},
         "request_schema": {
             "$schema": "https://json-schema.org/draft/2020-12/schema",
             "title": "SevDesk CheckAccountTransaction Request",
@@ -160,35 +149,26 @@ def sample_sevdesk_endpoint_config():
                 "valueDate": {
                     "type": "string",
                     "format": "date",
-                    "description": "Transaction date"
+                    "description": "Transaction date",
                 },
-                "amount": {
-                    "type": "number",
-                    "description": "Transaction amount"
-                },
+                "amount": {"type": "number", "description": "Transaction amount"},
                 "paymtPurpose": {
                     "type": "string",
                     "maxLength": 255,
-                    "description": "Payment purpose"
+                    "description": "Payment purpose",
                 },
-                "objectName": {
-                    "type": "string",
-                    "const": "CheckAccountTransaction"
-                },
+                "objectName": {"type": "string", "const": "CheckAccountTransaction"},
                 "checkAccount": {
                     "type": "object",
                     "properties": {
                         "id": {"type": "string"},
-                        "objectName": {"type": "string", "const": "CheckAccount"}
+                        "objectName": {"type": "string", "const": "CheckAccount"},
                     },
-                    "required": ["id", "objectName"]
+                    "required": ["id", "objectName"],
                 },
-                "status": {
-                    "type": "string",
-                    "enum": ["100", "200", "1000"]
-                }
+                "status": {"type": "string", "enum": ["100", "200", "1000"]},
             },
-            "required": ["valueDate", "amount", "objectName", "checkAccount", "status"]
+            "required": ["valueDate", "amount", "objectName", "checkAccount", "status"],
         },
         "endpoint_schema": {
             "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -201,20 +181,20 @@ def sample_sevdesk_endpoint_config():
                         "type": "object",
                         "properties": {
                             "id": {"type": "string"},
-                            "objectName": {"type": "string"}
-                        }
-                    }
+                            "objectName": {"type": "string"},
+                        },
+                    },
                 },
-                "success": {"type": "boolean"}
-            }
+                "success": {"type": "boolean"},
+            },
         },
         "error_mapping": {
             "400": "validation_error",
             "401": "authentication_error",
             "403": "authorization_error",
             "429": "rate_limit_error",
-            "500": "server_error"
-        }
+            "500": "server_error",
+        },
     }
 
 
@@ -227,14 +207,17 @@ def sample_database_endpoint_config():
         "primary_key": ["wise_id"],
         "unique_constraints": [
             {"name": "uk_wise_transactions_wise_id", "columns": ["wise_id"]},
-            {"name": "uk_wise_transactions_external_ref", "columns": ["external_reference"]}
+            {
+                "name": "uk_wise_transactions_external_ref",
+                "columns": ["external_reference"],
+            },
         ],
         "write_mode": "upsert",
         "conflict_resolution": {
             "on_conflict": "wise_id",
             "action": "update",
             "update_columns": ["amount", "status", "reference", "updated_at"],
-            "where_condition": "EXCLUDED.updated_at > transactions.updated_at"
+            "where_condition": "EXCLUDED.updated_at > transactions.updated_at",
         },
         "configure": {
             "auto_create_schema": True,
@@ -244,22 +227,22 @@ def sample_database_endpoint_config():
                     "name": "idx_transactions_created_at",
                     "columns": ["created_at"],
                     "type": "btree",
-                    "unique": False
+                    "unique": False,
                 },
                 {
                     "name": "idx_transactions_status",
                     "columns": ["status"],
                     "type": "btree",
-                    "unique": False
+                    "unique": False,
                 },
                 {
                     "name": "idx_transactions_amount",
                     "columns": ["amount"],
                     "type": "btree",
                     "unique": False,
-                    "where": "amount > 0"
-                }
-            ]
+                    "where": "amount > 0",
+                },
+            ],
         },
         "endpoint_schema": {
             "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -271,14 +254,14 @@ def sample_database_endpoint_config():
                     "database_type": "BIGINT",
                     "nullable": False,
                     "primary_key": True,
-                    "description": "Wise transfer ID"
+                    "description": "Wise transfer ID",
                 },
                 "created_at": {
                     "type": "string",
                     "format": "date-time",
                     "database_type": "TIMESTAMPTZ",
                     "nullable": False,
-                    "description": "Transaction creation timestamp"
+                    "description": "Transaction creation timestamp",
                 },
                 "updated_at": {
                     "type": "string",
@@ -286,60 +269,67 @@ def sample_database_endpoint_config():
                     "database_type": "TIMESTAMPTZ",
                     "nullable": False,
                     "default": "CURRENT_TIMESTAMP",
-                    "description": "Last update timestamp"
+                    "description": "Last update timestamp",
                 },
                 "amount": {
                     "type": "number",
                     "database_type": "DECIMAL(15,2)",
                     "nullable": False,
-                    "description": "Transaction amount"
+                    "description": "Transaction amount",
                 },
                 "currency": {
                     "type": "string",
                     "database_type": "VARCHAR(3)",
                     "nullable": False,
                     "pattern": "^[A-Z]{3}$",
-                    "description": "ISO currency code"
+                    "description": "ISO currency code",
                 },
                 "status": {
                     "type": "string",
                     "database_type": "VARCHAR(50)",
                     "nullable": False,
-                    "description": "Transaction status"
+                    "description": "Transaction status",
                 },
                 "reference": {
                     "type": "string",
                     "database_type": "TEXT",
                     "nullable": True,
-                    "description": "Payment reference"
+                    "description": "Payment reference",
                 },
                 "external_reference": {
                     "type": "string",
                     "database_type": "VARCHAR(255)",
                     "nullable": True,
-                    "description": "External system reference"
+                    "description": "External system reference",
                 },
                 "merchant_name": {
                     "type": "string",
                     "database_type": "VARCHAR(255)",
                     "nullable": True,
-                    "description": "Merchant name"
-                }
+                    "description": "Merchant name",
+                },
             },
-            "required": ["wise_id", "created_at", "updated_at", "amount", "currency", "status"]
+            "required": [
+                "wise_id",
+                "created_at",
+                "updated_at",
+                "amount",
+                "currency",
+                "status",
+            ],
         },
         "indexes": [
             {
                 "name": "idx_transactions_created_at",
                 "columns": ["created_at"],
-                "type": "btree"
+                "type": "btree",
             },
             {
                 "name": "idx_transactions_status_amount",
                 "columns": ["status", "amount"],
-                "type": "btree"
-            }
-        ]
+                "type": "btree",
+            },
+        ],
     }
 
 
@@ -350,9 +340,7 @@ def sample_invalid_pipeline_config():
         "pipeline_id": "invalid-pipeline",
         "name": "Invalid Pipeline",
         # Missing required fields like source, destination, streams
-        "runtime": {
-            "batch_size": "not_a_number"  # Invalid type
-        }
+        "runtime": {"batch_size": "not_a_number"},  # Invalid type
     }
 
 
@@ -363,21 +351,18 @@ def sample_s3_error_responses():
         "no_such_key": {
             "Error": {
                 "Code": "NoSuchKey",
-                "Message": "The specified key does not exist."
+                "Message": "The specified key does not exist.",
             }
         },
         "no_such_bucket": {
             "Error": {
                 "Code": "NoSuchBucket",
-                "Message": "The specified bucket does not exist."
+                "Message": "The specified bucket does not exist.",
             }
         },
         "access_denied": {
-            "Error": {
-                "Code": "AccessDenied",
-                "Message": "Access Denied"
-            }
-        }
+            "Error": {"Code": "AccessDenied", "Message": "Access Denied"}
+        },
     }
 
 
@@ -389,7 +374,7 @@ def environment_variables():
         "SEVDESK_API_TOKEN": "Bearer sevdesk_test_token_456",
         "DB_PASSWORD": "super_secret_db_password",
         "WISE_PROFILE_ID": "12345",
-        "SEVDESK_BANK_ACCOUNT_ID": "5936402"
+        "SEVDESK_BANK_ACCOUNT_ID": "5936402",
     }
 
 
@@ -400,38 +385,22 @@ def multi_stream_pipeline_config():
         "pipeline_id": "multi-stream-pipeline",
         "name": "Multi-Stream Pipeline Test",
         "version": "1.0",
-        "source": {
-            "connection_id": "wise-host-id",
-            "name": "Wise Platform"
-        },
+        "source": {"connection_id": "wise-host-id", "name": "Wise Platform"},
         "destination": {
             "connection_id": "database-host-id",
-            "name": "Analytics Database"
+            "name": "Analytics Database",
         },
         "schedule": {
             "type": "cron",
             "cron_expression": "0 */6 * * *",
-            "timezone": "UTC"
+            "timezone": "UTC",
         },
-        "engine": {
-            "vcpu": 1,
-            "memory": 8192
-        },
+        "engine": {"vcpu": 1, "memory": 8192},
         "runtime": {
             "buffer_size": 10000,
-            "batching": {
-                "batch_size": 500,
-                "max_concurrent_batches": 5
-            },
-            "logging": {
-                "log_level": "INFO",
-                "metrics_enabled": True
-            },
-            "error_handling": {
-                "strategy": "dlq",
-                "max_retries": 5,
-                "retry_delay": 10
-            }
+            "batching": {"batch_size": 500, "max_concurrent_batches": 5},
+            "logging": {"log_level": "INFO", "metrics_enabled": True},
+            "error_handling": {"strategy": "dlq", "max_retries": 5, "retry_delay": 10},
         },
         "streams": {
             "transfers-stream": {
@@ -444,14 +413,14 @@ def multi_stream_pipeline_config():
                     "cursor_mode": "inclusive",
                     "safety_window_seconds": 300,
                     "primary_key": ["id"],
-                    "tie_breaker_fields": ["id"]
+                    "tie_breaker_fields": ["id"],
                 },
                 "destination": {
                     "endpoint_id": "db-transfers-endpoint",
                     "refresh_mode": "upsert",
                     "batch_support": True,
-                    "batch_size": 100
-                }
+                    "batch_size": 100,
+                },
             },
             "accounts-stream": {
                 "name": "wise-accounts",
@@ -459,14 +428,14 @@ def multi_stream_pipeline_config():
                 "source": {
                     "endpoint_id": "wise-accounts-endpoint",
                     "replication_method": "full_refresh",
-                    "primary_key": ["id"]
+                    "primary_key": ["id"],
                 },
                 "destination": {
                     "endpoint_id": "db-accounts-endpoint",
                     "refresh_mode": "truncate_insert",
                     "batch_support": True,
-                    "batch_size": 50
-                }
-            }
+                    "batch_size": 50,
+                },
+            },
         },
     }

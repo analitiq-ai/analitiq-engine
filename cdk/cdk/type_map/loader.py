@@ -14,7 +14,6 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Optional
 
 from .exceptions import InvalidTypeMapError, TypeMapNotFoundError
 from .mapper import TypeMapper
@@ -27,7 +26,7 @@ TYPE_MAP_FILENAME = "type-map-read.json"
 WRITE_TYPE_MAP_FILENAME = "type-map-write.json"
 
 
-def _read_json_array(path: Path, label: str) -> Optional[list]:
+def _read_json_array(path: Path, label: str) -> list | None:
     """Read *path* as a JSON array; ``None`` when absent.
 
     Malformed JSON or a non-array document is a hard
@@ -40,19 +39,15 @@ def _read_json_array(path: Path, label: str) -> Optional[list]:
     try:
         payload = json.loads(path.read_text())
     except json.JSONDecodeError as err:
-        raise InvalidTypeMapError(
-            f"{label}: {path} is not valid JSON: {err}"
-        ) from err
+        raise InvalidTypeMapError(f"{label}: {path} is not valid JSON: {err}") from err
     if not isinstance(payload, list):
-        raise InvalidTypeMapError(
-            f"{label}: {path} must contain a JSON array of rules"
-        )
+        raise InvalidTypeMapError(f"{label}: {path} must contain a JSON array of rules")
     return payload
 
 
 def read_raw_type_maps(
     definition_dir: Path, label: str
-) -> Optional[dict[str, Optional[list]]]:
+) -> dict[str, list | None] | None:
     """Raw read/write rule arrays from *definition_dir*, unparsed.
 
     The worker-bootstrap path: the trusted shell ships these arrays in the
@@ -63,15 +58,13 @@ def read_raw_type_maps(
     rules = _read_json_array(definition_dir / TYPE_MAP_FILENAME, label)
     if rules is None:
         return None
-    write_rules = _read_json_array(
-        definition_dir / WRITE_TYPE_MAP_FILENAME, label
-    )
+    write_rules = _read_json_array(definition_dir / WRITE_TYPE_MAP_FILENAME, label)
     return {"rules": rules, "write_rules": write_rules}
 
 
 def _load_write_rules(
     definition_dir: Path, label: str
-) -> Optional[list[WriteTypeMapRule]]:
+) -> list[WriteTypeMapRule] | None:
     """Load the optional sibling ``type-map-write.json`` from *definition_dir*.
 
     Absent file → ``None`` (source-only / API connectors have no write map). A
@@ -93,7 +86,7 @@ def _load_write_rules(
 def build_type_mapper(
     label: str,
     rules_payload: list,
-    write_rules_payload: Optional[list] = None,
+    write_rules_payload: list | None = None,
 ) -> TypeMapper:
     """Build a :class:`TypeMapper` from raw rule payloads (no filesystem).
 
@@ -120,8 +113,11 @@ def build_type_mapper(
 
 
 def connector_definition_dir(connectors_dir: Path, slug: str) -> Path:
-    """Return the connector's ``definition/`` directory, honoring both
-    ``{slug}/`` and ``connector-{slug}/`` layouts used elsewhere in the repo."""
+    """Return the connector's ``definition/`` directory.
+
+    Honors both the ``{slug}/`` and ``connector-{slug}/`` layouts used
+    elsewhere in the repo.
+    """
     primary = connectors_dir / slug / "definition"
     if primary.is_dir():
         return primary
@@ -152,7 +148,7 @@ def load_type_map(connectors_dir: Path, slug: str) -> TypeMapper:
 
 def load_connection_type_map(
     connections_dir: Path, connection_id: str
-) -> Optional[TypeMapper]:
+) -> TypeMapper | None:
     """Load a connection-scoped ``type-map-read.json`` if present.
 
     Lives at ``connections/{connection_id}/definition/type-map-read.json`` and

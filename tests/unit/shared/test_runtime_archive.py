@@ -7,7 +7,6 @@ import urllib.error
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 
-
 MODULE_PATH = Path(__file__).resolve().parents[3] / "src" / "runtime_archive.py"
 SPEC = spec_from_file_location("runtime_archive_under_test", MODULE_PATH)
 assert SPEC is not None

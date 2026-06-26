@@ -5,7 +5,7 @@ They are used by file-based destination handlers to convert records before writi
 """
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 
 class BaseFormatter(ABC):
@@ -18,7 +18,7 @@ class BaseFormatter(ABC):
 
     def __init__(self) -> None:
         """Initialize the formatter with default configuration."""
-        self._config: Dict[str, Any] = {}
+        self._config: dict[str, Any] = {}
 
     @property
     @abstractmethod
@@ -52,7 +52,7 @@ class BaseFormatter(ABC):
         """
         return "application/octet-stream"
 
-    def configure(self, config: Dict[str, Any]) -> None:
+    def configure(self, config: dict[str, Any]) -> None:
         """
         Configure the formatter with format-specific options.
 
@@ -65,8 +65,8 @@ class BaseFormatter(ABC):
     @abstractmethod
     def serialize_batch(
         self,
-        records: List[Dict[str, Any]],
-        schema: Optional[Dict[str, Any]] = None,
+        records: list[dict[str, Any]],
+        schema: dict[str, Any] | None = None,
     ) -> bytes:
         """
         Serialize a batch of records to bytes.

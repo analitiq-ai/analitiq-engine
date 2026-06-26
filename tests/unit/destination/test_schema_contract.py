@@ -106,9 +106,7 @@ class TestSchemaContractCastArrowBatch:
         assert contract.to_dicts(cast) == [{"id": 1, "optional_field": None}]
 
     def test_cast_arrow_batch_drops_extra_columns(self):
-        schema = {
-            "columns": [{"name": "id", "arrow_type": "Int64", "nullable": False}]
-        }
+        schema = {"columns": [{"name": "id", "arrow_type": "Int64", "nullable": False}]}
         contract = SchemaContract(schema)
 
         source = pa.RecordBatch.from_pylist([{"id": 1, "extra": "drop me"}])
@@ -138,9 +136,7 @@ class TestSchemaContractCastArrowBatch:
         # path exactly as it does on the from_pylist path — same intent, same
         # behaviour across build paths. Before the shared guard this null was
         # silently admitted.
-        schema = {
-            "columns": [{"name": "id", "arrow_type": "Int64", "nullable": False}]
-        }
+        schema = {"columns": [{"name": "id", "arrow_type": "Int64", "nullable": False}]}
         contract = SchemaContract(schema)
 
         source = pa.RecordBatch.from_pylist([{"id": 1}, {"id": None}])
@@ -151,14 +147,10 @@ class TestSchemaContractCastArrowBatch:
         # safe=True: an int that overflows the narrower destination width must
         # fail loud, mirroring the per-row range check from_pylist enforces.
         # Before this, safe=False let the value saturate silently.
-        schema = {
-            "columns": [{"name": "n", "arrow_type": "Int32", "nullable": True}]
-        }
+        schema = {"columns": [{"name": "n", "arrow_type": "Int32", "nullable": True}]}
         contract = SchemaContract(schema)
 
-        source = pa.record_batch(
-            [pa.array([2**40], type=pa.int64())], names=["n"]
-        )
+        source = pa.record_batch([pa.array([2**40], type=pa.int64())], names=["n"])
         with pytest.raises(ValueError, match="cannot cast"):
             contract.cast_arrow_batch(source)
 
@@ -179,9 +171,7 @@ class TestSchemaContractCastArrowBatch:
             contract.cast_arrow_batch(source)
 
     def test_cast_arrow_batch_unparseable_date_raises(self):
-        schema = {
-            "columns": [{"name": "d", "arrow_type": "Date32", "nullable": True}]
-        }
+        schema = {"columns": [{"name": "d", "arrow_type": "Date32", "nullable": True}]}
         contract = SchemaContract(schema)
 
         source = pa.RecordBatch.from_pylist([{"d": "13/30/2025"}])
@@ -289,8 +279,14 @@ class TestSchemaContractFromPylist:
         }
         contract = SchemaContract(schema)
 
-        batch = contract.from_pylist([{"flags": "0"}, {"flags": "4294967295"}, {"flags": None}])
-        assert batch.to_pylist() == [{"flags": 0}, {"flags": 4294967295}, {"flags": None}]
+        batch = contract.from_pylist(
+            [{"flags": "0"}, {"flags": "4294967295"}, {"flags": None}]
+        )
+        assert batch.to_pylist() == [
+            {"flags": 0},
+            {"flags": 4294967295},
+            {"flags": None},
+        ]
         assert pa.types.is_unsigned_integer(batch.schema.field("flags").type)
 
     def test_from_pylist_bool_mixed_with_string_for_integer_raises(self):
@@ -302,24 +298,32 @@ class TestSchemaContractFromPylist:
             contract.from_pylist([{"val": "42"}, {"val": True}])
 
     def test_from_pylist_bool_for_float_raises(self):
-        # bool must be rejected for float columns too — silent coercion to 0.0/1.0 is data corruption.
-        schema = {"columns": [{"name": "rate", "arrow_type": "Float64", "nullable": True}]}
+        # bool must be rejected for float columns too — silent coercion to
+        # 0.0/1.0 is data corruption.
+        schema = {
+            "columns": [{"name": "rate", "arrow_type": "Float64", "nullable": True}]
+        }
         contract = SchemaContract(schema)
 
         with pytest.raises(ValueError, match=r"column 'rate' at row 1.*bool"):
             contract.from_pylist([{"rate": "3.14"}, {"rate": False}])
 
     def test_from_pylist_nan_string_for_float_raises(self):
-        # "nan" is valid Python float() input but must not silently produce an IEEE 754 NaN
-        # in the Arrow column — it would pass nullability checks and corrupt downstream queries.
-        schema = {"columns": [{"name": "rate", "arrow_type": "Float64", "nullable": True}]}
+        # "nan" is valid Python float() input but must not silently produce an
+        # IEEE 754 NaN in the Arrow column — it would pass nullability checks
+        # and corrupt downstream queries.
+        schema = {
+            "columns": [{"name": "rate", "arrow_type": "Float64", "nullable": True}]
+        }
         contract = SchemaContract(schema)
 
         with pytest.raises(ValueError, match=r"column 'rate' at row 0.*non-finite"):
             contract.from_pylist([{"rate": "nan"}])
 
     def test_from_pylist_inf_string_for_float_raises(self):
-        schema = {"columns": [{"name": "rate", "arrow_type": "Float64", "nullable": True}]}
+        schema = {
+            "columns": [{"name": "rate", "arrow_type": "Float64", "nullable": True}]
+        }
         contract = SchemaContract(schema)
 
         with pytest.raises(ValueError, match=r"column 'rate' at row 0.*non-finite"):
@@ -329,7 +333,9 @@ class TestSchemaContractFromPylist:
         # A native float('nan')/float('inf') next to a numeric string must be
         # rejected exactly like the strings "nan"/"inf" — same intent, same
         # semantics — not pass through into the Arrow column unchecked.
-        schema = {"columns": [{"name": "rate", "arrow_type": "Float64", "nullable": True}]}
+        schema = {
+            "columns": [{"name": "rate", "arrow_type": "Float64", "nullable": True}]
+        }
         contract = SchemaContract(schema)
 
         with pytest.raises(ValueError, match=r"column 'rate' at row 1.*non-finite"):
@@ -340,31 +346,45 @@ class TestSchemaContractFromPylist:
     def test_from_pylist_float32_string_overflow_raises(self):
         # "1e40" parses to a finite float64 but overflows to inf when stored
         # in a Float32 array — must fail loudly, not corrupt the destination.
-        schema = {"columns": [{"name": "rate", "arrow_type": "Float32", "nullable": True}]}
+        schema = {
+            "columns": [{"name": "rate", "arrow_type": "Float32", "nullable": True}]
+        }
         contract = SchemaContract(schema)
 
-        with pytest.raises(ValueError, match=r"column 'rate' at row 0.*overflows float"):
+        with pytest.raises(
+            ValueError, match=r"column 'rate' at row 0.*overflows float"
+        ):
             contract.from_pylist([{"rate": "1e40"}])
 
     def test_from_pylist_float32_native_overflow_mixed_with_string_raises(self):
         # The same overflow guard applies to native floats in a mixed column.
-        schema = {"columns": [{"name": "rate", "arrow_type": "Float32", "nullable": True}]}
+        schema = {
+            "columns": [{"name": "rate", "arrow_type": "Float32", "nullable": True}]
+        }
         contract = SchemaContract(schema)
 
-        with pytest.raises(ValueError, match=r"column 'rate' at row 1.*overflows float"):
+        with pytest.raises(
+            ValueError, match=r"column 'rate' at row 1.*overflows float"
+        ):
             contract.from_pylist([{"rate": "3.14"}, {"rate": 1e40}])
 
     def test_from_pylist_float32_native_only_overflow_raises(self):
         # JSON 1e40 decodes to a native float; a batch with no strings at all
         # must hit the same overflow guard, not bypass validation entirely.
-        schema = {"columns": [{"name": "rate", "arrow_type": "Float32", "nullable": True}]}
+        schema = {
+            "columns": [{"name": "rate", "arrow_type": "Float32", "nullable": True}]
+        }
         contract = SchemaContract(schema)
 
-        with pytest.raises(ValueError, match=r"column 'rate' at row 0.*overflows float"):
+        with pytest.raises(
+            ValueError, match=r"column 'rate' at row 0.*overflows float"
+        ):
             contract.from_pylist([{"rate": 1e40}])
 
     def test_from_pylist_native_only_nonfinite_float_raises(self):
-        schema = {"columns": [{"name": "rate", "arrow_type": "Float64", "nullable": True}]}
+        schema = {
+            "columns": [{"name": "rate", "arrow_type": "Float64", "nullable": True}]
+        }
         contract = SchemaContract(schema)
 
         with pytest.raises(ValueError, match=r"column 'rate' at row 0.*non-finite"):
@@ -397,7 +417,9 @@ class TestSchemaContractFromPylist:
         ]
 
     def test_from_pylist_float32_in_range_strings_pass(self):
-        schema = {"columns": [{"name": "rate", "arrow_type": "Float32", "nullable": True}]}
+        schema = {
+            "columns": [{"name": "rate", "arrow_type": "Float32", "nullable": True}]
+        }
         contract = SchemaContract(schema)
 
         batch = contract.from_pylist([{"rate": "3.14"}, {"rate": -2.5}, {"rate": None}])
@@ -425,7 +447,9 @@ class TestSchemaContractFromPylist:
             contract.from_pylist([{"val": "1"}, {"val": 2147483648}])
 
     def test_from_pylist_uint_negative_string_raises(self):
-        schema = {"columns": [{"name": "flags", "arrow_type": "UInt32", "nullable": True}]}
+        schema = {
+            "columns": [{"name": "flags", "arrow_type": "UInt32", "nullable": True}]
+        }
         contract = SchemaContract(schema)
 
         with pytest.raises(ValueError, match=r"column 'flags' at row 0.*out of range"):
@@ -444,7 +468,9 @@ class TestSchemaContractFromPylist:
         # Anything outside int/float/numeric-string (here a dict) is rejected
         # with row context instead of falling through to an ArrowInvalid that
         # blames the first non-null row.
-        schema = {"columns": [{"name": "val", "arrow_type": "Float64", "nullable": True}]}
+        schema = {
+            "columns": [{"name": "val", "arrow_type": "Float64", "nullable": True}]
+        }
         contract = SchemaContract(schema)
 
         with pytest.raises(ValueError, match=r"column 'val' at row 1.*got dict"):
@@ -699,9 +725,7 @@ class TestSchemaContractNestedObject:
         assert first == '{"k": "v", "n": 1}'
 
     def test_json_marker_accepts_list_value(self):
-        schema = {
-            "properties": {"tags": {"type": "array", "arrow_type": "Json"}}
-        }
+        schema = {"properties": {"tags": {"type": "array", "arrow_type": "Json"}}}
         contract = SchemaContract(schema)
         batch = contract.from_pylist([{"tags": ["a", "b", "c"]}])
         assert batch.column("tags")[0].as_py() == '["a", "b", "c"]'
@@ -711,31 +735,27 @@ class TestSchemaContractNestedObject:
         # is an author mistake. The encoder must surface it with the
         # row index, not let a stray string round-trip and crash the
         # decoder downstream.
-        schema = {
-            "properties": {"metadata": {"type": "object", "arrow_type": "Json"}}
-        }
+        schema = {"properties": {"metadata": {"type": "object", "arrow_type": "Json"}}}
         contract = SchemaContract(schema)
         with pytest.raises(ValueError, match="row 0 carries str"):
             contract.from_pylist([{"metadata": "not-a-dict"}])
 
     def test_json_marker_rejects_int_value(self):
-        schema = {
-            "properties": {"metadata": {"type": "object", "arrow_type": "Json"}}
-        }
+        schema = {"properties": {"metadata": {"type": "object", "arrow_type": "Json"}}}
         contract = SchemaContract(schema)
         with pytest.raises(ValueError, match="row 1 carries int"):
-            contract.from_pylist([
-                {"metadata": {"ok": True}},
-                {"metadata": 42},
-            ])
+            contract.from_pylist(
+                [
+                    {"metadata": {"ok": True}},
+                    {"metadata": 42},
+                ]
+            )
 
     def test_from_pylist_preserves_inner_row_index(self):
         """The encoder names the exact offending row; the outer
         ``from_pylist`` wrapper must not overwrite it with the
         first-non-null heuristic intended for opaque PyArrow errors."""
-        schema = {
-            "properties": {"metadata": {"type": "object", "arrow_type": "Json"}}
-        }
+        schema = {"properties": {"metadata": {"type": "object", "arrow_type": "Json"}}}
         contract = SchemaContract(schema)
         rows = [{"metadata": {"ok": 1}}] * 5 + [{"metadata": 99}]
         with pytest.raises(ValueError, match="row 5 carries int") as exc_info:
@@ -745,9 +765,7 @@ class TestSchemaContractNestedObject:
         assert "first non-null" not in str(exc_info.value)
 
     def test_decode_json_columns_inverts_serialization(self):
-        schema = {
-            "properties": {"metadata": {"type": "object", "arrow_type": "Json"}}
-        }
+        schema = {"properties": {"metadata": {"type": "object", "arrow_type": "Json"}}}
         contract = SchemaContract(schema)
         batch = contract.from_pylist([{"metadata": {"k": "v"}}])
         records = batch.to_pylist()
@@ -755,24 +773,18 @@ class TestSchemaContractNestedObject:
         assert decoded == [{"metadata": {"k": "v"}}]
 
     def test_decode_json_columns_surfaces_column_context_on_malformed(self):
-        schema = {
-            "properties": {"metadata": {"type": "object", "arrow_type": "Json"}}
-        }
+        schema = {"properties": {"metadata": {"type": "object", "arrow_type": "Json"}}}
         contract = SchemaContract(schema)
         # The decoder must mention the column name and row index — a bare
         # JSONDecodeError from deep in the stack would force the caller
         # to grep through stack frames to find the offending field.
-        with pytest.raises(
-            ValueError, match=r"Json column 'metadata' at row 0"
-        ):
+        with pytest.raises(ValueError, match=r"Json column 'metadata' at row 0"):
             contract.decode_json_columns([{"metadata": "not-valid-json{"}])
 
     def test_decode_json_columns_is_idempotent_on_dicts(self):
         # If a caller decodes twice (or the value already came as a dict),
         # the second pass must not raise.
-        schema = {
-            "properties": {"metadata": {"type": "object", "arrow_type": "Json"}}
-        }
+        schema = {"properties": {"metadata": {"type": "object", "arrow_type": "Json"}}}
         contract = SchemaContract(schema)
         decoded = contract.decode_json_columns([{"metadata": {"k": "v"}}])
         decoded = contract.decode_json_columns(decoded)
@@ -854,6 +866,7 @@ class TestFromPylistNullabilityEnforcement:
 
     def test_time_non_nullable_mixed_raises(self):
         from datetime import time as _time
+
         c = self._contract("Time32(SECOND)", nullable=False)
         with pytest.raises(ValueError, match=r"'v' is non-nullable.*\[1\]"):
             c.from_pylist([{"v": _time(10, 0, 0)}, {"v": None}])
@@ -877,9 +890,7 @@ class TestFromPylistNullabilityEnforcement:
             }
         )
         with pytest.raises(ValueError, match=r"'ts' is non-nullable.*\[1\]"):
-            contract.from_pylist(
-                [{"ts": "2026-01-01 00:00:00"}, {"ts": None}]
-            )
+            contract.from_pylist([{"ts": "2026-01-01 00:00:00"}, {"ts": None}])
 
     def test_source_format_date_non_nullable_mixed_raises(self):
         contract = SchemaContract(
@@ -949,11 +960,13 @@ class TestToDbRecords:
         }
         contract = SchemaContract(schema)
         batch = pa.RecordBatch.from_pylist(
-            [{
-                "id": 1,
-                "created": datetime(2026, 3, 23, 10, 18, 24, tzinfo=timezone.utc),
-                "amount": Decimal("42.5000"),
-            }],
+            [
+                {
+                    "id": 1,
+                    "created": datetime(2026, 3, 23, 10, 18, 24, tzinfo=timezone.utc),
+                    "amount": Decimal("42.5000"),
+                }
+            ],
             schema=contract.arrow_schema,
         )
         records = contract.to_db_records(batch)
@@ -977,9 +990,7 @@ class TestToDbRecords:
             ]
         }
         contract = SchemaContract(schema)
-        batch = contract.from_pylist(
-            [{"id": 1, "metadata": {"k": "v"}}]
-        )
+        batch = contract.from_pylist([{"id": 1, "metadata": {"k": "v"}}])
         records = contract.to_db_records(batch)
         assert isinstance(records[0]["metadata"], str)
         assert _json.loads(records[0]["metadata"]) == {"k": "v"}

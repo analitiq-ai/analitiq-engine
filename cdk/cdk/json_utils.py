@@ -1,12 +1,12 @@
 """JSON helpers shared by the CDK (Json-typed column decoding)."""
 
 import json
-from typing import Any, Dict, List, Set
+from typing import Any
 
 
 def decode_json_fields(
-    records: List[Dict[str, Any]], json_fields: Set[str]
-) -> List[Dict[str, Any]]:
+    records: list[dict[str, Any]], json_fields: set[str]
+) -> list[dict[str, Any]]:
     """Parse JSON-encoded string values for the named fields in place.
 
     Skips non-string values (already-parsed dicts/lists, None). Raises

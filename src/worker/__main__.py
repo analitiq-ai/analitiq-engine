@@ -27,9 +27,7 @@ async def _run_destination(bootstrap: WorkerBootstrap) -> int:
     from src.destination.server import DestinationGRPCServer
 
     _, destination_registry = build_worker_registries()
-    handler_cls = destination_registry.resolve(
-        bootstrap.kind, bootstrap.connector_id
-    )
+    handler_cls = destination_registry.resolve(bootstrap.kind, bootstrap.connector_id)
     handler = handler_cls()
     logger.info(
         "destination worker: %s serves (%s, %s)",

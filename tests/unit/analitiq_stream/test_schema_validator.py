@@ -80,17 +80,13 @@ class TestValidate:
         assert ei.value.kind == "pipeline"
         assert len(ei.value.errors) >= 1
 
-    def test_error_message_truncated_at_ten_errors(
-        self, schema_root: Path
-    ) -> None:
+    def test_error_message_truncated_at_ten_errors(self, schema_root: Path) -> None:
         _write_schema(
             schema_root,
             "pipeline",
             {
                 "type": "object",
-                "properties": {
-                    f"f{i}": {"type": "string"} for i in range(15)
-                },
+                "properties": {f"f{i}": {"type": "string"} for i in range(15)},
             },
         )
         bad = {f"f{i}": i for i in range(15)}  # all wrong type
@@ -139,12 +135,20 @@ class TestSchemaFetching:
         _write_schema(
             mirror_a,
             "pipeline",
-            {"type": "object", "required": ["a"], "properties": {"a": {"type": "string"}}},
+            {
+                "type": "object",
+                "required": ["a"],
+                "properties": {"a": {"type": "string"}},
+            },
         )
         _write_schema(
             mirror_b,
             "pipeline",
-            {"type": "object", "required": ["b"], "properties": {"b": {"type": "string"}}},
+            {
+                "type": "object",
+                "required": ["b"],
+                "properties": {"b": {"type": "string"}},
+            },
         )
 
         monkeypatch.setenv("ANALITIQ_SCHEMA_BASE_URL", mirror_a.as_uri())

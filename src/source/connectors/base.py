@@ -2,7 +2,8 @@
 
 import logging
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any, Dict
+from types import TracebackType
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from cdk.connection_runtime import ConnectionRuntime
@@ -20,7 +21,7 @@ class BaseConnector(ABC):
     the read/write contract, which would be a second grammar free to drift.
     """
 
-    def __init__(self, name: str = None):
+    def __init__(self, name: str | None = None):
         """
         Initialize base connector.
 
@@ -28,9 +29,9 @@ class BaseConnector(ABC):
             name: Optional name for the connector
         """
         self.name = name or self.__class__.__name__
-        self.connection = None
+        self.connection: Any = None
         self.is_connected = False
-        self.metrics = {
+        self.metrics: dict[str, int] = {
             "records_read": 0,
             "records_written": 0,
             "batches_read": 0,
@@ -39,7 +40,7 @@ class BaseConnector(ABC):
         }
 
     @abstractmethod
-    async def connect(self, runtime: "ConnectionRuntime"):
+    async def connect(self, runtime: "ConnectionRuntime") -> None:
         """
         Establish connection to the data source.
 
@@ -49,11 +50,13 @@ class BaseConnector(ABC):
         pass
 
     @abstractmethod
-    async def disconnect(self):
+    async def disconnect(self) -> None:
         """Close connection to the data source."""
         pass
 
-    async def prepare_schema(self, schema: Dict[str, Any], config: Dict[str, Any]):
+    async def prepare_schema(
+        self, schema: dict[str, Any], config: dict[str, Any]
+    ) -> None:
         """
         Prepare destination schema (create tables, validate endpoints, etc.).
 
@@ -73,7 +76,9 @@ class BaseConnector(ABC):
         """
         return False
 
-    async def evolve_schema(self, changes: Dict[str, Any], config: Dict[str, Any]):
+    async def evolve_schema(
+        self, changes: dict[str, Any], config: dict[str, Any]
+    ) -> None:
         """
         Evolve schema based on detected changes.
 
@@ -85,8 +90,8 @@ class BaseConnector(ABC):
             raise NotImplementedError(f"Schema evolution not supported by {self.name}")
 
     async def create_versioned_target(
-        self, changes: Dict[str, Any], config: Dict[str, Any]
-    ):
+        self, changes: dict[str, Any], config: dict[str, Any]
+    ) -> None:
         """
         Create a new versioned target for breaking schema changes.
 
@@ -115,7 +120,7 @@ class BaseConnector(ABC):
         """
         return False
 
-    async def health_check(self) -> Dict[str, Any]:
+    async def health_check(self) -> dict[str, Any]:
         """
         Perform health check on the connector.
 
@@ -128,7 +133,7 @@ class BaseConnector(ABC):
             "metrics": self.metrics.copy(),
         }
 
-    def get_metrics(self) -> Dict[str, Any]:
+    def get_metrics(self) -> dict[str, Any]:
         """
         Get connector metrics.
 
@@ -137,7 +142,7 @@ class BaseConnector(ABC):
         """
         return self.metrics.copy()
 
-    def reset_metrics(self):
+    def reset_metrics(self) -> None:
         """Reset connector metrics."""
         self.metrics = {
             "records_read": 0,
@@ -147,17 +152,25 @@ class BaseConnector(ABC):
             "errors": 0,
         }
 
-    async def __aenter__(self):
+    async def __aenter__(self) -> "BaseConnector":
         """Async context manager entry."""
         return self
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
         """Async context manager exit."""
         await self.disconnect()
 
-    def __repr__(self):
-        """String representation of connector."""
-        return f"{self.__class__.__name__}(name={self.name}, connected={self.is_connected})"
+    def __repr__(self) -> str:
+        """Return the string representation of connector."""
+        return (
+            f"{self.__class__.__name__}"
+            f"(name={self.name}, connected={self.is_connected})"
+        )
 
 
 class ConnectorError(Exception):

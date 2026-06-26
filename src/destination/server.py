@@ -11,17 +11,32 @@ import asyncio
 import io
 import logging
 import os
-from typing import Any, AsyncIterator, Dict, Optional
+from collections.abc import AsyncIterator
+from typing import Any, Optional
+
+import pyarrow as pa
 
 import grpc
-import pyarrow as pa
+from cdk.adbc_registry import AdbcConfigurationError
+from cdk.base_handler import BaseDestinationHandler
+from cdk.secrets.exceptions import PlaceholderExpansionError
+from cdk.sql.exceptions import (
+    SchemaConfigurationError,
+    UnsupportedDialectOperationError,
+)
+from cdk.type_map import InvalidTypeMapError, UnmappedTypeError
+from cdk.types import Cursor as CdkCursor
+from cdk.types import SchemaSpec
+from cdk.types import WriteMode as CdkWriteMode
 from grpc import aio as grpc_aio
 
+from ..grpc import DEFAULT_MAX_MESSAGE_SIZE
 from ..grpc.generated.analitiq.v1 import (
     AckStatus,
     BatchAck,
     ConnectionStatus,
     Cursor,
+    DestinationServiceServicer,
     GetCapabilitiesRequest,
     GetCapabilitiesResponse,
     HealthCheckRequest,
@@ -34,19 +49,7 @@ from ..grpc.generated.analitiq.v1 import (
     StreamResponse,
     WriteMode,
     add_DestinationServiceServicer_to_server,
-    DestinationServiceServicer,
 )
-from cdk.adbc_registry import AdbcConfigurationError
-from cdk.base_handler import BaseDestinationHandler
-from cdk.secrets.exceptions import PlaceholderExpansionError
-from cdk.sql.exceptions import (
-    SchemaConfigurationError,
-    UnsupportedDialectOperationError,
-)
-from cdk.types import Cursor as CdkCursor, SchemaSpec, WriteMode as CdkWriteMode
-from cdk.type_map import InvalidTypeMapError, UnmappedTypeError
-
-from ..grpc import DEFAULT_MAX_MESSAGE_SIZE
 
 logger = logging.getLogger(__name__)
 
@@ -67,10 +70,10 @@ _STATEMENT_TIMEOUT_BUDGET_FRACTION = 0.5
 
 
 def derive_statement_timeout_seconds(ack_timeout_seconds: int) -> float:
-    """Per-statement budget kept strictly below the sender's gRPC ack timeout
-    so a blocked DDL/write is cancelled before the sender gives up waiting for
-    the ack.
+    """Derive a per-statement budget strictly below the sender's ack timeout.
 
+    A blocked DDL/write is then cancelled before the sender gives up waiting
+    for the ack.
     Returns the full ack budget minus a fixed margin where the budget is large
     enough, otherwise half the budget. Both candidates are strictly below the
     ack budget for any positive budget, so the statement timeout can never
@@ -101,7 +104,7 @@ class DestinationGRPCServer:
         handler: BaseDestinationHandler,
         port: int = DEFAULT_GRPC_PORT,
         max_message_size: int = DEFAULT_MAX_MESSAGE_SIZE,
-        address: Optional[str] = None,
+        address: str | None = None,
     ):
         self.handler = handler
         self.port = port
@@ -109,7 +112,7 @@ class DestinationGRPCServer:
         # ``unix:/path/worker.sock`` so the channel never leaves the host.
         self.address = address
         self.max_message_size = max_message_size
-        self._server: Optional[grpc_aio.Server] = None
+        self._server: grpc_aio.Server | None = None
         self._servicer: Optional["DestinationServicer"] = None
         self._shutdown_event = asyncio.Event()
 
@@ -202,7 +205,7 @@ class DestinationServicer(DestinationServiceServicer):
         # ``schema_configured`` / ``current_stream_id`` on ``self`` would
         # let one stream's bookkeeping clobber another's.
         schema_configured = False
-        current_stream_id: Optional[str] = None
+        current_stream_id: str | None = None
 
         try:
             async for request in request_iterator:
@@ -484,5 +487,3 @@ class DestinationServicer(DestinationServiceServicer):
         if table.num_rows == 0:
             return pa.RecordBatch.from_pylist([], schema=table.schema)
         return table.combine_chunks().to_batches()[0]
-
-

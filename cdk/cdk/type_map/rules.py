@@ -1,9 +1,9 @@
-"""Type-map rule model and normalization primitives.
+r"""Type-map rule model and normalization primitives.
 
 A rule is one entry in ``type-map-read.json``:
 
     {"match": "exact", "native": "JSONB", "canonical": "Utf8"}
-    {"match": "regex", "native": "^VARCHAR\\((?<n>\\d+)\\)$", "canonical": "Utf8"}
+    {"match": "regex", "native": "^VARCHAR\((?<n>\d+)\)$", "canonical": "Utf8"}
 
 Regex rules must be written in an RE2-compatible subset so the same pattern
 behaves identically across engine languages. The following Perl/Python
@@ -12,8 +12,8 @@ extensions are rejected at load time:
 - lookahead ``(?=…)`` / negative lookahead ``(?!…)``
 - lookbehind ``(?<=…)`` / negative lookbehind ``(?<!…)``
 - atomic groups ``(?>…)``
-- numeric backreferences ``\\1``..``\\9``
-- named backreferences ``\\k<name>`` and Python-style ``(?P=name)``
+- numeric backreferences ``\1``..``\9``
+- named backreferences ``\k<name>`` and Python-style ``(?P=name)``
 
 ``(?<name>…)`` is rewritten to Python's ``(?P<name>…)`` so the compiled
 pattern works with ``re.fullmatch``.
@@ -22,12 +22,13 @@ pattern works with ``re.fullmatch``.
 from __future__ import annotations
 
 import re
-from typing import Final, Iterable, Literal, Pattern, TypeVar
+from collections.abc import Iterable
+from re import Pattern
+from typing import Final, Literal, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .exceptions import InvalidTypeMapError
-
 
 _NAMED_GROUP_RE2: Final[Pattern[str]] = re.compile(r"\(\?<([A-Za-z_][A-Za-z0-9_]*)>")
 _SUBSTITUTION_TOKEN: Final[Pattern[str]] = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
@@ -85,9 +86,7 @@ _TEMPORAL_UNIT_RE: Final[Pattern[str]] = re.compile(
 
 # Timestamp(unit, null) is semantically identical to Timestamp(unit) — both
 # produce a timezone-naïve type.  Fold the explicit null into the no-tz form.
-_NULL_TZ_RE: Final[Pattern[str]] = re.compile(
-    r"\bTimestamp\(([^,)]+),\s*null\)"
-)
+_NULL_TZ_RE: Final[Pattern[str]] = re.compile(r"\bTimestamp\(([^,)]+),\s*null\)")
 
 
 def _expand_temporal_unit(m: re.Match[str]) -> str:
@@ -134,9 +133,7 @@ def normalize_native_type(value: str) -> str:
     rules) and to inputs at lookup time.
     """
     if not isinstance(value, str):
-        raise TypeError(
-            f"native type must be a string, got {type(value).__name__}"
-        )
+        raise TypeError(f"native type must be a string, got {type(value).__name__}")
     return re.sub(r"\s+", " ", value.strip()).upper()
 
 
@@ -162,9 +159,7 @@ def normalize_canonical_type(value: str) -> str:
        timezone-naïve; ``parse_arrow_type`` already treats them identically.
     """
     if not isinstance(value, str):
-        raise TypeError(
-            f"canonical type must be a string, got {type(value).__name__}"
-        )
+        raise TypeError(f"canonical type must be a string, got {type(value).__name__}")
     # Step 1: whitespace normalization.
     compact = re.sub(r"\s*([(),])\s*", r"\1", value.strip())
     compact = compact.replace(",", ", ")
@@ -220,7 +215,7 @@ class TypeMapRule(BaseModel):
     canonical: str = Field(min_length=1)
 
     @model_validator(mode="after")
-    def _validate(self) -> "TypeMapRule":
+    def _validate(self) -> TypeMapRule:
         tokens = set(_SUBSTITUTION_TOKEN.findall(self.canonical))
 
         if self.match == "exact":
@@ -254,18 +249,18 @@ class TypeMapRule(BaseModel):
         return self
 
     def normalized_native(self) -> str:
-        """Normalization form of ``native`` used for exact matching."""
+        """Normalize ``native`` to the form used for exact matching."""
         if self.match != "exact":
             raise RuntimeError("normalized_native is only defined for exact rules")
         return normalize_native_type(self.native)
 
     def compile_pattern(self) -> Pattern[str]:
-        """Compile the regex pattern (RE2-subset) for forward matching.
+        r"""Compile the regex pattern (RE2-subset) for forward matching.
 
         Inputs are normalized to uppercase before matching, so literal
         characters in the pattern must be authored in uppercase too — we do
         NOT uppercase the pattern itself because that would turn character
-        classes like ``\\d`` into ``\\D``.
+        classes like ``\d`` into ``\D``.
         """
         if self.match != "regex":
             raise RuntimeError("compile_pattern is only defined for regex rules")
@@ -292,9 +287,7 @@ def _parse_rule_list(
     rules: list[_RuleT] = []
     for index, item in enumerate(payload):
         if not isinstance(item, dict):
-            raise InvalidTypeMapError(
-                f"{source}: rule #{index} is not a JSON object"
-            )
+            raise InvalidTypeMapError(f"{source}: rule #{index} is not a JSON object")
         try:
             rules.append(model(**item))
         except InvalidTypeMapError:
@@ -343,7 +336,7 @@ class WriteTypeMapRule(BaseModel):
     native: str = Field(min_length=1)
 
     @model_validator(mode="after")
-    def _validate(self) -> "WriteTypeMapRule":
+    def _validate(self) -> WriteTypeMapRule:
         # Substitution tokens render into ``native``; any ``${`` on the match
         # side (well-formed or a typo like ``${p)``) would be matched as literal
         # text and never fire, so reject the whole class rather than just the

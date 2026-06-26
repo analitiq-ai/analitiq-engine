@@ -5,10 +5,9 @@ Stores secrets in memory, useful for unit tests and development.
 """
 
 import logging
-from typing import Dict, Optional
 
-from cdk.secrets.protocol import SecretsResolver
 from cdk.secrets.exceptions import SecretNotFoundError
+from cdk.secrets.protocol import SecretsResolver
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +33,7 @@ class InMemorySecretsResolver(SecretsResolver):
 
     def __init__(
         self,
-        secrets: Optional[Dict[str, Dict[str, str]]] = None,
+        secrets: dict[str, dict[str, str]] | None = None,
     ):
         """
         Initialize in-memory secrets resolver.
@@ -42,9 +41,9 @@ class InMemorySecretsResolver(SecretsResolver):
         Args:
             secrets: Optional dictionary mapping connection_id to secrets dict
         """
-        self._secrets: Dict[str, Dict[str, str]] = secrets or {}
+        self._secrets: dict[str, dict[str, str]] = secrets or {}
 
-    def set_secrets(self, connection_id: str, secrets: Dict[str, str]) -> None:
+    def set_secrets(self, connection_id: str, secrets: dict[str, str]) -> None:
         """
         Set secrets for a connection.
 
@@ -54,7 +53,7 @@ class InMemorySecretsResolver(SecretsResolver):
         """
         self._secrets[connection_id] = secrets
 
-    def clear_secrets(self, connection_id: Optional[str] = None) -> None:
+    def clear_secrets(self, connection_id: str | None = None) -> None:
         """
         Clear secrets.
 
@@ -71,8 +70,8 @@ class InMemorySecretsResolver(SecretsResolver):
         self,
         connection_id: str,
         *,
-        keys: Optional[list[str]] = None,
-    ) -> Dict[str, str]:
+        keys: list[str] | None = None,
+    ) -> dict[str, str]:
         """
         Resolve secrets for a connection from memory.
 
@@ -101,7 +100,9 @@ class InMemorySecretsResolver(SecretsResolver):
         if keys:
             result = {k: v for k, v in result.items() if k in keys}
 
-        logger.debug(f"Resolved in-memory secrets for {connection_id} ({len(result)} keys)")
+        logger.debug(
+            f"Resolved in-memory secrets for {connection_id} ({len(result)} keys)"
+        )
         return result
 
     async def close(self) -> None:
@@ -109,5 +110,5 @@ class InMemorySecretsResolver(SecretsResolver):
         self._secrets.clear()
 
     def __repr__(self) -> str:
-        """String representation."""
+        """Return the string representation."""
         return f"InMemorySecretsResolver({len(self._secrets)} connections)"

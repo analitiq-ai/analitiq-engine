@@ -124,7 +124,8 @@ class TestStateManager:
             )
 
         lines = [
-            r.getMessage() for r in caplog.records
+            r.getMessage()
+            for r in caplog.records
             if r.getMessage().startswith("ANALITIQ_STATE::")
         ]
         assert len(lines) == 1

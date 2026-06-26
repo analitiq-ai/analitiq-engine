@@ -12,13 +12,19 @@ import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any
 
 from dotenv import load_dotenv
 
-from src.engine.engine import StreamingEngine
-from src.models.resolved import ResolvedPipeline, ResolvedStream, ResolvedSource, ResolvedDestination
 from cdk.connection_runtime import ConnectionRuntime
+from src.engine.engine import StreamingEngine
+from src.models.resolved import (
+    ResolvedDestination,
+    ResolvedPipeline,
+    ResolvedSource,
+    ResolvedStream,
+)
+
 from .engine.pipeline_config_prep import PipelineConfigPrep
 from .shared.run_id import get_or_generate_run_id
 from .state.error_classification import (
@@ -32,7 +38,6 @@ from .state.error_classification import (
 )
 from .state.metrics_storage import save_pipeline_metrics
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -43,9 +48,9 @@ logger = logging.getLogger(__name__)
 
 def _build_config_dict(
     pipeline_config: ResolvedPipeline,
-    stream_configs: List[ResolvedStream],
-) -> Dict[str, Any]:
-    streams: Dict[str, Dict[str, Any]] = {}
+    stream_configs: list[ResolvedStream],
+) -> dict[str, Any]:
+    streams: dict[str, dict[str, Any]] = {}
 
     for stream in stream_configs:
         if not stream.destinations:
@@ -63,8 +68,7 @@ def _build_config_dict(
         mapping = stream.mapping or {}
         mapping_config = {
             "assignments": [
-                _translate_assignment(a)
-                for a in (mapping.get("assignments") or [])
+                _translate_assignment(a) for a in (mapping.get("assignments") or [])
             ]
         }
 
@@ -88,9 +92,9 @@ def _translate_source_config(
     *,
     stream: ResolvedStream,
     source: ResolvedSource,
-    endpoint: Dict[str, Any],
+    endpoint: dict[str, Any],
     runtime: ConnectionRuntime,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Attach the contract documents to the source-side runtime payload.
 
     The connectors (API + database) read replication, filters, columns,
@@ -108,7 +112,7 @@ def _translate_source_config(
     """
     _ = stream  # received from _build_config_dict but not needed at this layer
     kind = runtime.connector_type
-    base: Dict[str, Any] = {
+    base: dict[str, Any] = {
         "connector_type": kind,
         "_resolved_source": source,
         "endpoint_ref": source.endpoint_ref.to_dict(),
@@ -132,7 +136,7 @@ def _translate_source_config(
     return base
 
 
-def _build_destination_config(destination: ResolvedDestination) -> Dict[str, Any]:
+def _build_destination_config(destination: ResolvedDestination) -> dict[str, Any]:
     """Engine-facing destination dict.
 
     The engine only needs the write mode (forwarded to the gRPC
@@ -145,8 +149,8 @@ def _build_destination_config(destination: ResolvedDestination) -> Dict[str, Any
 
 
 def _translate_database_source(
-    source: ResolvedSource, endpoint: Dict[str, Any]
-) -> Dict[str, Any]:
+    source: ResolvedSource, endpoint: dict[str, Any]
+) -> dict[str, Any]:
     """Pass the contract documents through to ``GenericSQLConnector``.
 
     The connector consumes ``database_object``, ``columns``,
@@ -162,9 +166,9 @@ def _translate_database_source(
 
 def _translate_api_source(
     source: ResolvedSource,
-    endpoint: Dict[str, Any],
+    endpoint: dict[str, Any],
     runtime: ConnectionRuntime,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Pass the contract documents through to ``APIConnector``.
 
     The connector consumes ``operations.read.{request,params,pagination,
@@ -184,20 +188,25 @@ def _translate_api_source(
     }
 
 
-def _translate_assignment(assignment: Dict[str, Any]) -> Dict[str, Any]:
+def _translate_assignment(assignment: dict[str, Any]) -> dict[str, Any]:
     """Translate a contract-shaped assignment to the transformer's shape.
 
     Contract shape (expression):
-        {"target": {"path": "id", "arrow_type": "Int64"}, "value": {"expression": {"op": "get", "path": "id"}}}
+        {"target": {"path": "id", "arrow_type": "Int64"},
+         "value": {"expression": {"op": "get", "path": "id"}}}
 
     Transformer shape (expression):
-        {"target": {"path": ["id"], "arrow_type": "Int64"}, "value": {"kind": "expr", "expr": {"op": "get", "path": ["id"]}}}
+        {"target": {"path": ["id"], "arrow_type": "Int64"},
+         "value": {"kind": "expr", "expr": {"op": "get", "path": ["id"]}}}
 
     Contract shape (constant):
-        {"target": {"path": "x"}, "value": {"constant": {"value": 42, "arrow_type": "Int32"}}}
+        {"target": {"path": "x"},
+         "value": {"constant": {"value": 42, "arrow_type": "Int32"}}}
 
     Transformer shape (constant):
-        {"target": {"path": ["x"]}, "value": {"kind": "const", "const": {"value": 42, "arrow_type": "Int32"}}}
+        {"target": {"path": ["x"]},
+         "value": {"kind": "const",
+                   "const": {"value": 42, "arrow_type": "Int32"}}}
 
     Any other ``value`` shape is passed through unchanged.
     """
@@ -215,7 +224,7 @@ def _translate_assignment(assignment: Dict[str, Any]) -> Dict[str, Any]:
     target = dict(raw_target)
     target["path"] = target_path
 
-    value: Dict[str, Any]
+    value: dict[str, Any]
     if "expression" in raw_value:
         expression = dict(raw_value["expression"])
         expr_path = expression.get("path")
@@ -227,7 +236,7 @@ def _translate_assignment(assignment: Dict[str, Any]) -> Dict[str, Any]:
     else:
         value = dict(raw_value)
 
-    out: Dict[str, Any] = {"target": target, "value": value}
+    out: dict[str, Any] = {"target": target, "value": value}
     if "validate" in assignment:
         out["validate"] = assignment["validate"]
     return out
@@ -243,11 +252,12 @@ class PipelineRunner:
     environment variable (may be supplied via a .env file).
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         load_dotenv()  # must precede os.getenv so .env-based configs work
-        self.pipeline_id = os.getenv("PIPELINE_ID")
-        if not self.pipeline_id:
+        pipeline_id = os.getenv("PIPELINE_ID")
+        if not pipeline_id:
             raise ValueError("PIPELINE_ID environment variable is required")
+        self.pipeline_id: str = pipeline_id
 
     async def run(self) -> bool:
         """Execute the pipeline. Returns True on success, False on failure."""
@@ -267,9 +277,13 @@ class PipelineRunner:
         try:
             logger.info("Initializing PipelineConfigPrep...")
             pipeline_config_prep = PipelineConfigPrep()
-            pipeline_config, stream_configs, resolved_connections, resolved_endpoints, connectors = (
-                pipeline_config_prep.create_config()
-            )
+            (
+                pipeline_config,
+                stream_configs,
+                resolved_connections,
+                resolved_endpoints,
+                connectors,
+            ) = pipeline_config_prep.create_config()
 
             # Translate the resolved contract into the engine config dict. This
             # still validates config (e.g. a stream with no destinations), so it
@@ -280,7 +294,9 @@ class PipelineRunner:
             config_dict = _build_config_dict(pipeline_config, stream_configs)
             config_ready = True
 
-            logger.info(f"Starting {pipeline_config.name} (ID: {pipeline_config.pipeline_id})")
+            logger.info(
+                f"Starting {pipeline_config.name} (ID: {pipeline_config.pipeline_id})"
+            )
 
             # Set up runtime directories
             project_root = Path(__file__).parent.parent
@@ -327,8 +343,13 @@ class PipelineRunner:
                 # A stream raised (e.g. a source auth/config failure) while
                 # others succeeded. Classify that exception.
                 status = "partial"
-                error_code, error_message, error_detail = classify_for_metrics(stream_error)
-                logger.warning(f"Partial run: {streams_failed} stream(s) failed [{error_code.value}]")
+                error_code, error_message, error_detail = classify_for_metrics(
+                    stream_error
+                )
+                logger.warning(
+                    f"Partial run: {streams_failed} stream(s) failed "
+                    f"[{error_code.value}]"
+                )
             elif records_failed > 0:
                 status = "partial"
                 # A destination write rejection completed without a raised

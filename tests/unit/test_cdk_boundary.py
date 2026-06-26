@@ -76,9 +76,7 @@ def test_cdk_imports_nothing_engine_side_or_grpc():
 def _forbidden_modules(source: str) -> set[str]:
     """Run the gate's static scan over a source string; return the hits."""
     tree = ast.parse(source)
-    return {
-        module for module, _ in _absolute_imports(tree) if _is_forbidden(module)
-    }
+    return {module for module, _ in _absolute_imports(tree) if _is_forbidden(module)}
 
 
 def test_gate_catches_forbidden_import_forms():

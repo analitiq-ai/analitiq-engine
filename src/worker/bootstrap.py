@@ -31,7 +31,7 @@ from __future__ import annotations
 import json
 import sys
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any
 
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.type_map import TypeMapper
@@ -46,12 +46,12 @@ class WorkerBootstrap:
     kind: str
     connector_id: str
     uds_path: str
-    connection_payload: Dict[str, Any]
-    connector_type_mapper: Optional[TypeMapper]
-    connection_type_mapper: Optional[TypeMapper]
-    endpoint_refs: Dict[str, Any]
-    stream_endpoints: Dict[str, Any]
-    source_config: Dict[str, Any]
+    connection_payload: dict[str, Any]
+    connector_type_mapper: TypeMapper | None
+    connection_type_mapper: TypeMapper | None
+    endpoint_refs: dict[str, Any]
+    stream_endpoints: dict[str, Any]
+    source_config: dict[str, Any]
 
     def build_runtime(self) -> ConnectionRuntime:
         """Rebuild the connection runtime from the resolved payload."""
@@ -62,15 +62,13 @@ class WorkerBootstrap:
         )
 
 
-def _mapper_from(block: Optional[Dict[str, Any]], label: str) -> Optional[TypeMapper]:
+def _mapper_from(block: dict[str, Any] | None, label: str) -> TypeMapper | None:
     if not block:
         return None
-    return build_type_mapper(
-        label, block.get("rules") or [], block.get("write_rules")
-    )
+    return build_type_mapper(label, block.get("rules") or [], block.get("write_rules"))
 
 
-def parse_bootstrap(raw: Dict[str, Any]) -> WorkerBootstrap:
+def parse_bootstrap(raw: dict[str, Any]) -> WorkerBootstrap:
     """Validate and parse the bootstrap dict into a typed object."""
     role = raw.get("role")
     if role not in _ROLES:
@@ -87,9 +85,7 @@ def parse_bootstrap(raw: Dict[str, Any]) -> WorkerBootstrap:
         connector_id=connector_id,
         uds_path=raw["uds_path"],
         connection_payload=dict(raw["connection"]),
-        connector_type_mapper=_mapper_from(
-            type_maps.get("connector"), connector_id
-        ),
+        connector_type_mapper=_mapper_from(type_maps.get("connector"), connector_id),
         connection_type_mapper=_mapper_from(
             type_maps.get("connection"),
             f"connection:{raw['connection'].get('connection_id', '?')}",

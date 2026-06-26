@@ -5,7 +5,7 @@ CSV is a widely-supported tabular format, ideal for spreadsheet compatibility.
 
 import csv
 import io
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from .base import BaseFormatter
 
@@ -40,7 +40,7 @@ class CsvFormatter(BaseFormatter):
         """Return the MIME content type."""
         return "text/csv"
 
-    def _get_csv_options(self) -> Dict[str, Any]:
+    def _get_csv_options(self) -> dict[str, Any]:
         """Get CSV writer options from configuration."""
         return {
             "delimiter": self._config.get("delimiter", ","),
@@ -50,9 +50,9 @@ class CsvFormatter(BaseFormatter):
 
     def _get_fieldnames(
         self,
-        records: List[Dict[str, Any]],
-        schema: Optional[Dict[str, Any]] = None,
-    ) -> List[str]:
+        records: list[dict[str, Any]],
+        schema: dict[str, Any] | None = None,
+    ) -> list[str]:
         """
         Get column names from schema or first record.
 
@@ -75,8 +75,8 @@ class CsvFormatter(BaseFormatter):
 
     def serialize_batch(
         self,
-        records: List[Dict[str, Any]],
-        schema: Optional[Dict[str, Any]] = None,
+        records: list[dict[str, Any]],
+        schema: dict[str, Any] | None = None,
         append: bool = False,
     ) -> bytes:
         """
@@ -130,5 +130,6 @@ class CsvFormatter(BaseFormatter):
             return str(value).lower()
         if isinstance(value, (list, dict)):
             import json
+
             return json.dumps(value)
         return str(value)
