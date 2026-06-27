@@ -4,7 +4,7 @@ import json
 import logging
 import shutil
 import tempfile
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -159,14 +159,48 @@ class TestStateManager:
         assert manager.commit_tracker is not None
 
 
-class TestStateManagerDurableRestore:
-    """Restoring incremental cursors from the injected RESUME_STATE env var.
+def _checkpoint_path(tmp_path, stream_id, pipeline_id="test-pipeline"):
+    return tmp_path / "state" / pipeline_id / f"{stream_id}.json"
 
-    A fresh container's local ``state/`` directory is empty (Fargate wipes it
-    every task), so the cursor a prior run emitted must come back through the
-    deployment-injected env var. The engine reads the source cursor keyed by
-    ``stream_id`` with the empty partition (see ``engine._extract_stage``), so
-    that is the shape these assert.
+
+def _write_checkpoint(tmp_path, stream_id, value, pipeline_id="test-pipeline"):
+    """Stage a per-stream committed checkpoint the way a prior run -- or the
+    config bundle on a fresh container -- leaves it:
+    ``state/{pipeline}/{stream_id}.json`` = ``{"cursor": <value>}``.
+    """
+    path = _checkpoint_path(tmp_path, stream_id, pipeline_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"cursor": value}))
+    return path
+
+
+def _commit(manager, stream_id, value, stream_version=1):
+    """Record a committed (destination-ACKed) high-water mark, as the engine
+    does on ACK via ``save_stream_checkpoint`` (which writes the per-stream file).
+
+    ``value`` is in the cursor-token form the engine carries: a JSON-native
+    scalar, or the tagged ``{"__type__": ..., "value": ...}`` form for a
+    datetime/date/decimal (which is what survives the ACK round trip, not a raw
+    Python object -- the checkpoint emits it as JSON).
+    """
+    manager.save_stream_checkpoint(
+        stream_name=stream_id,
+        partition={},
+        cursor={"primary": {"field": "cursor", "value": value, "inclusive": True}},
+        hwm=str(value),
+        stream_version=stream_version,
+    )
+
+
+class TestStateManagerCommittedCheckpoint:
+    """The per-stream committed checkpoint a fresh run resumes from.
+
+    Each stream's cursor lives in its own ``state/{pipeline}/{stream_id}.json``,
+    written on each destination ACK (``save_stream_checkpoint``) and read at the
+    next run's start (``get_cursor``). A fresh container restores from the same
+    per-stream files the config bundle delivers. ``save_cursor`` is the source's
+    pre-ACK position and is never persisted, so the on-disk bookmark can never
+    run ahead of what actually landed.
     """
 
     def setup_method(self):
@@ -177,86 +211,103 @@ class TestStateManagerDurableRestore:
         if Path(self.temp_dir).exists():
             shutil.rmtree(self.temp_dir)
 
-    async def test_restores_numeric_cursor_across_fresh_container(self, monkeypatch):
-        # No local checkpoint on disk -> the env var is the only bookmark.
-        monkeypatch.setenv("RESUME_STATE", json.dumps({"orders": 100}))
+    async def test_restores_numeric_cursor_across_fresh_container(self):
+        _write_checkpoint(self.tmp_path, "orders", 100)
         manager = _make_manager(self.tmp_path)
 
         assert await manager.get_cursor("orders") == {"cursor": 100}
 
-    async def test_restores_timestamp_cursor_as_datetime(self, monkeypatch):
-        # A timestamp cursor crosses durable state tagged, so it comes back a
-        # datetime (asyncpg rejects a plain string for a timestamp bind).
+    async def test_restores_timestamp_cursor_as_datetime(self):
+        # A timestamp cursor is stored tagged, so it comes back a datetime
+        # (asyncpg rejects a plain string for a timestamp bind).
         ts = "2024-06-01T12:00:00+00:00"
-        tagged = {"__type__": "datetime", "value": ts}
-        monkeypatch.setenv("RESUME_STATE", json.dumps({"events": tagged}))
-        manager = _make_manager(self.tmp_path)
-
-        restored = await manager.get_cursor("events")
-        from datetime import datetime
-
-        assert restored == {"cursor": datetime.fromisoformat(ts)}
-
-    async def test_unknown_stream_has_no_cursor(self, monkeypatch):
-        monkeypatch.setenv("RESUME_STATE", json.dumps({"orders": 100}))
-        manager = _make_manager(self.tmp_path)
-
-        assert await manager.get_cursor("not-in-payload") is None
-
-    async def test_malformed_resume_state_does_not_abort_construction(
-        self, monkeypatch
-    ):
-        # A corrupt tagged cursor must degrade to a full re-scan, not crash
-        # StateManager.__init__ on a fresh container.
-        monkeypatch.setenv(
-            "RESUME_STATE",
-            json.dumps({"orders": {"__type__": "datetime", "value": "garbage"}}),
+        _write_checkpoint(
+            self.tmp_path, "events", {"__type__": "datetime", "value": ts}
         )
-        manager = _make_manager(self.tmp_path)  # must not raise
+        manager = _make_manager(self.tmp_path)
 
-        assert await manager.get_cursor("orders") is None
+        assert await manager.get_cursor("events") == {
+            "cursor": datetime.fromisoformat(ts)
+        }
 
-    async def test_no_env_var_means_no_cursor(self, monkeypatch):
-        monkeypatch.delenv("RESUME_STATE", raising=False)
+    async def test_unknown_stream_has_no_cursor(self):
+        _write_checkpoint(self.tmp_path, "orders", 100)
+        manager = _make_manager(self.tmp_path)
+
+        assert await manager.get_cursor("not-a-stream") is None
+
+    async def test_malformed_checkpoint_degrades_to_no_cursor(self):
+        # A corrupt tagged cursor degrades to a full re-scan, never a crash.
+        _write_checkpoint(
+            self.tmp_path, "orders", {"__type__": "datetime", "value": "garbage"}
+        )
         manager = _make_manager(self.tmp_path)
 
         assert await manager.get_cursor("orders") is None
 
-    async def test_in_run_save_overrides_restored_cursor(self, monkeypatch):
-        # A cursor saved during the run supersedes the restored bookmark.
-        monkeypatch.setenv("RESUME_STATE", json.dumps({"orders": 100}))
+    async def test_no_checkpoint_means_no_cursor(self):
         manager = _make_manager(self.tmp_path)
 
+        assert await manager.get_cursor("orders") is None
+
+    async def test_commit_round_trips_across_runs(self):
+        ts = datetime(2024, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+        first = _make_manager(self.tmp_path)
+        _commit(first, "orders", 100)
+        # A timestamp crosses the ACK tagged, the same form the cursor token uses.
+        _commit(first, "events", {"__type__": "datetime", "value": ts.isoformat()})
+
+        # A fresh manager reads the per-stream files the first run wrote.
+        second = _make_manager(self.tmp_path)
+        assert await second.get_cursor("orders") == {"cursor": 100}
+        # The timestamp survives tagged, so it comes back a datetime not a string.
+        assert await second.get_cursor("events") == {"cursor": ts}
+
+    async def test_committed_checkpoint_on_disk_shape(self):
+        manager = _make_manager(self.tmp_path)
+        _commit(manager, "orders", 100)
+
+        written = json.loads(_checkpoint_path(self.tmp_path, "orders").read_text())
+        assert written == {"cursor": 100}
+
+    async def test_resumes_from_committed_not_preack_cursor(self):
+        # The source advances its cursor as it yields batches, ahead of the
+        # destination ACK. Only the committed (ACKed) value is persisted, never
+        # that pre-ACK position -- otherwise a stream that failed after extraction
+        # raced ahead would resume past rows that never landed and skip them.
+        first = _make_manager(self.tmp_path)
+        _commit(first, "orders", 5)  # ACKed up to id=5
+        await first.save_cursor("orders", {}, {"cursor": 999})  # source raced ahead
+
+        second = _make_manager(self.tmp_path)
+        assert await second.get_cursor("orders") == {"cursor": 5}  # committed 5
+
+    async def test_partial_progress_persists_per_batch(self):
+        # save_stream_checkpoint writes on every ACK, so an interrupted run's
+        # ACKed progress survives with no end-of-run snapshot needed.
+        first = _make_manager(self.tmp_path)
+        _commit(first, "orders", 50)
+        # No clean shutdown -- a fresh process still sees the committed batch.
+
+        second = _make_manager(self.tmp_path)
+        assert await second.get_cursor("orders") == {"cursor": 50}
+
+    async def test_save_cursor_is_not_persisted_across_runs(self):
+        # save_cursor updates only the in-run cache; the source's pre-ACK position
+        # is never written to disk, so a fresh manager does not see it.
+        first = _make_manager(self.tmp_path)
+        await first.save_cursor("orders", {}, {"cursor": 50})
+
+        second = _make_manager(self.tmp_path)
+        assert await second.get_cursor("orders") is None
+
+    async def test_in_run_save_updates_cache(self):
+        # save_cursor feeds the in-run cache so a same-run get_cursor sees it
+        # (the engine reads the resume point once at stream start).
+        manager = _make_manager(self.tmp_path)
         await manager.save_cursor("orders", {}, {"cursor": 250})
 
         assert await manager.get_cursor("orders") == {"cursor": 250}
-
-    async def test_null_valued_stream_is_skipped_not_seeded(self, monkeypatch):
-        # A null cursor in the payload (stream harvested before it emitted one)
-        # must be skipped, not seeded as {"cursor": None} -- otherwise it would
-        # shadow a real on-disk checkpoint with a useless value.
-        first = _make_manager(self.tmp_path)
-        await first.save_cursor("orders", {}, {"cursor": 50})  # writes ./state
-
-        monkeypatch.setenv("RESUME_STATE", json.dumps({"orders": None}))
-        second = _make_manager(self.tmp_path)  # same base_dir -> 50 on disk
-
-        # The null seed is skipped, so get_cursor falls through to disk.
-        assert await second.get_cursor("orders") == {"cursor": 50}
-
-    async def test_restored_cursor_wins_over_stale_on_disk_checkpoint(
-        self, monkeypatch
-    ):
-        # A leftover on-disk checkpoint must not shadow the injected resume
-        # state: the durable value is authoritative, the local file is stale.
-        monkeypatch.delenv("RESUME_STATE", raising=False)
-        first = _make_manager(self.tmp_path)
-        await first.save_cursor("orders", {}, {"cursor": 50})  # writes ./state
-
-        monkeypatch.setenv("RESUME_STATE", json.dumps({"orders": 100}))
-        second = _make_manager(self.tmp_path)  # same base_dir -> stale 50 on disk
-
-        assert await second.get_cursor("orders") == {"cursor": 100}
 
 
 if __name__ == "__main__":

@@ -56,9 +56,10 @@ class _RelayCheckpoint:
     """CheckpointStore facade for the worker side.
 
     ``get_cursor`` answers from the request's initial cursor; ``save_cursor``
-    queues the state for relay to the engine, which persists it. Order is
-    preserved: saves are drained into the response stream at the point the
-    connector made them.
+    queues the state for relay to the engine, which holds it in its in-run cache
+    (the durable per-stream checkpoint advances only on a destination ACK, not
+    from this pre-ACK source position). Order is preserved: saves are drained
+    into the response stream at the point the connector made them.
     """
 
     def __init__(self, initial: dict[str, Any] | None) -> None:

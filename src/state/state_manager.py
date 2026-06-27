@@ -10,7 +10,7 @@ from typing import Any
 from ..shared.run_id import get_or_generate_run_id
 from .batch_commit_tracker import BatchCommitTracker
 from .state_emission import emit_state_log
-from .store import CursorStore, parse_resume_state
+from .store import CursorStore
 
 logger = logging.getLogger(__name__)
 
@@ -42,36 +42,19 @@ class StateManager:
         # In-run batch commit tracker (initialized by init_commit_tracker)
         self._commit_tracker: BatchCommitTracker | None = None
 
-        # In-run cursor cache keyed by (stream_name, partition_key). Backed by
-        # an on-disk checkpoint so a fresh process resumes from where the last
-        # run left off instead of re-scanning the whole source.
+        # In-run cursor cache keyed by (stream_name, partition_key). Read by
+        # get_cursor and backed by the per-stream committed checkpoint, so a fresh
+        # process resumes from the prior run's ACKed bookmark instead of
+        # re-scanning the whole source.
         self._cursors: dict[str, dict[str, Any]] = {}
+        # Per-stream committed-cursor checkpoint files: one
+        # state/{pipeline_id}/{stream_id}.json per stream, written on each
+        # destination ACK and read at the next run's start. Each stream owns its
+        # file (no contention), and the value is the ACKed watermark -- never the
+        # source's pre-ACK position. On a fresh container the config bundle
+        # delivers these same files; there is no env var and no single shared
+        # file.
         self._cursor_store = CursorStore(self.base_dir)
-        self._restore_durable_cursors()
-
-    def _restore_durable_cursors(self) -> None:
-        """Seed the cursor cache from the injected durable resume state.
-
-        The on-disk ``state/`` checkpoint is wiped on a fresh container, so
-        without this an incremental stream would find no bookmark on re-run
-        and full-rescan the source. The deployment re-injects the cursors it
-        harvested from the prior run's emitted state as the ``RESUME_STATE``
-        env var; we decode it into the same ``{"cursor": <value>}`` shape
-        :meth:`get_cursor` returns, keyed by ``stream_id`` with the empty
-        partition the engine reads with.
-        """
-        restored = parse_resume_state(os.environ.get("RESUME_STATE"))
-        seeded = 0
-        for stream_id, value in restored.items():
-            if value is None:
-                continue
-            self._cursors[self._cursor_key(stream_id, {})] = {"cursor": value}
-            seeded += 1
-        if seeded:
-            logger.info(
-                "restored durable cursor state for %d stream(s) from RESUME_STATE",
-                seeded,
-            )
 
     def init_commit_tracker(self, run_id: str) -> None:
         """Initialize batch commit tracker for the current run."""
@@ -134,6 +117,13 @@ class StateManager:
         emission-time ``emitted_at`` ordering key is not stamped here -- it is
         added to every record centrally by
         :func:`src.state.log_emitter.emit_log`.
+
+        This runs only on a destination ACK (the engine's committed-watermark
+        path), so it is also where the per-stream checkpoint advances: persisting
+        the committed value here, never the source's pre-ACK cursor, is what
+        keeps a failed stream from resuming past rows that never landed. The
+        write goes to this stream's own file, so concurrent streams never
+        contend.
         """
         emit_state_log(
             run_id=self.current_run_id or "",
@@ -143,6 +133,10 @@ class StateManager:
             cursor_hex=json.dumps(cursor).encode().hex() if cursor else "",
             cursor_value=hwm,
         )
+        committed_value = cursor.get("primary", {}).get("value") if cursor else None
+        if committed_value is not None:
+            with self.lock:
+                self._cursor_store.set(self.pipeline_id, stream_name, committed_value)
 
     @staticmethod
     def _cursor_key(stream_name: str, partition: dict[str, Any]) -> str:
@@ -153,10 +147,12 @@ class StateManager:
     async def get_cursor(
         self, stream_name: str, partition: dict[str, Any] | None = None
     ) -> dict[str, Any] | None:
-        """Return the last saved cursor for a stream/partition, or None.
+        """Return the resume cursor for a stream/partition, or None.
 
-        Falls back to the on-disk checkpoint when the in-run cache is empty so
-        a newly started process resumes from the previous run's bookmark.
+        Falls back to the per-stream committed checkpoint when the in-run cache
+        is empty, so a newly started process (or a fresh container holding only
+        the bundle-delivered files) resumes from the previous run's ACKed
+        bookmark. A stream with no checkpoint resumes with a full re-scan.
         """
         key = self._cursor_key(stream_name, partition or {})
         with self.lock:
@@ -176,17 +172,17 @@ class StateManager:
         partition: dict[str, Any] | None,
         cursor: dict[str, Any],
     ) -> None:
-        """Persist cursor state for a stream/partition.
+        """Update the in-run cursor cache for a stream/partition.
 
-        Written both to the in-run cache and to the on-disk checkpoint so the
-        next run resumes from it. Partitioned cursors share one document per
-        ``(pipeline, stream)`` (the store's documented scope); partitions are
-        not exercised today.
+        Records the source's latest (pre-ACK) cursor for the duration of the run
+        only; it is never persisted. The durable per-stream checkpoint advances
+        solely on a destination ACK (see :meth:`save_stream_checkpoint`), so the
+        source running ahead of the ACK can't push the on-disk bookmark past rows
+        that have not landed.
         """
         key = self._cursor_key(stream_name, partition or {})
         with self.lock:
             self._cursors[key] = cursor
-            self._cursor_store.set(self.pipeline_id, stream_name, cursor.get("cursor"))
 
     def get_run_info(self) -> dict[str, Any]:
         """Get current run information."""

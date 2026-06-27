@@ -714,10 +714,12 @@ class StreamingEngine:
                             f"Stream {stream_name}: Batch {batch_seq} "
                             f"already committed (in-run), skipping send"
                         )
-                        # Skip metrics increment and output_queue - batch was
-                        # already counted when first committed. Checkpoint stage
-                        # will show unique batches written this run, not total
-                        # send attempts.
+                        # The batch's committed watermark is already on disk from
+                        # when it first committed (save_stream_checkpoint writes
+                        # the per-stream file on every ACK), so the skip needs no
+                        # extra checkpoint. Skip metrics increment and
+                        # output_queue too -- the batch was already counted when
+                        # first committed.
                         continue
 
                 # Retry loop for RETRYABLE_FAILURE

@@ -92,18 +92,32 @@ external log/metrics shipper is a deployment concern, not an engine concern.
 
 ### Incremental state restore
 
-An incremental stream's resume cursor is written two ways: to the local
-`state/{pipeline_id}/{stream_id}.json` checkpoint, and to an
+An incremental stream's resume cursor is written two ways: to an
 `ANALITIQ_STATE` stdout log line the external shipper harvests into durable
-storage. On a fresh container (each task starts with an empty `state/`) the
-local checkpoint is gone, so restore reads the `RESUME_STATE` environment
-variable instead — a JSON object `{stream_id: cursor}` the deployment
-injects from whatever it harvested off the prior run. `StateManager` seeds
-its cursor cache from it at startup (`src/state/store.py:parse_resume_state`,
-`src/state/state_manager.py`). This keeps restore symmetric with emission:
-the engine never reaches for cloud storage itself, it only consumes a
-resolved value the deployment supplies — exactly as it does for secrets and
-config.
+storage (cloud), and to a **per-stream checkpoint file**
+`state/{pipeline_id}/{stream_id}.json` = `{"cursor": <value>}`
+(`CursorStore`, via `StateManager.save_stream_checkpoint`). Each stream owns its
+own file and writes it on **every destination ACK**, so concurrent streams never
+contend on a shared file and a crash loses at most the last un-ACKed batch.
+
+The stored value is the **committed (destination-ACKed) high-water mark** —
+never the source's pre-ACK position (the source advances its cursor as it yields
+batches, ahead of the ACK). `save_cursor`, which relays that pre-ACK position
+from the source worker, updates only the in-run cache and is never persisted. So
+a stream that failed or never ACKed a batch resumes from its last safe bookmark
+instead of skipping rows that never landed, and a stream with no checkpoint
+resumes with a full re-scan.
+
+Restore is lazy: `get_cursor` reads a stream's checkpoint file at the start of
+its run (`src/state/store.py:CursorStore`, `src/state/state_manager.py`). The
+two delivery paths converge on the same files: in the cloud each task starts
+with an empty `state/`, so the deployment delivers the per-stream files in the
+config bundle from whatever it harvested off the prior run; locally the files
+the prior run wrote are read directly. Either way the engine only reads resolved
+local files and never reaches for cloud storage — exactly as it does for secrets
+and config. Delivering the cursors as bundle files rather than an env var also
+keeps a high-stream-count pipeline clear of any size limit the deployment
+imposes on a task's launch parameters.
 
 Each cursor carries its type. A `datetime`/`date` travels as a tagged
 `{"__type__": ..., "value": ...}` value — the same form the on-disk checkpoint
