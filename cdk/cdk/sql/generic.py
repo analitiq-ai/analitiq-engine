@@ -1177,6 +1177,15 @@ class GenericSQLConnector(BaseDestinationHandler):
         dialect-specific SQL; the identity column's PRIMARY KEY is the
         structural backstop. With no identity column (not expected for insert
         mode) it degrades to a plain INSERT.
+
+        Coalescing is identity-only: a row whose identity already exists is
+        skipped without comparing its other columns. For a keyed insert that
+        means a same-key row with *different* content is dropped (first
+        occurrence wins) -- the same tradeoff as two byte-identical keyless
+        rows. Insert mode cannot tell a retry's re-read from a genuinely
+        conflicting key without a per-row read-back, which would defeat the
+        single-statement anti-join; a stream that must reconcile changed rows
+        should use upsert.
         """
         if state.table is None or not records:
             return
@@ -1189,7 +1198,9 @@ class GenericSQLConnector(BaseDestinationHandler):
         # Drop intra-batch duplicates first: two rows sharing an identity both
         # pass NOT EXISTS (neither is in the table yet) and would then collide
         # on the primary key. First occurrence wins -- the Fivetran _record_hash
-        # tradeoff for byte-identical keyless rows.
+        # tradeoff for byte-identical keyless rows. The identity columns are the
+        # table's PRIMARY KEY (NOT NULL), so the Python ``None == None`` collapse
+        # that a nullable key could cause here is unreachable in practice.
         seen: set[tuple[Any, ...]] = set()
         deduped: list[dict[str, Any]] = []
         for record in records:

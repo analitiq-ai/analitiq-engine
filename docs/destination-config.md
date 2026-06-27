@@ -294,7 +294,12 @@ enforced depends on the write mode:
   the contract primary key, or — for a keyless insert stream — a synthetic
   engine-managed `_record_hash` column (full SHA-256 of the row content)
   declared as the table's `PRIMARY KEY`, the structural uniqueness
-  backstop. Two byte-identical keyless rows collapse to one.
+  backstop. Coalescing is identity-only — a row whose identity already
+  exists is skipped without comparing its other columns: two byte-identical
+  keyless rows collapse to one, and a keyed `insert` likewise drops a
+  same-key row whose content differs (first occurrence wins). `insert` cannot
+  tell a retry's re-read from a genuinely conflicting key; a stream that must
+  reconcile changed rows should use `upsert`.
 
 ADBC-only transports (Snowflake/BigQuery) do not yet do the keyless
 `insert` anti-join — plain `insert` there is at-least-once (a noted
