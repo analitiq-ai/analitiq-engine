@@ -202,14 +202,6 @@ class StreamingEngine:
                     f"all {len(streams)} streams processed"
                 )
 
-            # Persist the consolidated resume bookmark for the next run. Runs on
-            # full and partial success (a fully-failed run raises above and made
-            # no progress to snapshot). The snapshot is the committed (ACKed)
-            # watermark per stream, so a stream that failed after extraction
-            # advanced its source cursor contributes only what actually landed.
-            # Tolerant of I/O failure internally.
-            self.state_manager.write_resume_snapshot()
-
         except* StreamProcessingError as eg:
             # Handle stream processing errors specifically (Python 3.11+)
             logger.error(
@@ -233,6 +225,16 @@ class StreamingEngine:
                 if not task.done():
                     task.cancel()
             raise
+        finally:
+            # Persist the consolidated resume bookmark on every exit -- success,
+            # partial failure, AND an all-failed run that still ACKed some
+            # batches before raising. The snapshot is the committed (ACKed)
+            # watermark per stream, so persisting it even on a failed run only
+            # ever hands forward rows that actually landed; without this, an
+            # all-failed first run would leave no resume.json and force the next
+            # run onto the source-written (pre-ACK) per-stream checkpoint, which
+            # can skip un-landed rows. Tolerant of I/O failure internally.
+            self.state_manager.write_resume_snapshot()
 
     async def _process_stream(
         self,
@@ -721,6 +723,18 @@ class StreamingEngine:
                         logger.info(
                             f"Stream {stream_name}: Batch {batch_seq} "
                             f"already committed (in-run), skipping send"
+                        )
+                        # The batch is not re-sent, but its committed watermark
+                        # must still advance the resume snapshot: a Batch retry
+                        # that reuses the commit tracker skips every
+                        # already-committed batch here, and without this the
+                        # snapshot would regress to an older bookmark and make the
+                        # next run reprocess committed rows. The recomputed batch
+                        # cursor equals the one first committed (same rows), and
+                        # _persist_committed_cursor no-ops a non-incremental
+                        # (None) cursor.
+                        self._persist_committed_cursor(
+                            cursor, stream_id, stream_version
                         )
                         # Skip metrics increment and output_queue - batch was
                         # already counted when first committed. Checkpoint stage

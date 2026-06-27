@@ -159,13 +159,18 @@ class TestStateManager:
         assert manager.commit_tracker is not None
 
 
+def _resume_path(tmp_path, pipeline_id="test-pipeline"):
+    return tmp_path / "state" / pipeline_id / "resume" / "cursors.json"
+
+
 def _write_resume_file(tmp_path, payload, pipeline_id="test-pipeline"):
     """Write the resume-state file the deployment delivers in the config bundle.
 
-    A local run writes the same ``state/{pipeline_id}/resume.json`` itself at the
-    end of a run; these tests stage it directly to exercise the restore path.
+    A local run writes the same ``state/{pipeline_id}/resume/cursors.json`` itself
+    at the end of a run; these tests stage it directly to exercise the restore
+    path.
     """
-    resume_path = tmp_path / "state" / pipeline_id / "resume.json"
+    resume_path = _resume_path(tmp_path, pipeline_id)
     resume_path.parent.mkdir(parents=True, exist_ok=True)
     resume_path.write_text(json.dumps(payload))
     return resume_path
@@ -194,10 +199,10 @@ class TestStateManagerDurableRestore:
 
     A fresh container's local per-stream ``state/`` checkpoints are empty
     (Fargate wipes them every task), so the cursor a prior run emitted must come
-    back through the ``state/{pipeline_id}/resume.json`` file the deployment
-    delivers in the config bundle. The engine reads the source cursor keyed by
-    ``stream_id`` with the empty partition (see ``engine._extract_stage``), so
-    that is the shape these assert.
+    back through the ``state/{pipeline_id}/resume/cursors.json`` file the
+    deployment delivers in the config bundle. The engine reads the source cursor
+    keyed by ``stream_id`` with the empty partition (see
+    ``engine._extract_stage``), so that is the shape these assert.
     """
 
     def setup_method(self):
@@ -288,11 +293,11 @@ class TestStateManagerResumeSnapshot:
     """Writing the consolidated resume file a local run hands to its successor.
 
     A local run has no deployment to harvest its emitted state, so the engine
-    writes ``state/{pipeline_id}/resume.json`` itself when the pipeline finishes
-    (``StateManager.write_resume_snapshot``). The snapshot is the committed
-    (destination-ACKed) high-water mark per stream -- the same value the
-    deployment harvests from the emitted ``ANALITIQ_STATE`` lines -- so the local
-    output and the cloud-delivered input are the same contract, and a fresh
+    writes ``state/{pipeline_id}/resume/cursors.json`` itself when the pipeline
+    finishes (``StateManager.write_resume_snapshot``). The snapshot is the
+    committed (destination-ACKed) high-water mark per stream -- the same value
+    the deployment harvests from the emitted ``ANALITIQ_STATE`` lines -- so the
+    local output and the cloud-delivered input are the same contract, and a fresh
     manager restores from it the same way either was produced.
     """
 
@@ -305,9 +310,7 @@ class TestStateManagerResumeSnapshot:
             shutil.rmtree(self.temp_dir)
 
     def _written(self, pipeline_id="test-pipeline"):
-        return json.loads(
-            (self.tmp_path / "state" / pipeline_id / "resume.json").read_text()
-        )
+        return json.loads(_resume_path(self.tmp_path, pipeline_id).read_text())
 
     async def test_snapshot_round_trips_committed_cursors(self):
         ts = datetime(2024, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
@@ -368,6 +371,25 @@ class TestStateManagerResumeSnapshot:
         manager.write_resume_snapshot()
 
         assert self._written() == {"orders": 250}
+
+    async def test_resume_file_does_not_collide_with_resume_named_stream(self):
+        # A stream literally named "resume" writes its per-stream checkpoint to
+        # state/<pipeline>/resume.json; the consolidated file lives in a resume/
+        # sub-directory (cursors.json), so the per-stream write can't clobber the
+        # map and a fresh start restores the real "resume" stream, not a bogus
+        # "cursor" stream parsed out of a {"cursor": ...} checkpoint.
+        manager = _make_manager(self.tmp_path)
+        await manager.save_cursor("resume", {}, {"cursor": 42})  # per-stream file
+        _commit(manager, "resume", 42)
+
+        manager.write_resume_snapshot()
+
+        per_stream = self.tmp_path / "state" / "test-pipeline" / "resume.json"
+        assert json.loads(per_stream.read_text()) == {"cursor": 42}
+        assert self._written() == {"resume": 42}  # consolidated map intact
+
+        second = _make_manager(self.tmp_path)
+        assert await second.get_cursor("resume") == {"cursor": 42}
 
 
 if __name__ == "__main__":

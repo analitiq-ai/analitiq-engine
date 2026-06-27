@@ -33,12 +33,16 @@ class StateManager:
         self.base_dir = Path(base_dir)
         self.pipeline_dir = self.base_dir / pipeline_id
         # The consolidated resume bookmark, scoped per pipeline like every other
-        # state file (the per-stream checkpoints and batch-commit log live under
-        # the same dir): the cloud deployment delivers it in the config bundle, a
+        # state file: the cloud deployment delivers it in the config bundle, a
         # local run writes it at the end (write_resume_snapshot). Pipeline-scoping
         # stops a second pipeline that shares the local state/ dir from
-        # overwriting this pipeline's bookmark.
-        self._resume_path = self.pipeline_dir / "resume.json"
+        # overwriting this pipeline's bookmark. It lives in its own ``resume/``
+        # sub-directory, not directly under the pipeline dir, so it can never
+        # collide with a per-stream checkpoint -- those own the
+        # ``state/{pipeline_id}/{stream_id}.json`` namespace, and a stream whose
+        # id was ``resume`` would otherwise write its ``{"cursor": ...}`` file
+        # over this map.
+        self._resume_path = self.pipeline_dir / "resume" / "cursors.json"
 
         # Thread safety
         self.lock = threading.RLock()
@@ -72,8 +76,8 @@ class StateManager:
         without this an incremental stream would find no bookmark on re-run
         and full-rescan the source. The deployment delivers the cursors it
         harvested from the prior run's emitted state as
-        ``state/{pipeline_id}/resume.json`` in the config bundle (a local run
-        writes the same file itself, see :meth:`write_resume_snapshot`); we
+        ``state/{pipeline_id}/resume/cursors.json`` in the config bundle (a local
+        run writes the same file itself, see :meth:`write_resume_snapshot`); we
         decode it into the same ``{"cursor": <value>}`` shape
         :meth:`get_cursor` returns, keyed by ``stream_id`` with the empty
         partition the engine reads with. The seeded value wins over any stale
@@ -101,8 +105,9 @@ class StateManager:
         """Persist the committed resume cursors as the consolidated resume file.
 
         Called once the pipeline finishes so the next run resumes from the same
-        ``state/{pipeline_id}/resume.json`` the cloud deployment delivers. The
-        snapshot is the committed (destination-ACKed) high-water mark per stream
+        ``state/{pipeline_id}/resume/cursors.json`` the cloud deployment
+        delivers. The snapshot is the committed (destination-ACKed) high-water
+        mark per stream
         (``_committed_cursors``, advanced only by :meth:`save_stream_checkpoint`)
         merged with whatever this run resumed from -- never the source's pre-ACK
         position. So a stream that failed or never ACKed a batch keeps its last
