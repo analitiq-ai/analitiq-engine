@@ -725,17 +725,21 @@ class StreamingEngine:
                             f"already committed (in-run), skipping send"
                         )
                         # The batch is not re-sent, but its committed watermark
-                        # must still advance the resume snapshot: a Batch retry
-                        # that reuses the commit tracker skips every
-                        # already-committed batch here, and without this the
-                        # snapshot would regress to an older bookmark and make the
-                        # next run reprocess committed rows. The recomputed batch
-                        # cursor equals the one first committed (same rows), and
-                        # _persist_committed_cursor no-ops a non-incremental
-                        # (None) cursor.
-                        self._persist_committed_cursor(
-                            cursor, stream_id, stream_version
-                        )
+                        # must still advance the resume snapshot so a Batch retry
+                        # that reuses the commit tracker does not regress the
+                        # bookmark. Use the watermark the tracker RECORDED when
+                        # the batch first committed (existing.cursor), not the
+                        # freshly recomputed `cursor`: on a same-RUN_ID retry the
+                        # source re-reads inclusively from the durable cursor and
+                        # may have re-batched rows added since, so the recomputed
+                        # value could point past rows that never landed and make
+                        # the next run skip them. existing.cursor is None for a
+                        # non-incremental batch, which record_committed_value
+                        # ignores.
+                        if existing.cursor:
+                            self.state_manager.record_committed_value(
+                                stream_id, existing.cursor.get("value")
+                            )
                         # Skip metrics increment and output_queue - batch was
                         # already counted when first committed. Checkpoint stage
                         # will show unique batches written this run, not total

@@ -122,6 +122,22 @@ class StateManager:
             snapshot = dict(self._committed_cursors)
         write_resume_file(self._resume_path, snapshot)
 
+    def record_committed_value(self, stream_id: str, value: Any) -> None:
+        """Advance a stream's committed high-water mark from a recorded watermark.
+
+        For the engine's in-run idempotency skip path: a batch already committed
+        in a prior attempt is not re-sent, but the resume snapshot must still
+        carry its committed watermark so a retry does not regress the bookmark.
+        ``value`` is the value the commit tracker recorded when the batch first
+        committed -- what actually landed -- in the same cursor-token form
+        :meth:`save_stream_checkpoint` records (a JSON-native scalar or the
+        tagged datetime/date/decimal form). A ``None`` value (a non-incremental
+        batch) is ignored.
+        """
+        if value is not None:
+            with self.lock:
+                self._committed_cursors[stream_id] = value
+
     def init_commit_tracker(self, run_id: str) -> None:
         """Initialize batch commit tracker for the current run."""
         self._commit_tracker = BatchCommitTracker(

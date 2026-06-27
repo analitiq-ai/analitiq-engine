@@ -372,6 +372,18 @@ class TestStateManagerResumeSnapshot:
 
         assert self._written() == {"orders": 250}
 
+    async def test_recorded_committed_value_advances_snapshot(self):
+        # The in-run idempotency skip path advances the snapshot from the commit
+        # tracker's recorded watermark (what landed) without re-sending a batch;
+        # a None value (non-incremental batch) is ignored.
+        manager = _make_manager(self.tmp_path)
+        manager.record_committed_value("orders", 5)
+        manager.record_committed_value("noncursor", None)
+
+        manager.write_resume_snapshot()
+
+        assert self._written() == {"orders": 5}
+
     async def test_resume_file_does_not_collide_with_resume_named_stream(self):
         # A stream literally named "resume" writes its per-stream checkpoint to
         # state/<pipeline>/resume.json; the consolidated file lives in a resume/
