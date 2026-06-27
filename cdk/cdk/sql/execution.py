@@ -26,7 +26,7 @@ from typing import Any
 from sqlalchemy import text
 
 from ..database_utils import acquire_connection
-from ._adbc_utils import _adbc_execute
+from ._adbc_utils import _adbc_execute, _close_cursor_quietly
 from .exceptions import CreateTableError, DiscoveryError, SqlIntrospectionError
 
 logger = logging.getLogger(__name__)
@@ -117,7 +117,7 @@ def _fetch_rows_adbc_sync(runtime: Any, sql: str, params: Sequence[Any]) -> list
             _adbc_execute(cursor, sql, params)
             table = cursor.fetch_arrow_table()
         finally:
-            cursor.close()
+            _close_cursor_quietly(cursor)
         rows: list[Row] = table.to_pylist()
         return rows
     finally:
@@ -168,7 +168,7 @@ def _execute_ddl_adbc_sync(runtime: Any, statements: Sequence[str]) -> None:
                 for ddl in statements:
                     cursor.execute(ddl)
             finally:
-                cursor.close()
+                _close_cursor_quietly(cursor)
             conn.commit()
         except Exception:
             # Roll back the partially-applied batch so "committed together"

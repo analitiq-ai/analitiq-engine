@@ -19,9 +19,13 @@ from cdk.sql.execution import _qmark_to_named, execute_ddl, fetch_rows
 from .conftest import FakeAdbcRuntime, FakeSaRuntime
 
 
-def _runtime(*, responder=None, fail_execute=None) -> FakeAdbcRuntime:
+def _runtime(*, responder=None, fail_execute=None, fail_close=None) -> FakeAdbcRuntime:
     return FakeAdbcRuntime(
-        "postgresql", mapper=None, responder=responder, fail_execute=fail_execute
+        "postgresql",
+        mapper=None,
+        responder=responder,
+        fail_execute=fail_execute,
+        fail_close=fail_close,
     )
 
 
@@ -247,3 +251,65 @@ class TestErrorWrapping:
         runtime = FakeSaRuntime()
         with pytest.raises(DiscoveryError, match="count mismatch"):
             await fetch_rows(runtime, "WHERE a = ? AND b = ?", ["only-one"])
+
+
+class TestCursorCloseDoesNotMask:
+    """A failing ``cursor.close()`` in the finally must not hide the real error.
+
+    Both ADBC helpers close their cursor in a ``finally``. If the body already
+    raised, a close that also raises would replace it -- the caller would see
+    "cursor close failed" instead of the query/auth/syntax failure. The close
+    is swallowed (logged) so the body's exception stays in flight, and a close
+    that fails on the success path never breaks an otherwise-good run.
+    """
+
+    @pytest.mark.asyncio
+    async def test_fetch_close_failure_preserves_execute_error(self):
+        execute_boom = RuntimeError("permission denied for relation")
+        close_boom = RuntimeError("cursor already invalidated")
+        runtime = _runtime(fail_execute=execute_boom, fail_close=close_boom)
+        with pytest.raises(DiscoveryError) as exc:
+            await fetch_rows(runtime, "SELECT 1 FROM information_schema.tables", [])
+        # The original execute failure is chained, not the close failure.
+        assert exc.value.__cause__ is execute_boom
+        conn = runtime.connections[0]
+        assert conn.cursor_close_attempts == 1
+        assert conn.closed is True
+
+    @pytest.mark.asyncio
+    async def test_fetch_close_failure_on_success_returns_rows(self):
+        close_boom = RuntimeError("cursor already invalidated")
+        runtime = _runtime(
+            responder=lambda sql, params: [{"n": 1}], fail_close=close_boom
+        )
+        out = await fetch_rows(runtime, "SELECT 1 AS n", [])
+        assert out == [{"n": 1}]
+        conn = runtime.connections[0]
+        assert conn.cursor_close_attempts == 1
+        assert conn.closed is True
+
+    @pytest.mark.asyncio
+    async def test_ddl_close_failure_preserves_execute_error(self):
+        execute_boom = RuntimeError("relation already exists")
+        close_boom = RuntimeError("cursor already invalidated")
+        runtime = _runtime(fail_execute=execute_boom, fail_close=close_boom)
+        with pytest.raises(CreateTableError) as exc:
+            await execute_ddl(runtime, "CREATE TABLE t (x INT)")
+        # The execute failure survives the close failure, and rollback still ran.
+        assert exc.value.__cause__ is execute_boom
+        conn = runtime.connections[0]
+        assert conn.cursor_close_attempts == 1
+        assert conn.rollbacks == 1
+        assert conn.commits == 0
+        assert conn.closed is True
+
+    @pytest.mark.asyncio
+    async def test_ddl_close_failure_on_success_still_commits(self):
+        close_boom = RuntimeError("cursor already invalidated")
+        runtime = _runtime(fail_close=close_boom)
+        await execute_ddl(runtime, "CREATE TABLE t (x INT)")
+        conn = runtime.connections[0]
+        assert conn.cursor_close_attempts == 1
+        assert conn.commits == 1
+        assert conn.rollbacks == 0
+        assert conn.closed is True
