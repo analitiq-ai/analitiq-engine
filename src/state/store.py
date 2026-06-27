@@ -134,7 +134,10 @@ def load_resume_file(path: Path) -> dict[str, Any]:
         return {}
     try:
         raw = path.read_text()
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
+        # OSError for I/O; ValueError covers UnicodeDecodeError when the file is
+        # not valid UTF-8 (a corrupt/binary bundle artifact) -- that must degrade
+        # to a re-scan like any other bad resume state, not abort construction.
         logger.warning(
             "resume-state file %s is unreadable (%s); incremental streams "
             "resume with a full re-scan",

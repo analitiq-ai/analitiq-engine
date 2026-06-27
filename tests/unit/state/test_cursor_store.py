@@ -305,6 +305,16 @@ class TestResumeFile:
             assert load_resume_file(path) == {}
         assert any("unreadable" in r.message for r in caplog.records)
 
+    def test_non_utf8_file_degrades_to_empty_loudly(self, tmp_path, caplog):
+        # A corrupt/binary bundle artifact (invalid UTF-8) makes read_text raise
+        # UnicodeDecodeError; it must degrade to a re-scan like any other bad
+        # resume state, not abort StateManager construction.
+        path = tmp_path / "cursors.json"
+        path.write_bytes(b"\xff\xfe\x00not utf-8")
+        with caplog.at_level(logging.WARNING, logger="src.state.store"):
+            assert load_resume_file(path) == {}
+        assert any("unreadable" in r.message for r in caplog.records)
+
     def test_write_failure_does_not_raise(self, tmp_path, caplog):
         # A path whose parent cannot be created (a file sits where a dir must go)
         # must warn and move on, never abort an otherwise-successful run.
