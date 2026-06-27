@@ -393,6 +393,22 @@ class TestStateManagerResumeSnapshot:
 
         assert self._written() == {"orders": 250}
 
+    async def test_fallback_checkpoint_is_carried_into_snapshot(self):
+        # First run with no resume file but a leftover per-stream checkpoint:
+        # when get_cursor uses that checkpoint as the bookmark, it must be carried
+        # into the snapshot. Otherwise an end-of-run snapshot writes {} and the
+        # next run -- now seeing a resume file -- ignores the checkpoint and
+        # re-scans, duplicating rows for an insert/keyless stream.
+        first = _make_manager(self.tmp_path)
+        await first.save_cursor("orders", {}, {"cursor": 100})  # per-stream only
+
+        second = _make_manager(self.tmp_path)  # no resume file written yet
+        assert second._resume_file_present is False
+        assert await second.get_cursor("orders") == {"cursor": 100}  # uses fallback
+        second.write_resume_snapshot()  # no new commits this run
+
+        assert self._written() == {"orders": 100}  # carried forward, not {}
+
     async def test_recorded_committed_value_advances_snapshot(self):
         # The in-run idempotency skip path advances the snapshot from the commit
         # tracker's recorded watermark (what landed) without re-sending a batch;

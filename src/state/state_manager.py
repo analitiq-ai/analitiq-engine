@@ -243,7 +243,11 @@ class StateManager:
         ACK and could therefore point past rows that never landed. The on-disk
         checkpoint is consulted only when no resume file exists at all (a true
         first run, where it is absent too), so it can no longer shadow the
-        committed bookmark.
+        committed bookmark. When that checkpoint IS used, it becomes this run's
+        bookmark, so it is also recorded as committed -- otherwise an end-of-run
+        snapshot would write an empty file and the next run, now seeing a resume
+        file, would ignore the checkpoint and re-scan (duplicating rows for an
+        insert/keyless stream).
         """
         key = self._cursor_key(stream_name, partition or {})
         with self.lock:
@@ -257,6 +261,7 @@ class StateManager:
                 return None
             cursor = {"cursor": persisted}
             self._cursors[key] = cursor
+            self._committed_cursors[stream_name] = persisted
             return cursor
 
     async def save_cursor(
