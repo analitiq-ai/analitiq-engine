@@ -231,7 +231,7 @@ class StreamingEngine:
             # batches before raising. The snapshot is the committed (ACKed)
             # watermark per stream, so persisting it even on a failed run only
             # ever hands forward rows that actually landed; without this, an
-            # all-failed first run would leave no resume.json and force the next
+            # all-failed first run would leave no resume file and force the next
             # run onto the source-written (pre-ACK) per-stream checkpoint, which
             # can skip un-landed rows. Tolerant of I/O failure internally.
             self.state_manager.write_resume_snapshot()

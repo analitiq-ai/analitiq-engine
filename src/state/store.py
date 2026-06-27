@@ -61,10 +61,12 @@ def parse_resume_state(raw: str | None) -> dict[str, Any]:
     The engine emits its cursor checkpoints as ``ANALITIQ_STATE`` log lines
     (see :mod:`src.state.state_emission`); the deployment harvests those into
     durable storage and delivers them back on the next run as a resume-state
-    file inside the config bundle (``state/resume.json``) -- a JSON object
-    mapping ``stream_id`` to the high-water-mark cursor value. A
-    fresh container's local ``state/`` directory is otherwise empty, so this
-    delivered file is the only bookmark an incremental stream can resume from.
+    file inside the config bundle, at the same path the engine reads and writes
+    (``state/{pipeline_id}/resume/cursors.json`` -- see
+    :attr:`StateManager._resume_path`) -- a JSON object mapping ``stream_id`` to
+    the high-water-mark cursor value. A fresh container's local ``state/``
+    directory is otherwise empty, so this delivered file is the only bookmark an
+    incremental stream can resume from.
     A local run produces the same file itself at the end of a run (see
     :func:`write_resume_file`), so the restore path is identical in both
     environments. Reading a local file here keeps the engine cloud-agnostic: it
