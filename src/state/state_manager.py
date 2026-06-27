@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Any
 
 from ..shared.run_id import get_or_generate_run_id
-from .batch_commit_tracker import BatchCommitTracker
 from .state_emission import emit_state_log
 from .store import CursorStore
 
@@ -20,8 +19,9 @@ class StateManager:
     Manages pipeline run state and emits checkpoints to structured logs.
 
     Checkpoints are emitted as ANALITIQ_STATE:: log lines for
-    cross-run observability. Batch commit tracking uses local
-    filesystem for in-run idempotency.
+    cross-run observability. Idempotency is enforced at the destination on
+    content-derived row identity, not by an engine-side batch ledger
+    (issue #282), so this manager owns only cursor state.
     """
 
     def __init__(
@@ -39,9 +39,6 @@ class StateManager:
         # Current run ID (from env var RUN_ID if available)
         self.current_run_id: str | None = os.environ.get("RUN_ID")
 
-        # In-run batch commit tracker (initialized by init_commit_tracker)
-        self._commit_tracker: BatchCommitTracker | None = None
-
         # In-run cursor cache keyed by (stream_name, partition_key). Read by
         # get_cursor and backed by the per-stream committed checkpoint, so a fresh
         # process resumes from the prior run's ACKed bookmark instead of
@@ -55,18 +52,6 @@ class StateManager:
         # delivers these same files; there is no env var and no single shared
         # file.
         self._cursor_store = CursorStore(self.base_dir)
-
-    def init_commit_tracker(self, run_id: str) -> None:
-        """Initialize batch commit tracker for the current run."""
-        self._commit_tracker = BatchCommitTracker(
-            pipeline_dir=str(self.pipeline_dir),
-            run_id=run_id,
-        )
-
-    @property
-    def commit_tracker(self) -> BatchCommitTracker | None:
-        """Get the batch commit tracker (if initialized)."""
-        return self._commit_tracker
 
     def start_run(self, config: dict[str, Any], run_id: str | None = None) -> str:
         """

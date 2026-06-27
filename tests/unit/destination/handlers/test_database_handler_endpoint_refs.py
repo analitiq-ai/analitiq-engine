@@ -181,7 +181,6 @@ class TestWriteBatchFatalOnTypeMapError:
         handler._connected = True
         handler._streams["s1"] = _StreamState(
             table=MagicMock(),
-            batch_commits_table=MagicMock(),
             schema_name="myschema",
             table_name="events",
             write_mode="insert",
@@ -194,11 +193,6 @@ class TestWriteBatchFatalOnTypeMapError:
             yield AsyncMock()
 
         handler._engine.begin = _fake_begin
-
-        async def _not_committed(*_args, **_kwargs):
-            return False
-
-        handler._check_batch_committed = _not_committed  # type: ignore[method-assign]
 
         import pyarrow as pa
 
@@ -226,9 +220,8 @@ class TestWriteBatchFatalOnTypeMapError:
         from src.grpc.generated.analitiq.v1 import AckStatus, Cursor
 
         handler = GenericSQLConnector()
-        # Preconditions: connected, schema configured, idempotency check
-        # clean. We don't actually hit the DB because the schema-contract
-        # prepare_records call raises before any SQL runs.
+        # Preconditions: connected, schema configured. We don't actually hit
+        # the DB because the insert raises before any SQL runs.
         contract_mock = MagicMock()
         contract_mock.to_db_records.return_value = [{"id": 1}]
 
@@ -236,7 +229,6 @@ class TestWriteBatchFatalOnTypeMapError:
         handler._connected = True
         handler._streams["s1"] = _StreamState(
             table=MagicMock(),
-            batch_commits_table=MagicMock(),
             write_mode="insert",
             primary_keys=[],
             schema_contract=contract_mock,
@@ -252,11 +244,6 @@ class TestWriteBatchFatalOnTypeMapError:
             yield _FakeTxnConn()
 
         handler._engine.begin = _fake_begin
-
-        async def _not_committed(*_args, **_kwargs):
-            return False
-
-        handler._check_batch_committed = _not_committed  # type: ignore[method-assign]
 
         # The schema contract's prepare_records is called inside _insert_records;
         # route the UnmappedTypeError through that entry.
@@ -299,11 +286,6 @@ class TestWriteBatchFatalOnTypeMapError:
             schema_contract=None,
         )
 
-        async def _not_committed(*_args, **_kwargs):
-            return False
-
-        handler._check_batch_committed = _not_committed  # type: ignore[method-assign]
-
         import pyarrow as pa
 
         result = await handler.write_batch(
@@ -338,7 +320,6 @@ class TestWriteBatchFatalOnTypeMapError:
         handler._connected = True
         handler._streams["s1"] = _StreamState(
             table=MagicMock(),
-            batch_commits_table=MagicMock(),
             write_mode="upsert",
             conflict_keys=[],
             schema_contract=contract_mock,
@@ -353,11 +334,6 @@ class TestWriteBatchFatalOnTypeMapError:
             yield _FakeTxnConn()
 
         handler._engine.begin = _fake_begin
-
-        async def _not_committed(*_args, **_kwargs):
-            return False
-
-        handler._check_batch_committed = _not_committed  # type: ignore[method-assign]
 
         import pyarrow as pa
 
@@ -495,8 +471,6 @@ class TestEnsureTablesEngineNoneRaises:
             GenericSQLConnector, "_build_column_defs", return_value=[]
         ), mock_patch(
             "cdk.sql.generic.build_create_table_sql", return_value="CREATE ..."
-        ), mock_patch.object(
-            GenericSQLConnector, "_build_batch_commits_ddl", return_value="CREATE ..."
         ):
             with pytest.raises(
                 AdbcConfigurationError, match=r"connect\(\) must be called"
@@ -636,11 +610,6 @@ class TestDDLLockSerialization:
             "build_create_table_sql",
             lambda *a, **k: "CREATE TABLE t (id BIGINT)",
         )
-        monkeypatch.setattr(
-            GenericSQLConnector,
-            "_build_batch_commits_ddl",
-            lambda self, schema_name, mapper: "CREATE TABLE _batch_commits (x BIGINT)",
-        )
 
         in_flight = 0
         max_concurrent = 0
@@ -654,8 +623,8 @@ class TestDDLLockSerialization:
             # this critical section if the lock isn't holding.
             await asyncio.sleep(0.01)
             in_flight -= 1
-            # Reflection returns (target_table, batch_commits_table).
-            return object(), object()
+            # Reflection returns the single bound target table.
+            return object()
 
         # The handler's _ensure_tables_exist uses engine.begin() as an async
         # context manager; bypass with a coroutine returning a prepared ctx.

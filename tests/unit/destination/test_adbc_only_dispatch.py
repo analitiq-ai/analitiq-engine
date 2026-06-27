@@ -26,7 +26,6 @@ from cdk.sql import generic as database_module
 from cdk.sql.dialects import SqlDialect
 from cdk.sql.generic import (
     _FATAL_ADBC_ERROR_NAMES,
-    AdbcCommitRecordError,
     AdbcConfigurationError,
     GenericSQLConnector,
     _is_fatal_adbc_error,
@@ -41,10 +40,10 @@ class _FixtureAdbcDialect(SqlDialect):
 
     Stands in for a connector package's dialect: renders canonical Arrow types
     to canned native DDL strings (overriding ``render_column_type`` — the single
-    write surface — rather than the old per-purpose ADBC hooks), keys
-    ``_batch_commits`` text columns on a bounded type, supports ADBC upsert, and
-    folds schema names upper-case (the way Snowflake's package dialect would) so
-    the normalize-reaches-the-ingest-site coverage has something to assert.
+    write surface — rather than the old per-purpose ADBC hooks), supports ADBC
+    upsert, and folds schema names upper-case (the way Snowflake's package
+    dialect would) so the normalize-reaches-the-ingest-site coverage has
+    something to assert.
     """
 
     name = "fixture"
@@ -65,11 +64,6 @@ class _FixtureAdbcDialect(SqlDialect):
 
     def render_column_type(self, canonical, type_mapper, *, params=None) -> str:
         return self._CANONICAL_TO_DDL[canonical]
-
-    def batch_commits_key_type(self, type_mapper) -> str:
-        # Bounded text type for the PK text columns (as MySQL/MariaDB would
-        # need, and as the old adbc_text_type hook returned).
-        return "VARCHAR(255)"
 
     def adbc_stage_table_sql(self, stage_qualified, target_qualified) -> str:
         return (
@@ -150,34 +144,6 @@ class TestReclassify:
         assert "ProgrammingError" in str(wrapped)
         assert "missing table foo" in str(wrapped)
         assert wrapped.__cause__ is inner
-
-
-class TestAdbcCommitRecordError:
-    def test_insert_message_warns_duplication(self):
-        err = AdbcCommitRecordError(RuntimeError("commit failed"), "insert")
-        assert "duplicate" in str(err)
-        assert err.write_mode == "insert"
-
-    def test_truncate_insert_message_is_idempotent(self):
-        err = AdbcCommitRecordError(
-            RuntimeError("commit failed"),
-            "truncate_insert",
-        )
-        assert "idempotent" in str(err)
-        assert err.write_mode == "truncate_insert"
-
-    def test_upsert_message_is_idempotent_under_keys(self):
-        err = AdbcCommitRecordError(RuntimeError("commit failed"), "upsert")
-        assert "MERGE" in str(err) or "idempotent" in str(err)
-        assert err.write_mode == "upsert"
-
-    def test_unknown_mode_rejected_at_runtime(self):
-        # ``Literal`` constrains callers at type-check time; the runtime
-        # check catches code that bypasses typing (tests, dynamic
-        # dispatch) so a typo doesn't produce a misleading "unknown
-        # retry semantics" message in production failure summaries.
-        with pytest.raises(ValueError, match="write_mode must be one of"):
-            AdbcCommitRecordError(RuntimeError("x"), "weird_mode")
 
 
 class TestUnsupportedHooksAreFatal:
@@ -295,164 +261,6 @@ class TestStageTokenUniqueness:
             assert (
                 len(stage_name) <= 63
             ), f"stage name {stage_name!r} exceeds Postgres NAMEDATALEN"
-
-
-class TestCommitCollisionHandling:
-    """`_handle_commit_collision` must raise AdbcCommitRecordError for
-    insert mode (which would silently duplicate) and return silently for
-    upsert / truncate_insert (which are idempotent on re-ingest)."""
-
-    def _state(self, write_mode):
-        from cdk.sql.generic import _StreamState
-
-        return _StreamState(
-            schema_name="analytics", table_name="t", write_mode=write_mode
-        )
-
-    def test_insert_mode_raises(self):
-        h = GenericSQLConnector()
-        cause = RuntimeError("collision")
-        with pytest.raises(AdbcCommitRecordError) as exc:
-            h._handle_commit_collision(
-                self._state("insert"),
-                "r",
-                "s",
-                1,
-                cause,
-            )
-        assert exc.value.write_mode == "insert"
-        assert exc.value.__cause__ is cause
-
-    def test_upsert_mode_returns_silently(self):
-        h = GenericSQLConnector()
-        h._handle_commit_collision(
-            self._state("upsert"),
-            "r",
-            "s",
-            1,
-            RuntimeError("collision"),
-        )
-
-    def test_truncate_insert_mode_returns_silently(self):
-        h = GenericSQLConnector()
-        h._handle_commit_collision(
-            self._state("truncate_insert"),
-            "r",
-            "s",
-            1,
-            RuntimeError("collision"),
-        )
-
-
-class TestRecordBatchCommitViaAdbc:
-    """The base ``_record_batch_commit_via_adbc`` emits a plain INSERT and
-    treats an IntegrityError *cause* as a concurrent-retry collision (via
-    ``_handle_commit_collision`` semantics). The MERGE-based commit-record
-    specialization (BigQuery's PK-not-enforced path) lives in that connector
-    package, not here."""
-
-    def _state(self, write_mode="insert"):
-        from cdk.sql.generic import _StreamState
-
-        return _StreamState(
-            schema_name="analytics", table_name="t", write_mode=write_mode
-        )
-
-    @pytest.mark.asyncio
-    async def test_emits_plain_insert(self, monkeypatch):
-        captured = {}
-
-        def fake_execute(self, sql, params):
-            captured["sql"] = sql
-            captured["params"] = params
-            return -1
-
-        monkeypatch.setattr(GenericSQLConnector, "_execute_adbc_dml_sync", fake_execute)
-        h = GenericSQLConnector()
-        await h._record_batch_commit_via_adbc(
-            self._state(),
-            "r",
-            "s",
-            3,
-            b"cur",
-            7,
-        )
-        assert captured["sql"].startswith("INSERT INTO")
-        assert '"_batch_commits"' in captured["sql"]
-        assert captured["params"] == ("r", "s", 3, b"cur", 7)
-
-    @pytest.mark.asyncio
-    async def test_integrity_error_cause_is_collision_not_fatal(self, monkeypatch):
-        # The INSERT raises AdbcConfigurationError whose cause is an
-        # IntegrityError → treated as a concurrent-retry collision. For
-        # truncate_insert (idempotent) the handler returns silently.
-        # The class name must be exactly "IntegrityError" — the collision
-        # branch matches on the MRO class name, not the type identity.
-        class IntegrityError(Exception):
-            pass
-
-        def fake_execute(self, sql, params):
-            wrapped = AdbcConfigurationError("IntegrityError: dup pk")
-            wrapped.__cause__ = IntegrityError("dup pk")
-            raise wrapped
-
-        monkeypatch.setattr(GenericSQLConnector, "_execute_adbc_dml_sync", fake_execute)
-        h = GenericSQLConnector()
-        # truncate_insert collision → idempotent → returns silently.
-        await h._record_batch_commit_via_adbc(
-            self._state("truncate_insert"),
-            "r",
-            "s",
-            1,
-            b"cur",
-            1,
-        )
-
-    @pytest.mark.asyncio
-    async def test_integrity_error_cause_insert_mode_raises(self, monkeypatch):
-        class IntegrityError(Exception):
-            pass
-
-        def fake_execute(self, sql, params):
-            wrapped = AdbcConfigurationError("IntegrityError: dup pk")
-            wrapped.__cause__ = IntegrityError("dup pk")
-            raise wrapped
-
-        monkeypatch.setattr(GenericSQLConnector, "_execute_adbc_dml_sync", fake_execute)
-        h = GenericSQLConnector()
-        with pytest.raises(AdbcCommitRecordError) as exc:
-            await h._record_batch_commit_via_adbc(
-                self._state("insert"),
-                "r",
-                "s",
-                1,
-                b"cur",
-                1,
-            )
-        assert exc.value.write_mode == "insert"
-
-    @pytest.mark.asyncio
-    async def test_non_integrity_fatal_propagates(self, monkeypatch):
-        # A ProgrammingError cause is genuinely fatal, not a collision.
-        class _ProgrammingError(Exception):
-            pass
-
-        def fake_execute(self, sql, params):
-            wrapped = AdbcConfigurationError("ProgrammingError: bad sql")
-            wrapped.__cause__ = _ProgrammingError("bad sql")
-            raise wrapped
-
-        monkeypatch.setattr(GenericSQLConnector, "_execute_adbc_dml_sync", fake_execute)
-        h = GenericSQLConnector()
-        with pytest.raises(AdbcConfigurationError):
-            await h._record_batch_commit_via_adbc(
-                self._state("insert"),
-                "r",
-                "s",
-                1,
-                b"cur",
-                1,
-            )
 
 
 class TestIntegrityErrorMroDetection:
@@ -690,7 +498,6 @@ class TestAdbcDdlBuilders:
     * synthetic ``_synced_at`` audit column appears when the contract doesn't
       declare it (and uses the dialect's timestamp type)
     * PRIMARY KEY clause is emitted when the contract declares primary keys
-    * ``_batch_commits`` uses the dialect's binary / text / timestamp types
     * the PK clause carries the dialect's NOT ENFORCED variant when set
     """
 
@@ -765,29 +572,13 @@ class TestAdbcDdlBuilders:
         # Exactly one _synced_at declaration
         assert ddl.count('"_synced_at"') == 1
 
-    def test_batch_commits_ddl_uses_dialect_types(self):
-        h = _FixtureConnector()
-        # The fixture dialect renders types from canonical strings, ignoring
-        # the mapper, so any object satisfies the signature here.
-        ddl = h._build_batch_commits_ddl("analytics", object())
-        assert '"_batch_commits"' in ddl
-        assert "VARBINARY" in ddl  # render_column_type("Binary")
-        assert "TIMESTAMP" in ddl  # render_column_type("Timestamp(MICROSECOND)")
-        assert "VARCHAR(255)" in ddl  # batch_commits_key_type
-        # Folding dialect normalizes the schema in the qualified name.
-        assert '"ANALYTICS"."_batch_commits"' in ddl
-
     def test_pk_clause_not_enforced_variant(self):
         # The backtick fixture sets pk_not_enforced; the bare fixture doesn't.
         bq = _FixtureBacktickConnector()
         assert "NOT ENFORCED" in bq.dialect.pk_clause(["id"])
-        bq_commits = bq._build_batch_commits_ddl("analytics", object())
-        assert "NOT ENFORCED" in bq_commits
 
         snow = _FixtureConnector()
         assert "NOT ENFORCED" not in snow.dialect.pk_clause(["id"])
-        snow_commits = snow._build_batch_commits_ddl("analytics", object())
-        assert "NOT ENFORCED" not in snow_commits
 
 
 class TestDisconnectClosesAdbc:

@@ -226,15 +226,6 @@ class SqlDialect:
         """
         return "CURRENT_TIMESTAMP"
 
-    def batch_commits_key_type(self, type_mapper: TypeMapper) -> str:
-        """Native type for the ``_batch_commits`` primary-key text columns.
-
-        Defaults to the write map's ``Utf8``. Systems whose unbounded text
-        type cannot be a primary key (MySQL/MariaDB: TEXT keys need a
-        prefix length) override with a bounded type.
-        """
-        return self.render_column_type("Utf8", type_mapper)
-
     def adbc_stage_table_sql(self, stage_qualified: str, target_qualified: str) -> str:
         """Return SQL creating an empty staging table shaped like the target.
 
@@ -263,20 +254,6 @@ class SqlDialect:
         if schema_name:
             return {"db_schema_name": self.normalize_schema(schema_name)}
         return {}
-
-    def adbc_binary_bind(self, value: bytes) -> tuple[str, Any]:
-        """Return placeholder SQL and bind value for a binary ADBC parameter.
-
-        Targets the ``_batch_commits.committed_cursor`` parameterized
-        statement. Default: a plain ``?`` placeholder bound to the raw bytes,
-        which the
-        postgres driver and most others accept. Drivers that cannot bind a
-        binary parameter (Snowflake rejects it with "Unsupported bind param
-        type binary") override this to bind a hex string and convert it back
-        in SQL (``TO_BINARY(?, 'HEX')``); the column stays BINARY, so reads
-        round-trip to the original bytes either way.
-        """
-        return "?", value
 
     # ---- discovery queries (qmark placeholders + positional params) --------
     def schemas_query(self) -> Query:

@@ -1,6 +1,6 @@
 # gRPC Streaming Architecture
 
-**Scope:** This doc owns the engine<->destination gRPC protocol — wire messages, the Arrow IPC payload, cursor encode/decode, batch idempotency / exactly-once semantics, and the ack/retry flow. Environment variables, docker-compose, the handler registry, and per-handler config live in [destination-config.md](destination-config.md).
+**Scope:** This doc owns the engine<->destination gRPC protocol — wire messages, the Arrow IPC payload, cursor encode/decode, row-level idempotency semantics, and the ack/retry flow. Environment variables, docker-compose, the handler registry, and per-handler config live in [destination-config.md](destination-config.md).
 
 ## Overview
 
@@ -44,7 +44,7 @@ On `StreamRecords` the engine sends a `StreamRequest` carrying either a `SchemaM
 |---------|-----------|---------|
 | `SchemaMessage` | Engine -> Dest | Identifies the stream + write mode (once at stream start) |
 | `SchemaAck` | Dest -> Engine | Whether the schema was accepted |
-| `RecordBatch` | Engine -> Dest | Arrow IPC payload + idempotency keys + cursor |
+| `RecordBatch` | Engine -> Dest | Arrow IPC payload + content-derived record ids + cursor |
 | `BatchAck` | Dest -> Engine | Status, records written, committed cursor |
 
 ### Payload format: Arrow IPC only
@@ -70,13 +70,13 @@ message SchemaMessage {
 
 ```protobuf
 message RecordBatch {
-  string run_id = 1;              // idempotency key
-  string stream_id = 2;           // idempotency key
-  uint64 batch_seq = 3;           // idempotency key, monotonic per stream within run
+  string run_id = 1;              // routing/scoping identifier (not an idempotency key)
+  string stream_id = 2;           // routing/scoping identifier (not an idempotency key)
+  uint64 batch_seq = 3;           // monotonic ordering/log sequence per stream within a run (not an idempotency key)
   PayloadFormat format = 4;       // always PAYLOAD_FORMAT_ARROW_IPC
   bytes payload = 5;              // Arrow IPC stream (single record batch)
   uint32 record_count = 6;
-  repeated string record_ids = 7; // stable per-record IDs, parallel to payload rows
+  repeated string record_ids = 7; // content-derived row identities (SHA-256), parallel to payload rows
   Cursor cursor = 8;              // MAX watermark in this batch
 }
 ```
@@ -102,7 +102,7 @@ The engine computes it as the **MAX** watermark across the batch (`compute_max_c
 enum AckStatus {
   ACK_STATUS_UNSPECIFIED = 0;
   ACK_STATUS_SUCCESS = 1;            // all written, cursor advanced
-  ACK_STATUS_ALREADY_COMMITTED = 2;  // idempotent replay, no-op
+  ACK_STATUS_ALREADY_COMMITTED = 2;  // idempotent replay, no-op (file destination's manifest; the SQL destination writes idempotently and returns SUCCESS)
   ACK_STATUS_RETRYABLE_FAILURE = 3;  // no commit, safe to retry whole batch
   ACK_STATUS_FATAL_FAILURE = 4;      // no commit, do not retry, send to DLQ
 }
@@ -127,16 +127,19 @@ The engine deliberately does **not** set `grpc.keepalive_*` options on the clien
 
 ### Opaque cursor
 
-The destination never parses the cursor; the engine controls its semantics (timestamp + tie-breaker, LSN, composite key, ...). The destination stores it in its idempotency table and echoes it back. This keeps cursor typing out of every destination.
+The destination never parses the cursor; the engine controls its semantics (timestamp + tie-breaker, LSN, composite key, ...). The destination stores the cursor and echoes it back in the ACK; it keeps no batch idempotency table. This keeps cursor typing out of every destination.
 
-### Batch-level idempotency, exactly-once
+### Row-level, content-derived idempotency
 
-Each batch is keyed by `(run_id, stream_id, batch_seq)`. Before applying a batch the handler checks whether that key was already committed:
+Idempotency is enforced at the destination on **row identity**, not batch position. `batch_seq` is a monotonic ordering/log sequence per stream within a run — it is never the dedup key, and neither are `run_id`/`stream_id`. The SQL destination writes idempotently by content and returns `SUCCESS`; it keeps no per-batch commit ledger. How identity is enforced depends on the write mode:
 
-1. Already committed -> return `ALREADY_COMMITTED` with the stored cursor (no rewrite).
-2. New -> write records, record the commit, return `SUCCESS`.
+- **`upsert`** — MERGE / INSERT-or-UPDATE on the stream's `conflict_keys`.
+- **`truncate_insert`** — full refresh (TRUNCATE then insert); idempotent by construction.
+- **`insert`** — each row is inserted only if its identity is not already present (one `INSERT ... SELECT ... WHERE NOT EXISTS (...)` per row, built with SQLAlchemy core, no dialect-specific SQL). The identity is the contract primary key, or — for a keyless insert stream — a synthetic engine-managed `_record_hash` column (full SHA-256 of the row content) declared as the table's `PRIMARY KEY`, the structural uniqueness backstop. Two byte-identical keyless rows collapse to one.
 
-This survives a network failure that drops the ACK after the destination already committed: the engine retries, the destination recognizes the key, and no duplicate data lands. The commit-record table is the handler's concern; see [destination-config.md](destination-config.md#idempotency).
+This survives a network failure that drops the ACK after the destination already wrote: the engine retries, the row identity dedups, and no duplicate data lands. See [destination-config.md](destination-config.md#idempotency).
+
+ADBC-only transports (Snowflake/BigQuery) do not yet do the keyless `insert` anti-join — plain `insert` there is at-least-once (a noted follow-up); `upsert` and `truncate_insert` remain idempotent.
 
 ### All-or-nothing batches
 
@@ -144,7 +147,8 @@ A batch wholly succeeds or wholly fails. The cursor advances only on `SUCCESS`, 
 
 | Failure | AckStatus | Engine action |
 |---------|-----------|---------------|
-| ACK lost after commit (replay) | `ALREADY_COMMITTED` | Persist cursor, continue |
+| ACK lost after write (replay), SQL destination | `SUCCESS` | Row identity dedups the rewrite; persist cursor, continue |
+| ACK lost after write (replay), file destination | `ALREADY_COMMITTED` | Manifest recognizes the batch; persist cursor, continue |
 | Connection drop / timeout / deadlock | `RETRYABLE_FAILURE` | Retry whole batch with backoff |
 | Constraint violation / type error | `FATAL_FAILURE` | Send whole batch to DLQ, continue |
 
@@ -154,7 +158,7 @@ The client sends a batch, awaits its ACK, then sends the next (`send_batch` bloc
 
 ### Record IDs for DLQ correlation
 
-`record_ids` runs parallel to the payload rows and is stable across retries, so a DLQ'd row traces back to its source record even after a batch is reprocessed.
+`record_ids` are content-derived row identities (SHA-256 of the row content), parallel to the payload rows and stable across retries, so a DLQ'd row traces back to its source record even after a batch is reprocessed. For a keyless `insert` stream the same hash is the `_record_hash` primary-key value written to the destination.
 
 ## Type Map (code surfaces)
 

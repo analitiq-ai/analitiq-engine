@@ -10,58 +10,53 @@ from src.grpc.generated.analitiq.v1 import AckStatus
 
 
 class TestGenerateRecordId:
-    """Tests for record ID generation."""
+    """Record identity is content-derived and position-independent (#282).
 
-    def test_generate_record_id_with_position(self):
-        """Test generating record ID using batch position."""
+    The id is a function of the record content alone -- never the run, the
+    batch sequence, or the row's offset -- so the same logical row hashes to
+    the same id across attempts and across an inclusive cursor re-read, which
+    is what lets the destination enforce idempotency on row identity instead
+    of a positional ledger.
+    """
+
+    def test_same_record_same_id_regardless_of_position(self):
+        """The same record content always yields the same id; no run/batch/
+        index dimension can move it (positional independence is the point)."""
         record = {"id": 1, "name": "test"}
-        rid = generate_record_id(
-            record=record,
-            run_id="run-123",
-            batch_seq=1,
-            index=0,
+        assert generate_record_id(record) == generate_record_id(dict(record))
+
+    def test_different_content_different_id(self):
+        """Distinct record content hashes to distinct ids."""
+        assert generate_record_id({"id": 1, "name": "a"}) != generate_record_id(
+            {"id": 2, "name": "b"}
         )
 
-        assert rid is not None
-        assert len(rid) == 16  # sha256[:16]
-
-    def test_generate_record_id_with_primary_key(self):
-        """Test generating record ID using primary key fields."""
-        record = {"id": 123, "name": "test", "value": 42}
-        rid = generate_record_id(
-            record=record,
-            run_id="run-456",
-            batch_seq=2,
-            index=5,
-            primary_key_fields=["id"],
+    def test_primary_key_fields_derive_id_from_keys_only(self):
+        """With primary_key_fields the id derives only from those fields, so two
+        rows sharing the key values but differing elsewhere hash equal."""
+        a = {"id": 7, "name": "first", "value": 1}
+        b = {"id": 7, "name": "second", "value": 99}
+        assert generate_record_id(a, primary_key_fields=["id"]) == generate_record_id(
+            b, primary_key_fields=["id"]
+        )
+        # Different key values still diverge.
+        c = {"id": 8, "name": "first", "value": 1}
+        assert generate_record_id(a, primary_key_fields=["id"]) != generate_record_id(
+            c, primary_key_fields=["id"]
         )
 
-        assert rid is not None
-        assert len(rid) == 16
+    def test_two_identical_keyless_records_share_id(self):
+        """Byte-identical keyless records produce the same id -- the synthetic
+        ``_record_hash`` dedup key for a keyless insert stream."""
+        assert generate_record_id({"id": 1, "name": "test"}) == generate_record_id(
+            {"id": 1, "name": "test"}
+        )
 
-    def test_record_id_deterministic(self):
-        """Test that record ID is deterministic for same inputs."""
-        record = {"id": 1, "name": "test"}
-        rid1 = generate_record_id(record, "run-123", 1, 0)
-        rid2 = generate_record_id(record, "run-123", 1, 0)
-
-        assert rid1 == rid2
-
-    def test_record_id_differs_by_batch(self):
-        """Test that record ID differs for different batches."""
-        record = {"id": 1, "name": "test"}
-        rid1 = generate_record_id(record, "run-123", 1, 0)
-        rid2 = generate_record_id(record, "run-123", 2, 0)
-
-        assert rid1 != rid2
-
-    def test_record_id_differs_by_run(self):
-        """Test that record ID differs for different runs."""
-        record = {"id": 1, "name": "test"}
-        rid1 = generate_record_id(record, "run-123", 1, 0)
-        rid2 = generate_record_id(record, "run-456", 1, 0)
-
-        assert rid1 != rid2
+    def test_returned_id_is_full_sha256_hex(self):
+        """The id is the full (untruncated) 64-char SHA-256 hex digest."""
+        rid = generate_record_id({"id": 1, "name": "test"})
+        assert len(rid) == 64
+        assert all(c in "0123456789abcdef" for c in rid)
 
 
 class TestBatchResult:

@@ -112,7 +112,6 @@ def mock_state_manager():
     """Mock state manager for testing."""
     state_manager = Mock()
     state_manager.start_run = Mock(return_value="test-run-id")
-    state_manager.finalize_run = Mock()
     state_manager.get_checkpoint = Mock(return_value={})
     state_manager.checkpoint = AsyncMock()
     return state_manager
