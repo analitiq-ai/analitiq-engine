@@ -61,21 +61,28 @@ class FakeArrowCursor:
         return pa.Table.from_pylist(self._rows)
 
     def close(self) -> None:
-        pass
+        self._conn.cursor_close_attempts += 1
+        if self._conn.fail_close is not None:
+            raise self._conn.fail_close
 
 
 class FakeAdbcConnection:
     """In-memory DBAPI connection recording statements, commits, rollbacks."""
 
     def __init__(
-        self, responder: Responder | None, fail_execute: Exception | None
+        self,
+        responder: Responder | None,
+        fail_execute: Exception | None,
+        fail_close: Exception | None = None,
     ) -> None:
         self.responder = responder
         self.fail_execute = fail_execute
+        self.fail_close = fail_close
         self.executed: list[tuple[str, list[Any]]] = []
         self.commits = 0
         self.rollbacks = 0
         self.closed = False
+        self.cursor_close_attempts = 0
 
     def cursor(self) -> FakeArrowCursor:
         return FakeArrowCursor(self)
@@ -96,7 +103,9 @@ class FakeAdbcRuntime:
     Each ``open_adbc_connection()`` hands back a fresh connection (ADBC drivers
     do not pool), all sharing the same responder + a recorded-connections list
     so a test can assert what ran and that the connection was closed. Pass
-    ``fail_execute`` to make every ``cursor.execute`` raise (driver-error path).
+    ``fail_execute`` to make every ``cursor.execute`` raise (driver-error path);
+    pass ``fail_close`` to make every ``cursor.close`` raise (the close must not
+    mask the body's exception).
     """
 
     def __init__(
@@ -106,6 +115,7 @@ class FakeAdbcRuntime:
         mapper: Any = None,
         responder: Responder | None = None,
         fail_execute: Exception | None = None,
+        fail_close: Exception | None = None,
     ) -> None:
         self.driver = driver
         self.is_adbc = True
@@ -113,6 +123,7 @@ class FakeAdbcRuntime:
         self._mapper = mapper
         self._responder = responder
         self._fail_execute = fail_execute
+        self._fail_close = fail_close
         self.connections: list[FakeAdbcConnection] = []
 
     @property
@@ -120,7 +131,7 @@ class FakeAdbcRuntime:
         return self._mapper
 
     def open_adbc_connection(self) -> FakeAdbcConnection:
-        conn = FakeAdbcConnection(self._responder, self._fail_execute)
+        conn = FakeAdbcConnection(self._responder, self._fail_execute, self._fail_close)
         self.connections.append(conn)
         return conn
 
