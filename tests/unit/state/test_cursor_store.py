@@ -108,6 +108,19 @@ def test_corrupt_json_reverts_to_full_scan_loudly(tmp_path, caplog):
     assert any("unreadable" in r.message for r in caplog.records)
 
 
+def test_non_object_payload_reverts_to_full_scan_loudly(tmp_path, caplog):
+    # A valid-JSON-but-non-object file (a truncation that still parses, or
+    # tampering) must degrade to a re-scan, not raise AttributeError out of get().
+    store = CursorStore(tmp_path)
+    path = tmp_path / _PIPELINE / f"{_STREAM}.json"
+    path.parent.mkdir(parents=True)
+    path.write_text("42")
+
+    with caplog.at_level(logging.WARNING, logger="src.state.store"):
+        assert store.get(_PIPELINE, _STREAM) is None
+    assert any("unreadable" in r.message for r in caplog.records)
+
+
 def test_non_utf8_file_reverts_to_full_scan_loudly(tmp_path, caplog):
     # A corrupt/binary bundle artifact (invalid UTF-8) makes read_text raise
     # UnicodeDecodeError (a ValueError); it must degrade to a re-scan, not crash.
@@ -132,6 +145,20 @@ def test_bad_tagged_datetime_reverts_to_full_scan_loudly(tmp_path, caplog, bad_v
     path.write_text(
         json.dumps({"cursor": {"__type__": "datetime", "value": bad_value}})
     )
+
+    with caplog.at_level(logging.WARNING, logger="src.state.store"):
+        assert store.get(_PIPELINE, _STREAM) is None
+    assert any("unreadable" in r.message for r in caplog.records)
+
+
+def test_bad_tagged_decimal_reverts_to_full_scan_loudly(tmp_path, caplog):
+    # Decimal("garbage") raises InvalidOperation (an ArithmeticError, NOT a
+    # ValueError); decode_value normalizes it to ValueError so a corrupt decimal
+    # checkpoint degrades to a re-scan instead of crashing state load.
+    store = CursorStore(tmp_path)
+    path = tmp_path / _PIPELINE / f"{_STREAM}.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"cursor": {"__type__": "decimal", "value": "garbage"}}))
 
     with caplog.at_level(logging.WARNING, logger="src.state.store"):
         assert store.get(_PIPELINE, _STREAM) is None

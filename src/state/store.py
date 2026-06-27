@@ -83,12 +83,21 @@ class CursorStore:
             return None
         try:
             payload = json.loads(path.read_text())
+            if not isinstance(payload, dict):
+                # A valid-JSON-but-non-object file (a truncation that still parses,
+                # or external tampering -- the store only ever writes an object)
+                # is corruption, not a cursor; surface it as a ValueError so the
+                # handler below degrades it like any other unreadable checkpoint.
+                raise ValueError(
+                    f"expected a JSON object, got {type(payload).__name__}"
+                )
             return decode_value(payload.get("cursor"))
         except (OSError, ValueError, TypeError) as exc:
-            # Torn write, unparseable JSON, a bad ISO value (decode_value raises
-            # ValueError/TypeError; JSONDecodeError is a ValueError), or a
-            # non-UTF-8 file (UnicodeDecodeError is a ValueError). Treat any
-            # unreadable checkpoint the same: resume with a full re-scan, loudly.
+            # Torn write, unparseable JSON, a non-object payload, a bad ISO value
+            # (decode_value raises ValueError/TypeError; JSONDecodeError is a
+            # ValueError), or a non-UTF-8 file (UnicodeDecodeError is a
+            # ValueError). Treat any unreadable checkpoint the same: resume with a
+            # full re-scan, loudly.
             logger.warning(
                 "cursor checkpoint %s is unreadable (%s); stream resumes with a "
                 "full re-scan",
