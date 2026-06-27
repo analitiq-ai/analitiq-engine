@@ -27,7 +27,7 @@ from typing import Any
 
 import pyarrow as pa
 
-from ._adbc_utils import _adbc_execute
+from ._adbc_utils import _adbc_execute, _close_cursor_quietly
 
 logger = logging.getLogger(__name__)
 
@@ -99,10 +99,7 @@ class AdbcReader:
             # memory bounded.
             table = cursor.fetch_arrow_table()
         finally:
-            try:
-                cursor.close()
-            except Exception:
-                logger.warning("ADBC cursor close failed", exc_info=True)
+            _close_cursor_quietly(cursor)
         if table.num_rows == 0:
             return []
         batches: list[pa.RecordBatch] = table.to_batches()
