@@ -437,8 +437,6 @@ class TestUpsertFailsLoudWithoutConflictKeys:
                 "s1",
                 1,
                 MagicMock(),
-                b"",
-                1,
             )
 
         # Fail before any ingest/MERGE — no partial write.

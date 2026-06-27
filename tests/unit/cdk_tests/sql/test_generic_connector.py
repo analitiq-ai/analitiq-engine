@@ -16,7 +16,7 @@ the thin control-plane delegators:
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pyarrow as pa
 import pytest
