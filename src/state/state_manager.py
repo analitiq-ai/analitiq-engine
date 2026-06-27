@@ -4,7 +4,6 @@ import json
 import logging
 import os
 import threading
-from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -33,12 +32,13 @@ class StateManager:
         self.pipeline_id = pipeline_id
         self.base_dir = Path(base_dir)
         self.pipeline_dir = self.base_dir / pipeline_id
-        # The consolidated resume bookmark: the cloud deployment delivers it in
-        # the config bundle, a local run writes it at the end (write_resume_snapshot).
-        # It sits at the top of state/ (not beside the per-stream checkpoints,
-        # which own the state/{pipeline_id}/{stream_id}.json namespace) so a
-        # stream named "resume" can never collide with it.
-        self._resume_path = self.base_dir / "resume.json"
+        # The consolidated resume bookmark, scoped per pipeline like every other
+        # state file (the per-stream checkpoints and batch-commit log live under
+        # the same dir): the cloud deployment delivers it in the config bundle, a
+        # local run writes it at the end (write_resume_snapshot). Pipeline-scoping
+        # stops a second pipeline that shares the local state/ dir from
+        # overwriting this pipeline's bookmark.
+        self._resume_path = self.pipeline_dir / "resume.json"
 
         # Thread safety
         self.lock = threading.RLock()
@@ -53,6 +53,15 @@ class StateManager:
         # an on-disk checkpoint so a fresh process resumes from where the last
         # run left off instead of re-scanning the whole source.
         self._cursors: dict[str, dict[str, Any]] = {}
+        # The committed (destination-ACKed) high-water mark per stream -- the
+        # value write_resume_snapshot persists. Kept apart from _cursors, which
+        # the source advances as it yields batches, ahead of the ACK: snapshotting
+        # that pre-ACK position would let a failed or un-ACKed stream skip rows
+        # that never landed. Seeded from the delivered resume file so a stream
+        # that does not advance this run keeps its prior bookmark, then updated
+        # only from save_stream_checkpoint -- the same ACKed watermark the
+        # ANALITIQ_STATE log emits, so the local snapshot matches the cloud one.
+        self._committed_cursors: dict[str, Any] = {}
         self._cursor_store = CursorStore(self.base_dir)
         self._restore_durable_cursors()
 
@@ -62,14 +71,16 @@ class StateManager:
         The per-stream ``state/`` checkpoints are wiped on a fresh container, so
         without this an incremental stream would find no bookmark on re-run
         and full-rescan the source. The deployment delivers the cursors it
-        harvested from the prior run's emitted state as ``state/resume.json``
-        in the config bundle (a local run writes the same file itself, see
-        :meth:`write_resume_snapshot`); we decode it into the same
-        ``{"cursor": <value>}`` shape
+        harvested from the prior run's emitted state as
+        ``state/{pipeline_id}/resume.json`` in the config bundle (a local run
+        writes the same file itself, see :meth:`write_resume_snapshot`); we
+        decode it into the same ``{"cursor": <value>}`` shape
         :meth:`get_cursor` returns, keyed by ``stream_id`` with the empty
         partition the engine reads with. The seeded value wins over any stale
         per-stream checkpoint left on disk, since the delivered file is the
-        authoritative bookmark.
+        authoritative bookmark. It also seeds ``_committed_cursors`` so a stream
+        that does not advance this run still carries its bookmark into the next
+        snapshot.
         """
         restored = load_resume_file(self._resume_path)
         seeded = 0
@@ -77,6 +88,7 @@ class StateManager:
             if value is None:
                 continue
             self._cursors[self._cursor_key(stream_id, {})] = {"cursor": value}
+            self._committed_cursors[stream_id] = value
             seeded += 1
         if seeded:
             logger.info(
@@ -85,36 +97,25 @@ class StateManager:
                 self._resume_path,
             )
 
-    def write_resume_snapshot(self, stream_ids: Iterable[str]) -> None:
-        """Persist the run's resume cursors as the consolidated resume file.
+    def write_resume_snapshot(self) -> None:
+        """Persist the committed resume cursors as the consolidated resume file.
 
-        Called once the pipeline finishes so the next local run resumes from the
-        same ``state/resume.json`` the cloud deployment delivers, instead of
-        re-reading the per-stream checkpoints. Each stream's current
-        cursor is taken from the in-run cache, falling back to its on-disk
-        checkpoint; a stream with no cursor yet is omitted (nothing to resume).
-        In the cloud the durable channel stays the emitted ``ANALITIQ_STATE``
-        log lines, so this file is a harmless local artifact there.
+        Called once the pipeline finishes so the next run resumes from the same
+        ``state/{pipeline_id}/resume.json`` the cloud deployment delivers. The
+        snapshot is the committed (destination-ACKed) high-water mark per stream
+        (``_committed_cursors``, advanced only by :meth:`save_stream_checkpoint`)
+        merged with whatever this run resumed from -- never the source's pre-ACK
+        position. So a stream that failed or never ACKed a batch keeps its last
+        safe bookmark instead of skipping un-landed rows, a stream that did not
+        advance this run keeps the value it resumed from, and the file matches
+        the cloud one, which the deployment builds from the same emitted ACKed
+        watermarks. In the cloud the durable channel stays the emitted
+        ``ANALITIQ_STATE`` log lines, so this file is a harmless local artifact
+        there.
         """
-        snapshot: dict[str, Any] = {}
         with self.lock:
-            for stream_id in stream_ids:
-                cursor = self._current_cursor(stream_id)
-                if cursor is not None:
-                    snapshot[stream_id] = cursor
+            snapshot = dict(self._committed_cursors)
         write_resume_file(self._resume_path, snapshot)
-
-    def _current_cursor(self, stream_id: str) -> Any | None:
-        """Latest cursor value for a stream: in-run cache, then on-disk checkpoint.
-
-        Mirrors :meth:`get_cursor`'s resolution (cache wins over disk) but
-        returns the bare cursor value for the empty partition the engine reads
-        with, for building the resume snapshot.
-        """
-        cached = self._cursors.get(self._cursor_key(stream_id, {}))
-        if cached is not None:
-            return cached.get("cursor")
-        return self._cursor_store.get(self.pipeline_id, stream_id)
 
     def init_commit_tracker(self, run_id: str) -> None:
         """Initialize batch commit tracker for the current run."""
@@ -177,6 +178,12 @@ class StateManager:
         emission-time ``emitted_at`` ordering key is not stamped here -- it is
         added to every record centrally by
         :func:`src.state.log_emitter.emit_log`.
+
+        This runs only on a destination ACK (the engine's committed-watermark
+        path), so it is also where the resume snapshot's bookmark advances:
+        recording the committed value here, rather than reading the source's
+        pre-ACK cursor at snapshot time, is what keeps a failed stream from
+        persisting a watermark for rows that never landed.
         """
         emit_state_log(
             run_id=self.current_run_id or "",
@@ -186,6 +193,10 @@ class StateManager:
             cursor_hex=json.dumps(cursor).encode().hex() if cursor else "",
             cursor_value=hwm,
         )
+        committed_value = cursor.get("primary", {}).get("value") if cursor else None
+        if committed_value is not None:
+            with self.lock:
+                self._committed_cursors[stream_name] = committed_value
 
     @staticmethod
     def _cursor_key(stream_name: str, partition: dict[str, Any]) -> str:

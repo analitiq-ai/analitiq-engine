@@ -149,16 +149,22 @@ def write_resume_file(path: Path, cursors: dict[str, Any]) -> None:
     The map is ``{stream_id: cursor}`` with each value tagged by
     :func:`encode_value`, the exact shape :func:`parse_resume_state` decodes and
     the cloud deployment delivers -- so a local run's output and a cloud-injected
-    file are the same contract and decode to the same cursors. Writing it lets
-    the next local run resume without re-reading the per-stream checkpoints.
+    file are the same contract and decode to the same cursors. Each value is a
+    committed (destination-ACKed) high-water mark, so the next run resumes only
+    past rows that actually landed.
 
     This runs at the very end of an otherwise-successful run (the engine calls
     it inside a try block that re-raises anything it does not handle), so it must
-    never raise: a write failure must degrade to a full re-scan on the next run
-    -- loudly -- not abort a run whose data already landed. The encode/serialize
-    step is inside the guard for that reason, and the guarded exception set
-    matches :meth:`CursorStore.get` and :func:`parse_resume_state` -- ``OSError``
-    for the I/O, ``TypeError``/``ValueError`` for a value ``json`` cannot encode.
+    never raise: a write failure must leave the previous snapshot untouched and
+    degrade gracefully -- loudly -- not abort a run whose data already landed.
+    The atomic ``os.replace`` means a failed write never corrupts the existing
+    file; the prior snapshot (an older committed bookmark) stays in place and the
+    next run resumes from it, re-reading anything this run committed past it
+    (deduped by the upsert write mode) rather than skipping it. The
+    encode/serialize step is inside the guard for that reason, and the guarded
+    exception set matches :meth:`CursorStore.get` and :func:`parse_resume_state`
+    -- ``OSError`` for the I/O, ``TypeError``/``ValueError`` for a value ``json``
+    cannot encode.
     """
     tmp = path.parent / f"{path.name}.tmp"
     try:
@@ -173,8 +179,8 @@ def write_resume_file(path: Path, cursors: dict[str, Any]) -> None:
         with contextlib.suppress(OSError):
             tmp.unlink(missing_ok=True)
         logger.warning(
-            "failed to write resume-state file %s (%s); the next run resumes "
-            "from the per-stream checkpoints instead",
+            "failed to write resume-state file %s (%s); the previous snapshot "
+            "stays in place and the next run resumes from it",
             path,
             exc,
         )

@@ -204,9 +204,11 @@ class StreamingEngine:
 
             # Persist the consolidated resume bookmark for the next run. Runs on
             # full and partial success (a fully-failed run raises above and made
-            # no progress to snapshot); cursors advanced by the streams that did
-            # succeed are still captured. Tolerant of I/O failure internally.
-            self.state_manager.write_resume_snapshot(streams.keys())
+            # no progress to snapshot). The snapshot is the committed (ACKed)
+            # watermark per stream, so a stream that failed after extraction
+            # advanced its source cursor contributes only what actually landed.
+            # Tolerant of I/O failure internally.
+            self.state_manager.write_resume_snapshot()
 
         except* StreamProcessingError as eg:
             # Handle stream processing errors specifically (Python 3.11+)

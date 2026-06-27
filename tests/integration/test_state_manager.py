@@ -159,16 +159,34 @@ class TestStateManager:
         assert manager.commit_tracker is not None
 
 
-def _write_resume_file(tmp_path, payload):
+def _write_resume_file(tmp_path, payload, pipeline_id="test-pipeline"):
     """Write the resume-state file the deployment delivers in the config bundle.
 
-    A local run writes the same ``state/resume.json`` itself at the end of a
-    run; these tests stage it directly to exercise the restore path.
+    A local run writes the same ``state/{pipeline_id}/resume.json`` itself at the
+    end of a run; these tests stage it directly to exercise the restore path.
     """
-    resume_path = tmp_path / "state" / "resume.json"
+    resume_path = tmp_path / "state" / pipeline_id / "resume.json"
     resume_path.parent.mkdir(parents=True, exist_ok=True)
     resume_path.write_text(json.dumps(payload))
     return resume_path
+
+
+def _commit(manager, stream_id, value, stream_version=1):
+    """Record a committed (destination-ACKed) high-water mark, as the engine
+    does on ACK via ``save_stream_checkpoint``.
+
+    ``value`` is in the cursor-token form the engine carries: a JSON-native
+    scalar, or the tagged ``{"__type__": ..., "value": ...}`` form for a
+    datetime/date/decimal (which is what survives the ACK round trip, not a raw
+    Python object -- the checkpoint emits it as JSON).
+    """
+    manager.save_stream_checkpoint(
+        stream_name=stream_id,
+        partition={},
+        cursor={"primary": {"field": "cursor", "value": value, "inclusive": True}},
+        hwm=str(value),
+        stream_version=stream_version,
+    )
 
 
 class TestStateManagerDurableRestore:
@@ -176,8 +194,8 @@ class TestStateManagerDurableRestore:
 
     A fresh container's local per-stream ``state/`` checkpoints are empty
     (Fargate wipes them every task), so the cursor a prior run emitted must come
-    back through the ``state/resume.json`` file the deployment delivers in the
-    config bundle. The engine reads the source cursor keyed by
+    back through the ``state/{pipeline_id}/resume.json`` file the deployment
+    delivers in the config bundle. The engine reads the source cursor keyed by
     ``stream_id`` with the empty partition (see ``engine._extract_stage``), so
     that is the shape these assert.
     """
@@ -270,10 +288,12 @@ class TestStateManagerResumeSnapshot:
     """Writing the consolidated resume file a local run hands to its successor.
 
     A local run has no deployment to harvest its emitted state, so the engine
-    writes ``state/resume.json`` itself when the pipeline finishes
-    (``StateManager.write_resume_snapshot``). A fresh manager restores from it
-    exactly as it restores from a cloud-delivered file -- the local output and
-    the cloud-delivered input are the same contract.
+    writes ``state/{pipeline_id}/resume.json`` itself when the pipeline finishes
+    (``StateManager.write_resume_snapshot``). The snapshot is the committed
+    (destination-ACKed) high-water mark per stream -- the same value the
+    deployment harvests from the emitted ``ANALITIQ_STATE`` lines -- so the local
+    output and the cloud-delivered input are the same contract, and a fresh
+    manager restores from it the same way either was produced.
     """
 
     def setup_method(self):
@@ -284,13 +304,19 @@ class TestStateManagerResumeSnapshot:
         if Path(self.temp_dir).exists():
             shutil.rmtree(self.temp_dir)
 
-    async def test_snapshot_round_trips_through_a_fresh_manager(self):
+    def _written(self, pipeline_id="test-pipeline"):
+        return json.loads(
+            (self.tmp_path / "state" / pipeline_id / "resume.json").read_text()
+        )
+
+    async def test_snapshot_round_trips_committed_cursors(self):
         ts = datetime(2024, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
         first = _make_manager(self.tmp_path)
-        await first.save_cursor("orders", {}, {"cursor": 100})
-        await first.save_cursor("events", {}, {"cursor": ts})
+        _commit(first, "orders", 100)
+        # A timestamp crosses the ACK tagged, the same form the cursor token uses.
+        _commit(first, "events", {"__type__": "datetime", "value": ts.isoformat()})
 
-        first.write_resume_snapshot(["orders", "events"])
+        first.write_resume_snapshot()
 
         # A fresh manager (empty cache) seeds only from the resume file.
         second = _make_manager(self.tmp_path)
@@ -298,28 +324,50 @@ class TestStateManagerResumeSnapshot:
         # The timestamp survives tagged, so it comes back a datetime not a string.
         assert await second.get_cursor("events") == {"cursor": ts}
 
-    async def test_snapshot_omits_streams_with_no_cursor(self):
+    async def test_snapshot_uses_committed_not_preack_source_cursor(self):
+        # The source advances the in-run cursor as it yields batches, ahead of
+        # the destination ACK. The snapshot must use the committed (ACKed) value,
+        # never that pre-ACK position -- otherwise a stream that fails after
+        # extraction would persist a watermark for rows that never landed and
+        # skip them on the next run.
         manager = _make_manager(self.tmp_path)
-        await manager.save_cursor("orders", {}, {"cursor": 100})
+        _commit(manager, "orders", 5)  # ACKed up to id=5
+        # Source raced ahead to id=999 but those batches were never ACKed.
+        await manager.save_cursor("orders", {}, {"cursor": 999})
 
-        manager.write_resume_snapshot(["orders", "never_emitted"])
+        manager.write_resume_snapshot()
 
-        written = json.loads((self.tmp_path / "state" / "resume.json").read_text())
-        assert written == {"orders": 100}
+        assert self._written() == {"orders": 5}  # committed 5, not pre-ACK 999
 
-    async def test_snapshot_reads_through_to_on_disk_checkpoint(self):
-        # A stream whose cursor was written to disk by a prior run but not loaded
-        # into this manager's cache is still captured (the disk fallback).
-        first = _make_manager(self.tmp_path)
-        await first.save_cursor("orders", {}, {"cursor": 100})
+    async def test_snapshot_omits_stream_that_never_committed(self):
+        manager = _make_manager(self.tmp_path)
+        _commit(manager, "orders", 100)
+        # Pre-ACK source cursor only, no ACK -> nothing safe to resume from.
+        await manager.save_cursor("never", {}, {"cursor": 7})
 
-        # Fresh manager: cache is cold, the cursor lives only on the per-stream
-        # checkpoint until snapshot reads through to it.
-        second = _make_manager(self.tmp_path)
-        second.write_resume_snapshot(["orders"])
+        manager.write_resume_snapshot()
 
-        written = json.loads((self.tmp_path / "state" / "resume.json").read_text())
-        assert written == {"orders": 100}
+        assert self._written() == {"orders": 100}
+
+    async def test_snapshot_retains_seeded_cursor_for_unadvanced_stream(self):
+        # A stream delivered in resume.json that commits nothing this run must
+        # keep its bookmark in the next snapshot, not vanish from it.
+        _write_resume_file(self.tmp_path, {"orders": 100})
+        manager = _make_manager(self.tmp_path)  # seeds the committed baseline
+
+        manager.write_resume_snapshot()  # no commits this run
+
+        assert self._written() == {"orders": 100}
+
+    async def test_advanced_stream_overrides_seeded_cursor(self):
+        # When a seeded stream does commit this run, the committed value wins.
+        _write_resume_file(self.tmp_path, {"orders": 100})
+        manager = _make_manager(self.tmp_path)
+        _commit(manager, "orders", 250)
+
+        manager.write_resume_snapshot()
+
+        assert self._written() == {"orders": 250}
 
 
 if __name__ == "__main__":
