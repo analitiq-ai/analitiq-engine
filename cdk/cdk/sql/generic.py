@@ -53,6 +53,7 @@ from cdk.type_map import InvalidTypeMapError, TypeMapper, UnmappedTypeError
 from cdk.types import AckStatus, CheckpointStore, Cursor, EndpointScope, SchemaSpec
 
 from ..contract import ColumnDef
+from ._adbc_utils import _close_cursor_quietly
 from .adbc_reader import open_adbc_reader
 from .ddl import build_create_table_sql
 from .ddl import create_table as _sql_create_table
@@ -1619,10 +1620,7 @@ class GenericSQLConnector(BaseDestinationHandler):
                         cursor.execute(stmt)
                     conn.commit()
                 finally:
-                    try:
-                        cursor.close()
-                    except Exception:
-                        logger.debug("ADBC cursor close failed", exc_info=True)
+                    _close_cursor_quietly(cursor)
             except Exception as exc:
                 self._poison_adbc_connection()
                 if _is_fatal_adbc_error(exc):
@@ -1721,10 +1719,7 @@ class GenericSQLConnector(BaseDestinationHandler):
                     row: tuple[Any, ...] | None = cursor.fetchone()
                     return row
                 finally:
-                    try:
-                        cursor.close()
-                    except Exception:
-                        logger.debug("ADBC cursor close failed", exc_info=True)
+                    _close_cursor_quietly(cursor)
             except Exception as exc:
                 self._poison_adbc_connection()
                 if _is_fatal_adbc_error(exc):
@@ -1867,10 +1862,7 @@ class GenericSQLConnector(BaseDestinationHandler):
                     conn.commit()
                     return rowcount if isinstance(rowcount, int) else -1
                 finally:
-                    try:
-                        cursor.close()
-                    except Exception:
-                        logger.debug("ADBC cursor close failed", exc_info=True)
+                    _close_cursor_quietly(cursor)
             except Exception as exc:
                 self._poison_adbc_connection()
                 if _is_fatal_adbc_error(exc):
@@ -2016,10 +2008,7 @@ class GenericSQLConnector(BaseDestinationHandler):
                     )
                     conn.commit()
                 finally:
-                    try:
-                        cursor.close()
-                    except Exception:
-                        logger.debug("ADBC cursor close failed", exc_info=True)
+                    _close_cursor_quietly(cursor)
             except Exception as exc:
                 self._poison_adbc_connection()
                 if _is_fatal_adbc_error(exc):
@@ -2040,10 +2029,7 @@ class GenericSQLConnector(BaseDestinationHandler):
                 try:
                     cursor.execute(f"TRUNCATE TABLE {qualified}")
                 finally:
-                    try:
-                        cursor.close()
-                    except Exception:
-                        logger.debug("ADBC cursor close failed", exc_info=True)
+                    _close_cursor_quietly(cursor)
                 conn.commit()
             except Exception as exc:
                 self._poison_adbc_connection()
@@ -2192,10 +2178,7 @@ class GenericSQLConnector(BaseDestinationHandler):
                 cursor.execute(merge_sql)
                 conn.commit()
             finally:
-                try:
-                    cursor.close()
-                except Exception:
-                    logger.debug("ADBC cursor close failed", exc_info=True)
+                _close_cursor_quietly(cursor)
         except Exception as exc:
             # Best-effort stage cleanup using the local ``conn`` (not
             # ``self._adbc_conn``) so a concurrent poisoning by another
@@ -2210,10 +2193,7 @@ class GenericSQLConnector(BaseDestinationHandler):
                     drop_cursor.execute(f"DROP TABLE IF EXISTS {stage_qualified}")
                     conn.commit()
                 finally:
-                    try:
-                        drop_cursor.close()
-                    except Exception:
-                        logger.debug("ADBC cursor close failed", exc_info=True)
+                    _close_cursor_quietly(drop_cursor)
             except Exception:
                 # The next retry's pre-flight DROP-IF-EXISTS will clean
                 # the orphan up; warn so an operator sees the leftover
@@ -2239,10 +2219,7 @@ class GenericSQLConnector(BaseDestinationHandler):
                 drop_cursor.execute(f"DROP TABLE IF EXISTS {stage_qualified}")
                 conn.commit()
             finally:
-                try:
-                    drop_cursor.close()
-                except Exception:
-                    logger.debug("ADBC cursor close failed", exc_info=True)
+                _close_cursor_quietly(drop_cursor)
         except Exception:
             logger.warning(
                 "ADBC stage table %s post-MERGE DROP failed; next retry of "
@@ -2307,10 +2284,7 @@ class GenericSQLConnector(BaseDestinationHandler):
                     cursor.execute("SELECT 1")
                     cursor.fetchone()
                 finally:
-                    try:
-                        cursor.close()
-                    except Exception:
-                        logger.debug("ADBC cursor close failed", exc_info=True)
+                    _close_cursor_quietly(cursor)
             except Exception:
                 self._poison_adbc_connection()
                 raise
