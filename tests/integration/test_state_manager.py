@@ -272,42 +272,17 @@ class TestStateManagerDurableRestore:
 
         assert await manager.get_cursor("orders") is None
 
-    async def test_resume_file_omission_is_authoritative_over_stale_checkpoint(self):
-        # The data-loss case: a stream that has a stale pre-ACK per-stream
-        # checkpoint (the source raced to 999) but committed nothing, so the
-        # resume file omits it. With a resume file present, get_cursor must NOT
-        # resume from the stale 999 (which would skip un-landed rows); the omitted
-        # stream resumes from nothing (a full re-scan).
+    async def test_save_cursor_is_not_persisted_across_runs(self):
+        # save_cursor updates only the in-run cache; there is no per-stream
+        # on-disk checkpoint anymore. The durable cross-run bookmark is the
+        # committed resume file, so a fresh manager with no resume file does not
+        # see a cursor a prior manager merely saved (which would have been the
+        # source's pre-ACK position).
         first = _make_manager(self.tmp_path)
-        await first.save_cursor("orders", {}, {"cursor": 999})  # pre-ACK on disk
+        await first.save_cursor("orders", {}, {"cursor": 50})
 
-        _write_resume_file(self.tmp_path, {"other": 5})  # resume file omits "orders"
-        second = _make_manager(self.tmp_path)
-
+        second = _make_manager(self.tmp_path)  # no resume file written
         assert await second.get_cursor("orders") is None
-        assert await second.get_cursor("other") == {"cursor": 5}
-
-    async def test_no_resume_file_consults_on_disk_checkpoint(self):
-        # The one case the per-stream checkpoint is still read: a true first run
-        # with no resume file at all (the engine has not written one yet).
-        first = _make_manager(self.tmp_path)
-        await first.save_cursor("orders", {}, {"cursor": 50})  # writes ./state
-        # No resume file written (write_resume_snapshot not called).
-
-        second = _make_manager(self.tmp_path)
-        assert second._resume_file_present is False
-        assert await second.get_cursor("orders") == {"cursor": 50}
-
-    async def test_restored_cursor_wins_over_stale_on_disk_checkpoint(self):
-        # A leftover per-stream checkpoint must not shadow the delivered resume
-        # file: the delivered value is authoritative, the local file is stale.
-        first = _make_manager(self.tmp_path)
-        await first.save_cursor("orders", {}, {"cursor": 50})  # writes ./state
-
-        _write_resume_file(self.tmp_path, {"orders": 100})
-        second = _make_manager(self.tmp_path)  # same base_dir -> stale 50 on disk
-
-        assert await second.get_cursor("orders") == {"cursor": 100}
 
 
 class TestStateManagerResumeSnapshot:
@@ -393,22 +368,6 @@ class TestStateManagerResumeSnapshot:
 
         assert self._written() == {"orders": 250}
 
-    async def test_fallback_checkpoint_is_carried_into_snapshot(self):
-        # First run with no resume file but a leftover per-stream checkpoint:
-        # when get_cursor uses that checkpoint as the bookmark, it must be carried
-        # into the snapshot. Otherwise an end-of-run snapshot writes {} and the
-        # next run -- now seeing a resume file -- ignores the checkpoint and
-        # re-scans, duplicating rows for an insert/keyless stream.
-        first = _make_manager(self.tmp_path)
-        await first.save_cursor("orders", {}, {"cursor": 100})  # per-stream only
-
-        second = _make_manager(self.tmp_path)  # no resume file written yet
-        assert second._resume_file_present is False
-        assert await second.get_cursor("orders") == {"cursor": 100}  # uses fallback
-        second.write_resume_snapshot()  # no new commits this run
-
-        assert self._written() == {"orders": 100}  # carried forward, not {}
-
     async def test_recorded_committed_value_advances_snapshot(self):
         # The in-run idempotency skip path advances the snapshot from the commit
         # tracker's recorded watermark (what landed) without re-sending a batch;
@@ -420,25 +379,6 @@ class TestStateManagerResumeSnapshot:
         manager.write_resume_snapshot()
 
         assert self._written() == {"orders": 5}
-
-    async def test_resume_file_does_not_collide_with_resume_named_stream(self):
-        # A stream literally named "resume" writes its per-stream checkpoint to
-        # state/<pipeline>/resume.json; the consolidated file lives in a resume/
-        # sub-directory (cursors.json), so the per-stream write can't clobber the
-        # map and a fresh start restores the real "resume" stream, not a bogus
-        # "cursor" stream parsed out of a {"cursor": ...} checkpoint.
-        manager = _make_manager(self.tmp_path)
-        await manager.save_cursor("resume", {}, {"cursor": 42})  # per-stream file
-        _commit(manager, "resume", 42)
-
-        manager.write_resume_snapshot()
-
-        per_stream = self.tmp_path / "state" / "test-pipeline" / "resume.json"
-        assert json.loads(per_stream.read_text()) == {"cursor": 42}
-        assert self._written() == {"resume": 42}  # consolidated map intact
-
-        second = _make_manager(self.tmp_path)
-        assert await second.get_cursor("resume") == {"cursor": 42}
 
 
 if __name__ == "__main__":

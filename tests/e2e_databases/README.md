@@ -118,9 +118,9 @@ cd tests/e2e_databases && docker compose up -d --wait --remove-orphans e2e-postg
 SLUG=e2e-local-postgres-to-postgres-incremental
 PIPELINE_ID=$(python3 -c "import json;print(next(p['pipeline_id'] for p in json.load(open('pipelines/manifest.json'))['pipelines'] if p['path'].startswith('$SLUG/')))")
 
-# 1. run 1 over the 5 seeded rows. It lands ids 1-5 and saves the cursor to
-#    state/$PIPELINE_ID/resume/cursors.json (the consolidated bookmark) and the
-#    per-stream checkpoint.
+# 1. run 1 over the 5 seeded rows. It lands ids 1-5 and saves the committed
+#    cursor to state/$PIPELINE_ID/resume/cursors.json (the sole cross-run
+#    bookmark).
 (cd docker && PIPELINE_ID=$PIPELINE_ID docker compose run --rm source_engine)
 cat state/$PIPELINE_ID/resume/cursors.json   # -> {"<stream_id>": 5}
 
@@ -130,7 +130,7 @@ docker compose -f tests/e2e_databases/docker-compose.yml exec -T e2e-postgres \
 
 # 3. (optional, proves the cloud path) reduce local state to ONLY the resume
 #    file -- the fresh-container case where the deployment delivers just that
-#    file in the bundle, with no per-stream checkpoints to fall back on.
+#    file in the bundle.
 tmp=$(mktemp); cp state/$PIPELINE_ID/resume/cursors.json "$tmp"
 rm -rf state/$PIPELINE_ID && mkdir -p state/$PIPELINE_ID/resume
 mv "$tmp" state/$PIPELINE_ID/resume/cursors.json

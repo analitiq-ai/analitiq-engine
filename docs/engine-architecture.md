@@ -92,16 +92,14 @@ external log/metrics shipper is a deployment concern, not an engine concern.
 
 ### Incremental state restore
 
-An incremental stream's resume cursor is written three ways: to the local
-per-stream `state/{pipeline_id}/{stream_id}.json` checkpoint (every commit, for
-in-run/crash recovery), to an `ANALITIQ_STATE` stdout log line the external
-shipper harvests into durable storage (cloud), and — once the pipeline finishes
-— to a consolidated `state/{pipeline_id}/resume/cursors.json` file, a JSON
-object `{stream_id: cursor}` (`StateManager.write_resume_snapshot`). It is
-scoped per pipeline like every other state file, so a second pipeline sharing
-the local `state/` dir can't overwrite this one's bookmark, and it lives in its
-own `resume/` sub-directory so it can never collide with a per-stream checkpoint
-(which owns the `state/{pipeline_id}/{stream_id}.json` namespace).
+An incremental stream's resume cursor is written two ways: to an
+`ANALITIQ_STATE` stdout log line the external shipper harvests into durable
+storage (cloud), and — once the pipeline finishes — to a consolidated
+`state/{pipeline_id}/resume/cursors.json` file, a JSON object
+`{stream_id: cursor}` (`StateManager.write_resume_snapshot`). That file is the
+**sole cross-run cursor store** (the engine writes no per-stream checkpoint
+files); it is scoped per pipeline like every other state file, so a second
+pipeline sharing the local `state/` dir can't overwrite this one's bookmark.
 
 The snapshot is the **committed (destination-ACKed) high-water mark** per stream
 — the same value the `ANALITIQ_STATE` line emits, recorded on ACK by
@@ -110,11 +108,12 @@ its cursor as it yields batches, ahead of the ACK). So the local file and the
 cloud-delivered file carry the same values, and a stream that failed or never
 ACKed a batch keeps its last safe bookmark instead of skipping rows that never
 landed. A stream that resumed from the file but committed nothing this run keeps
-the value it resumed from.
+the value it resumed from; a stream the file omits has no committed cursor and
+resumes with a full re-scan.
 
 Restore reads that resume file at startup
-(`src/state/store.py:load_resume_file`, `src/state/state_manager.py`), and its
-seeded value wins over any stale per-stream checkpoint left on disk. The two
+(`src/state/store.py:load_resume_file`, `src/state/state_manager.py`) into the
+in-run cursor cache the engine reads each stream's resume point from. The two
 delivery paths converge on the same file: in the cloud each task starts with an
 empty `state/`, so the deployment delivers it in the config bundle
 from whatever it harvested off the prior run; locally there is no deployment, so

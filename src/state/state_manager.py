@@ -10,7 +10,7 @@ from typing import Any
 from ..shared.run_id import get_or_generate_run_id
 from .batch_commit_tracker import BatchCommitTracker
 from .state_emission import emit_state_log
-from .store import CursorStore, load_resume_file, write_resume_file
+from .store import load_resume_file, write_resume_file
 
 logger = logging.getLogger(__name__)
 
@@ -32,16 +32,11 @@ class StateManager:
         self.pipeline_id = pipeline_id
         self.base_dir = Path(base_dir)
         self.pipeline_dir = self.base_dir / pipeline_id
-        # The consolidated resume bookmark, scoped per pipeline like every other
-        # state file: the cloud deployment delivers it in the config bundle, a
-        # local run writes it at the end (write_resume_snapshot). Pipeline-scoping
-        # stops a second pipeline that shares the local state/ dir from
-        # overwriting this pipeline's bookmark. It lives in its own ``resume/``
-        # sub-directory, not directly under the pipeline dir, so it can never
-        # collide with a per-stream checkpoint -- those own the
-        # ``state/{pipeline_id}/{stream_id}.json`` namespace, and a stream whose
-        # id was ``resume`` would otherwise write its ``{"cursor": ...}`` file
-        # over this map.
+        # The consolidated resume bookmark and sole cross-run cursor store,
+        # scoped per pipeline (in its own ``resume/`` sub-directory) so a second
+        # pipeline that shares the local state/ dir can't overwrite it: the cloud
+        # deployment delivers it in the config bundle, a local run writes it at
+        # the end (write_resume_snapshot).
         self._resume_path = self.pipeline_dir / "resume" / "cursors.json"
 
         # Thread safety
@@ -53,20 +48,19 @@ class StateManager:
         # In-run batch commit tracker (initialized by init_commit_tracker)
         self._commit_tracker: BatchCommitTracker | None = None
 
-        # In-run cursor cache keyed by (stream_name, partition_key). Backed by
-        # an on-disk checkpoint so a fresh process resumes from where the last
-        # run left off instead of re-scanning the whole source.
+        # In-run cursor cache keyed by (stream_name, partition_key), seeded at
+        # startup from the resume file. The engine reads each stream's resume
+        # point from here once at stream start; it is not persisted -- the
+        # durable cross-run bookmark is the committed resume file (below).
         self._cursors: dict[str, dict[str, Any]] = {}
         # The committed (destination-ACKed) high-water mark per stream -- the
-        # value write_resume_snapshot persists. Kept apart from _cursors, which
-        # the source advances as it yields batches, ahead of the ACK: snapshotting
-        # that pre-ACK position would let a failed or un-ACKed stream skip rows
-        # that never landed. Seeded from the delivered resume file so a stream
-        # that does not advance this run keeps its prior bookmark, then updated
-        # only from save_stream_checkpoint -- the same ACKed watermark the
-        # ANALITIQ_STATE log emits, so the local snapshot matches the cloud one.
+        # value write_resume_snapshot persists, and the sole cross-run bookmark.
+        # Seeded from the delivered resume file so a stream that does not advance
+        # this run keeps its prior bookmark, then updated only from
+        # save_stream_checkpoint -- the same ACKed watermark the ANALITIQ_STATE
+        # log emits, so the local snapshot matches the cloud one. Never the
+        # source's pre-ACK position, which would let a failed stream skip rows.
         self._committed_cursors: dict[str, Any] = {}
-        self._cursor_store = CursorStore(self.base_dir)
         self._restore_durable_cursors()
 
     def _restore_durable_cursors(self) -> None:
@@ -80,17 +74,11 @@ class StateManager:
         run writes the same file itself, see :meth:`write_resume_snapshot`); we
         decode it into the same ``{"cursor": <value>}`` shape
         :meth:`get_cursor` returns, keyed by ``stream_id`` with the empty
-        partition the engine reads with. The seeded value wins over any stale
-        per-stream checkpoint left on disk, since the delivered file is the
-        authoritative bookmark. It also seeds ``_committed_cursors`` so a stream
-        that does not advance this run still carries its bookmark into the next
-        snapshot.
+        partition the engine reads with. It is the sole cross-run bookmark, so a
+        stream the file omits has no committed cursor and resumes with a full
+        re-scan. It also seeds ``_committed_cursors`` so a stream that does not
+        advance this run still carries its bookmark into the next snapshot.
         """
-        # Whether a resume file was delivered/left for this run. When one is
-        # present it is the authoritative committed bookmark, so get_cursor must
-        # not fall back to a pre-ACK per-stream checkpoint for a stream the file
-        # omits (that checkpoint can be ahead of the ACK and would skip rows).
-        self._resume_file_present = self._resume_path.exists()
         restored = load_resume_file(self._resume_path)
         seeded = 0
         for stream_id, value in restored.items():
@@ -233,36 +221,18 @@ class StateManager:
     async def get_cursor(
         self, stream_name: str, partition: dict[str, Any] | None = None
     ) -> dict[str, Any] | None:
-        """Return the last saved cursor for a stream/partition, or None.
+        """Return the resume cursor for a stream/partition, or None.
 
-        Resolution: the in-run cache (seeded at startup from the resume file,
-        updated by :meth:`save_cursor`) wins. When a resume file was present this
-        run it is the authoritative committed bookmark, so a stream the file
-        omits resumes from nothing (a full re-scan) -- never from the per-stream
-        on-disk checkpoint, which the source advances ahead of the destination
-        ACK and could therefore point past rows that never landed. The on-disk
-        checkpoint is consulted only when no resume file exists at all (a true
-        first run, where it is absent too), so it can no longer shadow the
-        committed bookmark. When that checkpoint IS used, it becomes this run's
-        bookmark, so it is also recorded as committed -- otherwise an end-of-run
-        snapshot would write an empty file and the next run, now seeing a resume
-        file, would ignore the checkpoint and re-scan (duplicating rows for an
-        insert/keyless stream).
+        Answered entirely from the in-run cache, which is seeded at startup from
+        the committed resume file and updated by :meth:`save_cursor` during the
+        run. The resume file is the sole cross-run bookmark, so a stream it omits
+        returns ``None`` (a full re-scan) -- there is no on-disk per-stream
+        checkpoint to fall back to (its pre-ACK position could point past rows
+        that never landed; the committed resume file replaced it).
         """
         key = self._cursor_key(stream_name, partition or {})
         with self.lock:
-            cached = self._cursors.get(key)
-            if cached is not None:
-                return cached
-            if self._resume_file_present:
-                return None
-            persisted = self._cursor_store.get(self.pipeline_id, stream_name)
-            if persisted is None:
-                return None
-            cursor = {"cursor": persisted}
-            self._cursors[key] = cursor
-            self._committed_cursors[stream_name] = persisted
-            return cursor
+            return self._cursors.get(key)
 
     async def save_cursor(
         self,
@@ -270,17 +240,16 @@ class StateManager:
         partition: dict[str, Any] | None,
         cursor: dict[str, Any],
     ) -> None:
-        """Persist cursor state for a stream/partition.
+        """Update the in-run cursor cache for a stream/partition.
 
-        Written both to the in-run cache and to the on-disk checkpoint so the
-        next run resumes from it. Partitioned cursors share one document per
-        ``(pipeline, stream)`` (the store's documented scope); partitions are
-        not exercised today.
+        Records the source's latest cursor for the duration of the run. It is
+        not persisted: the durable cross-run bookmark is the committed resume
+        file, written from the destination-ACKed watermark at end of run (see
+        :meth:`write_resume_snapshot`), never this pre-ACK source position.
         """
         key = self._cursor_key(stream_name, partition or {})
         with self.lock:
             self._cursors[key] = cursor
-            self._cursor_store.set(self.pipeline_id, stream_name, cursor.get("cursor"))
 
     def get_run_info(self) -> dict[str, Any]:
         """Get current run information."""

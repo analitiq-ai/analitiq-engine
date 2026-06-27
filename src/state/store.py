@@ -1,13 +1,13 @@
 """
-Filesystem-backed cursor checkpoint store.
+Resume-cursor encoding and the consolidated resume file.
 
-State for an incremental stream is one JSON document per
-``(pipeline, stream)`` pair. The schema contract leaves run-log/state
-ownership to a future contract; until then the engine writes minimal
-``{"cursor": <value>}`` documents under
-``state/{pipeline_id}/{stream_id}.json``. The store is
-deliberately tiny — no persistence backend, no schema migrations —
-because the engine must remain cloud-agnostic per the brief.
+An incremental stream's durable bookmark is the committed (destination-ACKed)
+high-water mark, persisted once per run as a single ``{stream_id: cursor}`` JSON
+object under ``state/{pipeline_id}/resume/cursors.json`` (written by
+:func:`write_resume_file`, read by :func:`load_resume_file`). The engine writes
+no per-stream checkpoint files — the resume file is the sole cross-run bookmark,
+kept cloud-agnostic: it is delivered in the config bundle (cloud) or written by
+the prior local run, and the engine only ever reads a resolved local file.
 
 Cursor values are usually scalars (an ``int`` id, a ``str``), but a timestamp
 cursor arrives as a ``datetime`` — which JSON cannot represent and which the
@@ -17,8 +17,7 @@ param, so a reloaded timestamp cursor must come back as a ``datetime``, not its
 ISO text. ``encode_value``/``decode_value`` tag ``datetime``/``date``/``time``/
 ``Decimal`` as ``{"__type__": ..., "value": ...}`` to round-trip them
 losslessly; JSON-native scalars (``int``, ``str``) pass through unchanged. This
-same tagging travels the gRPC cursor token and the durable resume-state file
-(see
+same tagging travels the gRPC cursor token and the resume file (see
 ``src/grpc/cursor.py`` and ``parse_resume_state``), so the type is carried
 end-to-end and never guessed from a string's shape — a ``str`` cursor whose
 value looks like a date stays a ``str``.
@@ -32,10 +31,10 @@ write mode against its conflict_keys; under insert mode a unique/primary key
 rejects the re-read duplicate loudly, while a keyless insert stream has nothing
 to dedup against and would append a duplicate boundary row (insert + an
 incremental cursor without a uniqueness key is unsafe). A lost or
-unreadable checkpoint costs a one-time full re-scan, never data, so both the
-read and write paths degrade to that re-scan on I/O failure rather than
-aborting a load — but say so loudly, since a corrupt checkpoint usually means a
-prior crash an operator should see.
+unreadable resume file costs a one-time full re-scan, never data, so the read
+and write paths degrade to that re-scan on I/O failure rather than aborting a
+load — but say so loudly, since a corrupt file usually means a prior crash an
+operator should see.
 """
 
 from __future__ import annotations
@@ -73,7 +72,7 @@ def parse_resume_state(raw: str | None) -> dict[str, Any]:
     consumes a resolved value the same way it consumes any other config input,
     and never reaches for cloud storage itself.
 
-    Each value carries its type the same way the on-disk checkpoint does: a
+    Each value carries its type the same way the gRPC cursor token does: a
     ``datetime``/``date`` is the tagged ``{"__type__": ..., "value": ...}`` form
     and is decoded back to the real type (asyncpg rejects a plain string for a
     timestamp bind); a JSON-native ``int``/``str`` is used verbatim. Because the
@@ -83,7 +82,7 @@ def parse_resume_state(raw: str | None) -> dict[str, Any]:
     Corrupt state degrades to a full re-scan -- loudly -- rather than aborting
     the run: a missing or non-object payload yields an empty mapping, and a
     single malformed tagged value (e.g. a bad ISO string) skips just that
-    stream, the same way :meth:`CursorStore.get` degrades on disk.
+    stream while keeping the rest.
     """
     if not raw:
         return {}
@@ -110,8 +109,8 @@ def parse_resume_state(raw: str | None) -> dict[str, Any]:
         except (ValueError, TypeError) as exc:
             # A malformed tagged datetime/date (corrupt durable state or a bad
             # manual injection) must not abort StateManager construction. Skip
-            # the stream so it resumes with a full re-scan -- loudly -- exactly
-            # as CursorStore.get does for an unreadable on-disk checkpoint.
+            # the stream so it resumes with a full re-scan -- loudly -- while the
+            # other streams still restore.
             logger.warning(
                 "resume-state cursor for stream %r is unreadable (%s); that "
                 "stream resumes with a full re-scan",
@@ -167,7 +166,7 @@ def write_resume_file(path: Path, cursors: dict[str, Any]) -> None:
     next run resumes from it, re-reading anything this run committed past it
     (deduped by the upsert write mode) rather than skipping it. The
     encode/serialize step is inside the guard for that reason, and the guarded
-    exception set matches :meth:`CursorStore.get` and :func:`parse_resume_state`
+    exception set mirrors :func:`load_resume_file` and :func:`parse_resume_state`
     -- ``OSError`` for the I/O, ``TypeError``/``ValueError`` for a value ``json``
     cannot encode.
     """
@@ -195,7 +194,7 @@ def encode_cursor_state(cursor: dict[str, Any]) -> dict[str, Any]:
     """JSON-safe form of a cursor-state dict (tags ``datetime``/``date``).
 
     The worker wire protocol relays cursor saves as JSON; this applies the
-    same tagging the on-disk store uses so a timestamp cursor survives the
+    same tagging the resume file uses so a timestamp cursor survives the
     hop as a ``datetime``, not its ISO text.
     """
     return {key: encode_value(value) for key, value in cursor.items()}
@@ -206,68 +205,12 @@ def decode_cursor_state(cursor: dict[str, Any]) -> dict[str, Any]:
     return {key: decode_value(value) for key, value in cursor.items()}
 
 
-class CursorStore:
-    def __init__(self, root: Path) -> None:
-        self._root = root
-        self._write_failures_warned: set[Path] = set()
-
-    def _path(self, pipeline_id: str, stream_id: str) -> Path:
-        return self._root / pipeline_id / f"{stream_id}.json"
-
-    def get(self, pipeline_id: str, stream_id: str) -> Any | None:
-        path = self._path(pipeline_id, stream_id)
-        if not path.exists():
-            return None
-        try:
-            payload = json.loads(path.read_text())
-            return decode_value(payload.get("cursor"))
-        except (OSError, ValueError, TypeError) as exc:
-            # Torn write, unparseable JSON, or a bad ISO value (decode_value raises
-            # ValueError/TypeError; JSONDecodeError is a ValueError). Treat any
-            # unreadable checkpoint the same: resume with a full re-scan, loudly.
-            logger.warning(
-                "cursor checkpoint %s is unreadable (%s); stream resumes with a "
-                "full re-scan",
-                path,
-                exc,
-            )
-            return None
-
-    def set(self, pipeline_id: str, stream_id: str, cursor: Any | None) -> None:
-        if cursor is None:
-            return
-        path = self._path(pipeline_id, stream_id)
-        tmp = path.parent / f"{path.name}.tmp"
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            tmp.write_text(json.dumps({"cursor": encode_value(cursor)}, default=str))
-            # Atomic swap so a concurrent/next-run reader never sees a torn file.
-            os.replace(tmp, path)
-        except OSError as exc:
-            # Don't leave a stale partial temp file behind if the swap failed.
-            with contextlib.suppress(OSError):
-                tmp.unlink(missing_ok=True)
-            # A write failure must not abort an otherwise-successful load; warn
-            # once per path so the silent degradation to full re-scan stays
-            # visible without spamming a line per batch, while a distinct second
-            # path's failure is still reported.
-            if path not in self._write_failures_warned:
-                self._write_failures_warned.add(path)
-                logger.warning(
-                    "failed to persist cursor checkpoint %s (%s); incremental "
-                    "resume is disabled until the path is writable",
-                    path,
-                    exc,
-                )
-
-
 def encode_value(value: Any) -> Any:
     """Tag a ``datetime``/``date``/``time``/``Decimal`` so JSON round-trips it.
 
-    Shared by the on-disk checkpoint, the worker cursor-state wire, and the
-    gRPC cursor token (``src/grpc/cursor.py``) so every place a cursor is
-    serialized carries the type the same way. JSON-native scalars are returned
-    unchanged.
+    Shared by the resume file, the worker cursor-state wire, and the gRPC cursor
+    token (``src/grpc/cursor.py``) so every place a cursor is serialized carries
+    the type the same way. JSON-native scalars are returned unchanged.
 
     Every JSON-unsupported scalar the engine can present as a cursor value is
     tagged so it round-trips losslessly into the resume bind: ``datetime`` /
