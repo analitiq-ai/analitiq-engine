@@ -86,6 +86,11 @@ class StateManager:
         that does not advance this run still carries its bookmark into the next
         snapshot.
         """
+        # Whether a resume file was delivered/left for this run. When one is
+        # present it is the authoritative committed bookmark, so get_cursor must
+        # not fall back to a pre-ACK per-stream checkpoint for a stream the file
+        # omits (that checkpoint can be ahead of the ACK and would skip rows).
+        self._resume_file_present = self._resume_path.exists()
         restored = load_resume_file(self._resume_path)
         seeded = 0
         for stream_id, value in restored.items():
@@ -230,14 +235,23 @@ class StateManager:
     ) -> dict[str, Any] | None:
         """Return the last saved cursor for a stream/partition, or None.
 
-        Falls back to the on-disk checkpoint when the in-run cache is empty so
-        a newly started process resumes from the previous run's bookmark.
+        Resolution: the in-run cache (seeded at startup from the resume file,
+        updated by :meth:`save_cursor`) wins. When a resume file was present this
+        run it is the authoritative committed bookmark, so a stream the file
+        omits resumes from nothing (a full re-scan) -- never from the per-stream
+        on-disk checkpoint, which the source advances ahead of the destination
+        ACK and could therefore point past rows that never landed. The on-disk
+        checkpoint is consulted only when no resume file exists at all (a true
+        first run, where it is absent too), so it can no longer shadow the
+        committed bookmark.
         """
         key = self._cursor_key(stream_name, partition or {})
         with self.lock:
             cached = self._cursors.get(key)
             if cached is not None:
                 return cached
+            if self._resume_file_present:
+                return None
             persisted = self._cursor_store.get(self.pipeline_id, stream_name)
             if persisted is None:
                 return None

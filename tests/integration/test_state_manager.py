@@ -265,16 +265,37 @@ class TestStateManagerDurableRestore:
         assert await manager.get_cursor("orders") == {"cursor": 250}
 
     async def test_null_valued_stream_is_skipped_not_seeded(self):
-        # A null cursor in the payload (stream harvested before it emitted one)
-        # must be skipped, not seeded as {"cursor": None} -- otherwise it would
-        # shadow a real on-disk checkpoint with a useless value.
+        # A null cursor in the payload (a stream harvested before it ever emitted
+        # one) is skipped, not seeded as {"cursor": None}.
+        _write_resume_file(self.tmp_path, {"orders": None})
+        manager = _make_manager(self.tmp_path)
+
+        assert await manager.get_cursor("orders") is None
+
+    async def test_resume_file_omission_is_authoritative_over_stale_checkpoint(self):
+        # The data-loss case: a stream that has a stale pre-ACK per-stream
+        # checkpoint (the source raced to 999) but committed nothing, so the
+        # resume file omits it. With a resume file present, get_cursor must NOT
+        # resume from the stale 999 (which would skip un-landed rows); the omitted
+        # stream resumes from nothing (a full re-scan).
+        first = _make_manager(self.tmp_path)
+        await first.save_cursor("orders", {}, {"cursor": 999})  # pre-ACK on disk
+
+        _write_resume_file(self.tmp_path, {"other": 5})  # resume file omits "orders"
+        second = _make_manager(self.tmp_path)
+
+        assert await second.get_cursor("orders") is None
+        assert await second.get_cursor("other") == {"cursor": 5}
+
+    async def test_no_resume_file_consults_on_disk_checkpoint(self):
+        # The one case the per-stream checkpoint is still read: a true first run
+        # with no resume file at all (the engine has not written one yet).
         first = _make_manager(self.tmp_path)
         await first.save_cursor("orders", {}, {"cursor": 50})  # writes ./state
+        # No resume file written (write_resume_snapshot not called).
 
-        _write_resume_file(self.tmp_path, {"orders": None})
-        second = _make_manager(self.tmp_path)  # same base_dir -> 50 on disk
-
-        # The null seed is skipped, so get_cursor falls through to disk.
+        second = _make_manager(self.tmp_path)
+        assert second._resume_file_present is False
         assert await second.get_cursor("orders") == {"cursor": 50}
 
     async def test_restored_cursor_wins_over_stale_on_disk_checkpoint(self):
