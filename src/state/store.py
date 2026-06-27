@@ -1,13 +1,19 @@
 """
-Resume-cursor encoding and the consolidated resume file.
+Per-stream cursor checkpoint store and cursor-value encoding.
 
 An incremental stream's durable bookmark is the committed (destination-ACKed)
-high-water mark, persisted once per run as a single ``{stream_id: cursor}`` JSON
-object under ``state/{pipeline_id}/resume/cursors.json`` (written by
-:func:`write_resume_file`, read by :func:`load_resume_file`). The engine writes
-no per-stream checkpoint files — the resume file is the sole cross-run bookmark,
-kept cloud-agnostic: it is delivered in the config bundle (cloud) or written by
-the prior local run, and the engine only ever reads a resolved local file.
+high-water mark, written as one minimal ``{"cursor": <value>}`` JSON document
+per ``(pipeline, stream)`` under ``state/{pipeline_id}/{stream_id}.json``
+(:class:`CursorStore`). Each stream owns its own file and writes it on every
+destination ACK, so concurrent streams never contend on a shared file and a
+crash loses at most the last un-ACKed batch. The store is deliberately tiny — no
+persistence backend, no schema migrations — because the engine must remain
+cloud-agnostic: the same per-stream files are written by a local run and
+delivered in the config bundle on a fresh container (whose local ``state/`` is
+otherwise empty), and the engine only ever reads a resolved local file. The
+cursor written here is the ACKed watermark, never the source's pre-ACK position,
+so a stream that fails after extraction raced ahead never resumes past rows that
+never landed.
 
 Cursor values are usually scalars (an ``int`` id, a ``str``), but a timestamp
 cursor arrives as a ``datetime`` — which JSON cannot represent and which the
@@ -17,10 +23,10 @@ param, so a reloaded timestamp cursor must come back as a ``datetime``, not its
 ISO text. ``encode_value``/``decode_value`` tag ``datetime``/``date``/``time``/
 ``Decimal`` as ``{"__type__": ..., "value": ...}`` to round-trip them
 losslessly; JSON-native scalars (``int``, ``str``) pass through unchanged. This
-same tagging travels the gRPC cursor token and the resume file (see
-``src/grpc/cursor.py`` and ``parse_resume_state``), so the type is carried
-end-to-end and never guessed from a string's shape — a ``str`` cursor whose
-value looks like a date stays a ``str``.
+same tagging travels the gRPC cursor token and the on-disk checkpoint (see
+``src/grpc/cursor.py``), so the type is carried end-to-end and never guessed
+from a string's shape — a ``str`` cursor whose value looks like a date stays a
+``str``.
 
 The resume bound is inclusive (``>=``): the stored cursor is re-read on the
 next run (see the read path in ``cdk/cdk/sql/generic.py``). This is what keeps
@@ -31,10 +37,10 @@ write mode against its conflict_keys; under insert mode a unique/primary key
 rejects the re-read duplicate loudly, while a keyless insert stream has nothing
 to dedup against and would append a duplicate boundary row (insert + an
 incremental cursor without a uniqueness key is unsafe). A lost or
-unreadable resume file costs a one-time full re-scan, never data, so the read
-and write paths degrade to that re-scan on I/O failure rather than aborting a
-load — but say so loudly, since a corrupt file usually means a prior crash an
-operator should see.
+unreadable checkpoint costs a one-time full re-scan, never data, so both the
+read and write paths degrade to that re-scan on I/O failure rather than
+aborting a load — but say so loudly, since a corrupt checkpoint usually means a
+prior crash an operator should see.
 """
 
 from __future__ import annotations
@@ -54,140 +60,69 @@ _TYPE_KEY = "__type__"
 _VALUE_KEY = "value"
 
 
-def parse_resume_state(raw: str | None) -> dict[str, Any]:
-    """Decode a resume-state JSON payload into per-stream cursors.
+class CursorStore:
+    """Per-stream committed-cursor checkpoint files under ``root/{pipeline}/``.
 
-    The engine emits its cursor checkpoints as ``ANALITIQ_STATE`` log lines
-    (see :mod:`src.state.state_emission`); the deployment harvests those into
-    durable storage and delivers them back on the next run as a resume-state
-    file inside the config bundle, at the same path the engine reads and writes
-    (``state/{pipeline_id}/resume/cursors.json`` -- see
-    :attr:`StateManager._resume_path`) -- a JSON object mapping ``stream_id`` to
-    the high-water-mark cursor value. A fresh container's local ``state/``
-    directory is otherwise empty, so this delivered file is the only bookmark an
-    incremental stream can resume from.
-    A local run produces the same file itself at the end of a run (see
-    :func:`write_resume_file`), so the restore path is identical in both
-    environments. Reading a local file here keeps the engine cloud-agnostic: it
-    consumes a resolved value the same way it consumes any other config input,
-    and never reaches for cloud storage itself.
-
-    Each value carries its type the same way the gRPC cursor token does: a
-    ``datetime``/``date`` is the tagged ``{"__type__": ..., "value": ...}`` form
-    and is decoded back to the real type (asyncpg rejects a plain string for a
-    timestamp bind); a JSON-native ``int``/``str`` is used verbatim. Because the
-    type is carried, not inferred, a ``str`` cursor whose value happens to look
-    like a date stays a ``str`` -- no shape-guessing.
-
-    Corrupt state degrades to a full re-scan -- loudly -- rather than aborting
-    the run: a missing or non-object payload yields an empty mapping, and a
-    single malformed tagged value (e.g. a bad ISO string) skips just that
-    stream while keeping the rest.
+    ``set`` is called on every destination ACK with the committed watermark, so
+    each stream's file holds only ACKed progress; ``get`` reads it back at the
+    start of the next run. A lost or unreadable checkpoint costs a one-time full
+    re-scan, never data, so both paths degrade to that re-scan -- loudly --
+    rather than aborting the load.
     """
-    if not raw:
-        return {}
-    try:
-        decoded = json.loads(raw)
-    except ValueError as exc:
-        logger.warning(
-            "resume state is not valid JSON (%s); incremental streams resume "
-            "with a full re-scan",
-            exc,
-        )
-        return {}
-    if not isinstance(decoded, dict):
-        logger.warning(
-            "resume state must be a JSON object {stream_id: cursor}; got %s; "
-            "incremental streams resume with a full re-scan",
-            type(decoded).__name__,
-        )
-        return {}
-    restored: dict[str, Any] = {}
-    for stream_id, value in decoded.items():
+
+    def __init__(self, root: Path) -> None:
+        self._root = root
+        self._write_failures_warned: set[Path] = set()
+
+    def _path(self, pipeline_id: str, stream_id: str) -> Path:
+        return self._root / pipeline_id / f"{stream_id}.json"
+
+    def get(self, pipeline_id: str, stream_id: str) -> Any | None:
+        path = self._path(pipeline_id, stream_id)
+        if not path.exists():
+            return None
         try:
-            restored[str(stream_id)] = decode_value(value)
-        except (ValueError, TypeError) as exc:
-            # A malformed tagged datetime/date (corrupt durable state or a bad
-            # manual injection) must not abort StateManager construction. Skip
-            # the stream so it resumes with a full re-scan -- loudly -- while the
-            # other streams still restore.
+            payload = json.loads(path.read_text())
+            return decode_value(payload.get("cursor"))
+        except (OSError, ValueError, TypeError) as exc:
+            # Torn write, unparseable JSON, a bad ISO value (decode_value raises
+            # ValueError/TypeError; JSONDecodeError is a ValueError), or a
+            # non-UTF-8 file (UnicodeDecodeError is a ValueError). Treat any
+            # unreadable checkpoint the same: resume with a full re-scan, loudly.
             logger.warning(
-                "resume-state cursor for stream %r is unreadable (%s); that "
-                "stream resumes with a full re-scan",
-                stream_id,
+                "cursor checkpoint %s is unreadable (%s); stream resumes with a "
+                "full re-scan",
+                path,
                 exc,
             )
-    return restored
+            return None
 
-
-def load_resume_file(path: Path) -> dict[str, Any]:
-    """Read the resume-state file and decode it into per-stream cursors.
-
-    The resume file is delivered in the config bundle (cloud) or written by the
-    previous local run (see :func:`write_resume_file`). An absent file is the
-    normal first-run case and yields an empty mapping; an unreadable file
-    degrades to a full re-scan -- loudly -- like every other resume-state defect
-    (see :func:`parse_resume_state`), rather than aborting the run.
-    """
-    if not path.exists():
-        return {}
-    try:
-        raw = path.read_text()
-    except (OSError, ValueError) as exc:
-        # OSError for I/O; ValueError covers UnicodeDecodeError when the file is
-        # not valid UTF-8 (a corrupt/binary bundle artifact) -- that must degrade
-        # to a re-scan like any other bad resume state, not abort construction.
-        logger.warning(
-            "resume-state file %s is unreadable (%s); incremental streams "
-            "resume with a full re-scan",
-            path,
-            exc,
-        )
-        return {}
-    return parse_resume_state(raw)
-
-
-def write_resume_file(path: Path, cursors: dict[str, Any]) -> None:
-    """Atomically write per-stream cursors as the resume-state file.
-
-    The map is ``{stream_id: cursor}`` with each value tagged by
-    :func:`encode_value`, the exact shape :func:`parse_resume_state` decodes and
-    the cloud deployment delivers -- so a local run's output and a cloud-injected
-    file are the same contract and decode to the same cursors. Each value is a
-    committed (destination-ACKed) high-water mark, so the next run resumes only
-    past rows that actually landed.
-
-    This runs at the very end of an otherwise-successful run (the engine calls
-    it inside a try block that re-raises anything it does not handle), so it must
-    never raise: a write failure must leave the previous snapshot untouched and
-    degrade gracefully -- loudly -- not abort a run whose data already landed.
-    The atomic ``os.replace`` means a failed write never corrupts the existing
-    file; the prior snapshot (an older committed bookmark) stays in place and the
-    next run resumes from it, re-reading anything this run committed past it
-    (deduped by the upsert write mode) rather than skipping it. The
-    encode/serialize step is inside the guard for that reason, and the guarded
-    exception set mirrors :func:`load_resume_file` and :func:`parse_resume_state`
-    -- ``OSError`` for the I/O, ``TypeError``/``ValueError`` for a value ``json``
-    cannot encode.
-    """
-    tmp = path.parent / f"{path.name}.tmp"
-    try:
-        encoded = {
-            stream_id: encode_value(value) for stream_id, value in cursors.items()
-        }
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp.write_text(json.dumps(encoded, default=str))
-        # Atomic swap so a concurrent/next-run reader never sees a torn file.
-        os.replace(tmp, path)
-    except (OSError, TypeError, ValueError) as exc:
-        with contextlib.suppress(OSError):
-            tmp.unlink(missing_ok=True)
-        logger.warning(
-            "failed to write resume-state file %s (%s); the previous snapshot "
-            "stays in place and the next run resumes from it",
-            path,
-            exc,
-        )
+    def set(self, pipeline_id: str, stream_id: str, cursor: Any | None) -> None:
+        if cursor is None:
+            return
+        path = self._path(pipeline_id, stream_id)
+        tmp = path.parent / f"{path.name}.tmp"
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_text(json.dumps({"cursor": encode_value(cursor)}, default=str))
+            # Atomic swap so a concurrent/next-run reader never sees a torn file.
+            os.replace(tmp, path)
+        except (OSError, TypeError, ValueError) as exc:
+            # Don't leave a stale partial temp file behind if the swap failed.
+            with contextlib.suppress(OSError):
+                tmp.unlink(missing_ok=True)
+            # A write failure must not abort an otherwise-successful load; warn
+            # once per path so the silent degradation to full re-scan stays
+            # visible without spamming a line per batch, while a distinct second
+            # path's failure is still reported.
+            if path not in self._write_failures_warned:
+                self._write_failures_warned.add(path)
+                logger.warning(
+                    "failed to persist cursor checkpoint %s (%s); incremental "
+                    "resume is disabled until the path is writable",
+                    path,
+                    exc,
+                )
 
 
 def encode_cursor_state(cursor: dict[str, Any]) -> dict[str, Any]:

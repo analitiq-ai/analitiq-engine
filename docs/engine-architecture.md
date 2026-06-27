@@ -94,34 +94,30 @@ external log/metrics shipper is a deployment concern, not an engine concern.
 
 An incremental stream's resume cursor is written two ways: to an
 `ANALITIQ_STATE` stdout log line the external shipper harvests into durable
-storage (cloud), and — once the pipeline finishes — to a consolidated
-`state/{pipeline_id}/resume/cursors.json` file, a JSON object
-`{stream_id: cursor}` (`StateManager.write_resume_snapshot`). That file is the
-**sole cross-run cursor store** (the engine writes no per-stream checkpoint
-files); it is scoped per pipeline like every other state file, so a second
-pipeline sharing the local `state/` dir can't overwrite this one's bookmark.
+storage (cloud), and to a **per-stream checkpoint file**
+`state/{pipeline_id}/{stream_id}.json` = `{"cursor": <value>}`
+(`CursorStore`, via `StateManager.save_stream_checkpoint`). Each stream owns its
+own file and writes it on **every destination ACK**, so concurrent streams never
+contend on a shared file and a crash loses at most the last un-ACKed batch.
 
-The snapshot is the **committed (destination-ACKed) high-water mark** per stream
-— the same value the `ANALITIQ_STATE` line emits, recorded on ACK by
-`save_stream_checkpoint`, not the source's pre-ACK position (the source advances
-its cursor as it yields batches, ahead of the ACK). So the local file and the
-cloud-delivered file carry the same values, and a stream that failed or never
-ACKed a batch keeps its last safe bookmark instead of skipping rows that never
-landed. A stream that resumed from the file but committed nothing this run keeps
-the value it resumed from; a stream the file omits has no committed cursor and
+The stored value is the **committed (destination-ACKed) high-water mark** —
+never the source's pre-ACK position (the source advances its cursor as it yields
+batches, ahead of the ACK). `save_cursor`, which relays that pre-ACK position
+from the source worker, updates only the in-run cache and is never persisted. So
+a stream that failed or never ACKed a batch resumes from its last safe bookmark
+instead of skipping rows that never landed, and a stream with no checkpoint
 resumes with a full re-scan.
 
-Restore reads that resume file at startup
-(`src/state/store.py:load_resume_file`, `src/state/state_manager.py`) into the
-in-run cursor cache the engine reads each stream's resume point from. The two
-delivery paths converge on the same file: in the cloud each task starts with an
-empty `state/`, so the deployment delivers it in the config bundle
-from whatever it harvested off the prior run; locally there is no deployment, so
-the engine's own end-of-run file is what the next run reads. Either
-way the engine only reads a resolved local file and never reaches for cloud
-storage — exactly as it does for secrets and config. Delivering the cursors in
-the bundle rather than an env var also keeps a high-stream-count pipeline clear
-of any size limit the deployment imposes on a task's launch parameters.
+Restore is lazy: `get_cursor` reads a stream's checkpoint file at the start of
+its run (`src/state/store.py:CursorStore`, `src/state/state_manager.py`). The
+two delivery paths converge on the same files: in the cloud each task starts
+with an empty `state/`, so the deployment delivers the per-stream files in the
+config bundle from whatever it harvested off the prior run; locally the files
+the prior run wrote are read directly. Either way the engine only reads resolved
+local files and never reaches for cloud storage — exactly as it does for secrets
+and config. Delivering the cursors as bundle files rather than an env var also
+keeps a high-stream-count pipeline clear of any size limit the deployment
+imposes on a task's launch parameters.
 
 Each cursor carries its type. A `datetime`/`date` travels as a tagged
 `{"__type__": ..., "value": ...}` value — the same form the on-disk checkpoint

@@ -159,26 +159,24 @@ class TestStateManager:
         assert manager.commit_tracker is not None
 
 
-def _resume_path(tmp_path, pipeline_id="test-pipeline"):
-    return tmp_path / "state" / pipeline_id / "resume" / "cursors.json"
+def _checkpoint_path(tmp_path, stream_id, pipeline_id="test-pipeline"):
+    return tmp_path / "state" / pipeline_id / f"{stream_id}.json"
 
 
-def _write_resume_file(tmp_path, payload, pipeline_id="test-pipeline"):
-    """Write the resume-state file the deployment delivers in the config bundle.
-
-    A local run writes the same ``state/{pipeline_id}/resume/cursors.json`` itself
-    at the end of a run; these tests stage it directly to exercise the restore
-    path.
+def _write_checkpoint(tmp_path, stream_id, value, pipeline_id="test-pipeline"):
+    """Stage a per-stream committed checkpoint the way a prior run -- or the
+    config bundle on a fresh container -- leaves it:
+    ``state/{pipeline}/{stream_id}.json`` = ``{"cursor": <value>}``.
     """
-    resume_path = _resume_path(tmp_path, pipeline_id)
-    resume_path.parent.mkdir(parents=True, exist_ok=True)
-    resume_path.write_text(json.dumps(payload))
-    return resume_path
+    path = _checkpoint_path(tmp_path, stream_id, pipeline_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"cursor": value}))
+    return path
 
 
 def _commit(manager, stream_id, value, stream_version=1):
     """Record a committed (destination-ACKed) high-water mark, as the engine
-    does on ACK via ``save_stream_checkpoint``.
+    does on ACK via ``save_stream_checkpoint`` (which writes the per-stream file).
 
     ``value`` is in the cursor-token form the engine carries: a JSON-native
     scalar, or the tagged ``{"__type__": ..., "value": ...}`` form for a
@@ -194,15 +192,15 @@ def _commit(manager, stream_id, value, stream_version=1):
     )
 
 
-class TestStateManagerDurableRestore:
-    """Restoring incremental cursors from the delivered resume-state file.
+class TestStateManagerCommittedCheckpoint:
+    """The per-stream committed checkpoint a fresh run resumes from.
 
-    A fresh container's local per-stream ``state/`` checkpoints are empty
-    (Fargate wipes them every task), so the cursor a prior run emitted must come
-    back through the ``state/{pipeline_id}/resume/cursors.json`` file the
-    deployment delivers in the config bundle. The engine reads the source cursor
-    keyed by ``stream_id`` with the empty partition (see
-    ``engine._extract_stage``), so that is the shape these assert.
+    Each stream's cursor lives in its own ``state/{pipeline}/{stream_id}.json``,
+    written on each destination ACK (``save_stream_checkpoint``) and read at the
+    next run's start (``get_cursor``). A fresh container restores from the same
+    per-stream files the config bundle delivers. ``save_cursor`` is the source's
+    pre-ACK position and is never persisted, so the on-disk bookmark can never
+    run ahead of what actually landed.
     """
 
     def setup_method(self):
@@ -214,171 +212,102 @@ class TestStateManagerDurableRestore:
             shutil.rmtree(self.temp_dir)
 
     async def test_restores_numeric_cursor_across_fresh_container(self):
-        # No per-stream checkpoint on disk -> the resume file is the only bookmark.
-        _write_resume_file(self.tmp_path, {"orders": 100})
+        _write_checkpoint(self.tmp_path, "orders", 100)
         manager = _make_manager(self.tmp_path)
 
         assert await manager.get_cursor("orders") == {"cursor": 100}
 
     async def test_restores_timestamp_cursor_as_datetime(self):
-        # A timestamp cursor crosses durable state tagged, so it comes back a
-        # datetime (asyncpg rejects a plain string for a timestamp bind).
+        # A timestamp cursor is stored tagged, so it comes back a datetime
+        # (asyncpg rejects a plain string for a timestamp bind).
         ts = "2024-06-01T12:00:00+00:00"
-        tagged = {"__type__": "datetime", "value": ts}
-        _write_resume_file(self.tmp_path, {"events": tagged})
+        _write_checkpoint(
+            self.tmp_path, "events", {"__type__": "datetime", "value": ts}
+        )
         manager = _make_manager(self.tmp_path)
 
-        restored = await manager.get_cursor("events")
-        from datetime import datetime
-
-        assert restored == {"cursor": datetime.fromisoformat(ts)}
+        assert await manager.get_cursor("events") == {
+            "cursor": datetime.fromisoformat(ts)
+        }
 
     async def test_unknown_stream_has_no_cursor(self):
-        _write_resume_file(self.tmp_path, {"orders": 100})
+        _write_checkpoint(self.tmp_path, "orders", 100)
         manager = _make_manager(self.tmp_path)
 
-        assert await manager.get_cursor("not-in-payload") is None
+        assert await manager.get_cursor("not-a-stream") is None
 
-    async def test_malformed_resume_state_does_not_abort_construction(self):
-        # A corrupt tagged cursor must degrade to a full re-scan, not crash
-        # StateManager.__init__ on a fresh container.
-        _write_resume_file(
-            self.tmp_path,
-            {"orders": {"__type__": "datetime", "value": "garbage"}},
+    async def test_malformed_checkpoint_degrades_to_no_cursor(self):
+        # A corrupt tagged cursor degrades to a full re-scan, never a crash.
+        _write_checkpoint(
+            self.tmp_path, "orders", {"__type__": "datetime", "value": "garbage"}
         )
-        manager = _make_manager(self.tmp_path)  # must not raise
-
-        assert await manager.get_cursor("orders") is None
-
-    async def test_no_resume_file_means_no_cursor(self):
         manager = _make_manager(self.tmp_path)
 
         assert await manager.get_cursor("orders") is None
 
-    async def test_in_run_save_overrides_restored_cursor(self):
-        # A cursor saved during the run supersedes the restored bookmark.
-        _write_resume_file(self.tmp_path, {"orders": 100})
-        manager = _make_manager(self.tmp_path)
-
-        await manager.save_cursor("orders", {}, {"cursor": 250})
-
-        assert await manager.get_cursor("orders") == {"cursor": 250}
-
-    async def test_null_valued_stream_is_skipped_not_seeded(self):
-        # A null cursor in the payload (a stream harvested before it ever emitted
-        # one) is skipped, not seeded as {"cursor": None}.
-        _write_resume_file(self.tmp_path, {"orders": None})
+    async def test_no_checkpoint_means_no_cursor(self):
         manager = _make_manager(self.tmp_path)
 
         assert await manager.get_cursor("orders") is None
 
-    async def test_save_cursor_is_not_persisted_across_runs(self):
-        # save_cursor updates only the in-run cache; there is no per-stream
-        # on-disk checkpoint anymore. The durable cross-run bookmark is the
-        # committed resume file, so a fresh manager with no resume file does not
-        # see a cursor a prior manager merely saved (which would have been the
-        # source's pre-ACK position).
-        first = _make_manager(self.tmp_path)
-        await first.save_cursor("orders", {}, {"cursor": 50})
-
-        second = _make_manager(self.tmp_path)  # no resume file written
-        assert await second.get_cursor("orders") is None
-
-
-class TestStateManagerResumeSnapshot:
-    """Writing the consolidated resume file a local run hands to its successor.
-
-    A local run has no deployment to harvest its emitted state, so the engine
-    writes ``state/{pipeline_id}/resume/cursors.json`` itself when the pipeline
-    finishes (``StateManager.write_resume_snapshot``). The snapshot is the
-    committed (destination-ACKed) high-water mark per stream -- the same value
-    the deployment harvests from the emitted ``ANALITIQ_STATE`` lines -- so the
-    local output and the cloud-delivered input are the same contract, and a fresh
-    manager restores from it the same way either was produced.
-    """
-
-    def setup_method(self):
-        self.temp_dir = tempfile.mkdtemp()
-        self.tmp_path = Path(self.temp_dir)
-
-    def teardown_method(self):
-        if Path(self.temp_dir).exists():
-            shutil.rmtree(self.temp_dir)
-
-    def _written(self, pipeline_id="test-pipeline"):
-        return json.loads(_resume_path(self.tmp_path, pipeline_id).read_text())
-
-    async def test_snapshot_round_trips_committed_cursors(self):
+    async def test_commit_round_trips_across_runs(self):
         ts = datetime(2024, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
         first = _make_manager(self.tmp_path)
         _commit(first, "orders", 100)
         # A timestamp crosses the ACK tagged, the same form the cursor token uses.
         _commit(first, "events", {"__type__": "datetime", "value": ts.isoformat()})
 
-        first.write_resume_snapshot()
-
-        # A fresh manager (empty cache) seeds only from the resume file.
+        # A fresh manager reads the per-stream files the first run wrote.
         second = _make_manager(self.tmp_path)
         assert await second.get_cursor("orders") == {"cursor": 100}
         # The timestamp survives tagged, so it comes back a datetime not a string.
         assert await second.get_cursor("events") == {"cursor": ts}
 
-    async def test_snapshot_uses_committed_not_preack_source_cursor(self):
-        # The source advances the in-run cursor as it yields batches, ahead of
-        # the destination ACK. The snapshot must use the committed (ACKed) value,
-        # never that pre-ACK position -- otherwise a stream that fails after
-        # extraction would persist a watermark for rows that never landed and
-        # skip them on the next run.
-        manager = _make_manager(self.tmp_path)
-        _commit(manager, "orders", 5)  # ACKed up to id=5
-        # Source raced ahead to id=999 but those batches were never ACKed.
-        await manager.save_cursor("orders", {}, {"cursor": 999})
-
-        manager.write_resume_snapshot()
-
-        assert self._written() == {"orders": 5}  # committed 5, not pre-ACK 999
-
-    async def test_snapshot_omits_stream_that_never_committed(self):
+    async def test_committed_checkpoint_on_disk_shape(self):
         manager = _make_manager(self.tmp_path)
         _commit(manager, "orders", 100)
-        # Pre-ACK source cursor only, no ACK -> nothing safe to resume from.
-        await manager.save_cursor("never", {}, {"cursor": 7})
 
-        manager.write_resume_snapshot()
+        written = json.loads(_checkpoint_path(self.tmp_path, "orders").read_text())
+        assert written == {"cursor": 100}
 
-        assert self._written() == {"orders": 100}
+    async def test_resumes_from_committed_not_preack_cursor(self):
+        # The source advances its cursor as it yields batches, ahead of the
+        # destination ACK. Only the committed (ACKed) value is persisted, never
+        # that pre-ACK position -- otherwise a stream that failed after extraction
+        # raced ahead would resume past rows that never landed and skip them.
+        first = _make_manager(self.tmp_path)
+        _commit(first, "orders", 5)  # ACKed up to id=5
+        await first.save_cursor("orders", {}, {"cursor": 999})  # source raced ahead
 
-    async def test_snapshot_retains_seeded_cursor_for_unadvanced_stream(self):
-        # A stream delivered in resume.json that commits nothing this run must
-        # keep its bookmark in the next snapshot, not vanish from it.
-        _write_resume_file(self.tmp_path, {"orders": 100})
-        manager = _make_manager(self.tmp_path)  # seeds the committed baseline
+        second = _make_manager(self.tmp_path)
+        assert await second.get_cursor("orders") == {"cursor": 5}  # committed 5
 
-        manager.write_resume_snapshot()  # no commits this run
+    async def test_partial_progress_persists_per_batch(self):
+        # save_stream_checkpoint writes on every ACK, so an interrupted run's
+        # ACKed progress survives with no end-of-run snapshot needed.
+        first = _make_manager(self.tmp_path)
+        _commit(first, "orders", 50)
+        # No clean shutdown -- a fresh process still sees the committed batch.
 
-        assert self._written() == {"orders": 100}
+        second = _make_manager(self.tmp_path)
+        assert await second.get_cursor("orders") == {"cursor": 50}
 
-    async def test_advanced_stream_overrides_seeded_cursor(self):
-        # When a seeded stream does commit this run, the committed value wins.
-        _write_resume_file(self.tmp_path, {"orders": 100})
+    async def test_save_cursor_is_not_persisted_across_runs(self):
+        # save_cursor updates only the in-run cache; the source's pre-ACK position
+        # is never written to disk, so a fresh manager does not see it.
+        first = _make_manager(self.tmp_path)
+        await first.save_cursor("orders", {}, {"cursor": 50})
+
+        second = _make_manager(self.tmp_path)
+        assert await second.get_cursor("orders") is None
+
+    async def test_in_run_save_updates_cache(self):
+        # save_cursor feeds the in-run cache so a same-run get_cursor sees it
+        # (the engine reads the resume point once at stream start).
         manager = _make_manager(self.tmp_path)
-        _commit(manager, "orders", 250)
+        await manager.save_cursor("orders", {}, {"cursor": 250})
 
-        manager.write_resume_snapshot()
-
-        assert self._written() == {"orders": 250}
-
-    async def test_recorded_committed_value_advances_snapshot(self):
-        # The in-run idempotency skip path advances the snapshot from the commit
-        # tracker's recorded watermark (what landed) without re-sending a batch;
-        # a None value (non-incremental batch) is ignored.
-        manager = _make_manager(self.tmp_path)
-        manager.record_committed_value("orders", 5)
-        manager.record_committed_value("noncursor", None)
-
-        manager.write_resume_snapshot()
-
-        assert self._written() == {"orders": 5}
+        assert await manager.get_cursor("orders") == {"cursor": 250}
 
 
 if __name__ == "__main__":

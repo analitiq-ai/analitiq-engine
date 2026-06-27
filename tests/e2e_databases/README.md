@@ -118,26 +118,24 @@ cd tests/e2e_databases && docker compose up -d --wait --remove-orphans e2e-postg
 SLUG=e2e-local-postgres-to-postgres-incremental
 PIPELINE_ID=$(python3 -c "import json;print(next(p['pipeline_id'] for p in json.load(open('pipelines/manifest.json'))['pipelines'] if p['path'].startswith('$SLUG/')))")
 
-# 1. run 1 over the 5 seeded rows. It lands ids 1-5 and saves the committed
-#    cursor to state/$PIPELINE_ID/resume/cursors.json (the sole cross-run
-#    bookmark).
+# 1. run 1 over the 5 seeded rows. It lands ids 1-5 and writes the committed
+#    cursor to the stream's own checkpoint file
+#    state/$PIPELINE_ID/<stream_id>.json on each ACK.
 (cd docker && PIPELINE_ID=$PIPELINE_ID docker compose run --rm source_engine)
-cat state/$PIPELINE_ID/resume/cursors.json   # -> {"<stream_id>": 5}
+cat state/$PIPELINE_ID/*.json   # the per-stream checkpoint -> {"cursor": 5}
 
 # 2. add rows past the cursor (ids 6,7).
 docker compose -f tests/e2e_databases/docker-compose.yml exec -T e2e-postgres \
   psql -U e2e_user -d e2e_db < tests/e2e_databases/seed/postgres_delta.sql
 
-# 3. (optional, proves the cloud path) reduce local state to ONLY the resume
-#    file -- the fresh-container case where the deployment delivers just that
-#    file in the bundle.
-tmp=$(mktemp); cp state/$PIPELINE_ID/resume/cursors.json "$tmp"
-rm -rf state/$PIPELINE_ID && mkdir -p state/$PIPELINE_ID/resume
-mv "$tmp" state/$PIPELINE_ID/resume/cursors.json
+# 3. (optional, proves the cloud path) reduce local state to ONLY the per-stream
+#    checkpoint files -- the fresh-container case where the deployment delivers
+#    just those files in the bundle (drop the in-run batch-commit log).
+rm -rf state/$PIPELINE_ID/state
 
-# 4. run 2. It restores the cursor from the resume file ("restored durable
-#    cursor state ... from state/<id>/resume/cursors.json") and reads only ids
-#    5,6,7 (the inclusive >= boundary), not the whole table.
+# 4. run 2. It reads each stream's checkpoint ("cursor checkpoint ..." / resumes
+#    from {"cursor": 5}) and reads only ids 5,6,7 (the inclusive >= boundary),
+#    not the whole table.
 (cd docker && PIPELINE_ID=$PIPELINE_ID docker compose run --rm source_engine)
 
 # 5. verify: 7 rows, 7 distinct ids (the re-read id=5 deduped, nothing lost).
@@ -150,5 +148,5 @@ docker compose -f tests/e2e_databases/docker-compose.yml exec -T e2e-postgres \
 ```
 
 A pass is: run 2 reads only the rows after the cursor (3, not 7), the
-destination ends with all 7 rows and no duplicate of the boundary row, and
-`state/$PIPELINE_ID/resume/cursors.json` advances to `{"<stream_id>": 7}`.
+destination ends with all 7 rows and no duplicate of the boundary row, and the
+stream's `state/$PIPELINE_ID/<stream_id>.json` advances to `{"cursor": 7}`.

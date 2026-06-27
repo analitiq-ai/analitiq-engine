@@ -225,16 +225,6 @@ class StreamingEngine:
                 if not task.done():
                     task.cancel()
             raise
-        finally:
-            # Persist the consolidated resume bookmark on every exit -- success,
-            # partial failure, AND an all-failed run that still ACKed some
-            # batches before raising. The snapshot is the committed (ACKed)
-            # watermark per stream, so persisting it even on a failed run only
-            # ever hands forward rows that actually landed; without this, an
-            # all-failed first run would leave no resume file and force the next
-            # run onto the source-written (pre-ACK) per-stream checkpoint, which
-            # can skip un-landed rows. Tolerant of I/O failure internally.
-            self.state_manager.write_resume_snapshot()
 
     async def _process_stream(
         self,
@@ -724,26 +714,12 @@ class StreamingEngine:
                             f"Stream {stream_name}: Batch {batch_seq} "
                             f"already committed (in-run), skipping send"
                         )
-                        # The batch is not re-sent, but its committed watermark
-                        # must still advance the resume snapshot so a Batch retry
-                        # that reuses the commit tracker does not regress the
-                        # bookmark. Use the watermark the tracker RECORDED when
-                        # the batch first committed (existing.cursor), not the
-                        # freshly recomputed `cursor`: on a same-RUN_ID retry the
-                        # source re-reads inclusively from the durable cursor and
-                        # may have re-batched rows added since, so the recomputed
-                        # value could point past rows that never landed and make
-                        # the next run skip them. existing.cursor is None for a
-                        # non-incremental batch, which record_committed_value
-                        # ignores.
-                        if existing.cursor:
-                            self.state_manager.record_committed_value(
-                                stream_id, existing.cursor.get("value")
-                            )
-                        # Skip metrics increment and output_queue - batch was
-                        # already counted when first committed. Checkpoint stage
-                        # will show unique batches written this run, not total
-                        # send attempts.
+                        # The batch's committed watermark is already on disk from
+                        # when it first committed (save_stream_checkpoint writes
+                        # the per-stream file on every ACK), so the skip needs no
+                        # extra checkpoint. Skip metrics increment and
+                        # output_queue too -- the batch was already counted when
+                        # first committed.
                         continue
 
                 # Retry loop for RETRYABLE_FAILURE
