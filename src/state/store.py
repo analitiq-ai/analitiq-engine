@@ -149,21 +149,27 @@ def write_resume_file(path: Path, cursors: dict[str, Any]) -> None:
     The map is ``{stream_id: cursor}`` with each value tagged by
     :func:`encode_value`, the exact shape :func:`parse_resume_state` decodes and
     the cloud deployment delivers -- so a local run's output and a cloud-injected
-    file are byte-for-byte the same contract. Writing it lets the next local run
-    resume without re-reading the per-stream checkpoints.
+    file are the same contract and decode to the same cursors. Writing it lets
+    the next local run resume without re-reading the per-stream checkpoints.
 
-    A write failure must not abort an otherwise-successful run, so an
-    ``OSError`` degrades to a full re-scan on the next run -- loudly -- exactly
-    as :meth:`CursorStore.set` does for a per-stream checkpoint.
+    This runs at the very end of an otherwise-successful run (the engine calls
+    it inside a try block that re-raises anything it does not handle), so it must
+    never raise: a write failure must degrade to a full re-scan on the next run
+    -- loudly -- not abort a run whose data already landed. The encode/serialize
+    step is inside the guard for that reason, and the guarded exception set
+    matches :meth:`CursorStore.get` and :func:`parse_resume_state` -- ``OSError``
+    for the I/O, ``TypeError``/``ValueError`` for a value ``json`` cannot encode.
     """
-    encoded = {stream_id: encode_value(value) for stream_id, value in cursors.items()}
     tmp = path.parent / f"{path.name}.tmp"
     try:
+        encoded = {
+            stream_id: encode_value(value) for stream_id, value in cursors.items()
+        }
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp.write_text(json.dumps(encoded, default=str))
         # Atomic swap so a concurrent/next-run reader never sees a torn file.
         os.replace(tmp, path)
-    except OSError as exc:
+    except (OSError, TypeError, ValueError) as exc:
         with contextlib.suppress(OSError):
             tmp.unlink(missing_ok=True)
         logger.warning(

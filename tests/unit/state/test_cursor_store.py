@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import date, datetime, timezone
+from decimal import Decimal
 
 import pytest
 
@@ -254,26 +255,38 @@ class TestResumeFile:
     """The on-disk resume file a local run writes and every run reads.
 
     A local run writes the consolidated ``{stream_id: cursor}`` map at the end of
-    a run; the cloud deployment delivers the byte-identical file in the config
-    bundle. Both are read back the same way, so write_resume_file and
-    load_resume_file must round-trip the tagged-value contract and degrade a
-    missing/unreadable file to an empty mapping (a full re-scan) rather than
-    crashing the run.
+    a run; the cloud deployment delivers the same file in the config bundle. Both
+    decode back the same way, so write_resume_file and load_resume_file must
+    round-trip the tagged-value contract and degrade a missing/unreadable file to
+    an empty mapping (a full re-scan) rather than crashing the run.
     """
 
-    def test_round_trips_numeric_and_timestamp_cursors(self, tmp_path):
+    def test_round_trips_native_and_tagged_cursors(self, tmp_path):
+        # Every cursor type the engine can present: a JSON-native int, and the
+        # tagged datetime/date/decimal forms that must come back as their real
+        # type (a decimal/date resuming as a bare string would mis-bind the
+        # source filter). default=str must never reach a tagged value.
         path = tmp_path / "resume.json"
         ts = datetime(2024, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
-        write_resume_file(path, {"orders": 100, "events": ts})
+        day = date(2024, 6, 1)
+        amount = Decimal("123.45")
+        write_resume_file(
+            path, {"orders": 100, "events": ts, "day": day, "amount": amount}
+        )
 
-        # The timestamp is tagged on disk, so it comes back a datetime, not a
-        # string -- the same shape the deployment-delivered file uses.
         on_disk = json.loads(path.read_text())
         assert on_disk == {
             "orders": 100,
             "events": {"__type__": "datetime", "value": ts.isoformat()},
+            "day": {"__type__": "date", "value": day.isoformat()},
+            "amount": {"__type__": "decimal", "value": "123.45"},
         }
-        assert load_resume_file(path) == {"orders": 100, "events": ts}
+        assert load_resume_file(path) == {
+            "orders": 100,
+            "events": ts,
+            "day": day,
+            "amount": amount,
+        }
 
     def test_missing_file_is_empty(self, tmp_path):
         assert load_resume_file(tmp_path / "absent.json") == {}

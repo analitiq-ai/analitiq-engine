@@ -110,8 +110,8 @@ from whatever it harvested off the prior run; locally there is no deployment, so
 the engine's own end-of-run `resume.json` is what the next run reads. Either
 way the engine only reads a resolved local file and never reaches for cloud
 storage — exactly as it does for secrets and config. Delivering the cursors in
-the bundle (not an env var) also keeps a high-stream-count pipeline clear of the
-AWS Batch/ECS task-override size cap.
+the bundle rather than an env var also keeps a high-stream-count pipeline clear
+of any size limit the deployment imposes on a task's launch parameters.
 
 Each cursor carries its type. A `datetime`/`date` travels as a tagged
 `{"__type__": ..., "value": ...}` value — the same form the on-disk checkpoint
