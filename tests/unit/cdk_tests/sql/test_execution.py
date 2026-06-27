@@ -282,9 +282,7 @@ class TestCursorCloseDoesNotMask:
         runtime = _runtime(fail_execute=execute_boom, fail_close=close_boom)
         with caplog.at_level(logging.WARNING, logger="cdk.sql._adbc_utils"):
             with pytest.raises(DiscoveryError) as exc:
-                await fetch_rows(
-                    runtime, "SELECT 1 FROM information_schema.tables", []
-                )
+                await fetch_rows(runtime, "SELECT 1 FROM information_schema.tables", [])
         # The original execute failure is chained, not the close failure.
         assert exc.value.__cause__ is execute_boom
         conn = runtime.connections[0]

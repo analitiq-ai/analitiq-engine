@@ -131,9 +131,7 @@ class FakeAdbcRuntime:
         return self._mapper
 
     def open_adbc_connection(self) -> FakeAdbcConnection:
-        conn = FakeAdbcConnection(
-            self._responder, self._fail_execute, self._fail_close
-        )
+        conn = FakeAdbcConnection(self._responder, self._fail_execute, self._fail_close)
         self.connections.append(conn)
         return conn
 
