@@ -1217,9 +1217,7 @@ class GenericSQLConnector(BaseDestinationHandler):
         # helper too (after the table is emptied); deduping there would silently
         # drop a same-key row in a full-refresh batch instead of surfacing the
         # PK violation, so it gets a plain INSERT.
-        identity = (
-            self._identity_columns(state) if state.write_mode == "insert" else []
-        )
+        identity = self._identity_columns(state) if state.write_mode == "insert" else []
         if not identity:
             conn.execute(table.insert(), records)
             return
