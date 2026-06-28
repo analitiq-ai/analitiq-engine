@@ -45,6 +45,21 @@ class TestGenerateRecordId:
             c, primary_key_fields=["id"]
         )
 
+    def test_missing_primary_key_fields_fall_back_to_full_record(self):
+        """When a mapping renames/drops the configured key it is absent from the
+        (transformed) record; the id falls back to the whole record so distinct
+        rows keep distinct ids instead of all hashing the same missing-key value
+        (issue #282 -- otherwise the keyless ``_record_hash`` dedup would
+        silently drop every row but the first)."""
+        # Configured PK "id" is absent (a mapping renamed it to "user_id").
+        a = {"user_id": 7, "name": "first"}
+        b = {"user_id": 8, "name": "second"}
+        assert generate_record_id(a, primary_key_fields=["id"]) != generate_record_id(
+            b, primary_key_fields=["id"]
+        )
+        # The fallback is exactly the keyless (no-key) hash of the same record.
+        assert generate_record_id(a, primary_key_fields=["id"]) == generate_record_id(a)
+
     def test_two_identical_keyless_records_share_id(self):
         """Byte-identical keyless records produce the same id -- the synthetic
         ``_record_hash`` dedup key for a keyless insert stream."""

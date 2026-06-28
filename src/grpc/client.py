@@ -932,16 +932,19 @@ def generate_record_id(
     stable business key); without them it derives from the whole record, so
     two byte-identical keyless rows share an id -- the Fivetran ``_fivetran_id``
     tradeoff: a keyless stream cannot tell a genuine duplicate from a re-read
-    one.
+    one. If the configured key fields are absent from the record -- a mapping
+    renamed or dropped them, so the transformed row no longer carries them --
+    the id falls back to the whole record. Without that fallback every row would
+    hash the same all-missing-key value, and the keyless ``_record_hash`` dedup
+    would collapse distinct rows to one and silently drop the rest.
 
     The full SHA-256 hex digest is returned (not truncated): it doubles as the
     ``_record_hash`` dedup key for keyless inserts, where a truncated digest's
     collision odds would silently drop legitimately-distinct rows.
     """
-    basis: Any = (
-        {field: record.get(field) for field in primary_key_fields}
-        if primary_key_fields
-        else record
-    )
+    if primary_key_fields and all(field in record for field in primary_key_fields):
+        basis: Any = {field: record[field] for field in primary_key_fields}
+    else:
+        basis = record
     canonical = json.dumps(basis, sort_keys=True, default=str)
     return hashlib.sha256(canonical.encode()).hexdigest()

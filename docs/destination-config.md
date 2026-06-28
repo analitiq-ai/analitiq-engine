@@ -299,7 +299,10 @@ enforced depends on the write mode:
   keyless rows collapse to one, and a keyed `insert` likewise drops a
   same-key row whose content differs (first occurrence wins). `insert` cannot
   tell a retry's re-read from a genuinely conflicting key; a stream that must
-  reconcile changed rows should use `upsert`.
+  reconcile changed rows should use `upsert`. A keyless insert target created
+  before `_record_hash` existed is rejected loudly on the next run (the column
+  is the primary key and cannot be back-filled on existing rows); recreate the
+  table so the engine can manage it.
 
 ADBC-only transports (Snowflake/BigQuery) do not yet do the keyless
 `insert` anti-join — plain `insert` there is at-least-once (a noted

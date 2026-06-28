@@ -776,7 +776,14 @@ class GenericSQLConnector(BaseDestinationHandler):
                     default=self.dialect.current_timestamp_default(),
                 )
             )
-        if self._needs_record_hash(state) and self.RECORD_HASH_COLUMN not in declared:
+        if self._needs_record_hash(state):
+            if self.RECORD_HASH_COLUMN in declared:
+                raise SchemaConfigurationError(
+                    f"keyless insert stream for "
+                    f"{state.schema_name}.{state.table_name} declares a column "
+                    f"named {self.RECORD_HASH_COLUMN!r}, which the engine reserves "
+                    f"as its synthetic dedup primary key; rename the column"
+                )
             # Keyless insert: the content-derived hash is the row's only
             # identity. Declared NOT NULL primary key (see _identity_columns)
             # so the database structurally enforces the dedup the insert
@@ -893,6 +900,22 @@ class GenericSQLConnector(BaseDestinationHandler):
                             state,
                             target_ddl,
                         )
+
+        if self._needs_record_hash(state) and (
+            state.table is None or self.RECORD_HASH_COLUMN not in state.table.c
+        ):
+            # A keyless insert table created before issue #282 has no
+            # _record_hash column; CREATE TABLE IF NOT EXISTS is a no-op and
+            # reflection returns it without the column, so every write would
+            # then fail indexing table.c[_record_hash]. Fail loud with a clear
+            # message instead -- the engine adds no migration (the column is the
+            # primary key, so it cannot be back-filled on existing rows).
+            raise SchemaConfigurationError(
+                f"keyless insert target {state.schema_name}.{state.table_name} "
+                f"has no {self.RECORD_HASH_COLUMN!r} column; it predates the "
+                f"content-hash dedup key (issue #282). Recreate the target so the "
+                f"engine manages {self.RECORD_HASH_COLUMN} as its primary key."
+            )
 
         logger.info(
             "Destination table ready for %s.%s",
@@ -1190,7 +1213,13 @@ class GenericSQLConnector(BaseDestinationHandler):
         if state.table is None or not records:
             return
         table = state.table
-        identity = self._identity_columns(state)
+        # The anti-join is an insert-mode concern. truncate_insert reaches this
+        # helper too (after the table is emptied); deduping there would silently
+        # drop a same-key row in a full-refresh batch instead of surfacing the
+        # PK violation, so it gets a plain INSERT.
+        identity = (
+            self._identity_columns(state) if state.write_mode == "insert" else []
+        )
         if not identity:
             conn.execute(table.insert(), records)
             return
