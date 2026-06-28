@@ -141,6 +141,8 @@ This survives a network failure that drops the ACK after the destination already
 
 ADBC-only transports (Snowflake/BigQuery) do not yet do the keyless `insert` anti-join — plain `insert` there is at-least-once (a noted follow-up); `upsert` and `truncate_insert` remain idempotent.
 
+A destination that does not dedup itself is **at-least-once on a same-`RUN_ID` retry**: the engine keeps no in-run pre-send skip, so a restart re-sends already-ACKed batches. This applies to the **API** and **stdout** handlers, which have no row-level dedup (an API rents its sink; stdout only prints), so a restart repeats their side effects. It matches what cloud retries already did — the removed engine-side mirror lived on the worker's local filesystem and never survived a fresh container — and a positional pre-send skip cannot be made correct without reintroducing the row-drop this design removes (an advancing cursor re-batches the same `batch_seq` over different rows). Giving API/stdout their own retry idempotency is a follow-up.
+
 ### All-or-nothing batches
 
 A batch wholly succeeds or wholly fails. The cursor advances only on `SUCCESS`, there is no partial-rollback bookkeeping, and DLQ routing is per-batch. This is why `AckStatus` has no partial value.
