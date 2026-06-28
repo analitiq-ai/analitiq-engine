@@ -26,6 +26,7 @@ or connector_id; operations with no portable form raise
 
 import asyncio
 import hashlib
+import json
 import logging
 import threading
 from collections.abc import AsyncIterator, Mapping
@@ -1031,13 +1032,13 @@ class GenericSQLConnector(BaseDestinationHandler):
                     )
                 elif self._sync_engine is not None:
                     prepared = self._prepare_for_sqlalchemy(state, record_batch)
-                    self._attach_record_hash(state, prepared, record_ids)
+                    self._attach_record_hash(state, prepared)
                     await asyncio.to_thread(
                         self._write_batch_on_sync_engine, state, prepared
                     )
                 else:
                     prepared = self._prepare_for_sqlalchemy(state, record_batch)
-                    self._attach_record_hash(state, prepared, record_ids)
+                    self._attach_record_hash(state, prepared)
                     async with self._require_async_engine().begin() as conn:
                         await conn.run_sync(self._apply_write_in_txn, state, prepared)
 
@@ -1164,24 +1165,26 @@ class GenericSQLConnector(BaseDestinationHandler):
         self,
         state: _StreamState,
         records: list[dict[str, Any]],
-        record_ids: list[str],
     ) -> None:
         """Populate the synthetic ``_record_hash`` for a keyless insert stream.
 
-        The engine ships one content-derived id per row (issue #282); a keyless
-        insert stores it as the row's primary key so the insert anti-join and
-        the column's PRIMARY KEY can drop a re-read duplicate. No-op for any
-        stream that dedups on a real key.
+        A keyless stream has no key identity, so the hash is the row's *content*,
+        computed here at the sink from the cast record -- deliberately not the
+        engine's wire ``record_id``, which derives from the source's declared
+        primary key when it has one. Deriving from content means two
+        byte-identical rows share a hash and collapse to one, while a row whose
+        content differs -- even if it repeats the source primary key -- gets a
+        distinct hash and is kept (issue #282). The record carries only contract
+        columns at this point (no ``_record_hash``/``_synced_at``), so the digest
+        is a stable function of the data and matches across attempts. No-op for
+        any stream that dedups on a real key.
         """
         if not self._needs_record_hash(state):
             return
-        if len(records) != len(record_ids):
-            raise SchemaConfigurationError(
-                f"record_ids length {len(record_ids)} != prepared row count "
-                f"{len(records)} for {state.schema_name}.{state.table_name}"
-            )
-        for record, record_id in zip(records, record_ids):
-            record[self.RECORD_HASH_COLUMN] = record_id
+        for record in records:
+            canonical = json.dumps(record, sort_keys=True, default=str)
+            digest = hashlib.sha256(canonical.encode()).hexdigest()
+            record[self.RECORD_HASH_COLUMN] = digest
 
     def _insert_records(
         self,
