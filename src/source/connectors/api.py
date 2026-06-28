@@ -41,6 +41,7 @@ from cdk.rate_limiter import RateLimiter
 from cdk.request_binding import bind_param_refs, resolve_param_defaults
 from cdk.resolver import Resolver
 from cdk.schema_contract import SchemaContract
+from cdk.type_map import UnmappedTypeError
 from cdk.types import CheckpointStore
 
 from ...shared.dict_path import walk_path
@@ -171,6 +172,7 @@ class APIConnector(BaseConnector):
             endpoint_doc,
             read_spec,
         )
+        self._apply_read_type_map(records_items_schema)
         schema_contract = SchemaContract(records_items_schema)
         request = read_spec.get("request") or {}
         path = request.get("path")
@@ -332,6 +334,44 @@ class APIConnector(BaseConnector):
                 f"the addressed items)"
             )
         return items
+
+    def _apply_read_type_map(self, items_schema: dict[str, Any]) -> None:
+        """Resolve each record field's ``arrow_type`` from the connector type-map.
+
+        API endpoints declare per-field JSON ``type``/``format`` and ship a
+        ``type-map-read.json`` mapping those to Arrow types - the same read
+        type-map the database source path consumes via ``connector_type_mapper``
+        (see ``cdk/sql/discovery.py``). ``SchemaContract`` requires an explicit
+        ``arrow_type`` per field, so resolve it here from the type-map. A field
+        that already declares ``arrow_type`` keeps it, so hand-annotated
+        connectors stay valid and the mapper is only consulted when needed; an
+        unmapped JSON type fails loud, naming the field.
+        """
+        runtime = self._runtime
+        if runtime is None:
+            raise ReadError(
+                "APIConnector: type-map resolution attempted before connect()"
+            )
+        mapper = None
+        for name, prop in (items_schema.get("properties") or {}).items():
+            if not isinstance(prop, dict) or prop.get("arrow_type"):
+                continue
+            json_type = prop.get("type")
+            if isinstance(json_type, list):
+                json_type = next((t for t in json_type if t != "null"), None)
+            if not isinstance(json_type, str):
+                continue
+            fmt = prop.get("format")
+            native = f"{json_type}:{fmt}" if isinstance(fmt, str) and fmt else json_type
+            if mapper is None:
+                mapper = runtime.connector_type_mapper
+            try:
+                prop["arrow_type"] = mapper.to_arrow_type(native)
+            except UnmappedTypeError as err:
+                raise ReadError(
+                    f"field {name!r}: JSON type {native!r} has no rule in the "
+                    f"connector's read type-map"
+                ) from err
 
     def _build_base_params(
         self,
