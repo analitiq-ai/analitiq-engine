@@ -63,8 +63,14 @@ services:
           cpus: '0.25'
           memory: 256M
 
-    # Long-running server - restart on failure only (exit 0 = intentional stop)
-    restart: on-failure
+    # Fail fast on unrecoverable startup. A destination that exits non-zero
+    # while connecting (bad DB host, wrong creds, missing driver) can never
+    # recover by retrying, so it must stay exited. With "on-failure" each crash
+    # restarts the container, which resets the healthcheck start_period, so it
+    # never flips to "unhealthy" and source_engine's depends_on: service_healthy
+    # gate waits forever. With "no" the exit is terminal and compose aborts the
+    # run as soon as the dependency exits before becoming healthy.
+    restart: "no"
 
     # Logging configuration
     logging:
