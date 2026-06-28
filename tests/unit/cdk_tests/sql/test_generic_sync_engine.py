@@ -38,23 +38,20 @@ def _sqlite_sync_engine():
 
 
 TARGET_DDL = "CREATE TABLE events (id INTEGER PRIMARY KEY, name TEXT)"
-COMMITS_DDL = (
-    "CREATE TABLE _batch_commits ("
-    " run_id TEXT NOT NULL, stream_id TEXT NOT NULL,"
-    " batch_seq INTEGER NOT NULL, committed_cursor BLOB,"
-    " records_written INTEGER, committed_at TIMESTAMP,"
-    " PRIMARY KEY (run_id, stream_id, batch_seq))"
-)
 
 
 def _connected_handler(engine, write_mode: str = "insert") -> GenericSQLConnector:
-    """Handler wired to *engine* with reflected tables for stream ``s1``."""
+    """Handler wired to *engine* with the reflected target table for ``s1``.
+
+    Content-derived idempotency (issue #282) means the destination creates
+    only the target table -- there is no positional ``_batch_commits`` ledger.
+    The stream's ``id`` primary key is the identity the insert anti-join skips
+    a re-read row on.
+    """
     with engine.begin() as conn:
         conn.exec_driver_sql(TARGET_DDL)
-        conn.exec_driver_sql(COMMITS_DDL)
     meta = MetaData()
     table = Table("events", meta, autoload_with=engine)
-    commits = Table("_batch_commits", meta, autoload_with=engine)
 
     contract = MagicMock()
     contract.to_db_records.side_effect = lambda rb: rb.to_pylist()
@@ -66,7 +63,6 @@ def _connected_handler(engine, write_mode: str = "insert") -> GenericSQLConnecto
         schema_name="",
         table_name="events",
         table=table,
-        batch_commits_table=commits,
         write_mode=write_mode,
         primary_keys=["id"],
         conflict_keys=[],
@@ -97,7 +93,7 @@ def _count(engine, table: str) -> int:
 
 class TestSyncEngineWritePath:
     @pytest.mark.asyncio
-    async def test_insert_writes_rows_and_commit_record(self):
+    async def test_insert_writes_rows(self):
         engine = _sqlite_sync_engine()
         try:
             handler = _connected_handler(engine)
@@ -107,22 +103,25 @@ class TestSyncEngineWritePath:
             assert result.status == AckStatus.ACK_STATUS_SUCCESS
             assert result.records_written == 2
             assert _count(engine, "events") == 2
-            assert _count(engine, "_batch_commits") == 1
         finally:
             engine.dispose()
 
     @pytest.mark.asyncio
-    async def test_replay_returns_already_committed(self):
+    async def test_reinsert_same_key_is_deduped(self):
+        # A same-run retry re-reads the inclusive cursor boundary, so the same
+        # keyed row can arrive twice. There is no positional ledger (issue
+        # #282); the insert anti-join skips the row whose ``id`` already exists,
+        # so the re-insert is a no-op that still acks SUCCESS -- never the
+        # removed ALREADY_COMMITTED status.
         engine = _sqlite_sync_engine()
         try:
             handler = _connected_handler(engine)
             first = await _write(handler, token=b"cur-1")
             assert first.status == AckStatus.ACK_STATUS_SUCCESS
             replay = await _write(handler, token=b"cur-1")
-            assert replay.status == AckStatus.ACK_STATUS_ALREADY_COMMITTED
-            assert replay.records_written == 1
+            assert replay.status == AckStatus.ACK_STATUS_SUCCESS
             assert replay.committed_cursor.token == b"cur-1"
-            # The replay did not double-insert.
+            # The re-insert was deduped on the primary key -- no double row.
             assert _count(engine, "events") == 1
         finally:
             engine.dispose()
@@ -142,29 +141,16 @@ class TestSyncEngineWritePath:
             engine.dispose()
 
     @pytest.mark.asyncio
-    async def test_empty_batch_still_records_commit(self):
+    async def test_empty_batch_returns_success(self):
+        # An empty batch writes nothing and records no marker -- the cursor
+        # advances and idempotency lives in the write itself (issue #282).
         engine = _sqlite_sync_engine()
         try:
             handler = _connected_handler(engine)
             result = await _write(handler, rows=[])
             assert result.status == AckStatus.ACK_STATUS_SUCCESS
             assert result.records_written == 0
-            assert _count(engine, "_batch_commits") == 1
-        finally:
-            engine.dispose()
-
-    @pytest.mark.asyncio
-    async def test_failed_write_rolls_back_atomically(self):
-        # A duplicate PK makes the DML raise; the commit record shares the
-        # transaction, so neither the rows nor the record may survive.
-        engine = _sqlite_sync_engine()
-        try:
-            handler = _connected_handler(engine)
-            await _write(handler, seq=1, rows=[{"id": 1, "name": "a"}])
-            result = await _write(handler, seq=2, rows=[{"id": 1, "name": "dupe"}])
-            assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
-            assert _count(engine, "events") == 1
-            assert _count(engine, "_batch_commits") == 1
+            assert _count(engine, "events") == 0
         finally:
             engine.dispose()
 
@@ -182,7 +168,7 @@ class TestSyncEngineWritePath:
 
 class TestSyncEngineDdl:
     @pytest.mark.asyncio
-    async def test_ddl_and_reflect_returns_bound_tables(self):
+    async def test_ddl_and_reflect_returns_bound_table(self):
         engine = _sqlite_sync_engine()
         try:
             handler = GenericSQLConnector()
@@ -190,14 +176,12 @@ class TestSyncEngineDdl:
             state = _StreamState(schema_name="", table_name="events")
             import asyncio
 
-            table, commits = await asyncio.to_thread(
+            table = await asyncio.to_thread(
                 handler._ddl_and_reflect_on_sync_engine,
                 state,
                 TARGET_DDL,
-                COMMITS_DDL,
             )
             assert {c.name for c in table.columns} == {"id", "name"}
-            assert "batch_seq" in {c.name for c in commits.columns}
         finally:
             engine.dispose()
 
@@ -326,7 +310,6 @@ class TestSyncRuntimeWiring:
             )
             await handler._ensure_tables_exist(state, _StubTypeMapper())
             assert state.table is not None
-            assert state.batch_commits_table is not None
 
             contract = MagicMock()
             contract.to_db_records.side_effect = lambda rb: rb.to_pylist()
@@ -336,7 +319,6 @@ class TestSyncRuntimeWiring:
             result = await _write(handler, rows=[{"id": 1, "name": "a"}])
             assert result.status == AckStatus.ACK_STATUS_SUCCESS
             assert _count(engine, "events") == 1
-            assert _count(engine, "_batch_commits") == 1
         finally:
             engine.dispose()
 
@@ -407,12 +389,8 @@ class TestAsyncEngineParity:
         meta = MetaData()
         async with engine.begin() as conn:
             await conn.exec_driver_sql(TARGET_DDL)
-            await conn.exec_driver_sql(COMMITS_DDL)
-            table, commits = await conn.run_sync(
-                lambda c: (
-                    Table("events", meta, autoload_with=c),
-                    Table("_batch_commits", meta, autoload_with=c),
-                )
+            table = await conn.run_sync(
+                lambda c: Table("events", meta, autoload_with=c)
             )
         contract = MagicMock()
         contract.to_db_records.side_effect = lambda rb: rb.to_pylist()
@@ -423,7 +401,6 @@ class TestAsyncEngineParity:
             schema_name="",
             table_name="events",
             table=table,
-            batch_commits_table=commits,
             write_mode="insert",
             primary_keys=["id"],
             conflict_keys=[],
@@ -437,22 +414,32 @@ class TestAsyncEngineParity:
             return result.scalar_one()
 
     @pytest.mark.asyncio
-    async def test_insert_replay_and_rollback(self):
+    async def test_insert_and_reinsert_dedupes(self):
         handler, engine = await self._async_handler()
         try:
             first = await _write(handler, seq=1, rows=[{"id": 1, "name": "a"}])
             assert first.status == AckStatus.ACK_STATUS_SUCCESS
             assert await self._async_count(engine, "events") == 1
 
+            # A re-read of the same keyed row is skipped by the insert
+            # anti-join (issue #282): SUCCESS, no double row -- never the
+            # removed ALREADY_COMMITTED status, never a PK-violation rollback.
             replay = await _write(handler, seq=1, rows=[{"id": 1, "name": "a"}])
-            assert replay.status == AckStatus.ACK_STATUS_ALREADY_COMMITTED
+            assert replay.status == AckStatus.ACK_STATUS_SUCCESS
             assert await self._async_count(engine, "events") == 1
 
-            # Duplicate PK: DML raises, and the commit record shares the
-            # transaction, so neither survives.
+            # Same primary key with different content is likewise deduped on
+            # ``id`` -- first occurrence wins, the second never lands.
             dupe = await _write(handler, seq=2, rows=[{"id": 1, "name": "dupe"}])
-            assert dupe.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
+            assert dupe.status == AckStatus.ACK_STATUS_SUCCESS
             assert await self._async_count(engine, "events") == 1
-            assert await self._async_count(engine, "_batch_commits") == 1
+            # First occurrence wins: the original row content is untouched.
+            rows = await self._async_rows(engine)
+            assert rows == [(1, "a")]
         finally:
             await engine.dispose()
+
+    async def _async_rows(self, engine):
+        async with engine.connect() as conn:
+            result = await conn.exec_driver_sql("SELECT id, name FROM events")
+            return result.all()

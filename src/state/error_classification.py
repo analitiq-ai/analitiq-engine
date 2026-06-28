@@ -465,7 +465,6 @@ _DESTINATION_NAMES = frozenset(
     {
         "WriteError",
         "CreateTableError",
-        "AdbcCommitRecordError",
     }
 )
 _DESTINATION_PHRASES = (

@@ -616,9 +616,9 @@ class TestServerUdsBind:
 
 
 class TestShutdownFinalizeRun:
-    """Shutdown runs the handler's optional finalize_run hook (e.g. pruning the
-    idempotency ledger) while still connected -- the worker is SIGTERM'd right
-    after, so this is the last reliable point for connection-dependent cleanup.
+    """Shutdown runs the handler's optional finalize_run hook (connection-
+    dependent run-completion cleanup) while still connected -- the worker is
+    SIGTERM'd right after, so this is the last reliable point for that cleanup.
     """
 
     @pytest.mark.asyncio
@@ -639,7 +639,7 @@ class TestShutdownFinalizeRun:
     @pytest.mark.asyncio
     async def test_non_success_reason_finalizes_with_succeeded_false(self):
         # A failed/aborted (or generic teardown) reason must not signal success,
-        # so the handler keeps its ledger for a possible resume.
+        # so the handler can skip success-only cleanup for a possible resume.
         handler = MagicMock()
         handler.finalize_run = AsyncMock()
         server = MagicMock()
