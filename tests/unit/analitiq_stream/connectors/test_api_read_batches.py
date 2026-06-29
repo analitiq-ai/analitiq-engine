@@ -572,9 +572,10 @@ class TestReadBatchesKeysetPagination:
         )
 
         assert [b.num_rows for b in batches] == [2, 1]
-        # First request carries no key; second carries the last id of page 1.
+        # First request carries no key; second carries the last id of page 1,
+        # stringified at the param boundary so yarl renders it faithfully.
         assert "after_id" not in session.calls[0][2]
-        assert session.calls[1][2]["after_id"] == 2
+        assert session.calls[1][2]["after_id"] == "2"
 
     @pytest.mark.asyncio
     async def test_keyset_without_from_record_raises_read_error(self):
@@ -1376,3 +1377,53 @@ class TestReadBatchesDecimalPrecision:
         assert batches[0].column("rate").to_pylist()[0] == pytest.approx(
             3.14159265358979
         )
+
+    @pytest.mark.asyncio
+    async def test_keyset_decimal_key_sent_with_full_precision(self):
+        # A fractional keyset key parses to Decimal; it must reach the next
+        # request as its full-precision string. yarl would otherwise truncate
+        # the Decimal to its integer part and silently skip rows.
+        page1 = '{"records": [{"score": 10.5}, {"score": 1234567890.12345678}]}'
+        page2 = '{"records": [{"score": 1234567890.99999999}]}'
+        session = _FakeSession(
+            [
+                _FakeResponse(status=200, body=page1),
+                _FakeResponse(status=200, body=page2),
+            ]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_ref(
+            "response.body.records",
+            {
+                "type": "object",
+                "properties": {
+                    "records": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "score": {"type": "number", "arrow_type": "Float64"},
+                            },
+                        },
+                    },
+                },
+            },
+        )
+        endpoint["operations"]["read"]["pagination"] = {
+            "type": "keyset",
+            "keyset": {"param": "after", "from_record": "score"},
+            "limit": {"param": "limit"},
+        }
+        await _consume(
+            connector,
+            runtime,
+            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=2,
+        )
+
+        assert "after" not in session.calls[0][2]
+        assert session.calls[1][2]["after"] == "1234567890.12345678"

@@ -59,13 +59,13 @@ _TRANSIENT_HTTP_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
 def _loads_preserving_decimals(payload: str) -> Any:
     """Decode a JSON response body without flattening decimals to float.
 
-    The stdlib default parses every fractional token as a double, discarding
-    digits before Arrow ever sees the value, so a Decimal-typed column lands a
-    rounded number. Parsing fractional tokens as ``Decimal`` keeps the exact
-    source digits; the schema contract then renders each value per its declared
-    Arrow type (Decimal columns stay exact, Float columns narrow to double on
-    purpose). Integer tokens are untouched -- the default already parses them as
-    arbitrary-precision ``int``.
+    The stdlib default parses every floating-point token as a double,
+    discarding digits before Arrow ever sees the value, so a Decimal-typed
+    column lands a rounded number. Parsing those tokens as ``Decimal`` keeps the
+    exact source digits; the schema contract then renders each value per its
+    declared Arrow type (Decimal columns stay exact, Float columns narrow to
+    double on purpose). Integer tokens are untouched -- the default already
+    parses them as arbitrary-precision ``int``.
     """
     return json.loads(payload, parse_float=Decimal)
 
@@ -579,11 +579,15 @@ class APIConnector(BaseConnector):
                 raise ReadError(
                     "keyset pagination requires keyset.from_record (record field)"
                 )
-            last_key: str | None = None
+            # Holds the raw record value (int/str/Decimal); stringified when
+            # placed into the query so yarl renders it faithfully. yarl
+            # truncates a Decimal to its integer part, which would silently
+            # skip rows on a fractional keyset key.
+            last_key: Any = None
             while True:
                 params = dict(base_params)
                 if last_key:
-                    params[keyset_param] = last_key
+                    params[keyset_param] = str(last_key)
                 query, body = build_request(params)
                 records = await self._request_records(
                     full_url, method, query, records_ref, body=body
