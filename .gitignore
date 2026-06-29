@@ -402,3 +402,7 @@ tests/e2e/reports/
 **/tests/**/fixtures/**/*.py[cod]
 # Cloud/internal handoff documents — never shared on GitHub.
 github-cloud/
+
+# Local git worktrees used for parallel branches.
+.worktree/
+.worktrees/

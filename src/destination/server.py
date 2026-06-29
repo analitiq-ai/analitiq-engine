@@ -10,7 +10,6 @@ This server implements the DestinationService gRPC interface, handling:
 import asyncio
 import io
 import logging
-import os
 from collections.abc import AsyncIterator
 from typing import Any, Optional
 
@@ -30,6 +29,7 @@ from cdk.types import SchemaSpec
 from cdk.types import WriteMode as CdkWriteMode
 from grpc import aio as grpc_aio
 
+from ..config import settings
 from ..grpc import DEFAULT_MAX_MESSAGE_SIZE
 from ..grpc.generated.analitiq.v1 import (
     AckStatus,
@@ -53,8 +53,8 @@ from ..grpc.generated.analitiq.v1 import (
 
 logger = logging.getLogger(__name__)
 
-# Default configuration from environment
-DEFAULT_GRPC_PORT = int(os.getenv("GRPC_PORT", "50051"))
+# Default configuration (resolved from src.config.settings, env-overridable).
+DEFAULT_GRPC_PORT = settings.grpc_server_port()
 
 # Shutdown reason that marks a terminal, fully-successful run -- the only case
 # where the destination prunes its idempotency ledger. Any other reason

@@ -82,25 +82,3 @@ class ReplicationConfig:
             "tie_breaker_fields",
             "primary_key",
         ]
-
-
-@dataclass
-class SourceConfig:
-    """Source configuration."""
-
-    endpoint_ref: dict[str, str] | None = None
-    host_id: str = ""
-    replication_method: str = "incremental"
-    replication_key: str | None = None
-    safety_window_seconds: int = 120
-
-
-@dataclass
-class DestinationConfig:
-    """Destination configuration."""
-
-    endpoint_ref: dict[str, str] | None = None
-    host_id: str = ""
-    refresh_mode: str = "upsert"
-    batch_support: bool = False
-    batch_size: int = 1

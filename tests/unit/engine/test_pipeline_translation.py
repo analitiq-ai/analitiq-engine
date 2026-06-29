@@ -323,7 +323,7 @@ class TestBuildConfigDict:
         assert assignments[0]["target"]["path"] == ["id"]
         assert assignments[0]["value"]["kind"] == "expr"
 
-    def test_runtime_propagated(self):
+    def test_runtime_not_in_config_dict(self):
         pipeline = _make_pipeline(
             runtime=RuntimeConfig(
                 batching=BatchingConfig(batch_size=500),
@@ -334,9 +334,10 @@ class TestBuildConfigDict:
 
         result = _build_config_dict(pipeline, [])
 
-        # The typed RuntimeConfig is threaded through unchanged (no dict
-        # conversion); the engine reads attributes off it.
-        runtime = result["runtime"]
-        assert runtime.batching.batch_size == 500
-        assert runtime.error_handling.strategy == "dlq"
-        assert runtime.buffer_size == 2048
+        # Runtime tuning is no longer threaded through the per-stream config
+        # dict; the runner reads the typed RuntimeConfig off pipeline.runtime
+        # and hands it to the StreamingEngine constructor.
+        assert "runtime" not in result
+        assert pipeline.runtime.batching.batch_size == 500
+        assert pipeline.runtime.error_handling.strategy == "dlq"
+        assert pipeline.runtime.buffer_size == 2048

@@ -84,10 +84,6 @@ def _build_config_dict(
         "pipeline_id": pipeline_config.pipeline_id,
         "name": pipeline_config.display_name or pipeline_config.pipeline_id,
         "streams": streams,
-        # The typed RuntimeConfig flows through the engine internals; it never
-        # crosses to the worker (only source_config is serialised there), so no
-        # dict conversion is needed.
-        "runtime": pipeline_config.runtime,
     }
 
 
@@ -315,16 +311,12 @@ class PipelineRunner:
             state_dir.mkdir(parents=True, exist_ok=True)
             dlq_dir.mkdir(parents=True, exist_ok=True)
 
-            # Runtime tuning parameters (typed; defaults resolved in the parser).
-            runtime = pipeline_config.runtime
+            # Runtime tuning is a single typed RuntimeConfig (defaults resolved
+            # in the parser with pipeline-config > env > default precedence).
             engine = StreamingEngine(
                 pipeline_id=pipeline_config.pipeline_id,
-                batch_size=runtime.batching.batch_size,
-                max_concurrent_batches=runtime.batching.max_concurrent_batches,
-                buffer_size=runtime.buffer_size,
+                runtime=pipeline_config.runtime,
                 dlq_path=str(dlq_dir),
-                max_retries=runtime.error_handling.max_retries,
-                retry_delay=runtime.error_handling.retry_delay_seconds,
             )
 
             logger.info("Starting pipeline execution...")

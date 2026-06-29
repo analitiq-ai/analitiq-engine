@@ -37,14 +37,15 @@ from dataclasses import dataclass
 from typing import Any
 
 import grpc
+from src.config import settings
 
 logger = logging.getLogger(__name__)
 
 # Seconds to wait for the worker's socket to accept (covers the worker's
 # connector connect(), which for a destination runs before the bind).
-DEFAULT_READY_TIMEOUT = float(os.getenv("WORKER_READY_TIMEOUT_SECONDS", "300"))
+DEFAULT_READY_TIMEOUT = settings.worker_ready_timeout_seconds()
 # Grace between SIGTERM and SIGKILL on close.
-DEFAULT_KILL_GRACE = float(os.getenv("WORKER_KILL_GRACE_SECONDS", "10"))
+DEFAULT_KILL_GRACE = settings.worker_kill_grace_seconds()
 
 # DSN-shaped credentials: scheme://user:password@host -> scheme://user:***@host
 _DSN_CREDENTIALS = re.compile(r"(://[^:/@\s]+:)[^@\s]+(@)")
@@ -61,9 +62,9 @@ def _child_limits() -> None:
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
     cap = min(1024, hard if hard != resource.RLIM_INFINITY else 1024)
     resource.setrlimit(resource.RLIMIT_NOFILE, (cap, cap))
-    as_mb = os.getenv("WORKER_RLIMIT_AS_MB")
+    as_mb = settings.worker_rlimit_as_mb()
     if as_mb:
-        limit = int(as_mb) * 1024 * 1024
+        limit = as_mb * 1024 * 1024
         resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
 
 

@@ -37,10 +37,11 @@ import os
 import sys
 from typing import Any
 
+from src.config import settings
 from src.models.stream import WriteMode
 
 # Set up logging
-log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+log_level = settings.log_level()
 logging.basicConfig(
     level=getattr(logging, log_level, logging.INFO),
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -155,8 +156,8 @@ async def run_destination_mode() -> None:
     from src.engine.pipeline_config_prep import PipelineConfigPrep
     from src.worker.proxy import WorkerProxyHandler
 
-    grpc_port = int(os.getenv("GRPC_PORT", "50051"))
-    destination_index = int(os.getenv("DESTINATION_INDEX", "0"))
+    grpc_port = settings.grpc_server_port()
+    destination_index = settings.destination_index()
 
     # Load configuration using PipelineConfigPrep (same as engine)
     logger.info("Loading pipeline configuration via PipelineConfigPrep")
@@ -287,7 +288,7 @@ async def main() -> int:
     logger.info("Analitiq Stream Starting")
     logger.info("=" * 60)
 
-    run_mode = os.getenv("RUN_MODE", "source").lower()
+    run_mode = settings.run_mode()
     logger.info(f"Run mode: {run_mode}")
 
     try:

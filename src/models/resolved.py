@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from cdk.connection_runtime import ConnectionRuntime
+from src.config import settings
 from src.models.stream import EndpointRef
 
 # Mirrors the published stream contract's replication-method enum.
@@ -121,10 +122,16 @@ class ResolvedStream:
 
 @dataclass(frozen=True)
 class BatchingConfig:
-    """Batch sizing for the engine's producer/consumer loop."""
+    """Batch sizing for the engine's producer/consumer loop.
 
-    batch_size: int = 1000
-    max_concurrent_batches: int = 3
+    Defaults come from :mod:`src.config.settings` (env-overridable) and apply
+    only when a pipeline's ``runtime.batching`` block omits the key.
+    """
+
+    batch_size: int = field(default_factory=settings.default_batch_size)
+    max_concurrent_batches: int = field(
+        default_factory=settings.default_max_concurrent_batches
+    )
 
     def __post_init__(self) -> None:
         if self.batch_size <= 0:
@@ -144,11 +151,17 @@ _VALID_ERROR_STRATEGIES = frozenset({"fail", "dlq", "skip"})
 
 @dataclass(frozen=True)
 class ErrorHandlingConfig:
-    """Fault-handling policy for a pipeline run."""
+    """Fault-handling policy for a pipeline run.
 
-    strategy: str = "fail"
-    max_retries: int = 3
-    retry_delay_seconds: int = 5
+    Defaults come from :mod:`src.config.settings` (env-overridable) and apply
+    only when a pipeline's ``runtime.error_handling`` block omits the key.
+    """
+
+    strategy: str = field(default_factory=settings.default_error_strategy)
+    max_retries: int = field(default_factory=settings.default_max_retries)
+    retry_delay_seconds: int = field(
+        default_factory=settings.default_retry_delay_seconds
+    )
 
     def __post_init__(self) -> None:
         if self.strategy not in _VALID_ERROR_STRATEGIES:
@@ -173,12 +186,13 @@ class RuntimeConfig:
 
     ``batching`` / ``error_handling`` are typed sub-configs (closed, known
     key sets) so consumers read attributes instead of ``dict.get(...)`` with
-    per-call-site defaults -- the defaults live once, in the parser.
+    per-call-site defaults -- the defaults live once, in
+    :mod:`src.config.settings`.
     """
 
     batching: BatchingConfig = field(default_factory=BatchingConfig)
     error_handling: ErrorHandlingConfig = field(default_factory=ErrorHandlingConfig)
-    buffer_size: int = 5000
+    buffer_size: int = field(default_factory=settings.default_buffer_size)
 
     def __post_init__(self) -> None:
         if self.buffer_size <= 0:
