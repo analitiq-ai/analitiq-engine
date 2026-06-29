@@ -8,7 +8,9 @@ and destinations with comprehensive fault tolerance and observability.
 __version__ = "0.1.0"
 __author__ = "Analitiq Core Team"
 
-import os
+# Aliased to a private name so it is not re-exported as a public package
+# attribute (see tests/.../test_package_init.py::test_no_unexpected_exports).
+import os as _os
 
 # Disable gRPC's fork handlers before any submodule below imports grpc and
 # registers them. The engine forks worker subprocesses (worker/spawn.py) while
@@ -18,7 +20,7 @@ import os
 # subprocess here is fork+exec and never touches gRPC before exec, so the fork
 # handlers are pure overhead. This must run before the imports below pull in
 # grpc; setdefault keeps any explicit override.
-os.environ.setdefault("GRPC_ENABLE_FORK_SUPPORT", "0")
+_os.environ.setdefault("GRPC_ENABLE_FORK_SUPPORT", "0")
 
 from .engine.engine import StreamingEngine  # noqa: E402
 from .source.connectors.api import APIConnector  # noqa: E402
