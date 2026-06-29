@@ -445,11 +445,11 @@ class SchemaContract:
                         f"{v!r} as {field.type}: {exc}"
                     ) from exc
             elif isinstance(v, int) or (not is_int and isinstance(v, (float, Decimal))):
-                # A Decimal is only accepted on a float column; the float()
-                # narrowing below is the intended (lossy) conversion to the
-                # declared double width. A Decimal on an integer column is not
-                # matched here and falls through to the error.
-                parsed = v
+                # A Decimal is only accepted on a float column; narrow it to
+                # float here -- the intended (lossy) conversion to the declared
+                # double width. A Decimal on an integer column is not matched
+                # here and falls through to the error.
+                parsed = float(v) if isinstance(v, Decimal) else v
             else:
                 raise ValueError(
                     f"column {field.name!r} at row {row}: expected numeric or "
