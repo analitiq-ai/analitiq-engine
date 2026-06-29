@@ -16,7 +16,7 @@ from src.engine.engine import StreamingEngine
 from src.engine.exceptions import StreamProcessingError
 from src.grpc.generated.analitiq.v1 import AckStatus
 from src.models.resolved import (
-    ErrorHandlingConfig,
+    BatchingConfig,
     ReplicationConfig,
     ResolvedSource,
     RuntimeConfig,
@@ -47,9 +47,10 @@ def engine(temp_dir):
     """Create a StreamingEngine instance for testing."""
     return StreamingEngine(
         pipeline_id="test-pipeline",
-        batch_size=10,
-        max_concurrent_batches=2,
-        buffer_size=100,
+        runtime=RuntimeConfig(
+            batching=BatchingConfig(batch_size=10, max_concurrent_batches=2),
+            buffer_size=100,
+        ),
         dlq_path=temp_dir,
     )
 
@@ -107,11 +108,6 @@ def sample_stream_config():
             "connector_type": "api",
             "host": "https://dest.example.com",
         },
-        "runtime": RuntimeConfig(
-            error_handling=ErrorHandlingConfig(
-                strategy="dlq", max_retries=3, retry_delay_seconds=1
-            ),
-        ),
     }
 
 
@@ -539,7 +535,8 @@ class TestEngineFatalFailureHandling:
 
         stream_dlq = DeadLetterQueue(f"{temp_dir}/dlq")
 
-        # Patch env vars for faster retries
+        engine.error_strategy = "dlq"
+        engine.retry_delay = 0.01  # keep exponential backoff fast in the test
         stream_metrics = {
             "records_processed": 0,
             "records_failed": 0,
@@ -547,19 +544,16 @@ class TestEngineFatalFailureHandling:
             "batches_failed": 0,
         }
 
-        with patch.dict(
-            "os.environ", {"MAX_RETRIES": "2", "RETRY_BASE_DELAY_MS": "10"}
-        ):
-            # Execute - should NOT raise (goes to DLQ after retries)
-            await engine._load_stage(
-                input_queue=input_queue,
-                output_queue=output_queue,
-                grpc_client=mock_grpc_client,
-                config=sample_stream_config,
-                stream_dlq=stream_dlq,
-                run_id="test-run-001",
-                stream_metrics=stream_metrics,
-            )
+        # Execute - should NOT raise (goes to DLQ after retries)
+        await engine._load_stage(
+            input_queue=input_queue,
+            output_queue=output_queue,
+            grpc_client=mock_grpc_client,
+            config=sample_stream_config,
+            stream_dlq=stream_dlq,
+            run_id="test-run-001",
+            stream_metrics=stream_metrics,
+        )
 
         # Assert: send_batch was called multiple times (initial + retries)
         # Initial call + 3 retries (default max_retries=3) = 4 calls
@@ -598,9 +592,7 @@ class TestEngineFatalFailureHandling:
         stream_dlq = DeadLetterQueue(f"{temp_dir}/dlq")
 
         config = dict(sample_stream_config)
-        config["runtime"] = RuntimeConfig(
-            error_handling=ErrorHandlingConfig(strategy="fail")
-        )
+        engine.error_strategy = "fail"
         engine.retry_delay = 0.01
 
         stream_metrics = {
@@ -656,9 +648,7 @@ class TestEngineFatalFailureHandling:
         stream_dlq = DeadLetterQueue(f"{temp_dir}/dlq")
 
         config = dict(sample_stream_config)
-        config["runtime"] = RuntimeConfig(
-            error_handling=ErrorHandlingConfig(strategy="skip")
-        )
+        engine.error_strategy = "skip"
         engine.retry_delay = 0.01
 
         stream_metrics = {
@@ -723,11 +713,10 @@ class TestEngineFatalFailureHandling:
         config = dict(sample_stream_config)
         # ErrorHandlingConfig validates the strategy enum at construction, so a
         # bogus value can only reach the engine if that typed boundary were
-        # bypassed. Force it (frozen-bypass) to prove the load stage's defensive
-        # `else: raise` still fails loud rather than silently completing.
-        runtime = RuntimeConfig(error_handling=ErrorHandlingConfig(strategy="fail"))
-        object.__setattr__(runtime.error_handling, "strategy", "bogus")
-        config["runtime"] = runtime
+        # bypassed. Set it straight on the engine to prove the load stage's
+        # defensive `else: raise` still fails loud rather than silently
+        # completing.
+        engine.error_strategy = "bogus"
         engine.retry_delay = 0.01
 
         stream_metrics = {
@@ -988,6 +977,7 @@ class TestEngineDLQOnFailure:
         dlq_path = f"{temp_dir}/dlq"
         stream_dlq = DeadLetterQueue(dlq_path)
 
+        engine.error_strategy = "dlq"  # fatal failures DLQ before raising
         stream_metrics = {
             "records_processed": 0,
             "records_failed": 0,

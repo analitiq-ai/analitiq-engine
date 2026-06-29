@@ -9,7 +9,6 @@ import hashlib
 import io
 import json
 import logging
-import os
 from dataclasses import dataclass
 from typing import Any
 
@@ -17,6 +16,7 @@ import pyarrow as pa
 
 import grpc
 from grpc import aio as grpc_aio
+from src.config import settings
 
 from . import DEFAULT_MAX_MESSAGE_SIZE
 from .cursor import Cursor
@@ -47,15 +47,9 @@ _STREAM_TASK_FAILED = object()  # Sentinel pushed onto the response queue when
 # blocking on `response_queue.get` until timeout.
 
 
-# Default configuration from environment
-# An empty DESTINATION_GRPC_HOST (the var is set but blank — e.g. baked into the
-# image to mean "gRPC mode not configured") must fall back to localhost rather
-# than yield a hostless ":50051" address. ``or`` covers both unset and blank.
-DEFAULT_GRPC_HOST = os.getenv("DESTINATION_GRPC_HOST") or "localhost"
-DEFAULT_GRPC_PORT = int(os.getenv("DESTINATION_GRPC_PORT", "50051"))
-# Literal fallback (not env-derived) so a non-positive GRPC_TIMEOUT_SECONDS
-# cannot poison it - see resolve_grpc_ack_timeout_seconds.
-_FALLBACK_GRPC_TIMEOUT = 30
+# Default configuration (resolved from src.config.settings, env-overridable).
+DEFAULT_GRPC_HOST = settings.grpc_destination_host()
+DEFAULT_GRPC_PORT = settings.grpc_destination_port()
 
 
 def resolve_grpc_ack_timeout_seconds() -> int:
@@ -66,21 +60,18 @@ def resolve_grpc_ack_timeout_seconds() -> int:
     (``SchemaMessage.ack_timeout_seconds``), and the destination derives its
     statement timeout from that wire value rather than reading the env
     directly — a forwarding hop may only tighten the stamp, never widen it —
-    so the bound cannot drift past the engine's wait (issues #231, #234).
-
-    A non-positive value (``GRPC_TIMEOUT_SECONDS=0`` or negative) falls back to
-    the default rather than being used as-is: a zero ack budget makes the
-    schema-ACK ``wait_for`` fire immediately, before the destination can reply.
+    so the bound cannot drift past the engine's wait (issues #231, #234). The
+    non-positive guard (a zero budget would fire the schema-ACK ``wait_for``
+    immediately) lives in :func:`src.config.settings.grpc_ack_timeout_seconds`.
     """
-    raw = int(os.getenv("GRPC_TIMEOUT_SECONDS", str(_FALLBACK_GRPC_TIMEOUT)))
-    return raw if raw > 0 else _FALLBACK_GRPC_TIMEOUT
+    return settings.grpc_ack_timeout_seconds()
 
 
 # Every client defaults to the guarded budget, so a non-positive
 # GRPC_TIMEOUT_SECONDS cannot make a client built without an explicit timeout
 # (e.g. the proxy's UDS client) wait_for(timeout=0) and reject immediately.
 DEFAULT_GRPC_TIMEOUT = resolve_grpc_ack_timeout_seconds()
-DEFAULT_MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
+DEFAULT_MAX_RETRIES = settings.grpc_max_retries()
 
 
 @dataclass

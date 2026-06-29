@@ -74,26 +74,34 @@ logger = logging.getLogger(__name__)
 def _parse_runtime_config(raw: Mapping[str, Any]) -> RuntimeConfig:
     """Build a typed :class:`RuntimeConfig` from the raw pipeline runtime block.
 
-    Defaults live here, once, instead of being re-stated at every consumer's
-    ``dict.get(key, default)`` call site.
+    Only keys the pipeline actually sets are forwarded; every omitted (or
+    ``null``) key falls through to the dataclass default, which sources the
+    value from :mod:`src.config.settings` (env-overridable). The precedence is
+    therefore pipeline config > environment variable > built-in default.
     """
     batching = raw.get("batching") or {}
     error_handling = raw.get("error_handling") or {}
-    # The contract allows retry_delay_seconds: null (and treats an omitted key
-    # the same); normalise both to the default here so the typed int field never
-    # has to carry None.
-    retry_delay = error_handling.get("retry_delay_seconds")
+
+    # A present-but-null key is treated like an omitted one (the contract allows
+    # retry_delay_seconds: null): both fall through to the settings default.
+    batching_kwargs = {
+        key: batching[key]
+        for key in ("batch_size", "max_concurrent_batches")
+        if batching.get(key) is not None
+    }
+    error_kwargs = {
+        key: error_handling[key]
+        for key in ("strategy", "max_retries", "retry_delay_seconds")
+        if error_handling.get(key) is not None
+    }
+    runtime_kwargs: dict[str, Any] = {}
+    if raw.get("buffer_size") is not None:
+        runtime_kwargs["buffer_size"] = raw["buffer_size"]
+
     return RuntimeConfig(
-        batching=BatchingConfig(
-            batch_size=batching.get("batch_size", 1000),
-            max_concurrent_batches=batching.get("max_concurrent_batches", 3),
-        ),
-        error_handling=ErrorHandlingConfig(
-            strategy=error_handling.get("strategy", "fail"),
-            max_retries=error_handling.get("max_retries", 3),
-            retry_delay_seconds=5 if retry_delay is None else retry_delay,
-        ),
-        buffer_size=raw.get("buffer_size", 5000),
+        batching=BatchingConfig(**batching_kwargs),
+        error_handling=ErrorHandlingConfig(**error_kwargs),
+        **runtime_kwargs,
     )
 
 

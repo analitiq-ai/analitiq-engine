@@ -62,21 +62,24 @@ class StreamingEngine:
     def __init__(
         self,
         pipeline_id: str,
-        batch_size: int = 1000,
-        max_concurrent_batches: int = 10,
-        buffer_size: int = 10000,
+        runtime: RuntimeConfig,
         dlq_path: str = "./deadletter/",
-        max_retries: int = 3,
-        retry_delay: float = 5.0,
     ):
         self.pipeline_id = pipeline_id
-        self.batch_size = batch_size
-        self.max_concurrent_batches = max_concurrent_batches
-        self.buffer_size = buffer_size
+        self.runtime = runtime
         self.dlq_path = dlq_path
-        self.max_retries = max_retries
-        self.retry_delay = retry_delay
-        self.semaphore = Semaphore(max_concurrent_batches)
+        # Working values derived from the single typed RuntimeConfig (built by
+        # the runner with pipeline-config > env > default precedence). No loose
+        # constructor defaults: the only source of truth is the RuntimeConfig.
+        # error_strategy and retry_delay stay plain attributes so a test can
+        # vary one knob without rebuilding the frozen config.
+        self.batch_size = runtime.batching.batch_size
+        self.max_concurrent_batches = runtime.batching.max_concurrent_batches
+        self.buffer_size = runtime.buffer_size
+        self.max_retries = runtime.error_handling.max_retries
+        self.retry_delay = runtime.error_handling.retry_delay_seconds
+        self.error_strategy = runtime.error_handling.strategy
+        self.semaphore = Semaphore(self.max_concurrent_batches)
 
         # Setup structured logging
         self.logger = logging.getLogger(f"{__name__}.{pipeline_id}")
@@ -85,7 +88,7 @@ class StreamingEngine:
         self.sharded_state_manager = StateManager(pipeline_id, "./state")
         self._state_manager = self.sharded_state_manager
         self.retry_handler = RetryHandler(
-            max_retries=max_retries, base_delay=retry_delay
+            max_retries=self.max_retries, base_delay=self.retry_delay
         )
         self.circuit_breaker = CircuitBreaker()
         self.dlq = DeadLetterQueue(self.dlq_path)
@@ -118,10 +121,11 @@ class StreamingEngine:
     async def stream_data(self, pipeline_config: dict[str, Any]) -> None:
         """Process all streams concurrently with state management.
 
-        ``pipeline_config`` is the runner-assembled config dict; its
-        ``runtime`` entry is a typed ``RuntimeConfig`` (the engine's internal
-        contract since the typed-boundary refactor), not a raw mapping. Stages
-        read it through attribute access, so a dict here is a caller bug.
+        ``pipeline_config`` is the runner-assembled config dict (pipeline id,
+        name, and per-stream source/destination/mapping). Runtime tuning is not
+        carried here -- it is the typed :class:`RuntimeConfig` passed to the
+        constructor and read via ``self.runtime`` and the values derived from
+        it.
         """
         pipeline_id = pipeline_config["pipeline_id"]
         streams = pipeline_config.get("streams", {})
@@ -321,7 +325,6 @@ class StreamingEngine:
                 "source": source_cfg,
                 "destination": destination_cfg,
                 "mapping": stream_config.get("mapping") or {},
-                "runtime": pipeline_config.get("runtime") or RuntimeConfig(),
             }
 
             # Start pipeline stages for this stream
@@ -656,7 +659,7 @@ class StreamingEngine:
         batch_seq = 0
         max_retries = self.max_retries
         retry_base_delay = self.retry_delay
-        error_strategy = config["runtime"].error_handling.strategy
+        error_strategy = self.error_strategy
 
         try:
             while True:

@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import urllib.error
 import urllib.request
 from collections.abc import Iterable
@@ -37,13 +36,11 @@ from jsonschema.exceptions import (  # type: ignore[import-untyped]  # stubs abs
     ValidationError,
 )
 
+from src.config import settings
 from src.config.utils import load_json_file
 
 logger = logging.getLogger(__name__)
 
-
-_DEFAULT_SCHEMA_BASE_URL = "https://schemas.analitiq.ai"
-_FETCH_TIMEOUT_SECONDS = 15
 
 ARTIFACT_KINDS = (
     "connector",
@@ -74,22 +71,16 @@ class ContractValidationError(ValueError):
         super().__init__("\n".join(message_lines))
 
 
-def _schema_base_url() -> str:
-    return (os.getenv("ANALITIQ_SCHEMA_BASE_URL") or _DEFAULT_SCHEMA_BASE_URL).rstrip(
-        "/"
-    )
-
-
 @lru_cache(maxsize=None)
 def _load_schema(kind: str) -> dict[str, Any]:
     if kind not in ARTIFACT_KINDS:
         raise ValueError(
             f"Unknown artifact kind {kind!r}; expected one of {ARTIFACT_KINDS}"
         )
-    url = f"{_schema_base_url()}/{kind}/latest.json"
+    url = f"{settings.schema_base_url()}/{kind}/latest.json"
     try:
         with urllib.request.urlopen(  # nosec B310
-            url, timeout=_FETCH_TIMEOUT_SECONDS
+            url, timeout=settings.SCHEMA_FETCH_TIMEOUT_SECONDS
         ) as response:
             payload = response.read()
     except urllib.error.URLError as err:
