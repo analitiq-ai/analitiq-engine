@@ -572,10 +572,11 @@ class TestReadBatchesKeysetPagination:
         )
 
         assert [b.num_rows for b in batches] == [2, 1]
-        # First request carries no key; second carries the last id of page 1,
-        # stringified at the param boundary so yarl renders it faithfully.
+        # First request carries no key; second carries the last id of page 1.
+        # An int key stays native (yarl renders it faithfully); only Decimals
+        # are stringified at the query boundary.
         assert "after_id" not in session.calls[0][2]
-        assert session.calls[1][2]["after_id"] == "2"
+        assert session.calls[1][2]["after_id"] == 2
 
     @pytest.mark.asyncio
     async def test_keyset_without_from_record_raises_read_error(self):
@@ -1427,3 +1428,48 @@ class TestReadBatchesDecimalPrecision:
 
         assert "after" not in session.calls[0][2]
         assert session.calls[1][2]["after"] == "1234567890.12345678"
+
+    @pytest.mark.asyncio
+    async def test_keyset_body_param_keeps_native_numeric_type(self):
+        # A keyset param declared ``in: body`` must reach the JSON body as its
+        # native type. Stringifying it (to dodge yarl in the query) would send
+        # an integer key as a string, which a numeric body schema can reject.
+        session = _FakeSession(
+            [
+                _FakeResponse(
+                    status=200,
+                    body={"records": [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]},
+                ),
+                _FakeResponse(status=200, body={"records": [{"id": 3, "name": "c"}]}),
+            ]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(
+            pagination={
+                "type": "keyset",
+                "keyset": {"param": "after", "from_record": "id"},
+                "limit": {"param": "limit"},
+            },
+        )
+        endpoint["operations"]["read"]["params"] = {
+            "after": {"in": "body", "type": "integer", "required": False},
+        }
+        endpoint["operations"]["read"]["request"] = {
+            "method": "POST",
+            "path": "/items/search",
+            "body": {"after": {"from_param": "after"}},
+        }
+        await _consume(
+            connector,
+            runtime,
+            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=2,
+        )
+
+        # Body param stays out of the query and keeps its native int type.
+        assert "after" not in session.calls[1][2]
+        assert session.bodies[1] == {"after": 2}

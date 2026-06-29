@@ -249,8 +249,12 @@ class APIConnector(BaseConnector):
         def build_request(
             page_params: dict[str, Any],
         ) -> tuple[dict[str, Any], Any]:
+            # yarl truncates a Decimal to its integer part when rendering the
+            # query string, so stringify Decimals here (the query boundary).
+            # Body params are left native -- the JSON body keeps their numeric
+            # type for endpoints whose schema expects a number.
             query = {
-                name: value
+                name: str(value) if isinstance(value, Decimal) else value
                 for name, value in page_params.items()
                 if param_placements.get(name) != "body"
             }
@@ -579,15 +583,15 @@ class APIConnector(BaseConnector):
                 raise ReadError(
                     "keyset pagination requires keyset.from_record (record field)"
                 )
-            # Holds the raw record value (int/str/Decimal); stringified when
-            # placed into the query so yarl renders it faithfully. yarl
-            # truncates a Decimal to its integer part, which would silently
-            # skip rows on a fractional keyset key.
+            # Holds the raw record value (int/str/Decimal). It feeds both the
+            # query string and any body binding through build_request, so it
+            # stays native here; build_request stringifies Decimals only for the
+            # query (where yarl would truncate them) and keeps the body numeric.
             last_key: Any = None
             while True:
                 params = dict(base_params)
                 if last_key:
-                    params[keyset_param] = str(last_key)
+                    params[keyset_param] = last_key
                 query, body = build_request(params)
                 records = await self._request_records(
                     full_url, method, query, records_ref, body=body
