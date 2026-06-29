@@ -35,6 +35,52 @@ def _is_json_field(field_def: dict[str, Any]) -> bool:
     return field_def.get("arrow_type") == _JSON_ARROW_TYPE
 
 
+def _decimals_to_float(value: Any) -> Any:
+    """Replace every ``Decimal`` with ``float`` inside an opaque ``Json`` blob.
+
+    A ``Json`` column carries no per-field type, so its interior numbers were
+    plain floats before the API reader began parsing JSON with
+    ``parse_float=Decimal``. ``json.dumps`` cannot serialize a ``Decimal``, so
+    narrow them back to float, reproducing the pre-change blob bytes exactly
+    (``float(Decimal(token))`` equals the old ``float(token)``).
+    """
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, dict):
+        return {k: _decimals_to_float(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_decimals_to_float(v) for v in value]
+    return value
+
+
+def _narrow_float_decimals(value: Any, arrow_type: pa.DataType) -> Any:
+    """Narrow Decimals bound for a float leaf; leave decimal leaves exact.
+
+    The lossless JSON parse hands every floating-point token to the builder as
+    a ``Decimal``. pyarrow cannot place a ``Decimal`` in a nested floating
+    field, so narrow those to ``float`` -- but a nested field declared decimal
+    keeps its ``Decimal``: pyarrow builds it losslessly and ``float()`` would
+    discard digits. The walk follows the declared ``Object``/``List`` type, so
+    the keep-or-narrow choice is made per leaf, not per value.
+    """
+    if value is None:
+        return None
+    if pa.types.is_struct(arrow_type) and isinstance(value, dict):
+        child = {f.name: f.type for f in arrow_type}
+        return {
+            k: _narrow_float_decimals(v, child[k]) if k in child else v
+            for k, v in value.items()
+        }
+    if (
+        pa.types.is_list(arrow_type) or pa.types.is_large_list(arrow_type)
+    ) and isinstance(value, list):
+        item_type = arrow_type.value_type
+        return [_narrow_float_decimals(v, item_type) for v in value]
+    if isinstance(value, Decimal) and pa.types.is_floating(arrow_type):
+        return float(value)
+    return value
+
+
 class SchemaContract:
     """Arrow schema mapping for a connector endpoint."""
 
@@ -242,7 +288,7 @@ class SchemaContract:
                 if v is None:
                     serialized.append(None)
                 elif isinstance(v, (dict, list)):
-                    serialized.append(json.dumps(v))
+                    serialized.append(json.dumps(_decimals_to_float(v)))
                 else:
                     raise ValueError(
                         f"column {field.name!r} declared arrow_type='Json' "
@@ -286,6 +332,18 @@ class SchemaContract:
 
         if pa.types.is_integer(field.type) or pa.types.is_floating(field.type):
             return SchemaContract._build_numeric_column(field, values)
+
+        if (
+            pa.types.is_struct(field.type)
+            or pa.types.is_list(field.type)
+            or pa.types.is_large_list(field.type)
+        ):
+            # Nested Object/List columns may carry Decimals from the lossless
+            # JSON parse. pyarrow cannot place a Decimal in a nested float
+            # field, so narrow those leaves to float; a nested decimal leaf
+            # keeps its Decimal and stays exact.
+            narrowed = [_narrow_float_decimals(v, field.type) for v in values]
+            return pa.array(narrowed, type=field.type)
 
         return pa.array(values, type=field.type)
 
@@ -386,8 +444,12 @@ class SchemaContract:
                         f"column {field.name!r} at row {row}: cannot parse "
                         f"{v!r} as {field.type}: {exc}"
                     ) from exc
-            elif isinstance(v, int) or (not is_int and isinstance(v, float)):
-                parsed = v
+            elif isinstance(v, int) or (not is_int and isinstance(v, (float, Decimal))):
+                # A Decimal is only accepted on a float column; narrow it to
+                # float here -- the intended (lossy) conversion to the declared
+                # double width. A Decimal on an integer column is not matched
+                # here and falls through to the error.
+                parsed = float(v) if isinstance(v, Decimal) else v
             else:
                 raise ValueError(
                     f"column {field.name!r} at row {row}: expected numeric or "

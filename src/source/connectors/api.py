@@ -28,9 +28,11 @@ per-stream overrides; nothing else.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections.abc import AsyncIterator, Callable
 from datetime import timezone
+from decimal import Decimal
 from typing import Any
 
 import aiohttp
@@ -61,6 +63,20 @@ _TRANSIENT_HTTP_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
 # never declare it. Sourced from ReplicationConfig; SourceConfig carries the
 # same default independently (models/state.py), so the two move separately.
 _DEFAULT_SAFETY_WINDOW_SECONDS: int = ReplicationConfig.safety_window_seconds
+
+
+def _loads_preserving_decimals(payload: str) -> Any:
+    """Decode a JSON response body without flattening decimals to float.
+
+    The stdlib default parses every floating-point token as a double,
+    discarding digits before Arrow ever sees the value, so a Decimal-typed
+    column lands a rounded number. Parsing those tokens as ``Decimal`` keeps the
+    exact source digits; the schema contract then renders each value per its
+    declared Arrow type (Decimal columns stay exact, Float columns narrow to
+    double on purpose). Integer tokens are untouched -- the default already
+    parses them as arbitrary-precision ``int``.
+    """
+    return json.loads(payload, parse_float=Decimal)
 
 
 class APIConnector(BaseConnector):
@@ -243,16 +259,31 @@ class APIConnector(BaseConnector):
         def build_request(
             page_params: dict[str, Any],
         ) -> tuple[dict[str, Any], Any]:
+            # A fractional value from the lossless JSON parse (e.g. a keyset
+            # key) arrives as a Decimal, which neither sink takes as-is, so each
+            # placement converts it to the form its serializer needs; int/str
+            # stay native.
             query = {
-                name: value
+                # yarl truncates a Decimal in the query string; stringify it
+                # (full precision).
+                name: str(value) if isinstance(value, Decimal) else value
                 for name, value in page_params.items()
                 if param_placements.get(name) != "body"
             }
-            body = (
-                resolver.resolve_for_request(bind_param_refs(raw_body, page_params))
-                if raw_body is not None
-                else None
-            )
+            if raw_body is not None:
+                # aiohttp serializes the body via stdlib json.dumps, which
+                # cannot encode a Decimal. Narrow body Decimals to float so the
+                # value stays a JSON number a numeric body schema accepts --
+                # the same float the body carried before the lossless parse.
+                body_params = {
+                    name: float(value) if isinstance(value, Decimal) else value
+                    for name, value in page_params.items()
+                }
+                body = resolver.resolve_for_request(
+                    bind_param_refs(raw_body, body_params)
+                )
+            else:
+                body = None
             return query, body
 
         records_ref = ((read_spec.get("response") or {}).get("records") or {}).get(
@@ -684,7 +715,11 @@ class APIConnector(BaseConnector):
                 raise ReadError(
                     "keyset pagination requires keyset.from_record (record field)"
                 )
-            last_key: str | None = None
+            # Holds the raw record value (int/str/Decimal). It feeds both the
+            # query string and any body binding through build_request, so it
+            # stays native here; build_request stringifies Decimals only for the
+            # query (where yarl would truncate them) and keeps the body numeric.
+            last_key: Any = None
             while True:
                 params = dict(base_params)
                 if last_key:
@@ -759,7 +794,7 @@ class APIConnector(BaseConnector):
                 if response.status in _TRANSIENT_HTTP_STATUSES:
                     raise TransientReadError(detail)
                 raise ReadError(detail)
-            data = await response.json()
+            data = await response.json(loads=_loads_preserving_decimals)
         self.metrics["records_read"] += 0  # incremented below per page
         records = _extract_records(data, records_ref)
         if records:

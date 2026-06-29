@@ -809,6 +809,79 @@ class TestSchemaContractNestedObject:
         assert pa.types.is_struct(contract.arrow_schema.field("payload").type)
 
 
+class TestFromPylistDecimalFromLosslessParse:
+    """API readers parse JSON with ``parse_float=Decimal``, so ``Decimal``
+    values now reach every build path. Decimal-typed leaves (top level or
+    nested) must stay exact; float-typed leaves narrow to double; integer
+    columns still reject a fractional Decimal."""
+
+    _HIGH = Decimal("1234567890.12345678")  # 18 sig digits; float64 cannot hold
+
+    def test_nested_object_decimal_subfield_stays_exact(self):
+        schema = {
+            "properties": {
+                "line": {
+                    "arrow_type": "Object",
+                    "properties": {
+                        "amount": {"arrow_type": "Decimal128(20,8)"},
+                        "rate": {"arrow_type": "Float64"},
+                    },
+                },
+            },
+        }
+        contract = SchemaContract(schema)
+        batch = contract.from_pylist(
+            [{"line": {"amount": self._HIGH, "rate": Decimal("3.14")}}]
+        )
+        row = batch.to_pylist()[0]["line"]
+        # decimal leaf keeps every digit; float leaf narrows to double
+        assert row["amount"] == self._HIGH
+        assert row["rate"] == pytest.approx(3.14)
+
+    def test_nested_list_decimal_element_stays_exact(self):
+        schema = {
+            "properties": {
+                "amounts": {
+                    "arrow_type": "List",
+                    "items": {"arrow_type": "Decimal128(20,8)"},
+                },
+            },
+        }
+        contract = SchemaContract(schema)
+        batch = contract.from_pylist([{"amounts": [self._HIGH, Decimal("0.00000001")]}])
+        assert batch.to_pylist()[0]["amounts"] == [self._HIGH, Decimal("0.00000001")]
+
+    def test_nested_float_subfield_narrows_decimal(self):
+        # pyarrow cannot place a Decimal in a nested float field; the narrowing
+        # walk must convert it rather than crash the build.
+        schema = {
+            "properties": {
+                "line": {
+                    "arrow_type": "Object",
+                    "properties": {"price": {"arrow_type": "Float64"}},
+                },
+            },
+        }
+        contract = SchemaContract(schema)
+        batch = contract.from_pylist([{"line": {"price": Decimal("9.99")}}])
+        assert batch.to_pylist()[0]["line"]["price"] == pytest.approx(9.99)
+
+    def test_json_blob_with_nested_decimal_serializes_as_number(self):
+        # json.dumps cannot serialize a Decimal; the blob must still encode and
+        # the nested value must stay a JSON number, not become a string.
+        schema = {"properties": {"meta": {"type": "object", "arrow_type": "Json"}}}
+        contract = SchemaContract(schema)
+        batch = contract.from_pylist([{"meta": {"x": Decimal("3.14"), "n": 1}}])
+        wire = batch.column("meta")[0].as_py()
+        assert wire == '{"x": 3.14, "n": 1}'
+
+    def test_integer_column_rejects_fractional_decimal(self):
+        schema = {"properties": {"qty": {"arrow_type": "Int64"}}}
+        contract = SchemaContract(schema)
+        with pytest.raises(ValueError, match="row 0.*got Decimal"):
+            contract.from_pylist([{"qty": Decimal("1.5")}])
+
+
 class TestFromPylistNullabilityEnforcement:
     """from_pylist must reject None values in non-nullable columns for every
     column family — numeric, string, temporal, decimal, JSON, and source_format.
