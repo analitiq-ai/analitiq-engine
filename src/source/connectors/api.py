@@ -41,8 +41,8 @@ from cdk.rate_limiter import RateLimiter
 from cdk.request_binding import bind_param_refs, resolve_param_defaults
 from cdk.resolver import Resolver
 from cdk.schema_contract import SchemaContract
-from cdk.type_map import UnmappedTypeError
-from cdk.types import CheckpointStore
+from cdk.type_map import TypeMapper, UnmappedTypeError
+from cdk.types import CheckpointStore, EndpointScope
 
 from ...models.state import ReplicationConfig
 from ...shared.dict_path import walk_path
@@ -180,7 +180,7 @@ class APIConnector(BaseConnector):
             endpoint_doc,
             read_spec,
         )
-        self._apply_read_type_map(records_items_schema)
+        self._apply_read_type_map(records_items_schema, endpoint_ref)
         schema_contract = SchemaContract(records_items_schema)
         request = read_spec.get("request") or {}
         path = request.get("path")
@@ -343,43 +343,104 @@ class APIConnector(BaseConnector):
             )
         return items
 
-    def _apply_read_type_map(self, items_schema: dict[str, Any]) -> None:
-        """Resolve each record field's ``arrow_type`` from the connector type-map.
+    def _apply_read_type_map(
+        self, items_schema: dict[str, Any], endpoint_ref: dict[str, Any]
+    ) -> None:
+        """Resolve each record field's ``arrow_type`` from the read type-map.
 
         API endpoints declare per-field JSON ``type``/``format`` and ship a
         ``type-map-read.json`` mapping those to Arrow types - the same read
-        type-map the database source path consumes via ``connector_type_mapper``
-        (see ``cdk/sql/discovery.py``). ``SchemaContract`` requires an explicit
-        ``arrow_type`` per field, so resolve it here from the type-map. A field
-        that already declares ``arrow_type`` keeps it, so hand-annotated
-        connectors stay valid and the mapper is only consulted when needed; an
-        unmapped JSON type fails loud, naming the field.
+        type-map the database source path consumes (see ``cdk/sql/discovery.py``).
+        ``SchemaContract`` requires an explicit ``arrow_type`` per field and
+        recurses into ``Object``/``List`` children, so resolution walks nested
+        ``properties``/``items`` too. A field that already declares
+        ``arrow_type`` keeps it, so hand-annotated connectors stay valid and the
+        mapper is only consulted when a field needs it; an unmapped JSON type
+        fails loud, naming the field.
+
+        The mapper is chosen by the endpoint's scope so a connection-scoped
+        endpoint's ``type-map-read.json`` composes over the connector defaults,
+        matching the database path
+        (``GenericSQLConnector._type_mapper_for_stream``). A missing or invalid
+        type-map is a deterministic config defect, so it surfaces as
+        ``ReadError`` (fail fast) rather than the raw ``RuntimeError`` the worker
+        would otherwise classify as retryable.
         """
         runtime = self._runtime
         if runtime is None:
             raise ReadError(
                 "APIConnector: type-map resolution attempted before connect()"
             )
-        mapper = None
+        scope = endpoint_ref.get("scope")
+        if not scope:
+            raise ReadError(
+                "APIConnector: stream_source endpoint_ref has no 'scope'; "
+                f"expected one of {[s.value for s in EndpointScope]}"
+            )
+
+        mapper: TypeMapper | None = None
+
+        def get_mapper() -> TypeMapper:
+            # Resolved lazily: an endpoint that hand-annotates every field never
+            # needs a type-map. A missing/unknown mapper is a config defect, so
+            # surface it as a deterministic ReadError, not a retryable error.
+            nonlocal mapper
+            if mapper is None:
+                try:
+                    mapper = runtime.type_mapper_for(scope=EndpointScope(scope))
+                except (RuntimeError, ValueError) as err:
+                    raise ReadError(
+                        f"APIConnector: no usable read type-map for "
+                        f"{scope!r}-scoped endpoint; a field needs arrow_type "
+                        f"resolution but the type-map is absent or invalid"
+                    ) from err
+            return mapper
+
         for name, prop in (items_schema.get("properties") or {}).items():
-            if not isinstance(prop, dict) or prop.get("arrow_type"):
-                continue
-            json_type = prop.get("type")
+            if isinstance(prop, dict):
+                self._resolve_field_arrow_type(prop, name, get_mapper)
+
+    def _resolve_field_arrow_type(
+        self,
+        field: dict[str, Any],
+        name: str,
+        get_mapper: Callable[[], TypeMapper],
+    ) -> None:
+        """Fill ``field['arrow_type']`` from the type-map if absent, then recurse.
+
+        ``SchemaContract.resolve_arrow_type`` recurses into ``Object``
+        ``properties`` and ``List`` ``items`` and requires an ``arrow_type`` at
+        every level, so a nested child authored with only JSON ``type``/
+        ``format`` must be resolved here too - otherwise the schema build fails.
+        Recursion runs even when the field already carries an ``arrow_type``,
+        because a hand-annotated container can still hold children that do not.
+        """
+        if not field.get("arrow_type"):
+            json_type = field.get("type")
             if isinstance(json_type, list):
                 json_type = next((t for t in json_type if t != "null"), None)
-            if not isinstance(json_type, str):
-                continue
-            fmt = prop.get("format")
-            native = f"{json_type}:{fmt}" if isinstance(fmt, str) and fmt else json_type
-            if mapper is None:
-                mapper = runtime.connector_type_mapper
-            try:
-                prop["arrow_type"] = mapper.to_arrow_type(native)
-            except UnmappedTypeError as err:
-                raise ReadError(
-                    f"field {name!r}: JSON type {native!r} has no rule in the "
-                    f"connector's read type-map"
-                ) from err
+            if isinstance(json_type, str):
+                fmt = field.get("format")
+                native = (
+                    f"{json_type}:{fmt}" if isinstance(fmt, str) and fmt else json_type
+                )
+                try:
+                    field["arrow_type"] = get_mapper().to_arrow_type(native)
+                except UnmappedTypeError as err:
+                    raise ReadError(
+                        f"field {name!r}: JSON type {native!r} has no rule in "
+                        f"the connector's read type-map"
+                    ) from err
+        nested = field.get("properties")
+        if isinstance(nested, dict):
+            for child_name, child in nested.items():
+                if isinstance(child, dict):
+                    self._resolve_field_arrow_type(
+                        child, f"{name}.{child_name}", get_mapper
+                    )
+        items = field.get("items")
+        if isinstance(items, dict):
+            self._resolve_field_arrow_type(items, f"{name}[]", get_mapper)
 
     def _build_base_params(
         self,
