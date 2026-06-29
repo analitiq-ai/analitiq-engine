@@ -53,29 +53,59 @@ def _decimals_to_float(value: Any) -> Any:
     return value
 
 
-def _narrow_float_decimals(value: Any, arrow_type: pa.DataType) -> Any:
-    """Narrow Decimals bound for a float leaf; leave decimal leaves exact.
+def _prepare_nested_value(
+    value: Any, arrow_type: pa.DataType, path: str, row: int
+) -> Any:
+    """Fit a nested value to its declared leaf types, failing loud where it can't.
 
-    The lossless JSON parse hands every floating-point token to the builder as
-    a ``Decimal``. pyarrow cannot place a ``Decimal`` in a nested floating
-    field, so narrow those to ``float`` -- but a nested field declared decimal
-    keeps its ``Decimal``: pyarrow builds it losslessly and ``float()`` would
-    discard digits. The walk follows the declared ``Object``/``List`` type, so
-    the keep-or-narrow choice is made per leaf, not per value.
+    pyarrow builds ``Object``/``List`` columns directly from Python values
+    (``pa.array(values, type=...)``), which bypasses the per-row guards that
+    ``_build_numeric_column`` applies to top-level scalar columns. Walking the
+    declared type alongside the value restores those guards per leaf:
+
+    - a ``Decimal`` bound for a float leaf is narrowed to ``float`` (the
+      lossless JSON parse hands every floating-point token in as a ``Decimal``,
+      which pyarrow cannot place in a floating field); a decimal leaf keeps its
+      ``Decimal`` and stays exact
+    - a non-integer value bound for an integer leaf is rejected, naming the
+      column path and row -- pyarrow would otherwise silently truncate it
+      (``5.5 -> 5``), unlike a top-level Int column, which fails loud (#290)
     """
     if value is None:
         return None
     if pa.types.is_struct(arrow_type) and isinstance(value, dict):
         child = {f.name: f.type for f in arrow_type}
         return {
-            k: _narrow_float_decimals(v, child[k]) if k in child else v
+            k: _prepare_nested_value(v, child[k], f"{path}.{k}", row)
+            if k in child
+            else v
             for k, v in value.items()
         }
     if (
         pa.types.is_list(arrow_type) or pa.types.is_large_list(arrow_type)
     ) and isinstance(value, list):
         item_type = arrow_type.value_type
-        return [_narrow_float_decimals(v, item_type) for v in value]
+        return [
+            _prepare_nested_value(v, item_type, f"{path}[{i}]", row)
+            for i, v in enumerate(value)
+        ]
+    if pa.types.is_integer(arrow_type):
+        # bool is a Python int subclass; isinstance(True, int) is True, so guard
+        # it explicitly before the int acceptance check below, matching the
+        # bool rejection _build_numeric_column applies to top-level Int columns.
+        if isinstance(value, bool):
+            raise ValueError(
+                f"column {path!r} at row {row}: got bool {value!r} for "
+                f"{arrow_type}; declare arrow_type='Boolean' or fix the "
+                f"source mapping"
+            )
+        if not isinstance(value, int):
+            raise ValueError(
+                f"column {path!r} at row {row}: value {value!r} "
+                f"({type(value).__name__}) is not an integer for {arrow_type}; "
+                f"pyarrow would silently truncate it"
+            )
+        return value
     if isinstance(value, Decimal) and pa.types.is_floating(arrow_type):
         return float(value)
     return value
@@ -338,12 +368,16 @@ class SchemaContract:
             or pa.types.is_list(field.type)
             or pa.types.is_large_list(field.type)
         ):
-            # Nested Object/List columns may carry Decimals from the lossless
-            # JSON parse. pyarrow cannot place a Decimal in a nested float
-            # field, so narrow those leaves to float; a nested decimal leaf
-            # keeps its Decimal and stays exact.
-            narrowed = [_narrow_float_decimals(v, field.type) for v in values]
-            return pa.array(narrowed, type=field.type)
+            # Nested Object/List columns bypass _build_numeric_column's per-row
+            # guards: pyarrow builds the array directly from Python values. Walk
+            # the declared type per leaf to narrow Decimals onto float leaves and
+            # reject a non-integer landing on an Int leaf (which pyarrow would
+            # otherwise silently truncate), naming the column path and row.
+            prepared = [
+                _prepare_nested_value(v, field.type, field.name, row)
+                for row, v in enumerate(values)
+            ]
+            return pa.array(prepared, type=field.type)
 
         return pa.array(values, type=field.type)
 
