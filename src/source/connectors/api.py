@@ -55,10 +55,11 @@ logger = logging.getLogger(__name__)
 # outages. Everything else non-200 is a deterministic contract/config error.
 _TRANSIENT_HTTP_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
 
-# Lookback applied to the stored cursor on incremental reads when a stream
-# does not set its own. It is an operational safety default, not a per-connector
-# attribute, so connectors never declare it; the canonical value lives on
-# ReplicationConfig.
+# Lookback subtracted from the stored cursor on an incremental read when the
+# stream has a prior cursor but declares no safety window of its own. It is an
+# operational safety default, not a per-connector attribute, so connectors
+# never declare it. Sourced from ReplicationConfig; SourceConfig carries the
+# same default independently (models/state.py), so the two move separately.
 _DEFAULT_SAFETY_WINDOW_SECONDS: int = ReplicationConfig.safety_window_seconds
 
 
