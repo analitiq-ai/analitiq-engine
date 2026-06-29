@@ -882,6 +882,110 @@ class TestFromPylistDecimalFromLosslessParse:
             contract.from_pylist([{"qty": Decimal("1.5")}])
 
 
+class TestFromPylistNestedIntegerLeaf:
+    """A non-integer value landing on a nested Int leaf must fail loud, naming
+    the column path, exactly as a top-level Int column does -- pyarrow's nested
+    builder would otherwise silently truncate it (``5.5 -> 5``) (#290)."""
+
+    @staticmethod
+    def _object_with_int(field: str = "qty", arrow_type: str = "Int64") -> dict:
+        return {
+            "properties": {
+                "line": {
+                    "arrow_type": "Object",
+                    "properties": {field: {"arrow_type": arrow_type}},
+                }
+            }
+        }
+
+    def test_nested_int_leaf_rejects_fractional_float(self):
+        contract = SchemaContract(self._object_with_int())
+        with pytest.raises(ValueError, match=r"line\.qty.*row 0.*not an integer"):
+            contract.from_pylist([{"line": {"qty": 5.5}}])
+
+    def test_nested_int_leaf_rejects_fractional_decimal(self):
+        # The lossless JSON parse delivers fractional tokens as Decimal, so this
+        # is the realistic shape a fractional value takes on a nested Int leaf.
+        contract = SchemaContract(self._object_with_int())
+        with pytest.raises(ValueError, match=r"line\.qty.*not an integer"):
+            contract.from_pylist([{"line": {"qty": Decimal("5.5")}}])
+
+    def test_nested_int_leaf_rejects_integral_float(self):
+        # Parity with top-level Int columns, which reject every float (even 5.0),
+        # rather than silently accepting a value that merely happens to be whole.
+        contract = SchemaContract(self._object_with_int())
+        with pytest.raises(ValueError, match=r"line\.qty.*not an integer"):
+            contract.from_pylist([{"line": {"qty": 5.0}}])
+
+    def test_nested_int_leaf_rejects_bool(self):
+        contract = SchemaContract(self._object_with_int("flag"))
+        with pytest.raises(ValueError, match=r"line\.flag.*got bool"):
+            contract.from_pylist([{"line": {"flag": True}}])
+
+    def test_nested_list_int_element_rejects_fractional(self):
+        schema = {
+            "properties": {
+                "scores": {"arrow_type": "List", "items": {"arrow_type": "Int64"}}
+            }
+        }
+        contract = SchemaContract(schema)
+        with pytest.raises(ValueError, match=r"scores\[1\].*not an integer"):
+            contract.from_pylist([{"scores": [1, 2.5]}])
+
+    def test_list_of_objects_int_leaf_rejects_fractional(self):
+        schema = {
+            "properties": {
+                "positions": {
+                    "arrow_type": "List",
+                    "items": {
+                        "arrow_type": "Object",
+                        "properties": {"qty": {"arrow_type": "Int32"}},
+                    },
+                }
+            }
+        }
+        contract = SchemaContract(schema)
+        with pytest.raises(ValueError, match=r"positions\[0\]\.qty.*not an integer"):
+            contract.from_pylist([{"positions": [{"qty": 2.5}]}])
+
+    def test_nested_int_leaf_names_offending_row(self):
+        contract = SchemaContract(self._object_with_int())
+        with pytest.raises(ValueError, match=r"line\.qty.*row 2"):
+            contract.from_pylist(
+                [{"line": {"qty": 1}}, {"line": {"qty": 2}}, {"line": {"qty": 9.9}}]
+            )
+
+    def test_nested_int_leaf_accepts_valid_ints(self):
+        contract = SchemaContract(self._object_with_int())
+        batch = contract.from_pylist([{"line": {"qty": 7}}, {"line": {"qty": None}}])
+        assert batch.to_pylist() == [{"line": {"qty": 7}}, {"line": {"qty": None}}]
+
+    def test_nested_list_int_accepts_valid_ints(self):
+        schema = {
+            "properties": {
+                "scores": {"arrow_type": "List", "items": {"arrow_type": "Int64"}}
+            }
+        }
+        contract = SchemaContract(schema)
+        batch = contract.from_pylist([{"scores": [1, 2, 3]}, {"scores": []}])
+        assert batch.to_pylist() == [{"scores": [1, 2, 3]}, {"scores": []}]
+
+    def test_nested_float_leaf_accepts_fractional_value(self):
+        # The guard touches integer leaves only; a fractional value on a nested
+        # float leaf is unaffected and still narrows/builds cleanly.
+        schema = {
+            "properties": {
+                "line": {
+                    "arrow_type": "Object",
+                    "properties": {"rate": {"arrow_type": "Float64"}},
+                }
+            }
+        }
+        contract = SchemaContract(schema)
+        batch = contract.from_pylist([{"line": {"rate": 3.5}}])
+        assert batch.to_pylist()[0]["line"]["rate"] == pytest.approx(3.5)
+
+
 class TestFromPylistNullabilityEnforcement:
     """from_pylist must reject None values in non-nullable columns for every
     column family — numeric, string, temporal, decimal, JSON, and source_format.
