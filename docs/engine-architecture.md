@@ -57,7 +57,7 @@ src/
 │   ├── connectors/              # API / File / Stream handlers + destination_registry / get_handler
 │   ├── formatters/              # JSONL / CSV / Parquet
 │   ├── storage/                 # Local file storage
-│   ├── idempotency/             # _batch_commits and _manifest.json trackers
+│   ├── idempotency/             # file _manifest.json tracker (SQL dedups on row identity)
 │   └── server.py                # gRPC server
 │
 ├── engine/                  # Core engine
@@ -159,7 +159,7 @@ silently losing rows.
    _checkpoint_stage` — wired together with async queues. The transform
    stage uses `AssignmentTransformer` for the assignment AST.
 5. `_load_stage` streams batches over gRPC to the destination service
-   with batch-level idempotency (protocol in
+   with row-level, content-derived idempotency (protocol in
    [`grpc-streaming-architecture.md`](grpc-streaming-architecture.md)).
 6. Metrics snapshots are emitted to logs as `ANALITIQ_METRICS::{...}`
    lines (batch-level from the engine, pipeline-level from the runner)

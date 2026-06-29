@@ -148,16 +148,6 @@ class TestStateManager:
 
         assert manager.get_run_info() == {}
 
-    def test_init_commit_tracker(self):
-        """Test batch commit tracker initialization."""
-        manager = _make_manager(self.tmp_path)
-
-        assert manager.commit_tracker is None
-
-        manager.init_commit_tracker("run-123")
-
-        assert manager.commit_tracker is not None
-
 
 def _checkpoint_path(tmp_path, stream_id, pipeline_id="test-pipeline"):
     return tmp_path / "state" / pipeline_id / f"{stream_id}.json"

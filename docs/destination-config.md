@@ -59,7 +59,7 @@ Handler source lives under `src/destination/`:
   - `stream.py` — `StreamDestinationHandler` (stdout).
 - `formatters/` — JSONL / CSV / Parquet serializers.
 - `storage/` — local filesystem backend.
-- `idempotency/` — `_batch_commits` and `_manifest.json` trackers.
+- `idempotency/` — file `_manifest.json` tracker (the SQL destination dedups on row identity, with no commit-ledger table).
 - `server.py` — gRPC server.
 
 Shared building blocks moved to the CDK at `cdk/cdk/`:
@@ -278,29 +278,35 @@ type-mapping and transport detail.
 
 ## Idempotency
 
-All handlers track `(run_id, stream_id, batch_seq)` for exactly-once
-delivery.
+### Database (row identity)
 
-### Database (`_batch_commits` table)
+The SQL destination dedups on **row identity** (content-derived), not
+batch position, and keeps no commit-ledger table. `batch_seq` is only an
+ordering sequence on the wire; it is never the dedup key. How identity is
+enforced depends on the write mode:
 
-```sql
-CREATE TABLE _batch_commits (
-  run_id          VARCHAR(255),
-  stream_id       VARCHAR(255),
-  batch_seq       BIGINT,
-  committed_cursor BYTEA,
-  records_written  INT,
-  committed_at    TIMESTAMPTZ DEFAULT NOW(),
-  PRIMARY KEY (run_id, stream_id, batch_seq)
-);
-```
+- **`upsert`** — MERGE / INSERT-or-UPDATE on the stream's `conflict_keys`.
+- **`truncate_insert`** — full refresh (TRUNCATE then insert); idempotent
+  by construction.
+- **`insert`** — each row is inserted only if its identity is not already
+  present: one `INSERT ... SELECT ... WHERE NOT EXISTS (...)` per row,
+  built with SQLAlchemy core (no dialect-specific SQL). The identity is
+  the contract primary key, or — for a keyless insert stream — a synthetic
+  engine-managed `_record_hash` column (full SHA-256 of the row content)
+  declared as the table's `PRIMARY KEY`, the structural uniqueness
+  backstop. Coalescing is identity-only — a row whose identity already
+  exists is skipped without comparing its other columns: two byte-identical
+  keyless rows collapse to one, and a keyed `insert` likewise drops a
+  same-key row whose content differs (first occurrence wins). `insert` cannot
+  tell a retry's re-read from a genuinely conflicting key; a stream that must
+  reconcile changed rows should use `upsert`. A keyless insert target created
+  before `_record_hash` existed is rejected loudly on the next run (the column
+  is the primary key and cannot be back-filled on existing rows); recreate the
+  table so the engine can manage it.
 
-On batch receipt:
-
-1. Look up `(run_id, stream_id, batch_seq)`.
-2. Hit → return `ALREADY_COMMITTED` with the stored cursor.
-3. Miss → write the batch and the commit record in a single transaction;
-   return `SUCCESS`.
+ADBC-only transports (Snowflake/BigQuery) do not yet do the keyless
+`insert` anti-join — plain `insert` there is at-least-once (a noted
+follow-up); `upsert` and `truncate_insert` remain idempotent.
 
 ### File / S3 (`_manifest.json`)
 
@@ -313,14 +319,16 @@ batch_seq)` and become no-ops.
 
 | Field | Description |
 |-------|-------------|
-| `run_id` | Unique pipeline-run identifier (same value on retries) |
-| `stream_id` | Stream identifier |
-| `batch_seq` | Monotonically increasing batch sequence |
+| `run_id` | Unique pipeline-run identifier (same value on retries); routing/scoping, not a dedup key |
+| `stream_id` | Stream identifier; routing/scoping, not a dedup key |
+| `batch_seq` | Monotonic ordering/log sequence per stream within a run (not a dedup key) |
 | `cursor` | Opaque token produced by the engine, stored verbatim by the destination |
-| `record_ids` | Per-record IDs for DLQ correlation |
+| `record_ids` | Content-derived row identities (SHA-256) for DLQ correlation; the `_record_hash` value for a keyless insert |
 
-Returns `ACK_STATUS_ALREADY_COMMITTED` for replayed batches; full
-protocol semantics are in
+The SQL destination writes idempotently by row identity and returns
+`ACK_STATUS_SUCCESS` on a replay; the file destination returns
+`ACK_STATUS_ALREADY_COMMITTED` for replayed batches. Full protocol
+semantics are in
 [`grpc-streaming-architecture.md`](grpc-streaming-architecture.md).
 
 ## Adding a New Destination

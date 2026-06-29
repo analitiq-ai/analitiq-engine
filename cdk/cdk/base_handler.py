@@ -36,8 +36,12 @@ class BaseDestinationHandler(ABC):
     4. Cursor storage for checkpointing
 
     Idempotency Contract:
-    - Handlers must track (run_id, stream_id, batch_seq) in a metadata table
-    - Duplicate batches should return ALREADY_COMMITTED with stored cursor
+    - A retried or replayed batch must not duplicate or drop rows; the
+      mechanism is the handler's (a SQL handler dedups on the write mode's
+      keys -- MERGE on conflict_keys, or the synthetic _record_hash for a
+      keyless insert; a file handler may use a manifest)
+    - A handler that detects a prior commit may return ALREADY_COMMITTED with
+      the stored cursor; a sink that writes idempotently returns SUCCESS
     - All writes within a batch must be atomic (all-or-nothing)
     """
 
@@ -114,8 +118,8 @@ class BaseDestinationHandler(ABC):
         handler is still connected. The worker process is torn down (SIGTERM)
         before ``disconnect`` could run connection-bound cleanup, so anything
         needing the live connection at end-of-run belongs here. Default is a
-        no-op; handlers with run-scoped state to release (e.g. a SQL connector
-        pruning its idempotency ledger) override it.
+        no-op; handlers with run-scoped state to release (e.g. a connector
+        flushing a per-run buffer or temporary object) override it.
 
         ``succeeded`` is the engine's terminal-run outcome: ``True`` only when
         the pipeline finished successfully. Cleanup that would break a resume
@@ -157,9 +161,12 @@ class BaseDestinationHandler(ABC):
         """Write a batch of records to the destination.
 
         Idempotency Requirements:
-        - Must check if (run_id, stream_id, batch_seq) was already committed
-        - If already committed: return ALREADY_COMMITTED with stored cursor
-        - If new: write records atomically, store cursor, return SUCCESS
+        - A retried/replayed batch must not duplicate or drop rows; dedup on
+          row identity (the write mode's keys, or the synthetic _record_hash
+          for a keyless insert), never the batch's position
+        - Write records atomically (all-or-nothing), store the cursor, and
+          return SUCCESS; a handler that detects a prior commit may instead
+          return ALREADY_COMMITTED with the stored cursor
         - On failure: return RETRYABLE_FAILURE or FATAL_FAILURE
 
         Args:
