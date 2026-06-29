@@ -43,8 +43,10 @@ from cdk.rate_limiter import RateLimiter
 from cdk.request_binding import bind_param_refs, resolve_param_defaults
 from cdk.resolver import Resolver
 from cdk.schema_contract import SchemaContract
-from cdk.types import CheckpointStore
+from cdk.type_map import TypeMapper, UnmappedTypeError
+from cdk.types import CheckpointStore, EndpointScope
 
+from ...models.state import ReplicationConfig
 from ...shared.dict_path import walk_path
 from ...shared.http_utils import join_url
 from .base import BaseConnector, ConnectionError, ReadError, TransientReadError
@@ -54,6 +56,13 @@ logger = logging.getLogger(__name__)
 # HTTP statuses retrying can heal: request timeout, rate limit, upstream
 # outages. Everything else non-200 is a deterministic contract/config error.
 _TRANSIENT_HTTP_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
+
+# Lookback subtracted from the stored cursor on an incremental read when the
+# stream has a prior cursor but declares no safety window of its own. It is an
+# operational safety default, not a per-connector attribute, so connectors
+# never declare it. Sourced from ReplicationConfig; SourceConfig carries the
+# same default independently (models/state.py), so the two move separately.
+_DEFAULT_SAFETY_WINDOW_SECONDS: int = ReplicationConfig.safety_window_seconds
 
 
 def _loads_preserving_decimals(payload: str) -> Any:
@@ -187,6 +196,7 @@ class APIConnector(BaseConnector):
             endpoint_doc,
             read_spec,
         )
+        self._apply_read_type_map(records_items_schema, endpoint_ref)
         schema_contract = SchemaContract(records_items_schema)
         request = read_spec.get("request") or {}
         path = request.get("path")
@@ -353,6 +363,114 @@ class APIConnector(BaseConnector):
             )
         return items
 
+    def _apply_read_type_map(
+        self, items_schema: dict[str, Any], endpoint_ref: dict[str, Any]
+    ) -> None:
+        """Resolve each record field's ``arrow_type`` from the read type-map.
+
+        API endpoints declare per-field JSON ``type``/``format`` and ship a
+        ``type-map-read.json`` mapping those to Arrow types - the same read
+        type-map the database source path consumes (see ``cdk/sql/discovery.py``).
+        ``SchemaContract`` requires an explicit ``arrow_type`` per field and
+        recurses into ``Object``/``List`` children, so resolution walks nested
+        ``properties``/``items`` too. A field that already declares
+        ``arrow_type`` keeps it, so hand-annotated connectors stay valid and the
+        mapper is only consulted when a field needs it; an unmapped JSON type
+        fails loud, naming the field.
+
+        The mapper is chosen by the endpoint's scope so a connection-scoped
+        endpoint's ``type-map-read.json`` composes over the connector defaults,
+        matching the database path
+        (``GenericSQLConnector._type_mapper_for_stream``). A missing or invalid
+        type-map is a deterministic config defect, so it surfaces as
+        ``ReadError`` (fail fast) rather than the raw ``RuntimeError`` the worker
+        would otherwise classify as retryable.
+        """
+        runtime = self._runtime
+        if runtime is None:
+            raise ReadError(
+                "APIConnector: type-map resolution attempted before connect()"
+            )
+        scope = endpoint_ref.get("scope")
+        if not scope:
+            raise ReadError(
+                "APIConnector: stream_source endpoint_ref has no 'scope'; "
+                f"expected one of {[s.value for s in EndpointScope]}"
+            )
+
+        mapper: TypeMapper | None = None
+
+        def get_mapper() -> TypeMapper:
+            # Resolved lazily: an endpoint that hand-annotates every field never
+            # needs a type-map. A missing/unknown mapper is a config defect, so
+            # surface it as a deterministic ReadError, not a retryable error.
+            nonlocal mapper
+            if mapper is None:
+                try:
+                    mapper = runtime.type_mapper_for(scope=EndpointScope(scope))
+                except (RuntimeError, ValueError) as err:
+                    raise ReadError(
+                        f"APIConnector: no usable read type-map for "
+                        f"{scope!r}-scoped endpoint; a field needs arrow_type "
+                        f"resolution but the type-map is absent or invalid"
+                    ) from err
+            return mapper
+
+        for name, prop in (items_schema.get("properties") or {}).items():
+            if isinstance(prop, dict):
+                self._resolve_field_arrow_type(prop, name, get_mapper)
+
+    def _resolve_field_arrow_type(
+        self,
+        field: dict[str, Any],
+        name: str,
+        get_mapper: Callable[[], TypeMapper],
+    ) -> None:
+        """Fill ``field['arrow_type']`` from the type-map if absent, then recurse.
+
+        Recursion is gated to the resolved ``arrow_type`` exactly as
+        ``SchemaContract.resolve_arrow_type`` does: it descends into
+        ``properties`` only for ``Object`` and into ``items`` only for ``List``,
+        and treats everything else (including a ``Json`` blob that keeps
+        ``properties``/``items`` for documentation, and every scalar) as a leaf.
+        A nested child authored with only JSON ``type``/``format`` under a real
+        ``Object``/``List`` must be resolved here too, or the schema build
+        fails; but descending into a ``Json`` blob's documentary children would
+        wrongly fail a read on a child type the schema build never consults.
+        Recursion runs even when a container already carries an ``arrow_type``,
+        because a hand-annotated ``Object``/``List`` can still hold children
+        that do not.
+        """
+        if not field.get("arrow_type"):
+            json_type = field.get("type")
+            if isinstance(json_type, list):
+                json_type = next((t for t in json_type if t != "null"), None)
+            if isinstance(json_type, str):
+                fmt = field.get("format")
+                native = (
+                    f"{json_type}:{fmt}" if isinstance(fmt, str) and fmt else json_type
+                )
+                try:
+                    field["arrow_type"] = get_mapper().to_arrow_type(native)
+                except UnmappedTypeError as err:
+                    raise ReadError(
+                        f"field {name!r}: JSON type {native!r} has no rule in "
+                        f"the connector's read type-map"
+                    ) from err
+        arrow_type = field.get("arrow_type")
+        if arrow_type == "Object":
+            nested = field.get("properties")
+            if isinstance(nested, dict):
+                for child_name, child in nested.items():
+                    if isinstance(child, dict):
+                        self._resolve_field_arrow_type(
+                            child, f"{name}.{child_name}", get_mapper
+                        )
+        elif arrow_type == "List":
+            items = field.get("items")
+            if isinstance(items, dict):
+                self._resolve_field_arrow_type(items, f"{name}[]", get_mapper)
+
     def _build_base_params(
         self,
         read_spec: dict[str, Any],
@@ -433,9 +551,12 @@ class APIConnector(BaseConnector):
             )
             return
         if safety_window_seconds is None:
-            raise ReadError(
-                f"stream {stream_name!r}: incremental replication requires "
-                f"safety_window_seconds in the replication block"
+            safety_window_seconds = _DEFAULT_SAFETY_WINDOW_SECONDS
+            logger.info(
+                "stream %r: no safety_window_seconds in the replication block; "
+                "applying engine default of %d seconds",
+                stream_name,
+                safety_window_seconds,
             )
         effective_start = self._compute_effective_start(
             cursor_value, safety_window_seconds

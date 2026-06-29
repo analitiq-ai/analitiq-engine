@@ -136,9 +136,6 @@ class StreamingEngine:
         run_id = self.state_manager.start_run(pipeline_config)
         logger.info(f"Started state run: {run_id}")
 
-        # Initialize in-run commit tracker
-        self.state_manager.init_commit_tracker(run_id)
-
         stream_exceptions = []
         stream_tasks = []
 
@@ -680,18 +677,16 @@ class StreamingEngine:
                     f"with {record_count} records"
                 )
 
-                # Generate stable record IDs for DLQ correlation
+                # Content-derived record identity: DLQ correlation and the
+                # destination's row-level idempotency key. Independent of
+                # run_id/batch_seq/position, so the same row hashes identically
+                # across attempts and an inclusive cursor re-read (issue #282).
                 record_ids = [
                     generate_record_id(
                         record=record,
-                        run_id=run_id,
-                        batch_seq=batch_seq,
-                        index=i,
-                        primary_key_fields=primary_key_fields
-                        if primary_key_fields
-                        else None,
+                        primary_key_fields=primary_key_fields or None,
                     )
-                    for i, record in enumerate(record_dicts)
+                    for record in record_dicts
                 ]
 
                 # Compute MAX cursor value in batch (batch may be unordered)
@@ -702,25 +697,6 @@ class StreamingEngine:
                         cursor_field=cursor_field,
                         tie_breaker_fields=tie_breaker_fields,
                     )
-
-                # In-run idempotency check (skip send, don't re-count)
-                if self.state_manager.commit_tracker:
-                    existing = self.state_manager.commit_tracker.check_committed(
-                        stream_id=stream_id,
-                        batch_seq=batch_seq,
-                    )
-                    if existing:
-                        logger.info(
-                            f"Stream {stream_name}: Batch {batch_seq} "
-                            f"already committed (in-run), skipping send"
-                        )
-                        # The batch's committed watermark is already on disk from
-                        # when it first committed (save_stream_checkpoint writes
-                        # the per-stream file on every ACK), so the skip needs no
-                        # extra checkpoint. Skip metrics increment and
-                        # output_queue too -- the batch was already counted when
-                        # first committed.
-                        continue
 
                 # Retry loop for RETRYABLE_FAILURE
                 retry_count = 0
@@ -747,17 +723,6 @@ class StreamingEngine:
                         )
                         self.metrics.increment_records_processed(result.records_written)
                         stream_metrics["records_processed"] += result.records_written
-
-                        # Record batch commit for in-run idempotency
-                        if self.state_manager.commit_tracker:
-                            self.state_manager.commit_tracker.record_commit(
-                                stream_id=stream_id,
-                                batch_seq=batch_seq,
-                                records_written=result.records_written,
-                                cursor_bytes=result.committed_cursor.token
-                                if result.committed_cursor
-                                else b"",
-                            )
 
                         # Emit per-batch metrics
                         if os.getenv("METRICS_ENABLED", "false").lower() == "true":
@@ -796,19 +761,6 @@ class StreamingEngine:
                             stream_id,
                             stream_version,
                         )
-
-                        # Record batch commit for in-run idempotency
-                        # (prevents re-send on retry)
-                        if self.state_manager.commit_tracker:
-                            self.state_manager.commit_tracker.record_commit(
-                                stream_id=stream_id,
-                                batch_seq=batch_seq,
-                                records_written=result.records_written,
-                                cursor_bytes=result.committed_cursor.token
-                                if result.committed_cursor
-                                else b"",
-                            )
-
                         logger.info(
                             f"Stream {stream_name}: Batch {batch_seq} "
                             "already committed (idempotent replay)"

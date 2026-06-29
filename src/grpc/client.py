@@ -7,6 +7,7 @@ including schema negotiation, batch sending, and ACK handling.
 import asyncio
 import hashlib
 import io
+import json
 import logging
 import os
 from dataclasses import dataclass
@@ -914,31 +915,36 @@ class DestinationGRPCClient:
 
 def generate_record_id(
     record: dict[str, Any],
-    run_id: str,
-    batch_seq: int,
-    index: int,
     primary_key_fields: list[str] | None = None,
 ) -> str:
-    """
-    Generate a stable record ID for DLQ correlation.
+    """Content-derived, position-independent identity for a record.
 
-    Args:
-        record: The record dict
-        run_id: Current run ID
-        batch_seq: Current batch sequence
-        index: Index of record within batch
-        primary_key_fields: Optional primary key fields to include in hash
+    The id is a function of the record's content alone -- never the run, the
+    batch sequence, or the row's offset in the batch -- so the same logical
+    row hashes to the same id across attempts and across an inclusive cursor
+    re-read. That is what lets a destination enforce idempotency on row
+    identity (a keyed MERGE, or the synthetic ``_record_hash`` column for a
+    keyless insert) instead of a positional ``(run_id, stream_id, batch_seq)``
+    ledger, which a same-run retry from an advanced cursor cannot key
+    correctly (issue #282).
 
-    Returns:
-        Stable record ID string
+    With ``primary_key_fields`` the id derives from those fields (the row's
+    stable business key); without them it derives from the whole record, so
+    two byte-identical keyless rows share an id -- the Fivetran ``_fivetran_id``
+    tradeoff: a keyless stream cannot tell a genuine duplicate from a re-read
+    one. If the configured key fields are absent from the record -- a mapping
+    renamed or dropped them, so the transformed row no longer carries them --
+    the id falls back to the whole record. Without that fallback every row would
+    hash the same all-missing-key value, and the keyless ``_record_hash`` dedup
+    would collapse distinct rows to one and silently drop the rest.
+
+    The full SHA-256 hex digest is returned (not truncated): it doubles as the
+    ``_record_hash`` dedup key for keyless inserts, where a truncated digest's
+    collision odds would silently drop legitimately-distinct rows.
     """
-    if primary_key_fields:
-        # Use primary key values for ID
-        pk_values = [str(record.get(field, "")) for field in primary_key_fields]
-        pk_str = "|".join(pk_values)
-        hash_input = f"{run_id}:{batch_seq}:{pk_str}"
+    if primary_key_fields and all(field in record for field in primary_key_fields):
+        basis: Any = {field: record[field] for field in primary_key_fields}
     else:
-        # Use batch position as ID
-        hash_input = f"{run_id}:{batch_seq}:{index}"
-
-    return hashlib.sha256(hash_input.encode()).hexdigest()[:16]
+        basis = record
+    canonical = json.dumps(basis, sort_keys=True, default=str)
+    return hashlib.sha256(canonical.encode()).hexdigest()
