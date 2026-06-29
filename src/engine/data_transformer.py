@@ -787,3 +787,155 @@ def build_output_schema(
 
         fields.append(pa.field(target_name, arrow_type, nullable=nullable))
     return pa.schema(fields)
+
+
+# Non-scalar Arrow target types, excluded from the Arrow-native fast path.
+# "Json" resolves to a pa.large_string whose value the Python path JSON-encodes
+# via json.dumps (see _json_target_names / _apply_assignment_transformations);
+# "Object" and "List" resolve to native pa.struct / pa.list_ that the scalar
+# single-column plan does not handle. None of the three is a plain scalar.
+_NON_SCALAR_ARROW_TYPES = frozenset({"Object", "List", "Json"})
+
+
+def plan_arrow_transform(
+    assignments: list[dict[str, Any]],
+) -> list[dict[str, Any]] | None:
+    """Return an Arrow-native plan for *assignments*, or ``None`` to fall back.
+
+    A stream qualifies for the Arrow-native transform only when every
+    assignment is a pure column rename/retype or a constant -- i.e. it needs
+    no per-record scalar evaluation. Concretely, each assignment must:
+
+    - carry no ``validate`` block (validation is per-record),
+    - target a single top-level column with a scalar Arrow type (not
+      ``Object``/``List``/``Json``), and
+    - take its value from either a constant or a single-segment ``get``.
+
+    Anything else (nested paths, ``concat``/``if``/``fn`` expressions, JSON
+    columns) returns ``None`` so the caller uses the Python evaluator. The
+    decision is static -- assignments do not change across batches -- so a
+    qualifying stream pays zero Python materialisation per batch.
+    """
+    plan: list[dict[str, Any]] = []
+    for assignment in assignments:
+        if assignment.get("validate"):
+            return None
+
+        target = assignment.get("target") or {}
+        path = target.get("path")
+        if not (isinstance(path, list) and len(path) == 1 and isinstance(path[0], str)):
+            return None
+        if (
+            target.get("arrow_type") in _NON_SCALAR_ARROW_TYPES
+            or target.get("properties")
+            or target.get("items")
+        ):
+            return None
+
+        value = assignment.get("value") or {}
+        kind = value.get("kind")
+        if kind == "const":
+            plan.append(
+                {"kind": "const", "value": (value.get("const") or {}).get("value")}
+            )
+        elif kind == "expr":
+            expr = value.get("expr") or {}
+            if expr.get("op") != "get":
+                return None
+            source_path = expr.get("path")
+            if not (
+                isinstance(source_path, list)
+                and len(source_path) == 1
+                and isinstance(source_path[0], str)
+            ):
+                return None
+            plan.append({"kind": "get", "source": source_path[0]})
+        else:
+            return None
+
+    return plan
+
+
+def run_arrow_transform(
+    batch: pa.RecordBatch,
+    plan: list[dict[str, Any]],
+    output_schema: pa.Schema,
+) -> pa.RecordBatch:
+    """Apply an Arrow-native transform plan to a batch.
+
+    Each output column is built to match the Python path it replaces
+    (``to_pylist`` -> per-record assignment -> ``from_pylist``):
+
+    - a ``const`` becomes ``pa.array([value] * num_rows, target_type)`` -- the
+      same Python-value-to-Arrow conversion ``from_pylist`` performs;
+    - a ``get`` whose source column already has the target type is passed
+      through unchanged -- a pure rename, with no Python materialisation;
+    - a ``get`` that needs a retype is rebuilt with
+      ``pa.array(column.to_pylist(), target_type)``, which reproduces
+      ``from_pylist``'s per-column conversion exactly. Neither a raw Arrow
+      ``cast`` nor ``assume_timezone`` is used, because each diverges from
+      ``from_pylist`` for cases the contract allows: ``cast`` stringifies an
+      int->string that ``from_pylist`` rejects, and ``assume_timezone`` reads a
+      naive timestamp as wall-clock-in-zone where ``from_pylist`` reads it as a
+      UTC instant. Routing through Python values keeps the fast path from
+      silently disagreeing with the slow one. Only a retype reads a source
+      column's data back into Python; a const builds a short Python list of the
+      literal but touches no source data, and a rename stays wholly in Arrow.
+    - a missing source column becomes all-nulls, mirroring the Python path
+      where an absent field resolves to ``None`` for every row.
+
+    A non-nullable target that ends up with nulls fails the batch, matching the
+    Python path's nullability enforcement.
+
+    One benign divergence: a same-type passthrough of a sub-microsecond
+    timestamp (e.g. ``Timestamp(NANOSECOND)``) succeeds here but fails the
+    Python path, whose ``to_pylist`` cannot represent it as a Python datetime.
+    The fast path preserves data the slow path would drop by raising, so this
+    is strictly safer, not a regression.
+    """
+    num_rows = batch.num_rows
+    source_names = batch.schema.names
+    arrays: list[pa.Array] = []
+
+    # strict: output_schema and plan are both built one-per-assignment, so a
+    # length mismatch means build_output_schema and plan_arrow_transform have
+    # desynced -- fail loud rather than silently truncate or misalign columns.
+    for field, step in zip(output_schema, plan, strict=True):
+        if step["kind"] == "const":
+            array = _build_array([step["value"]] * num_rows, field)
+        elif step["source"] in source_names:
+            column = batch.column(source_names.index(step["source"]))
+            array = (
+                column
+                if column.type == field.type
+                else _build_array(column.to_pylist(), field)
+            )
+        else:
+            # Source column absent -> all-null, mirroring the Python path where
+            # a missing field resolves to None for every row.
+            array = pa.nulls(num_rows, type=field.type)
+
+        if not field.nullable and array.null_count > 0:
+            raise TransformationError(
+                f"column {field.name!r}: {array.null_count} null value(s) but "
+                f"field is not nullable"
+            )
+        arrays.append(array)
+
+    return pa.RecordBatch.from_arrays(arrays, schema=output_schema)
+
+
+def _build_array(values: list[Any], field: pa.Field) -> pa.Array:
+    """Build an Arrow array from Python *values*, matching ``from_pylist``.
+
+    Wraps pyarrow's conversion errors in :class:`TransformationError` with the
+    column name so a bad constant or an impossible retype fails the batch with
+    a clear message, the same way the Python path's ``from_pylist`` failure
+    would surface as a transform error.
+    """
+    try:
+        return pa.array(values, type=field.type)
+    except (pa.ArrowInvalid, pa.ArrowTypeError, pa.ArrowNotImplementedError) as e:
+        raise TransformationError(
+            f"column {field.name!r}: cannot build {field.type} column: {e}"
+        ) from e
