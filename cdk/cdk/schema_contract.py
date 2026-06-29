@@ -35,6 +35,25 @@ def _is_json_field(field_def: dict[str, Any]) -> bool:
     return field_def.get("arrow_type") == _JSON_ARROW_TYPE
 
 
+def _decimals_to_float(value: Any) -> Any:
+    """Recursively replace ``Decimal`` with ``float`` inside a nested value.
+
+    API readers parse JSON with ``parse_float=Decimal`` so scalar Decimal
+    columns keep exact digits. Inside an opaque ``Json`` blob or a nested
+    ``Object``/``List`` column the same token was already a float before that
+    change, and pyarrow refuses to build a float field from a ``Decimal``, so
+    narrow Decimals back to float here. This reproduces the pre-existing blob
+    representation exactly -- only top-level Decimal columns gain precision.
+    """
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, dict):
+        return {k: _decimals_to_float(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_decimals_to_float(v) for v in value]
+    return value
+
+
 class SchemaContract:
     """Arrow schema mapping for a connector endpoint."""
 
@@ -242,7 +261,7 @@ class SchemaContract:
                 if v is None:
                     serialized.append(None)
                 elif isinstance(v, (dict, list)):
-                    serialized.append(json.dumps(v))
+                    serialized.append(json.dumps(_decimals_to_float(v)))
                 else:
                     raise ValueError(
                         f"column {field.name!r} declared arrow_type='Json' "
@@ -286,6 +305,16 @@ class SchemaContract:
 
         if pa.types.is_integer(field.type) or pa.types.is_floating(field.type):
             return SchemaContract._build_numeric_column(field, values)
+
+        if (
+            pa.types.is_struct(field.type)
+            or pa.types.is_list(field.type)
+            or pa.types.is_large_list(field.type)
+        ):
+            # Nested Object/List columns may carry Decimals from the lossless
+            # JSON parse; pyarrow cannot place a Decimal in a nested float
+            # field, so narrow them to float (their pre-existing shape).
+            return pa.array([_decimals_to_float(v) for v in values], type=field.type)
 
         return pa.array(values, type=field.type)
 
@@ -386,7 +415,11 @@ class SchemaContract:
                         f"column {field.name!r} at row {row}: cannot parse "
                         f"{v!r} as {field.type}: {exc}"
                     ) from exc
-            elif isinstance(v, int) or (not is_int and isinstance(v, float)):
+            elif isinstance(v, int) or (not is_int and isinstance(v, (float, Decimal))):
+                # A Decimal reaches here only on a float column from the
+                # lossless JSON parse; the float() narrowing below is the
+                # intended (lossy) conversion to the declared double width. A
+                # Decimal on an integer column falls through to the error.
                 parsed = v
             else:
                 raise ValueError(

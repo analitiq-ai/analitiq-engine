@@ -28,9 +28,11 @@ per-stream overrides; nothing else.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections.abc import AsyncIterator, Callable
 from datetime import timezone
+from decimal import Decimal
 from typing import Any
 
 import aiohttp
@@ -52,6 +54,20 @@ logger = logging.getLogger(__name__)
 # HTTP statuses retrying can heal: request timeout, rate limit, upstream
 # outages. Everything else non-200 is a deterministic contract/config error.
 _TRANSIENT_HTTP_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
+
+
+def _loads_preserving_decimals(payload: str) -> Any:
+    """Decode a JSON response body without flattening decimals to float.
+
+    The stdlib default parses every fractional token as a double, discarding
+    digits before Arrow ever sees the value, so a Decimal-typed column lands a
+    rounded number. Parsing fractional tokens as ``Decimal`` keeps the exact
+    source digits; the schema contract then renders each value per its declared
+    Arrow type (Decimal columns stay exact, Float columns narrow to double on
+    purpose). Integer tokens are untouched -- the default already parses them as
+    arbitrary-precision ``int``.
+    """
+    return json.loads(payload, parse_float=Decimal)
 
 
 class APIConnector(BaseConnector):
@@ -638,7 +654,7 @@ class APIConnector(BaseConnector):
                 if response.status in _TRANSIENT_HTTP_STATUSES:
                     raise TransientReadError(detail)
                 raise ReadError(detail)
-            data = await response.json()
+            data = await response.json(loads=_loads_preserving_decimals)
         self.metrics["records_read"] += 0  # incremented below per page
         records = _extract_records(data, records_ref)
         if records:

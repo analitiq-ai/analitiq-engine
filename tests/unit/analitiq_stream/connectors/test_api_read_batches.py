@@ -26,6 +26,7 @@ an async context manager that yields a stub response.
 from __future__ import annotations
 
 import json
+from decimal import Decimal
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -55,8 +56,11 @@ class _FakeResponse:
     async def __aexit__(self, *_exc) -> None:
         return None
 
-    async def json(self) -> Any:
-        return self._body
+    async def json(self, *, loads: Any = json.loads) -> Any:
+        # aiohttp decodes the raw body text through ``loads``; model that so the
+        # connector's custom decoder (e.g. parse_float=Decimal) actually runs.
+        raw = self._body if isinstance(self._body, str) else json.dumps(self._body)
+        return loads(raw)
 
     async def text(self) -> str:
         return json.dumps(self._body) if not isinstance(self._body, str) else self._body
@@ -1317,3 +1321,58 @@ class TestExtractNextCursor:
     @pytest.mark.unit
     def test_integer_token_coerced_to_str(self):
         assert _extract_next_cursor({"next": 42}, "response.body.next") == "42"
+
+
+# ---------------------------------------------------------------------------
+# Decimal precision at the JSON boundary (#288)
+# ---------------------------------------------------------------------------
+
+
+_HIGH_PRECISION_RECORDS_SCHEMA: dict[str, Any] = {
+    "type": "array",
+    "items": {
+        "type": "object",
+        "properties": {
+            # 18 significant digits -- more than a float64 can represent, so a
+            # default json.loads would round it before Arrow ever sees it.
+            "amount": {"type": "number", "arrow_type": "Decimal128(20,8)"},
+            "rate": {"type": "number", "arrow_type": "Float64"},
+        },
+    },
+}
+
+
+class TestReadBatchesDecimalPrecision:
+    @pytest.mark.asyncio
+    async def test_decimal_column_keeps_exact_source_digits(self):
+        # Body is delivered as raw JSON text (not a pre-parsed dict) so the
+        # connector's decoder governs how the numeric token is parsed -- the
+        # whole point of the fix is to parse it losslessly.
+        body = '[{"amount": 1234567890.12345678, "rate": 3.14159265358979}]'
+        session = _FakeSession([_FakeResponse(status=200, body=body)])
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_ref(
+            "response.body", _HIGH_PRECISION_RECORDS_SCHEMA
+        )
+        batches = await _consume(
+            connector,
+            runtime,
+            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=100,
+        )
+
+        assert len(batches) == 1
+        amount = batches[0].column("amount").to_pylist()[0]
+        # Every digit survives the boundary -- the value the default parser
+        # would have rounded to 1234567890.1234567.
+        assert amount == Decimal("1234567890.12345678")
+        # The Float64 column still narrows to a double without erroring on the
+        # Decimal the lossless parse produced.
+        assert batches[0].schema.field("rate").type == pa.float64()
+        assert batches[0].column("rate").to_pylist()[0] == pytest.approx(
+            3.14159265358979
+        )
