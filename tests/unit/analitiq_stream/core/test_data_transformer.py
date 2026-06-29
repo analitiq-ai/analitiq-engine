@@ -1,10 +1,17 @@
 """Unit tests for DataTransformer - assignments format only."""
 
 from datetime import datetime, timedelta
+from decimal import Decimal
 
+import pyarrow as pa
 import pytest
 
-from src.engine.data_transformer import DataTransformer
+from src.engine.data_transformer import (
+    DataTransformer,
+    build_output_schema,
+    plan_arrow_transform,
+    run_arrow_transform,
+)
 from src.engine.exceptions import TransformationError
 
 
@@ -930,3 +937,394 @@ class TestDataTransformer:
         }
         with pytest.raises(TransformationError, match=r"trim.*version 99"):
             await transformer.apply_transformations(batch, config)
+
+
+# --- Arrow-native transform fast path (issue #291) ---------------------------
+
+
+def _typed_get(target_name, arrow_type, source_name, nullable=True):
+    """Assignment that gets a single top-level source column into a target."""
+    return {
+        "target": {
+            "path": [target_name],
+            "arrow_type": arrow_type,
+            "nullable": nullable,
+        },
+        "value": {"kind": "expr", "expr": {"op": "get", "path": [source_name]}},
+    }
+
+
+def _typed_const(target_name, arrow_type, value, nullable=True):
+    """Assignment that sets a target column to a constant value."""
+    return {
+        "target": {
+            "path": [target_name],
+            "arrow_type": arrow_type,
+            "nullable": nullable,
+        },
+        "value": {"kind": "const", "const": {"value": value}},
+    }
+
+
+def _scalar_target(name="out", arrow_type="Utf8", nullable=True):
+    return {"path": [name], "arrow_type": arrow_type, "nullable": nullable}
+
+
+def _naive_ts_column():
+    """A two-row naive (tz-unaware) microsecond timestamp column.
+
+    The naive datetimes are the deliberate subject of the tz-cast tests, so the
+    flake8-datetimez ban is suppressed on each literal.
+    """
+    return pa.array(
+        [
+            datetime(2025, 8, 16, 10, 30),  # noqa: DTZ001
+            datetime(2025, 8, 16, 11, 0),  # noqa: DTZ001
+        ],
+        pa.timestamp("us"),
+    )
+
+
+async def _assert_paths_match(source_batch, assignments):
+    """Run both transform paths on *source_batch*; return the Arrow batch.
+
+    Asserts the Arrow-native fast path is byte-identical to the engine's Python
+    path (``to_pylist`` -> assignments -> ``from_pylist``) that it replaces --
+    the same comparison the engine would make if it ran both.
+    """
+    output_schema = build_output_schema(assignments)
+    plan = plan_arrow_transform(assignments)
+    assert plan is not None, "assignments should qualify for the Arrow path"
+
+    arrow_batch = run_arrow_transform(source_batch, plan, output_schema)
+
+    transformer = DataTransformer()
+    transformed = await transformer.apply_transformations(
+        source_batch.to_pylist(), {"mapping": {"assignments": assignments}}
+    )
+    python_batch = pa.RecordBatch.from_pylist(transformed, schema=output_schema)
+
+    assert arrow_batch.equals(python_batch), (
+        "Arrow-native output diverged from the Python path:\n"
+        f"  arrow ={arrow_batch.to_pydict()}\n"
+        f"  python={python_batch.to_pydict()}"
+    )
+    return arrow_batch
+
+
+_FALLBACK_ASSIGNMENTS = [
+    pytest.param(
+        {
+            "target": _scalar_target(),
+            "value": {"kind": "expr", "expr": {"op": "get", "path": ["a"]}},
+            "validate": {"rules": [{"type": "not_null"}]},
+        },
+        id="validate-block",
+    ),
+    pytest.param(
+        {
+            "target": {"path": ["a", "b"], "arrow_type": "Utf8"},
+            "value": {"kind": "expr", "expr": {"op": "get", "path": ["a"]}},
+        },
+        id="nested-target-path",
+    ),
+    pytest.param(
+        {
+            "target": _scalar_target(),
+            "value": {"kind": "expr", "expr": {"op": "get", "path": ["a", "b"]}},
+        },
+        id="nested-get-path",
+    ),
+    pytest.param(
+        {
+            "target": _scalar_target(),
+            "value": {
+                "kind": "expr",
+                "expr": {
+                    "op": "pipe",
+                    "args": [
+                        {"op": "get", "path": ["a"]},
+                        {"op": "fn", "name": "lower", "version": 1, "args": []},
+                    ],
+                },
+            },
+        },
+        id="pipe-expression",
+    ),
+    pytest.param(
+        {
+            "target": _scalar_target(),
+            "value": {
+                "kind": "expr",
+                "expr": {
+                    "op": "if",
+                    "args": [
+                        {"op": "const", "value": True},
+                        {"op": "const", "value": 1},
+                        {"op": "const", "value": 2},
+                    ],
+                },
+            },
+        },
+        id="if-expression",
+    ),
+    pytest.param(
+        {
+            "target": _scalar_target(),
+            "value": {
+                "kind": "expr",
+                "expr": {"op": "fn", "name": "now", "version": 1, "args": []},
+            },
+        },
+        id="fn-expression",
+    ),
+    pytest.param(
+        {"target": _scalar_target(), "value": {"kind": "mystery"}},
+        id="unknown-value-kind",
+    ),
+    pytest.param(
+        {
+            "target": _scalar_target(arrow_type="Json"),
+            "value": {"kind": "expr", "expr": {"op": "get", "path": ["a"]}},
+        },
+        id="json-target",
+    ),
+    pytest.param(
+        {
+            "target": {
+                "path": ["a"],
+                "arrow_type": "Object",
+                "properties": {"x": {"arrow_type": "Utf8"}},
+            },
+            "value": {"kind": "expr", "expr": {"op": "get", "path": ["a"]}},
+        },
+        id="object-target",
+    ),
+    pytest.param(
+        {
+            "target": {
+                "path": ["a"],
+                "arrow_type": "List",
+                "items": {"arrow_type": "Utf8"},
+            },
+            "value": {"kind": "expr", "expr": {"op": "get", "path": ["a"]}},
+        },
+        id="list-target",
+    ),
+]
+
+
+class TestArrowNativeTransform:
+    """The Arrow-native fast path must equal the Python path it replaces."""
+
+    @pytest.mark.asyncio
+    async def test_byte_identical_rename_retype_const_and_missing(self):
+        """Rename, retype, constant, and missing-source columns all match the
+        Python path exactly within a single qualifying stream."""
+        source = pa.RecordBatch.from_pydict(
+            {
+                "targetValue": pa.array([100.50, 250.75], pa.float64()),
+                "targetCurrency": pa.array(["EUR", "USD"], pa.utf8()),
+            }
+        )
+        assignments = [
+            _typed_get("amount", "Float64", "targetValue"),  # rename, same type
+            _typed_get("currency", "LargeUtf8", "targetCurrency"),  # retype
+            _typed_const("source_system", "Utf8", "wise"),  # constant
+            _typed_get("note", "Utf8", "absent"),  # missing -> nulls
+        ]
+        result = await _assert_paths_match(source, assignments)
+
+        assert result.column("amount").to_pylist() == [100.50, 250.75]
+        assert result.column("currency").type == pa.large_utf8()
+        assert result.column("source_system").to_pylist() == ["wise", "wise"]
+        assert result.column("note").null_count == 2
+
+    def test_rename_passthrough_is_zero_copy(self):
+        """A same-type rename reuses the source array's buffers verbatim --
+        no Python round-trip, no rebuild. Value equality alone would pass for a
+        rebuilt array, so assert buffer identity, which is the whole point of
+        the passthrough branch."""
+        source = pa.RecordBatch.from_pydict({"id": pa.array([1, 2, 3], pa.int64())})
+        assignments = [_typed_get("identifier", "Int64", "id")]
+        plan = plan_arrow_transform(assignments)
+        output_schema = build_output_schema(assignments)
+        result = run_arrow_transform(source, plan, output_schema)
+
+        src_buffers = [b.address if b else None for b in source.column("id").buffers()]
+        out_buffers = [
+            b.address if b else None for b in result.column("identifier").buffers()
+        ]
+        assert out_buffers == src_buffers
+
+    @pytest.mark.asyncio
+    async def test_byte_identical_timestamp_naive_to_utc(self):
+        """Naive timestamp -> tz-aware UTC matches the Python path."""
+        source = pa.RecordBatch.from_pydict({"created": _naive_ts_column()})
+        assignments = [
+            _typed_get("created_at", "Timestamp(MICROSECOND, UTC)", "created")
+        ]
+        result = await _assert_paths_match(source, assignments)
+        assert result.column("created_at").type == pa.timestamp("us", tz="UTC")
+
+    @pytest.mark.asyncio
+    async def test_byte_identical_timestamp_naive_to_non_utc(self):
+        """Naive timestamp -> non-UTC tz matches the Python path, which reads
+        the naive value as a UTC instant. assume_timezone would instead read it
+        as wall-clock-in-zone and silently shift every row."""
+        source = pa.RecordBatch.from_pydict({"created": _naive_ts_column()})
+        assignments = [
+            _typed_get(
+                "created_at", "Timestamp(MICROSECOND, America/New_York)", "created"
+            )
+        ]
+        result = await _assert_paths_match(source, assignments)
+        # 10:30 UTC instant rendered in New York (EDT) is 06:30 wall clock.
+        assert result.column("created_at")[0].as_py().hour == 6
+
+    @pytest.mark.asyncio
+    async def test_int_to_string_retype_fails_like_python_path(self):
+        """An int source into a string target raises in both paths: pyarrow's
+        from_pylist refuses to stringify ints, and the fast path defers to that
+        same conversion instead of masking it with a permissive cast."""
+        source = pa.RecordBatch.from_pydict({"id": pa.array([1, 2], pa.int64())})
+        assignments = [_typed_get("id_str", "Utf8", "id")]
+        output_schema = build_output_schema(assignments)
+        plan = plan_arrow_transform(assignments)
+        assert plan is not None
+
+        with pytest.raises(TransformationError):
+            run_arrow_transform(source, plan, output_schema)
+
+        transformer = DataTransformer()
+        transformed = await transformer.apply_transformations(
+            source.to_pylist(), {"mapping": {"assignments": assignments}}
+        )
+        with pytest.raises((pa.ArrowTypeError, pa.ArrowInvalid)):
+            pa.RecordBatch.from_pylist(transformed, schema=output_schema)
+
+    @pytest.mark.asyncio
+    async def test_nonnullable_null_fails_the_batch(self):
+        """A null in a non-nullable target fails the batch, as in the Python
+        path."""
+        source = pa.RecordBatch.from_pydict({"name": pa.array(["a", None], pa.utf8())})
+        assignments = [_typed_get("name", "Utf8", "name", nullable=False)]
+        output_schema = build_output_schema(assignments)
+        plan = plan_arrow_transform(assignments)
+
+        with pytest.raises(TransformationError, match="not nullable"):
+            run_arrow_transform(source, plan, output_schema)
+
+        transformer = DataTransformer()
+        with pytest.raises(TransformationError):
+            await transformer.apply_transformations(
+                source.to_pylist(), {"mapping": {"assignments": assignments}}
+            )
+
+    def test_plan_qualifies_and_describes_steps(self):
+        """A qualifying stream yields a static plan mirroring its assignments."""
+        assignments = [
+            _typed_get("amount", "Float64", "targetValue"),
+            _typed_const("kind", "Utf8", "txn"),
+        ]
+        assert plan_arrow_transform(assignments) == [
+            {"kind": "get", "source": "targetValue"},
+            {"kind": "const", "value": "txn"},
+        ]
+
+    @pytest.mark.parametrize("assignment", _FALLBACK_ASSIGNMENTS)
+    def test_plan_falls_back_to_python_path(self, assignment):
+        """Anything needing per-record evaluation returns None (Python path)."""
+        assert plan_arrow_transform([assignment]) is None
+
+    @pytest.mark.parametrize("bad", _FALLBACK_ASSIGNMENTS)
+    def test_plan_aborts_whole_stream_on_one_disqualifier(self, bad):
+        """A single disqualifying assignment voids the whole plan, in either
+        position -- a partial plan would misalign with the output schema."""
+        good = _typed_get("ok", "Int64", "id")
+        assert plan_arrow_transform([good, bad]) is None
+        assert plan_arrow_transform([bad, good]) is None
+
+    @pytest.mark.asyncio
+    async def test_missing_source_into_non_nullable_fails(self):
+        """An absent source column into a non-nullable target fails the batch:
+        the all-nulls branch meets the null_count check."""
+        source = pa.RecordBatch.from_pydict({"present": pa.array([1, 2], pa.int64())})
+        assignments = [_typed_get("x", "Utf8", "absent", nullable=False)]
+        plan = plan_arrow_transform(assignments)
+        output_schema = build_output_schema(assignments)
+        with pytest.raises(TransformationError, match="not nullable"):
+            run_arrow_transform(source, plan, output_schema)
+
+    @pytest.mark.asyncio
+    async def test_const_none_into_non_nullable_fails(self):
+        """A constant None into a non-nullable target fails the batch."""
+        source = pa.RecordBatch.from_pydict({"id": pa.array([1, 2], pa.int64())})
+        assignments = [_typed_const("x", "Utf8", None, nullable=False)]
+        plan = plan_arrow_transform(assignments)
+        output_schema = build_output_schema(assignments)
+        with pytest.raises(TransformationError, match="not nullable"):
+            run_arrow_transform(source, plan, output_schema)
+
+    @pytest.mark.asyncio
+    async def test_mixed_nullable_and_non_nullable_matches_python(self):
+        """A non-nullable column with no nulls alongside a nullable column that
+        carries nulls passes and matches the Python path."""
+        source = pa.RecordBatch.from_pydict(
+            {
+                "name": pa.array(["a", "b"], pa.utf8()),
+                "note": pa.array(["x", None], pa.utf8()),
+            }
+        )
+        assignments = [
+            _typed_get("name", "Utf8", "name", nullable=False),
+            _typed_get("note", "Utf8", "note", nullable=True),
+        ]
+        result = await _assert_paths_match(source, assignments)
+        assert result.column("note").null_count == 1
+
+    @pytest.mark.asyncio
+    async def test_one_plan_reused_across_batch_sizes(self):
+        """The static plan is decided once and reused across batches of
+        different row counts -- including an empty batch -- each matching the
+        Python path. Guards const sizing, the all-nulls branch, and that no
+        per-plan state leaks between batches."""
+        assignments = [
+            _typed_get("amount", "Float64", "v"),
+            _typed_const("kind", "Utf8", "txn"),
+            _typed_get("missing", "Utf8", "absent"),
+        ]
+        plan = plan_arrow_transform(assignments)
+        output_schema = build_output_schema(assignments)
+        transformer = DataTransformer()
+
+        for values in ([1.0, 2.0, 3.0], [4.0], []):
+            source = pa.RecordBatch.from_pydict({"v": pa.array(values, pa.float64())})
+            arrow_batch = run_arrow_transform(source, plan, output_schema)
+            transformed = await transformer.apply_transformations(
+                source.to_pylist(), {"mapping": {"assignments": assignments}}
+            )
+            python_batch = pa.RecordBatch.from_pylist(transformed, schema=output_schema)
+            assert arrow_batch.num_rows == len(values)
+            assert arrow_batch.equals(python_batch)
+
+    @pytest.mark.asyncio
+    async def test_byte_identical_decimal_passthrough_and_scalar_consts(self):
+        """Decimal passthrough plus bool / None constants match the Python
+        path. Decimals are this codebase's known sharp edge (#288/#289)."""
+        source = pa.RecordBatch.from_pydict(
+            {
+                "price": pa.array(
+                    [Decimal("1.23"), Decimal("4.56")], pa.decimal128(10, 2)
+                )
+            }
+        )
+        assignments = [
+            _typed_get("price", "Decimal128(10, 2)", "price"),
+            _typed_const("active", "Boolean", True),
+            _typed_const("note", "Utf8", None),
+        ]
+        result = await _assert_paths_match(source, assignments)
+        assert result.column("price").to_pylist() == [Decimal("1.23"), Decimal("4.56")]
+        assert result.column("active").to_pylist() == [True, True]
+        assert result.column("note").null_count == 2
