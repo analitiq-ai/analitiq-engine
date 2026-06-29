@@ -44,6 +44,7 @@ from cdk.schema_contract import SchemaContract
 from cdk.type_map import UnmappedTypeError
 from cdk.types import CheckpointStore
 
+from ...models.state import ReplicationConfig
 from ...shared.dict_path import walk_path
 from ...shared.http_utils import join_url
 from .base import BaseConnector, ConnectionError, ReadError, TransientReadError
@@ -53,6 +54,12 @@ logger = logging.getLogger(__name__)
 # HTTP statuses retrying can heal: request timeout, rate limit, upstream
 # outages. Everything else non-200 is a deterministic contract/config error.
 _TRANSIENT_HTTP_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
+
+# Lookback applied to the stored cursor on incremental reads when a stream
+# does not set its own. It is an operational safety default, not a per-connector
+# attribute, so connectors never declare it; the canonical value lives on
+# ReplicationConfig.
+_DEFAULT_SAFETY_WINDOW_SECONDS: int = ReplicationConfig.safety_window_seconds
 
 
 class APIConnector(BaseConnector):
@@ -453,9 +460,12 @@ class APIConnector(BaseConnector):
             )
             return
         if safety_window_seconds is None:
-            raise ReadError(
-                f"stream {stream_name!r}: incremental replication requires "
-                f"safety_window_seconds in the replication block"
+            safety_window_seconds = _DEFAULT_SAFETY_WINDOW_SECONDS
+            logger.info(
+                "stream %r: no safety_window_seconds in the replication block; "
+                "applying engine default of %d seconds",
+                stream_name,
+                safety_window_seconds,
             )
         effective_start = self._compute_effective_start(
             cursor_value, safety_window_seconds
