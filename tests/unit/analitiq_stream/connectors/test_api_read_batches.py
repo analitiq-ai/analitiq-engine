@@ -1473,3 +1473,62 @@ class TestReadBatchesDecimalPrecision:
         # Body param stays out of the query and keeps its native int type.
         assert "after" not in session.calls[1][2]
         assert session.bodies[1] == {"after": 2}
+
+    @pytest.mark.asyncio
+    async def test_keyset_body_param_narrows_fractional_decimal_to_float(self):
+        # A fractional keyset key parses to Decimal. In the body it must become
+        # a float (a JSON number) -- stdlib json.dumps, which aiohttp uses for
+        # the body, cannot serialize a Decimal and would raise on page 2.
+        page1 = '{"records": [{"score": 1.5}, {"score": 2.5}]}'
+        page2 = '{"records": [{"score": 3.5}]}'
+        session = _FakeSession(
+            [
+                _FakeResponse(status=200, body=page1),
+                _FakeResponse(status=200, body=page2),
+            ]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_ref(
+            "response.body.records",
+            {
+                "type": "object",
+                "properties": {
+                    "records": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "score": {"type": "number", "arrow_type": "Float64"},
+                            },
+                        },
+                    },
+                },
+            },
+        )
+        endpoint["operations"]["read"]["params"] = {
+            "after": {"in": "body", "type": "number", "required": False},
+        }
+        endpoint["operations"]["read"]["request"] = {
+            "method": "POST",
+            "path": "/items/search",
+            "body": {"after": {"from_param": "after"}},
+        }
+        endpoint["operations"]["read"]["pagination"] = {
+            "type": "keyset",
+            "keyset": {"param": "after", "from_record": "score"},
+            "limit": {"param": "limit"},
+        }
+        await _consume(
+            connector,
+            runtime,
+            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=2,
+        )
+
+        body = session.bodies[1]
+        assert body == {"after": 2.5}
+        assert isinstance(body["after"], float)

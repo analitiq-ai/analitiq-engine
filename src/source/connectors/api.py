@@ -259,20 +259,31 @@ class APIConnector(BaseConnector):
         def build_request(
             page_params: dict[str, Any],
         ) -> tuple[dict[str, Any], Any]:
-            # yarl truncates a Decimal to its integer part when rendering the
-            # query string, so stringify Decimals here (the query boundary).
-            # Body params are left native -- the JSON body keeps their numeric
-            # type for endpoints whose schema expects a number.
+            # A fractional value from the lossless JSON parse (e.g. a keyset
+            # key) arrives as a Decimal, which neither sink takes as-is, so each
+            # placement converts it to the form its serializer needs; int/str
+            # stay native.
             query = {
+                # yarl truncates a Decimal in the query string; stringify it
+                # (full precision).
                 name: str(value) if isinstance(value, Decimal) else value
                 for name, value in page_params.items()
                 if param_placements.get(name) != "body"
             }
-            body = (
-                resolver.resolve_for_request(bind_param_refs(raw_body, page_params))
-                if raw_body is not None
-                else None
-            )
+            if raw_body is not None:
+                # aiohttp serializes the body via stdlib json.dumps, which
+                # cannot encode a Decimal. Narrow body Decimals to float so the
+                # value stays a JSON number a numeric body schema accepts --
+                # the same float the body carried before the lossless parse.
+                body_params = {
+                    name: float(value) if isinstance(value, Decimal) else value
+                    for name, value in page_params.items()
+                }
+                body = resolver.resolve_for_request(
+                    bind_param_refs(raw_body, body_params)
+                )
+            else:
+                body = None
             return query, body
 
         records_ref = ((read_spec.get("response") or {}).get("records") or {}).get(
