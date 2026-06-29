@@ -408,12 +408,18 @@ class APIConnector(BaseConnector):
     ) -> None:
         """Fill ``field['arrow_type']`` from the type-map if absent, then recurse.
 
-        ``SchemaContract.resolve_arrow_type`` recurses into ``Object``
-        ``properties`` and ``List`` ``items`` and requires an ``arrow_type`` at
-        every level, so a nested child authored with only JSON ``type``/
-        ``format`` must be resolved here too - otherwise the schema build fails.
-        Recursion runs even when the field already carries an ``arrow_type``,
-        because a hand-annotated container can still hold children that do not.
+        Recursion is gated to the resolved ``arrow_type`` exactly as
+        ``SchemaContract.resolve_arrow_type`` does: it descends into
+        ``properties`` only for ``Object`` and into ``items`` only for ``List``,
+        and treats everything else (including a ``Json`` blob that keeps
+        ``properties``/``items`` for documentation, and every scalar) as a leaf.
+        A nested child authored with only JSON ``type``/``format`` under a real
+        ``Object``/``List`` must be resolved here too, or the schema build
+        fails; but descending into a ``Json`` blob's documentary children would
+        wrongly fail a read on a child type the schema build never consults.
+        Recursion runs even when a container already carries an ``arrow_type``,
+        because a hand-annotated ``Object``/``List`` can still hold children
+        that do not.
         """
         if not field.get("arrow_type"):
             json_type = field.get("type")
@@ -431,16 +437,19 @@ class APIConnector(BaseConnector):
                         f"field {name!r}: JSON type {native!r} has no rule in "
                         f"the connector's read type-map"
                     ) from err
-        nested = field.get("properties")
-        if isinstance(nested, dict):
-            for child_name, child in nested.items():
-                if isinstance(child, dict):
-                    self._resolve_field_arrow_type(
-                        child, f"{name}.{child_name}", get_mapper
-                    )
-        items = field.get("items")
-        if isinstance(items, dict):
-            self._resolve_field_arrow_type(items, f"{name}[]", get_mapper)
+        arrow_type = field.get("arrow_type")
+        if arrow_type == "Object":
+            nested = field.get("properties")
+            if isinstance(nested, dict):
+                for child_name, child in nested.items():
+                    if isinstance(child, dict):
+                        self._resolve_field_arrow_type(
+                            child, f"{name}.{child_name}", get_mapper
+                        )
+        elif arrow_type == "List":
+            items = field.get("items")
+            if isinstance(items, dict):
+                self._resolve_field_arrow_type(items, f"{name}[]", get_mapper)
 
     def _build_base_params(
         self,
