@@ -563,3 +563,65 @@ class TestBuildOutputSchema:
         assert schema.field("a").type == pa.int64()
         assert not schema.field("a").nullable
         assert schema.field("b").nullable
+
+
+class TestPerRecordParity:
+    """Edge semantics that must match the deleted per-record evaluator.
+
+    Vectorized Arrow kernels diverge from Python at the edges (null equality,
+    string truthiness, boolean formatting, all-null fallbacks); each kernel here
+    is steered back to the per-record behavior so existing mappings keep working.
+    """
+
+    def _v1(self, name):
+        return _FUNCTION_CATALOG[name][1]
+
+    def test_to_string_renders_bool_as_python_str(self):
+        out = self._v1("to_string")(pa.array([True, False, None])).to_pylist()
+        assert out == ["True", "False", None]
+
+    def test_string_condition_uses_python_truthiness(self):
+        node = {
+            "op": "if",
+            "args": [_get("s"), _const_node("Y"), _const_node("N")],
+        }
+        out = _run(
+            [{"s": "x"}, {"s": ""}, {"s": None}],
+            [_assignment("r", "Utf8", _expr(node))],
+        )
+        assert out == [{"r": "Y"}, {"r": "N"}, {"r": "N"}]
+
+    def test_eq_treats_two_nulls_as_equal(self):
+        node = {
+            "op": "if",
+            "args": [
+                {"op": "eq", "args": [_get("a"), _const_node(None)]},
+                _const_node("missing"),
+                _const_node("present"),
+            ],
+        }
+        out = _run(
+            [{"a": None}, {"a": 5}],
+            [_assignment("r", "Utf8", _expr(node))],
+        )
+        assert out == [{"r": "missing"}, {"r": "present"}]
+
+    def test_default_fills_a_missing_source_column(self):
+        node = {
+            "op": "pipe",
+            "args": [_get("absent"), {"op": "fn", "name": "default", "args": ["N/A"]}],
+        }
+        out = _run([{"x": 1}], [_assignment("v", "Utf8", _expr(node))])
+        assert out == [{"v": "N/A"}]
+
+    def test_coalesce_fn_emits_fallback_for_all_null_input(self):
+        node = {
+            "op": "pipe",
+            "args": [_get("absent"), {"op": "fn", "name": "coalesce", "args": ["fb"]}],
+        }
+        out = _run([{"x": 1}], [_assignment("v", "Utf8", _expr(node))])
+        assert out == [{"v": "fb"}]
+
+    def test_iso_to_date_rejects_trailing_junk(self):
+        with pytest.raises(TransformationError, match="iso_to_date"):
+            self._v1("iso_to_date")(pa.array(["2025-08-16not-a-timestamp"]))

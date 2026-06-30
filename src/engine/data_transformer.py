@@ -29,7 +29,7 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Final
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -264,12 +264,12 @@ def _compile_expr(expr: dict[str, Any]) -> _ExprFn:
         case "eq":
             args = _expect_args(expr, op, 2)
             left, right = (_compile_expr(a) for a in args)
-            return lambda batch: _compare(pc.equal, left(batch), right(batch), op)
+            return lambda batch: _equal(left(batch), right(batch))
 
         case "neq":
             args = _expect_args(expr, op, 2)
             left, right = (_compile_expr(a) for a in args)
-            return lambda batch: _compare(pc.not_equal, left(batch), right(batch), op)
+            return lambda batch: pc.invert(_equal(left(batch), right(batch)))
 
         case "gt" | "gte" | "lt" | "lte":
             args = _expect_args(expr, op, 2)
@@ -416,6 +416,26 @@ def _compare(
         ) from e
 
 
+def _equal(left: pa.Array, right: pa.Array) -> pa.Array:
+    """Element-wise equality with the per-record evaluator's null semantics.
+
+    Python `==` treats two ``None`` operands as equal and a ``None`` against a
+    present value as unequal; Arrow's ``pc.equal`` instead yields ``null``
+    whenever either side is null. This restores the former: ``True`` where both
+    are null, otherwise the kernel result with a one-sided null counting as not
+    equal. (``neq`` is the inversion of this.)
+    """
+    left, right = _unify_null_typed([left, right])
+    both_null = pc.and_(pc.is_null(left), pc.is_null(right))
+    try:
+        equal = pc.fill_null(pc.equal(left, right), False)
+    except (pa.ArrowInvalid, pa.ArrowTypeError, pa.ArrowNotImplementedError) as e:
+        raise TransformationError(
+            f"eq expression cannot compare {left.type} and {right.type}: {e}"
+        ) from e
+    return pc.if_else(both_null, pa.scalar(True), equal)
+
+
 def _bool_reduce(
     kernel: Callable[[Any, Any], pa.Array], operands: list[pa.Array]
 ) -> pa.Array:
@@ -427,9 +447,20 @@ def _bool_reduce(
 
 
 def _truthy(array: pa.Array) -> pa.Array:
-    """Coerce a column to boolean truthiness: null counts as False."""
+    """Coerce a column to Python boolean truthiness: null counts as False.
+
+    Matches the per-record evaluator, which applied Python truthiness to
+    arbitrary values: an empty string / zero / null is false, any other value is
+    true. A bare Arrow ``cast(_, bool)`` would instead reject strings outright,
+    so strings (non-empty -> true) and numerics (non-zero -> true) are handled
+    explicitly.
+    """
     if pa.types.is_boolean(array.type):
         return pc.fill_null(array, False)
+    if pa.types.is_string(array.type) or pa.types.is_large_string(array.type):
+        return pc.fill_null(pc.greater(pc.utf8_length(array), 0), False)
+    if pa.types.is_null(array.type):
+        return pa.array([False] * len(array))
     try:
         return pc.fill_null(pc.cast(array, pa.bool_()), False)
     except (pa.ArrowInvalid, pa.ArrowTypeError, pa.ArrowNotImplementedError) as e:
@@ -481,7 +512,14 @@ def _fn_to_float(column: pa.Array) -> pa.Array:
 
 
 def _fn_to_string(column: pa.Array) -> pa.Array:
-    """Format as string -- the explicit conversion the matrix points authors to."""
+    """Format as string -- the explicit conversion the matrix points authors to.
+
+    Booleans render as ``"True"``/``"False"`` to match the per-record ``str()``
+    the catalog v1 used; Arrow's cast would emit lowercase ``"true"``/``"false"``
+    and silently change every existing boolean-to-string mapping.
+    """
+    if pa.types.is_boolean(column.type):
+        return pc.if_else(column, pa.scalar("True"), pa.scalar("False"))
     try:
         return pc.cast(column, pa.string())
     except (pa.ArrowInvalid, pa.ArrowTypeError, pa.ArrowNotImplementedError) as e:
@@ -505,7 +543,14 @@ def _fn_now(column: pa.Array) -> pa.Array:
 
 
 def _fn_default(column: pa.Array, default_value: Any = None) -> pa.Array:
-    """Substitute *default_value* wherever the column is null."""
+    """Substitute *default_value* wherever the column is null.
+
+    A wholly-null column infers Arrow ``null`` type (a missing or all-null source
+    field), which cannot hold a typed default; it is rebuilt from the default so
+    ``missing | default("N/A")`` still fills, as the per-record path did.
+    """
+    if pa.types.is_null(column.type):
+        return pa.array([default_value] * len(column))
     try:
         return pc.fill_null(column, pa.scalar(default_value, column.type))
     except (pa.ArrowInvalid, pa.ArrowTypeError, pa.ArrowNotImplementedError) as e:
@@ -515,9 +560,14 @@ def _fn_default(column: pa.Array, default_value: Any = None) -> pa.Array:
 
 
 def _fn_coalesce(column: pa.Array, *alternatives: Any) -> pa.Array:
-    """Return the first non-null among the column and the literal alternatives."""
-    scalars = [pa.scalar(alt, column.type) for alt in alternatives]
-    return pc.coalesce(column, *scalars)
+    """Return the first non-null among the column and the literal alternatives.
+
+    The alternatives are broadcast to columns and unified with the input, so a
+    wholly-null (``null``-typed) input still adopts the alternatives' type and
+    emits the fallback, as the per-record path did.
+    """
+    arrays = [column] + [pa.array([alt] * len(column)) for alt in alternatives]
+    return _coalesce(arrays)
 
 
 def _fn_iso_to_datetime(column: pa.Array) -> pa.Array:
@@ -528,19 +578,36 @@ def _fn_iso_to_datetime(column: pa.Array) -> pa.Array:
         raise TransformationError(f"iso_to_datetime failed: {e}") from e
 
 
+# Anchored ISO-8601 date / datetime shape: a calendar date with an optional
+# time and an optional 'Z' or numeric offset. Used to reject a value with
+# trailing junk (e.g. "2025-08-16garbage") before its date prefix is taken.
+_ISO_8601_RE: Final[
+    str
+] = r"^\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2}(:\d{2})?(\.\d+)?(Z|[+-]\d{2}:?\d{2})?)?$"
+
+
 def _fn_iso_to_date(column: pa.Array) -> pa.Array:
     """Render the date part of an ISO-8601 value as a ``YYYY-MM-DD`` string.
 
-    Every ISO-8601 form begins with the calendar date, so the leading 10
-    characters are sliced and validated by parsing them as a naive timestamp.
-    This accepts the full range the per-record path did -- a bare date, a naive
-    datetime, and a tz-suffixed timestamp (``Z`` or an offset) alike -- keeping
-    the original wall-clock date, while still failing loud on a value that is
-    not a date. (A direct string -> date32 cast is unavailable on pyarrow 12, so
-    the date is round-tripped through a timestamp.)
+    The whole value is first validated against the ISO-8601 shape, so a value
+    with trailing junk (``"2025-08-16not-a-timestamp"``) is rejected rather than
+    silently truncated to its date prefix -- matching the per-record
+    ``datetime.fromisoformat`` which parsed the entire string. The leading 10
+    characters (the calendar date, present in every ISO form -- a bare date, a
+    naive datetime, or a ``Z``/offset timestamp) are then parsed as a naive
+    timestamp (which validates the date and keeps the original wall-clock date)
+    and reformatted. (A direct string -> date32 cast is unavailable on
+    pyarrow 12, so the date is round-tripped through a timestamp.)
     """
     try:
-        date_part = pc.utf8_slice_codeunits(pc.cast(column, pa.string()), 0, 10)
+        strings = pc.cast(column, pa.string())
+        matches = pc.match_substring_regex(strings, pattern=_ISO_8601_RE)
+        malformed = pc.and_(pc.is_valid(strings), pc.invert(matches))
+        if pc.any(malformed, min_count=0).as_py():
+            raise TransformationError(
+                "iso_to_date: value is not a valid ISO-8601 date/datetime"
+            )
+        date_part = pc.utf8_slice_codeunits(strings, 0, 10)
         return pc.strftime(pc.cast(date_part, pa.timestamp("s")), format="%Y-%m-%d")
     except (pa.ArrowInvalid, pa.ArrowTypeError, pa.ArrowNotImplementedError) as e:
         raise TransformationError(f"iso_to_date failed: {e}") from e
