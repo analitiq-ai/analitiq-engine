@@ -156,7 +156,11 @@ def classify_conversion(source_family: str, target_family: str) -> Conversion:
         return Conversion("forbidden")
 
     # Json is an opaque blob built at the source boundary from a dict/list; it
-    # has no defined scalar conversion in either direction.
+    # has no defined scalar conversion in either direction. These rows are
+    # publication-only: a live Json column is a pa.large_string, so the runtime
+    # boundaries (via arrow_family) classify it as LargeUtf8, never "Json". The
+    # rows exist so the published contract tells the authoring UI that a column
+    # declared arrow_type="Json" cannot be retyped.
     if src_kind == "json" or tgt_kind == "json":
         return Conversion("forbidden")
 
