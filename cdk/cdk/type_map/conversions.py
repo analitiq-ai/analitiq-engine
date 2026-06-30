@@ -138,6 +138,15 @@ def classify_conversion(source_family: str, target_family: str) -> Conversion:
     if source_family == target_family:
         return Conversion("identity")
 
+    # Null is the universal filler: nothing converts *to* Null, but a Null source
+    # fills *any* typed column -- scalar, nested, or Json -- with typed nulls.
+    # Decided before the nested/json guards so an all-null source column can still
+    # feed a nested or Json target (a present, wholly-null batch column).
+    if tgt_kind == "null":
+        return Conversion("forbidden")
+    if src_kind == "null":
+        return Conversion("auto")
+
     # scalar -> string: a formatting choice (notation, precision), declared via
     # to_string. This is the one direction the destination cast must not perform
     # silently -- the Int64 -> Utf8 incident that motivated the matrix.
@@ -163,12 +172,6 @@ def classify_conversion(source_family: str, target_family: str) -> Conversion:
     # declared arrow_type="Json" cannot be retyped.
     if src_kind == "json" or tgt_kind == "json":
         return Conversion("forbidden")
-
-    # Nothing converts *to* Null; Null fills any column with typed nulls.
-    if tgt_kind == "null":
-        return Conversion("forbidden")
-    if src_kind == "null":
-        return Conversion("auto")
 
     # Same kind, different family: a width/precision change inside one group
     # (Int32 -> Int64, Decimal128 -> Decimal256). The lossless direction passes

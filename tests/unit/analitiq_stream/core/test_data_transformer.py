@@ -625,3 +625,27 @@ class TestPerRecordParity:
     def test_iso_to_date_rejects_trailing_junk(self):
         with pytest.raises(TransformationError, match="iso_to_date"):
             self._v1("iso_to_date")(pa.array(["2025-08-16not-a-timestamp"]))
+
+    def test_iso_to_date_rejects_out_of_range_time(self):
+        # The date prefix is well-formed but the time is not -- the per-record
+        # fromisoformat rejected the whole value, so this must too.
+        with pytest.raises(TransformationError, match="iso_to_date"):
+            self._v1("iso_to_date")(pa.array(["2025-08-16T99:99:99"]))
+
+    def test_concat_renders_bool_as_python_str(self):
+        node = {"op": "concat", "args": [_get("a"), _get("b")]}
+        out = _run(
+            [{"a": "active=", "b": True}],
+            [_assignment("s", "Utf8", _expr(node))],
+        )
+        assert out == [{"s": "active=True"}]
+
+    def test_top_level_fn_runs_without_a_pipe_seed(self):
+        # A bare fn node as the value (the docs list `fn` as an op); `now` ignores
+        # its input, so every row gets a tz-aware timestamp.
+        node = {"op": "fn", "name": "now", "version": 1, "args": []}
+        out = _run(
+            [{"x": 1}, {"x": 2}],
+            [_assignment("ts", "Timestamp(MICROSECOND, UTC)", _expr(node))],
+        )
+        assert all(row["ts"] is not None for row in out)

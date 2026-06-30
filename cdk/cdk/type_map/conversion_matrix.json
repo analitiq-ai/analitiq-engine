@@ -2870,7 +2870,7 @@
     },
     "Json": {
       "fn": null,
-      "mode": "forbidden",
+      "mode": "auto",
       "runtime_checked": false
     },
     "LargeBinary": {
@@ -2885,7 +2885,7 @@
     },
     "List": {
       "fn": null,
-      "mode": "forbidden",
+      "mode": "auto",
       "runtime_checked": false
     },
     "Null": {
@@ -2895,7 +2895,7 @@
     },
     "Object": {
       "fn": null,
-      "mode": "forbidden",
+      "mode": "auto",
       "runtime_checked": false
     },
     "Time32": {

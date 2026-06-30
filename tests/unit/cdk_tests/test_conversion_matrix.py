@@ -121,6 +121,10 @@ class TestNamedCells:
             ("Object", "List", "forbidden", None, False),
             ("Int64", "Null", "forbidden", None, False),
             ("Null", "Int64", "auto", None, False),
+            # Null fills any typed column, nested included (decided before the
+            # nested-forbidden guard), so an all-null source can feed a struct.
+            ("Null", "Object", "auto", None, False),
+            ("Null", "List", "auto", None, False),
             # Json is an opaque blob: no scalar conversion either way.
             ("Json", "Int64", "forbidden", None, False),
             ("Int64", "Json", "forbidden", None, False),
@@ -257,6 +261,27 @@ class TestDestinationBoundaryConformance:
         col = pa.array([0, 1_000], pa.timestamp("s"))
         out = _cast("Timestamp(MICROSECOND)", col)
         assert pa.types.is_timestamp(out.column(0).type)
+
+    def test_all_null_source_fills_a_nested_target(self) -> None:
+        # An all-null (null-typed) source column targeting a nullable struct must
+        # fill typed nulls, not reject: Null fills any typed column, nested too.
+        struct = "Object"
+        contract = SchemaContract(
+            {
+                "columns": [
+                    {
+                        "name": "c",
+                        "arrow_type": struct,
+                        "nullable": True,
+                        "properties": {"a": {"arrow_type": "Int64"}},
+                    }
+                ]
+            }
+        )
+        batch = pa.RecordBatch.from_arrays([pa.nulls(2)], names=["c"])
+        out = contract.cast_arrow_batch(batch)
+        assert out.column(0).to_pylist() == [None, None]
+        assert pa.types.is_struct(out.column(0).type)
 
     def test_dictionary_encoded_column_decodes(self) -> None:
         # Regression: an ADBC dictionary-encoded text column targeting Utf8 must

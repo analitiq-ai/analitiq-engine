@@ -256,6 +256,13 @@ def _compile_expr(expr: dict[str, Any]) -> _ExprFn:
 
             return run_pipe
 
+        case "fn":
+            # A top-level fn (e.g. ``now()``) with no pipe seed: the per-record
+            # evaluator applied it to a ``None`` input, so here it runs over an
+            # all-null column. Zero-input functions like ``now`` ignore it.
+            fn = _compile_fn(expr)
+            return lambda batch: fn(pa.nulls(batch.num_rows))
+
         case "if":
             args = _expect_args(expr, op, 3)
             cond, then_, else_ = (_compile_expr(a) for a in args)
@@ -472,10 +479,22 @@ def _truthy(array: pa.Array) -> pa.Array:
 def _concat(parts: list[pa.Array]) -> pa.Array:
     """Concatenate columns as strings, dropping nulls (mirrors per-record concat)."""
     try:
-        strings = [pc.cast(part, pa.string()) for part in parts]
+        strings = [_string_form(part) for part in parts]
     except (pa.ArrowInvalid, pa.ArrowTypeError, pa.ArrowNotImplementedError) as e:
         raise TransformationError(f"concat expression cannot stringify: {e}") from e
     return pc.binary_join_element_wise(*strings, pa.scalar(""), null_handling="skip")
+
+
+def _string_form(column: pa.Array) -> pa.Array:
+    """Render a column as strings the way the per-record ``str()`` did.
+
+    Booleans become ``"True"``/``"False"`` rather than Arrow's lowercase
+    ``"true"``/``"false"``; everything else uses Arrow's string cast. Shared by
+    ``to_string`` and ``concat`` so the two never diverge on booleans.
+    """
+    if pa.types.is_boolean(column.type):
+        return pc.if_else(column, pa.scalar("True"), pa.scalar("False"))
+    return pc.cast(column, pa.string())
 
 
 # ---------------------------------------------------------------------------
@@ -515,13 +534,12 @@ def _fn_to_string(column: pa.Array) -> pa.Array:
     """Format as string -- the explicit conversion the matrix points authors to.
 
     Booleans render as ``"True"``/``"False"`` to match the per-record ``str()``
-    the catalog v1 used; Arrow's cast would emit lowercase ``"true"``/``"false"``
-    and silently change every existing boolean-to-string mapping.
+    the catalog v1 used (via :func:`_string_form`); Arrow's cast would emit
+    lowercase ``"true"``/``"false"`` and silently change every existing
+    boolean-to-string mapping.
     """
-    if pa.types.is_boolean(column.type):
-        return pc.if_else(column, pa.scalar("True"), pa.scalar("False"))
     try:
-        return pc.cast(column, pa.string())
+        return _string_form(column)
     except (pa.ArrowInvalid, pa.ArrowTypeError, pa.ArrowNotImplementedError) as e:
         raise TransformationError(
             f"to_string: cannot convert {column.type}: {e}"
@@ -579,11 +597,16 @@ def _fn_iso_to_datetime(column: pa.Array) -> pa.Array:
 
 
 # Anchored ISO-8601 date / datetime shape: a calendar date with an optional
-# time and an optional 'Z' or numeric offset. Used to reject a value with
-# trailing junk (e.g. "2025-08-16garbage") before its date prefix is taken.
-_ISO_8601_RE: Final[
-    str
-] = r"^\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2}(:\d{2})?(\.\d+)?(Z|[+-]\d{2}:?\d{2})?)?$"
+# time and an optional 'Z' or numeric offset. The hour/minute/second and offset
+# ranges are constrained (00-23 / 00-59) so a value with trailing junk
+# ("2025-08-16garbage") or an out-of-range time ("2025-08-16T99:99:99") is
+# rejected before its date prefix is taken; the date's month/day are validated by
+# the timestamp cast that follows.
+_ISO_8601_RE: Final[str] = (
+    r"^\d{4}-\d{2}-\d{2}"
+    r"([T ]([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?(\.\d+)?"
+    r"(Z|[+-]([01]\d|2[0-3]):?[0-5]\d)?)?$"
+)
 
 
 def _fn_iso_to_date(column: pa.Array) -> pa.Array:
