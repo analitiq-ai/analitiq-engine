@@ -19,9 +19,13 @@ A conversion has one of four *modes*:
 - ``forbidden`` -- never permitted (e.g. ``Object -> Int64``).
 
 ``runtime_checked`` marks a conversion that is permitted but may still reject
-individual rows (a narrowing that overflows, a string that will not parse). The
-boundary performs the build with ``safe=True`` so a bad row fails loud rather
-than saturating or truncating.
+individual rows (an integer narrowing that overflows, a string that will not
+parse). The two Arrow->Arrow boundaries -- the destination cast and the
+transform retype -- run it through the same ``pc.cast(safe=True)``, which fails
+loud on an out-of-range integer narrowing or a lossy ``Float -> Int`` rather
+than truncating. (``safe=True`` is not total: a finite ``Float64`` magnitude
+beyond ``Float32`` range still casts to +/-inf; that residue is tracked for a
+follow-up, not relied on here.)
 
 The grid is keyed on the **published arrow_type family vocabulary** -- the same
 head names :func:`~cdk.type_map.arrow.parse_arrow_type` consumes (``"Int64"``,

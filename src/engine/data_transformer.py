@@ -11,6 +11,7 @@ from decimal import Decimal
 from typing import Any
 
 import pyarrow as pa
+import pyarrow.compute as pc
 
 from cdk.type_map.arrow import classify_arrow_conversion, resolve_arrow_type
 from cdk.type_map.exceptions import InvalidTypeMapError
@@ -870,32 +871,21 @@ def run_arrow_transform(
       same Python-value-to-Arrow conversion ``from_pylist`` performs;
     - a ``get`` whose source column already has the target type is passed
       through unchanged -- a pure rename, with no Python materialisation;
-    - a ``get`` that needs a retype is first checked against the conversion
-      matrix (the same policy the destination cast consults): a ``forbidden`` or
-      ``explicit`` conversion fails loud with the required function named, so an
-      ``Int64 -> Utf8`` whose mapping omitted ``to_string`` is rejected here
-      identically to the destination, not silently stringified. A permitted
-      ``auto`` retype is then rebuilt with ``pa.array(column.to_pylist(),
-      target_type)``, which reproduces ``from_pylist``'s per-column conversion
-      exactly. Neither a raw Arrow ``cast`` nor ``assume_timezone`` is used,
-      because each diverges from ``from_pylist`` for cases the contract allows:
-      ``assume_timezone`` reads a naive timestamp as wall-clock-in-zone where
-      ``from_pylist`` reads it as a UTC instant. Routing through Python values
-      keeps the fast path from silently disagreeing with the slow one. Only a
-      retype reads a source column's data back into Python; a const builds a
-      short Python list of the literal but touches no source data, and a rename
-      stays wholly in Arrow.
+    - a ``get`` that needs a retype is gated and executed by ``_retype_column``:
+      the conversion matrix rejects a ``forbidden``/``explicit`` pair, and a
+      permitted pair runs through the same ``pc.cast(safe=True)`` the destination
+      uses, so a retype and the destination cast of the same column produce the
+      same value or fail loud together (an ``Int64 -> Int32`` overflow, a
+      lossy ``Float64 -> Int64``). See ``_retype_column``.
     - a missing source column becomes all-nulls, mirroring the Python path
       where an absent field resolves to ``None`` for every row.
 
     A non-nullable target that ends up with nulls fails the batch, matching the
     Python path's nullability enforcement.
 
-    One benign divergence: a same-type passthrough of a sub-microsecond
-    timestamp (e.g. ``Timestamp(NANOSECOND)``) succeeds here but fails the
-    Python path, whose ``to_pylist`` cannot represent it as a Python datetime.
-    The fast path preserves data the slow path would drop by raising, so this
-    is strictly safer, not a regression.
+    A ``const`` literal is still built with ``pa.array`` (``_build_array``): it
+    is a Python value declared in the mapping, not a typed Arrow column, so there
+    is no source arrow_type for the matrix to classify.
     """
     num_rows = batch.num_rows
     source_names = batch.schema.names
@@ -928,15 +918,19 @@ def run_arrow_transform(
 
 
 def _retype_column(column: pa.Array, field: pa.Field) -> pa.Array:
-    """Retype a source column to its target type, gated by the conversion matrix.
+    """Convert a source column to its target type, gated by the conversion matrix.
 
     A ``get`` whose source and target Arrow types differ is a column conversion.
-    The conversion matrix (:mod:`cdk.type_map.conversions`) -- the same policy
-    the destination cast consults -- decides whether it is permitted, so the two
-    boundaries cannot disagree. A ``forbidden`` or ``explicit`` conversion fails
-    loud with the required function named (rather than as a cryptic
-    ``ArrowTypeError`` from ``pa.array``); a permitted conversion is built
-    through Python values to match the slow path exactly.
+    The matrix (:mod:`cdk.type_map.conversions`) -- the same policy the
+    destination cast consults -- decides whether it is permitted; a ``forbidden``
+    or ``explicit`` pair fails loud with the required function named (rather than
+    as a cryptic ``ArrowTypeError``). A permitted pair runs through the same
+    ``pc.cast(safe=True)`` as ``SchemaContract.cast_arrow_batch``, so the transform
+    and the destination execute an identical conversion: both parse ``"1" ->
+    Int64``, both reject a lossy ``Float64 -> Int64`` or an out-of-range
+    narrowing. Using the same executor on both boundaries is what makes the
+    matrix's "auto means auto everywhere" guarantee real; a bare ``pa.array``
+    here would silently truncate ``1.5 -> 1`` that the destination rejects.
     """
     conversion = classify_arrow_conversion(column.type, field.type)
     if conversion.mode == "forbidden":
@@ -950,16 +944,24 @@ def _retype_column(column: pa.Array, field: pa.Field) -> pa.Array:
             f"requires an explicit '{conversion.fn}' conversion declared in the "
             f"mapping"
         )
-    return _build_array(column.to_pylist(), field)
+    try:
+        return pc.cast(column, field.type, safe=True)
+    except (pa.ArrowInvalid, pa.ArrowTypeError, pa.ArrowNotImplementedError) as e:
+        raise TransformationError(
+            f"column {field.name!r}: cannot convert {column.type} → "
+            f"{field.type}: {e}"
+        ) from e
 
 
 def _build_array(values: list[Any], field: pa.Field) -> pa.Array:
-    """Build an Arrow array from Python *values*, matching ``from_pylist``.
+    """Build an Arrow array from a ``const`` literal's Python *values*.
 
-    Wraps pyarrow's conversion errors in :class:`TransformationError` with the
-    column name so a bad constant or an impossible retype fails the batch with
-    a clear message, the same way the Python path's ``from_pylist`` failure
-    would surface as a transform error.
+    Used only for ``const`` assignments -- a Python value declared in the mapping
+    (not a typed source column), so there is no source arrow_type to classify and
+    ``pa.array`` constructs it directly. Column-to-column retypes go through
+    :func:`_retype_column`. Wraps pyarrow's conversion errors in
+    :class:`TransformationError` with the column name so a bad constant fails the
+    batch with a clear message.
     """
     try:
         return pa.array(values, type=field.type)

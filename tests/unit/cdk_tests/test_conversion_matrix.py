@@ -14,11 +14,13 @@ boundary consults. These tests pin three things so it cannot silently rot:
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import pyarrow as pa
 import pytest
 
 from cdk.schema_contract import SchemaContract
-from cdk.type_map.arrow import arrow_family, classify_arrow_conversion, parse_arrow_type
+from cdk.type_map.arrow import arrow_family, parse_arrow_type
 from cdk.type_map.conversions import (
     ARROW_FAMILIES,
     build_conversion_matrix,
@@ -33,6 +35,7 @@ from src.engine.data_transformer import (
     plan_arrow_transform,
     run_arrow_transform,
 )
+from src.engine.exceptions import TransformationError
 
 _VALID_MODES = {"identity", "auto", "explicit", "forbidden"}
 
@@ -104,30 +107,42 @@ class TestNamedCells:
     """The conversions the ticket / ADR call out by name."""
 
     @pytest.mark.parametrize(
-        ("source", "target", "mode", "fn"),
+        ("source", "target", "mode", "fn", "runtime_checked"),
         [
-            ("Int64", "Utf8", "explicit", "to_string"),
-            ("Boolean", "Utf8", "explicit", "to_string"),
-            ("Float64", "Utf8", "explicit", "to_string"),
-            ("Timestamp", "Utf8", "explicit", "to_string"),
+            ("Int64", "Utf8", "explicit", "to_string", False),
+            ("Boolean", "Utf8", "explicit", "to_string", False),
+            ("Float64", "Utf8", "explicit", "to_string", False),
+            ("Timestamp", "Utf8", "explicit", "to_string", False),
             # Parsing a string into a scalar stays implicit: API sources ship
             # every value as a JSON string and the engine has always parsed them.
-            ("Utf8", "Int64", "auto", None),
-            ("Utf8", "Float64", "auto", None),
-            ("Int32", "Int64", "auto", None),
-            ("Int64", "Int32", "auto", None),
-            ("Object", "Int64", "forbidden", None),
-            ("List", "Int64", "forbidden", None),
-            ("Int64", "Null", "forbidden", None),
-            ("Null", "Int64", "auto", None),
+            ("Utf8", "Int64", "auto", None, True),
+            ("Utf8", "Float64", "auto", None, True),
+            ("Int32", "Int64", "auto", None, True),
+            ("Int64", "Int32", "auto", None, True),
+            ("Float64", "Int64", "auto", None, True),
+            ("Object", "Int64", "forbidden", None, False),
+            ("List", "Int64", "forbidden", None, False),
+            # One nested shape never becomes another.
+            ("Object", "List", "forbidden", None, False),
+            ("Int64", "Null", "forbidden", None, False),
+            ("Null", "Int64", "auto", None, False),
+            # Json is an opaque blob: no scalar conversion either way.
+            ("Json", "Int64", "forbidden", None, False),
+            ("Int64", "Json", "forbidden", None, False),
         ],
     )
     def test_named_cell(
-        self, source: str, target: str, mode: str, fn: str | None
+        self,
+        source: str,
+        target: str,
+        mode: str,
+        fn: str | None,
+        runtime_checked: bool,
     ) -> None:
         conv = classify_conversion(source, target)
         assert conv.mode == mode
         assert conv.fn == fn
+        assert conv.runtime_checked == runtime_checked
 
 
 class TestArrowFamilyRoundTrip:
@@ -136,16 +151,25 @@ class TestArrowFamilyRoundTrip:
     @pytest.mark.parametrize(
         "canonical",
         [
+            "Null",
             "Int8",
             "Int64",
+            "UInt8",
+            "UInt16",
             "UInt32",
+            "UInt64",
+            "Float16",
             "Float32",
             "Float64",
             "Utf8",
             "LargeUtf8",
             "Boolean",
             "Binary",
+            "LargeBinary",
+            "FixedSizeBinary(16)",
             "Date32",
+            "Date64",
+            "Time32(SECOND)",
             "Time64(MICROSECOND)",
             "Timestamp(MICROSECOND, UTC)",
             "Duration(SECOND)",
@@ -157,10 +181,27 @@ class TestArrowFamilyRoundTrip:
         family = canonical.split("(")[0]
         assert arrow_family(parse_arrow_type(canonical)) == family
 
+    def test_binary_trio_disambiguated(self) -> None:
+        # is_fixed_size_binary / is_large_binary / is_binary are adjacent,
+        # first-match-wins probes; a reorder would silently misclassify these.
+        assert arrow_family(pa.binary()) == "Binary"
+        assert arrow_family(pa.large_binary()) == "LargeBinary"
+        assert arrow_family(pa.binary(16)) == "FixedSizeBinary"
+
     def test_struct_and_list_families(self) -> None:
         assert arrow_family(pa.struct([("a", pa.int64())])) == "Object"
         assert arrow_family(pa.list_(pa.int64())) == "List"
         assert arrow_family(pa.large_list(pa.int64())) == "List"
+
+    def test_out_of_vocabulary_type_fails_loud(self) -> None:
+        # A live Arrow type outside the published vocabulary must raise, not
+        # resolve to a silent default, so it cannot slip through a boundary.
+        for dtype in (
+            pa.map_(pa.string(), pa.int64()),
+            pa.dictionary(pa.int32(), pa.string()),
+        ):
+            with pytest.raises(InvalidTypeMapError):
+                arrow_family(dtype)
 
 
 def _dest(arrow_type: str, *, nullable: bool = True) -> SchemaContract:
@@ -193,9 +234,23 @@ class TestDestinationBoundaryConformance:
         assert out.column(0).type == pa.int64()
         assert out.column(0).to_pylist() == [1, 2]
 
+    def test_auto_string_parse_builds(self) -> None:
+        # API sources ship JSON strings; the destination parses them. This is
+        # why string->scalar stays auto -- protect it from a silent flip.
+        out = _cast("Int64", pa.array(["1", "2"], pa.string()))
+        assert out.column(0).to_pylist() == [1, 2]
+
+    def test_runtime_checked_unparseable_string_is_rejected(self) -> None:
+        with pytest.raises(ValueError):
+            _cast("Int64", pa.array(["1", "x"], pa.string()))
+
     def test_runtime_checked_narrowing_overflow_is_rejected(self) -> None:
         with pytest.raises(ValueError):
             _cast("Int32", pa.array([2**40], pa.int64()))
+
+    def test_runtime_checked_lossy_float_to_int_is_rejected(self) -> None:
+        with pytest.raises(ValueError):
+            _cast("Int64", pa.array([1.5], pa.float64()))
 
     def test_same_family_unit_change_builds(self) -> None:
         col = pa.array([0, 1_000], pa.timestamp("s"))
@@ -217,57 +272,75 @@ def _retype_batch(target_arrow_type: str, column: pa.Array) -> pa.RecordBatch:
 
 
 class TestTransformBoundaryConformance:
-    """run_arrow_transform agrees with the destination on the same pairs."""
+    """run_arrow_transform executes a retype like the destination cast."""
 
     def test_explicit_int_to_string_is_rejected(self) -> None:
-        from src.engine.exceptions import TransformationError
-
         with pytest.raises(TransformationError, match="to_string"):
             _retype_batch("Utf8", pa.array([1, 2], pa.int64()))
+
+    def test_forbidden_nested_source_to_scalar_is_rejected(self) -> None:
+        # plan_arrow_transform inspects only the TARGET type, so a get from a
+        # struct source into a scalar target DOES take the fast path and reaches
+        # the matrix's forbidden gate -- it must fail loud, not crash obscurely.
+        col = pa.array([{"a": 1}], pa.struct([("a", pa.int64())]))
+        with pytest.raises(TransformationError, match="not a permitted conversion"):
+            _retype_batch("Int64", col)
 
     def test_auto_widening_builds(self) -> None:
         out = _retype_batch("Int64", pa.array([1, 2], pa.int32()))
         assert out.column(0).type == pa.int64()
 
+    def test_auto_string_parse_builds(self) -> None:
+        out = _retype_batch("Int64", pa.array(["1", "2"], pa.string()))
+        assert out.column(0).to_pylist() == [1, 2]
+
+    def test_runtime_checked_lossy_float_to_int_is_rejected(self) -> None:
+        # Regression guard: a bare pa.array here would silently truncate 1.5->1,
+        # which the destination rejects. The fast path must reject it too.
+        with pytest.raises(TransformationError):
+            _retype_batch("Int64", pa.array([1.5], pa.float64()))
+
+
+def _boundary_outcome(build: Callable[[], list]) -> tuple:
+    """Run one boundary build; return ('ok', values) or ('reject',).
+
+    Normalizes the two boundaries' distinct exception types (ValueError vs
+    TransformationError) so their outcomes can be compared directly.
+    """
+    try:
+        return ("ok", build())
+    except (ValueError, TransformationError):
+        return ("reject",)
+
 
 class TestBoundariesAgree:
-    """The matrix exists so the two boundaries cannot disagree on a pair."""
+    """The matrix's promise: a retype and the destination cast of the same
+    column produce the SAME outcome -- the same value, or both fail loud."""
 
     @pytest.mark.parametrize(
-        ("source", "target"),
+        ("source_type", "values", "target"),
         [
-            (pa.int64(), pa.string()),  # explicit: both reject
-            (pa.struct([("a", pa.int64())]), pa.int64()),  # forbidden: both reject
+            (pa.int32(), [1, 2], "Int64"),  # auto widen -> both [1, 2]
+            (pa.string(), ["1", "2"], "Int64"),  # auto parse -> both [1, 2]
+            (pa.float64(), [1.0, 2.0], "Int64"),  # lossless float -> both [1, 2]
+            (pa.float64(), [1.5], "Int64"),  # lossy float -> both reject
+            (pa.string(), ["x"], "Int64"),  # unparseable -> both reject
+            (pa.int64(), [2**40], "Int32"),  # overflow -> both reject
+            (pa.int64(), [1, 2], "Utf8"),  # explicit -> both reject
+            (pa.struct([("a", pa.int64())]), [{"a": 1}], "Int64"),  # forbidden
         ],
     )
-    def test_explicit_and_forbidden_reject_on_both_boundaries(
-        self, source: pa.DataType, target: pa.DataType
+    def test_transform_and_destination_match(
+        self, source_type: pa.DataType, values: list, target: str
     ) -> None:
-        conv = classify_arrow_conversion(source, target)
-        assert conv.mode in {"explicit", "forbidden"}
-        # Destination rejects.
-        with pytest.raises(ValueError):
-            _cast(str_arrow_type(target), pa.array(_sample(source), source))
-        # Transform rejects (same pair) -- only when the fast path applies
-        # (scalar source). Nested sources never reach run_arrow_transform.
-        if not (pa.types.is_struct(source) or pa.types.is_list(source)):
-            from src.engine.exceptions import TransformationError
-
-            with pytest.raises(TransformationError):
-                _retype_batch(str_arrow_type(target), pa.array(_sample(source), source))
-
-
-def str_arrow_type(dtype: pa.DataType) -> str:
-    """Canonical arrow_type string for a scalar DataType used in these tests."""
-    return {
-        pa.string(): "Utf8",
-        pa.int64(): "Int64",
-    }[dtype]
-
-
-def _sample(dtype: pa.DataType) -> list:
-    if pa.types.is_integer(dtype):
-        return [1, 2]
-    if pa.types.is_struct(dtype):
-        return [{"a": 1}]
-    raise AssertionError(f"no sample for {dtype}")
+        col = pa.array(values, source_type)
+        destination = _boundary_outcome(
+            lambda: _cast(target, col).column(0).to_pylist()
+        )
+        transform = _boundary_outcome(
+            lambda: _retype_batch(target, col).column(0).to_pylist()
+        )
+        assert destination == transform, (
+            f"{source_type} -> {target}: destination={destination} "
+            f"transform={transform}"
+        )
