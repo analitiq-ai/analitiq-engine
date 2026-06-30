@@ -63,7 +63,7 @@ src/
 ├── engine/                  # Core engine
 │   ├── engine.py                # StreamingEngine (extract -> transform -> load -> checkpoint)
 │   ├── pipeline_config_prep.py  # Loads manifest/pipelines/streams/connections/connectors
-│   ├── data_transformer.py      # AssignmentTransformer (mapping AST execution)
+│   ├── data_transformer.py      # compile_transform (vectorized mapping AST -> Arrow compute)
 │   ├── expression_evaluator.py  # SecureExpressionEvaluator (string-form expressions)
 │   └── exceptions.py
 │
@@ -157,7 +157,8 @@ silently losing rows.
    `stream_data`. Each stream runs four async stages —
    `_extract_stage -> _transform_stage -> _load_stage ->
    _checkpoint_stage` — wired together with async queues. The transform
-   stage uses `AssignmentTransformer` for the assignment AST.
+   stage compiles the assignment AST once (`compile_transform`) and applies
+   it to each batch as vectorized Arrow compute.
 5. `_load_stage` streams batches over gRPC to the destination service
    with row-level, content-derived idempotency (protocol in
    [`grpc-streaming-architecture.md`](grpc-streaming-architecture.md)).

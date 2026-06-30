@@ -8,7 +8,9 @@ schema-contract internals see
 
 Streams declare their record-shape transformation under `mapping` in
 `pipelines/{id}/streams/{stream_id}.json`. The implementation lives in
-`src/engine/data_transformer.py` (`AssignmentTransformer`).
+`src/engine/data_transformer.py`: the assignments are compiled once by
+`compile_transform` into vectorized `pyarrow.compute` and applied to each Arrow
+batch.
 
 ## Overview
 
@@ -19,8 +21,9 @@ Target Field (path + type)  ←  Value (const | expr AST)  ←  Optional validat
 ```
 
 Expressions are a **structured AST** (JSON), not source strings. End
-users edit assignments through a UI; the engine evaluates the AST per
-record. Stream-level `source_to_generic` and
+users edit assignments through a UI; the engine compiles the AST once per
+stream and evaluates it as vectorized Arrow compute over each batch -- the
+data never leaves Arrow. Stream-level `source_to_generic` and
 `generic_to_destination` blocks describe canonical typing for the
 destination's schema contract and are independent of the assignment AST.
 
@@ -142,7 +145,7 @@ destination's schema contract and are independent of the assignment AST.
 
 ## Expression AST
 
-Implemented `op` values (see `_evaluate_expression` in
+Implemented `op` values (compiled by `_compile_expr` in
 `data_transformer.py`):
 
 | `op` | Description |
@@ -158,16 +161,18 @@ Implemented `op` values (see `_evaluate_expression` in
 | `concat` | String concatenation of evaluated args (None args dropped) |
 | `coalesce` | First non-null evaluated arg |
 
-Unknown `op` values raise a `TransformationError`. Expression
-evaluation is not subject to per-assignment `on_error` routing (that
-applies only to `validate` rule failures); a single expression error
-fails the entire batch and surfaces as a transform-stage stream
+Unknown `op` values raise a `TransformationError`. A single expression
+error fails the entire batch and surfaces as a transform-stage stream
 failure — keep authoring tooling honest by validating against this
-list.
+list. Because each op is a vectorized column operation, the boolean and
+conditional ops (`and`, `or`, `if`) evaluate every operand over the whole
+batch rather than short-circuiting per row; expressions are pure, so the
+result is unchanged, but a branch that would error only on rows it does
+not feed still fails the batch.
 
 ## Function Catalog
 
-Built-in functions (`AssignmentTransformer.FUNCTION_CATALOG`):
+Built-in functions (`_FUNCTION_CATALOG` in `data_transformer.py`):
 
 | Name | Version | Purpose |
 |------|---------|---------|
@@ -198,27 +203,26 @@ behaviour.
 }
 ```
 
-Implemented rule types (`_validate_value`):
+Implemented rule types (`_run_validation` in `data_transformer.py`), each
+compiled to a vectorized boolean mask over the batch. A null value is exempt
+from every rule except `not_null`:
 
 | `type` | Required keys | Notes |
 |--------|---------------|-------|
-| `not_null` (alias `required`) | — | Fails when the value is None |
-| `min_length` | `value` | Compares against `len(str(value))` |
+| `not_null` (alias `required`) | — | Fails where the value is null |
+| `min_length` | `value` | Unicode length of the value as a string |
 | `max_length` | `value` | Same |
-| `pattern` | `value` | Python `re.match` against `str(value)` |
+| `pattern` | `value` | Anchored regex match (`^(?:pattern)`) against the value as a string |
 | `range` | `min` and/or `max` | Numeric comparison |
 | `in_list` | `value` | Value must be in the supplied list |
 
-`on_error` actions:
-
-- `dlq` — record is sent to the dead-letter queue, processing continues
-- `quarantine` — record is parked for review, processing continues
-- `skip_record` — drop the record, processing continues
-- `default_value` — substitute the rule's `default` and continue
-- `stop_stream` — abort the current stream
-
-A stream-level `defaults.on_error` is used when an assignment does not
-specify `validate.on_error`.
+Validation is **batch-wide and fail-loud**: if any row fails any rule, the
+whole batch fails with a `TransformationError` naming the column and the
+offending rows. The transform does not route individual records — it surfaces
+the failure, and the stream-level `error_strategy` decides retry vs DLQ vs skip
+for the failed batch (see [`engine-architecture.md`](engine-architecture.md)).
+The `validate.on_error` and stream `defaults.on_error` fields are carried in the
+stream contract for the authoring UI and control plane.
 
 ## Type Conversion
 

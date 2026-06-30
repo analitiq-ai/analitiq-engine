@@ -8,8 +8,8 @@ boundary consults. These tests pin three things so it cannot silently rot:
 2. every ``explicit`` conversion names a function that actually exists in the
    engine's mapping ``FUNCTION_CATALOG``;
 3. each declared mode matches what the real builders do -- ``cast_arrow_batch``
-   (destination) and ``run_arrow_transform`` (transform) accept/reject the same
-   pair identically, which is the divergence the matrix exists to remove.
+   (destination) and the compiled transform retype accept/reject the same pair
+   identically, which is the divergence the matrix exists to remove.
 """
 
 from __future__ import annotations
@@ -29,12 +29,7 @@ from cdk.type_map.conversions import (
     render_conversion_matrix,
 )
 from cdk.type_map.exceptions import InvalidTypeMapError
-from src.engine.data_transformer import (
-    AssignmentTransformer,
-    build_output_schema,
-    plan_arrow_transform,
-    run_arrow_transform,
-)
+from src.engine.data_transformer import _FUNCTION_CATALOG, compile_transform
 from src.engine.exceptions import TransformationError
 
 _VALID_MODES = {"identity", "auto", "explicit", "forbidden"}
@@ -91,7 +86,7 @@ class TestMatrixBoundToFunctionCatalog:
     """Every explicit conversion must name a real mapping function."""
 
     def test_explicit_fns_exist_in_catalog(self) -> None:
-        catalog = AssignmentTransformer.FUNCTION_CATALOG
+        catalog = _FUNCTION_CATALOG
         named = {
             conv["fn"]
             for row in build_conversion_matrix().values()
@@ -278,23 +273,20 @@ def _retype_batch(target_arrow_type: str, column: pa.Array) -> pa.RecordBatch:
             "value": {"kind": "expr", "expr": {"op": "get", "path": ["src"]}},
         }
     ]
-    plan = plan_arrow_transform(assignments)
-    schema = build_output_schema(assignments)
     batch = pa.RecordBatch.from_arrays([column], names=["src"])
-    return run_arrow_transform(batch, plan, schema)
+    return compile_transform(assignments).run(batch)
 
 
 class TestTransformBoundaryConformance:
-    """run_arrow_transform executes a retype like the destination cast."""
+    """The compiled transform retype behaves like the destination cast."""
 
     def test_explicit_int_to_string_is_rejected(self) -> None:
         with pytest.raises(TransformationError, match="to_string"):
             _retype_batch("Utf8", pa.array([1, 2], pa.int64()))
 
     def test_forbidden_nested_source_to_scalar_is_rejected(self) -> None:
-        # plan_arrow_transform inspects only the TARGET type, so a get from a
-        # struct source into a scalar target DOES take the fast path and reaches
-        # the matrix's forbidden gate -- it must fail loud, not crash obscurely.
+        # A get from a struct source column into a scalar target reaches the
+        # matrix's forbidden gate -- it must fail loud, not crash obscurely.
         col = pa.array([{"a": 1}], pa.struct([("a", pa.int64())]))
         with pytest.raises(TransformationError, match="not a permitted conversion"):
             _retype_batch("Int64", col)
