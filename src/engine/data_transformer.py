@@ -532,14 +532,16 @@ def _fn_iso_to_date(column: pa.Array) -> pa.Array:
     """Render the date part of an ISO-8601 value as a ``YYYY-MM-DD`` string.
 
     Every ISO-8601 form begins with the calendar date, so the leading 10
-    characters are sliced and validated by a ``date32`` cast. This accepts the
-    full range the per-record path did -- a bare date, a naive datetime, and a
-    tz-suffixed timestamp (``Z`` or an offset) alike -- keeping the original
-    wall-clock date, while still failing loud on a value that is not a date.
+    characters are sliced and validated by parsing them as a naive timestamp.
+    This accepts the full range the per-record path did -- a bare date, a naive
+    datetime, and a tz-suffixed timestamp (``Z`` or an offset) alike -- keeping
+    the original wall-clock date, while still failing loud on a value that is
+    not a date. (A direct string -> date32 cast is unavailable on pyarrow 12, so
+    the date is round-tripped through a timestamp.)
     """
     try:
         date_part = pc.utf8_slice_codeunits(pc.cast(column, pa.string()), 0, 10)
-        return pc.cast(pc.cast(date_part, pa.date32()), pa.string())
+        return pc.strftime(pc.cast(date_part, pa.timestamp("s")), format="%Y-%m-%d")
     except (pa.ArrowInvalid, pa.ArrowTypeError, pa.ArrowNotImplementedError) as e:
         raise TransformationError(f"iso_to_date failed: {e}") from e
 
