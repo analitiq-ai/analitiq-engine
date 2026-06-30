@@ -198,10 +198,16 @@ class TestArrowFamilyRoundTrip:
         # resolve to a silent default, so it cannot slip through a boundary.
         for dtype in (
             pa.map_(pa.string(), pa.int64()),
-            pa.dictionary(pa.int32(), pa.string()),
+            pa.union([pa.field("a", pa.int64())], mode="sparse"),
         ):
             with pytest.raises(InvalidTypeMapError):
                 arrow_family(dtype)
+
+    def test_dictionary_classifies_by_value_type(self) -> None:
+        # Some ADBC drivers dictionary-encode low-cardinality columns; a
+        # dictionary is its value type for conversion purposes (pc.cast decodes).
+        assert arrow_family(pa.dictionary(pa.int32(), pa.string())) == "Utf8"
+        assert arrow_family(pa.dictionary(pa.int8(), pa.int64())) == "Int64"
 
 
 def _dest(arrow_type: str, *, nullable: bool = True) -> SchemaContract:
@@ -256,6 +262,13 @@ class TestDestinationBoundaryConformance:
         col = pa.array([0, 1_000], pa.timestamp("s"))
         out = _cast("Timestamp(MICROSECOND)", col)
         assert pa.types.is_timestamp(out.column(0).type)
+
+    def test_dictionary_encoded_column_decodes(self) -> None:
+        # Regression: an ADBC dictionary-encoded text column targeting Utf8 must
+        # decode (classify by value type), not raise on the pre-cast lookup.
+        out = _cast("Utf8", pa.array(["a", "b", "a"]).dictionary_encode())
+        assert out.column(0).to_pylist() == ["a", "b", "a"]
+        assert out.column(0).type == pa.string()
 
 
 def _retype_batch(target_arrow_type: str, column: pa.Array) -> pa.RecordBatch:

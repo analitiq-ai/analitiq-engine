@@ -273,6 +273,12 @@ def arrow_family(dtype: pa.DataType) -> str:
     a silent default -- conversions classified against an unknown family would
     be meaningless.
     """
+    if pa.types.is_dictionary(dtype):
+        # A dictionary-encoded column (some ADBC drivers return these for
+        # low-cardinality columns) is, for conversion purposes, its value type;
+        # pc.cast transparently decodes it. Classify by the decoded value type
+        # so dict<_, Utf8> is treated exactly like Utf8 rather than rejected.
+        return arrow_family(dtype.value_type)
     for probe, family in _FAMILY_PROBES:
         if probe(dtype):
             return family
