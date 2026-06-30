@@ -12,6 +12,7 @@ import pyarrow.compute as pc
 
 from .json_utils import decode_json_fields
 from .type_map import resolve_arrow_type
+from .type_map.arrow import classify_arrow_conversion
 from .type_map.exceptions import InvalidTypeMapError
 
 logger = logging.getLogger(__name__)
@@ -247,24 +248,50 @@ class SchemaContract:
             if col.type == field.type:
                 array = col
             else:
-                try:
-                    # safe=True so an overflow or lossy narrowing fails loud
-                    # here, matching the per-row range checks the from_pylist
-                    # path enforces — the same author intent cannot saturate
-                    # on one build path while it is rejected on the other.
-                    array = pc.cast(col, field.type, safe=True)
-                except (
-                    pa.ArrowInvalid,
-                    pa.ArrowTypeError,
-                    pa.ArrowNotImplementedError,
-                ) as e:
-                    raise ValueError(
-                        f"column {field.name!r}: cannot cast "
-                        f"{col.type} → {field.type}: {e}"
-                    ) from e
+                array = self._convert_to_field(field, col)
             self._assert_non_nullable(field, array)
             arrays.append(array)
         return pa.RecordBatch.from_arrays(arrays, schema=self._arrow_schema)
+
+    @staticmethod
+    def _convert_to_field(field: pa.Field, col: pa.Array) -> pa.Array:
+        """Cast one incoming column to its destination type via the matrix.
+
+        The conversion matrix (:mod:`cdk.type_map.conversions`) is the single
+        policy both this cast and the engine's transform build consult, so a
+        conversion cannot be accepted on one boundary and rejected on the other.
+        An ``explicit`` conversion reaching this point (e.g. ``Int64 -> Utf8``)
+        means the mapping omitted the function the conversion requires: it fails
+        loud here rather than silently stringifying, matching the transform
+        path's rejection of the same author intent.
+        """
+        conversion = classify_arrow_conversion(col.type, field.type)
+        if conversion.mode == "forbidden":
+            raise ValueError(
+                f"column {field.name!r}: converting {col.type} → {field.type} "
+                f"is not a permitted conversion"
+            )
+        if conversion.mode == "explicit":
+            raise ValueError(
+                f"column {field.name!r}: converting {col.type} → {field.type} "
+                f"requires an explicit '{conversion.fn}' conversion declared in "
+                f"the mapping; the destination does not perform it implicitly"
+            )
+        try:
+            # auto / identity (same family differing only in width or unit):
+            # safe=True so an overflow or lossy narrowing fails loud here,
+            # matching the per-row range checks the from_pylist path enforces —
+            # the same author intent cannot saturate on one build path while it
+            # is rejected on the other.
+            return pc.cast(col, field.type, safe=True)
+        except (
+            pa.ArrowInvalid,
+            pa.ArrowTypeError,
+            pa.ArrowNotImplementedError,
+        ) as e:
+            raise ValueError(
+                f"column {field.name!r}: cannot cast {col.type} → {field.type}: {e}"
+            ) from e
 
     @staticmethod
     def to_dicts(batch: Any) -> list[dict[str, Any]]:

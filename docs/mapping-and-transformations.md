@@ -220,23 +220,41 @@ Implemented rule types (`_validate_value`):
 A stream-level `defaults.on_error` is used when an assignment does not
 specify `validate.on_error`.
 
-## Type Coercion
+## Type Conversion
 
-`target.type` drives a JSON-compatible coercion step before the value is
-written into the result (`_coerce_type`):
+A field's `target.arrow_type` is the type the engine builds the post-transform
+column to. Whether a given `source arrow_type → target arrow_type` conversion is
+permitted is decided by a single declarative policy — the **conversion matrix**
+(`cdk/cdk/type_map/conversions.py`) — consulted identically at every build
+boundary (the transform retype and the destination
+`SchemaContract.cast_arrow_batch`), so a conversion can never be accepted on one
+boundary and rejected on another. Each pair resolves to one mode:
 
-- `string` → `str(value)`
-- `integer` → `int(float(value))` (returns the original value if
-  parsing fails)
-- `decimal`, `number` → `float(value)`
-- `boolean` → bool, with `"true"`/`"false"` string parsing
+- `identity` — same type, passthrough.
+- `auto` — lossless, applied implicitly: a width widening (`Int32 → Int64`), and
+  parsing the JSON strings an API source ships (`"1" → Int64`,
+  `"2025-01-01" → Date32`), which both build paths already perform.
+- `explicit` — permitted only with a declared conversion function. Formatting a
+  scalar as a string (`Int64 → Utf8`, `Boolean → Utf8`, `Float64 → Utf8`,
+  `Timestamp → Utf8`) is a notation choice, not a free widening, so the mapping
+  must wire `to_string`. A boundary that still sees the raw scalar fails loud,
+  naming the function — the destination no longer silently stringifies an int.
+- `forbidden` — never permitted (`Object → Int64`).
 
-`datetime`, `date`, and `time` values are intentionally **not** coerced
-in the engine — they pass through as JSON-friendly strings and are
-materialized by the destination handler's Arrow-based schema contract
-(`SchemaContract`, `cdk/cdk/schema_contract.py`), which preserves
-precision. This is deliberate: coercing to native
-Python `datetime` here would lose information during gRPC serialization.
+`runtime_checked` marks a permitted conversion a per-row guard may still reject
+(a narrowing that overflows, a string that will not parse); the build runs with
+`safe=True` so a bad row fails loud rather than truncating.
+
+The same policy is published as a generated artifact
+(`cdk/cdk/type_map/conversion_matrix.json`, built from the canonical table by
+`build_conversion_matrix()`) so the mapping authoring UI offers exactly the
+conversions the engine accepts and auto-wires the function an `explicit`
+conversion needs.
+
+`datetime`, `date`, and `time` columns are built and carried as typed Arrow
+values, materialized by the destination's Arrow schema contract
+(`SchemaContract`, `cdk/cdk/schema_contract.py`), which preserves precision
+across the gRPC boundary.
 
 ## Versioning Strategy
 

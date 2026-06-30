@@ -14,6 +14,7 @@ from typing import Any, Final
 
 import pyarrow as pa
 
+from .conversions import Conversion, classify_conversion
 from .exceptions import InvalidTypeMapError
 
 _PARAM_SPLIT: Final[Pattern[str]] = re.compile(r"\s*,\s*")
@@ -222,3 +223,70 @@ def _parse_fixed_binary(args: tuple[str, ...], head: str) -> pa.DataType:
             f"{head}({args[0]}) byte_width is not an integer"
         ) from err
     return pa.binary(width)
+
+
+# Ordered (predicate, family) probes mapping a live DataType back to its
+# conversion-matrix family. Probes are mutually exclusive and first-match-wins.
+# Width/parameter detail is intentionally dropped: a DataType collapses to the
+# family head conversions.classify_conversion keys its policy on (int32 ->
+# "Int32", timestamp[us, tz=UTC] -> "Timestamp"). Kept in step with the family
+# heads parse_arrow_type produces; list and large_list both fold to "List", the
+# single nested-list family the contract emits.
+_FAMILY_PROBES: Final[tuple[tuple[Callable[[pa.DataType], bool], str], ...]] = (
+    (pa.types.is_null, "Null"),
+    (pa.types.is_boolean, "Boolean"),
+    (pa.types.is_int8, "Int8"),
+    (pa.types.is_int16, "Int16"),
+    (pa.types.is_int32, "Int32"),
+    (pa.types.is_int64, "Int64"),
+    (pa.types.is_uint8, "UInt8"),
+    (pa.types.is_uint16, "UInt16"),
+    (pa.types.is_uint32, "UInt32"),
+    (pa.types.is_uint64, "UInt64"),
+    (pa.types.is_float16, "Float16"),
+    (pa.types.is_float32, "Float32"),
+    (pa.types.is_float64, "Float64"),
+    (pa.types.is_string, "Utf8"),
+    (pa.types.is_large_string, "LargeUtf8"),
+    (pa.types.is_fixed_size_binary, "FixedSizeBinary"),
+    (pa.types.is_large_binary, "LargeBinary"),
+    (pa.types.is_binary, "Binary"),
+    (pa.types.is_date32, "Date32"),
+    (pa.types.is_date64, "Date64"),
+    (pa.types.is_time32, "Time32"),
+    (pa.types.is_time64, "Time64"),
+    (pa.types.is_timestamp, "Timestamp"),
+    (pa.types.is_duration, "Duration"),
+    (pa.types.is_decimal128, "Decimal128"),
+    (pa.types.is_decimal256, "Decimal256"),
+    (pa.types.is_struct, "Object"),
+    (pa.types.is_list, "List"),
+    (pa.types.is_large_list, "List"),
+)
+
+
+def arrow_family(dtype: pa.DataType) -> str:
+    """Return the conversion-matrix family name for a PyArrow ``DataType``.
+
+    The inverse of the family head :func:`parse_arrow_type` consumes. An
+    unrecognised type raises :class:`InvalidTypeMapError` rather than resolve to
+    a silent default -- conversions classified against an unknown family would
+    be meaningless.
+    """
+    for probe, family in _FAMILY_PROBES:
+        if probe(dtype):
+            return family
+    raise InvalidTypeMapError(
+        f"arrow type {dtype!r} has no conversion-matrix family; it is outside "
+        f"the published arrow_type vocabulary"
+    )
+
+
+def classify_arrow_conversion(source: pa.DataType, target: pa.DataType) -> Conversion:
+    """Classify a live ``source -> target`` DataType conversion via the matrix.
+
+    Bridges the runtime build boundaries (``SchemaContract.cast_arrow_batch``,
+    the Arrow-native transform retype) to the pure-string policy in
+    :mod:`cdk.type_map.conversions` so both consult one source of truth.
+    """
+    return classify_conversion(arrow_family(source), arrow_family(target))

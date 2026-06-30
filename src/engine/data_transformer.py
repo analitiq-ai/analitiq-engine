@@ -12,7 +12,7 @@ from typing import Any
 
 import pyarrow as pa
 
-from cdk.type_map.arrow import resolve_arrow_type
+from cdk.type_map.arrow import classify_arrow_conversion, resolve_arrow_type
 from cdk.type_map.exceptions import InvalidTypeMapError
 
 from ..shared.dict_path import walk_path
@@ -870,17 +870,21 @@ def run_arrow_transform(
       same Python-value-to-Arrow conversion ``from_pylist`` performs;
     - a ``get`` whose source column already has the target type is passed
       through unchanged -- a pure rename, with no Python materialisation;
-    - a ``get`` that needs a retype is rebuilt with
-      ``pa.array(column.to_pylist(), target_type)``, which reproduces
-      ``from_pylist``'s per-column conversion exactly. Neither a raw Arrow
-      ``cast`` nor ``assume_timezone`` is used, because each diverges from
-      ``from_pylist`` for cases the contract allows: ``cast`` stringifies an
-      int->string that ``from_pylist`` rejects, and ``assume_timezone`` reads a
-      naive timestamp as wall-clock-in-zone where ``from_pylist`` reads it as a
-      UTC instant. Routing through Python values keeps the fast path from
-      silently disagreeing with the slow one. Only a retype reads a source
-      column's data back into Python; a const builds a short Python list of the
-      literal but touches no source data, and a rename stays wholly in Arrow.
+    - a ``get`` that needs a retype is first checked against the conversion
+      matrix (the same policy the destination cast consults): a ``forbidden`` or
+      ``explicit`` conversion fails loud with the required function named, so an
+      ``Int64 -> Utf8`` whose mapping omitted ``to_string`` is rejected here
+      identically to the destination, not silently stringified. A permitted
+      ``auto`` retype is then rebuilt with ``pa.array(column.to_pylist(),
+      target_type)``, which reproduces ``from_pylist``'s per-column conversion
+      exactly. Neither a raw Arrow ``cast`` nor ``assume_timezone`` is used,
+      because each diverges from ``from_pylist`` for cases the contract allows:
+      ``assume_timezone`` reads a naive timestamp as wall-clock-in-zone where
+      ``from_pylist`` reads it as a UTC instant. Routing through Python values
+      keeps the fast path from silently disagreeing with the slow one. Only a
+      retype reads a source column's data back into Python; a const builds a
+      short Python list of the literal but touches no source data, and a rename
+      stays wholly in Arrow.
     - a missing source column becomes all-nulls, mirroring the Python path
       where an absent field resolves to ``None`` for every row.
 
@@ -906,9 +910,7 @@ def run_arrow_transform(
         elif step["source"] in source_names:
             column = batch.column(source_names.index(step["source"]))
             array = (
-                column
-                if column.type == field.type
-                else _build_array(column.to_pylist(), field)
+                column if column.type == field.type else _retype_column(column, field)
             )
         else:
             # Source column absent -> all-null, mirroring the Python path where
@@ -923,6 +925,32 @@ def run_arrow_transform(
         arrays.append(array)
 
     return pa.RecordBatch.from_arrays(arrays, schema=output_schema)
+
+
+def _retype_column(column: pa.Array, field: pa.Field) -> pa.Array:
+    """Retype a source column to its target type, gated by the conversion matrix.
+
+    A ``get`` whose source and target Arrow types differ is a column conversion.
+    The conversion matrix (:mod:`cdk.type_map.conversions`) -- the same policy
+    the destination cast consults -- decides whether it is permitted, so the two
+    boundaries cannot disagree. A ``forbidden`` or ``explicit`` conversion fails
+    loud with the required function named (rather than as a cryptic
+    ``ArrowTypeError`` from ``pa.array``); a permitted conversion is built
+    through Python values to match the slow path exactly.
+    """
+    conversion = classify_arrow_conversion(column.type, field.type)
+    if conversion.mode == "forbidden":
+        raise TransformationError(
+            f"column {field.name!r}: converting {column.type} → {field.type} "
+            f"is not a permitted conversion"
+        )
+    if conversion.mode == "explicit":
+        raise TransformationError(
+            f"column {field.name!r}: converting {column.type} → {field.type} "
+            f"requires an explicit '{conversion.fn}' conversion declared in the "
+            f"mapping"
+        )
+    return _build_array(column.to_pylist(), field)
 
 
 def _build_array(values: list[Any], field: pa.Field) -> pa.Array:
