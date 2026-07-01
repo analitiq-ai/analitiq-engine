@@ -9,7 +9,7 @@ function catalog, the conversion matrix gating, fail-loud batch-wide semantics,
 and the static (compile-time) arity checks.
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 
 import pyarrow as pa
@@ -649,3 +649,46 @@ class TestPerRecordParity:
             [_assignment("ts", "Timestamp(MICROSECOND, UTC)", _expr(node))],
         )
         assert all(row["ts"] is not None for row in out)
+
+    def test_temporal_condition_is_truthy_when_present(self):
+        # Any datetime is truthy in Python; only a missing (null) value is false.
+        node = {"op": "if", "args": [_get("d"), _const_node("Y"), _const_node("N")]}
+        out = _run(
+            [{"d": datetime(2025, 1, 1, tzinfo=timezone.utc)}, {"d": None}],
+            [_assignment("r", "Utf8", _expr(node))],
+        )
+        assert out == [{"r": "Y"}, {"r": "N"}]
+
+    def test_iso_to_date_rejects_fraction_without_seconds(self):
+        with pytest.raises(TransformationError, match="iso_to_date"):
+            self._v1("iso_to_date")(pa.array(["2025-08-16T10:30.5Z"]))
+
+    def test_iso_to_datetime_accepts_naive_and_bare_date(self):
+        out = self._v1("iso_to_datetime")(
+            pa.array(["2026-05-12T10:30:00Z", "2026-05-12T10:30:00", "2026-05-12"])
+        ).to_pylist()
+        assert all(ts is not None and ts.tzinfo is not None for ts in out)
+
+    def test_fn_wrong_arity_raises_transformation_error(self):
+        node = {
+            "op": "pipe",
+            "args": [_get("s"), {"op": "fn", "name": "trim", "args": ["extra"]}],
+        }
+        with pytest.raises(TransformationError, match="wrong arguments"):
+            _run([{"s": " x "}], [_assignment("s", "Utf8", _expr(node))])
+
+    def test_pattern_validation_matches_python_bool_spelling(self):
+        # A `True|False` pattern on a Boolean column must pass: booleans render as
+        # "True"/"False" for validation, matching to_string/concat.
+        out = _run(
+            [{"b": True}, {"b": False}],
+            [
+                _assignment(
+                    "b",
+                    "Boolean",
+                    _expr(_get("b")),
+                    validate={"rules": [{"type": "pattern", "value": "True|False"}]},
+                )
+            ],
+        )
+        assert out == [{"b": True}, {"b": False}]

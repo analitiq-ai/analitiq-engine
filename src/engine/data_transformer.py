@@ -349,7 +349,18 @@ def _compile_fn(node: dict[str, Any]) -> Callable[[pa.Array], pa.Array]:
             f"function {name!r} has no handler for version {version}; "
             f"registered versions: {sorted(versions)}"
         )
-    return lambda column: kernel(column, *args)
+
+    def apply(column: pa.Array) -> pa.Array:
+        # A wrong argument count is a mapping authoring error; surface it as the
+        # TransformationError contract rather than a raw Python TypeError.
+        try:
+            return kernel(column, *args)
+        except TypeError as e:
+            raise TransformationError(
+                f"function {name!r} called with wrong arguments: {e}"
+            ) from e
+
+    return apply
 
 
 # ---------------------------------------------------------------------------
@@ -466,6 +477,11 @@ def _truthy(array: pa.Array) -> pa.Array:
         return pc.fill_null(array, False)
     if pa.types.is_string(array.type) or pa.types.is_large_string(array.type):
         return pc.fill_null(pc.greater(pc.utf8_length(array), 0), False)
+    if pa.types.is_temporal(array.type):
+        # A date/time/timestamp value is always truthy in Python; only a null
+        # (missing) is false. Arrow's cast-to-bool would reject it or read the
+        # physical zero (epoch/midnight) as false.
+        return pc.is_valid(array)
     if pa.types.is_null(array.type):
         return pa.array([False] * len(array))
     try:
@@ -588,23 +604,41 @@ def _fn_coalesce(column: pa.Array, *alternatives: Any) -> pa.Array:
     return _coalesce(arrays)
 
 
+# A trailing 'Z' or numeric offset, used to strip the zone marker before a naive
+# parse. pyarrow 12 has no single string cast that accepts naive, 'Z', and
+# offset forms together, so the zone is dropped and the value stamped UTC.
+_ISO_ZONE_SUFFIX_RE: Final[str] = r"(Z|[+-]([01]\d|2[0-3]):?[0-5]\d)$"
+
+
 def _fn_iso_to_datetime(column: pa.Array) -> pa.Array:
-    """Parse ISO-8601 strings into timezone-aware microsecond timestamps."""
+    """Parse ISO-8601 strings into timezone-aware (UTC) microsecond timestamps.
+
+    Accepts every form the per-record ``datetime.fromisoformat`` did -- a bare
+    date, a naive datetime, and a ``Z``/offset timestamp. The zone marker is
+    stripped and the remaining value parsed as a naive timestamp stamped UTC
+    (wall-clock, consistent with ``iso_to_date``); on pyarrow 12 no single cast
+    accepts all three forms, and a tz-aware cast rejects naive input outright.
+    """
     try:
-        return pc.cast(pc.cast(column, pa.string()), pa.timestamp("us", tz="UTC"))
+        strings = pc.cast(column, pa.string())
+        naive = pc.replace_substring_regex(
+            strings, pattern=_ISO_ZONE_SUFFIX_RE, replacement=""
+        )
+        return pc.assume_timezone(pc.cast(naive, pa.timestamp("us")), "UTC")
     except (pa.ArrowInvalid, pa.ArrowTypeError, pa.ArrowNotImplementedError) as e:
         raise TransformationError(f"iso_to_datetime failed: {e}") from e
 
 
 # Anchored ISO-8601 date / datetime shape: a calendar date with an optional
 # time and an optional 'Z' or numeric offset. The hour/minute/second and offset
-# ranges are constrained (00-23 / 00-59) so a value with trailing junk
-# ("2025-08-16garbage") or an out-of-range time ("2025-08-16T99:99:99") is
-# rejected before its date prefix is taken; the date's month/day are validated by
-# the timestamp cast that follows.
+# ranges are constrained (00-23 / 00-59) and a fractional part is tied to the
+# seconds group, so a value with trailing junk ("2025-08-16garbage"), an
+# out-of-range time ("2025-08-16T99:99:99"), or a fraction without seconds
+# ("2025-08-16T10:30.5Z") is rejected before its date prefix is taken; the date's
+# month/day are validated by the timestamp cast that follows.
 _ISO_8601_RE: Final[str] = (
     r"^\d{4}-\d{2}-\d{2}"
-    r"([T ]([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?(\.\d+)?"
+    r"([T ]([01]\d|2[0-3]):[0-5]\d(:[0-5]\d(\.\d+)?)?"
     r"(Z|[+-]([01]\d|2[0-3]):?[0-5]\d)?)?$"
 )
 
@@ -712,15 +746,15 @@ def _rule_failure_mask(
             case "not_null" | "required":
                 return pc.is_null(value)
             case "min_length":
-                length = pc.utf8_length(pc.cast(value, pa.string()))
+                length = pc.utf8_length(_string_form(value))
                 return failing(pc.less(length, rule.get("value", 0)))
             case "max_length":
-                length = pc.utf8_length(pc.cast(value, pa.string()))
+                length = pc.utf8_length(_string_form(value))
                 return failing(pc.greater(length, rule.get("value", 0)))
             case "pattern":
                 pattern = rule.get("value", "")
                 matched = pc.match_substring_regex(
-                    pc.cast(value, pa.string()), pattern=f"^(?:{pattern})"
+                    _string_form(value), pattern=f"^(?:{pattern})"
                 )
                 return failing(pc.invert(matched))
             case "range":
