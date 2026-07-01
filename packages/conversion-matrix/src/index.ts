@@ -19,7 +19,13 @@ export { conversionMatrix, arrowFamilies };
 /**
  * The policy for converting `source` to `target`, or `undefined` if either
  * family is not in the published grid.
+ *
+ * Only own properties count: family names may come from untrusted input, so
+ * prototype keys ("__proto__", "constructor", "toString") resolve to
+ * `undefined`, never an inherited value.
  */
 export function getConversion(source: string, target: string): ConversionCell | undefined {
-  return conversionMatrix[source]?.[target];
+  const row = Object.hasOwn(conversionMatrix, source) ? conversionMatrix[source] : undefined;
+  if (!row || !Object.hasOwn(row, target)) return undefined;
+  return row[target];
 }

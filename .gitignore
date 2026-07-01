@@ -409,6 +409,7 @@ tests/e2e/reports/
 # conversion-matrix npm package: committed past the blanket *.json and scripts/
 # ignores (its build scripts and config are source, not generated artifacts).
 !packages/conversion-matrix/package.json
+!packages/conversion-matrix/package-lock.json
 !packages/conversion-matrix/tsconfig.json
 !packages/conversion-matrix/scripts/
 !packages/conversion-matrix/scripts/*.mjs
