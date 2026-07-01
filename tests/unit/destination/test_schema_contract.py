@@ -183,6 +183,61 @@ class TestSchemaContractCastArrowBatch:
         with pytest.raises(ValueError, match="not a permitted conversion"):
             contract.cast_arrow_batch(source)
 
+    def test_cast_arrow_batch_explicit_nested_leaf_is_rejected(self):
+        # The destination gates a scalar leaf inside a nested target with the
+        # same matrix the transform's _cast_structural does: an Int64 -> Utf8
+        # struct leaf fails loud naming the leaf, instead of silently
+        # stringifying it -- one policy, both boundaries.
+        schema = {
+            "columns": [
+                {
+                    "name": "c",
+                    "arrow_type": "Object",
+                    "nullable": True,
+                    "properties": {"a": {"arrow_type": "Utf8"}},
+                }
+            ]
+        }
+        contract = SchemaContract(schema)
+        col = pa.array([{"a": 1}], pa.struct([("a", pa.int64())]))
+        source = pa.RecordBatch.from_arrays([col], names=["c"])
+        with pytest.raises(ValueError, match="to_string"):
+            contract.cast_arrow_batch(source)
+
+    def test_cast_arrow_batch_forbidden_nested_leaf_is_rejected(self):
+        schema = {
+            "columns": [
+                {
+                    "name": "c",
+                    "arrow_type": "Object",
+                    "nullable": True,
+                    "properties": {"a": {"arrow_type": "Binary"}},
+                }
+            ]
+        }
+        contract = SchemaContract(schema)
+        col = pa.array([{"a": 1}], pa.struct([("a", pa.int64())]))
+        source = pa.RecordBatch.from_arrays([col], names=["c"])
+        with pytest.raises(ValueError, match="not a permitted conversion"):
+            contract.cast_arrow_batch(source)
+
+    def test_cast_arrow_batch_auto_widening_nested_leaf_builds(self):
+        schema = {
+            "columns": [
+                {
+                    "name": "c",
+                    "arrow_type": "Object",
+                    "nullable": True,
+                    "properties": {"a": {"arrow_type": "Int64"}},
+                }
+            ]
+        }
+        contract = SchemaContract(schema)
+        col = pa.array([{"a": 1}], pa.struct([("a", pa.int32())]))
+        source = pa.RecordBatch.from_arrays([col], names=["c"])
+        out = contract.cast_arrow_batch(source)
+        assert out.column(0).to_pylist() == [{"a": 1}]
+
 
 class TestSchemaContractFromPylist:
     """Source-side: building an Arrow batch from dicts using the contract."""

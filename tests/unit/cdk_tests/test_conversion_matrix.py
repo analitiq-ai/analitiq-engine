@@ -358,6 +358,12 @@ class TestBoundariesAgree:
             (pa.int64(), [2**40], "Int32"),  # overflow -> both reject
             (pa.int64(), [1, 2], "Utf8"),  # explicit -> both reject
             (pa.struct([("a", pa.int64())]), [{"a": 1}], "Int64"),  # forbidden
+            # Allowlisted cross-kind casts, exercised at runtime (not just the
+            # policy) so CI on pyarrow 12 proves the kernel the grid promises
+            # actually runs -- the "stable on 12 and 24" claim, enforced.
+            (pa.string(), ["1", "2"], "Decimal128(20, 4)"),  # string parse
+            (pa.float64(), [1.5], "Decimal128(20, 4)"),  # numeric interconvert
+            (pa.date32(), [0, 1], "Timestamp(MICROSECOND)"),  # date <-> timestamp
         ],
     )
     def test_transform_and_destination_match(
@@ -465,6 +471,13 @@ def _retype_nested(target: dict, column: pa.Array) -> pa.RecordBatch:
     return compile_transform(assignments).run(batch)
 
 
+def _cast_nested(target: dict, column: pa.Array) -> pa.RecordBatch:
+    """Run the destination cast into a nested (``Object``/``List``) target."""
+    contract = SchemaContract({"columns": [{"name": "c", "nullable": True, **target}]})
+    batch = pa.RecordBatch.from_arrays([column], names=["c"])
+    return contract.cast_arrow_batch(batch)
+
+
 _STRUCT_INT = pa.struct([("a", pa.int64())])
 _OBJECT_STR = {"arrow_type": "Object", "properties": {"a": {"arrow_type": "Utf8"}}}
 
@@ -528,3 +541,24 @@ class TestNestedLeafGating:
         )
         assert scalar == ("reject",)
         assert nested == ("reject",)
+
+    def test_destination_rejects_explicit_nested_leaf(self) -> None:
+        # The destination cast gates nested leaves through the same matrix, so it
+        # no longer silently stringifies a struct leaf the transform rejects.
+        col = pa.array([{"a": 1}], _STRUCT_INT)
+        with pytest.raises(ValueError, match="to_string"):
+            _cast_nested(_OBJECT_STR, col)
+
+    def test_transform_and_destination_agree_on_nested_leaf(self) -> None:
+        # Boundary parity extended to nested: the retype and the destination cast
+        # of struct<a: Int64> -> struct<a: Utf8> fail loud identically. Before the
+        # destination-side gate this diverged (transform reject, destination
+        # silently stringified) -- exactly what the matrix exists to prevent.
+        col = pa.array([{"a": 1}], _STRUCT_INT)
+        transform = _boundary_outcome(
+            lambda: _retype_nested(_OBJECT_STR, col).column(0).to_pylist()
+        )
+        destination = _boundary_outcome(
+            lambda: _cast_nested(_OBJECT_STR, col).column(0).to_pylist()
+        )
+        assert transform == destination == ("reject",)
