@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from re import Pattern
 from typing import Any, Final
 
@@ -296,3 +297,62 @@ def classify_arrow_conversion(source: pa.DataType, target: pa.DataType) -> Conve
     :mod:`cdk.type_map.conversions` so both consult one source of truth.
     """
     return classify_conversion(arrow_family(source), arrow_family(target))
+
+
+@dataclass(frozen=True, slots=True)
+class BlockedLeaf:
+    """A scalar leaf inside a nested conversion the matrix does not permit.
+
+    ``path`` locates the leaf within the nested target (``"addr.zip"``,
+    ``"tags[]"``); ``conversion`` is the offending :class:`Conversion` (its mode
+    is ``explicit`` or ``forbidden``, and ``fn`` names the function an
+    ``explicit`` leaf would require).
+    """
+
+    path: str
+    source: pa.DataType
+    target: pa.DataType
+    conversion: Conversion
+
+
+def _is_list_type(dtype: pa.DataType) -> bool:
+    return bool(pa.types.is_list(dtype) or pa.types.is_large_list(dtype))
+
+
+def first_blocked_nested_leaf(
+    source: pa.DataType, target: pa.DataType, path: str = ""
+) -> BlockedLeaf | None:
+    """Classify every scalar leaf of a nested conversion through the matrix.
+
+    A nested target is materialised structurally, but each scalar leaf inside it
+    is a real ``source -> target`` conversion that must clear the same policy a
+    top-level scalar retype does: an ``Int64 -> Utf8`` leaf is ``explicit``, and
+    an ``Object -> Int64`` leaf is ``forbidden``, whether the leaf sits at the top
+    level or three fields deep. This walks matching struct fields and list
+    elements in lockstep and returns the first leaf whose mode is ``explicit`` or
+    ``forbidden``, or ``None`` when every leaf is ``identity`` or ``auto`` (which
+    the caller's ``pc.cast`` then materialises). A structural mismatch -- a struct
+    facing a list, a scalar facing a struct -- classifies ``forbidden`` at that
+    node and surfaces here too. A field only the target declares has no source
+    leaf to gate and is left to the caller's cast.
+    """
+    if pa.types.is_struct(source) and pa.types.is_struct(target):
+        source_fields = {field.name: field.type for field in source}
+        for field in target:
+            child = source_fields.get(field.name)
+            if child is None:
+                continue
+            leaf_path = f"{path}.{field.name}" if path else field.name
+            blocked = first_blocked_nested_leaf(child, field.type, leaf_path)
+            if blocked is not None:
+                return blocked
+        return None
+    if _is_list_type(source) and _is_list_type(target):
+        elem_path = f"{path}[]" if path else "[]"
+        return first_blocked_nested_leaf(
+            source.value_type, target.value_type, elem_path
+        )
+    conversion = classify_arrow_conversion(source, target)
+    if conversion.mode in ("explicit", "forbidden"):
+        return BlockedLeaf(path, source, target, conversion)
+    return None

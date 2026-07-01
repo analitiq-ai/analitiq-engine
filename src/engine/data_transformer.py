@@ -34,7 +34,11 @@ from typing import Any, Final
 import pyarrow as pa
 import pyarrow.compute as pc
 
-from cdk.type_map.arrow import classify_arrow_conversion, resolve_arrow_type
+from cdk.type_map.arrow import (
+    classify_arrow_conversion,
+    first_blocked_nested_leaf,
+    resolve_arrow_type,
+)
 from cdk.type_map.exceptions import InvalidTypeMapError
 
 from .exceptions import TransformationError
@@ -823,12 +827,33 @@ def _retype_column(column: pa.Array, field: pa.Field) -> pa.Array:
 
 
 def _cast_structural(column: pa.Array, field: pa.Field) -> pa.Array:
-    """Assemble a nested (``struct``/``list``) target column.
+    """Assemble a nested (``struct``/``list``) target column, gating each leaf.
 
-    Nested shapes are outside the scalar conversion matrix; the cast is the
-    structural materialisation of the declared shape. Wraps pyarrow's errors so a
-    shape mismatch fails the batch with the column named.
+    The shape is materialised structurally, but every scalar leaf inside it is a
+    real ``source -> target`` conversion and clears the same matrix a top-level
+    scalar retype does: an ``Int64 -> Utf8`` leaf is ``explicit`` and an
+    ``Object -> Int64`` leaf is ``forbidden`` whether it sits at the top level or
+    three fields deep. Without this gate ``pc.cast`` would silently stringify a
+    numeric struct leaf -- the same author intent a scalar retype rejects. A
+    blocked leaf fails the batch naming the leaf's path; the mapping grammar has
+    no per-leaf function slot, so an ``explicit`` leaf is resolved by
+    restructuring the mapping to supply that leaf already typed. Wraps pyarrow's
+    errors so a shape mismatch fails the batch with the column named.
     """
+    blocked = first_blocked_nested_leaf(column.type, field.type, field.name)
+    if blocked is not None:
+        conversion = blocked.conversion
+        detail = (
+            f"requires an explicit '{conversion.fn}' conversion, which the mapping "
+            f"grammar cannot express per leaf -- restructure the mapping to supply "
+            f"this leaf already typed"
+            if conversion.mode == "explicit"
+            else "is not a permitted conversion"
+        )
+        raise TransformationError(
+            f"column {field.name!r}: nested leaf {blocked.path!r} converting "
+            f"{blocked.source} -> {blocked.target} {detail}"
+        )
     try:
         return pc.cast(column, field.type, safe=True)
     except (pa.ArrowInvalid, pa.ArrowTypeError, pa.ArrowNotImplementedError) as e:

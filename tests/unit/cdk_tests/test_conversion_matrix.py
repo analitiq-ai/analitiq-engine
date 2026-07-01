@@ -358,6 +358,12 @@ class TestBoundariesAgree:
             (pa.int64(), [2**40], "Int32"),  # overflow -> both reject
             (pa.int64(), [1, 2], "Utf8"),  # explicit -> both reject
             (pa.struct([("a", pa.int64())]), [{"a": 1}], "Int64"),  # forbidden
+            # Allowlisted cross-kind casts, exercised at runtime (not just the
+            # policy) so CI on pyarrow 12 proves the kernel the grid promises
+            # actually runs -- the "stable on 12 and 24" claim, enforced.
+            (pa.string(), ["1", "2"], "Decimal128(20, 4)"),  # string parse
+            (pa.float64(), [1.5], "Decimal128(20, 4)"),  # numeric interconvert
+            (pa.date32(), [0, 1], "Timestamp(MICROSECOND)"),  # date <-> timestamp
         ],
     )
     def test_transform_and_destination_match(
@@ -374,3 +380,185 @@ class TestBoundariesAgree:
             f"{source_type} -> {target}: destination={destination} "
             f"transform={transform}"
         )
+
+
+class TestCrossKindAllowlist:
+    """Item 1 (#297): the cross-kind catch-all is an explicit stable-cast
+    allowlist. The published grid promises only casts the runtime performs
+    identically on every supported pyarrow version; every impossible or
+    version-dependent pair publishes as ``forbidden`` instead of a fake ``auto``.
+    """
+
+    # Cross-kind pairs pyarrow cannot cast (Binary -> Int64), or that only some
+    # pyarrow versions can (Utf8 -> Date32, unimplemented on 12), or that the
+    # allowlist deliberately excludes (Float64 -> Boolean; only bool <-> int is
+    # offered). The old catch-all mislabelled every one of these ``auto``.
+    @pytest.mark.parametrize(
+        ("source", "target"),
+        [
+            ("Binary", "Int64"),
+            ("Binary", "Utf8"),
+            ("Duration", "Date32"),
+            ("Time64", "Boolean"),
+            ("Utf8", "Date32"),
+            ("Utf8", "Boolean"),
+            ("Utf8", "Timestamp"),
+            ("Int64", "Date32"),
+            ("Int64", "Timestamp"),
+            ("Float64", "Boolean"),
+            ("Decimal128", "Boolean"),
+            ("Timestamp", "Int64"),
+            ("Date32", "Int64"),
+        ],
+    )
+    def test_impossible_cross_kind_pair_is_forbidden(
+        self, source: str, target: str
+    ) -> None:
+        conv = classify_conversion(source, target)
+        assert conv.mode == "forbidden", (source, target)
+        assert conv.fn is None
+        assert conv.runtime_checked is False
+
+    # The four allowlist categories: numeric <-> numeric, bool <-> int,
+    # string -> numeric parse, date <-> timestamp. Each stays auto + runtime
+    # checked -- attempted, the safe-cast rejecting a row/width it cannot convert.
+    @pytest.mark.parametrize(
+        ("source", "target"),
+        [
+            ("Int64", "Float64"),
+            ("Float64", "Int64"),
+            ("Int64", "Decimal128"),
+            ("Decimal128", "Int64"),
+            ("Float64", "Decimal128"),
+            ("Decimal128", "Float64"),
+            ("Boolean", "Int64"),
+            ("Int64", "Boolean"),
+            ("Utf8", "Int64"),
+            ("Utf8", "Float64"),
+            ("Utf8", "Decimal128"),
+            ("Date32", "Timestamp"),
+            ("Timestamp", "Date32"),
+        ],
+    )
+    def test_allowlisted_cross_kind_pair_is_auto(
+        self, source: str, target: str
+    ) -> None:
+        conv = classify_conversion(source, target)
+        assert conv.mode == "auto", (source, target)
+        assert conv.fn is None
+        assert conv.runtime_checked is True
+
+    def test_no_cross_kind_pair_is_auto_without_being_runtime_checked(self) -> None:
+        # A cross-kind auto is always a runtime-checked cast (it can reject a
+        # row); a non-checked auto would be a same-kind widen, never cross-kind.
+        for source in ARROW_FAMILIES:
+            for target in ARROW_FAMILIES:
+                conv = classify_conversion(source, target)
+                if conv.mode == "auto" and not conv.runtime_checked:
+                    # The only non-checked auto is a Null source filling a column.
+                    assert source == "Null", (source, target)
+
+
+def _retype_nested(target: dict, column: pa.Array) -> pa.RecordBatch:
+    """Run the transform retype into a nested (``Object``/``List``) target."""
+    assignments = [
+        {
+            "target": {"path": ["c"], **target},
+            "value": {"kind": "expr", "expr": {"op": "get", "path": ["src"]}},
+        }
+    ]
+    batch = pa.RecordBatch.from_arrays([column], names=["src"])
+    return compile_transform(assignments).run(batch)
+
+
+def _cast_nested(target: dict, column: pa.Array) -> pa.RecordBatch:
+    """Run the destination cast into a nested (``Object``/``List``) target."""
+    contract = SchemaContract({"columns": [{"name": "c", "nullable": True, **target}]})
+    batch = pa.RecordBatch.from_arrays([column], names=["c"])
+    return contract.cast_arrow_batch(batch)
+
+
+_STRUCT_INT = pa.struct([("a", pa.int64())])
+_OBJECT_STR = {"arrow_type": "Object", "properties": {"a": {"arrow_type": "Utf8"}}}
+
+
+class TestNestedLeafGating:
+    """Item 2 (#297): a scalar leaf inside a nested target clears the same matrix
+    a top-level scalar retype does -- ``_cast_structural`` no longer lets
+    ``pc.cast`` silently convert a struct/list child the matrix would gate.
+    """
+
+    def test_explicit_int_to_string_struct_leaf_fails_loud(self) -> None:
+        col = pa.array([{"a": 1}], _STRUCT_INT)
+        with pytest.raises(TransformationError, match="to_string"):
+            _retype_nested(_OBJECT_STR, col)
+
+    def test_explicit_int_to_string_list_leaf_fails_loud(self) -> None:
+        col = pa.array([[1, 2]], pa.list_(pa.int64()))
+        with pytest.raises(TransformationError, match="to_string"):
+            _retype_nested({"arrow_type": "List", "items": {"arrow_type": "Utf8"}}, col)
+
+    def test_forbidden_struct_leaf_fails_loud(self) -> None:
+        col = pa.array([{"a": 1}], _STRUCT_INT)
+        target = {"arrow_type": "Object", "properties": {"a": {"arrow_type": "Binary"}}}
+        with pytest.raises(TransformationError, match="not a permitted conversion"):
+            _retype_nested(target, col)
+
+    def test_auto_widening_struct_leaf_builds(self) -> None:
+        col = pa.array([{"a": 1}], pa.struct([("a", pa.int32())]))
+        target = {"arrow_type": "Object", "properties": {"a": {"arrow_type": "Int64"}}}
+        out = _retype_nested(target, col)
+        assert out.column(0).to_pylist() == [{"a": 1}]
+
+    def test_deeply_nested_explicit_leaf_names_its_path(self) -> None:
+        # The gate walks to the leaf; the error names where the offending leaf is.
+        inner = pa.struct([("zip", pa.int64())])
+        col = pa.array([{"addr": {"zip": 90210}}], pa.struct([("addr", inner)]))
+        target = {
+            "arrow_type": "Object",
+            "properties": {
+                "addr": {
+                    "arrow_type": "Object",
+                    "properties": {"zip": {"arrow_type": "Utf8"}},
+                }
+            },
+        }
+        with pytest.raises(TransformationError, match=r"addr\.zip"):
+            _retype_nested(target, col)
+
+    def test_scalar_and_nested_leaf_gate_identically(self) -> None:
+        # Parity: the same Int64 -> Utf8 intent fails loud whether it is a
+        # top-level column or a struct child -- the divergence item 2 removes.
+        scalar = _boundary_outcome(
+            lambda: _retype_batch("Utf8", pa.array([1], pa.int64()))
+            .column(0)
+            .to_pylist()
+        )
+        nested = _boundary_outcome(
+            lambda: _retype_nested(_OBJECT_STR, pa.array([{"a": 1}], _STRUCT_INT))
+            .column(0)
+            .to_pylist()
+        )
+        assert scalar == ("reject",)
+        assert nested == ("reject",)
+
+    def test_destination_rejects_explicit_nested_leaf(self) -> None:
+        # The destination cast gates nested leaves through the same matrix, so it
+        # no longer silently stringifies a struct leaf the transform rejects.
+        col = pa.array([{"a": 1}], _STRUCT_INT)
+        with pytest.raises(ValueError, match="to_string"):
+            _cast_nested(_OBJECT_STR, col)
+
+    def test_transform_and_destination_agree_on_nested_leaf(self) -> None:
+        # Boundary parity extended to nested: the retype and the destination cast
+        # of struct<a: Int64> -> struct<a: Utf8> fail loud identically. Before the
+        # destination-side gate this diverged (transform reject, destination
+        # silently stringified) -- exactly what the matrix exists to prevent.
+        col = pa.array([{"a": 1}], _STRUCT_INT)
+        transform = _boundary_outcome(
+            lambda: _retype_nested(_OBJECT_STR, col).column(0).to_pylist()
+        )
+        destination = _boundary_outcome(
+            lambda: _cast_nested(_OBJECT_STR, col).column(0).to_pylist()
+        )
+        assert transform == destination == ("reject",)

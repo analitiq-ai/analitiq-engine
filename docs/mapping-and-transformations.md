@@ -188,9 +188,6 @@ vectorized evaluation and are accepted:
   or Object condition in `if`/`and`/`or` is not supported and fails loud.
 - **`to_string` of a temporal** uses Arrow's ISO formatting, which can differ in
   notation/precision from Python's `str(datetime)`.
-- **Nested targets** (`Object`/`List`) are assembled structurally; the scalar
-  conversion matrix is not applied per child, so an `Int64 -> Utf8` *inside* a
-  struct is not gated as `explicit` the way a top-level scalar retype is.
 - **Validation `pattern`** runs on Arrow's RE2 engine (anchored `^(?:...)`),
   which supports standard regex but not Python-only features such as lookaround.
 
@@ -259,15 +256,22 @@ boundary (the transform retype and the destination
 boundary and rejected on another. Each pair resolves to one mode:
 
 - `identity` — same type, passthrough.
-- `auto` — lossless, applied implicitly: a width widening (`Int32 → Int64`), and
-  parsing the JSON strings an API source ships (`"1" → Int64`,
-  `"2025-01-01" → Date32`), which both build paths already perform.
+- `auto` — lossless, applied implicitly: a width widening (`Int32 → Int64`),
+  numeric interconversion (`Int64 → Float64`), and parsing the JSON-string
+  numbers an API source ships (`"1" → Int64`, `"1.5" → Float64`), which both
+  build paths already perform.
 - `explicit` — permitted only with a declared conversion function. Formatting a
   scalar as a string (`Int64 → Utf8`, `Boolean → Utf8`, `Float64 → Utf8`,
   `Timestamp → Utf8`) is a notation choice, not a free widening, so the mapping
   must wire `to_string`. A boundary that still sees the raw scalar fails loud,
   naming the function — the destination no longer silently stringifies an int.
-- `forbidden` — never permitted (`Object → Int64`).
+  This gate applies to a scalar leaf *inside* a nested (`Object`/`List`) target
+  too: an `Int64 → Utf8` struct leaf fails loud, not a silent per-child cast.
+- `forbidden` — never permitted: nested and `Json` conversions (`Object → Int64`)
+  and every cross-kind pair outside the stable-cast allowlist (`Binary → Int64`,
+  `Duration → Date32`, `Utf8 → Date32`). The published grid lists only casts the
+  runtime performs identically on every supported pyarrow version, so it never
+  promises a conversion that cannot run.
 
 `runtime_checked` marks a permitted conversion a per-row guard may still reject
 (a narrowing that overflows, a string that will not parse); the build runs with

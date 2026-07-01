@@ -12,7 +12,7 @@ import pyarrow.compute as pc
 
 from .json_utils import decode_json_fields
 from .type_map import resolve_arrow_type
-from .type_map.arrow import classify_arrow_conversion
+from .type_map.arrow import classify_arrow_conversion, first_blocked_nested_leaf
 from .type_map.exceptions import InvalidTypeMapError
 
 logger = logging.getLogger(__name__)
@@ -263,7 +263,11 @@ class SchemaContract:
         An ``explicit`` conversion reaching this point (e.g. ``Int64 -> Utf8``)
         means the mapping omitted the function the conversion requires: it fails
         loud here rather than silently stringifying, matching the transform
-        path's rejection of the same author intent.
+        path's rejection of the same author intent. The same gate reaches inside a
+        nested target: a scalar leaf (``Int64 -> Utf8`` in a struct/list child)
+        clears the matrix too, so the destination cannot silently stringify a leaf
+        the transform's ``_cast_structural`` rejects -- one policy, both
+        boundaries.
         """
         conversion = classify_arrow_conversion(col.type, field.type)
         if conversion.mode == "forbidden":
@@ -277,6 +281,20 @@ class SchemaContract:
                 f"requires an explicit '{conversion.fn}' conversion declared in "
                 f"the mapping; the destination does not perform it implicitly"
             )
+        if pa.types.is_nested(field.type):
+            blocked = first_blocked_nested_leaf(col.type, field.type, field.name)
+            if blocked is not None:
+                leaf = blocked.conversion
+                required = (
+                    f"requires an explicit '{leaf.fn}' conversion declared in the "
+                    f"mapping; the destination does not perform it implicitly"
+                    if leaf.mode == "explicit"
+                    else "is not a permitted conversion"
+                )
+                raise ValueError(
+                    f"column {field.name!r}: nested leaf {blocked.path!r} "
+                    f"converting {blocked.source} → {blocked.target} {required}"
+                )
         try:
             # auto / identity (same family differing only in width or unit):
             # safe=True so an overflow or lossy narrowing fails loud here,
