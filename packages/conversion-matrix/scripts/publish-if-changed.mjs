@@ -9,7 +9,7 @@
 
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -33,21 +33,33 @@ const npmViewOrAbsent = (args) => {
   }
 };
 
-// Digest of everything we ship: each dist file's path and raw bytes, in a stable
-// order. Captures grid, compiled code, and types; a no-op rebuild is unchanged.
-function distDigest() {
-  const dir = join(pkgRoot, "dist");
+// Digest of the exact tarball contents npm will publish -- enumerated from
+// `npm pack` so it stays honest as the file set evolves (dist, README, LICENSE,
+// package.json metadata). package.json is hashed without the two fields this
+// script mutates (version, analitiqPackageSha256), which would otherwise make
+// the digest depend on its own output. Any other shipped change cuts a version;
+// a no-op rebuild does not.
+function shipDigest() {
+  const listing = JSON.parse(npm(["pack", "--dry-run", "--json"]));
+  const paths = listing[0].files.map((f) => f.path).sort();
   const hash = createHash("sha256");
-  for (const name of readdirSync(dir).sort()) {
-    hash.update(name);
+  for (const path of paths) {
+    hash.update(path);
     hash.update("\0");
-    hash.update(readFileSync(join(dir, name)));
+    if (path === "package.json") {
+      const pkg = JSON.parse(readFileSync(join(pkgRoot, path), "utf8"));
+      delete pkg.version;
+      delete pkg.analitiqPackageSha256;
+      hash.update(Buffer.from(JSON.stringify(pkg)));
+    } else {
+      hash.update(readFileSync(join(pkgRoot, path)));
+    }
     hash.update("\0");
   }
   return hash.digest("hex");
 }
 
-const currentSha = distDigest();
+const currentSha = shipDigest();
 const publishedSha = npmViewOrAbsent(["view", pkgName, "analitiqPackageSha256"]);
 
 if (publishedSha && publishedSha === currentSha) {

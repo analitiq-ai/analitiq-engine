@@ -3,7 +3,7 @@ name = "analitiq-stream"
 version = "0.1.0"
 description = "A fault-tolerant data streaming framework for Python 3.11+"
 authors = ["Analitiq Core Team <dev@analitiq.com>"]
-license = "MIT"
+license = "Apache-2.0"
 readme = "README.md"
 homepage = "https://github.com/analitiq/analitiq-stream"
 repository = "https://github.com/analitiq/analitiq-stream"
@@ -12,7 +12,7 @@ keywords = ["data-streaming", "etl", "pipeline", "async", "fault-tolerant"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
