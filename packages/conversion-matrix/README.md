@@ -49,5 +49,5 @@ getConversion("Int32", "Int64");
 The raw grid is also shipped as JSON:
 
 ```ts
-import matrix from "@analitiq-ai/conversion-matrix/conversion_matrix.json";
+import matrix from "@analitiq-ai/conversion-matrix/conversion_matrix.json" with { type: "json" };
 ```

@@ -38,7 +38,7 @@ execFileSync(tsc, ["-p", "tsconfig.json"], { cwd: pkgRoot, stdio: "inherit" });
 mkdirSync(join(pkgRoot, "dist"), { recursive: true });
 const shippedJson = join(pkgRoot, "dist", "conversion_matrix.json");
 copyFileSync(sourceJson, shippedJson);
-if (readFileSync(shippedJson, "utf8") !== raw) {
+if (Buffer.compare(readFileSync(shippedJson), readFileSync(sourceJson)) !== 0) {
   console.error("shipped conversion_matrix.json is not byte-identical to the engine source");
   process.exit(1);
 }

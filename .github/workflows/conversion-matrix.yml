@@ -39,6 +39,10 @@ jobs:
     if: github.event_name == 'push'
     needs: verify
     runs-on: ubuntu-latest
+    # Serialize publishes so two quick pushes to main cannot race on the version.
+    concurrency:
+      group: conversion-matrix-publish
+      cancel-in-progress: false
     permissions:
       contents: read
       packages: write
