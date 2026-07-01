@@ -154,7 +154,12 @@ class TestSchemaContractCastArrowBatch:
         with pytest.raises(ValueError, match="cannot cast"):
             contract.cast_arrow_batch(source)
 
-    def test_cast_arrow_batch_unparseable_timestamp_raises(self):
+    def test_cast_arrow_batch_string_to_timestamp_is_forbidden(self):
+        # A raw string column targeting a temporal is a version-dependent cast
+        # (Utf8 -> Timestamp is unimplemented on pyarrow 12), so the matrix
+        # forbids it rather than publish an "auto" that only runs on some
+        # versions: the source builds temporals with its own parser, and an
+        # author who needs a string parse wires iso_to_timestamp.
         schema = {
             "columns": [
                 {
@@ -167,15 +172,15 @@ class TestSchemaContractCastArrowBatch:
         contract = SchemaContract(schema)
 
         source = pa.RecordBatch.from_pylist([{"ts": "not-a-timestamp"}])
-        with pytest.raises(ValueError, match="cannot cast"):
+        with pytest.raises(ValueError, match="not a permitted conversion"):
             contract.cast_arrow_batch(source)
 
-    def test_cast_arrow_batch_unparseable_date_raises(self):
+    def test_cast_arrow_batch_string_to_date_is_forbidden(self):
         schema = {"columns": [{"name": "d", "arrow_type": "Date32", "nullable": True}]}
         contract = SchemaContract(schema)
 
         source = pa.RecordBatch.from_pylist([{"d": "13/30/2025"}])
-        with pytest.raises(ValueError, match="cannot cast"):
+        with pytest.raises(ValueError, match="not a permitted conversion"):
             contract.cast_arrow_batch(source)
 
 

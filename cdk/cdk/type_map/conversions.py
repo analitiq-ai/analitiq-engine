@@ -120,6 +120,32 @@ _STRINGABLE_KINDS: Final[frozenset[str]] = frozenset(
     {"int", "float", "bool", "decimal", "date", "time", "timestamp", "duration"}
 )
 
+# The numeric kinds. A conversion between any two of them -- widen, narrow, or an
+# int/float/decimal representation change -- is attempted implicitly; the runtime
+# safe-cast rejects a row it cannot convert exactly.
+_NUMERIC_KINDS: Final[frozenset[str]] = frozenset({"int", "float", "decimal"})
+
+# The cross-kind pairs the runtime safe-cast performs on the *stable* pyarrow
+# kernels -- the ones that behave identically on pyarrow 12 and 24. A cross-kind
+# pair absent here is forbidden: either pc.cast cannot perform it at all (Binary
+# -> Int64, Duration -> Date, Time -> Boolean), or it is version-dependent (Utf8
+# -> Date32 is unimplemented on 12), so the published grid must not promise it.
+# Every listed pair resolves to auto + runtime_checked -- attempted, and the
+# safe-cast fails loud on a row or width it cannot convert exactly. Same-kind
+# width/unit changes (Int32 -> Int64, Date32 -> Date64) are settled a step
+# earlier and never reach this table.
+_CROSS_KIND_AUTO: Final[frozenset[tuple[str, str]]] = frozenset(
+    # numeric <-> numeric: widen, narrow, or change representation.
+    {(src, tgt) for src in _NUMERIC_KINDS for tgt in _NUMERIC_KINDS if src != tgt}
+    # bool <-> int: the canonical 0/1 <-> false/true mapping.
+    | {("bool", "int"), ("int", "bool")}
+    # string -> numeric parse: an API source ships every value as a JSON string
+    # and the engine has always parsed "1" -> Int, "1.5" -> Float.
+    | {("string", "int"), ("string", "float"), ("string", "decimal")}
+    # date <-> timestamp: the same instant at a coarser or finer resolution.
+    | {("date", "timestamp"), ("timestamp", "date")}
+)
+
 
 def classify_conversion(source_family: str, target_family: str) -> Conversion:
     """Return the permitted :class:`Conversion` for one family pair.
@@ -153,11 +179,14 @@ def classify_conversion(source_family: str, target_family: str) -> Conversion:
     if tgt_kind == "string" and src_kind in _STRINGABLE_KINDS:
         return Conversion("explicit", fn=_TO_STRING)
 
-    # string -> scalar is *not* explicit: an API source ships every value as a
-    # JSON string, and both the source read (_build_numeric_column) and this
-    # cast already parse "1" -> Int, "2025-01-01" -> Date. Parsing is the
-    # engine's standing behavior, so it stays auto + runtime_checked (the
-    # safe-cast performs the parse and fails loud on a row it cannot).
+    # string -> a numeric scalar is *not* explicit: an API source ships every
+    # value as a JSON string, and both the source read (_build_numeric_column)
+    # and this cast already parse "1" -> Int, "1.5" -> Float. That parse is the
+    # engine's standing behavior, so string -> int/float/decimal resolves to auto
+    # via the cross-kind allowlist below. Parsing a string into a *temporal* is
+    # not offered: Utf8 -> Date32 is unimplemented on pyarrow 12, so the grid
+    # would promise a version-dependent cast; an author renders those with an
+    # explicit function (iso_to_date) instead.
 
     # Nested structures never convert to or from a scalar, and one nested shape
     # never becomes another (Object <-> List).
@@ -179,13 +208,16 @@ def classify_conversion(source_family: str, target_family: str) -> Conversion:
     if src_kind == tgt_kind:
         return Conversion("auto", runtime_checked=True)
 
-    # Every remaining cross-kind scalar pair (Int -> Float, Decimal -> Float,
-    # Date -> Timestamp, ...) is attempted through the safe-cast, which performs
-    # the lossless cases and rejects a row it cannot convert exactly. Pairs the
-    # cast cannot perform at all (e.g. Utf8 -> Boolean) fail loud there. This is
-    # the one bucket whose membership is not individually adjudicated; tightening
-    # a specific pair to explicit/forbidden is a one-line change above.
-    return Conversion("auto", runtime_checked=True)
+    # Cross-kind: permitted only for the stable, well-defined casts on the
+    # allowlist (numeric <-> numeric, bool <-> int, string -> numeric parse, date
+    # <-> timestamp). The safe-cast performs the lossless cases and rejects a row
+    # it cannot convert exactly. Every other cross-kind pair -- Binary -> Int64,
+    # Duration -> Date, Time -> Boolean, and the like -- is forbidden: the runtime
+    # cast already fails loud on it, so the published grid says so rather than
+    # promising an "auto" conversion that can never run.
+    if (src_kind, tgt_kind) in _CROSS_KIND_AUTO:
+        return Conversion("auto", runtime_checked=True)
+    return Conversion("forbidden")
 
 
 def build_conversion_matrix() -> dict[str, dict[str, dict[str, object]]]:
