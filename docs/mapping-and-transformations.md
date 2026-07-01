@@ -170,6 +170,30 @@ batch rather than short-circuiting per row; expressions are pure, so the
 result is unchanged, but a branch that would error only on rows it does
 not feed still fails the batch.
 
+### Vectorized evaluation: known divergences
+
+The transform is a single Arrow-native path (`compile_transform`); each op is a
+`pyarrow.compute` kernel applied to a whole column. This is deliberately steered
+back to the former per-record behavior at the edges (null equality, string
+truthiness, boolean/ISO handling), but a few differences are inherent to typed,
+vectorized evaluation and are accepted:
+
+- **Typed intermediates.** Each pipe stage produces a typed Arrow column, so a
+  value cannot change type mid-pipe the way an untyped Python value could. A
+  `coalesce`/`default` whose alternative has a *different concrete type* than the
+  column (e.g. a string fallback on a numeric column, resolved only by a later
+  stage) fails loud instead of carrying a mixed-type value forward. Author the
+  fallback at the column's type, or convert first.
+- **Boolean truthiness** covers scalars and strings (non-empty is true); a List
+  or Object condition in `if`/`and`/`or` is not supported and fails loud.
+- **`to_string` of a temporal** uses Arrow's ISO formatting, which can differ in
+  notation/precision from Python's `str(datetime)`.
+- **Nested targets** (`Object`/`List`) are assembled structurally; the scalar
+  conversion matrix is not applied per child, so an `Int64 -> Utf8` *inside* a
+  struct is not gated as `explicit` the way a top-level scalar retype is.
+- **Validation `pattern`** runs on Arrow's RE2 engine (anchored `^(?:...)`),
+  which supports standard regex but not Python-only features such as lookaround.
+
 ## Function Catalog
 
 Built-in functions (`_FUNCTION_CATALOG` in `data_transformer.py`):
