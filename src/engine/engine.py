@@ -8,8 +8,6 @@ from asyncio import Queue, Semaphore
 from datetime import datetime, timezone
 from typing import Any
 
-import pyarrow as pa
-
 from cdk.contract import Readable
 
 # gRPC imports for destination streaming
@@ -40,12 +38,7 @@ from ..state.error_classification import (
 from ..state.metrics_storage import create_metrics_record, emit_metrics_log
 from ..state.retry_handler import RetryHandler
 from ..state.state_manager import StateManager
-from .data_transformer import (
-    DataTransformer,
-    build_output_schema,
-    plan_arrow_transform,
-    run_arrow_transform,
-)
+from .data_transformer import compile_transform
 from .exceptions import ConfigurationError, StreamProcessingError
 
 logger = logging.getLogger(__name__)
@@ -97,9 +90,6 @@ class StreamingEngine:
         )
         self.circuit_breaker = CircuitBreaker()
         self.dlq = DeadLetterQueue(self.dlq_path)
-
-        # Data transformation component
-        self.data_transformer = DataTransformer()
 
         # Metrics tracking with Pydantic validation
         self.metrics = PipelineMetrics()
@@ -527,19 +517,10 @@ class StreamingEngine:
         logger.debug(f"Starting transform stage for stream {stream_name}")
 
         assignments = (config.get("mapping") or {}).get("assignments") or []
-        output_schema = build_output_schema(assignments) if assignments else None
-        # Streams whose assignments are pure renames/retypes/constants skip the
-        # per-record Python evaluator: a rename stays in Arrow, and only a
-        # retype reads its own column back into Python (see run_arrow_transform).
-        # The plan is static, so this is decided once here. A None plan means at
-        # least one assignment needs per-record evaluation; that stream uses the
-        # Python evaluator below.
-        arrow_plan = plan_arrow_transform(assignments) if assignments else None
-        if arrow_plan is not None:
-            logger.info(
-                "Stream %s: transform using Arrow-native fast path",
-                stream_name,
-            )
+        # The assignments are static, so the transform is compiled once here into
+        # vectorized Arrow compute and applied to every batch -- the data never
+        # leaves Arrow (no per-record Python, no to_pylist/from_pylist).
+        compiled = compile_transform(assignments) if assignments else None
         batch_count = 0
         try:
             while True:
@@ -547,23 +528,10 @@ class StreamingEngine:
                 if batch is None:
                     break
 
-                if not assignments:
+                if compiled is None:
                     transformed_batch = batch
-                elif arrow_plan is not None:
-                    transformed_batch = run_arrow_transform(
-                        batch, arrow_plan, output_schema
-                    )
                 else:
-                    pylist = batch.to_pylist()
-                    transformed_pylist = (
-                        await self.data_transformer.apply_transformations(
-                            pylist, config
-                        )
-                    )
-                    transformed_batch = pa.RecordBatch.from_pylist(
-                        transformed_pylist,
-                        schema=output_schema,
-                    )
+                    transformed_batch = compiled.run(batch)
 
                 await output_queue.put(transformed_batch)
                 batch_count += 1

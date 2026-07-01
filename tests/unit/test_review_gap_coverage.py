@@ -267,55 +267,48 @@ class TestStartStreamStateReset:
 
 class TestIsoTimestampStrictRaise:
     """Returning ``datetime.now()`` on unparseable cursor input would
-    silently re-window incremental replication. The assignment-transformer
-    function must raise so the engine routes via error_strategy."""
+    silently re-window incremental replication. The vectorized iso_* kernels
+    must raise so the engine routes via error_strategy."""
 
-    @pytest.mark.asyncio
-    async def test_fn_iso_to_datetime_raises_on_unparseable(self):
+    def test_iso_to_datetime_raises_on_unparseable(self):
         # A datetime.now() fallback would fabricate timestamps that are
         # indistinguishable from valid data (issue #138).
-        from src.engine.data_transformer import AssignmentTransformer
+        import pyarrow as pa
+
+        from src.engine.data_transformer import _FUNCTION_CATALOG
         from src.engine.exceptions import TransformationError
 
-        t = AssignmentTransformer()
         with pytest.raises(TransformationError, match="iso_to_datetime"):
-            await t._fn_iso_to_datetime("not-a-timestamp")
+            _FUNCTION_CATALOG["iso_to_datetime"][1](pa.array(["not-a-timestamp"]))
 
-    @pytest.mark.asyncio
-    async def test_fn_iso_to_datetime_parses_valid_input(self):
-        from datetime import datetime
+    def test_iso_to_datetime_parses_valid_input_and_passes_null(self):
+        import pyarrow as pa
 
-        from src.engine.data_transformer import AssignmentTransformer
+        from src.engine.data_transformer import _FUNCTION_CATALOG
 
-        t = AssignmentTransformer()
-        result = await t._fn_iso_to_datetime("2026-05-12T10:30:00Z")
-        assert isinstance(result, datetime)
-        assert result.tzinfo is not None
-        assert await t._fn_iso_to_datetime(None) is None
+        out = _FUNCTION_CATALOG["iso_to_datetime"][1](
+            pa.array(["2026-05-12T10:30:00Z", None])
+        )
+        assert out.type == pa.timestamp("us", tz="UTC")
+        rows = out.to_pylist()
+        assert rows[0].tzinfo is not None
+        assert rows[1] is None
 
-    @pytest.mark.asyncio
-    async def test_fn_iso_to_date_raises_on_unparseable(self):
-        from src.engine.data_transformer import AssignmentTransformer
+    def test_iso_to_date_raises_on_unparseable(self):
+        import pyarrow as pa
+
+        from src.engine.data_transformer import _FUNCTION_CATALOG
         from src.engine.exceptions import TransformationError
 
-        t = AssignmentTransformer()
         with pytest.raises(TransformationError, match="iso_to_date"):
-            await t._fn_iso_to_date("not-a-date")
+            _FUNCTION_CATALOG["iso_to_date"][1](pa.array(["not-a-date"]))
 
-    @pytest.mark.asyncio
-    async def test_fn_iso_to_date_raises_on_non_iso_input(self):
-        from src.engine.data_transformer import AssignmentTransformer
-        from src.engine.exceptions import TransformationError
+    def test_iso_to_date_parses_valid_input_and_passes_null(self):
+        import pyarrow as pa
 
-        t = AssignmentTransformer()
-        with pytest.raises(TransformationError, match="iso_to_date"):
-            await t._fn_iso_to_date([1, 2, 3])
+        from src.engine.data_transformer import _FUNCTION_CATALOG
 
-    @pytest.mark.asyncio
-    async def test_fn_iso_to_date_parses_valid_input(self):
-        from src.engine.data_transformer import AssignmentTransformer
-
-        t = AssignmentTransformer()
-        assert await t._fn_iso_to_date("2026-05-12T10:30:00") == "2026-05-12"
-        assert await t._fn_iso_to_date("2026-05-12") == "2026-05-12"
-        assert await t._fn_iso_to_date(None) is None
+        out = _FUNCTION_CATALOG["iso_to_date"][1](
+            pa.array(["2026-05-12T10:30:00", "2026-05-12", None])
+        )
+        assert out.to_pylist() == ["2026-05-12", "2026-05-12", None]

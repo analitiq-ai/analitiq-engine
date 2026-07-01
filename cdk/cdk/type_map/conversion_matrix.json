@@ -1,0 +1,4265 @@
+{
+  "Binary": {
+    "Binary": {
+      "fn": null,
+      "mode": "identity",
+      "runtime_checked": false
+    },
+    "Boolean": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Date32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Date64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Decimal128": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Decimal256": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Duration": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "FixedSizeBinary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int8": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Json": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "LargeBinary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "LargeUtf8": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "List": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Null": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Object": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Time32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Time64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Timestamp": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt8": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Utf8": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    }
+  },
+  "Boolean": {
+    "Binary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Boolean": {
+      "fn": null,
+      "mode": "identity",
+      "runtime_checked": false
+    },
+    "Date32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Date64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Decimal128": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Decimal256": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Duration": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "FixedSizeBinary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int8": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Json": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "LargeBinary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "LargeUtf8": {
+      "fn": "to_string",
+      "mode": "explicit",
+      "runtime_checked": false
+    },
+    "List": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Null": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Object": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Time32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Time64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Timestamp": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt8": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Utf8": {
+      "fn": "to_string",
+      "mode": "explicit",
+      "runtime_checked": false
+    }
+  },
+  "Date32": {
+    "Binary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Boolean": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Date32": {
+      "fn": null,
+      "mode": "identity",
+      "runtime_checked": false
+    },
+    "Date64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Decimal128": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Decimal256": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Duration": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "FixedSizeBinary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int8": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Json": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "LargeBinary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "LargeUtf8": {
+      "fn": "to_string",
+      "mode": "explicit",
+      "runtime_checked": false
+    },
+    "List": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Null": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Object": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Time32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Time64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Timestamp": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt8": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Utf8": {
+      "fn": "to_string",
+      "mode": "explicit",
+      "runtime_checked": false
+    }
+  },
+  "Date64": {
+    "Binary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Boolean": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Date32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Date64": {
+      "fn": null,
+      "mode": "identity",
+      "runtime_checked": false
+    },
+    "Decimal128": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Decimal256": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Duration": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "FixedSizeBinary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int8": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Json": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "LargeBinary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "LargeUtf8": {
+      "fn": "to_string",
+      "mode": "explicit",
+      "runtime_checked": false
+    },
+    "List": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Null": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Object": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Time32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Time64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Timestamp": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt8": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Utf8": {
+      "fn": "to_string",
+      "mode": "explicit",
+      "runtime_checked": false
+    }
+  },
+  "Decimal128": {
+    "Binary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Boolean": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Date32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Date64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Decimal128": {
+      "fn": null,
+      "mode": "identity",
+      "runtime_checked": false
+    },
+    "Decimal256": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Duration": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "FixedSizeBinary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int8": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Json": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "LargeBinary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "LargeUtf8": {
+      "fn": "to_string",
+      "mode": "explicit",
+      "runtime_checked": false
+    },
+    "List": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Null": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Object": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Time32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Time64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Timestamp": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt8": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Utf8": {
+      "fn": "to_string",
+      "mode": "explicit",
+      "runtime_checked": false
+    }
+  },
+  "Decimal256": {
+    "Binary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Boolean": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Date32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Date64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Decimal128": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Decimal256": {
+      "fn": null,
+      "mode": "identity",
+      "runtime_checked": false
+    },
+    "Duration": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "FixedSizeBinary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int8": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Json": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "LargeBinary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "LargeUtf8": {
+      "fn": "to_string",
+      "mode": "explicit",
+      "runtime_checked": false
+    },
+    "List": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Null": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Object": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Time32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Time64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Timestamp": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt8": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Utf8": {
+      "fn": "to_string",
+      "mode": "explicit",
+      "runtime_checked": false
+    }
+  },
+  "Duration": {
+    "Binary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Boolean": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Date32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Date64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Decimal128": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Decimal256": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Duration": {
+      "fn": null,
+      "mode": "identity",
+      "runtime_checked": false
+    },
+    "FixedSizeBinary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int8": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Json": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "LargeBinary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "LargeUtf8": {
+      "fn": "to_string",
+      "mode": "explicit",
+      "runtime_checked": false
+    },
+    "List": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Null": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Object": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Time32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Time64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Timestamp": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt8": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Utf8": {
+      "fn": "to_string",
+      "mode": "explicit",
+      "runtime_checked": false
+    }
+  },
+  "FixedSizeBinary": {
+    "Binary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Boolean": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Date32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Date64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Decimal128": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Decimal256": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Duration": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "FixedSizeBinary": {
+      "fn": null,
+      "mode": "identity",
+      "runtime_checked": false
+    },
+    "Float16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int8": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Json": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "LargeBinary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "LargeUtf8": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "List": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Null": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Object": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Time32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Time64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Timestamp": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt8": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Utf8": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    }
+  },
+  "Float16": {
+    "Binary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Boolean": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Date32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Date64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Decimal128": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Decimal256": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Duration": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "FixedSizeBinary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float16": {
+      "fn": null,
+      "mode": "identity",
+      "runtime_checked": false
+    },
+    "Float32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int8": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Json": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "LargeBinary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "LargeUtf8": {
+      "fn": "to_string",
+      "mode": "explicit",
+      "runtime_checked": false
+    },
+    "List": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Null": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Object": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Time32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Time64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Timestamp": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt8": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Utf8": {
+      "fn": "to_string",
+      "mode": "explicit",
+      "runtime_checked": false
+    }
+  },
+  "Float32": {
+    "Binary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Boolean": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Date32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Date64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Decimal128": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Decimal256": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Duration": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "FixedSizeBinary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float32": {
+      "fn": null,
+      "mode": "identity",
+      "runtime_checked": false
+    },
+    "Float64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int8": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Json": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "LargeBinary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "LargeUtf8": {
+      "fn": "to_string",
+      "mode": "explicit",
+      "runtime_checked": false
+    },
+    "List": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Null": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Object": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Time32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Time64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Timestamp": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt8": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Utf8": {
+      "fn": "to_string",
+      "mode": "explicit",
+      "runtime_checked": false
+    }
+  },
+  "Float64": {
+    "Binary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Boolean": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Date32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Date64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Decimal128": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Decimal256": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Duration": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "FixedSizeBinary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float64": {
+      "fn": null,
+      "mode": "identity",
+      "runtime_checked": false
+    },
+    "Int16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int8": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Json": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "LargeBinary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "LargeUtf8": {
+      "fn": "to_string",
+      "mode": "explicit",
+      "runtime_checked": false
+    },
+    "List": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Null": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Object": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Time32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Time64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Timestamp": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt8": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Utf8": {
+      "fn": "to_string",
+      "mode": "explicit",
+      "runtime_checked": false
+    }
+  },
+  "Int16": {
+    "Binary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Boolean": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Date32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Date64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Decimal128": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Decimal256": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Duration": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "FixedSizeBinary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int16": {
+      "fn": null,
+      "mode": "identity",
+      "runtime_checked": false
+    },
+    "Int32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int8": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Json": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "LargeBinary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "LargeUtf8": {
+      "fn": "to_string",
+      "mode": "explicit",
+      "runtime_checked": false
+    },
+    "List": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Null": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Object": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Time32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Time64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Timestamp": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt8": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Utf8": {
+      "fn": "to_string",
+      "mode": "explicit",
+      "runtime_checked": false
+    }
+  },
+  "Int32": {
+    "Binary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Boolean": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Date32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Date64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Decimal128": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Decimal256": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Duration": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "FixedSizeBinary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int32": {
+      "fn": null,
+      "mode": "identity",
+      "runtime_checked": false
+    },
+    "Int64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int8": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Json": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "LargeBinary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "LargeUtf8": {
+      "fn": "to_string",
+      "mode": "explicit",
+      "runtime_checked": false
+    },
+    "List": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Null": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Object": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Time32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Time64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Timestamp": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt8": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Utf8": {
+      "fn": "to_string",
+      "mode": "explicit",
+      "runtime_checked": false
+    }
+  },
+  "Int64": {
+    "Binary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Boolean": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Date32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Date64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Decimal128": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Decimal256": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Duration": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "FixedSizeBinary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int64": {
+      "fn": null,
+      "mode": "identity",
+      "runtime_checked": false
+    },
+    "Int8": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Json": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "LargeBinary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "LargeUtf8": {
+      "fn": "to_string",
+      "mode": "explicit",
+      "runtime_checked": false
+    },
+    "List": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Null": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Object": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Time32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Time64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Timestamp": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt8": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Utf8": {
+      "fn": "to_string",
+      "mode": "explicit",
+      "runtime_checked": false
+    }
+  },
+  "Int8": {
+    "Binary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Boolean": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Date32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Date64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Decimal128": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Decimal256": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Duration": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "FixedSizeBinary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int8": {
+      "fn": null,
+      "mode": "identity",
+      "runtime_checked": false
+    },
+    "Json": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "LargeBinary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "LargeUtf8": {
+      "fn": "to_string",
+      "mode": "explicit",
+      "runtime_checked": false
+    },
+    "List": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Null": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Object": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Time32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Time64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Timestamp": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt8": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Utf8": {
+      "fn": "to_string",
+      "mode": "explicit",
+      "runtime_checked": false
+    }
+  },
+  "Json": {
+    "Binary": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Boolean": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Date32": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Date64": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Decimal128": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Decimal256": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Duration": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "FixedSizeBinary": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Float16": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Float32": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Float64": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Int16": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Int32": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Int64": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Int8": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Json": {
+      "fn": null,
+      "mode": "identity",
+      "runtime_checked": false
+    },
+    "LargeBinary": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "LargeUtf8": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "List": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Null": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Object": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Time32": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Time64": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Timestamp": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "UInt16": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "UInt32": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "UInt64": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "UInt8": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Utf8": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    }
+  },
+  "LargeBinary": {
+    "Binary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Boolean": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Date32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Date64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Decimal128": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Decimal256": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Duration": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "FixedSizeBinary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int8": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Json": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "LargeBinary": {
+      "fn": null,
+      "mode": "identity",
+      "runtime_checked": false
+    },
+    "LargeUtf8": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "List": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Null": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Object": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Time32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Time64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Timestamp": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt8": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Utf8": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    }
+  },
+  "LargeUtf8": {
+    "Binary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Boolean": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Date32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Date64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Decimal128": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Decimal256": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Duration": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "FixedSizeBinary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int8": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Json": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "LargeBinary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "LargeUtf8": {
+      "fn": null,
+      "mode": "identity",
+      "runtime_checked": false
+    },
+    "List": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Null": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Object": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Time32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Time64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Timestamp": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt8": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Utf8": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    }
+  },
+  "List": {
+    "Binary": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Boolean": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Date32": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Date64": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Decimal128": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Decimal256": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Duration": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "FixedSizeBinary": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Float16": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Float32": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Float64": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Int16": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Int32": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Int64": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Int8": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Json": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "LargeBinary": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "LargeUtf8": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "List": {
+      "fn": null,
+      "mode": "identity",
+      "runtime_checked": false
+    },
+    "Null": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Object": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Time32": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Time64": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Timestamp": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "UInt16": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "UInt32": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "UInt64": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "UInt8": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Utf8": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    }
+  },
+  "Null": {
+    "Binary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": false
+    },
+    "Boolean": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": false
+    },
+    "Date32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": false
+    },
+    "Date64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": false
+    },
+    "Decimal128": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": false
+    },
+    "Decimal256": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": false
+    },
+    "Duration": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": false
+    },
+    "FixedSizeBinary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": false
+    },
+    "Float16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": false
+    },
+    "Float32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": false
+    },
+    "Float64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": false
+    },
+    "Int16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": false
+    },
+    "Int32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": false
+    },
+    "Int64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": false
+    },
+    "Int8": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": false
+    },
+    "Json": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": false
+    },
+    "LargeBinary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": false
+    },
+    "LargeUtf8": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": false
+    },
+    "List": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": false
+    },
+    "Null": {
+      "fn": null,
+      "mode": "identity",
+      "runtime_checked": false
+    },
+    "Object": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": false
+    },
+    "Time32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": false
+    },
+    "Time64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": false
+    },
+    "Timestamp": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": false
+    },
+    "UInt16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": false
+    },
+    "UInt32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": false
+    },
+    "UInt64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": false
+    },
+    "UInt8": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": false
+    },
+    "Utf8": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": false
+    }
+  },
+  "Object": {
+    "Binary": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Boolean": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Date32": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Date64": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Decimal128": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Decimal256": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Duration": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "FixedSizeBinary": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Float16": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Float32": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Float64": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Int16": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Int32": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Int64": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Int8": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Json": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "LargeBinary": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "LargeUtf8": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "List": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Null": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Object": {
+      "fn": null,
+      "mode": "identity",
+      "runtime_checked": false
+    },
+    "Time32": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Time64": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Timestamp": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "UInt16": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "UInt32": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "UInt64": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "UInt8": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Utf8": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    }
+  },
+  "Time32": {
+    "Binary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Boolean": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Date32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Date64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Decimal128": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Decimal256": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Duration": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "FixedSizeBinary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int8": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Json": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "LargeBinary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "LargeUtf8": {
+      "fn": "to_string",
+      "mode": "explicit",
+      "runtime_checked": false
+    },
+    "List": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Null": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Object": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Time32": {
+      "fn": null,
+      "mode": "identity",
+      "runtime_checked": false
+    },
+    "Time64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Timestamp": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt8": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Utf8": {
+      "fn": "to_string",
+      "mode": "explicit",
+      "runtime_checked": false
+    }
+  },
+  "Time64": {
+    "Binary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Boolean": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Date32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Date64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Decimal128": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Decimal256": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Duration": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "FixedSizeBinary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int8": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Json": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "LargeBinary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "LargeUtf8": {
+      "fn": "to_string",
+      "mode": "explicit",
+      "runtime_checked": false
+    },
+    "List": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Null": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Object": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Time32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Time64": {
+      "fn": null,
+      "mode": "identity",
+      "runtime_checked": false
+    },
+    "Timestamp": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt8": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Utf8": {
+      "fn": "to_string",
+      "mode": "explicit",
+      "runtime_checked": false
+    }
+  },
+  "Timestamp": {
+    "Binary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Boolean": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Date32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Date64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Decimal128": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Decimal256": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Duration": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "FixedSizeBinary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int8": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Json": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "LargeBinary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "LargeUtf8": {
+      "fn": "to_string",
+      "mode": "explicit",
+      "runtime_checked": false
+    },
+    "List": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Null": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Object": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Time32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Time64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Timestamp": {
+      "fn": null,
+      "mode": "identity",
+      "runtime_checked": false
+    },
+    "UInt16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt8": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Utf8": {
+      "fn": "to_string",
+      "mode": "explicit",
+      "runtime_checked": false
+    }
+  },
+  "UInt16": {
+    "Binary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Boolean": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Date32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Date64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Decimal128": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Decimal256": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Duration": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "FixedSizeBinary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int8": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Json": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "LargeBinary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "LargeUtf8": {
+      "fn": "to_string",
+      "mode": "explicit",
+      "runtime_checked": false
+    },
+    "List": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Null": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Object": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Time32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Time64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Timestamp": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt16": {
+      "fn": null,
+      "mode": "identity",
+      "runtime_checked": false
+    },
+    "UInt32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt8": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Utf8": {
+      "fn": "to_string",
+      "mode": "explicit",
+      "runtime_checked": false
+    }
+  },
+  "UInt32": {
+    "Binary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Boolean": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Date32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Date64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Decimal128": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Decimal256": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Duration": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "FixedSizeBinary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int8": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Json": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "LargeBinary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "LargeUtf8": {
+      "fn": "to_string",
+      "mode": "explicit",
+      "runtime_checked": false
+    },
+    "List": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Null": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Object": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Time32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Time64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Timestamp": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt32": {
+      "fn": null,
+      "mode": "identity",
+      "runtime_checked": false
+    },
+    "UInt64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt8": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Utf8": {
+      "fn": "to_string",
+      "mode": "explicit",
+      "runtime_checked": false
+    }
+  },
+  "UInt64": {
+    "Binary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Boolean": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Date32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Date64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Decimal128": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Decimal256": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Duration": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "FixedSizeBinary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int8": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Json": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "LargeBinary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "LargeUtf8": {
+      "fn": "to_string",
+      "mode": "explicit",
+      "runtime_checked": false
+    },
+    "List": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Null": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Object": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Time32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Time64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Timestamp": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt64": {
+      "fn": null,
+      "mode": "identity",
+      "runtime_checked": false
+    },
+    "UInt8": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Utf8": {
+      "fn": "to_string",
+      "mode": "explicit",
+      "runtime_checked": false
+    }
+  },
+  "UInt8": {
+    "Binary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Boolean": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Date32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Date64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Decimal128": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Decimal256": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Duration": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "FixedSizeBinary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int8": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Json": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "LargeBinary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "LargeUtf8": {
+      "fn": "to_string",
+      "mode": "explicit",
+      "runtime_checked": false
+    },
+    "List": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Null": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Object": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Time32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Time64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Timestamp": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt8": {
+      "fn": null,
+      "mode": "identity",
+      "runtime_checked": false
+    },
+    "Utf8": {
+      "fn": "to_string",
+      "mode": "explicit",
+      "runtime_checked": false
+    }
+  },
+  "Utf8": {
+    "Binary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Boolean": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Date32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Date64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Decimal128": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Decimal256": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Duration": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "FixedSizeBinary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Float64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Int8": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Json": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "LargeBinary": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "LargeUtf8": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "List": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Null": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Object": {
+      "fn": null,
+      "mode": "forbidden",
+      "runtime_checked": false
+    },
+    "Time32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Time64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Timestamp": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt16": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt32": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt64": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "UInt8": {
+      "fn": null,
+      "mode": "auto",
+      "runtime_checked": true
+    },
+    "Utf8": {
+      "fn": null,
+      "mode": "identity",
+      "runtime_checked": false
+    }
+  }
+}

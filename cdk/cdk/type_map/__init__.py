@@ -12,6 +12,13 @@ and require the ``analitiq-cdk[arrow]`` extra.
 from typing import TYPE_CHECKING, Any
 
 from .._extras import reraise_for_missing_extra
+from .conversions import (
+    Conversion,
+    build_conversion_matrix,
+    classify_conversion,
+    load_published_matrix,
+    render_conversion_matrix,
+)
 from .exceptions import (
     InvalidTypeMapError,
     TypeMapError,
@@ -35,10 +42,22 @@ from .rules import (
 )
 
 # Arrow datatype builders: kept off the eager import graph (they pull pyarrow).
-_LAZY_ARROW = frozenset({"parse_arrow_type", "resolve_arrow_type"})
+_LAZY_ARROW = frozenset(
+    {
+        "parse_arrow_type",
+        "resolve_arrow_type",
+        "arrow_family",
+        "classify_arrow_conversion",
+    }
+)
 
 if TYPE_CHECKING:
-    from .arrow import parse_arrow_type, resolve_arrow_type  # noqa: F401
+    from .arrow import (  # noqa: F401
+        arrow_family,
+        classify_arrow_conversion,
+        parse_arrow_type,
+        resolve_arrow_type,
+    )
 
 
 def __getattr__(name: str) -> Any:
@@ -57,6 +76,7 @@ def __getattr__(name: str) -> Any:
 
 
 __all__ = [
+    "Conversion",
     "InvalidTypeMapError",
     "TYPE_MAP_FILENAME",
     "WRITE_TYPE_MAP_FILENAME",
@@ -66,6 +86,12 @@ __all__ = [
     "TypeMapper",
     "UnmappedTypeError",
     "WriteTypeMapRule",
+    "arrow_family",
+    "build_conversion_matrix",
+    "classify_arrow_conversion",
+    "classify_conversion",
+    "load_published_matrix",
+    "render_conversion_matrix",
     "parse_arrow_type",
     "resolve_arrow_type",
     "load_connection_type_map",

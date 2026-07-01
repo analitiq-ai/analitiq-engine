@@ -400,6 +400,11 @@ tests/e2e/reports/
 # would otherwise un-ignore __pycache__/*.pyc and let it be committed).
 **/tests/**/fixtures/**/__pycache__/
 **/tests/**/fixtures/**/*.py[cod]
+
+# Published conversion matrix: a generated contract artifact (built from the
+# canonical table in cdk/cdk/type_map/conversions.py), tracked despite the
+# blanket *.json ignore so Infra/the frontend can consume it.
+!cdk/cdk/type_map/conversion_matrix.json
 # Cloud/internal handoff documents — never shared on GitHub.
 github-cloud/
 
