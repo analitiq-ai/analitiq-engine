@@ -313,6 +313,81 @@ class TestTruncateOnFirstBatchAdbc:
 
 
 @pytest.mark.unit
+class TestFirstBatchDropGuard:
+    """A dropped FIRST batch must fail a truncate_insert stream whatever
+    the error strategy: the destination truncates on batch_seq 1, so
+    skipping/DLQ-ing it and continuing would let batch 2 append onto the
+    previous refresh's rows — stale data mixed into a partial snapshot."""
+
+    def _engine(self):
+        import src.engine.engine as engine_module
+
+        engine = engine_module.StreamingEngine.__new__(engine_module.StreamingEngine)
+        engine.max_retries = 0
+        engine.retry_delay = 0
+        engine.error_strategy = "dlq"
+        engine.metrics = MagicMock()
+        engine.pipeline_id = "p1"
+        return engine
+
+    def _config(self, write_mode: str) -> dict:
+        resolved_source = MagicMock()
+        resolved_source.replication = None
+        resolved_source.primary_keys = []
+        return {
+            "stream_name": "s",
+            "stream_id": "s1",
+            "stream_version": 1,
+            "source": {"_resolved_source": resolved_source},
+            "destination": {"write_mode": write_mode},
+        }
+
+    async def _run_load_stage(self, engine, config):
+        import asyncio
+
+        from src.grpc.generated.analitiq.v1 import AckStatus
+
+        input_queue: asyncio.Queue = asyncio.Queue()
+        await input_queue.put(_batch([{"id": 1, "name": "a"}]))
+        await input_queue.put(None)
+        output_queue: asyncio.Queue = asyncio.Queue()
+
+        grpc_client = MagicMock()
+        result = MagicMock()
+        result.status = AckStatus.ACK_STATUS_RETRYABLE_FAILURE
+        result.failure_summary = "db down"
+        grpc_client.send_batch = AsyncMock(return_value=result)
+
+        stream_dlq = MagicMock()
+        stream_dlq.send_batch = AsyncMock()
+
+        await engine._load_stage(
+            input_queue,
+            output_queue,
+            grpc_client,
+            config,
+            stream_dlq,
+            "run-1",
+            {"records_processed": 0, "records_failed": 0, "batches_failed": 0},
+        )
+        return stream_dlq
+
+    @pytest.mark.asyncio
+    async def test_dropped_first_batch_fails_a_truncate_insert_stream(self):
+        from src.engine.exceptions import StreamProcessingError
+
+        engine = self._engine()
+        with pytest.raises(StreamProcessingError, match="truncate_insert"):
+            await self._run_load_stage(engine, self._config("truncate_insert"))
+
+    @pytest.mark.asyncio
+    async def test_other_write_modes_keep_the_configured_strategy(self):
+        engine = self._engine()
+        stream_dlq = await self._run_load_stage(engine, self._config("upsert"))
+        stream_dlq.send_batch.assert_awaited_once()
+
+
+@pytest.mark.unit
 class TestFullRefreshCheckpoint:
     @pytest.mark.asyncio
     async def test_get_cursor_never_resumes(self):

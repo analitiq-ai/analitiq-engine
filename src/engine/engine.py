@@ -481,6 +481,12 @@ class StreamingEngine:
                     exc_info=True,
                 )
 
+    @staticmethod
+    def _is_truncate_insert(config: dict[str, Any]) -> bool:
+        """Whether this stream's destination write mode is truncate_insert."""
+        mode = (config.get("destination") or {}).get("write_mode", "")
+        return str(mode).lower() == "truncate_insert"
+
     async def _extract_stage(
         self,
         source_connector: Readable,
@@ -512,10 +518,7 @@ class StreamingEngine:
             # cursor saves still flow through unchanged for watermark
             # emission.
             checkpoint: CheckpointStore = self.state_manager
-            write_mode = str(
-                (config.get("destination") or {}).get("write_mode", "")
-            ).lower()
-            if write_mode == "truncate_insert":
+            if self._is_truncate_insert(config):
                 logger.info(
                     "Stream %s: truncate_insert is a full refresh; "
                     "ignoring any persisted resume cursor",
@@ -832,6 +835,21 @@ class StreamingEngine:
                             self.metrics.increment_batches_failed()
                             stream_metrics["records_failed"] += record_count
                             stream_metrics["batches_failed"] += 1
+                            if batch_seq == 1 and self._is_truncate_insert(config):
+                                # The destination truncates on batch_seq 1
+                                # (issue #307). Dropping the first batch via
+                                # dlq/skip and continuing would let batch 2
+                                # append onto the PREVIOUS refresh's rows —
+                                # stale data mixed into a partial snapshot.
+                                # A full refresh that cannot start must fail
+                                # the stream, whatever the error strategy.
+                                raise StreamProcessingError(
+                                    f"Batch 1 of a truncate_insert stream "
+                                    f"failed after {max_retries} retries; "
+                                    f"dropping it would append the rest of "
+                                    f"the refresh onto the previous run's "
+                                    f"rows: {result.failure_summary}"
+                                )
                             if error_strategy == "dlq":
                                 await stream_dlq.send_batch(
                                     record_dicts,
