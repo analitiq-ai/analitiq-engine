@@ -44,6 +44,34 @@ from .exceptions import ConfigurationError, StreamProcessingError
 logger = logging.getLogger(__name__)
 
 
+class _FullRefreshCheckpoint:
+    """Checkpoint view for truncate_insert streams: never resumes.
+
+    A full refresh must re-read the source from scratch on every
+    (re)start — the destination truncates once per run, so a resumed
+    slice would be the only data left in the target (issue #307).
+    ``get_cursor`` therefore always answers ``None`` (full re-scan);
+    ``save_cursor`` delegates so in-run watermark tracking and state
+    emission stay exactly as they are for every other stream.
+    """
+
+    def __init__(self, inner: StateManager) -> None:
+        self._inner = inner
+
+    async def get_cursor(
+        self, stream_name: str, partition: dict[str, Any] | None = None
+    ) -> dict[str, Any] | None:
+        return None
+
+    async def save_cursor(
+        self,
+        stream_name: str,
+        partition: dict[str, Any] | None,
+        cursor: dict[str, Any],
+    ) -> None:
+        await self._inner.save_cursor(stream_name, partition, cursor)
+
+
 class StreamingEngine:
     """
     High-performance async multi-stream engine with state management.
@@ -475,11 +503,29 @@ class StreamingEngine:
             state_stream_name = config["stream_id"]
             partition: dict[str, Any] = {}
 
+            # A truncate_insert stream is a full refresh: the destination
+            # truncates once per run, so the source must read from scratch
+            # on every (re)start. Resuming from a persisted cursor would
+            # load only the resumed slice into the freshly truncated table
+            # (issue #307), so the resume read is disabled; cursor saves
+            # still flow through unchanged for watermark emission.
+            checkpoint: Any = self.state_manager
+            write_mode = str(
+                (config.get("destination") or {}).get("write_mode", "")
+            ).lower()
+            if write_mode == "truncate_insert":
+                logger.info(
+                    "Stream %s: truncate_insert is a full refresh; "
+                    "ignoring any persisted resume cursor",
+                    stream_name,
+                )
+                checkpoint = _FullRefreshCheckpoint(self.state_manager)
+
             batch_count = 0
             async for batch in source_connector.read_batches(
                 runtime,
                 json_safe_config,
-                checkpoint=self.state_manager,
+                checkpoint=checkpoint,
                 stream_name=state_stream_name,
                 partition=partition,
                 batch_size=self.batch_size,

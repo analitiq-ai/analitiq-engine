@@ -80,8 +80,8 @@ class TestSqlVerdicts:
     """The SQL verdict must match the write path that actually runs:
     upsert dedups on its conflict keys everywhere; insert anti-joins on
     row identity only on the SQLAlchemy transport; truncate-insert
-    cannot claim replay safety (per-batch truncate vs mid-stream
-    resume)."""
+    truncates once per run (issue #307) but appends with no row-identity
+    dedup, so it cannot claim replay safety."""
 
     def _handler(self, *, adbc_only: bool, **state_kwargs) -> GenericSQLConnector:
         handler = GenericSQLConnector()
@@ -100,13 +100,13 @@ class TestSqlVerdicts:
         assert "id" in verdict.reason
 
     def test_truncate_insert_reports_not_replay_safe(self):
-        """Truncate-insert truncates per batch; a restart resuming
-        mid-stream truncates away rows earlier batches committed, and the
-        handler cannot see whether the stream resumes from a cursor."""
+        """Truncate-insert truncates once per run (issue #307), but its
+        append phase has no row-identity dedup, so a replayed
+        already-committed batch re-inserts its rows."""
         handler = self._handler(adbc_only=True, write_mode="truncate_insert")
         verdict = handler.retry_semantics("s1")
         assert verdict.semantics == RetrySemantics.RETRY_SEMANTICS_AT_LEAST_ONCE
-        assert "truncates per batch" in verdict.reason
+        assert "once per run" in verdict.reason
 
     def test_keyed_insert_on_sqlalchemy_exactly_once(self):
         handler = self._handler(

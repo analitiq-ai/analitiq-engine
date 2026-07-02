@@ -75,9 +75,11 @@ def _batch(rows) -> pa.RecordBatch:
     return pa.RecordBatch.from_pylist(rows)
 
 
-async def _write(handler, *, seq: int = 1, rows=None, token: bytes = b"tok"):
+async def _write(
+    handler, *, seq: int = 1, rows=None, token: bytes = b"tok", run_id: str = "r1"
+):
     return await handler.write_batch(
-        run_id="r1",
+        run_id=run_id,
         stream_id="s1",
         batch_seq=seq,
         record_batch=_batch(rows if rows is not None else [{"id": 1, "name": "a"}]),
@@ -127,16 +129,31 @@ class TestSyncEngineWritePath:
             engine.dispose()
 
     @pytest.mark.asyncio
-    async def test_truncate_insert_replaces_rows(self):
+    async def test_truncate_insert_new_run_replaces_previous_refresh(self):
+        # The truncate runs once per (run, stream) — issue #307. A later
+        # batch of the SAME run appends; a new run's first batch empties
+        # the table.
         engine = _sqlite_sync_engine()
         try:
             handler = _connected_handler(engine, write_mode="truncate_insert")
-            await _write(handler, seq=1, rows=[{"id": 1, "name": "old"}])
-            result = await _write(handler, seq=2, rows=[{"id": 7, "name": "new"}])
+            await _write(handler, seq=1, rows=[{"id": 1, "name": "old"}], run_id="r1")
+            result = await _write(
+                handler, seq=2, rows=[{"id": 7, "name": "new"}], run_id="r1"
+            )
             assert result.status == AckStatus.ACK_STATUS_SUCCESS
             with engine.connect() as conn:
                 rows = conn.exec_driver_sql("SELECT id, name FROM events").all()
-            assert rows == [(7, "new")]
+            # Same run: batch 2 appends instead of wiping batch 1.
+            assert sorted(rows) == [(1, "old"), (7, "new")]
+
+            result = await _write(
+                handler, seq=1, rows=[{"id": 9, "name": "next"}], run_id="r2"
+            )
+            assert result.status == AckStatus.ACK_STATUS_SUCCESS
+            with engine.connect() as conn:
+                rows = conn.exec_driver_sql("SELECT id, name FROM events").all()
+            # New run: a fresh refresh replaces the previous one.
+            assert rows == [(9, "next")]
         finally:
             engine.dispose()
 
