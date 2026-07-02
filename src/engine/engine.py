@@ -382,6 +382,64 @@ class StreamingEngine:
             # Wait for all stream stages to complete
             await asyncio.gather(*tasks)
 
+            # A truncate_insert source that emitted zero batches never fires
+            # write_batch, so the destination was never told to truncate. The
+            # flag is only set when _load_stage exited the batch loop cleanly;
+            # if extract failed, gather re-raises before we get here, so the
+            # previous run's rows are never wiped by an upstream error (issue #312).
+            if stream_metrics.pop("_zero_batch_truncate_needed", False):
+                logger.info(
+                    "Stream %s: source yielded no batches on a "
+                    "truncate_insert stream; sending synthetic empty "
+                    "batch to trigger truncate",
+                    stream_name,
+                )
+                empty_batch = pa.record_batch([], schema=pa.schema([]))
+                retry_count = 0
+                while True:
+                    result: BatchResult = await grpc_client.send_batch(
+                        run_id=run_id,
+                        stream_id=stream_id,
+                        batch_seq=1,
+                        record_batch=empty_batch,
+                        record_ids=[],
+                        cursor=Cursor(token=b""),
+                    )
+                    if result.status == AckStatus.ACK_STATUS_SUCCESS:
+                        logger.info(
+                            "Stream %s: synthetic truncate batch committed",
+                            stream_name,
+                        )
+                        break
+                    if result.status == AckStatus.ACK_STATUS_ALREADY_COMMITTED:
+                        logger.info(
+                            "Stream %s: synthetic truncate already committed "
+                            "(idempotent replay)",
+                            stream_name,
+                        )
+                        break
+                    if (
+                        result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
+                        and retry_count < self.max_retries
+                    ):
+                        retry_count += 1
+                        delay = self.retry_delay * (2 ** (retry_count - 1))
+                        logger.warning(
+                            "Stream %s: synthetic truncate retryable failure, "
+                            "retry %d/%d after %.2fs: %s",
+                            stream_name,
+                            retry_count,
+                            self.max_retries,
+                            delay,
+                            result.failure_summary,
+                        )
+                        await asyncio.sleep(delay)
+                        continue
+                    raise StreamProcessingError(
+                        f"Stream {stream_name}: zero-batch truncate failed: "
+                        f"{result.failure_summary}"
+                    )
+
             if stream_metrics["records_failed"] > 0:
                 # The dlq/skip strategies complete the stream without raising
                 # after exhausting retries; reflect that it only partly succeeded
@@ -940,34 +998,12 @@ class StreamingEngine:
                             f"Batch {batch_seq} unknown ACK status: {result.status}"
                         )
 
-            # A truncate_insert source that emitted zero batches never fires
-            # write_batch, so the destination is never told to truncate.
-            # Send a synthetic empty batch (batch_seq=1) to trigger the
-            # existing truncate-only path in write_batch (issue #312).
+            # Signal the outer scope that extract completed cleanly with no
+            # batches on a truncate_insert stream. The outer scope sends the
+            # synthetic batch AFTER gather succeeds so the truncate is
+            # skipped if extract failed (issue #312).
             if batch_seq == 0 and self._is_truncate_insert(config):
-                logger.info(
-                    "Stream %s: source yielded no batches on a "
-                    "truncate_insert stream; sending synthetic empty "
-                    "batch to trigger truncate",
-                    stream_name,
-                )
-                empty_batch = pa.record_batch([], schema=pa.schema([]))
-                result = await grpc_client.send_batch(
-                    run_id=run_id,
-                    stream_id=stream_id,
-                    batch_seq=1,
-                    record_batch=empty_batch,
-                    record_ids=[],
-                    cursor=Cursor(token=b""),
-                )
-                if result.status not in (
-                    AckStatus.ACK_STATUS_SUCCESS,
-                    AckStatus.ACK_STATUS_ALREADY_COMMITTED,
-                ):
-                    raise StreamProcessingError(
-                        f"Stream {stream_name}: zero-batch truncate failed: "
-                        f"{result.failure_summary}"
-                    )
+                stream_metrics["_zero_batch_truncate_needed"] = True
 
             # Signal end of stream
             await output_queue.put(None)

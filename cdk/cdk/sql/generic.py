@@ -1253,10 +1253,9 @@ class GenericSQLConnector(BaseDestinationHandler):
     async def _truncate_only(self, state: _StreamState) -> None:
         """Empty the target table with no insert (any transport).
 
-        Runs when a refresh's first batch is delivered with zero rows.
-        A refresh that yields no batches at all never reaches
-        ``write_batch``; closing that gap needs an engine-side signal
-        (issue #312), and this helper is the write it would trigger.
+        Runs when a refresh's first batch is delivered with zero rows,
+        including the synthetic empty batch the engine sends when the
+        source yields no batches at all (issue #312).
         """
         if self._adbc_only:
             await asyncio.to_thread(
