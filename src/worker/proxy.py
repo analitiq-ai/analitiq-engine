@@ -22,7 +22,15 @@ import pyarrow as pa
 
 from cdk.base_handler import BaseDestinationHandler, BatchWriteResult
 from cdk.connection_runtime import ConnectionRuntime
-from cdk.types import SUCCESS_STATUSES, AckStatus, Cursor, SchemaSpec, WriteMode
+from cdk.types import (
+    SUCCESS_STATUSES,
+    AckStatus,
+    Cursor,
+    RetrySemantics,
+    RetryVerdict,
+    SchemaSpec,
+    WriteMode,
+)
 from src.destination.server import SHUTDOWN_REASON_SUCCESS
 from src.grpc.client import DestinationGRPCClient
 from src.grpc.generated.analitiq.v1 import Cursor as ProtoCursor
@@ -52,6 +60,10 @@ class WorkerProxyHandler(BaseDestinationHandler):
         # its own start_stream params and self-heals after a transport teardown,
         # so the proxy no longer tracks schema config for rebuilds.
         self._streams: dict[str, DestinationGRPCClient] = {}
+        # Retry-safety verdict per stream, captured from the worker's
+        # SchemaAck so the shell's engine-facing ack re-reports the
+        # worker's real verdict (issue #286).
+        self._retry_verdicts: dict[str, RetryVerdict] = {}
         self._capabilities: Any | None = None
         self._label = "dest-worker"
         # Reason the most recent configure_schema returned False, forwarded
@@ -136,6 +148,7 @@ class WorkerProxyHandler(BaseDestinationHandler):
                     exc_info=True,
                 )
         self._streams.clear()
+        self._retry_verdicts.clear()
         if self._control is not None:
             # Forward the terminal-run outcome as the worker's shutdown reason
             # so it prunes its idempotency ledger only on a successful run.
@@ -182,7 +195,36 @@ class WorkerProxyHandler(BaseDestinationHandler):
         if client is None:
             return False
         self._streams[stream_id] = client
+        # Re-report the worker's retry-safety verdict on the shell hop
+        # (issue #286). Drop any verdict from an earlier configure of this
+        # stream first, so a reconfigure can never serve a stale one. Every
+        # conforming worker stamps a specified verdict on an accepted ack;
+        # an unspecified one is a worker defect — warn and fall through to
+        # the base default rather than report it as the worker's claim.
+        self._retry_verdicts.pop(stream_id, None)
+        verdict = client.stream_retry_semantics
+        if verdict is not None and verdict[0] != int(
+            RetrySemantics.RETRY_SEMANTICS_UNSPECIFIED
+        ):
+            self._retry_verdicts[stream_id] = RetryVerdict(
+                semantics=RetrySemantics(verdict[0]),
+                reason=verdict[1],
+            )
+        else:
+            logger.warning(
+                "%s: accepted schema ack for stream %s carried no "
+                "retry-safety verdict; reporting the at-least-once default",
+                self._label,
+                stream_id,
+            )
         return True
+
+    def retry_semantics(self, stream_id: str) -> RetryVerdict:
+        """Return the worker's verdict captured from its SchemaAck (#286)."""
+        verdict = self._retry_verdicts.get(stream_id)
+        if verdict is None:
+            return super().retry_semantics(stream_id)
+        return verdict
 
     async def _open_stream(
         self, stream_id: str, schema_config: dict[str, Any]

@@ -315,6 +315,54 @@ A single `_manifest.json` in the base path records `commits[]` with
 `file_path`, `committed_at`. Replays match by `(run_id, stream_id,
 batch_seq)` and become no-ops.
 
+This positional match is sound for an in-run replay of the same batch,
+but not across a same-run restart: the source resumes from the committed
+cursor while `batch_seq` restarts, so a committed position can re-arrive
+carrying different rows and be skipped as a replay. The file destination
+therefore reports itself as not replay-safe (at-least-once) in the
+schema ack (issue #286).
+
+### API (per-record idempotency key)
+
+An API `upsert` is idempotent through the endpoint's own `conflict_keys`.
+For `insert`, the api-endpoint contract's
+`operations.write.<mode>.idempotency` block (infra#890) declares where a
+per-request idempotency key lands:
+
+```json
+{ "in": "header", "name": "Idempotency-Key" }
+```
+
+`in` is `"header"` (Stripe-style) or `"body"` (Square-style, requires a
+JSON-object request body); `name` is the header or top-level body field.
+The author declares **placement only** — the key value is engine-owned
+and follows the write mode's identity semantics, mirroring the SQL
+destination:
+
+- **`insert`** — the identity-derived `record_id` (primary-key fields
+  when the source declares them, else the full content): the first
+  occurrence of an identity wins, like the SQL insert anti-join; a
+  stream that must reconcile changed rows uses `upsert`.
+- **`upsert`** — a full-content hash (the `_record_hash`
+  canonicalisation): an identical replay dedups, while a changed row
+  gets a new key so the provider applies the update instead of
+  replaying its cached response.
+
+Either way a re-sent record carries the same key and the provider
+dedups it within its replay window. The key name must not collide with
+an engine- or connection-owned request header (`Content-Type`, auth
+headers, ...) nor with a body field the request body or write input
+schema already declares — `configure_schema` rejects those documents.
+
+The block cannot be combined with a `batching` block — the contract has
+no batching mode; a present block IS the multi-record case. Both the
+published schema and `configure_schema` reject the combination, because
+a restart re-batches records and a per-request key spanning several
+records cannot dedup (issue #286). Without the block, API `insert` is
+at-least-once on a same-run restart. Every destination reports its
+per-stream verdict in the schema ack (`retry_semantics` + reason) and
+the engine logs it at stream start.
+
 ## gRPC Batch Parameters
 
 | Field | Description |

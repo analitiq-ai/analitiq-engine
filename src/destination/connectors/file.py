@@ -12,7 +12,7 @@ import pyarrow as pa
 
 from cdk.base_handler import BaseDestinationHandler, BatchWriteResult
 from cdk.connection_runtime import ConnectionRuntime
-from cdk.types import AckStatus, Cursor, SchemaSpec
+from cdk.types import AckStatus, Cursor, RetrySemantics, RetryVerdict, SchemaSpec
 
 from ..formatters import get_formatter
 from ..formatters.base import BaseFormatter
@@ -72,6 +72,27 @@ class FileDestinationHandler(BaseDestinationHandler):
     def supports_bulk_load(self) -> bool:
         """File destinations support bulk writes."""
         return True
+
+    def retry_semantics(self, stream_id: str) -> RetryVerdict:
+        """File replay safety does not hold across a restart (issue #286).
+
+        The manifest dedups by batch position (run_id, stream_id,
+        batch_seq), which is sound for an in-run replay of the same batch
+        but not for a same-run restart: the source resumes from the
+        committed cursor while batch_seq restarts, so a committed position
+        can re-arrive carrying different rows and be skipped as a replay
+        (the row-drop class of issue #282). Until the manifest keys on
+        content, the honest claim is that a restart is not replay-safe.
+        """
+        _ = stream_id
+        return RetryVerdict(
+            semantics=RetrySemantics.RETRY_SEMANTICS_AT_LEAST_ONCE,
+            reason=(
+                "the manifest dedups by batch position, and a same-run "
+                "restart re-numbers re-batched rows; a committed position "
+                "carrying different rows would be skipped as a replay"
+            ),
+        )
 
     async def connect(self, runtime: ConnectionRuntime) -> None:
         """

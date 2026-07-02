@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 import pyarrow as pa
 
-from .types import BatchWriteResult, Cursor, SchemaSpec
+from .types import BatchWriteResult, Cursor, RetrySemantics, RetryVerdict, SchemaSpec
 
 if TYPE_CHECKING:
     from .connection_runtime import ConnectionRuntime
@@ -147,6 +147,26 @@ class BaseDestinationHandler(ABC):
             True if schema configuration succeeded, False otherwise
         """
         pass
+
+    def retry_semantics(self, stream_id: str) -> RetryVerdict:
+        """Retry-safety verdict for a stream this handler has configured.
+
+        Called by the destination servicer after an accepted
+        ``configure_schema``; the verdict rides the SchemaAck so the engine
+        can log, per stream, whether a same-run restart re-sends committed
+        records (issue #286). The verdict is the handler's to make — write
+        mode, keys, transport, and declared idempotency all factor in — so
+        handlers override this per stream. The default is the only honest
+        claim for a handler that declares nothing: at-least-once.
+        """
+        _ = stream_id
+        return RetryVerdict(
+            semantics=RetrySemantics.RETRY_SEMANTICS_AT_LEAST_ONCE,
+            reason=(
+                "handler declares no retry-safety; a same-run restart may "
+                "re-send already-committed records"
+            ),
+        )
 
     @abstractmethod
     async def write_batch(

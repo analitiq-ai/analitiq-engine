@@ -49,6 +49,48 @@ class WriteMode(IntEnum):
     WRITE_MODE_TRUNCATE_INSERT = 3  # Truncate table before insert (full refresh)
 
 
+class RetrySemantics(IntEnum):
+    """Retry safety a destination guarantees on a same-run restart (#286).
+
+    Integer values mirror the ``RetrySemantics`` enum in ``stream.proto``
+    exactly, so the servicer passes the value straight into a protobuf
+    ``SchemaAck`` without a lookup table.
+    """
+
+    RETRY_SEMANTICS_UNSPECIFIED = 0
+    # The handler dedups re-sent records by row identity; a restart can
+    # neither duplicate nor drop.
+    RETRY_SEMANTICS_EXACTLY_ONCE = 1
+    # A restart is not replay-safe: committed records are re-applied, or
+    # re-batched rows are misclassified (skipped / truncated away). The
+    # verdict's reason names the concrete failure mode.
+    RETRY_SEMANTICS_AT_LEAST_ONCE = 2
+
+
+@dataclass(frozen=True)
+class RetryVerdict:
+    """A handler's retry-safety verdict for one configured stream.
+
+    ``reason`` names the mechanism behind the verdict (the dedup key, the
+    manifest, the declared idempotency key, or the gap) so the engine's
+    per-stream log line is actionable, not just a label. A verdict must
+    commit to exactly-once or at-least-once: UNSPECIFIED is the wire's
+    absent value, and letting a handler construct it would silently
+    degrade into the base default downstream instead of failing at the
+    defective handler.
+    """
+
+    semantics: RetrySemantics
+    reason: str
+
+    def __post_init__(self) -> None:
+        if self.semantics == RetrySemantics.RETRY_SEMANTICS_UNSPECIFIED:
+            raise ValueError(
+                "RetryVerdict requires exactly-once or at-least-once; "
+                "a handler must never claim UNSPECIFIED"
+            )
+
+
 @dataclass(frozen=True)
 class Cursor:
     """Opaque checkpoint cursor.
