@@ -18,18 +18,19 @@ from that artifact on every build, so it cannot drift from the engine.
 
 ## Install
 
-Published to **GitHub Packages**, like every other `@analitiq-ai/*` package.
-GitHub Packages requires authentication to install, so a consumer needs a
-`.npmrc` with both the scope->registry mapping and a token (a `GITHUB_TOKEN` in
-CI, or a personal access token with the `read:packages` scope locally):
+A **private** package on **GitHub Packages**, like every other `@analitiq-ai/*`
+package (the `analitiq-ai` org does not allow public packages). A consumer needs
+read access to the package (granted per repo/team, the same way
+`@analitiq-ai/contracts` is) and a `.npmrc` with the scope->registry mapping and
+a token (a `GITHUB_TOKEN` in CI, or a personal access token with the
+`read:packages` scope locally):
 
 ```
 @analitiq-ai:registry=https://npm.pkg.github.com
 //npm.pkg.github.com/:_authToken=${GITHUB_TOKEN}
 ```
 
-This is the same setup already used to consume `@analitiq-ai/contracts`. With it
-in place:
+With that in place:
 
 ```
 npm install @analitiq-ai/conversion-matrix
@@ -76,13 +77,14 @@ The engine repo owns and publishes this package; consumers only pin it. CI
    `scripts/publish-if-changed.mjs` hashes the exact `npm pack` file set and
    compares it to the digest recorded on the last published version, so an
    engine release that changes nothing we ship never cuts a new version.
-4. **Version** auto-bumps the patch off the last published release; the package
-   publishes scoped with `access: "public"`.
+4. **Version** auto-bumps the patch off the last published release. The package
+   is private on GitHub Packages (the `analitiq-ai` org does not allow public
+   packages), like `@analitiq-ai/contracts`.
 
 The published data always matches the engine commit that produced it.
 
-> **One-time setup:** GitHub Packages does not derive public visibility from
-> `publishConfig.access` alone -- a first publish can land private, and only an
-> org/repo admin can flip the package to Public (the workflow's `GITHUB_TOKEN`
-> lacks the org-admin scope to do it). After the first publish, an admin must set
-> the package visibility to Public once so the frontend can install it.
+> **One-time setup:** the first publish creates the package private. So the
+> frontend can install it, an admin grants the consuming repo(s) read access to
+> the package once (package -> Package settings -> Manage Actions access -> add
+> repo with Read), the same grant `@analitiq-ai/contracts` uses. The workflow's
+> `GITHUB_TOKEN` publishes new versions but cannot grant this access.
