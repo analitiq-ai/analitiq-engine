@@ -464,7 +464,7 @@ class TestApiHandlerChunkedWrites:
 
         # Mock: 3 of 5 written; the unsent tail comes back as failed ids
         api_handler._write_chunked_mode = AsyncMock(
-            return_value=(3, ["rec-3", "rec-4"])
+            return_value=(3, ["rec-3", "rec-4"], "boom")
         )
 
         # Execute
@@ -510,12 +510,13 @@ class TestApiHandlerChunkedWrites:
         records = [{"id": i} for i in range(5)]
         record_ids = [f"r{i}" for i in range(5)]
 
-        written, failed = await api_handler._write_chunked_mode(
+        written, failed, first_failure = await api_handler._write_chunked_mode(
             state, records, record_ids
         )
         # First chunk (r0, r1) landed; everything from the failed chunk on fails.
         assert written == 2
         assert failed == ["r2", "r3", "r4"]
+        assert "chunk down" in first_failure
         # The third chunk must never be attempted after a chunk fails.
         assert len(calls) == 2
 
@@ -559,6 +560,85 @@ class TestApiHandlerChunkedWrites:
         assert result.records_written == 2
         assert result.committed_cursor is None
         assert result.failed_record_ids == ("r2", "r3", "r4")
+
+    @pytest.mark.asyncio
+    async def test_chunk_body_build_failure_fails_only_that_chunk(
+        self,
+        api_handler: ApiDestinationHandler,
+    ):
+        """A data-dependent body-build failure mid-loop must fail just that
+        chunk's records and keep going — letting it propagate after chunks
+        already landed would report 0 written and re-send the landed chunks
+        on a batch re-run (the dup-on-retry hazard)."""
+        state = api_handler._streams["test-stream"]
+        state.max_records = 2
+
+        real_build = api_handler._build_body
+
+        def _build(state_arg, *, record=None, records=None):
+            if records and any(r["id"] == 3 for r in records):
+                raise ValueError("record 3 cannot feed the derived field")
+            return real_build(state_arg, record=record, records=records)
+
+        sent = []
+
+        async def _send(state_arg, data, extra_headers=None):
+            sent.append(data)
+            return {}
+
+        api_handler._build_body = _build
+        api_handler._send_request = _send
+        records = [{"id": i} for i in range(6)]
+        record_ids = [f"r{i}" for i in range(6)]
+
+        written, failed, first_failure = await api_handler._write_chunked_mode(
+            state, records, record_ids
+        )
+        # Chunks (r0,r1) and (r4,r5) landed; the build-failed chunk (r2,r3)
+        # is attributed, and the loop continued past it.
+        assert written == 4
+        assert failed == ["r2", "r3"]
+        assert "ValueError" in first_failure
+        assert len(sent) == 2
+
+    @pytest.mark.asyncio
+    async def test_chunk_body_build_failure_is_fatal_with_detail_end_to_end(
+        self,
+        api_handler: ApiDestinationHandler,
+        mock_cursor: MagicMock,
+    ):
+        """Through write_batch: the true written count, the failed chunk's
+        ids, and the first-failure reason all reach the engine-facing
+        result."""
+        api_handler._connected = True
+        api_handler._session = MagicMock()
+        state = api_handler._streams["test-stream"]
+        state.max_records = 2
+
+        real_build = api_handler._build_body
+
+        def _build(state_arg, *, record=None, records=None):
+            if records and any(r["id"] == 3 for r in records):
+                raise ValueError("record 3 cannot feed the derived field")
+            return real_build(state_arg, record=record, records=records)
+
+        api_handler._build_body = _build
+        api_handler._send_request = AsyncMock(return_value={})
+
+        result = await api_handler.write_batch(
+            run_id="r",
+            stream_id="test-stream",
+            batch_seq=1,
+            record_batch=_to_record_batch([{"id": i} for i in range(6)]),
+            record_ids=[f"r{i}" for i in range(6)],
+            cursor=mock_cursor,
+        )
+
+        assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+        assert result.records_written == 4
+        assert result.failed_record_ids == ("r2", "r3")
+        assert result.committed_cursor is None
+        assert "first failure: ValueError" in result.failure_summary
 
     @pytest.mark.asyncio
     async def test_first_chunk_failure_reraises(
@@ -803,9 +883,23 @@ class TestApiHandlerContractBatching:
     async def test_non_contract_batching_fails_the_stream(self, handler, batching):
         """A batching block that is not ``{"max_records": <int >= 2>}`` must
         fail configure_schema loud — the silent single-record fallback is
-        exactly the defect in issue #305."""
+        exactly the defect in issue #305 — and the reason must ride the
+        SchemaAck channel (issue #231), not just the sidecar log."""
         assert await self._configure(handler, self._doc(batching=batching)) is False
         assert "s1" not in handler._streams
+        assert "max_records" in handler.last_schema_rejection
+
+    @pytest.mark.asyncio
+    async def test_accepted_configure_clears_rejection_reason(self, handler):
+        """A rejection reason from an earlier failed configure must not
+        leak into a later accepted stream's ack."""
+        assert await self._configure(handler, self._doc(batching={})) is False
+        assert handler.last_schema_rejection is not None
+        assert (
+            await self._configure(handler, self._doc(batching={"max_records": 2}))
+            is True
+        )
+        assert handler.last_schema_rejection is None
 
     @pytest.mark.asyncio
     async def test_chunked_writes_respect_max_records_end_to_end(self, handler):
@@ -930,6 +1024,17 @@ class TestApiHandlerSupportsBulkLoad:
             }
         )
         assert handler.supports_bulk_load is True
+
+    @pytest.mark.parametrize(
+        "batching",
+        [{}, {"max_records": 1}, {"mode": "bulk", "size": 100}, "bulk"],
+    )
+    def test_false_for_batching_block_configure_would_reject(self, handler, batching):
+        """Capability advertisement and configure_schema share one
+        acceptance predicate: a block configure rejects must not be
+        advertised as bulk-load capability."""
+        handler.set_stream_endpoints({"s1": self._doc(batching=batching)})
+        assert handler.supports_bulk_load is False
 
     def test_malformed_contract_returns_false_not_raises(self, handler):
         """Capability advertisement over arbitrary docs must not crash."""
@@ -1492,7 +1597,7 @@ class TestApiHandlerBodySpec:
             return {}
 
         handler._send_request = _capture  # type: ignore[assignment]
-        written, failed = await handler._write_chunked_mode(
+        written, failed, _ = await handler._write_chunked_mode(
             state, [{"id": 1}, {"id": 2}], ["r1", "r2"]
         )
         assert written == 2
@@ -1515,7 +1620,7 @@ class TestApiHandlerBodySpec:
             return {}
 
         handler._send_request = _capture  # type: ignore[assignment]
-        written, failed = await handler._write_chunked_mode(
+        written, failed, _ = await handler._write_chunked_mode(
             state, [{"id": 1}, {"id": 2}, {"id": 3}], ["r1", "r2", "r3"]
         )
         assert written == 3
