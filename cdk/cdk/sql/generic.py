@@ -508,10 +508,11 @@ class GenericSQLConnector(BaseDestinationHandler):
         (anti-join on the contract primary key or the synthetic
         ``_record_hash``); the ADBC path is plain append until the
         anti-join lands there (issue #282 follow-up). Truncate-insert
-        truncates per batch, so replaying the SAME batch is idempotent —
-        but a restart that resumes mid-stream truncates away rows earlier
-        batches committed, and this handler cannot see whether the stream
-        resumes from a cursor, so it must not claim replay safety.
+        truncates on the read's first batch only (issue #307) and its
+        append phase is a plain insert with no row-identity dedup —
+        deliberately, since deduping a full refresh would collapse
+        legitimate duplicate rows — so a replayed already-committed
+        later batch re-inserts its rows.
         """
         state = self._streams.get(stream_id)
         if state is None:
@@ -528,9 +529,10 @@ class GenericSQLConnector(BaseDestinationHandler):
             return RetryVerdict(
                 semantics=RetrySemantics.RETRY_SEMANTICS_AT_LEAST_ONCE,
                 reason=(
-                    "truncate-insert truncates per batch; a restart that "
-                    "resumes mid-stream truncates away rows committed by "
-                    "earlier batches and keeps only the resumed slice"
+                    "truncate-insert truncates on the run's first batch "
+                    "and appends after that with no row-identity dedup; a "
+                    "replayed already-committed later batch re-inserts its "
+                    "rows"
                 ),
             )
         if self._adbc_only:
@@ -1071,10 +1073,30 @@ class GenericSQLConnector(BaseDestinationHandler):
             # (issue #231).
             async with self._statement_deadline():
                 record_count = record_batch.num_rows
+
+                # A full refresh truncates on the read's FIRST batch
+                # (batch_seq 1, issue #307) and appends after that.
+                # batch_seq is the engine's own statement of a fresh read:
+                # it restarts at 1 only when the engine (re)starts the
+                # stream read from scratch, and truncate_insert reads are
+                # never cursor-resumed. Keying on worker-side memory
+                # instead would break when engine and destination restart
+                # independently: a fresh worker joining mid-refresh would
+                # truncate away committed batches, and a surviving worker
+                # would skip the truncate for a restarted read.
+                truncate_now = state.write_mode == "truncate_insert" and batch_seq == 1
+
                 if record_count == 0:
-                    # Empty batch: nothing to write. The cursor still advances
-                    # (the watermark moved); idempotency lives in the write
-                    # itself, so there is no separate marker to record.
+                    # Empty batch: nothing to insert. The cursor still
+                    # advances (the watermark moved); idempotency lives in
+                    # the write itself, so there is no separate marker to
+                    # record. An empty FIRST batch, if one is delivered,
+                    # must still truncate. This does NOT cover a source
+                    # that yields no batches at all — write_batch never
+                    # runs then, and only the engine can close that gap
+                    # (issue #312).
+                    if truncate_now:
+                        await self._truncate_only(state)
                     return BatchWriteResult(
                         status=AckStatus.ACK_STATUS_SUCCESS,
                         records_written=0,
@@ -1088,18 +1110,24 @@ class GenericSQLConnector(BaseDestinationHandler):
                         stream_id,
                         batch_seq,
                         record_batch,
+                        truncate_now=truncate_now,
                     )
                 elif self._sync_engine is not None:
                     prepared = self._prepare_for_sqlalchemy(state, record_batch)
                     self._attach_record_hash(state, prepared)
                     await asyncio.to_thread(
-                        self._write_batch_on_sync_engine, state, prepared
+                        self._write_batch_on_sync_engine,
+                        state,
+                        prepared,
+                        truncate_now,
                     )
                 else:
                     prepared = self._prepare_for_sqlalchemy(state, record_batch)
                     self._attach_record_hash(state, prepared)
                     async with self._require_async_engine().begin() as conn:
-                        await conn.run_sync(self._apply_write_in_txn, state, prepared)
+                        await conn.run_sync(
+                            self._apply_write_in_txn, state, prepared, truncate_now
+                        )
 
                 logger.info(f"Wrote batch {batch_seq}: {record_count} records")
                 return BatchWriteResult(
@@ -1193,16 +1221,19 @@ class GenericSQLConnector(BaseDestinationHandler):
         conn: Connection,
         state: _StreamState,
         records: list[dict[str, Any]],
+        truncate_now: bool,
     ) -> None:
         """Dispatch one batch's DML on an open transaction.
 
         Written once against the sync ``Connection`` API so both
         SQLAlchemy engine flavours execute identical statements: the
         async engine enters via ``AsyncConnection.run_sync``, the sync
-        engine directly from its worker thread.
+        engine directly from its worker thread. ``truncate_now`` is the
+        first-batch truncate decision made in ``write_batch`` (issue
+        #307); only truncate_insert reads it.
         """
         if state.write_mode == "truncate_insert":
-            self._truncate_and_insert(conn, state, records)
+            self._truncate_and_insert(conn, state, records, truncate_now)
         elif state.write_mode == "upsert":
             self._upsert_records(conn, state, records)
         else:
@@ -1212,13 +1243,32 @@ class GenericSQLConnector(BaseDestinationHandler):
         self,
         state: _StreamState,
         records: list[dict[str, Any]],
+        truncate_now: bool,
     ) -> None:
         """Run one write attempt on the sync engine (worker thread).
 
         Mirrors the async path: the DML runs in a single transaction.
         """
         with self._require_sync_engine().begin() as conn:
-            self._apply_write_in_txn(conn, state, records)
+            self._apply_write_in_txn(conn, state, records, truncate_now)
+
+    async def _truncate_only(self, state: _StreamState) -> None:
+        """Empty the target table with no insert (any transport).
+
+        Runs when a refresh's first batch is delivered with zero rows.
+        A refresh that yields no batches at all never reaches
+        ``write_batch``; closing that gap needs an engine-side signal
+        (issue #312), and this helper is the write it would trigger.
+        """
+        if self._adbc_only:
+            await asyncio.to_thread(
+                self._adbc_truncate_sync, state.schema_name, state.table_name
+            )
+        elif self._sync_engine is not None:
+            await asyncio.to_thread(self._write_batch_on_sync_engine, state, [], True)
+        else:
+            async with self._require_async_engine().begin() as conn:
+                await conn.run_sync(self._apply_write_in_txn, state, [], True)
 
     def _attach_record_hash(
         self,
@@ -1276,9 +1326,9 @@ class GenericSQLConnector(BaseDestinationHandler):
             return
         table = state.table
         # The anti-join is an insert-mode concern. truncate_insert reaches this
-        # helper too (after the table is emptied); deduping there would silently
-        # drop a same-key row in a full-refresh batch instead of surfacing the
-        # PK violation, so it gets a plain INSERT.
+        # helper too (after the run's first batch emptied the table); deduping
+        # there would silently drop a same-key row in a full-refresh batch
+        # instead of surfacing the PK violation, so it gets a plain INSERT.
         identity = self._identity_columns(state) if state.write_mode == "insert" else []
         if not identity:
             conn.execute(table.insert(), records)
@@ -1353,11 +1403,20 @@ class GenericSQLConnector(BaseDestinationHandler):
         conn: Connection,
         state: _StreamState,
         records: list[dict[str, Any]],
+        truncate_now: bool,
     ) -> None:
-        """Truncate table and insert pre-cast records."""
+        """Insert pre-cast records, emptying the table first when told to.
+
+        The truncate runs only on the read's first batch (``truncate_now``,
+        decided in ``write_batch``): truncating per batch would keep only
+        the final batch of a multi-batch refresh (issue #307). The delete
+        shares the batch's transaction, so a failed first batch rolls the
+        truncate back with it.
+        """
         if state.table is None:
             return
-        conn.execute(state.table.delete())
+        if truncate_now:
+            conn.execute(state.table.delete())
         self._insert_records(conn, state, records)
 
     def _prepare_for_sqlalchemy(
@@ -1513,19 +1572,22 @@ class GenericSQLConnector(BaseDestinationHandler):
         stream_id: str,
         batch_seq: int,
         record_batch: pa.RecordBatch,
+        truncate_now: bool,
     ) -> None:
         """Full write path for ADBC-only mode.
 
         Insert: append via ``adbc_ingest``. Truncate-insert: TRUNCATE
-        TABLE then append. Upsert: ingest into a session-scoped temp
-        table, then ``MERGE INTO`` the target.
+        TABLE on the read's first batch (``truncate_now``, issue #307),
+        then append; later batches of the refresh append only. Upsert:
+        ingest into a session-scoped temp table, then ``MERGE INTO`` the
+        target.
 
-        Truncate-insert (full refresh) and upsert (MERGE on conflict keys) are
-        idempotent under retry on their own terms. Plain ``insert`` is
-        at-least-once here: the ADBC path has no row-level dedup yet, so a
-        same-run retry can re-ingest the inclusive cursor boundary. The
-        SQLAlchemy path's ``_record_hash`` anti-join (issue #282) is the
-        follow-up that closes this for ADBC.
+        Upsert (MERGE on conflict keys) is idempotent under retry on its
+        own terms. Plain ``insert`` — and truncate_insert's append phase —
+        is at-least-once here: the ADBC path has no row-level dedup yet,
+        so a same-run retry can re-ingest the inclusive cursor boundary.
+        The SQLAlchemy path's ``_record_hash`` anti-join (issue #282) is
+        the follow-up that closes this for ADBC.
         """
         if state.schema_contract is None:
             raise AdbcConfigurationError(
@@ -1534,9 +1596,16 @@ class GenericSQLConnector(BaseDestinationHandler):
             )
         cast_batch = state.schema_contract.cast_arrow_batch(record_batch)
 
-        if state.write_mode == "truncate_insert":
+        if state.write_mode == "truncate_insert" and truncate_now:
             await asyncio.to_thread(
                 self._truncate_then_ingest_sync,
+                cast_batch,
+                state.schema_name,
+                state.table_name,
+            )
+        elif state.write_mode == "truncate_insert":
+            await asyncio.to_thread(
+                self._adbc_only_ingest_sync,
                 cast_batch,
                 state.schema_name,
                 state.table_name,
@@ -1612,12 +1681,8 @@ class GenericSQLConnector(BaseDestinationHandler):
                     raise _reclassify_as_fatal(exc) from exc
                 raise
 
-    def _truncate_then_ingest_sync(
-        self,
-        cast_batch: pa.RecordBatch,
-        schema_name: str,
-        table_name: str,
-    ) -> None:
+    def _adbc_truncate_sync(self, schema_name: str, table_name: str) -> None:
+        """TRUNCATE the target table on the ADBC connection (own commit)."""
         qualified = self.dialect.quote_qualified(schema_name, table_name)
         with self._adbc_op_lock:
             conn = self._reopen_adbc_if_needed_sync()
@@ -1633,8 +1698,17 @@ class GenericSQLConnector(BaseDestinationHandler):
                 if _is_fatal_adbc_error(exc):
                     raise _reclassify_as_fatal(exc) from exc
                 raise
-            # RLock is reentrant: this same-thread acquire inside
-            # _adbc_only_ingest_sync is safe.
+
+    def _truncate_then_ingest_sync(
+        self,
+        cast_batch: pa.RecordBatch,
+        schema_name: str,
+        table_name: str,
+    ) -> None:
+        # RLock is reentrant: the same-thread acquires inside
+        # _adbc_truncate_sync and _adbc_only_ingest_sync are safe.
+        with self._adbc_op_lock:
+            self._adbc_truncate_sync(schema_name, table_name)
             self._adbc_only_ingest_sync(cast_batch, schema_name, table_name)
 
     def _merge_ingest_sync(

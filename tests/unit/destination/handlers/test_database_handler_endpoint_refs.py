@@ -437,6 +437,7 @@ class TestUpsertFailsLoudWithoutConflictKeys:
                 "s1",
                 1,
                 MagicMock(),
+                truncate_now=False,
             )
 
         # Fail before any ingest/MERGE — no partial write.
