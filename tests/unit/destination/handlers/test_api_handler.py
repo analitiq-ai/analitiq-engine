@@ -1897,3 +1897,175 @@ class TestApiHandlerIdempotencyHeaderCollision:
             )
         )
         assert ok is False
+
+
+@pytest.mark.unit
+class TestApiHandlerIdempotencyKeyPerMode:
+    """The key value follows the write mode's identity semantics: insert
+    sends the identity-derived record_id (SQL-insert parity); upsert
+    sends a full-content hash so a changed row gets a new key and the
+    provider applies the update instead of replaying its cached
+    response."""
+
+    def _handler(self, write_mode_key):
+        handler = ApiDestinationHandler()
+        handler._connected = True
+        handler._session = MagicMock()
+        state = _StreamState(
+            endpoint="/v1/records",
+            batch_mode=ApiDestinationHandler.BATCH_MODE_SINGLE,
+            idempotency_in="header",
+            idempotency_name="Idempotency-Key",
+            write_mode_key=write_mode_key,
+        )
+        handler._streams["s1"] = state
+        return handler, state
+
+    @pytest.mark.asyncio
+    async def test_insert_sends_record_id(self):
+        handler, state = self._handler("insert")
+        captured = []
+
+        async def _capture(state_arg, data, extra_headers=None):
+            captured.append(extra_headers)
+            return {}
+
+        handler._send_request = _capture  # type: ignore[assignment]
+        await handler._write_single_mode(state, [{"id": 1}], ["rid-1"])
+        assert captured == [{"Idempotency-Key": "rid-1"}]
+
+    @pytest.mark.asyncio
+    async def test_upsert_sends_content_hash_not_record_id(self):
+        from src.destination.connectors.api import _content_idempotency_key
+
+        handler, state = self._handler("upsert")
+        captured = []
+
+        async def _capture(state_arg, data, extra_headers=None):
+            captured.append(extra_headers)
+            return {}
+
+        handler._send_request = _capture  # type: ignore[assignment]
+        record_v1 = {"id": 1, "name": "a"}
+        record_v2 = {"id": 1, "name": "b"}
+        await handler._write_single_mode(
+            state, [record_v1, record_v2], ["rid-1", "rid-1"]
+        )
+        keys = [h["Idempotency-Key"] for h in captured]
+        assert keys[0] == _content_idempotency_key(record_v1)
+        assert keys[1] == _content_idempotency_key(record_v2)
+        # Same entity (same record_id), changed content: the keys differ,
+        # so the provider applies the update rather than deduping it.
+        assert keys[0] != keys[1]
+        assert "rid-1" not in keys
+
+    @pytest.mark.asyncio
+    async def test_upsert_replay_of_identical_record_reuses_key(self):
+        handler, state = self._handler("upsert")
+        captured = []
+
+        async def _capture(state_arg, data, extra_headers=None):
+            captured.append(extra_headers)
+            return {}
+
+        handler._send_request = _capture  # type: ignore[assignment]
+        record = {"id": 1, "name": "a"}
+        await handler._write_single_mode(
+            state, [record, dict(record)], ["rid-1", "rid-1"]
+        )
+        keys = [h["Idempotency-Key"] for h in captured]
+        assert keys[0] == keys[1]
+
+
+@pytest.mark.unit
+class TestApiHandlerIdempotencyReservedCollisions:
+    """Configure-time rejections for keys that would collide with
+    connection-owned headers or pass-through body fields."""
+
+    def _doc(self, *, idempotency, input_schema=None):
+        block: dict[str, Any] = {
+            "request": {"method": "POST", "path": "/v1/insert"},
+            "idempotency": idempotency,
+        }
+        if input_schema is not None:
+            block["input"] = {"schema": input_schema}
+        return {"operations": {"write": {"insert": block}}}
+
+    def _handler(self, *, session_headers=frozenset()):
+        handler = ApiDestinationHandler()
+        handler._connected = True
+        handler._session = MagicMock()
+        handler._session_header_names = set(session_headers)
+        return handler
+
+    @pytest.mark.asyncio
+    async def test_rejects_key_shadowing_connection_header(self):
+        """An idempotency header named after a connection default header
+        (e.g. Authorization) would send the record id as the credential."""
+        handler = self._handler(session_headers={"authorization"})
+        handler.set_stream_endpoints(
+            {"s1": self._doc(idempotency={"in": "header", "name": "Authorization"})}
+        )
+        ok = await handler.configure_schema(
+            SchemaMessage(
+                stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT
+            )
+        )
+        assert ok is False
+
+    @pytest.mark.asyncio
+    async def test_accepts_header_not_sent_by_connection(self):
+        handler = self._handler(session_headers={"authorization"})
+        handler.set_stream_endpoints(
+            {"s1": self._doc(idempotency={"in": "header", "name": "Idempotency-Key"})}
+        )
+        ok = await handler.configure_schema(
+            SchemaMessage(
+                stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT
+            )
+        )
+        assert ok is True
+
+    @pytest.mark.asyncio
+    async def test_rejects_body_key_declared_in_input_schema(self):
+        """No body template: the record is the body, shaped by the write
+        input schema — a declared field with the reserved name would
+        collide on every record after the ack promised exactly-once."""
+        handler = self._handler()
+        handler.set_stream_endpoints(
+            {
+                "s1": self._doc(
+                    idempotency={"in": "body", "name": "idempotency_key"},
+                    input_schema={
+                        "properties": {
+                            "id": {"arrow_type": "Int64"},
+                            "idempotency_key": {"arrow_type": "Utf8"},
+                        }
+                    },
+                )
+            }
+        )
+        ok = await handler.configure_schema(
+            SchemaMessage(
+                stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT
+            )
+        )
+        assert ok is False
+
+    @pytest.mark.asyncio
+    async def test_accepts_body_key_absent_from_input_schema(self):
+        handler = self._handler()
+        handler.set_stream_endpoints(
+            {
+                "s1": self._doc(
+                    idempotency={"in": "body", "name": "idempotency_key"},
+                    input_schema={"properties": {"id": {"arrow_type": "Int64"}}},
+                )
+            }
+        )
+        ok = await handler.configure_schema(
+            SchemaMessage(
+                stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT
+            )
+        )
+        assert ok is True

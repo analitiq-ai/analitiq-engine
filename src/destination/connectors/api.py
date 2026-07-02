@@ -6,6 +6,7 @@ rate limiting, retries, and different batch modes.
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
 from collections.abc import Mapping
@@ -74,7 +75,12 @@ def _endpoint_write_mode_block(
 
 
 def _idempotency_config_problem(
-    idempotency: Any, batching: Any, state: "_StreamState"
+    idempotency: Any,
+    batching: Any,
+    state: "_StreamState",
+    *,
+    reserved_headers: frozenset[str] | set[str],
+    declared_input_fields: set[str],
 ) -> str | None:
     """Why this ``idempotency`` block cannot work for the stream, or ``None``.
 
@@ -83,7 +89,10 @@ def _idempotency_config_problem(
     configure time instead of writing without the key it promised. The
     contract has no batching mode: a present ``batching`` block IS the
     multi-record case, so the schema's exclusion — and this mirror — key
-    on its presence.
+    on its presence. ``reserved_headers`` are the lowercased engine- and
+    connection-owned request headers; ``declared_input_fields`` are the
+    write input schema's field names, which shape the pass-through body
+    when no body template is declared.
     """
     if not isinstance(idempotency, Mapping):
         return f"idempotency must be an object, got {type(idempotency).__name__}"
@@ -93,13 +102,16 @@ def _idempotency_config_problem(
         return f"idempotency.in must be 'header' or 'body', got {target!r}"
     if not isinstance(name, str) or not name:
         return f"idempotency.name must be a non-empty string, got {name!r}"
-    if target == "header" and name.lower() == "content-type":
-        # Same rule as the body reserved-field check: the engine owns this
-        # header on every request, and layering the key over it would
-        # silently break the request instead of rejecting the document.
+    if target == "header" and name.lower() in reserved_headers:
+        # Same rule as the body reserved-field check: these headers are
+        # engine-owned (Content-Type) or carry the connection's own
+        # values (auth and friends); layering the key over one would
+        # silently break every request — or worse, send the record id as
+        # the credential — instead of rejecting the document.
         return (
-            "idempotency.name must not be 'Content-Type'; the engine owns "
-            "that header on every request"
+            f"idempotency.name {name!r} collides with an engine- or "
+            f"connection-owned request header; pick a header the "
+            f"connection does not already send"
         )
     if batching:
         return (
@@ -119,6 +131,16 @@ def _idempotency_config_problem(
             return (
                 f"request.body already declares the field {name!r} that "
                 f"idempotency.name reserves for the engine-owned key"
+            )
+        if state.body_spec is None and name in declared_input_fields:
+            # No body template: the record itself is the body, shaped by
+            # the write input schema — a declared field with the reserved
+            # name would collide on every record at write time, after the
+            # ack already promised exactly-once.
+            return (
+                f"the write input schema already declares the field "
+                f"{name!r} that idempotency.name reserves for the "
+                f"engine-owned key on the pass-through body"
             )
     return None
 
@@ -222,6 +244,33 @@ def _collect_json_fields(mode_block: Mapping[str, Any]) -> set[str]:
     return names
 
 
+def _collect_input_field_names(mode_block: Mapping[str, Any]) -> set[str]:
+    """Every field name the write input schema declares (both shapes)."""
+    schema = (mode_block.get("input") or {}).get("schema") or {}
+    names: set[str] = set(
+        name for name in (schema.get("properties") or {}) if isinstance(name, str)
+    )
+    for col in schema.get("columns") or []:
+        if isinstance(col, dict) and col.get("name"):
+            names.add(col["name"])
+    return names
+
+
+def _content_idempotency_key(record: Mapping[str, Any]) -> str:
+    """Full-content hash used as the idempotency key in upsert mode.
+
+    Upsert exists to reconcile changed rows, so its key must change when
+    the content changes: a stable identity key would make the provider's
+    replay cache swallow a legitimate update to the same entity within
+    its dedup window. The canonicalisation mirrors the SQL destination's
+    ``_record_hash`` (sorted-key JSON, ``default=str``), so an identical
+    replay dedups and a changed row gets a new key — SQL upsert
+    semantics, provider-side.
+    """
+    canonical = json.dumps(dict(record), sort_keys=True, default=str)
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
 @dataclass
 class _StreamState:
     """Per-stream API destination state.
@@ -263,6 +312,12 @@ class _StreamState:
     # semantics: the first occurrence of an identity wins.
     idempotency_in: str | None = None
     idempotency_name: str = ""
+    # The stream's write mode key ("insert" / "upsert"). Insert keys on
+    # the engine's identity-derived record_id (SQL insert parity: first
+    # occurrence of an identity wins); upsert keys on the full record
+    # content so a changed row gets a new key and the provider applies
+    # the update instead of replaying the cached response.
+    write_mode_key: str = "insert"
     # Retry-safety verdict computed at configure time (issue #286).
     retry_verdict: RetryVerdict | None = None
 
@@ -335,6 +390,13 @@ class ApiDestinationHandler(BaseDestinationHandler):
         # connect() time. Everything else (4xx other than 429, and 5xx
         # other than 500/503/504 such as 502) is single-attempt.
         self._retry_statuses: set = {429, 500, 503, 504}
+
+        # Lowercased default-header names the connection's session sends on
+        # every request (auth and friends), captured at connect() time. An
+        # idempotency header colliding with one of these is rejected at
+        # configure time — layering the key over it would shadow the
+        # connection's own value on every write.
+        self._session_header_names: set[str] = set()
 
     def set_stream_endpoints(
         self, stream_endpoints: Mapping[str, Mapping[str, Any]]
@@ -418,6 +480,7 @@ class ApiDestinationHandler(BaseDestinationHandler):
             client_session=runtime.session,
             retry_options=retry_options,
         )
+        self._session_header_names = {k.lower() for k in runtime.session.headers}
 
         self._connected = True
         logger.info(f"ApiDestinationHandler connected to {self._base_url}")
@@ -517,10 +580,16 @@ class ApiDestinationHandler(BaseDestinationHandler):
                 )
                 return False
 
+        state.write_mode_key = mode_key
+
         idempotency = mode_block.get("idempotency")
         if idempotency is not None:
             problem = _idempotency_config_problem(
-                idempotency, mode_block.get("batching"), state
+                idempotency,
+                mode_block.get("batching"),
+                state,
+                reserved_headers={"content-type"} | self._session_header_names,
+                declared_input_fields=_collect_input_field_names(mode_block),
             )
             if problem is not None:
                 logger.error(
@@ -730,10 +799,24 @@ class ApiDestinationHandler(BaseDestinationHandler):
         first_failure = ""
 
         for i, record in enumerate(records):
+            # Insert keys on the identity-derived record_id (first
+            # occurrence of an identity wins, matching the SQL insert
+            # anti-join); upsert keys on the full record content so a
+            # changed row gets a new key and the provider applies the
+            # update instead of replaying its cached response.
+            idempotency_key = (
+                None
+                if state.idempotency_in is None
+                else (
+                    record_ids[i]
+                    if state.write_mode_key == "insert"
+                    else _content_idempotency_key(record)
+                )
+            )
             try:
                 body = self._build_body(state, record=record)
-                if state.idempotency_in == "body":
-                    body = _body_with_idempotency_key(state, body, record_ids[i])
+                if state.idempotency_in == "body" and idempotency_key is not None:
+                    body = _body_with_idempotency_key(state, body, idempotency_key)
             except (TypeError, ValueError) as e:
                 logger.warning(
                     "Failed to build body for record %s: %s: %s",
@@ -745,8 +828,8 @@ class ApiDestinationHandler(BaseDestinationHandler):
                 first_failure = first_failure or f"{type(e).__name__}: {e}"
                 continue
             idempotency_header = (
-                {state.idempotency_name: record_ids[i]}
-                if state.idempotency_in == "header"
+                {state.idempotency_name: idempotency_key}
+                if state.idempotency_in == "header" and idempotency_key is not None
                 else None
             )
             try:

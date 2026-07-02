@@ -335,13 +335,24 @@ per-request idempotency key lands:
 
 `in` is `"header"` (Stripe-style) or `"body"` (Square-style, requires a
 JSON-object request body); `name` is the header or top-level body field.
-The author declares **placement only** — the key value is engine-owned:
-the identity-derived `record_id` the engine already computes per record
-(primary-key fields when the source declares them, else the full
-content), so a re-sent record carries the same key and the provider
-dedups it within its replay window. This gives API `insert` the same
-identity semantics as SQL `insert`: the first occurrence of an identity
-wins; a stream that must reconcile changed rows uses `upsert`.
+The author declares **placement only** — the key value is engine-owned
+and follows the write mode's identity semantics, mirroring the SQL
+destination:
+
+- **`insert`** — the identity-derived `record_id` (primary-key fields
+  when the source declares them, else the full content): the first
+  occurrence of an identity wins, like the SQL insert anti-join; a
+  stream that must reconcile changed rows uses `upsert`.
+- **`upsert`** — a full-content hash (the `_record_hash`
+  canonicalisation): an identical replay dedups, while a changed row
+  gets a new key so the provider applies the update instead of
+  replaying its cached response.
+
+Either way a re-sent record carries the same key and the provider
+dedups it within its replay window. The key name must not collide with
+an engine- or connection-owned request header (`Content-Type`, auth
+headers, ...) nor with a body field the request body or write input
+schema already declares — `configure_schema` rejects those documents.
 
 The block cannot be combined with a `batching` block — the contract has
 no batching mode; a present block IS the multi-record case. Both the
