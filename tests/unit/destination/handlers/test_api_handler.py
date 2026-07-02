@@ -1447,12 +1447,38 @@ class TestClassifyHttpError:
             == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
         )
 
+    def test_399_is_retryable_boundary(self):
+        assert (
+            _classify_http_error(self._response_error(399))
+            == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
+        )
+
+    def test_499_is_fatal_boundary(self):
+        assert (
+            _classify_http_error(self._response_error(499))
+            == AckStatus.ACK_STATUS_FATAL_FAILURE
+        )
+
+    def test_non_response_client_error_is_retryable(self):
+        import aiohttp
+
+        assert (
+            _classify_http_error(aiohttp.ClientError())
+            == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
+        )
+
 
 @pytest.mark.unit
 class TestApiHandlerDeterministic4xxClassification:
     """HTTP 4xx rejections (except 429) are deterministic: the engine must
-    not burn retries on them. Tests cover write_batch (single- and chunked-
-    mode code paths) and the _write_chunked_mode re-raise decision."""
+    not burn retries on them. Tests cover write_batch's outer exception
+    handler and the _write_chunked_mode re-raise decision.
+
+    Note: in single mode _write_single_mode catches ClientError per-record
+    and never re-raises, so write_batch's outer catch is only exercised in
+    practice by chunked mode's first-chunk re-raise. The outer-catch tests
+    below mock _write_single_mode to raise explicitly, isolating the
+    classification logic from the single/chunked dispatch."""
 
     def _response_error(self, status: int) -> "aiohttp.ClientResponseError":
         import aiohttp
@@ -1463,11 +1489,11 @@ class TestApiHandlerDeterministic4xxClassification:
         )
 
     @pytest.mark.asyncio
-    async def test_write_batch_4xx_is_fatal(
+    async def test_write_batch_outer_catch_4xx_is_fatal(
         self, api_handler: ApiDestinationHandler, mock_cursor: MagicMock
     ):
-        """A 4xx ClientResponseError bubbling out of a write mode is FATAL,
-        not RETRYABLE — retrying a deterministic rejection wastes retries."""
+        """write_batch's outer exception handler classifies a 4xx
+        ClientResponseError as FATAL, not RETRYABLE."""
         import aiohttp
 
         api_handler._connected = True
@@ -1489,38 +1515,13 @@ class TestApiHandlerDeterministic4xxClassification:
 
         assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
         assert result.records_written == 0
+        assert result.committed_cursor is None
 
     @pytest.mark.asyncio
-    async def test_write_batch_422_is_fatal(
+    async def test_write_batch_outer_catch_429_is_retryable(
         self, api_handler: ApiDestinationHandler, mock_cursor: MagicMock
     ):
-        """422 Unprocessable Entity is a deterministic payload rejection."""
-        import aiohttp
-
-        api_handler._connected = True
-        api_handler._session = MagicMock()
-        api_handler._write_single_mode = AsyncMock(
-            side_effect=aiohttp.ClientResponseError(
-                MagicMock(), (), status=422, message="Unprocessable Entity"
-            )
-        )
-
-        result = await api_handler.write_batch(
-            run_id="r",
-            stream_id="test-stream",
-            batch_seq=1,
-            record_batch=_to_record_batch([{"id": 1}]),
-            record_ids=["r1"],
-            cursor=mock_cursor,
-        )
-
-        assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
-
-    @pytest.mark.asyncio
-    async def test_write_batch_429_is_retryable(
-        self, api_handler: ApiDestinationHandler, mock_cursor: MagicMock
-    ):
-        """429 Rate Limit is transient — stays RETRYABLE."""
+        """write_batch's outer exception handler classifies 429 as RETRYABLE."""
         import aiohttp
 
         api_handler._connected = True
@@ -1543,10 +1544,10 @@ class TestApiHandlerDeterministic4xxClassification:
         assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
 
     @pytest.mark.asyncio
-    async def test_write_batch_5xx_is_retryable(
+    async def test_write_batch_outer_catch_5xx_is_retryable(
         self, api_handler: ApiDestinationHandler, mock_cursor: MagicMock
     ):
-        """5xx server errors are transient — stay RETRYABLE."""
+        """write_batch's outer exception handler classifies 5xx as RETRYABLE."""
         import aiohttp
 
         api_handler._connected = True
@@ -1567,6 +1568,38 @@ class TestApiHandlerDeterministic4xxClassification:
         )
 
         assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
+
+    @pytest.mark.asyncio
+    async def test_single_mode_4xx_is_fatal_via_failed_records(
+        self, api_handler: ApiDestinationHandler, mock_cursor: MagicMock
+    ):
+        """In single mode, a 4xx from _send_request is caught per-record by
+        _write_single_mode (not re-raised). The record goes into failed_ids
+        and write_batch returns FATAL via _build_write_result, not via the
+        outer exception handler."""
+        import aiohttp
+
+        api_handler._connected = True
+        api_handler._session = MagicMock()
+        api_handler._send_request = AsyncMock(
+            side_effect=aiohttp.ClientResponseError(
+                MagicMock(), (), status=400, message="Bad Request"
+            )
+        )
+
+        result = await api_handler.write_batch(
+            run_id="r",
+            stream_id="test-stream",
+            batch_seq=1,
+            record_batch=_to_record_batch([{"id": 1}]),
+            record_ids=["r1"],
+            cursor=mock_cursor,
+        )
+
+        assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+        assert result.records_written == 0
+        assert result.committed_cursor is None
+        assert result.failed_record_ids == ("r1",)
 
     @pytest.mark.asyncio
     async def test_first_chunk_4xx_does_not_reraise(
@@ -1650,6 +1683,48 @@ class TestApiHandlerDeterministic4xxClassification:
                 state, [{"id": 0}, {"id": 1}], ["r0", "r1"]
             )
         assert exc_info.value.status == 429
+
+    @pytest.mark.asyncio
+    async def test_mid_batch_4xx_attributes_tail_as_fatal(
+        self, api_handler: ApiDestinationHandler, mock_cursor: MagicMock
+    ):
+        """A 4xx on a non-first chunk (some records already landed) must
+        attribute the failed chunk plus unsent tail and return FATAL.
+        The 4xx must not re-raise (nothing-landed invariant only applies at
+        written == 0; mid-batch duplication risk doesn't change the rule)."""
+        import aiohttp
+
+        api_handler._connected = True
+        api_handler._session = MagicMock()
+        state = api_handler._streams["test-stream"]
+        state.max_records = 2
+
+        calls = []
+
+        async def _send(state_arg, data, extra_headers=None):
+            calls.append(data)
+            if len(calls) == 2:
+                raise aiohttp.ClientResponseError(
+                    MagicMock(), (), status=400, message="Bad Request"
+                )
+            return {}
+
+        api_handler._send_request = _send
+
+        result = await api_handler.write_batch(
+            run_id="r",
+            stream_id="test-stream",
+            batch_seq=1,
+            record_batch=_to_record_batch([{"id": i} for i in range(5)]),
+            record_ids=[f"r{i}" for i in range(5)],
+            cursor=mock_cursor,
+        )
+
+        assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+        assert result.records_written == 2
+        assert result.committed_cursor is None
+        assert result.failed_record_ids == ("r2", "r3", "r4")
+        assert len(calls) == 2
 
 
 @pytest.mark.unit

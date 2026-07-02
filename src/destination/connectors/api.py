@@ -277,7 +277,7 @@ def _collect_input_field_names(mode_block: Mapping[str, Any]) -> set[str]:
     return names
 
 
-def _classify_http_error(exc: BaseException) -> "AckStatus":
+def _classify_http_error(exc: aiohttp.ClientError | asyncio.TimeoutError) -> "AckStatus":
     """FATAL for deterministic 4xx rejections (not 429); RETRYABLE for everything else.
 
     A ClientResponseError with a 4xx status other than 429 is a deterministic
@@ -426,8 +426,9 @@ class ApiDestinationHandler(BaseDestinationHandler):
 
         # HTTP statuses that trigger retry with exponential backoff; the
         # attempt count comes from ``runtime.raw_config["max_retries"]`` at
-        # connect() time. Everything else (4xx other than 429, and 5xx
-        # other than 500/503/504 such as 502) is single-attempt.
+        # connect() time. 4xx other than 429 are single-attempt and
+        # classified FATAL by _classify_http_error; 5xx outside this set
+        # (e.g. 502) are single-attempt but remain RETRYABLE.
         self._retry_statuses: set = {429, 500, 503, 504}
 
         # Lowercased default-header names the connection's session sends on
@@ -997,6 +998,7 @@ class ApiDestinationHandler(BaseDestinationHandler):
                     len(batch),
                     type(e).__name__,
                     e,
+                    exc_info=True,
                 )
                 return written, list(record_ids[i:]), f"{type(e).__name__}: {e}"
             written += len(batch)
@@ -1012,9 +1014,13 @@ class ApiDestinationHandler(BaseDestinationHandler):
         """
         Send HTTP request with rate limiting.
 
-        Retry logic is handled by RetryClient (configured in connect()):
-        - 429, 500, 503, 504: Retry up to max_retries with exponential backoff
-        - 502 and other 4xx: Single attempt, no retry
+        RetryClient transport-level retries (configured in connect()):
+        - 429, 500, 503, 504: retry up to max_retries with exponential backoff
+        - all other statuses (4xx except 429, 502, etc.): single attempt
+
+        Engine-level ack classification (via _classify_http_error):
+        - 4xx except 429: ACK_STATUS_FATAL_FAILURE — deterministic rejection
+        - 429, 5xx, connection errors, timeouts: ACK_STATUS_RETRYABLE_FAILURE
 
         Args:
             data: Request body (single record or list of records)
