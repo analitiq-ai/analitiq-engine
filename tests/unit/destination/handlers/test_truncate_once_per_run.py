@@ -408,3 +408,177 @@ class TestFullRefreshCheckpoint:
 
         await view.save_cursor("s1", {}, {"cursor": "x"})
         inner.save_cursor.assert_awaited_once_with("s1", {}, {"cursor": "x"})
+
+
+@pytest.mark.unit
+class TestZeroBatchTruncate:
+    """A truncate_insert source that yields no batches must still truncate.
+
+    Without the fix (issue #312), write_batch never fires and the
+    previous run's rows survive untouched.  The engine now sends a
+    synthetic empty batch (batch_seq=1) after the extraction loop exits
+    with batch_seq==0, which triggers the existing truncate-only path
+    already proven by TestTruncateOnFirstBatchSqlAlchemy.
+    """
+
+    def _engine(self):
+        engine = StreamingEngine.__new__(StreamingEngine)
+        engine.max_retries = 0
+        engine.retry_delay = 0
+        engine.error_strategy = "fail"
+        engine.metrics = MagicMock()
+        engine.pipeline_id = "p1"
+        return engine
+
+    def _config(self, write_mode: str) -> dict:
+        resolved_source = MagicMock()
+        resolved_source.replication = None
+        resolved_source.primary_keys = []
+        return {
+            "stream_name": "s",
+            "stream_id": "s1",
+            "stream_version": 1,
+            "source": {"_resolved_source": resolved_source},
+            "destination": {"write_mode": write_mode},
+        }
+
+    async def _run_zero_batch_load_stage(self, engine, config, ack_status=None):
+        import asyncio
+
+        from src.grpc.generated.analitiq.v1 import AckStatus
+
+        if ack_status is None:
+            ack_status = AckStatus.ACK_STATUS_SUCCESS
+
+        input_queue: asyncio.Queue = asyncio.Queue()
+        await input_queue.put(None)  # end-of-stream immediately — zero batches
+        output_queue: asyncio.Queue = asyncio.Queue()
+
+        grpc_client = MagicMock()
+        result = MagicMock()
+        result.status = ack_status
+        result.failure_summary = "db down"
+        result.committed_cursor = None
+        result.records_written = 0
+        grpc_client.send_batch = AsyncMock(return_value=result)
+        grpc_client.end_stream = AsyncMock()
+
+        stream_dlq = MagicMock()
+        stream_dlq.send_batch = AsyncMock()
+
+        stream_metrics = {
+            "records_processed": 0,
+            "records_failed": 0,
+            "records_skipped": 0,
+            "batches_processed": 0,
+            "batches_failed": 0,
+        }
+        await engine._load_stage(
+            input_queue,
+            output_queue,
+            grpc_client,
+            config,
+            stream_dlq,
+            "run-1",
+            stream_metrics,
+        )
+        return grpc_client
+
+    @pytest.mark.asyncio
+    async def test_synthetic_batch_sent_for_zero_batch_truncate_insert(self):
+        """Engine sends exactly one send_batch call (the synthetic empty
+        batch) when a truncate_insert source produces no real batches."""
+        engine = self._engine()
+        grpc_client = await self._run_zero_batch_load_stage(
+            engine, self._config("truncate_insert")
+        )
+
+        grpc_client.send_batch.assert_awaited_once()
+        call_kwargs = grpc_client.send_batch.call_args
+        assert call_kwargs.kwargs["batch_seq"] == 1
+        assert call_kwargs.kwargs["record_batch"].num_rows == 0
+        assert call_kwargs.kwargs["record_ids"] == []
+
+    @pytest.mark.asyncio
+    async def test_no_synthetic_batch_for_zero_batch_insert(self):
+        """Non-truncate_insert streams do not get a synthetic batch when
+        the source yields nothing — there is nothing to truncate."""
+        engine = self._engine()
+        grpc_client = await self._run_zero_batch_load_stage(
+            engine, self._config("insert")
+        )
+        grpc_client.send_batch.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_no_synthetic_batch_for_zero_batch_upsert(self):
+        """Upsert streams do not get a synthetic batch either."""
+        engine = self._engine()
+        grpc_client = await self._run_zero_batch_load_stage(
+            engine, self._config("upsert")
+        )
+        grpc_client.send_batch.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_synthetic_batch_failure_raises(self):
+        """A failed synthetic truncate batch raises StreamProcessingError
+        so the pipeline fails loud rather than leaving stale data behind."""
+        from src.grpc.generated.analitiq.v1 import AckStatus
+
+        from src.engine.exceptions import StreamProcessingError
+
+        engine = self._engine()
+        with pytest.raises(StreamProcessingError, match="zero-batch truncate"):
+            await self._run_zero_batch_load_stage(
+                engine,
+                self._config("truncate_insert"),
+                ack_status=AckStatus.ACK_STATUS_FATAL_FAILURE,
+            )
+
+    @pytest.mark.asyncio
+    async def test_zero_batch_truncate_insert_clears_table_sqlalchemy(self):
+        """End-to-end: an empty source with truncate_insert leaves the
+        destination table empty (SQLAlchemy path), not stale from the
+        previous run."""
+        engine = _sqlite_engine()
+        table = _table(engine)
+        handler = _sqlite_handler(engine, table)
+
+        # Previous run populated the table
+        await _write(handler, 1, [{"id": 1, "name": "prev"}], run_id="run-0")
+        assert _rows(engine, table) == [(1, "prev")]
+
+        # Synthetic empty batch sent by engine when source yields nothing
+        r = await _write(handler, 1, [], run_id="run-1")
+        assert r.success
+        assert _rows(engine, table) == []
+
+    @pytest.mark.asyncio
+    async def test_zero_batch_truncate_insert_clears_table_adbc(self):
+        """End-to-end: an empty source with truncate_insert triggers the
+        ADBC truncate path when the engine sends the synthetic batch."""
+        handler = GenericSQLConnector()
+        handler._connected = True
+        handler._adbc_only = True
+        contract = MagicMock()
+        contract.cast_arrow_batch = lambda b: b
+        handler._streams["s1"] = SqlStreamState(
+            table_name="t",
+            write_mode="truncate_insert",
+            schema_contract=contract,
+        )
+        handler._adbc_truncate_sync = MagicMock()
+        handler._truncate_then_ingest_sync = MagicMock()
+        handler._adbc_only_ingest_sync = MagicMock()
+
+        r = await handler.write_batch(
+            run_id="run-1",
+            stream_id="s1",
+            batch_seq=1,
+            record_batch=pa.record_batch([], schema=pa.schema([])),
+            record_ids=[],
+            cursor=MagicMock(),
+        )
+        assert r.success
+        handler._adbc_truncate_sync.assert_called_once()
+        handler._truncate_then_ingest_sync.assert_not_called()
+        handler._adbc_only_ingest_sync.assert_not_called()

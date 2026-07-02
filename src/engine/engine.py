@@ -8,6 +8,7 @@ from asyncio import Queue, Semaphore
 from datetime import datetime, timezone
 from typing import Any
 
+import pyarrow as pa
 from cdk.contract import Readable
 from cdk.types import CheckpointStore
 
@@ -19,7 +20,7 @@ from ..grpc.client import (
     resolve_grpc_ack_timeout_seconds,
 )
 from ..grpc.cursor import compute_max_cursor, cursor_to_state_dict
-from ..grpc.generated.analitiq.v1 import AckStatus, RetrySemantics
+from ..grpc.generated.analitiq.v1 import AckStatus, Cursor, RetrySemantics
 from ..models.metrics import PipelineMetrics
 from ..models.resolved import RuntimeConfig
 from ..shared.run_id import get_or_generate_run_id
@@ -938,6 +939,35 @@ class StreamingEngine:
                         raise StreamProcessingError(
                             f"Batch {batch_seq} unknown ACK status: {result.status}"
                         )
+
+            # A truncate_insert source that emitted zero batches never fires
+            # write_batch, so the destination is never told to truncate.
+            # Send a synthetic empty batch (batch_seq=1) to trigger the
+            # existing truncate-only path in write_batch (issue #312).
+            if batch_seq == 0 and self._is_truncate_insert(config):
+                logger.info(
+                    "Stream %s: source yielded no batches on a "
+                    "truncate_insert stream; sending synthetic empty "
+                    "batch to trigger truncate",
+                    stream_name,
+                )
+                empty_batch = pa.record_batch([], schema=pa.schema([]))
+                result = await grpc_client.send_batch(
+                    run_id=run_id,
+                    stream_id=stream_id,
+                    batch_seq=1,
+                    record_batch=empty_batch,
+                    record_ids=[],
+                    cursor=Cursor(token=b""),
+                )
+                if result.status not in (
+                    AckStatus.ACK_STATUS_SUCCESS,
+                    AckStatus.ACK_STATUS_ALREADY_COMMITTED,
+                ):
+                    raise StreamProcessingError(
+                        f"Stream {stream_name}: zero-batch truncate failed: "
+                        f"{result.failure_summary}"
+                    )
 
             # Signal end of stream
             await output_queue.put(None)

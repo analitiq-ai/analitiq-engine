@@ -1090,11 +1090,9 @@ class GenericSQLConnector(BaseDestinationHandler):
                     # Empty batch: nothing to insert. The cursor still
                     # advances (the watermark moved); idempotency lives in
                     # the write itself, so there is no separate marker to
-                    # record. An empty FIRST batch, if one is delivered,
-                    # must still truncate. This does NOT cover a source
-                    # that yields no batches at all — write_batch never
-                    # runs then, and only the engine can close that gap
-                    # (issue #312).
+                    # record. An empty FIRST batch (including the synthetic
+                    # one the engine sends when the source yields no batches
+                    # at all — issue #312) must still truncate.
                     if truncate_now:
                         await self._truncate_only(state)
                     return BatchWriteResult(
