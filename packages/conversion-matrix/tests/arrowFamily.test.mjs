@@ -1,10 +1,15 @@
-// Tests for arrowFamily() — mirrors the engine's Python arrow_family() contract.
+// Tests for arrowFamily() — covers the head-extraction contract and the two
+// special folds (LargeList→List, Dictionary→value-type family).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { arrowFamily, getConversion } from "../dist/index.js";
 
 test("simple family heads pass through unchanged", () => {
   assert.equal(arrowFamily("Int64"), "Int64");
+  assert.equal(arrowFamily("Int8"), "Int8");
+  assert.equal(arrowFamily("UInt64"), "UInt64");
+  assert.equal(arrowFamily("Float64"), "Float64");
+  assert.equal(arrowFamily("Date32"), "Date32");
   assert.equal(arrowFamily("Utf8"), "Utf8");
   assert.equal(arrowFamily("LargeUtf8"), "LargeUtf8");
   assert.equal(arrowFamily("Boolean"), "Boolean");
@@ -50,9 +55,30 @@ test("Dictionary with complex value type (parameterised head)", () => {
   assert.equal(arrowFamily("Dictionary<Int32, Decimal128(18, 4)>"), "Decimal128");
 });
 
+test("Dictionary with no angle brackets returns 'Dictionary'", () => {
+  assert.equal(arrowFamily("Dictionary"), "Dictionary");
+});
+
+test("Dictionary with malformed angle brackets (no comma) returns 'Dictionary'", () => {
+  assert.equal(arrowFamily("Dictionary<Int32>"), "Dictionary");
+  assert.equal(arrowFamily("Dictionary<>"), "Dictionary");
+});
+
+test("doubly-nested Dictionary resolves through two levels", () => {
+  assert.equal(arrowFamily("Dictionary<Int32, Dictionary<Int8, Utf8>>"), "Utf8");
+  assert.equal(arrowFamily("Dictionary<Int32, Dictionary<Int8, LargeList>>"), "List");
+});
+
 test("unknown types return the head unchanged", () => {
   assert.equal(arrowFamily("UnknownType"), "UnknownType");
   assert.equal(arrowFamily("FutureType(param)"), "FutureType");
+  assert.equal(arrowFamily(""), "");
+});
+
+test("prototype-key strings pass through and do not pollute getConversion", () => {
+  assert.equal(arrowFamily("__proto__"), "__proto__");
+  assert.equal(arrowFamily("constructor"), "constructor");
+  assert.equal(getConversion(arrowFamily("__proto__"), "Utf8"), undefined);
 });
 
 test("leading/trailing whitespace is stripped", () => {

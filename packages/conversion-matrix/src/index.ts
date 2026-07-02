@@ -33,49 +33,43 @@ export function getConversion(source: string, target: string): ConversionCell | 
 /**
  * The conversion-matrix family name for a canonical Arrow type string.
  *
- * Mirrors the engine's Python `arrow_family(dtype)` for the two folds a naive
- * head-split misses:
- * - `LargeList` folds to `"List"` (same family; the engine maps both PyArrow
- *   `list` and `large_list` to `"List"`).
- * - `Dictionary<IndexType, ValueType>` folds to the value type's family (the
- *   engine decodes dict-encoded columns transparently and classifies by the
- *   decoded value type).
+ * Applies the same two reclassifications the engine's Python `arrow_family(dtype)`
+ * makes that a direct head-split cannot express:
+ * - `"LargeList"` → `"List"` (the engine maps both the `List` and `LargeList`
+ *   canonical type strings to the same `"List"` family).
+ * - `"Dictionary<IndexType, ValueType>"` → the value type's family (the engine
+ *   decodes dict-encoded columns transparently and classifies by the decoded type).
  *
  * For all other types the family is the leading token of the canonical string —
- * the text before any parenthesised parameters (e.g. `"Timestamp"` from
- * `"Timestamp(MICROSECOND, UTC)"`).
+ * the text before any parenthesised parameters or angle-bracketed type arguments
+ * (e.g. `"Timestamp"` from `"Timestamp(MICROSECOND, UTC)"`, or `"Dictionary"`
+ * from `"Dictionary<Int32, Utf8>"`).
  *
- * Returns the extracted head unchanged for unrecognised families; callers can
- * pass the result directly to `getConversion`, which returns `undefined` for
- * unknown families.
+ * Unlike the Python equivalent (which raises for unrecognised types), this
+ * function returns the extracted head unchanged for unrecognised families so
+ * callers can pass the result directly to `getConversion`, which returns
+ * `undefined` for unknown families.
  */
 export function arrowFamily(canonicalType: string): string {
   const trimmed = canonicalType.trim();
-  const parenIdx = trimmed.indexOf("(");
-  const angleIdx = trimmed.indexOf("<");
-  const splitAt =
-    parenIdx === -1 && angleIdx === -1
-      ? trimmed.length
-      : parenIdx === -1
-        ? angleIdx
-        : angleIdx === -1
-          ? parenIdx
-          : Math.min(parenIdx, angleIdx);
+  const delimiters = [trimmed.indexOf("("), trimmed.indexOf("<")].filter((i) => i !== -1);
+  const splitAt = delimiters.length === 0 ? trimmed.length : Math.min(...delimiters);
   const head = trimmed.slice(0, splitAt).trim();
 
   if (head === "LargeList") return "List";
 
   // Dictionary<IndexType, ValueType> — IndexType is always a plain integer
   // (no commas), so the first comma separates it from the (possibly complex)
-  // value type.
+  // value type. If angle brackets are absent or malformed, falls back to
+  // returning "Dictionary" as the head.
   if (head === "Dictionary") {
     const lt = trimmed.indexOf("<");
     const gt = trimmed.lastIndexOf(">");
     if (lt !== -1 && gt > lt) {
-      const inner = trimmed.slice(lt + 1, gt).trim();
+      const inner = trimmed.slice(lt + 1, gt);
       const comma = inner.indexOf(",");
       if (comma !== -1) {
-        return arrowFamily(inner.slice(comma + 1).trim());
+        return arrowFamily(inner.slice(comma + 1));
       }
     }
     return head;
