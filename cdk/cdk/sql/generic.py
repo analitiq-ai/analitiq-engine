@@ -1090,9 +1090,11 @@ class GenericSQLConnector(BaseDestinationHandler):
                     # Empty batch: nothing to insert. The cursor still
                     # advances (the watermark moved); idempotency lives in
                     # the write itself, so there is no separate marker to
-                    # record. An empty FIRST batch must still truncate —
-                    # skipping it would leave the previous refresh in place
-                    # under a run that reports success.
+                    # record. An empty FIRST batch, if one is delivered,
+                    # must still truncate. This does NOT cover a source
+                    # that yields no batches at all — write_batch never
+                    # runs then, and only the engine can close that gap
+                    # (issue #312).
                     if truncate_now:
                         await self._truncate_only(state)
                     return BatchWriteResult(
@@ -1253,9 +1255,10 @@ class GenericSQLConnector(BaseDestinationHandler):
     async def _truncate_only(self, state: _StreamState) -> None:
         """Empty the target table with no insert (any transport).
 
-        Runs when the refresh's first batch carries zero rows: the
-        truncate must still happen or the previous refresh survives a
-        successful run.
+        Runs when a refresh's first batch is delivered with zero rows.
+        A refresh that yields no batches at all never reaches
+        ``write_batch``; closing that gap needs an engine-side signal
+        (issue #312), and this helper is the write it would trigger.
         """
         if self._adbc_only:
             await asyncio.to_thread(

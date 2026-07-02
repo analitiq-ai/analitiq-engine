@@ -201,9 +201,9 @@ class TestTruncateOnFirstBatchSqlAlchemy:
 
     @pytest.mark.asyncio
     async def test_empty_first_batch_still_truncates(self):
-        """A refresh whose first batch carries zero rows must still empty
-        the table — skipping the truncate would leave the previous refresh
-        in place under a run that reports success."""
+        """A refresh whose first batch is DELIVERED with zero rows must
+        still empty the table. (A source that yields no batches at all
+        never reaches write_batch — that gap is issue #312.)"""
         engine = _sqlite_engine()
         table = _table(engine)
         handler = _sqlite_handler(engine, table)

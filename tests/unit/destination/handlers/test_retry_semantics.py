@@ -80,8 +80,8 @@ class TestSqlVerdicts:
     """The SQL verdict must match the write path that actually runs:
     upsert dedups on its conflict keys everywhere; insert anti-joins on
     row identity only on the SQLAlchemy transport; truncate-insert
-    truncates once per run (issue #307) but appends with no row-identity
-    dedup, so it cannot claim replay safety."""
+    truncates on the run's first batch (issue #307) but appends with no
+    row-identity dedup, so it cannot claim replay safety."""
 
     def _handler(self, *, adbc_only: bool, **state_kwargs) -> GenericSQLConnector:
         handler = GenericSQLConnector()

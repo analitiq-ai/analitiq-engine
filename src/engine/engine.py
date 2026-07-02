@@ -49,11 +49,11 @@ class _FullRefreshCheckpoint:
     """Checkpoint view for truncate_insert streams: never resumes.
 
     A full refresh must re-read the source from scratch on every
-    (re)start — the destination truncates once per run, so a resumed
-    slice would be the only data left in the target (issue #307).
-    ``get_cursor`` therefore always answers ``None`` (full re-scan);
-    ``save_cursor`` delegates so in-run watermark tracking and state
-    emission stay exactly as they are for every other stream.
+    (re)start — the destination truncates on the read's first batch, so
+    a resumed slice would be the only data left in the target (issue
+    #307). ``get_cursor`` therefore always answers ``None`` (full
+    re-scan); ``save_cursor`` delegates so in-run watermark tracking and
+    state emission stay exactly as they are for every other stream.
     """
 
     def __init__(self, inner: StateManager) -> None:
