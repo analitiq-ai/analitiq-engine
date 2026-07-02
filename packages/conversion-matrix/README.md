@@ -44,7 +44,7 @@ getConversion("Int64", "Utf8");
 // { mode: "explicit", fn: "to_string", runtime_checked: false }
 
 getConversion("Int32", "Int64");
-// { mode: "auto", fn: null, runtime_checked: false }
+// { mode: "auto", fn: null, runtime_checked: true }
 
 getConversion("Nope", "Utf8");
 // undefined  (unknown family)
