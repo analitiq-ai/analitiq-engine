@@ -277,6 +277,24 @@ def _collect_input_field_names(mode_block: Mapping[str, Any]) -> set[str]:
     return names
 
 
+def _classify_http_error(exc: BaseException) -> "AckStatus":
+    """FATAL for deterministic 4xx rejections (not 429); RETRYABLE for everything else.
+
+    A ClientResponseError with a 4xx status other than 429 is a deterministic
+    rejection — the API refused the payload, and retrying burns retries
+    identically. 429, 5xx, connection errors, and timeouts may recover, so
+    they stay RETRYABLE (subject to the nothing-landed invariant on
+    multi-record paths).
+    """
+    if (
+        isinstance(exc, aiohttp.ClientResponseError)
+        and 400 <= exc.status < 500
+        and exc.status != 429
+    ):
+        return AckStatus.ACK_STATUS_FATAL_FAILURE
+    return AckStatus.ACK_STATUS_RETRYABLE_FAILURE
+
+
 def _content_idempotency_key(record: Mapping[str, Any]) -> str:
     """Full-content hash used as the idempotency key in upsert mode.
 
@@ -730,9 +748,10 @@ class ApiDestinationHandler(BaseDestinationHandler):
             )
 
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            status = _classify_http_error(e)
             logger.error("Transport error writing to API: %s", e, exc_info=True)
             return BatchWriteResult(
-                status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
+                status=status,
                 records_written=0,
                 failure_summary=f"{type(e).__name__}: {e}",
             )
@@ -930,12 +949,14 @@ class ApiDestinationHandler(BaseDestinationHandler):
         excludes it with batching), so that duplication is unmitigated.
         The failed chunk and the unsent tail are attributed as failed.
 
-        A transport failure before any chunk landed (``written == 0``)
-        re-raises instead, so write_batch classifies it RETRYABLE —
-        nothing was written, a retry cannot duplicate. A build failure
-        never re-raises: it is deterministic, so a retry cannot help and
-        FATAL with the ids attributed is the honest verdict even at
-        ``written == 0``.
+        A RETRYABLE transport failure before any chunk landed
+        (``written == 0``) re-raises instead, so write_batch classifies it
+        RETRYABLE — nothing was written, a retry cannot duplicate. A FATAL
+        transport failure (4xx non-429) does not re-raise even at
+        ``written == 0``: the API rejected the payload deterministically, and
+        retrying wastes retries identically. A build failure never re-raises:
+        it is deterministic, so a retry cannot help and FATAL with the ids
+        attributed is the honest verdict even at ``written == 0``.
         """
         chunk_size = state.max_records
         if chunk_size is None:
@@ -963,8 +984,12 @@ class ApiDestinationHandler(BaseDestinationHandler):
             try:
                 await self._send_request(state, body)
             except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-                if written == 0:
-                    # No chunk landed yet — safe to retry the whole batch.
+                if (
+                    written == 0
+                    and _classify_http_error(e) == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
+                ):
+                    # No chunk landed and the error is transient — safe to
+                    # retry the whole batch.
                     raise
                 logger.warning(
                     "Failed to write batch chunk at offset %d (%d records): %s: %s",

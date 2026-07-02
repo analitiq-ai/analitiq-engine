@@ -17,6 +17,7 @@ from src.destination.connectors.api import (
     _API_WRITE_MODE_KEYS,
     ApiDestinationHandler,
     _StreamState,
+    _classify_http_error,
 )
 from src.grpc.generated.analitiq.v1 import AckStatus, SchemaMessage, WriteMode
 
@@ -1365,6 +1366,290 @@ class TestOrjsonDefault:
         assert '"price":"9.99"' in encoded
         assert '"price":"12.50"' in encoded
         assert '"created":"2026-05-12T10:00:00+00:00"' in encoded
+
+
+@pytest.mark.unit
+class TestClassifyHttpError:
+    """``_classify_http_error`` classifies ClientResponseError by HTTP status
+    and leaves all other exception types as RETRYABLE."""
+
+    def _response_error(self, status: int) -> "aiohttp.ClientResponseError":
+        import aiohttp
+
+        req = MagicMock()
+        return aiohttp.ClientResponseError(req, (), status=status)
+
+    def test_400_is_fatal(self):
+        import aiohttp
+
+        assert (
+            _classify_http_error(self._response_error(400))
+            == AckStatus.ACK_STATUS_FATAL_FAILURE
+        )
+
+    def test_422_is_fatal(self):
+        assert (
+            _classify_http_error(self._response_error(422))
+            == AckStatus.ACK_STATUS_FATAL_FAILURE
+        )
+
+    def test_401_is_fatal(self):
+        assert (
+            _classify_http_error(self._response_error(401))
+            == AckStatus.ACK_STATUS_FATAL_FAILURE
+        )
+
+    def test_404_is_fatal(self):
+        assert (
+            _classify_http_error(self._response_error(404))
+            == AckStatus.ACK_STATUS_FATAL_FAILURE
+        )
+
+    def test_429_is_retryable(self):
+        assert (
+            _classify_http_error(self._response_error(429))
+            == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
+        )
+
+    def test_500_is_retryable(self):
+        assert (
+            _classify_http_error(self._response_error(500))
+            == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
+        )
+
+    def test_503_is_retryable(self):
+        assert (
+            _classify_http_error(self._response_error(503))
+            == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
+        )
+
+    def test_connection_error_is_retryable(self):
+        import aiohttp
+
+        assert (
+            _classify_http_error(aiohttp.ClientConnectionError("refused"))
+            == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
+        )
+
+    def test_timeout_is_retryable(self):
+        import asyncio
+
+        assert (
+            _classify_http_error(asyncio.TimeoutError())
+            == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
+        )
+
+    def test_payload_error_is_retryable(self):
+        import aiohttp
+
+        assert (
+            _classify_http_error(aiohttp.ClientPayloadError("truncated"))
+            == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
+        )
+
+
+@pytest.mark.unit
+class TestApiHandlerDeterministic4xxClassification:
+    """HTTP 4xx rejections (except 429) are deterministic: the engine must
+    not burn retries on them. Tests cover write_batch (single- and chunked-
+    mode code paths) and the _write_chunked_mode re-raise decision."""
+
+    def _response_error(self, status: int) -> "aiohttp.ClientResponseError":
+        import aiohttp
+
+        req = MagicMock()
+        return aiohttp.ClientResponseError(
+            req, (), status=status, message=f"HTTP {status}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_write_batch_4xx_is_fatal(
+        self, api_handler: ApiDestinationHandler, mock_cursor: MagicMock
+    ):
+        """A 4xx ClientResponseError bubbling out of a write mode is FATAL,
+        not RETRYABLE — retrying a deterministic rejection wastes retries."""
+        import aiohttp
+
+        api_handler._connected = True
+        api_handler._session = MagicMock()
+        api_handler._write_single_mode = AsyncMock(
+            side_effect=aiohttp.ClientResponseError(
+                MagicMock(), (), status=400, message="Bad Request"
+            )
+        )
+
+        result = await api_handler.write_batch(
+            run_id="r",
+            stream_id="test-stream",
+            batch_seq=1,
+            record_batch=_to_record_batch([{"id": 1}]),
+            record_ids=["r1"],
+            cursor=mock_cursor,
+        )
+
+        assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+        assert result.records_written == 0
+
+    @pytest.mark.asyncio
+    async def test_write_batch_422_is_fatal(
+        self, api_handler: ApiDestinationHandler, mock_cursor: MagicMock
+    ):
+        """422 Unprocessable Entity is a deterministic payload rejection."""
+        import aiohttp
+
+        api_handler._connected = True
+        api_handler._session = MagicMock()
+        api_handler._write_single_mode = AsyncMock(
+            side_effect=aiohttp.ClientResponseError(
+                MagicMock(), (), status=422, message="Unprocessable Entity"
+            )
+        )
+
+        result = await api_handler.write_batch(
+            run_id="r",
+            stream_id="test-stream",
+            batch_seq=1,
+            record_batch=_to_record_batch([{"id": 1}]),
+            record_ids=["r1"],
+            cursor=mock_cursor,
+        )
+
+        assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+
+    @pytest.mark.asyncio
+    async def test_write_batch_429_is_retryable(
+        self, api_handler: ApiDestinationHandler, mock_cursor: MagicMock
+    ):
+        """429 Rate Limit is transient — stays RETRYABLE."""
+        import aiohttp
+
+        api_handler._connected = True
+        api_handler._session = MagicMock()
+        api_handler._write_single_mode = AsyncMock(
+            side_effect=aiohttp.ClientResponseError(
+                MagicMock(), (), status=429, message="Too Many Requests"
+            )
+        )
+
+        result = await api_handler.write_batch(
+            run_id="r",
+            stream_id="test-stream",
+            batch_seq=1,
+            record_batch=_to_record_batch([{"id": 1}]),
+            record_ids=["r1"],
+            cursor=mock_cursor,
+        )
+
+        assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
+
+    @pytest.mark.asyncio
+    async def test_write_batch_5xx_is_retryable(
+        self, api_handler: ApiDestinationHandler, mock_cursor: MagicMock
+    ):
+        """5xx server errors are transient — stay RETRYABLE."""
+        import aiohttp
+
+        api_handler._connected = True
+        api_handler._session = MagicMock()
+        api_handler._write_single_mode = AsyncMock(
+            side_effect=aiohttp.ClientResponseError(
+                MagicMock(), (), status=503, message="Service Unavailable"
+            )
+        )
+
+        result = await api_handler.write_batch(
+            run_id="r",
+            stream_id="test-stream",
+            batch_seq=1,
+            record_batch=_to_record_batch([{"id": 1}]),
+            record_ids=["r1"],
+            cursor=mock_cursor,
+        )
+
+        assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
+
+    @pytest.mark.asyncio
+    async def test_first_chunk_4xx_does_not_reraise(
+        self, api_handler: ApiDestinationHandler
+    ):
+        """A 4xx on the first chunk (nothing landed) must NOT re-raise:
+        the rejection is deterministic, so re-raising as RETRYABLE would
+        burn engine retries on a payload the API will always refuse."""
+        import aiohttp
+
+        state = api_handler._streams["test-stream"]
+        state.max_records = 2
+
+        api_handler._send_request = AsyncMock(
+            side_effect=aiohttp.ClientResponseError(
+                MagicMock(), (), status=400, message="Bad Request"
+            )
+        )
+        records = [{"id": i} for i in range(4)]
+        record_ids = [f"r{i}" for i in range(4)]
+
+        written, failed, first_failure = await api_handler._write_chunked_mode(
+            state, records, record_ids
+        )
+        assert written == 0
+        assert failed == record_ids
+        assert "400" in first_failure or "Bad Request" in first_failure
+
+    @pytest.mark.asyncio
+    async def test_first_chunk_4xx_is_fatal_end_to_end(
+        self, api_handler: ApiDestinationHandler, mock_cursor: MagicMock
+    ):
+        """End-to-end: a 4xx on the first (and only attempted) chunk must
+        yield FATAL with every record id attributed and no cursor advance."""
+        import aiohttp
+
+        api_handler._connected = True
+        api_handler._session = MagicMock()
+        state = api_handler._streams["test-stream"]
+        state.max_records = 2
+
+        api_handler._send_request = AsyncMock(
+            side_effect=aiohttp.ClientResponseError(
+                MagicMock(), (), status=400, message="Bad Request"
+            )
+        )
+
+        result = await api_handler.write_batch(
+            run_id="r",
+            stream_id="test-stream",
+            batch_seq=1,
+            record_batch=_to_record_batch([{"id": i} for i in range(4)]),
+            record_ids=[f"r{i}" for i in range(4)],
+            cursor=mock_cursor,
+        )
+
+        assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+        assert result.records_written == 0
+        assert result.committed_cursor is None
+        assert result.failed_record_ids == ("r0", "r1", "r2", "r3")
+
+    @pytest.mark.asyncio
+    async def test_first_chunk_429_still_reraises(
+        self, api_handler: ApiDestinationHandler
+    ):
+        """429 on the first chunk is RETRYABLE and must still re-raise so
+        write_batch can classify it RETRYABLE — nothing landed, safe to retry."""
+        import aiohttp
+
+        state = api_handler._streams["test-stream"]
+        state.max_records = 2
+
+        api_handler._send_request = AsyncMock(
+            side_effect=aiohttp.ClientResponseError(
+                MagicMock(), (), status=429, message="Too Many Requests"
+            )
+        )
+
+        with pytest.raises(aiohttp.ClientResponseError) as exc_info:
+            await api_handler._write_chunked_mode(
+                state, [{"id": 0}, {"id": 1}], ["r0", "r1"]
+            )
+        assert exc_info.value.status == 429
 
 
 @pytest.mark.unit
