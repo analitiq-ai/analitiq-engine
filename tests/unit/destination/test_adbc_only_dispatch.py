@@ -549,6 +549,52 @@ class TestAdbcDdlBuilders:
         snow = _FixtureConnector()
         assert "NOT ENFORCED" not in snow.dialect.pk_clause(["id"])
 
+    def test_keyless_insert_ddl_includes_record_hash_as_primary_key(self):
+        """``_record_hash`` must appear as NOT NULL PRIMARY KEY in the generated
+        DDL for a keyless insert stream on either transport. This is the
+        structural guarantee the stage-MERGE relies on: the database enforces
+        hash uniqueness in the target table.
+
+        Production code passes ``_identity_columns(state)`` as the PK list;
+        for keyless insert this returns ``[RECORD_HASH_COLUMN]`` so the
+        ``_record_hash`` column is the table's sole primary key.
+        """
+        from cdk.sql.ddl import build_create_table_sql
+
+        class _TypeMapperStub:
+            def to_arrow_type(self, native: str) -> str:
+                return {"TEXT": "Utf8"}[native]
+
+        state = _StreamState(
+            schema_name="public",
+            table_name="events",
+            write_mode="insert",
+            primary_keys=[],  # keyless
+            endpoint_document={
+                "columns": [
+                    {"name": "payload", "native_type": "TEXT", "nullable": True}
+                ]
+            },
+        )
+        h = _FixtureConnector()
+        h._adbc_only = True
+        # Use _identity_columns (as production code does in _ensure_tables_exist)
+        # not state.primary_keys — for keyless insert this returns [_record_hash].
+        ddl = build_create_table_sql(
+            h.dialect,
+            _TypeMapperStub(),
+            state.schema_name,
+            state.table_name,
+            h._build_column_defs(state, _TypeMapperStub()),
+            h._identity_columns(state),
+            if_not_exists=True,
+        )
+        assert '"_record_hash"' in ddl
+        assert '"_record_hash" STRING NOT NULL' in ddl
+        assert 'PRIMARY KEY' in ddl
+        pk_pos = ddl.index("PRIMARY KEY")
+        assert "_record_hash" in ddl[pk_pos:]
+
 
 class TestDisconnectClosesAdbc:
     """``disconnect()`` must release the cached ADBC connection and the
@@ -698,13 +744,15 @@ class TestAttachRecordHashToBatch:
         expected = self._expected_hash({"x": 10, "y": "z"})
         assert arrow_hash == expected
 
-    def test_two_identical_rows_get_same_hash(self):
+    def test_intra_batch_duplicate_rows_are_deduplicated(self):
+        # Two byte-identical rows produce the same hash and are collapsed to
+        # one so the stage table never carries two rows with the same conflict
+        # key (which would make MERGE raise "multiple source rows match").
         h = _FixtureConnector()
         h._adbc_only = True
         batch = pa.record_batch({"v": [42, 42]})
         result = h._attach_record_hash_to_batch(batch, self._state())
-        hashes = result.column(GenericSQLConnector.RECORD_HASH_COLUMN).to_pylist()
-        assert hashes[0] == hashes[1]
+        assert result.num_rows == 1
 
     def test_two_different_rows_get_different_hashes(self):
         h = _FixtureConnector()
@@ -713,6 +761,28 @@ class TestAttachRecordHashToBatch:
         result = h._attach_record_hash_to_batch(batch, self._state())
         hashes = result.column(GenericSQLConnector.RECORD_HASH_COLUMN).to_pylist()
         assert hashes[0] != hashes[1]
+
+    def test_null_value_produces_stable_hash(self):
+        h = _FixtureConnector()
+        h._adbc_only = True
+        batch = pa.record_batch({"v": pa.array([None], type=pa.int64()), "name": ["alice"]})
+        result = h._attach_record_hash_to_batch(batch, self._state())
+        arrow_hash = result.column(GenericSQLConnector.RECORD_HASH_COLUMN)[0].as_py()
+        expected = self._expected_hash({"v": None, "name": "alice"})
+        assert arrow_hash == expected
+
+    def test_null_and_string_none_produce_different_hashes(self):
+        h = _FixtureConnector()
+        h._adbc_only = True
+        b1 = pa.record_batch({"v": pa.array([None], type=pa.int64())})
+        b2 = pa.record_batch({"v": pa.array(["None"])})
+        h1 = h._attach_record_hash_to_batch(b1, self._state()).column(
+            GenericSQLConnector.RECORD_HASH_COLUMN
+        )[0].as_py()
+        h2 = h._attach_record_hash_to_batch(b2, self._state()).column(
+            GenericSQLConnector.RECORD_HASH_COLUMN
+        )[0].as_py()
+        assert h1 != h2
 
     def test_noop_for_keyed_insert(self):
         h = _FixtureConnector()
@@ -777,6 +847,7 @@ class TestMergeIngestInsertOnly:
         merge_sql = next(s for s in executed if "MERGE INTO" in s)
         assert "WHEN NOT MATCHED THEN INSERT" in merge_sql
         assert "WHEN MATCHED THEN UPDATE" not in merge_sql
+        assert '"_record_hash"' in merge_sql
 
     def test_insert_only_does_not_warn_about_missing_update_cols(self, caplog):
         h = _FixtureConnector()
@@ -922,3 +993,28 @@ class TestWriteBatchAdbcOnlyKeylessInsert:
 
         assert len(tokens) == 2
         assert tokens[0] == tokens[1]
+
+    @pytest.mark.asyncio
+    async def test_retry_produces_identical_hashed_batch(self):
+        """Same batch retried twice must produce identical _record_hash values
+        so the stage-MERGE skips rows already committed on the first attempt."""
+        h = _FixtureConnector()
+        h._adbc_only = True
+        state = self._make_state("insert")
+        batch = pa.record_batch({"name": ["alice"], "v": [42]})
+
+        captured: list[list[str]] = []
+
+        def capture(cb, *args, **kwargs):
+            captured.append(
+                cb.column(GenericSQLConnector.RECORD_HASH_COLUMN).to_pylist()
+            )
+
+        with patch.object(h, "_merge_ingest_sync", side_effect=capture):
+            for _ in range(2):
+                await h._write_batch_adbc_only(
+                    state, "run1", "s1", 7, batch, truncate_now=False
+                )
+
+        assert len(captured) == 2
+        assert captured[0] == captured[1]
