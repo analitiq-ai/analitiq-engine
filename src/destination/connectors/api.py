@@ -78,13 +78,16 @@ def _batching_max_records(batching: Any) -> int | None:
     """``max_records`` from a contract-valid ``batching`` block, else ``None``.
 
     The api-endpoint contract's Batching shape is
-    ``{"max_records": <int >= 2>}`` (required, closed). This is the single
-    acceptance predicate for a batching block: ``supports_bulk_load``
-    (capability advertisement) and ``configure_schema`` (per-stream
-    acceptance) both apply it, so the two cannot disagree on whether a
-    given block enables multi-record requests.
+    ``{"max_records": <int >= 2>}`` — required and closed, so unknown
+    sibling keys (a typo, or the pre-contract ``mode``/``size`` blended
+    in) make the block non-contract and must not be waved through. This
+    is the single acceptance predicate for a batching block:
+    ``supports_bulk_load`` (capability advertisement) and
+    ``configure_schema`` (per-stream acceptance) both apply it, so the
+    two cannot disagree on whether a given block enables multi-record
+    requests.
     """
-    if not isinstance(batching, Mapping):
+    if not isinstance(batching, Mapping) or set(batching) != {"max_records"}:
         return None
     value = batching.get("max_records")
     if isinstance(value, bool) or not isinstance(value, int) or value < 2:

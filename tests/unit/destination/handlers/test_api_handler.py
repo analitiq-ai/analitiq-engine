@@ -950,6 +950,8 @@ class TestApiHandlerContractBatching:
             {"max_records": True},  # bool is not an integer count
             {"max_records": None},  # null count
             {"mode": "bulk", "size": 100},  # the pre-contract shape (#305)
+            {"max_records": 10, "max_record": 5},  # closed shape: typo sibling
+            {"max_records": 100, "mode": "single"},  # closed shape: blended
             "bulk",  # not an object at all
         ],
     )
@@ -1101,7 +1103,13 @@ class TestApiHandlerSupportsBulkLoad:
 
     @pytest.mark.parametrize(
         "batching",
-        [{}, {"max_records": 1}, {"mode": "bulk", "size": 100}, "bulk"],
+        [
+            {},
+            {"max_records": 1},
+            {"mode": "bulk", "size": 100},
+            {"max_records": 10, "max_record": 5},
+            "bulk",
+        ],
     )
     def test_false_for_batching_block_configure_would_reject(self, handler, batching):
         """Capability advertisement and configure_schema share one
