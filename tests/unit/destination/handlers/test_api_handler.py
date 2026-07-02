@@ -1521,13 +1521,14 @@ class TestApiHandlerIdempotencyConfig:
         *,
         mode="insert",
         idempotency=None,
-        batching_mode="single",
+        batching="absent",
         body=None,
     ):
         block: dict[str, Any] = {
             "request": {"method": "POST", "path": f"/v1/{mode}"},
-            "batching": {"mode": batching_mode, "size": 10},
         }
+        if batching != "absent":
+            block["batching"] = batching
         if body is not None:
             block["request"]["body"] = body
         if idempotency is not None:
@@ -1577,15 +1578,15 @@ class TestApiHandlerIdempotencyConfig:
         assert handler._streams["s1"].idempotency_in == "body"
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("batching_mode", ["bulk", "batch"])
-    async def test_rejects_non_single_batching(self, handler, batching_mode):
-        """A restart re-batches records, so a per-request key over several
-        records cannot dedup — reject at configure time (issue #286)."""
+    async def test_rejects_when_batching_block_present(self, handler):
+        """The contract has no batching mode — a present block IS the
+        multi-record case. A restart re-batches records, so a per-request
+        key over several records cannot dedup (issue #286 / infra#890)."""
         handler.set_stream_endpoints(
             {
                 "s1": self._doc(
                     idempotency={"in": "header", "name": "Idempotency-Key"},
-                    batching_mode=batching_mode,
+                    batching={"max_records": 5},
                 )
             }
         )
@@ -1596,6 +1597,25 @@ class TestApiHandlerIdempotencyConfig:
         )
         assert ok is False
         assert "s1" not in handler._streams
+
+    @pytest.mark.asyncio
+    async def test_explicit_null_batching_is_accepted(self, handler):
+        """The contract's nullable default: "batching": null means
+        single-record, so the exclusion must not fire on it."""
+        handler.set_stream_endpoints(
+            {
+                "s1": self._doc(
+                    idempotency={"in": "header", "name": "Idempotency-Key"},
+                    batching=None,
+                )
+            }
+        )
+        ok = await handler.configure_schema(
+            SchemaMessage(
+                stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT
+            )
+        )
+        assert ok is True
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -1798,7 +1818,6 @@ class TestApiHandlerRetrySemantics:
     def _doc(self, *, mode="insert", idempotency=None):
         block: dict[str, Any] = {
             "request": {"method": "POST", "path": f"/v1/{mode}"},
-            "batching": {"mode": "single"},
         }
         if idempotency is not None:
             block["idempotency"] = idempotency
@@ -1865,7 +1884,6 @@ class TestApiHandlerIdempotencyHeaderCollision:
                         "write": {
                             "insert": {
                                 "request": {"method": "POST", "path": "/v1/insert"},
-                                "batching": {"mode": "single"},
                                 "idempotency": {"in": "header", "name": name},
                             }
                         }

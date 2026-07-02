@@ -333,13 +333,14 @@ the content-derived `record_id` the engine already computes per record,
 so a re-sent record carries the same key and the provider dedups it
 (within its replay window).
 
-The block requires `batching.mode: "single"`; both the published schema
-and `configure_schema` reject any other combination, because a restart
-re-batches records and a per-request key spanning several records cannot
-dedup (issue #286). Without the block, API `insert` is at-least-once on a
-same-run restart. Every destination reports its per-stream verdict in the
-schema ack (`retry_semantics` + reason) and the engine logs it at stream
-start.
+The block cannot be combined with a `batching` block — the contract has
+no batching mode; a present block IS the multi-record case. Both the
+published schema and `configure_schema` reject the combination, because
+a restart re-batches records and a per-request key spanning several
+records cannot dedup (issue #286). Without the block, API `insert` is
+at-least-once on a same-run restart. Every destination reports its
+per-stream verdict in the schema ack (`retry_semantics` + reason) and
+the engine logs it at stream start.
 
 ## gRPC Batch Parameters
 

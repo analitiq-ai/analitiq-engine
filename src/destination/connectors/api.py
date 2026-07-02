@@ -73,12 +73,17 @@ def _endpoint_write_mode_block(
     return dict(mode_block)
 
 
-def _idempotency_config_problem(idempotency: Any, state: "_StreamState") -> str | None:
+def _idempotency_config_problem(
+    idempotency: Any, batching: Any, state: "_StreamState"
+) -> str | None:
     """Why this ``idempotency`` block cannot work for the stream, or ``None``.
 
     Mirrors the api-endpoint schema's own constraints (infra#890) so a
     document that slipped past contract validation still fails loud at
-    configure time instead of writing without the key it promised.
+    configure time instead of writing without the key it promised. The
+    contract has no batching mode: a present ``batching`` block IS the
+    multi-record case, so the schema's exclusion — and this mirror — key
+    on its presence.
     """
     if not isinstance(idempotency, Mapping):
         return f"idempotency must be an object, got {type(idempotency).__name__}"
@@ -96,11 +101,12 @@ def _idempotency_config_problem(idempotency: Any, state: "_StreamState") -> str 
             "idempotency.name must not be 'Content-Type'; the engine owns "
             "that header on every request"
         )
-    if state.batch_mode != ApiDestinationHandler.BATCH_MODE_SINGLE:
+    if batching:
         return (
-            f"idempotency requires batching.mode 'single', got "
-            f"{state.batch_mode!r}: a restart re-batches records, so a "
-            f"per-request key over several records cannot dedup (issue #286)"
+            "idempotency cannot be combined with a batching block: a "
+            "restart re-batches records, so a per-request key over several "
+            "records cannot dedup (issue #286); the api-endpoint schema "
+            "forbids the combination (infra#890)"
         )
     if target == "body":
         if state.body_spec is not None and not isinstance(state.body_spec, Mapping):
@@ -509,7 +515,9 @@ class ApiDestinationHandler(BaseDestinationHandler):
 
         idempotency = mode_block.get("idempotency")
         if idempotency is not None:
-            problem = _idempotency_config_problem(idempotency, state)
+            problem = _idempotency_config_problem(
+                idempotency, mode_block.get("batching"), state
+            )
             if problem is not None:
                 logger.error(
                     "API endpoint document for stream %r: %s", stream_id, problem
