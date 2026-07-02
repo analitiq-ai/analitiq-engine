@@ -863,17 +863,11 @@ class GenericSQLConnector(BaseDestinationHandler):
     def _needs_record_hash(self, state: _StreamState) -> bool:
         """Whether this stream uses the synthetic ``_record_hash`` dedup key.
 
-        Only a keyless ``insert`` stream on the SQLAlchemy transport: it has no
-        contract primary key to dedup on, and the SQLAlchemy write path can
-        populate the hash and anti-join on it. Upsert/truncate_insert dedup on
-        their own keys; ADBC-only keyless insert stays plain append until the
-        content-hash dedup lands there (issue #282 follow-up).
+        A keyless ``insert`` stream on either transport: SQLAlchemy anti-joins
+        on the hash; ADBC routes through a stage-MERGE keyed on the hash.
+        Upsert/truncate_insert dedup on their own keys.
         """
-        return (
-            not self._adbc_only
-            and state.write_mode == "insert"
-            and not state.primary_keys
-        )
+        return state.write_mode == "insert" and not state.primary_keys
 
     def _identity_columns(self, state: _StreamState) -> list[str]:
         """Columns the insert anti-join matches a re-read row on.
@@ -1295,6 +1289,31 @@ class GenericSQLConnector(BaseDestinationHandler):
             digest = hashlib.sha256(canonical.encode()).hexdigest()
             record[self.RECORD_HASH_COLUMN] = digest
 
+    def _attach_record_hash_to_batch(
+        self,
+        batch: pa.RecordBatch,
+        state: _StreamState,
+    ) -> pa.RecordBatch:
+        """Append a ``_record_hash`` column to an Arrow batch for ADBC dedup.
+
+        Mirrors ``_attach_record_hash`` for the ADBC write path, which works
+        with Arrow batches rather than dicts. The hash is computed from the
+        same JSON-serialized row content so retries of the same data produce
+        the same hash. No-op for streams that don't need the synthetic key.
+        """
+        if not self._needs_record_hash(state):
+            return batch
+        hashes = []
+        for i in range(batch.num_rows):
+            row = {name: batch.column(name)[i].as_py() for name in batch.schema.names}
+            canonical = json.dumps(row, sort_keys=True, default=str)
+            hashes.append(hashlib.sha256(canonical.encode()).hexdigest())
+        hash_col = pa.array(hashes, type=pa.string())
+        return pa.RecordBatch.from_arrays(
+            list(batch.columns) + [hash_col],
+            names=list(batch.schema.names) + [self.RECORD_HASH_COLUMN],
+        )
+
     def _insert_records(
         self,
         conn: Connection,
@@ -1576,18 +1595,16 @@ class GenericSQLConnector(BaseDestinationHandler):
     ) -> None:
         """Full write path for ADBC-only mode.
 
-        Insert: append via ``adbc_ingest``. Truncate-insert: TRUNCATE
-        TABLE on the read's first batch (``truncate_now``, issue #307),
-        then append; later batches of the refresh append only. Upsert:
-        ingest into a session-scoped temp table, then ``MERGE INTO`` the
-        target.
+        Keyless insert: MERGE on ``_record_hash`` (insert-if-not-exists,
+        issue #285). Keyed insert: plain append (PK enforces dedup).
+        Truncate-insert: TRUNCATE TABLE on the read's first batch
+        (``truncate_now``, issue #307), then plain append. Upsert:
+        ingest into a session-scoped temp table, then ``MERGE INTO``
+        keyed on ``conflict_keys``.
 
-        Upsert (MERGE on conflict keys) is idempotent under retry on its
-        own terms. Plain ``insert`` — and truncate_insert's append phase —
-        is at-least-once here: the ADBC path has no row-level dedup yet,
-        so a same-run retry can re-ingest the inclusive cursor boundary.
-        The SQLAlchemy path's ``_record_hash`` anti-join (issue #282) is
-        the follow-up that closes this for ADBC.
+        All modes are idempotent under retry: upsert and keyed insert on
+        their own keys; truncate_insert via full-refresh semantics; keyless
+        insert via content-hash dedup.
         """
         if state.schema_contract is None:
             raise AdbcConfigurationError(
@@ -1645,6 +1662,26 @@ class GenericSQLConnector(BaseDestinationHandler):
                 list(cast_batch.schema.names),
                 state.conflict_keys,
                 stage_token,
+            )
+        elif self._needs_record_hash(state):
+            # Keyless insert: dedup via stage-MERGE keyed on _record_hash so
+            # a same-run retry does not duplicate rows (issue #285).
+            hashed_batch = self._attach_record_hash_to_batch(cast_batch, state)
+            stage_token = (
+                "b"
+                + hashlib.sha256(
+                    f"{run_id}|{stream_id}|{batch_seq}".encode()
+                ).hexdigest()[:16]
+            )
+            await asyncio.to_thread(
+                self._merge_ingest_sync,
+                hashed_batch,
+                state.schema_name,
+                state.table_name,
+                list(hashed_batch.schema.names),
+                [self.RECORD_HASH_COLUMN],
+                stage_token,
+                insert_only=True,
             )
         else:
             await asyncio.to_thread(
@@ -1719,8 +1756,10 @@ class GenericSQLConnector(BaseDestinationHandler):
         all_columns: list[str],
         conflict_keys: list[str],
         stage_token: str,
+        *,
+        insert_only: bool = False,
     ) -> None:
-        """Upsert via ingest-to-stage + ``MERGE INTO`` target.
+        """Upsert (or insert-if-not-exists) via ingest-to-stage + ``MERGE INTO``.
 
         Creates a stage table named ``_analitiq_stage_<target>_<token>``
         in the target schema, ingests the cast batch via
@@ -1737,6 +1776,11 @@ class GenericSQLConnector(BaseDestinationHandler):
         omitted and the operation degrades to insert-if-not-exists. A
         warning surfaces this so operators don't silently see "matched
         rows unchanged" without an explanation.
+
+        ``insert_only=True`` suppresses the ``WHEN MATCHED THEN UPDATE``
+        clause entirely regardless of ``update_cols``. Use this for
+        content-hash dedup where a matching row is byte-identical and an
+        UPDATE would be a no-op.
         """
         # Suffix with the per-write token so concurrent streams and
         # retries (which may overlap before the previous DROP completes)
@@ -1745,7 +1789,7 @@ class GenericSQLConnector(BaseDestinationHandler):
         target_qualified = self.dialect.quote_qualified(schema_name, table_name)
         stage_qualified = self.dialect.quote_qualified(schema_name, stage_name)
         update_cols = [c for c in all_columns if c not in conflict_keys]
-        if not update_cols:
+        if not update_cols and not insert_only:
             logger.warning(
                 "ADBC upsert into %s.%s has no non-key columns to update "
                 "(all_columns == conflict_keys); MERGE will only INSERT "
@@ -1769,6 +1813,7 @@ class GenericSQLConnector(BaseDestinationHandler):
                 all_columns,
                 conflict_keys,
                 update_cols,
+                insert_only=insert_only,
             )
 
     def _merge_ingest_locked_sync(
@@ -1781,6 +1826,8 @@ class GenericSQLConnector(BaseDestinationHandler):
         all_columns: list[str],
         conflict_keys: list[str],
         update_cols: list[str],
+        *,
+        insert_only: bool = False,
     ) -> None:
         """Run the body of :meth:`_merge_ingest_sync` under the held lock.
 
@@ -1838,7 +1885,7 @@ class GenericSQLConnector(BaseDestinationHandler):
                     f"MERGE INTO {target_qualified} t USING {stage_qualified} s "
                     f"ON {on_clause} "
                 )
-                if update_cols:
+                if update_cols and not insert_only:
                     merge_sql += (
                         f"WHEN MATCHED THEN UPDATE SET {set_clause} "  # nosec B608
                     )
