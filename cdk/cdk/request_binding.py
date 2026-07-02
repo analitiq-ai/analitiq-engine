@@ -101,7 +101,7 @@ def collect_from_input_selectors(spec: Any) -> set:
 
     Walks the same structure as :func:`bind_record_inputs` (``literal``
     nodes are opaque) without binding anything — used to validate a body
-    spec against its batching mode before any record is in flight.
+    spec against its batching declaration before any record is in flight.
     """
     selectors: set = set()
     if isinstance(spec, Mapping):
@@ -130,8 +130,9 @@ def bind_record_inputs(
 
     ``"record"`` binds the single in-flight record, ``"records"`` binds the
     whole batch, ``"record.<dotted.path>"`` binds one record field. A
-    ``from_input`` that does not match the active batching mode (e.g.
-    ``"record"`` in bulk mode) is an authoring error and raises.
+    ``from_input`` that does not match the stream's batching declaration
+    (e.g. ``"record"`` on a batched stream) is an authoring error and
+    raises.
     """
     if isinstance(spec, Mapping):
         if "from_input" in spec:
@@ -165,15 +166,16 @@ def _record_input_value(
     if selector == "records":
         if records is None:
             raise ValueError(
-                "`from_input: records` requires batching mode bulk or batch; "
+                "`from_input: records` requires a batching declaration; "
                 "this stream sends one record per request"
             )
         return records
     if selector == "record" or selector.startswith("record."):
         if record is None:
             raise ValueError(
-                f"`from_input: {selector}` requires batching mode single; "
-                f"this stream sends multiple records per request"
+                f"`from_input: {selector}` requires a single-record stream "
+                f"(no batching declaration); this stream sends multiple "
+                f"records per request"
             )
         if selector == "record":
             return record

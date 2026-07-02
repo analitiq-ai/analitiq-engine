@@ -137,13 +137,16 @@ kind enum.
 | Handler | Transactions | Upsert | Bulk Load |
 |---------|--------------|--------|-----------|
 | Database | Yes | Yes (via `ON CONFLICT` / `MERGE` / dialect equivalent) | Yes |
-| API | No | No | `single` / `bulk` / `batch` posting modes |
+| API | No | Contract-driven (`operations.write.upsert`) | Contract-driven (`operations.write.<mode>.batching`) |
 | File / S3 | No | No | Yes |
 | Stdout | No | No | No |
 
-The API handler posts records in one of three modes (`single`, `bulk`,
-`batch` — `BATCH_MODE_*` in `src/destination/connectors/api.py`),
-selected from the endpoint's write configuration.
+The API handler sends one request per record unless the endpoint's
+`operations.write.<mode>` declares a `batching` block. The contract
+shape is `{"max_records": <int >= 2>}` — the provider's maximum records
+per request; with the block present, records are sent in chunks of at
+most `max_records`. A `batching` block of any other shape fails the
+stream at `configure_schema` time.
 
 ## Formatters
 

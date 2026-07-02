@@ -1,7 +1,7 @@
 """API destination handler for writing records to REST APIs.
 
 This handler sends records to REST API endpoints with support for
-rate limiting, retries, and different batch modes.
+rate limiting, retries, and contract-declared request batching.
 """
 
 import asyncio
@@ -283,8 +283,11 @@ class _StreamState:
 
     endpoint: str = ""
     method: str = "POST"
-    batch_mode: str = "single"
-    batch_size: int = 100
+    # ``operations.write.<mode>.batching.max_records`` — the provider's
+    # maximum records per request. ``None`` means the endpoint declares
+    # no batching block, so every record is sent as its own request;
+    # otherwise records are sent in chunks of at most this many.
+    max_records: int | None = None
     # Names of body fields declared with ``arrow_type: "Json"`` in the
     # endpoint's write input schema. The wire carries them as
     # JSON-encoded strings (so they fit a ``pa.large_string`` column);
@@ -327,14 +330,16 @@ class ApiDestinationHandler(BaseDestinationHandler):
     Destination handler that writes records to REST APIs.
 
     Supports:
-    - Multiple batch modes: single, bulk, batch
+    - Contract-declared batching (``operations.write.<mode>.batching``):
+      absent means one request per record; present means chunked requests
+      of at most ``max_records`` records each
     - Rate limiting with configurable limits
     - Retry with exponential backoff
     - Multiple authentication methods
     - Per-record idempotency keys (``operations.write.<mode>.idempotency``,
-      infra#890): single mode only; the engine-owned identity-derived
-      record id is sent as a header or a body field so a same-run restart
-      cannot double-write (issue #286)
+      infra#890): single-record streams only; the engine-owned
+      identity-derived record id is sent as a header or a body field so a
+      same-run restart cannot double-write (issue #286)
 
     Configuration (connection config):
     - host: Base URL for the API
@@ -344,17 +349,12 @@ class ApiDestinationHandler(BaseDestinationHandler):
       - max_requests: Max requests per time window
       - time_window: Time window in seconds
 
-    Per-stream endpoint settings (path, method, batch mode, batch size,
-    optional body template) are read from the preloaded contract API
-    endpoint document at ``configure_schema`` time, keyed by
-    ``operations.write.<mode>``. The SchemaSpec off the wire only carries
-    ``stream_id``, ``version``, and ``write_mode``.
+    Per-stream endpoint settings (path, method, batching, optional body
+    template) are read from the preloaded contract API endpoint document
+    at ``configure_schema`` time, keyed by ``operations.write.<mode>``.
+    The SchemaSpec off the wire only carries ``stream_id``, ``version``,
+    and ``write_mode``.
     """
-
-    # Batch modes
-    BATCH_MODE_SINGLE = "single"  # POST each record individually
-    BATCH_MODE_BULK = "bulk"  # POST all records in one request
-    BATCH_MODE_BATCH = "batch"  # POST records in chunks
 
     def __init__(self) -> None:
         """Initialize the API handler."""
@@ -443,8 +443,20 @@ class ApiDestinationHandler(BaseDestinationHandler):
 
     @property
     def supports_bulk_load(self) -> bool:
-        """Report that this connector supports bulk mode."""
-        return True
+        """Report whether any registered endpoint declares write batching.
+
+        Contract-driven like ``supports_upsert``: multi-record requests
+        exist only where an endpoint's ``operations.write.<mode>.batching``
+        block declares the provider's per-request cap; without one every
+        write is one request per record, so advertising bulk load would
+        promise a capability no configured stream can use.
+        """
+        return any(
+            isinstance(block.get("batching"), Mapping)
+            for doc in self._stream_endpoints.values()
+            for mode_key in _API_WRITE_MODE_KEYS.values()
+            if (block := _endpoint_write_mode_block(doc, mode_key)) is not None
+        )
 
     def retry_semantics(self, stream_id: str) -> RetryVerdict:
         """Per-stream verdict computed at configure time (issue #286)."""
@@ -549,22 +561,37 @@ class ApiDestinationHandler(BaseDestinationHandler):
             params_spec=dict(mode_block.get("params") or {}),
         )
 
-        batching = mode_block.get("batching") or {}
-        b_mode = (batching.get("mode") or "single").lower()
-        if b_mode == "bulk":
-            state.batch_mode = self.BATCH_MODE_BULK
-        elif b_mode == "batch":
-            state.batch_mode = self.BATCH_MODE_BATCH
-        else:
-            state.batch_mode = self.BATCH_MODE_SINGLE
-        state.batch_size = int(batching.get("size") or 100)
+        # Contract shape (infra#890): a present ``batching`` block IS the
+        # multi-record case and must carry ``max_records`` (int >= 2);
+        # absence/null means one request per record. Any other shape is a
+        # non-contract document — fail the stream loud instead of silently
+        # running single-record (issue #305).
+        batching = mode_block.get("batching")
+        if batching is not None:
+            max_records = (
+                batching.get("max_records") if isinstance(batching, Mapping) else None
+            )
+            if (
+                isinstance(max_records, bool)
+                or not isinstance(max_records, int)
+                or max_records < 2
+            ):
+                logger.error(
+                    "API endpoint document for stream %r: batching must be "
+                    '{"max_records": <int >= 2>} per the api-endpoint '
+                    "contract, got %r",
+                    stream_id,
+                    batching,
+                )
+                return False
+            state.max_records = max_records
 
         # A body spec whose from_input selectors contradict the batching
-        # mode can never build a valid request — reject the stream now
-        # rather than failing every record at write time.
+        # declaration can never build a valid request — reject the stream
+        # now rather than failing every record at write time.
         if state.body_spec is not None:
             selectors = collect_from_input_selectors(state.body_spec)
-            is_single = state.batch_mode == self.BATCH_MODE_SINGLE
+            is_single = state.max_records is None
             wants_batch = "records" in selectors
             wants_single = any(
                 s == "record" or s.startswith("record.") for s in selectors
@@ -572,11 +599,11 @@ class ApiDestinationHandler(BaseDestinationHandler):
             if (wants_batch and is_single) or (wants_single and not is_single):
                 logger.error(
                     "API endpoint document for stream %r: request.body "
-                    "from_input selectors %s do not match batching mode %r "
-                    "('records' needs bulk/batch; 'record' needs single)",
+                    "from_input selectors %s do not match the batching "
+                    "declaration ('records' needs a batching block; "
+                    "'record' needs none)",
                     stream_id,
                     sorted(selectors),
-                    state.batch_mode,
                 )
                 return False
 
@@ -603,11 +630,13 @@ class ApiDestinationHandler(BaseDestinationHandler):
 
         self._streams[stream_id] = state
         logger.info(
-            "API schema configured for stream %r: %s %s, batch_mode=%s",
+            "API schema configured for stream %r: %s %s, %s",
             stream_id,
             state.method,
             state.endpoint,
-            state.batch_mode,
+            "single-record"
+            if state.max_records is None
+            else f"batched (max_records={state.max_records})",
         )
         return True
 
@@ -658,14 +687,12 @@ class ApiDestinationHandler(BaseDestinationHandler):
         try:
             decode_json_fields(records, state.json_fields)
             failure_detail = ""
-            if state.batch_mode == self.BATCH_MODE_SINGLE:
+            if state.max_records is None:
                 written, failed_ids, failure_detail = await self._write_single_mode(
                     state, records, record_ids
                 )
-            elif state.batch_mode == self.BATCH_MODE_BULK:
-                written, failed_ids = await self._write_bulk_mode(state, records)
             else:
-                written, failed_ids = await self._write_batch_mode(
+                written, failed_ids = await self._write_chunked_mode(
                     state, records, record_ids
                 )
 
@@ -852,42 +879,29 @@ class ApiDestinationHandler(BaseDestinationHandler):
 
         return written, failed_ids, first_failure
 
-    async def _write_bulk_mode(
-        self, state: _StreamState, records: list[dict[str, Any]]
-    ) -> tuple[int, list[str]]:
-        """Write all records in a single request.
-
-        Returns ``(written, failed_record_ids)``. A 2xx response means the API
-        accepted the whole payload; a non-2xx raises in ``_send_request`` and
-        is handled one level up as a retryable transport failure (nothing was
-        written in a single bulk request, so a retry cannot duplicate).
-
-        Per-item partial failure inside a 2xx body is NOT inspected: the engine
-        is connector-agnostic and no endpoint contract declares where a
-        per-item error array lives, so the response shape is opaque. Detecting
-        it would require a declared response-error contract; until then bulk
-        mode is all-or-nothing at the transport level.
-        """
-        await self._send_request(state, self._build_body(state, records=records))
-        return len(records), []
-
-    async def _write_batch_mode(
+    async def _write_chunked_mode(
         self,
         state: _StreamState,
         records: list[dict[str, Any]],
         record_ids: list[str],
     ) -> tuple[int, list[str]]:
-        """Write records in fixed-size chunks.
+        """Write records in chunks of at most ``max_records``.
 
         Returns ``(written, failed_record_ids)``. The written count tracks
         records actually sent so a mid-loop chunk failure reports the true
         count instead of 0 — reporting 0 (and RETRYABLE) would re-send the
         chunks that already landed and duplicate them.
 
+        Per-item partial failure inside a 2xx response body is NOT
+        inspected: the engine is connector-agnostic and no endpoint
+        contract declares where a per-item error array lives, so the
+        response shape is opaque. A 2xx means the API accepted the whole
+        chunk.
+
         Two transport-failure cases differ by whether a chunk already landed:
         - failure before any chunk succeeded (``written == 0``) re-raises, so
-          write_batch classifies it RETRYABLE like bulk mode — nothing was
-          written, so a retry cannot duplicate;
+          write_batch classifies it RETRYABLE — nothing was written, so a
+          retry cannot duplicate;
         - failure after at least one chunk landed stops the loop and attributes
           every not-yet-written record id as failed, so the shared result path
           makes it FATAL and a whole-batch retry cannot re-send the landed
@@ -895,10 +909,16 @@ class ApiDestinationHandler(BaseDestinationHandler):
         Non-transport (authoring/programming) errors propagate to write_batch
         and become FATAL there, matching single mode.
         """
+        chunk_size = state.max_records
+        if chunk_size is None:
+            raise RuntimeError(
+                "chunked write dispatched for a stream with no batching "
+                "declaration; write_batch routes those to single mode"
+            )
         written = 0
 
-        for i in range(0, len(records), state.batch_size):
-            batch = records[i : i + state.batch_size]
+        for i in range(0, len(records), chunk_size):
+            batch = records[i : i + chunk_size]
             try:
                 await self._send_request(state, self._build_body(state, records=batch))
             except (aiohttp.ClientError, asyncio.TimeoutError) as e:
