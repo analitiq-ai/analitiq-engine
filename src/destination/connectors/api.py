@@ -88,6 +88,14 @@ def _idempotency_config_problem(idempotency: Any, state: "_StreamState") -> str 
         return f"idempotency.in must be 'header' or 'body', got {target!r}"
     if not isinstance(name, str) or not name:
         return f"idempotency.name must be a non-empty string, got {name!r}"
+    if target == "header" and name.lower() == "content-type":
+        # Same rule as the body reserved-field check: the engine owns this
+        # header on every request, and layering the key over it would
+        # silently break the request instead of rejecting the document.
+        return (
+            "idempotency.name must not be 'Content-Type'; the engine owns "
+            "that header on every request"
+        )
     if state.batch_mode != ApiDestinationHandler.BATCH_MODE_SINGLE:
         return (
             f"idempotency requires batching.mode 'single', got "
@@ -568,8 +576,9 @@ class ApiDestinationHandler(BaseDestinationHandler):
 
         try:
             decode_json_fields(records, state.json_fields)
+            failure_detail = ""
             if state.batch_mode == self.BATCH_MODE_SINGLE:
-                written, failed_ids = await self._write_single_mode(
+                written, failed_ids, failure_detail = await self._write_single_mode(
                     state, records, record_ids
                 )
             elif state.batch_mode == self.BATCH_MODE_BULK:
@@ -587,6 +596,7 @@ class ApiDestinationHandler(BaseDestinationHandler):
                 failed_record_ids=failed_ids,
                 total=len(records),
                 cursor=cursor,
+                failure_detail=failure_detail,
             )
 
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
@@ -656,6 +666,7 @@ class ApiDestinationHandler(BaseDestinationHandler):
         failed_record_ids: list[str],
         total: int,
         cursor: Cursor | None,
+        failure_detail: str = "",
     ) -> BatchWriteResult:
         """One partial-failure verdict shared by every write mode.
 
@@ -663,7 +674,10 @@ class ApiDestinationHandler(BaseDestinationHandler):
         RETRYABLE) and carries the failed record ids: the records that did
         land are already written, so retrying the whole batch would duplicate
         them. A failure result carries no cursor, so the checkpoint never
-        advances past records that were never written.
+        advances past records that were never written. ``failure_detail``
+        carries the first per-record failure reason into the summary — the
+        bare count crosses the wire but the reason otherwise stays in this
+        container's logs, leaving the engine-side operator nothing to act on.
         """
         if written == total and not failed_record_ids:
             return BatchWriteResult(
@@ -672,11 +686,14 @@ class ApiDestinationHandler(BaseDestinationHandler):
                 committed_cursor=cursor,
             )
         failed_count = len(failed_record_ids) or (total - written)
+        summary = f"{failed_count}/{total} records failed to write to API"
+        if failure_detail:
+            summary = f"{summary}; first failure: {failure_detail}"
         return BatchWriteResult(
             status=AckStatus.ACK_STATUS_FATAL_FAILURE,
             records_written=written,
             failed_record_ids=tuple(failed_record_ids),
-            failure_summary=f"{failed_count}/{total} records failed to write to API",
+            failure_summary=summary,
         )
 
     async def _write_single_mode(
@@ -684,18 +701,21 @@ class ApiDestinationHandler(BaseDestinationHandler):
         state: _StreamState,
         records: list[dict[str, Any]],
         record_ids: list[str],
-    ) -> tuple[int, list[str]]:
+    ) -> tuple[int, list[str], str]:
         """Write records one at a time.
 
-        Returns ``(written, failed_record_ids)``. Body construction is
-        data-dependent (a record field can feed a derived function) and
-        transport errors are per-record data issues; both are caught per
-        record so a bad record fails just itself. Authoring and programming
-        errors (TransportSpecError, RuntimeError, KeyError) propagate to
-        write_batch and become FATAL for the whole batch.
+        Returns ``(written, failed_record_ids, first_failure)`` — the first
+        per-record failure reason rides the engine-facing failure summary.
+        Body construction is data-dependent (a record field can feed a
+        derived function) and transport errors are per-record data issues;
+        both are caught per record so a bad record fails just itself.
+        Authoring and programming errors (TransportSpecError, RuntimeError,
+        KeyError) propagate to write_batch and become FATAL for the whole
+        batch.
         """
         written = 0
         failed_ids: list[str] = []
+        first_failure = ""
 
         for i, record in enumerate(records):
             try:
@@ -710,6 +730,7 @@ class ApiDestinationHandler(BaseDestinationHandler):
                     e,
                 )
                 failed_ids.append(record_ids[i])
+                first_failure = first_failure or f"{type(e).__name__}: {e}"
                 continue
             idempotency_header = (
                 {state.idempotency_name: record_ids[i]}
@@ -727,13 +748,14 @@ class ApiDestinationHandler(BaseDestinationHandler):
                     e,
                 )
                 failed_ids.append(record_ids[i])
+                first_failure = first_failure or f"{type(e).__name__}: {e}"
 
         if failed_ids:
             logger.warning(
                 f"Failed to write {len(failed_ids)} records: {failed_ids[:5]}..."
             )
 
-        return written, failed_ids
+        return written, failed_ids, first_failure
 
     async def _write_bulk_mode(
         self, state: _StreamState, records: list[dict[str, Any]]

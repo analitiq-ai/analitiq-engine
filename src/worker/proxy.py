@@ -196,9 +196,12 @@ class WorkerProxyHandler(BaseDestinationHandler):
             return False
         self._streams[stream_id] = client
         # Re-report the worker's retry-safety verdict on the shell hop
-        # (issue #286). An unspecified value on an accepted ack falls
-        # through to the base default, so the engine never reads a
-        # zero-value enum off the wire.
+        # (issue #286). Drop any verdict from an earlier configure of this
+        # stream first, so a reconfigure can never serve a stale one. Every
+        # conforming worker stamps a specified verdict on an accepted ack;
+        # an unspecified one is a worker defect — warn and fall through to
+        # the base default rather than report it as the worker's claim.
+        self._retry_verdicts.pop(stream_id, None)
         verdict = client.stream_retry_semantics
         if verdict is not None and verdict[0] != int(
             RetrySemantics.RETRY_SEMANTICS_UNSPECIFIED
@@ -206,6 +209,13 @@ class WorkerProxyHandler(BaseDestinationHandler):
             self._retry_verdicts[stream_id] = RetryVerdict(
                 semantics=RetrySemantics(verdict[0]),
                 reason=verdict[1],
+            )
+        else:
+            logger.warning(
+                "%s: accepted schema ack for stream %s carried no "
+                "retry-safety verdict; reporting the at-least-once default",
+                self._label,
+                stream_id,
             )
         return True
 

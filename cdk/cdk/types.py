@@ -70,11 +70,22 @@ class RetryVerdict:
 
     ``reason`` names the mechanism behind the verdict (the dedup key, the
     manifest, the declared idempotency key, or the gap) so the engine's
-    per-stream log line is actionable, not just a label.
+    per-stream log line is actionable, not just a label. A verdict must
+    commit to exactly-once or at-least-once: UNSPECIFIED is the wire's
+    absent value, and letting a handler construct it would silently
+    degrade into the base default downstream instead of failing at the
+    defective handler.
     """
 
     semantics: RetrySemantics
     reason: str
+
+    def __post_init__(self) -> None:
+        if self.semantics == RetrySemantics.RETRY_SEMANTICS_UNSPECIFIED:
+            raise ValueError(
+                "RetryVerdict requires exactly-once or at-least-once; "
+                "a handler must never claim UNSPECIFIED"
+            )
 
 
 @dataclass(frozen=True)

@@ -88,9 +88,10 @@ class TestApiHandlerWriteBatchFailures:
         api_handler._connected = True
         api_handler._session = MagicMock()
 
-        # Mock _write_single_mode to return (0, all-ids) — every record failed
+        # Mock _write_single_mode to return (0, all-ids, reason) — every
+        # record failed
         api_handler._write_single_mode = AsyncMock(
-            return_value=(0, list(sample_record_ids))
+            return_value=(0, list(sample_record_ids), "boom")
         )
 
         # Execute
@@ -131,7 +132,7 @@ class TestApiHandlerWriteBatchFailures:
 
         # Mock: 1 out of 3 records succeeded; the other two ids come back failed
         failed = list(sample_record_ids[1:])
-        api_handler._write_single_mode = AsyncMock(return_value=(1, failed))
+        api_handler._write_single_mode = AsyncMock(return_value=(1, failed, "boom"))
 
         # Execute
         result = await api_handler.write_batch(
@@ -166,7 +167,7 @@ class TestApiHandlerWriteBatchFailures:
         api_handler._session = MagicMock()
 
         # Mock: all 3 records succeeded, none failed
-        api_handler._write_single_mode = AsyncMock(return_value=(3, []))
+        api_handler._write_single_mode = AsyncMock(return_value=(3, [], ""))
 
         # Execute
         result = await api_handler.write_batch(
@@ -332,7 +333,7 @@ class TestApiHandlerWriteSingleMode:
         api_handler._send_request = mock_send_request
         state = api_handler._streams["test-stream"]
 
-        written, failed = await api_handler._write_single_mode(
+        written, failed, _ = await api_handler._write_single_mode(
             state, records, record_ids
         )
         assert written == 2
@@ -358,7 +359,7 @@ class TestApiHandlerWriteSingleMode:
         )
         state = api_handler._streams["test-stream"]
 
-        written, failed = await api_handler._write_single_mode(
+        written, failed, _ = await api_handler._write_single_mode(
             state, records, record_ids
         )
         assert written == 0
@@ -402,7 +403,7 @@ class TestApiHandlerWriteSingleMode:
         state = api_handler._streams["test-stream"]
 
         # Execute
-        written, failed = await api_handler._write_single_mode(
+        written, failed, _ = await api_handler._write_single_mode(
             state, records, record_ids
         )
 
@@ -1340,7 +1341,7 @@ class TestApiHandlerBodySpec:
             return {}
 
         handler._send_request = _capture  # type: ignore[assignment]
-        written, failed = await handler._write_single_mode(
+        written, failed, _ = await handler._write_single_mode(
             state, [{"id": 1}, {"id": 2}], ["r1", "r2"]
         )
         assert written == 2
@@ -1696,7 +1697,7 @@ class TestApiHandlerIdempotencyInjection:
             return {}
 
         handler._send_request = _capture  # type: ignore[assignment]
-        written, failed = await handler._write_single_mode(
+        written, failed, _ = await handler._write_single_mode(
             state, [{"id": 1}, {"id": 2}], ["r1", "r2"]
         )
         assert (written, failed) == (2, [])
@@ -1717,7 +1718,9 @@ class TestApiHandlerIdempotencyInjection:
             return {}
 
         handler._send_request = _capture  # type: ignore[assignment]
-        written, failed = await handler._write_single_mode(state, [{"id": 1}], ["r1"])
+        written, failed, _ = await handler._write_single_mode(
+            state, [{"id": 1}], ["r1"]
+        )
         assert (written, failed) == (1, [])
         assert captured == [({"id": 1, "idempotency_key": "r1"}, None)]
 
@@ -1745,7 +1748,7 @@ class TestApiHandlerIdempotencyInjection:
             return {}
 
         handler._send_request = _capture  # type: ignore[assignment]
-        written, failed = await handler._write_single_mode(
+        written, failed, _ = await handler._write_single_mode(
             state,
             [{"id": 1, "idempotency_key": "mine"}, {"id": 2}],
             ["r1", "r2"],
@@ -1765,6 +1768,27 @@ class TestApiHandlerIdempotencyInjection:
         handler._send_request = _capture  # type: ignore[assignment]
         await handler._write_single_mode(state, [{"id": 1}], ["r1"])
         assert captured == [None]
+
+    @pytest.mark.asyncio
+    async def test_first_failure_reason_reaches_the_failure_summary(self):
+        """A reserved-field collision on every record must surface its
+        actionable reason in the engine-facing summary, not just this
+        container's per-record warnings."""
+        handler, _state = self._handler_with_state(
+            idempotency_in="body", idempotency_name="idempotency_key"
+        )
+        handler._connected = True
+        result = await handler.write_batch(
+            run_id="run",
+            stream_id="s1",
+            batch_seq=0,
+            record_batch=_to_record_batch([{"id": 1, "idempotency_key": "mine"}]),
+            record_ids=["r1"],
+            cursor=MagicMock(),
+        )
+        assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+        assert "1/1 records failed" in result.failure_summary
+        assert "reserves" in result.failure_summary
 
 
 @pytest.mark.unit
@@ -1821,3 +1845,37 @@ class TestApiHandlerRetrySemantics:
         verdict = handler.retry_semantics("ghost")
         assert verdict.semantics == RetrySemantics.RETRY_SEMANTICS_AT_LEAST_ONCE
         assert "declares no retry-safety" in verdict.reason
+
+
+@pytest.mark.unit
+class TestApiHandlerIdempotencyHeaderCollision:
+    """The engine owns Content-Type on every request; an idempotency key
+    named after it would silently override the header instead of failing."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("name", ["Content-Type", "content-type"])
+    async def test_rejects_content_type_as_key_name(self, name):
+        handler = ApiDestinationHandler()
+        handler._connected = True
+        handler._session = MagicMock()
+        handler.set_stream_endpoints(
+            {
+                "s1": {
+                    "operations": {
+                        "write": {
+                            "insert": {
+                                "request": {"method": "POST", "path": "/v1/insert"},
+                                "batching": {"mode": "single"},
+                                "idempotency": {"in": "header", "name": name},
+                            }
+                        }
+                    }
+                }
+            }
+        )
+        ok = await handler.configure_schema(
+            SchemaMessage(
+                stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT
+            )
+        )
+        assert ok is False

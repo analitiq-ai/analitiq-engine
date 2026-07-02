@@ -127,3 +127,17 @@ class TestSqlVerdicts:
         verdict = handler.retry_semantics("ghost")
         assert verdict.semantics == RetrySemantics.RETRY_SEMANTICS_AT_LEAST_ONCE
         assert "declares no retry-safety" in verdict.reason
+
+
+@pytest.mark.unit
+class TestRetryVerdictValidation:
+    def test_unspecified_semantics_is_rejected_at_construction(self):
+        """UNSPECIFIED is the wire's absent value; a handler constructing
+        it would silently degrade into the base default downstream."""
+        from cdk.types import RetryVerdict
+
+        with pytest.raises(ValueError, match="never claim UNSPECIFIED"):
+            RetryVerdict(
+                semantics=RetrySemantics.RETRY_SEMANTICS_UNSPECIFIED,
+                reason="defective handler",
+            )
