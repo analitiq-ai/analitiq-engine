@@ -247,9 +247,9 @@ def _collect_json_fields(mode_block: Mapping[str, Any]) -> set[str]:
 def _collect_input_field_names(mode_block: Mapping[str, Any]) -> set[str]:
     """Every field name the write input schema declares (both shapes)."""
     schema = (mode_block.get("input") or {}).get("schema") or {}
-    names: set[str] = set(
+    names: set[str] = {
         name for name in (schema.get("properties") or {}) if isinstance(name, str)
-    )
+    }
     for col in schema.get("columns") or []:
         if isinstance(col, dict) and col.get("name"):
             names.add(col["name"])
