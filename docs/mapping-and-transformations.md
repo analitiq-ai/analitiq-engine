@@ -281,7 +281,9 @@ The same policy is published as a generated artifact
 (`cdk/cdk/type_map/conversion_matrix.json`, built from the canonical table by
 `build_conversion_matrix()`) so the mapping authoring UI offers exactly the
 conversions the engine accepts and auto-wires the function an `explicit`
-conversion needs.
+conversion needs. The frontend consumes it as the `@analitiq-ai/conversion-matrix`
+npm package (`packages/conversion-matrix/`), which regenerates from that artifact
+on every build and is republished to GitHub Packages whenever the grid changes.
 
 `datetime`, `date`, and `time` columns are built and carried as typed Arrow
 values, materialized by the destination's Arrow schema contract

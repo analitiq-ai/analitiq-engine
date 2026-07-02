@@ -1,0 +1,70 @@
+name: conversion-matrix
+
+# Publishes @analitiq-ai/conversion-matrix to GitHub Packages when the engine's
+# conversion grid changes, so the frontend can pin it. The grid is generated
+# from cdk/cdk/type_map/conversion_matrix.json; the package regenerates from it
+# on every build and cannot drift.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - cdk/cdk/type_map/conversion_matrix.json
+      - packages/conversion-matrix/**
+      - .github/workflows/conversion-matrix.yml
+  pull_request:
+    paths:
+      - cdk/cdk/type_map/conversion_matrix.json
+      - packages/conversion-matrix/**
+      - .github/workflows/conversion-matrix.yml
+
+defaults:
+  run:
+    working-directory: packages/conversion-matrix
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: npm ci --no-audit --no-fund
+      - run: npm run build
+      - name: Packaged grid is byte-identical to the engine source
+        run: cmp dist/conversion_matrix.json ../../cdk/cdk/type_map/conversion_matrix.json
+
+  publish:
+    if: github.event_name == 'push'
+    needs: verify
+    runs-on: ubuntu-latest
+    # Serialize publishes so two quick pushes to main cannot race on the version.
+    concurrency:
+      group: conversion-matrix-publish
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      # Build from the current tip of main, not the triggering commit. Publishing
+      # per-commit is wrong two ways: if verify jobs finish out of order an older
+      # commit could ship a stale grid as a higher version, and a later unrelated
+      # push (which does not re-trigger this path-filtered workflow) could strand
+      # a matrix change unpublished. Building main's tip always publishes the
+      # current grid; the content digest makes a duplicate run a no-op and the
+      # concurrency group serializes racing publishes.
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://npm.pkg.github.com"
+          scope: "@analitiq-ai"
+      - run: npm ci --no-audit --no-fund
+      - run: npm run build
+      - name: Publish when the grid content changed
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/publish-if-changed.mjs
