@@ -921,20 +921,21 @@ class ApiDestinationHandler(BaseDestinationHandler):
         response shape is opaque. A 2xx means the API accepted the whole
         chunk.
 
-        Body construction is data-dependent (a record field can feed a
-        derived function), so a build failure is caught per chunk: it
-        fails just that chunk's records and the loop continues — letting
-        it propagate after chunks already landed would report 0 written
-        and re-send the landed chunks on a batch re-run.
+        Any chunk failure stops the loop: the batch verdict is already
+        FATAL (written can no longer reach total), the engine DLQs the
+        whole batch and fails the stream on FATAL, and the uncheckpointed
+        batch gets replayed on a restart — so every record sent past the
+        first failed chunk would land only to be re-sent by that replay.
+        Chunked streams can never carry an idempotency key (the contract
+        excludes it with batching), so that duplication is unmitigated.
+        The failed chunk and the unsent tail are attributed as failed.
 
-        Two transport-failure cases differ by whether a chunk already landed:
-        - failure before any chunk succeeded (``written == 0``) re-raises, so
-          write_batch classifies it RETRYABLE — nothing was written, so a
-          retry cannot duplicate;
-        - failure after at least one chunk landed stops the loop and attributes
-          every not-yet-sent record id as failed, so the shared result path
-          makes it FATAL and a whole-batch retry cannot re-send the landed
-          chunk.
+        A transport failure before any chunk landed (``written == 0``)
+        re-raises instead, so write_batch classifies it RETRYABLE —
+        nothing was written, a retry cannot duplicate. A build failure
+        never re-raises: it is deterministic, so a retry cannot help and
+        FATAL with the ids attributed is the honest verdict even at
+        ``written == 0``.
         """
         chunk_size = state.max_records
         if chunk_size is None:
@@ -943,12 +944,9 @@ class ApiDestinationHandler(BaseDestinationHandler):
                 "declaration; write_batch routes those to single mode"
             )
         written = 0
-        failed_ids: list[str] = []
-        first_failure = ""
 
         for i in range(0, len(records), chunk_size):
             batch = records[i : i + chunk_size]
-            chunk_ids = record_ids[i : i + chunk_size]
             try:
                 body = self._build_body(state, records=batch)
             except (TypeError, ValueError) as e:
@@ -957,13 +955,11 @@ class ApiDestinationHandler(BaseDestinationHandler):
                     "%s...): %s: %s",
                     i,
                     len(batch),
-                    chunk_ids[:3],
+                    record_ids[i : i + 3],
                     type(e).__name__,
                     e,
                 )
-                failed_ids.extend(chunk_ids)
-                first_failure = first_failure or f"{type(e).__name__}: {e}"
-                continue
+                return written, list(record_ids[i:]), f"{type(e).__name__}: {e}"
             try:
                 await self._send_request(state, body)
             except (aiohttp.ClientError, asyncio.TimeoutError) as e:
@@ -977,16 +973,10 @@ class ApiDestinationHandler(BaseDestinationHandler):
                     type(e).__name__,
                     e,
                 )
-                # Every record from this chunk onward is unsent; earlier
-                # build-failed ids are already recorded and disjoint.
-                return (
-                    written,
-                    failed_ids + list(record_ids[i:]),
-                    first_failure or f"{type(e).__name__}: {e}",
-                )
+                return written, list(record_ids[i:]), f"{type(e).__name__}: {e}"
             written += len(batch)
 
-        return written, failed_ids, first_failure
+        return written, [], ""
 
     async def _send_request(
         self,
