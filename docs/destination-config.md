@@ -289,11 +289,14 @@ ordering sequence on the wire; it is never the dedup key. How identity is
 enforced depends on the write mode:
 
 - **`upsert`** — MERGE / INSERT-or-UPDATE on the stream's `conflict_keys`.
-- **`truncate_insert`** — full refresh: TRUNCATE once per run on the run's
-  first write (issue #307), plain append after that with no row-identity
-  dedup (deduping a full refresh would collapse legitimate duplicate
-  rows). The engine never resumes a truncate_insert stream from a
-  cursor — a restart re-reads the source from scratch and re-truncates.
+- **`truncate_insert`** — full refresh: TRUNCATE on the read's first
+  batch (`batch_seq` 1, issue #307), plain append after that with no
+  row-identity dedup (deduping a full refresh would collapse legitimate
+  duplicate rows). `batch_seq` restarts at 1 only when the engine
+  (re)starts the read, so the decision survives engine and destination
+  restarting independently. The engine never resumes a truncate_insert
+  stream from a cursor — a restart re-reads the source from scratch and
+  re-truncates.
 - **`insert`** — each row is inserted only if its identity is not already
   present: one `INSERT ... SELECT ... WHERE NOT EXISTS (...)` per row,
   built with SQLAlchemy core (no dialect-specific SQL). The identity is

@@ -100,13 +100,13 @@ class TestSqlVerdicts:
         assert "id" in verdict.reason
 
     def test_truncate_insert_reports_not_replay_safe(self):
-        """Truncate-insert truncates once per run (issue #307), but its
-        append phase has no row-identity dedup, so a replayed
-        already-committed batch re-inserts its rows."""
+        """Truncate-insert truncates on the run's first batch (issue
+        #307), but its append phase has no row-identity dedup, so a
+        replayed already-committed later batch re-inserts its rows."""
         handler = self._handler(adbc_only=True, write_mode="truncate_insert")
         verdict = handler.retry_semantics("s1")
         assert verdict.semantics == RetrySemantics.RETRY_SEMANTICS_AT_LEAST_ONCE
-        assert "once per run" in verdict.reason
+        assert "first batch" in verdict.reason
 
     def test_keyed_insert_on_sqlalchemy_exactly_once(self):
         handler = self._handler(

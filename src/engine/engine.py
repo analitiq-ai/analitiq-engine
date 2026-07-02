@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from cdk.contract import Readable
+from cdk.types import CheckpointStore
 
 # gRPC imports for destination streaming
 from ..grpc.client import (
@@ -504,12 +505,13 @@ class StreamingEngine:
             partition: dict[str, Any] = {}
 
             # A truncate_insert stream is a full refresh: the destination
-            # truncates once per run, so the source must read from scratch
-            # on every (re)start. Resuming from a persisted cursor would
-            # load only the resumed slice into the freshly truncated table
-            # (issue #307), so the resume read is disabled; cursor saves
-            # still flow through unchanged for watermark emission.
-            checkpoint: Any = self.state_manager
+            # truncates on the read's first batch, so the source must read
+            # from scratch on every (re)start. Resuming from a persisted
+            # cursor would load only the resumed slice into the freshly
+            # truncated table (issue #307), so the resume read is disabled;
+            # cursor saves still flow through unchanged for watermark
+            # emission.
+            checkpoint: CheckpointStore = self.state_manager
             write_mode = str(
                 (config.get("destination") or {}).get("write_mode", "")
             ).lower()
