@@ -315,6 +315,32 @@ A single `_manifest.json` in the base path records `commits[]` with
 `file_path`, `committed_at`. Replays match by `(run_id, stream_id,
 batch_seq)` and become no-ops.
 
+### API (per-record idempotency key)
+
+An API `upsert` is idempotent through the endpoint's own `conflict_keys`.
+For `insert`, the api-endpoint contract's
+`operations.write.<mode>.idempotency` block (infra#890) declares where a
+per-request idempotency key lands:
+
+```json
+{ "in": "header", "name": "Idempotency-Key" }
+```
+
+`in` is `"header"` (Stripe-style) or `"body"` (Square-style, requires a
+JSON-object request body); `name` is the header or top-level body field.
+The author declares **placement only** — the key value is engine-owned:
+the content-derived `record_id` the engine already computes per record,
+so a re-sent record carries the same key and the provider dedups it
+(within its replay window).
+
+The block requires `batching.mode: "single"`; both the published schema
+and `configure_schema` reject any other combination, because a restart
+re-batches records and a per-request key spanning several records cannot
+dedup (issue #286). Without the block, API `insert` is at-least-once on a
+same-run restart. Every destination reports its per-stream verdict in the
+schema ack (`retry_semantics` + reason) and the engine logs it at stream
+start.
+
 ## gRPC Batch Parameters
 
 | Field | Description |

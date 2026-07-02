@@ -50,7 +50,15 @@ from cdk.database_utils import acquire_connection
 from cdk.query_builder import Filter, ParamsLike, QueryBuilder, QueryConfig
 from cdk.schema_contract import SchemaContract
 from cdk.type_map import InvalidTypeMapError, TypeMapper, UnmappedTypeError
-from cdk.types import AckStatus, CheckpointStore, Cursor, EndpointScope, SchemaSpec
+from cdk.types import (
+    AckStatus,
+    CheckpointStore,
+    Cursor,
+    EndpointScope,
+    RetrySemantics,
+    RetryVerdict,
+    SchemaSpec,
+)
 
 from ..contract import ColumnDef
 from ._adbc_utils import _close_cursor_quietly
@@ -491,6 +499,52 @@ class GenericSQLConnector(BaseDestinationHandler):
         SQL destinations implement truncate-insert (TRUNCATE then ingest).
         """
         return True
+
+    def retry_semantics(self, stream_id: str) -> RetryVerdict:
+        """Retry-safety verdict per write mode, keys, and transport (#286).
+
+        Upsert and truncate-insert are idempotent on their own terms on
+        every transport. Insert dedups by row identity only on the
+        SQLAlchemy path (anti-join on the contract primary key or the
+        synthetic ``_record_hash``); the ADBC path is plain append until
+        the anti-join lands there (issue #282 follow-up).
+        """
+        state = self._streams.get(stream_id)
+        if state is None:
+            return super().retry_semantics(stream_id)
+        if state.write_mode == "upsert":
+            return RetryVerdict(
+                semantics=RetrySemantics.RETRY_SEMANTICS_EXACTLY_ONCE,
+                reason=(
+                    f"upsert merges on conflict keys "
+                    f"{state.conflict_keys}; a re-sent row updates in place"
+                ),
+            )
+        if state.write_mode == "truncate_insert":
+            return RetryVerdict(
+                semantics=RetrySemantics.RETRY_SEMANTICS_EXACTLY_ONCE,
+                reason=(
+                    "truncate-insert replaces the target on every write; "
+                    "a replay rewrites the same rows"
+                ),
+            )
+        if self._adbc_only:
+            return RetryVerdict(
+                semantics=RetrySemantics.RETRY_SEMANTICS_AT_LEAST_ONCE,
+                reason=(
+                    "plain insert on the ADBC transport has no row-level "
+                    "dedup yet (issue #282 follow-up); a same-run restart "
+                    "can re-ingest re-read rows"
+                ),
+            )
+        return RetryVerdict(
+            semantics=RetrySemantics.RETRY_SEMANTICS_EXACTLY_ONCE,
+            reason=(
+                f"insert anti-joins on row identity "
+                f"{self._identity_columns(state)}; a re-read row lands "
+                f"only once"
+            ),
+        )
 
     async def connect(self, runtime: ConnectionRuntime) -> None:
         """

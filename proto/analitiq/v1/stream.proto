@@ -132,9 +132,28 @@ message StreamResponse {
   }
 }
 
+// Retry semantics a destination guarantees for one stream on a
+// same-RUN_ID restart (issue #286). EXACTLY_ONCE means the handler
+// dedups re-sent records itself (row-identity MERGE / anti-join, file
+// manifest, or a per-record idempotency key on an API); AT_LEAST_ONCE
+// means a restart re-sends already-committed records and repeats their
+// side effects.
+enum RetrySemantics {
+  RETRY_SEMANTICS_UNSPECIFIED = 0;
+  RETRY_SEMANTICS_EXACTLY_ONCE = 1;
+  RETRY_SEMANTICS_AT_LEAST_ONCE = 2;
+}
+
 // Schema acknowledgment (sent after SchemaMessage)
 message SchemaAck {
   string stream_id = 1;
   bool accepted = 2;
   string message = 3;  // Error message if not accepted
+
+  // Retry-safety verdict for this stream, set on an accepted ack.
+  // The handler owning the sink decides (write mode, keys, transport,
+  // declared idempotency all factor in); the engine logs it at stream
+  // start so operators know which streams can duplicate on a restart.
+  RetrySemantics retry_semantics = 4;
+  string retry_semantics_reason = 5;
 }

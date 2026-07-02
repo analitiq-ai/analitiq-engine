@@ -43,7 +43,7 @@ On `StreamRecords` the engine sends a `StreamRequest` carrying either a `SchemaM
 | Message | Direction | Purpose |
 |---------|-----------|---------|
 | `SchemaMessage` | Engine -> Dest | Identifies the stream + write mode (once at stream start) |
-| `SchemaAck` | Dest -> Engine | Whether the schema was accepted |
+| `SchemaAck` | Dest -> Engine | Whether the schema was accepted, plus the stream's retry-safety verdict (`retry_semantics` + reason) |
 | `RecordBatch` | Engine -> Dest | Arrow IPC payload + content-derived record ids + cursor |
 | `BatchAck` | Dest -> Engine | Status, records written, committed cursor |
 
@@ -141,7 +141,14 @@ This survives a network failure that drops the ACK after the destination already
 
 ADBC-only transports (Snowflake/BigQuery) do not yet do the keyless `insert` anti-join — plain `insert` there is at-least-once (a noted follow-up); `upsert` and `truncate_insert` remain idempotent.
 
-A destination that does not dedup itself is **at-least-once on a same-`RUN_ID` retry**: the engine keeps no in-run pre-send skip, so a restart re-sends already-ACKed batches. This applies to the **API** and **stdout** handlers, which have no row-level dedup (an API rents its sink; stdout only prints), so a restart repeats their side effects. It matches what cloud retries already did — the removed engine-side mirror lived on the worker's local filesystem and never survived a fresh container — and a positional pre-send skip cannot be made correct without reintroducing the row-drop this design removes (an advancing cursor re-batches the same `batch_seq` over different rows). Giving API/stdout their own retry idempotency is a follow-up.
+A destination that does not dedup itself is **at-least-once on a same-`RUN_ID` retry**: the engine keeps no in-run pre-send skip, so a restart re-sends already-ACKed batches, and a positional pre-send skip cannot be made correct without reintroducing the row-drop this design removes (an advancing cursor re-batches the same `batch_seq` over different rows). Per handler (issue #286):
+
+- **API, `upsert` mode** — exactly-once: the endpoint dedups on its `conflict_keys`; a re-sent record updates in place.
+- **API, `insert` mode with a declared `idempotency` block** — exactly-once within the provider's replay window. The api-endpoint contract's `operations.write.<mode>.idempotency` (`{"in": "header" | "body", "name": "<key>"}`, infra#890) declares **where** the key lands; the engine owns the **value** — the content-derived `record_id` already computed per record. Requires `batching.mode: "single"` (both the schema and `configure_schema` reject any other combination: a restart re-batches records, so a per-request key spanning several records can never dedup); `in: "body"` additionally requires a JSON-object request body.
+- **API, `insert` mode without the block** — at-least-once: the engine rents the sink and has no key to dedup on.
+- **stdout** — at-least-once by construction: it only prints, so a replayed batch prints again.
+
+Every handler reports its verdict per stream in the `SchemaAck` (`retry_semantics` + `retry_semantics_reason`, forwarded verbatim across the worker-proxy hop), and the engine logs it at stream start — the operator learns which streams may duplicate on a restart before any data moves.
 
 ### All-or-nothing batches
 

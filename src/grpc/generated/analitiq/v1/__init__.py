@@ -11,6 +11,7 @@ from .stream_pb2 import (
     StreamRequest,
     StreamResponse,
     SchemaAck,
+    RetrySemantics,
 )
 
 from .destination_service_pb2 import (
@@ -56,6 +57,7 @@ __all__ = [
     "StreamRequest",
     "StreamResponse",
     "SchemaAck",
+    "RetrySemantics",
     # destination_service.proto messages
     "HealthCheckRequest",
     "HealthCheckResponse",

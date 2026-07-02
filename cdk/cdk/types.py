@@ -49,6 +49,35 @@ class WriteMode(IntEnum):
     WRITE_MODE_TRUNCATE_INSERT = 3  # Truncate table before insert (full refresh)
 
 
+class RetrySemantics(IntEnum):
+    """Retry safety a destination guarantees for one stream on a same-run
+    restart (issue #286).
+
+    Integer values mirror the ``RetrySemantics`` enum in ``stream.proto``
+    exactly, so the servicer passes the value straight into a protobuf
+    ``SchemaAck`` without a lookup table.
+    """
+
+    RETRY_SEMANTICS_UNSPECIFIED = 0
+    # The handler dedups re-sent records itself; a restart cannot duplicate.
+    RETRY_SEMANTICS_EXACTLY_ONCE = 1
+    # A restart re-sends already-committed records and repeats side effects.
+    RETRY_SEMANTICS_AT_LEAST_ONCE = 2
+
+
+@dataclass(frozen=True)
+class RetryVerdict:
+    """A handler's retry-safety verdict for one configured stream.
+
+    ``reason`` names the mechanism behind the verdict (the dedup key, the
+    manifest, the declared idempotency key, or the gap) so the engine's
+    per-stream log line is actionable, not just a label.
+    """
+
+    semantics: RetrySemantics
+    reason: str
+
+
 @dataclass(frozen=True)
 class Cursor:
     """Opaque checkpoint cursor.

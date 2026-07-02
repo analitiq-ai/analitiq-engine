@@ -19,6 +19,7 @@ import pytest
 from cdk.base_handler import BatchWriteResult
 from cdk.type_map import InvalidTypeMapError, UnmappedTypeError
 from cdk.types import Cursor as CdkCursor
+from cdk.types import RetrySemantics, RetryVerdict
 from src.destination.connectors.api import ApiDestinationHandler
 from src.destination.server import DestinationServicer
 from src.grpc.generated.analitiq.v1 import (
@@ -31,6 +32,18 @@ from src.grpc.generated.analitiq.v1 import (
     StreamRequest,
     WriteMode,
 )
+from src.grpc.generated.analitiq.v1 import RetrySemantics as WireRetrySemantics
+
+
+def _stub_retry_semantics(handler) -> None:
+    """Give a MagicMock handler a real verdict: the servicer stamps it into
+    the accepted SchemaAck, and protobuf rejects a MagicMock value."""
+    handler.retry_semantics = MagicMock(
+        return_value=RetryVerdict(
+            semantics=RetrySemantics.RETRY_SEMANTICS_AT_LEAST_ONCE,
+            reason="test stub",
+        )
+    )
 
 
 async def _iter_once(msg: StreamRequest) -> AsyncIterator[StreamRequest]:
@@ -264,6 +277,7 @@ class TestSchemaAckBudget:
             return True
 
         handler.configure_schema = AsyncMock(side_effect=_configure)
+        _stub_retry_semantics(handler)
         servicer = DestinationServicer(handler, server=MagicMock())
 
         async for _ in servicer.StreamRecords(
@@ -470,6 +484,7 @@ class TestWireToCdkTranslation:
 
         handler = MagicMock()
         handler.configure_schema = AsyncMock(return_value=True)
+        _stub_retry_semantics(handler)
         servicer = DestinationServicer(handler, server=MagicMock())
 
         async for _ in servicer.StreamRecords(
@@ -498,6 +513,7 @@ class TestWireToCdkTranslation:
                 committed_cursor=CdkCursor(token=b"committed-xyz"),
             )
         )
+        _stub_retry_semantics(handler)
         servicer = DestinationServicer(handler, server=MagicMock())
 
         responses = []
@@ -533,6 +549,7 @@ class TestWireToCdkTranslation:
                 failure_summary="transient",
             )
         )
+        _stub_retry_semantics(handler)
         servicer = DestinationServicer(handler, server=MagicMock())
 
         responses = []
@@ -678,3 +695,55 @@ class TestShutdownFinalizeRun:
             await servicer.Shutdown(MagicMock(reason="pipeline_completed"), MagicMock())
 
         server.signal_shutdown.assert_called_once()
+
+
+class TestSchemaAckRetrySemantics:
+    """An accepted SchemaAck carries the handler's retry-safety verdict
+    (issue #286); a rejected one carries none (unspecified on the wire)."""
+
+    @pytest.mark.asyncio
+    async def test_accepted_ack_carries_handler_verdict(self):
+        handler = MagicMock()
+        handler.configure_schema = AsyncMock(return_value=True)
+        handler.retry_semantics = MagicMock(
+            return_value=RetryVerdict(
+                semantics=RetrySemantics.RETRY_SEMANTICS_EXACTLY_ONCE,
+                reason="the manifest dedups replays",
+            )
+        )
+
+        servicer = DestinationServicer(handler, server=MagicMock())
+        responses = []
+        async for resp in servicer.StreamRecords(
+            _iter_once(_schema_request()), context=MagicMock()
+        ):
+            responses.append(resp)
+
+        ack = responses[0].schema_ack
+        assert ack.accepted is True
+        assert ack.retry_semantics == WireRetrySemantics.Value(
+            "RETRY_SEMANTICS_EXACTLY_ONCE"
+        )
+        assert ack.retry_semantics_reason == "the manifest dedups replays"
+        handler.retry_semantics.assert_called_once_with("s1")
+
+    @pytest.mark.asyncio
+    async def test_rejected_ack_carries_no_verdict(self):
+        handler = MagicMock()
+        handler.configure_schema = AsyncMock(return_value=False)
+        handler.last_schema_rejection = None
+
+        servicer = DestinationServicer(handler, server=MagicMock())
+        responses = []
+        async for resp in servicer.StreamRecords(
+            _iter_once(_schema_request()), context=MagicMock()
+        ):
+            responses.append(resp)
+
+        ack = responses[0].schema_ack
+        assert ack.accepted is False
+        assert ack.retry_semantics == WireRetrySemantics.Value(
+            "RETRY_SEMANTICS_UNSPECIFIED"
+        )
+        assert ack.retry_semantics_reason == ""
+        handler.retry_semantics.assert_not_called()

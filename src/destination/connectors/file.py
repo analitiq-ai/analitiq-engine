@@ -12,7 +12,13 @@ import pyarrow as pa
 
 from cdk.base_handler import BaseDestinationHandler, BatchWriteResult
 from cdk.connection_runtime import ConnectionRuntime
-from cdk.types import AckStatus, Cursor, SchemaSpec
+from cdk.types import (
+    AckStatus,
+    Cursor,
+    RetrySemantics,
+    RetryVerdict,
+    SchemaSpec,
+)
 
 from ..formatters import get_formatter
 from ..formatters.base import BaseFormatter
@@ -72,6 +78,17 @@ class FileDestinationHandler(BaseDestinationHandler):
     def supports_bulk_load(self) -> bool:
         """File destinations support bulk writes."""
         return True
+
+    def retry_semantics(self, stream_id: str) -> RetryVerdict:
+        """File writes dedup replays through the manifest (issue #286)."""
+        _ = stream_id
+        return RetryVerdict(
+            semantics=RetrySemantics.RETRY_SEMANTICS_EXACTLY_ONCE,
+            reason=(
+                "the manifest records every committed batch; a replayed "
+                "batch is detected and skipped instead of rewritten"
+            ),
+        )
 
     async def connect(self, runtime: ConnectionRuntime) -> None:
         """

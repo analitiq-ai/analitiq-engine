@@ -153,6 +153,12 @@ class DestinationGRPCClient:
         # "Schema configuration failed".
         self._schema_rejection_message: str | None = None
 
+        # Retry-safety verdict from the most recent accepted SchemaAck
+        # (issue #286): (RetrySemantics wire value, reason), or None when
+        # no accepted ack has been seen. The engine logs it per stream at
+        # startup; the worker proxy re-reports it across the shell hop.
+        self._stream_retry_semantics: tuple[int, str] | None = None
+
         # Connection state
         self._connected = False
         self._stream_active = False
@@ -370,6 +376,7 @@ class DestinationGRPCClient:
         self._task_failure = None
         self._peer_closed_stream = False
         self._schema_rejection_message = None
+        self._stream_retry_semantics = None
 
         # Create queues for bidirectional communication
         self._request_queue = asyncio.Queue()
@@ -425,6 +432,10 @@ class DestinationGRPCClient:
                 if response.accepted:
                     logger.info(f"Schema accepted for stream {stream_id}")
                     accepted = True
+                    self._stream_retry_semantics = (
+                        response.retry_semantics,
+                        response.retry_semantics_reason,
+                    )
                 else:
                     self._schema_rejection_message = response.message
                     logger.error(f"Schema rejected: {response.message}")
@@ -457,6 +468,15 @@ class DestinationGRPCClient:
         accepted (or none has run).
         """
         return self._schema_rejection_message
+
+    @property
+    def stream_retry_semantics(self) -> tuple[int, str] | None:
+        """Retry-safety verdict from the last accepted SchemaAck (#286).
+
+        ``(RetrySemantics wire value, reason)``, or None when the most
+        recent start_stream was not accepted (or none has run).
+        """
+        return self._stream_retry_semantics
 
     async def send_batch(
         self,

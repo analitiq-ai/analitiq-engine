@@ -29,7 +29,13 @@ from cdk.request_binding import (
     resolve_param_defaults,
 )
 from cdk.resolver import Resolver
-from cdk.types import AckStatus, Cursor, SchemaSpec
+from cdk.types import (
+    AckStatus,
+    Cursor,
+    RetrySemantics,
+    RetryVerdict,
+    SchemaSpec,
+)
 
 from ...shared.http_utils import join_url
 
@@ -71,6 +77,101 @@ def _endpoint_write_mode_block(
     if not isinstance(request, Mapping) or not request.get("path"):
         return None
     return dict(mode_block)
+
+
+def _idempotency_config_problem(idempotency: Any, state: "_StreamState") -> str | None:
+    """Why this ``idempotency`` block cannot work for the stream, or ``None``.
+
+    Mirrors the api-endpoint schema's own constraints (infra#890) so a
+    document that slipped past contract validation still fails loud at
+    configure time instead of writing without the key it promised.
+    """
+    if not isinstance(idempotency, Mapping):
+        return f"idempotency must be an object, got {type(idempotency).__name__}"
+    target = idempotency.get("in")
+    name = idempotency.get("name")
+    if target not in ("header", "body"):
+        return f"idempotency.in must be 'header' or 'body', got {target!r}"
+    if not isinstance(name, str) or not name:
+        return f"idempotency.name must be a non-empty string, got {name!r}"
+    if state.batch_mode != ApiDestinationHandler.BATCH_MODE_SINGLE:
+        return (
+            f"idempotency requires batching.mode 'single', got "
+            f"{state.batch_mode!r}: a restart re-batches records, so a "
+            f"per-request key over several records cannot dedup (issue #286)"
+        )
+    if target == "body":
+        if state.body_spec is not None and not isinstance(state.body_spec, Mapping):
+            return (
+                f"idempotency.in='body' needs a JSON-object request body; "
+                f"the declared request.body is a "
+                f"{type(state.body_spec).__name__}"
+            )
+        if isinstance(state.body_spec, Mapping) and name in state.body_spec:
+            return (
+                f"request.body already declares the field {name!r} that "
+                f"idempotency.name reserves for the engine-owned key"
+            )
+    return None
+
+
+def _retry_verdict(mode_key: str, state: "_StreamState") -> RetryVerdict:
+    """Retry-safety verdict for one configured API stream (issue #286).
+
+    Upsert dedups on the endpoint's conflict keys regardless of a declared
+    idempotency key; insert is exactly-once only when the endpoint declares
+    where the engine-owned key lands, otherwise a same-run restart re-sends
+    already-delivered records.
+    """
+    if mode_key == "upsert":
+        return RetryVerdict(
+            semantics=RetrySemantics.RETRY_SEMANTICS_EXACTLY_ONCE,
+            reason=(
+                "upsert dedups on the endpoint's conflict keys; a re-sent "
+                "record updates in place"
+            ),
+        )
+    if state.idempotency_in is not None:
+        return RetryVerdict(
+            semantics=RetrySemantics.RETRY_SEMANTICS_EXACTLY_ONCE,
+            reason=(
+                f"each request carries the content-derived record id as an "
+                f"idempotency key ({state.idempotency_in} "
+                f"{state.idempotency_name!r}); dedup holds within the "
+                f"provider's replay window"
+            ),
+        )
+    return RetryVerdict(
+        semantics=RetrySemantics.RETRY_SEMANTICS_AT_LEAST_ONCE,
+        reason=(
+            "insert mode with no declared idempotency key; a same-run "
+            "restart re-sends already-delivered records"
+        ),
+    )
+
+
+def _body_with_idempotency_key(
+    state: "_StreamState", body: Any, record_id: str
+) -> dict[str, Any]:
+    """Return the request body with the engine-owned idempotency key added.
+
+    Configure time already rejected a declared non-object body spec; this
+    guards the remaining runtime shapes (a spec-less record body, or a spec
+    that resolved away its object shape). A body that already carries the
+    reserved field is a collision the engine must not silently overwrite.
+    """
+    if not isinstance(body, dict):
+        raise ValueError(
+            f"idempotency.in='body' for endpoint {state.endpoint!r} needs a "
+            f"JSON-object request body, got {type(body).__name__}"
+        )
+    if state.idempotency_name in body:
+        raise ValueError(
+            f"request body already carries the field "
+            f"{state.idempotency_name!r}, which idempotency.name reserves "
+            f"for the engine-owned key; rename the record field or the key"
+        )
+    return {**body, state.idempotency_name: record_id}
 
 
 def _orjson_default(obj: Any) -> Any:
@@ -143,6 +244,15 @@ class _StreamState:
     # ``operations.write.<mode>.params`` — declared write params whose
     # resolved defaults feed body ``{"from_param": ...}`` bindings.
     params_spec: dict[str, Any] = field(default_factory=dict)
+    # ``operations.write.<mode>.idempotency`` (infra#890): where the
+    # engine-owned per-record idempotency key lands ("header" or "body")
+    # and the header/field name it lands under. ``None`` means the
+    # endpoint declares no key. The key VALUE is always the record's
+    # content-derived ``record_id`` — the author declares placement only.
+    idempotency_in: str | None = None
+    idempotency_name: str = ""
+    # Retry-safety verdict computed at configure time (issue #286).
+    retry_verdict: RetryVerdict | None = None
 
 
 class ApiDestinationHandler(BaseDestinationHandler):
@@ -154,6 +264,10 @@ class ApiDestinationHandler(BaseDestinationHandler):
     - Rate limiting with configurable limits
     - Retry with exponential backoff
     - Multiple authentication methods
+    - Per-record idempotency keys (``operations.write.<mode>.idempotency``,
+      infra#890): single mode only; the engine-owned content-derived
+      record id is sent as a header or a body field so a same-run restart
+      cannot double-write (issue #286)
 
     Configuration (connection config):
     - host: Base URL for the API
@@ -257,6 +371,13 @@ class ApiDestinationHandler(BaseDestinationHandler):
     def supports_bulk_load(self) -> bool:
         """Report that this connector supports bulk mode."""
         return True
+
+    def retry_semantics(self, stream_id: str) -> RetryVerdict:
+        """Per-stream verdict computed at configure time (issue #286)."""
+        state = self._streams.get(stream_id)
+        if state is None or state.retry_verdict is None:
+            return super().retry_semantics(stream_id)
+        return state.retry_verdict
 
     async def connect(self, runtime: ConnectionRuntime) -> None:
         """
@@ -383,6 +504,19 @@ class ApiDestinationHandler(BaseDestinationHandler):
                     state.batch_mode,
                 )
                 return False
+
+        idempotency = mode_block.get("idempotency")
+        if idempotency is not None:
+            problem = _idempotency_config_problem(idempotency, state)
+            if problem is not None:
+                logger.error(
+                    "API endpoint document for stream %r: %s", stream_id, problem
+                )
+                return False
+            state.idempotency_in = idempotency["in"]
+            state.idempotency_name = idempotency["name"]
+
+        state.retry_verdict = _retry_verdict(mode_key, state)
 
         self._streams[stream_id] = state
         logger.info(
@@ -572,6 +706,8 @@ class ApiDestinationHandler(BaseDestinationHandler):
         for i, record in enumerate(records):
             try:
                 body = self._build_body(state, record=record)
+                if state.idempotency_in == "body":
+                    body = _body_with_idempotency_key(state, body, record_ids[i])
             except (TypeError, ValueError) as e:
                 logger.warning(
                     "Failed to build body for record %s: %s: %s",
@@ -581,8 +717,13 @@ class ApiDestinationHandler(BaseDestinationHandler):
                 )
                 failed_ids.append(record_ids[i])
                 continue
+            idempotency_header = (
+                {state.idempotency_name: record_ids[i]}
+                if state.idempotency_in == "header"
+                else None
+            )
             try:
-                await self._send_request(state, body)
+                await self._send_request(state, body, extra_headers=idempotency_header)
                 written += 1
             except (aiohttp.ClientError, asyncio.TimeoutError) as e:
                 logger.warning(
@@ -667,7 +808,12 @@ class ApiDestinationHandler(BaseDestinationHandler):
 
         return written, []
 
-    async def _send_request(self, state: _StreamState, data: Any) -> dict[str, Any]:
+    async def _send_request(
+        self,
+        state: _StreamState,
+        data: Any,
+        extra_headers: Mapping[str, str] | None = None,
+    ) -> dict[str, Any]:
         """
         Send HTTP request with rate limiting.
 
@@ -677,6 +823,8 @@ class ApiDestinationHandler(BaseDestinationHandler):
 
         Args:
             data: Request body (single record or list of records)
+            extra_headers: Per-request headers layered over the defaults
+                (single mode passes the idempotency key header here)
 
         Returns:
             Response JSON
@@ -700,11 +848,15 @@ class ApiDestinationHandler(BaseDestinationHandler):
         # one C-speed pass instead of a separate Python or Arrow cast.
         body = orjson.dumps(data, default=_orjson_default)
 
+        headers = {"Content-Type": "application/json"}
+        if extra_headers:
+            headers.update(extra_headers)
+
         async with self._session.request(
             method=state.method,
             url=url,
             data=body,
-            headers={"Content-Type": "application/json"},
+            headers=headers,
         ) as response:
             # Check for non-success status
             if response.status >= 400:

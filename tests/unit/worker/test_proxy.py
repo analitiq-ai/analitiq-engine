@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from cdk.types import AckStatus, SchemaSpec, WriteMode
+from cdk.types import AckStatus, RetrySemantics, SchemaSpec, WriteMode
 from src.worker.proxy import WorkerProxyHandler
 
 
@@ -88,6 +88,7 @@ class TestProxyConfigureSchema:
         client = MagicMock()
         client.connect = AsyncMock(return_value=True)
         client.start_stream = AsyncMock(return_value=True)
+        client.stream_retry_semantics = None
 
         with patch(
             "src.worker.proxy.DestinationGRPCClient", return_value=client
@@ -108,6 +109,56 @@ class TestProxyConfigureSchema:
         schema_config = client.start_stream.call_args.kwargs["schema_config"]
         assert schema_config["ack_timeout_seconds"] == 300
         assert schema_config["write_mode"] == "upsert"
+
+    async def test_re_reports_worker_retry_verdict(self):
+        """The shell's engine-facing ack must carry the worker's verdict
+        (issue #286), not the base handler default."""
+        proxy = _proxy()
+        proxy._handle = _handle()
+        client = MagicMock()
+        client.connect = AsyncMock(return_value=True)
+        client.start_stream = AsyncMock(return_value=True)
+        client.stream_retry_semantics = (
+            int(RetrySemantics.RETRY_SEMANTICS_EXACTLY_ONCE),
+            "upsert merges on conflict keys",
+        )
+
+        with patch("src.worker.proxy.DestinationGRPCClient", return_value=client):
+            accepted = await proxy.configure_schema(
+                SchemaSpec(
+                    stream_id="s1",
+                    version=1,
+                    write_mode=WriteMode.WRITE_MODE_UPSERT,
+                    ack_timeout_seconds=300,
+                )
+            )
+
+        assert accepted is True
+        verdict = proxy.retry_semantics("s1")
+        assert verdict.semantics == RetrySemantics.RETRY_SEMANTICS_EXACTLY_ONCE
+        assert verdict.reason == "upsert merges on conflict keys"
+
+    async def test_unspecified_worker_verdict_falls_back_to_base_default(self):
+        proxy = _proxy()
+        proxy._handle = _handle()
+        client = MagicMock()
+        client.connect = AsyncMock(return_value=True)
+        client.start_stream = AsyncMock(return_value=True)
+        client.stream_retry_semantics = None
+
+        with patch("src.worker.proxy.DestinationGRPCClient", return_value=client):
+            await proxy.configure_schema(
+                SchemaSpec(
+                    stream_id="s1",
+                    version=1,
+                    write_mode=WriteMode.WRITE_MODE_INSERT,
+                    ack_timeout_seconds=300,
+                )
+            )
+
+        verdict = proxy.retry_semantics("s1")
+        assert verdict.semantics == RetrySemantics.RETRY_SEMANTICS_AT_LEAST_ONCE
+        assert "declares no retry-safety" in verdict.reason
 
 
 class TestProxyWriteBatch:

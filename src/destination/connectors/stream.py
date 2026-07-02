@@ -13,7 +13,13 @@ import pyarrow as pa
 
 from cdk.base_handler import BaseDestinationHandler, BatchWriteResult
 from cdk.connection_runtime import ConnectionRuntime
-from cdk.types import AckStatus, Cursor, SchemaSpec
+from cdk.types import (
+    AckStatus,
+    Cursor,
+    RetrySemantics,
+    RetryVerdict,
+    SchemaSpec,
+)
 
 from ..formatters import get_formatter
 from ..formatters.base import BaseFormatter
@@ -60,6 +66,17 @@ class StreamDestinationHandler(BaseDestinationHandler):
     def supports_bulk_load(self) -> bool:
         """Stdout does not support bulk load."""
         return False
+
+    def retry_semantics(self, stream_id: str) -> RetryVerdict:
+        """Stdout has no dedup by construction (issue #286)."""
+        _ = stream_id
+        return RetryVerdict(
+            semantics=RetrySemantics.RETRY_SEMANTICS_AT_LEAST_ONCE,
+            reason=(
+                "stdout only prints; a replayed batch prints its records "
+                "again"
+            ),
+        )
 
     async def connect(self, runtime: ConnectionRuntime) -> None:
         """

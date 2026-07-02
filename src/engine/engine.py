@@ -18,7 +18,7 @@ from ..grpc.client import (
     resolve_grpc_ack_timeout_seconds,
 )
 from ..grpc.cursor import compute_max_cursor, cursor_to_state_dict
-from ..grpc.generated.analitiq.v1 import AckStatus
+from ..grpc.generated.analitiq.v1 import AckStatus, RetrySemantics
 from ..models.metrics import PipelineMetrics
 from ..models.resolved import RuntimeConfig
 from ..shared.run_id import get_or_generate_run_id
@@ -302,6 +302,19 @@ class StreamingEngine:
                     stage=FailureStage.DESTINATION_LOAD,
                 )
             logger.info(f"Stream {stream_name}: gRPC stream started, schema accepted")
+            # Surface the destination's retry-safety verdict per stream
+            # (issue #286): an at-least-once stream re-sends committed
+            # records on a same-run restart, and the operator should learn
+            # that at startup, not from duplicated side effects.
+            retry_verdict = grpc_client.stream_retry_semantics
+            if retry_verdict is not None:
+                semantics_value, retry_reason = retry_verdict
+                logger.info(
+                    "Stream %s: retry semantics on a same-run restart: %s (%s)",
+                    stream_name,
+                    RetrySemantics.Name(semantics_value),
+                    retry_reason,
+                )
 
             extract_queue: Queue[Any] = Queue(maxsize=self.buffer_size)
             transform_queue: Queue[Any] = Queue(maxsize=self.buffer_size)

@@ -321,13 +321,31 @@ class DestinationServicer(DestinationServiceServicer):
                         ack_message = f"{type(e).__name__}: {e}"
                     schema_configured = accepted
 
-                    yield StreamResponse(
-                        schema_ack=SchemaAck(
+                    if accepted:
+                        # The handler decides the stream's retry safety
+                        # (write mode, keys, transport, declared
+                        # idempotency); the ack carries the verdict so the
+                        # engine can log which streams may duplicate on a
+                        # same-run restart (issue #286). The worker proxy
+                        # forwards the worker's verdict, so this holds
+                        # across both hops.
+                        verdict = self.handler.retry_semantics(
+                            schema_msg.stream_id
+                        )
+                        schema_ack = SchemaAck(
                             stream_id=schema_msg.stream_id,
-                            accepted=accepted,
+                            accepted=True,
+                            message=ack_message,
+                            retry_semantics=verdict.semantics,
+                            retry_semantics_reason=verdict.reason,
+                        )
+                    else:
+                        schema_ack = SchemaAck(
+                            stream_id=schema_msg.stream_id,
+                            accepted=False,
                             message=ack_message,
                         )
-                    )
+                    yield StreamResponse(schema_ack=schema_ack)
 
                 elif msg_type == "batch":
                     # Handle record batch
