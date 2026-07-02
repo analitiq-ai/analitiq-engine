@@ -58,9 +58,12 @@ class RetrySemantics(IntEnum):
     """
 
     RETRY_SEMANTICS_UNSPECIFIED = 0
-    # The handler dedups re-sent records itself; a restart cannot duplicate.
+    # The handler dedups re-sent records by row identity; a restart can
+    # neither duplicate nor drop.
     RETRY_SEMANTICS_EXACTLY_ONCE = 1
-    # A restart re-sends already-committed records and repeats side effects.
+    # A restart is not replay-safe: committed records are re-applied, or
+    # re-batched rows are misclassified (skipped / truncated away). The
+    # verdict's reason names the concrete failure mode.
     RETRY_SEMANTICS_AT_LEAST_ONCE = 2
 
 

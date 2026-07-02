@@ -503,11 +503,15 @@ class GenericSQLConnector(BaseDestinationHandler):
     def retry_semantics(self, stream_id: str) -> RetryVerdict:
         """Retry-safety verdict per write mode, keys, and transport (#286).
 
-        Upsert and truncate-insert are idempotent on their own terms on
-        every transport. Insert dedups by row identity only on the
-        SQLAlchemy path (anti-join on the contract primary key or the
-        synthetic ``_record_hash``); the ADBC path is plain append until
-        the anti-join lands there (issue #282 follow-up).
+        Upsert is idempotent on its conflict keys on every transport.
+        Insert dedups by row identity only on the SQLAlchemy path
+        (anti-join on the contract primary key or the synthetic
+        ``_record_hash``); the ADBC path is plain append until the
+        anti-join lands there (issue #282 follow-up). Truncate-insert
+        truncates per batch, so replaying the SAME batch is idempotent —
+        but a restart that resumes mid-stream truncates away rows earlier
+        batches committed, and this handler cannot see whether the stream
+        resumes from a cursor, so it must not claim replay safety.
         """
         state = self._streams.get(stream_id)
         if state is None:
@@ -522,10 +526,11 @@ class GenericSQLConnector(BaseDestinationHandler):
             )
         if state.write_mode == "truncate_insert":
             return RetryVerdict(
-                semantics=RetrySemantics.RETRY_SEMANTICS_EXACTLY_ONCE,
+                semantics=RetrySemantics.RETRY_SEMANTICS_AT_LEAST_ONCE,
                 reason=(
-                    "truncate-insert replaces the target on every write; "
-                    "a replay rewrites the same rows"
+                    "truncate-insert truncates per batch; a restart that "
+                    "resumes mid-stream truncates away rows committed by "
+                    "earlier batches and keeps only the resumed slice"
                 ),
             )
         if self._adbc_only:

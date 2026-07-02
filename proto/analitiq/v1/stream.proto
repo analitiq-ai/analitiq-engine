@@ -134,10 +134,12 @@ message StreamResponse {
 
 // Retry semantics a destination guarantees for one stream on a
 // same-RUN_ID restart (issue #286). EXACTLY_ONCE means the handler
-// dedups re-sent records itself (row-identity MERGE / anti-join, file
-// manifest, or a per-record idempotency key on an API); AT_LEAST_ONCE
-// means a restart re-sends already-committed records and repeats their
-// side effects.
+// dedups re-sent records by row identity (MERGE / anti-join, or a
+// per-record idempotency key on an API), so a restart can neither
+// duplicate nor drop. AT_LEAST_ONCE means a restart is NOT replay-safe:
+// depending on the sink, committed records are re-applied (duplicate
+// side effects) or re-batched rows are misclassified (skipped or
+// truncated away) — the reason string names the concrete failure mode.
 enum RetrySemantics {
   RETRY_SEMANTICS_UNSPECIFIED = 0;
   RETRY_SEMANTICS_EXACTLY_ONCE = 1;

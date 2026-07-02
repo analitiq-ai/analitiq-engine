@@ -143,10 +143,11 @@ def _retry_verdict(mode_key: str, state: "_StreamState") -> RetryVerdict:
         return RetryVerdict(
             semantics=RetrySemantics.RETRY_SEMANTICS_EXACTLY_ONCE,
             reason=(
-                f"each request carries the content-derived record id as an "
+                f"each request carries the record's identity hash as an "
                 f"idempotency key ({state.idempotency_in} "
                 f"{state.idempotency_name!r}); dedup holds within the "
-                f"provider's replay window"
+                f"provider's replay window, with SQL insert-mode identity "
+                f"semantics (first occurrence of a key wins)"
             ),
         )
     return RetryVerdict(
@@ -256,7 +257,10 @@ class _StreamState:
     # engine-owned per-record idempotency key lands ("header" or "body")
     # and the header/field name it lands under. ``None`` means the
     # endpoint declares no key. The key VALUE is always the record's
-    # content-derived ``record_id`` — the author declares placement only.
+    # identity-derived ``record_id`` (primary-key fields when the source
+    # declares them, else the full content) — the author declares
+    # placement only, and dedup follows SQL insert-mode identity
+    # semantics: the first occurrence of an identity wins.
     idempotency_in: str | None = None
     idempotency_name: str = ""
     # Retry-safety verdict computed at configure time (issue #286).
@@ -273,7 +277,7 @@ class ApiDestinationHandler(BaseDestinationHandler):
     - Retry with exponential backoff
     - Multiple authentication methods
     - Per-record idempotency keys (``operations.write.<mode>.idempotency``,
-      infra#890): single mode only; the engine-owned content-derived
+      infra#890): single mode only; the engine-owned identity-derived
       record id is sent as a header or a body field so a same-run restart
       cannot double-write (issue #286)
 

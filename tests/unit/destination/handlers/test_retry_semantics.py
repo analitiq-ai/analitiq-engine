@@ -60,10 +60,14 @@ class TestBaseDefaultVerdict:
 
 @pytest.mark.unit
 class TestFileAndStdoutVerdicts:
-    def test_file_reports_exactly_once_via_manifest(self):
+    def test_file_reports_not_replay_safe(self):
+        """The manifest dedups by batch position; a same-run restart
+        re-numbers re-batched rows, so a committed position carrying
+        different rows would be skipped (issue #282 row-drop class) —
+        the verdict must not claim exactly-once."""
         verdict = FileDestinationHandler().retry_semantics("s1")
-        assert verdict.semantics == RetrySemantics.RETRY_SEMANTICS_EXACTLY_ONCE
-        assert "manifest" in verdict.reason
+        assert verdict.semantics == RetrySemantics.RETRY_SEMANTICS_AT_LEAST_ONCE
+        assert "batch position" in verdict.reason
 
     def test_stdout_reports_at_least_once(self):
         verdict = StreamDestinationHandler().retry_semantics("s1")
@@ -74,8 +78,10 @@ class TestFileAndStdoutVerdicts:
 @pytest.mark.unit
 class TestSqlVerdicts:
     """The SQL verdict must match the write path that actually runs:
-    upsert / truncate_insert dedup on their own terms everywhere; insert
-    anti-joins on row identity only on the SQLAlchemy transport."""
+    upsert dedups on its conflict keys everywhere; insert anti-joins on
+    row identity only on the SQLAlchemy transport; truncate-insert
+    cannot claim replay safety (per-batch truncate vs mid-stream
+    resume)."""
 
     def _handler(self, *, adbc_only: bool, **state_kwargs) -> GenericSQLConnector:
         handler = GenericSQLConnector()
@@ -93,10 +99,14 @@ class TestSqlVerdicts:
         assert verdict.semantics == RetrySemantics.RETRY_SEMANTICS_EXACTLY_ONCE
         assert "id" in verdict.reason
 
-    def test_truncate_insert_exactly_once(self):
+    def test_truncate_insert_reports_not_replay_safe(self):
+        """Truncate-insert truncates per batch; a restart resuming
+        mid-stream truncates away rows earlier batches committed, and the
+        handler cannot see whether the stream resumes from a cursor."""
         handler = self._handler(adbc_only=True, write_mode="truncate_insert")
         verdict = handler.retry_semantics("s1")
-        assert verdict.semantics == RetrySemantics.RETRY_SEMANTICS_EXACTLY_ONCE
+        assert verdict.semantics == RetrySemantics.RETRY_SEMANTICS_AT_LEAST_ONCE
+        assert "truncates per batch" in verdict.reason
 
     def test_keyed_insert_on_sqlalchemy_exactly_once(self):
         handler = self._handler(

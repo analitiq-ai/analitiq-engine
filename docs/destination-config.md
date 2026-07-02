@@ -315,6 +315,13 @@ A single `_manifest.json` in the base path records `commits[]` with
 `file_path`, `committed_at`. Replays match by `(run_id, stream_id,
 batch_seq)` and become no-ops.
 
+This positional match is sound for an in-run replay of the same batch,
+but not across a same-run restart: the source resumes from the committed
+cursor while `batch_seq` restarts, so a committed position can re-arrive
+carrying different rows and be skipped as a replay. The file destination
+therefore reports itself as not replay-safe (at-least-once) in the
+schema ack (issue #286).
+
 ### API (per-record idempotency key)
 
 An API `upsert` is idempotent through the endpoint's own `conflict_keys`.
@@ -329,9 +336,12 @@ per-request idempotency key lands:
 `in` is `"header"` (Stripe-style) or `"body"` (Square-style, requires a
 JSON-object request body); `name` is the header or top-level body field.
 The author declares **placement only** — the key value is engine-owned:
-the content-derived `record_id` the engine already computes per record,
-so a re-sent record carries the same key and the provider dedups it
-(within its replay window).
+the identity-derived `record_id` the engine already computes per record
+(primary-key fields when the source declares them, else the full
+content), so a re-sent record carries the same key and the provider
+dedups it within its replay window. This gives API `insert` the same
+identity semantics as SQL `insert`: the first occurrence of an identity
+wins; a stream that must reconcile changed rows uses `upsert`.
 
 The block cannot be combined with a `batching` block — the contract has
 no batching mode; a present block IS the multi-record case. Both the
