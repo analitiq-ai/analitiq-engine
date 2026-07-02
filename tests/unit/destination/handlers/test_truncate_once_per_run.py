@@ -22,7 +22,7 @@ from sqlalchemy.pool import StaticPool
 
 from cdk.sql.generic import GenericSQLConnector
 from cdk.sql.generic import _StreamState as SqlStreamState
-from src.engine.engine import _FullRefreshCheckpoint
+from src.engine.engine import StreamingEngine, _FullRefreshCheckpoint
 
 
 def _batch(rows: list[dict]) -> pa.RecordBatch:
@@ -320,9 +320,7 @@ class TestFirstBatchDropGuard:
     previous refresh's rows — stale data mixed into a partial snapshot."""
 
     def _engine(self):
-        import src.engine.engine as engine_module
-
-        engine = engine_module.StreamingEngine.__new__(engine_module.StreamingEngine)
+        engine = StreamingEngine.__new__(StreamingEngine)
         engine.max_retries = 0
         engine.retry_delay = 0
         engine.error_strategy = "dlq"
