@@ -662,12 +662,64 @@ class TestZeroBatchTruncate:
     async def test_outer_scope_no_send_for_non_truncate_insert(self):
         """When write_mode is not truncate_insert, no synthetic batch is
         ever sent regardless of how many batches the source produced."""
-        from src.grpc.generated.analitiq.v1 import AckStatus
-
         engine = self._process_stream_engine()
         grpc_client = await self._invoke_process_stream(
             engine, [], write_mode="insert"
         )
+        grpc_client.send_batch.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_extract_failure_does_not_truncate(self):
+        """An upstream (extract/transform) failure must never trigger a
+        spurious truncate. The safety guarantee: gather re-raises before
+        the post-gather synthetic-batch block runs, so send_batch is
+        never called even if _load_stage had set the flag."""
+        import asyncio
+        from unittest.mock import patch
+
+        engine = self._process_stream_engine()
+
+        grpc_client = MagicMock()
+        grpc_client.connect = AsyncMock(return_value=True)
+        grpc_client.start_stream = AsyncMock(return_value=True)
+        grpc_client.stream_retry_semantics = None
+        grpc_client.send_batch = AsyncMock()
+        grpc_client.disconnect = AsyncMock()
+
+        def _failing_stages(**kwargs):
+            sm = kwargs["stream_metrics"]
+            # Simulate _load_stage having set the flag before extract
+            # raised — the worst-case race scenario.
+            sm["_zero_batch_truncate_needed"] = True
+
+            async def _raise():
+                raise RuntimeError("source connection refused")
+
+            return [asyncio.create_task(_raise())]
+
+        stream_config = {
+            "name": "s",
+            "stream_id": "s1",
+            "source": {},
+            "destination": {"write_mode": "truncate_insert"},
+            "mapping": {},
+        }
+        pipeline_config = {"pipeline_id": "p1"}
+
+        from src.engine.exceptions import StreamProcessingError
+
+        with (
+            patch.object(engine, "_create_source_connector", return_value=MagicMock()),
+            patch.object(engine, "_create_grpc_client", return_value=grpc_client),
+            patch.object(engine, "_create_pipeline_stages", side_effect=_failing_stages),
+            patch("src.engine.engine.DeadLetterQueue"),
+            patch("src.engine.engine.create_metrics_record", return_value=MagicMock()),
+        ):
+            with pytest.raises(RuntimeError, match="source connection refused"):
+                await engine._process_stream("s1", stream_config, pipeline_config)
+
+        # The whole point of the post-gather placement: gather raised, so
+        # the synthetic truncate block was never reached.
         grpc_client.send_batch.assert_not_awaited()
 
     # ------------------------------------------------------------------ #
