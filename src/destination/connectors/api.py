@@ -554,6 +554,9 @@ class ApiDestinationHandler(BaseDestinationHandler):
         plus optional ``batching`` block.
         """
         stream_id = schema_spec.stream_id
+        # The servicer reads last_schema_rejection right after this call.
+        # The handler is shared across concurrent streams, so the reset ->
+        # read window is race-free only while this method stays await-free.
         self.last_schema_rejection = None
         endpoint_doc = self._stream_endpoints.get(stream_id)
         if endpoint_doc is None:

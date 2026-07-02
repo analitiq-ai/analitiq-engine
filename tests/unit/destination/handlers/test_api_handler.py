@@ -641,6 +641,80 @@ class TestApiHandlerChunkedWrites:
         assert "first failure: ValueError" in result.failure_summary
 
     @pytest.mark.asyncio
+    async def test_build_failure_then_transport_failure_attributes_disjointly(
+        self,
+        api_handler: ApiDestinationHandler,
+    ):
+        """The trickiest interleaving: an early chunk build-fails, a later
+        chunk lands, then a transport failure stops the loop. The
+        build-failed ids and the unsent tail must concatenate without
+        double-attributing or dropping any id."""
+        import aiohttp
+
+        state = api_handler._streams["test-stream"]
+        state.max_records = 2
+
+        real_build = api_handler._build_body
+
+        def _build(state_arg, *, record=None, records=None):
+            if records and any(r["id"] == 1 for r in records):  # first chunk
+                raise ValueError("record 1 cannot feed the derived field")
+            return real_build(state_arg, record=record, records=records)
+
+        sent = []
+
+        async def _send(state_arg, data, extra_headers=None):
+            sent.append(data)
+            if len(sent) == 2:  # third chunk (r4, r5) fails transport
+                raise aiohttp.ClientConnectionError("chunk down")
+            return {}
+
+        api_handler._build_body = _build
+        api_handler._send_request = _send
+        records = [{"id": i} for i in range(8)]
+        record_ids = [f"r{i}" for i in range(8)]
+
+        written, failed, first_failure = await api_handler._write_chunked_mode(
+            state, records, record_ids
+        )
+        # Chunk (r0,r1) build-failed; (r2,r3) landed; (r4,r5) transport-failed
+        # so everything from it onward is unsent. written + failed == total.
+        assert written == 2
+        assert failed == ["r0", "r1", "r4", "r5", "r6", "r7"]
+        assert "ValueError" in first_failure
+
+    @pytest.mark.asyncio
+    async def test_transport_failure_with_only_build_failures_reraises(
+        self,
+        api_handler: ApiDestinationHandler,
+    ):
+        """A transport failure while nothing has landed re-raises (RETRYABLE)
+        even if earlier chunks build-failed: retrying cannot duplicate, and
+        the deterministic build failures re-attribute on the retry once a
+        chunk lands."""
+        import aiohttp
+
+        state = api_handler._streams["test-stream"]
+        state.max_records = 2
+
+        real_build = api_handler._build_body
+
+        def _build(state_arg, *, record=None, records=None):
+            if records and any(r["id"] == 1 for r in records):  # first chunk
+                raise ValueError("record 1 cannot feed the derived field")
+            return real_build(state_arg, record=record, records=records)
+
+        api_handler._build_body = _build
+        api_handler._send_request = AsyncMock(
+            side_effect=aiohttp.ClientConnectionError("down")
+        )
+        records = [{"id": i} for i in range(4)]
+        record_ids = [f"r{i}" for i in range(4)]
+
+        with pytest.raises(aiohttp.ClientConnectionError):
+            await api_handler._write_chunked_mode(state, records, record_ids)
+
+    @pytest.mark.asyncio
     async def test_first_chunk_failure_reraises(
         self,
         api_handler: ApiDestinationHandler,
