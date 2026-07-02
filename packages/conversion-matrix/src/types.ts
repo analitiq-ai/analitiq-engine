@@ -26,5 +26,12 @@ export interface ConversionCell {
 /** An arrow_type family head, e.g. "Int64", "Utf8", "Timestamp". */
 export type ArrowFamily = string;
 
-/** The full grid: `matrix[source][target]` yields the policy cell. */
-export type ConversionMatrix = Record<ArrowFamily, Record<ArrowFamily, ConversionCell>>;
+/**
+ * The full grid: `matrix[source]?.[target]` yields the policy cell.
+ *
+ * Both levels are partial because `ArrowFamily` is `string`: a lookup with an
+ * unknown or typoed family is `undefined`, so consumers must handle the miss
+ * regardless of their own `noUncheckedIndexedAccess` setting. `getConversion`
+ * is the safe accessor.
+ */
+export type ConversionMatrix = Partial<Record<ArrowFamily, Partial<Record<ArrowFamily, ConversionCell>>>>;

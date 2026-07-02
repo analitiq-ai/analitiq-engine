@@ -80,3 +80,9 @@ The engine repo owns and publishes this package; consumers only pin it. CI
    publishes scoped with `access: "public"`.
 
 The published data always matches the engine commit that produced it.
+
+> **One-time setup:** GitHub Packages does not derive public visibility from
+> `publishConfig.access` alone -- a first publish can land private, and only an
+> org/repo admin can flip the package to Public (the workflow's `GITHUB_TOKEN`
+> lacks the org-admin scope to do it). After the first publish, an admin must set
+> the package visibility to Public once so the frontend can install it.

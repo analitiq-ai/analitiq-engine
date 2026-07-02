@@ -55,7 +55,21 @@ jobs:
           scope: "@analitiq-ai"
       - run: npm ci --no-audit --no-fund
       - run: npm run build
+      # verify jobs can finish out of order, so an older commit could otherwise
+      # reach publish last and ship a stale grid as a higher version. Only the
+      # run whose commit is the current main tip publishes; superseded runs skip.
+      - name: Skip if superseded by a newer commit on main
+        id: latest
+        run: |
+          git fetch origin main --depth=1 --quiet
+          if [ "$(git rev-parse origin/main)" = "${{ github.sha }}" ]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Superseded by a newer commit on main; skipping publish."
+          fi
       - name: Publish when the grid content changed
+        if: steps.latest.outputs.publish == 'true'
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: node scripts/publish-if-changed.mjs
