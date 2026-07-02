@@ -12,13 +12,7 @@ import pyarrow as pa
 
 from cdk.base_handler import BaseDestinationHandler, BatchWriteResult
 from cdk.connection_runtime import ConnectionRuntime
-from cdk.types import (
-    AckStatus,
-    Cursor,
-    RetrySemantics,
-    RetryVerdict,
-    SchemaSpec,
-)
+from cdk.types import AckStatus, Cursor, RetrySemantics, RetryVerdict, SchemaSpec
 
 from ..formatters import get_formatter
 from ..formatters.base import BaseFormatter

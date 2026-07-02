@@ -28,11 +28,9 @@ from src.grpc.generated.analitiq.v1 import (
     GetCapabilitiesRequest,
     PayloadFormat,
     RecordBatch,
-    SchemaMessage,
-    StreamRequest,
-    WriteMode,
 )
 from src.grpc.generated.analitiq.v1 import RetrySemantics as WireRetrySemantics
+from src.grpc.generated.analitiq.v1 import SchemaMessage, StreamRequest, WriteMode
 
 
 def _stub_retry_semantics(handler) -> None:

@@ -29,13 +29,7 @@ from cdk.request_binding import (
     resolve_param_defaults,
 )
 from cdk.resolver import Resolver
-from cdk.types import (
-    AckStatus,
-    Cursor,
-    RetrySemantics,
-    RetryVerdict,
-    SchemaSpec,
-)
+from cdk.types import AckStatus, Cursor, RetrySemantics, RetryVerdict, SchemaSpec
 
 from ...shared.http_utils import join_url
 

@@ -210,7 +210,7 @@ class WorkerProxyHandler(BaseDestinationHandler):
         return True
 
     def retry_semantics(self, stream_id: str) -> RetryVerdict:
-        """The worker's verdict, captured from its SchemaAck (issue #286)."""
+        """Return the worker's verdict captured from its SchemaAck (#286)."""
         verdict = self._retry_verdicts.get(stream_id)
         if verdict is None:
             return super().retry_semantics(stream_id)

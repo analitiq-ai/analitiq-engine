@@ -50,8 +50,7 @@ class WriteMode(IntEnum):
 
 
 class RetrySemantics(IntEnum):
-    """Retry safety a destination guarantees for one stream on a same-run
-    restart (issue #286).
+    """Retry safety a destination guarantees on a same-run restart (#286).
 
     Integer values mirror the ``RetrySemantics`` enum in ``stream.proto``
     exactly, so the servicer passes the value straight into a protobuf

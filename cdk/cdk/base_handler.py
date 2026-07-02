@@ -11,13 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 import pyarrow as pa
 
-from .types import (
-    BatchWriteResult,
-    Cursor,
-    RetrySemantics,
-    RetryVerdict,
-    SchemaSpec,
-)
+from .types import BatchWriteResult, Cursor, RetrySemantics, RetryVerdict, SchemaSpec
 
 if TYPE_CHECKING:
     from .connection_runtime import ConnectionRuntime

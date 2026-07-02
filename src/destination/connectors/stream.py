@@ -13,13 +13,7 @@ import pyarrow as pa
 
 from cdk.base_handler import BaseDestinationHandler, BatchWriteResult
 from cdk.connection_runtime import ConnectionRuntime
-from cdk.types import (
-    AckStatus,
-    Cursor,
-    RetrySemantics,
-    RetryVerdict,
-    SchemaSpec,
-)
+from cdk.types import AckStatus, Cursor, RetrySemantics, RetryVerdict, SchemaSpec
 
 from ..formatters import get_formatter
 from ..formatters.base import BaseFormatter
@@ -72,10 +66,7 @@ class StreamDestinationHandler(BaseDestinationHandler):
         _ = stream_id
         return RetryVerdict(
             semantics=RetrySemantics.RETRY_SEMANTICS_AT_LEAST_ONCE,
-            reason=(
-                "stdout only prints; a replayed batch prints its records "
-                "again"
-            ),
+            reason="stdout only prints; a replayed batch prints its records again",
         )
 
     async def connect(self, runtime: ConnectionRuntime) -> None:

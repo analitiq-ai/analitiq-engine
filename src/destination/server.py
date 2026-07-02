@@ -329,9 +329,7 @@ class DestinationServicer(DestinationServiceServicer):
                         # same-run restart (issue #286). The worker proxy
                         # forwards the worker's verdict, so this holds
                         # across both hops.
-                        verdict = self.handler.retry_semantics(
-                            schema_msg.stream_id
-                        )
+                        verdict = self.handler.retry_semantics(schema_msg.stream_id)
                         schema_ack = SchemaAck(
                             stream_id=schema_msg.stream_id,
                             accepted=True,

@@ -1717,9 +1717,7 @@ class TestApiHandlerIdempotencyInjection:
             return {}
 
         handler._send_request = _capture  # type: ignore[assignment]
-        written, failed = await handler._write_single_mode(
-            state, [{"id": 1}], ["r1"]
-        )
+        written, failed = await handler._write_single_mode(state, [{"id": 1}], ["r1"])
         assert (written, failed) == (1, [])
         assert captured == [({"id": 1, "idempotency_key": "r1"}, None)]
 
