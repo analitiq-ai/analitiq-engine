@@ -277,19 +277,23 @@ def _collect_input_field_names(mode_block: Mapping[str, Any]) -> set[str]:
     return names
 
 
-def _classify_http_error(exc: aiohttp.ClientError | asyncio.TimeoutError) -> "AckStatus":
-    """FATAL for deterministic 4xx rejections (not 429); RETRYABLE for everything else.
+def _classify_http_error(
+    exc: aiohttp.ClientError | asyncio.TimeoutError,
+) -> "AckStatus":
+    """FATAL for deterministic 4xx rejections (not 408/429); RETRYABLE otherwise.
 
-    A ClientResponseError with a 4xx status other than 429 is a deterministic
-    rejection — the API refused the payload, and retrying burns retries
-    identically. 429, 5xx, connection errors, and timeouts may recover, so
-    they stay RETRYABLE (subject to the nothing-landed invariant on
+    A ClientResponseError with a 4xx status other than 408 and 429 is a
+    deterministic rejection — the API refused the payload, and retrying burns
+    retries identically. 408 (Request Timeout) and 429 (Too Many Requests) are
+    transient 4xx that may recover, so they stay RETRYABLE, matching the source
+    connector's ``_TRANSIENT_HTTP_STATUSES``. 5xx, connection errors, and
+    timeouts stay RETRYABLE too (subject to the nothing-landed invariant on
     multi-record paths).
     """
     if (
         isinstance(exc, aiohttp.ClientResponseError)
         and 400 <= exc.status < 500
-        and exc.status != 429
+        and exc.status not in (408, 429)
     ):
         return AckStatus.ACK_STATUS_FATAL_FAILURE
     return AckStatus.ACK_STATUS_RETRYABLE_FAILURE
@@ -987,7 +991,8 @@ class ApiDestinationHandler(BaseDestinationHandler):
             except (aiohttp.ClientError, asyncio.TimeoutError) as e:
                 if (
                     written == 0
-                    and _classify_http_error(e) == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
+                    and _classify_http_error(e)
+                    == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
                 ):
                     # No chunk landed and the error is transient — safe to
                     # retry the whole batch.

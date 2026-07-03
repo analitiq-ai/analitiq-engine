@@ -9,6 +9,7 @@ document's ``operations.write.<mode>`` block selects the path / method
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import aiohttp
 import pyarrow as pa
 import pytest
 
@@ -16,8 +17,8 @@ from cdk.types import RetrySemantics
 from src.destination.connectors.api import (
     _API_WRITE_MODE_KEYS,
     ApiDestinationHandler,
-    _StreamState,
     _classify_http_error,
+    _StreamState,
 )
 from src.grpc.generated.analitiq.v1 import AckStatus, SchemaMessage, WriteMode
 
@@ -1374,17 +1375,19 @@ class TestClassifyHttpError:
     and leaves all other exception types as RETRYABLE."""
 
     def _response_error(self, status: int) -> "aiohttp.ClientResponseError":
-        import aiohttp
-
         req = MagicMock()
         return aiohttp.ClientResponseError(req, (), status=status)
 
     def test_400_is_fatal(self):
-        import aiohttp
-
         assert (
             _classify_http_error(self._response_error(400))
             == AckStatus.ACK_STATUS_FATAL_FAILURE
+        )
+
+    def test_408_is_retryable(self):
+        assert (
+            _classify_http_error(self._response_error(408))
+            == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
         )
 
     def test_422_is_fatal(self):
@@ -1481,8 +1484,6 @@ class TestApiHandlerDeterministic4xxClassification:
     classification logic from the single/chunked dispatch."""
 
     def _response_error(self, status: int) -> "aiohttp.ClientResponseError":
-        import aiohttp
-
         req = MagicMock()
         return aiohttp.ClientResponseError(
             req, (), status=status, message=f"HTTP {status}"
