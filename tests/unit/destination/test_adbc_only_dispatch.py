@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from decimal import Decimal, localcontext
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pyarrow as pa
@@ -29,11 +30,13 @@ from cdk.sql import generic as database_module
 from cdk.sql.dialects import SqlDialect
 from cdk.sql.generic import (
     _FATAL_ADBC_ERROR_NAMES,
-    _StreamState,
     AdbcConfigurationError,
     GenericSQLConnector,
+    SchemaConfigurationError,
+    _canonical_json_default,
     _is_fatal_adbc_error,
     _reclassify_as_fatal,
+    _StreamState,
 )
 
 # --- fixture dialects + connector (stand in for a connector package) --------
@@ -591,7 +594,7 @@ class TestAdbcDdlBuilders:
         )
         assert '"_record_hash"' in ddl
         assert '"_record_hash" STRING NOT NULL' in ddl
-        assert 'PRIMARY KEY' in ddl
+        assert "PRIMARY KEY" in ddl
         pk_pos = ddl.index("PRIMARY KEY")
         assert "_record_hash" in ddl[pk_pos:]
 
@@ -728,7 +731,7 @@ class TestAttachRecordHashToBatch:
     def test_appends_hash_column_to_keyless_insert_batch(self):
         h = _FixtureConnector()
         h._adbc_only = True
-        batch = pa.record_batch(
+        batch = pa.RecordBatch.from_pydict(
             {"id": [1, 2], "name": ["alice", "bob"]},
         )
         result = h._attach_record_hash_to_batch(batch, self._state())
@@ -738,7 +741,7 @@ class TestAttachRecordHashToBatch:
     def test_hash_matches_sqlalchemy_path_digest(self):
         h = _FixtureConnector()
         h._adbc_only = True
-        batch = pa.record_batch({"x": [10], "y": ["z"]})
+        batch = pa.RecordBatch.from_pydict({"x": [10], "y": ["z"]})
         result = h._attach_record_hash_to_batch(batch, self._state())
         arrow_hash = result.column(GenericSQLConnector.RECORD_HASH_COLUMN)[0].as_py()
         expected = self._expected_hash({"x": 10, "y": "z"})
@@ -750,14 +753,14 @@ class TestAttachRecordHashToBatch:
         # key (which would make MERGE raise "multiple source rows match").
         h = _FixtureConnector()
         h._adbc_only = True
-        batch = pa.record_batch({"v": [42, 42]})
+        batch = pa.RecordBatch.from_pydict({"v": [42, 42]})
         result = h._attach_record_hash_to_batch(batch, self._state())
         assert result.num_rows == 1
 
     def test_two_different_rows_get_different_hashes(self):
         h = _FixtureConnector()
         h._adbc_only = True
-        batch = pa.record_batch({"v": [1, 2]})
+        batch = pa.RecordBatch.from_pydict({"v": [1, 2]})
         result = h._attach_record_hash_to_batch(batch, self._state())
         hashes = result.column(GenericSQLConnector.RECORD_HASH_COLUMN).to_pylist()
         assert hashes[0] != hashes[1]
@@ -765,7 +768,9 @@ class TestAttachRecordHashToBatch:
     def test_null_value_produces_stable_hash(self):
         h = _FixtureConnector()
         h._adbc_only = True
-        batch = pa.record_batch({"v": pa.array([None], type=pa.int64()), "name": ["alice"]})
+        batch = pa.RecordBatch.from_pydict(
+            {"v": pa.array([None], type=pa.int64()), "name": ["alice"]}
+        )
         result = h._attach_record_hash_to_batch(batch, self._state())
         arrow_hash = result.column(GenericSQLConnector.RECORD_HASH_COLUMN)[0].as_py()
         expected = self._expected_hash({"v": None, "name": "alice"})
@@ -774,27 +779,31 @@ class TestAttachRecordHashToBatch:
     def test_null_and_string_none_produce_different_hashes(self):
         h = _FixtureConnector()
         h._adbc_only = True
-        b1 = pa.record_batch({"v": pa.array([None], type=pa.int64())})
-        b2 = pa.record_batch({"v": pa.array(["None"])})
-        h1 = h._attach_record_hash_to_batch(b1, self._state()).column(
-            GenericSQLConnector.RECORD_HASH_COLUMN
-        )[0].as_py()
-        h2 = h._attach_record_hash_to_batch(b2, self._state()).column(
-            GenericSQLConnector.RECORD_HASH_COLUMN
-        )[0].as_py()
+        b1 = pa.RecordBatch.from_pydict({"v": pa.array([None], type=pa.int64())})
+        b2 = pa.RecordBatch.from_pydict({"v": pa.array(["None"])})
+        h1 = (
+            h._attach_record_hash_to_batch(b1, self._state())
+            .column(GenericSQLConnector.RECORD_HASH_COLUMN)[0]
+            .as_py()
+        )
+        h2 = (
+            h._attach_record_hash_to_batch(b2, self._state())
+            .column(GenericSQLConnector.RECORD_HASH_COLUMN)[0]
+            .as_py()
+        )
         assert h1 != h2
 
     def test_noop_for_keyed_insert(self):
         h = _FixtureConnector()
         h._adbc_only = True
-        batch = pa.record_batch({"id": [1]})
+        batch = pa.RecordBatch.from_pydict({"id": [1]})
         result = h._attach_record_hash_to_batch(batch, self._state(primary_keys=["id"]))
         assert result is batch
 
     def test_noop_for_upsert(self):
         h = _FixtureConnector()
         h._adbc_only = True
-        batch = pa.record_batch({"id": [1]})
+        batch = pa.RecordBatch.from_pydict({"id": [1]})
         result = h._attach_record_hash_to_batch(batch, self._state("upsert"))
         assert result is batch
 
@@ -832,7 +841,7 @@ class TestMergeIngestInsertOnly:
         conn, executed = self._build_conn()
         h._adbc_conn = conn
 
-        batch = pa.record_batch(
+        batch = pa.RecordBatch.from_pydict(
             {"_record_hash": ["abc123"], "name": ["alice"]},
         )
         h._merge_ingest_sync(
@@ -855,7 +864,7 @@ class TestMergeIngestInsertOnly:
         conn, _ = self._build_conn()
         h._adbc_conn = conn
 
-        batch = pa.record_batch({"_record_hash": ["abc123"]})
+        batch = pa.RecordBatch.from_pydict({"_record_hash": ["abc123"]})
         with caplog.at_level(logging.WARNING, logger=database_module.logger.name):
             h._merge_ingest_sync(
                 batch,
@@ -877,7 +886,7 @@ class TestMergeIngestInsertOnly:
         conn, _ = self._build_conn()
         h._adbc_conn = conn
 
-        batch = pa.record_batch({"id": [1]})
+        batch = pa.RecordBatch.from_pydict({"id": [1]})
         with caplog.at_level(logging.WARNING, logger=database_module.logger.name):
             h._merge_ingest_sync(
                 batch,
@@ -916,7 +925,7 @@ class TestWriteBatchAdbcOnlyKeylessInsert:
         h = _FixtureConnector()
         h._adbc_only = True
         state = self._make_state("insert")
-        batch = pa.record_batch({"name": ["alice"]})
+        batch = pa.RecordBatch.from_pydict({"name": ["alice"]})
 
         with (
             patch.object(h, "_merge_ingest_sync") as mock_merge,
@@ -938,7 +947,7 @@ class TestWriteBatchAdbcOnlyKeylessInsert:
         h = _FixtureConnector()
         h._adbc_only = True
         state = self._make_state("insert")
-        batch = pa.record_batch({"name": ["alice"]})
+        batch = pa.RecordBatch.from_pydict({"name": ["alice"]})
 
         captured_batches: list[pa.RecordBatch] = []
 
@@ -951,14 +960,16 @@ class TestWriteBatchAdbcOnlyKeylessInsert:
             )
 
         assert len(captured_batches) == 1
-        assert GenericSQLConnector.RECORD_HASH_COLUMN in captured_batches[0].schema.names
+        assert (
+            GenericSQLConnector.RECORD_HASH_COLUMN in captured_batches[0].schema.names
+        )
 
     @pytest.mark.asyncio
     async def test_keyed_insert_uses_plain_ingest(self):
         h = _FixtureConnector()
         h._adbc_only = True
         state = self._make_state("insert", primary_keys=["id"])
-        batch = pa.record_batch({"id": [1], "name": ["alice"]})
+        batch = pa.RecordBatch.from_pydict({"id": [1], "name": ["alice"]})
 
         with (
             patch.object(h, "_merge_ingest_sync") as mock_merge,
@@ -978,7 +989,7 @@ class TestWriteBatchAdbcOnlyKeylessInsert:
         h = _FixtureConnector()
         h._adbc_only = True
         state = self._make_state("insert")
-        batch = pa.record_batch({"v": [1]})
+        batch = pa.RecordBatch.from_pydict({"v": [1]})
 
         tokens: list[str] = []
 
@@ -1001,7 +1012,7 @@ class TestWriteBatchAdbcOnlyKeylessInsert:
         h = _FixtureConnector()
         h._adbc_only = True
         state = self._make_state("insert")
-        batch = pa.record_batch({"name": ["alice"], "v": [42]})
+        batch = pa.RecordBatch.from_pydict({"name": ["alice"], "v": [42]})
 
         captured: list[list[str]] = []
 
@@ -1018,3 +1029,84 @@ class TestWriteBatchAdbcOnlyKeylessInsert:
 
         assert len(captured) == 2
         assert captured[0] == captured[1]
+
+
+class TestCanonicalJsonDefaultDecimal:
+    """``_canonical_json_default`` strips trailing zeros WITHOUT context
+    rounding: a scale change stays idempotent, but distinct high-precision
+    values keep distinct canonical strings (issue #285 review P1)."""
+
+    def test_scale_change_is_idempotent(self):
+        # Same value at different scale -> same canonical string -> same hash.
+        assert _canonical_json_default(Decimal("3.14")) == _canonical_json_default(
+            Decimal("3.1400")
+        )
+
+    def test_distinct_high_precision_values_do_not_collide(self):
+        # NUMERIC(38) values differing past the 28-digit default context must
+        # not collapse to one string (that would drop a row on the dedup MERGE).
+        a = Decimal("123456789012345678901234567890.00")
+        b = Decimal("123456789012345678901234567891.00")
+        assert _canonical_json_default(a) != _canonical_json_default(b)
+
+    def test_active_context_precision_does_not_round(self):
+        # A low active precision must not truncate the canonical form.
+        with localcontext() as ctx:
+            ctx.prec = 5
+            s = _canonical_json_default(Decimal("123456789012345678901234567890"))
+        assert s == "123456789012345678901234567890"
+
+    def test_integer_trailing_zeros_preserved(self):
+        # Only fractional trailing zeros are stripped; 100 stays 100.
+        assert _canonical_json_default(Decimal("100")) == "100"
+
+    def test_non_finite_decimal_passes_through(self):
+        assert _canonical_json_default(Decimal("NaN")) == "NaN"
+
+
+class _NoMergeAdbcDialect(_FixtureAdbcDialect):
+    """ADBC dialect that ingests but cannot MERGE (base default)."""
+
+    supports_upsert_adbc = False
+
+
+class _NoMergeConnector(GenericSQLConnector):
+    dialect_class = _NoMergeAdbcDialect
+
+
+class TestKeylessInsertRequiresMergeSupport:
+    """Keyless ADBC insert dedups via stage-MERGE; a dialect that cannot MERGE
+    must fail loud at configure, not fatal on the first write (issue #285 P2)."""
+
+    def _state(self, primary_keys=None):
+        return _StreamState(
+            schema_name="public",
+            table_name="orders",
+            write_mode="insert",
+            primary_keys=primary_keys or [],
+        )
+
+    @pytest.mark.asyncio
+    async def test_keyless_insert_without_merge_support_fails_configure(self):
+        h = _NoMergeConnector()
+        h._adbc_only = True
+        with pytest.raises(AdbcConfigurationError, match="MERGE"):
+            await h._ensure_tables_exist(self._state(), MagicMock())
+
+    @pytest.mark.asyncio
+    async def test_merge_capable_dialect_is_not_gated(self):
+        # Same keyless insert on a MERGE-capable dialect clears the guard and
+        # fails later on the (deliberately absent) endpoint document instead.
+        h = _FixtureConnector()
+        h._adbc_only = True
+        with pytest.raises(SchemaConfigurationError):
+            await h._ensure_tables_exist(self._state(), MagicMock())
+
+    @pytest.mark.asyncio
+    async def test_keyed_insert_is_not_gated(self):
+        # Keyed insert needs no _record_hash dedup, so the guard is bypassed
+        # even on a non-MERGE dialect.
+        h = _NoMergeConnector()
+        h._adbc_only = True
+        with pytest.raises(SchemaConfigurationError):
+            await h._ensure_tables_exist(self._state(primary_keys=["id"]), MagicMock())

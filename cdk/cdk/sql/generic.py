@@ -29,10 +29,10 @@ import hashlib
 import json
 import logging
 import threading
-from decimal import Decimal
 from collections.abc import AsyncIterator, Mapping
 from contextlib import AbstractAsyncContextManager, AsyncExitStack, nullcontext
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import Any, Literal
 
 import pyarrow as pa
@@ -87,9 +87,21 @@ def _canonical_json_default(v: Any) -> str:
     string and therefore the same ``_record_hash``. Without normalization a
     schema scale change between runs would assign a new hash to an already-stored
     row and silently duplicate it on retry.
+
+    The trailing-zero strip must be context-free: ``Decimal.normalize()`` applies
+    the active decimal context precision (default 28), which rounds high-precision
+    values such as ``NUMERIC(38)`` and would collapse two distinct rows onto the
+    same hash -- the dedup MERGE would then drop one. Fixed-point ``format`` renders
+    the exact coefficient with no rounding; stripping only the fractional trailing
+    zeros keeps the scale-change idempotency without losing precision.
     """
     if isinstance(v, Decimal):
-        return str(v.normalize())
+        if not v.is_finite():
+            return str(v)
+        text = format(v, "f")
+        if "." in text:
+            text = text.rstrip("0").rstrip(".")
+        return text
     return str(v)
 
 
@@ -920,6 +932,25 @@ class GenericSQLConnector(BaseDestinationHandler):
         ADBC cursor. On the SQLAlchemy path the table is then REFLECTED so
         DML binding uses the real column types the database reports.
         """
+        if (
+            self._adbc_only
+            and self._needs_record_hash(state)
+            and not self.dialect.supports_upsert_adbc
+        ):
+            # Keyless insert dedups via stage-MERGE (_record_hash). A dialect
+            # that ingests but cannot MERGE (supports_upsert_adbc=False, the base
+            # default) would otherwise reach _merge_ingest_sync and fatal on the
+            # first write via adbc_stage_table_sql. Fail loud at configure time
+            # instead: a keyless insert cannot be made exactly-once on this
+            # dialect, and a silent plain-append fallback would reintroduce the
+            # lost-ack duplication that issue #285 closes.
+            raise AdbcConfigurationError(
+                f"Keyless insert on {state.schema_name}.{state.table_name} "
+                f"requires stage-MERGE dedup, but the ADBC dialect "
+                f"{type(self.dialect).__name__} does not support MERGE "
+                f"(supports_upsert_adbc=False). Declare a primary key for this "
+                f"stream or add MERGE support to the connector's dialect."
+            )
         if not state.endpoint_document:
             raise SchemaConfigurationError(
                 f"destination stream for {state.schema_name}.{state.table_name} "
@@ -1313,7 +1344,9 @@ class GenericSQLConnector(BaseDestinationHandler):
         if not self._needs_record_hash(state):
             return
         for record in records:
-            canonical = json.dumps(record, sort_keys=True, default=_canonical_json_default)
+            canonical = json.dumps(
+                record, sort_keys=True, default=_canonical_json_default
+            )
             digest = hashlib.sha256(canonical.encode()).hexdigest()
             record[self.RECORD_HASH_COLUMN] = digest
 
@@ -1570,7 +1603,8 @@ class GenericSQLConnector(BaseDestinationHandler):
                 cursor = conn.cursor()
                 try:
                     cursor.execute(
-                        f"SELECT {hash_col} FROM {target_qualified} WHERE 1=0"  # nosec B608
+                        f"SELECT {hash_col} "  # nosec B608
+                        f"FROM {target_qualified} WHERE 1=0"
                     )
                 finally:
                     _close_cursor_quietly(cursor)
