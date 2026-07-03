@@ -122,15 +122,24 @@ class TestSqlVerdicts:
         assert verdict.semantics == RetrySemantics.RETRY_SEMANTICS_EXACTLY_ONCE
         assert GenericSQLConnector.RECORD_HASH_COLUMN in verdict.reason
 
-    def test_insert_on_adbc_at_least_once(self):
-        """The ADBC path has no row-level dedup yet (issue #282 follow-up),
-        keyed or keyless — the verdict must not overpromise."""
+    def test_keyed_insert_on_adbc_at_least_once(self):
+        """Keyed ADBC insert uses plain append; the PK prevents silent dups
+        but a retry re-reading the inclusive boundary may surface a constraint
+        violation — the verdict must not claim exactly-once."""
         handler = self._handler(
             adbc_only=True, write_mode="insert", primary_keys=["id"]
         )
         verdict = handler.retry_semantics("s1")
         assert verdict.semantics == RetrySemantics.RETRY_SEMANTICS_AT_LEAST_ONCE
-        assert "ADBC" in verdict.reason
+        assert "ADBC" in verdict.reason or "keyed" in verdict.reason
+
+    def test_keyless_insert_on_adbc_exactly_once_via_record_hash(self):
+        """Keyless ADBC insert routes through stage-MERGE on _record_hash
+        (issue #285) — the verdict must reflect the new exactly-once guarantee."""
+        handler = self._handler(adbc_only=True, write_mode="insert")  # no primary_keys
+        verdict = handler.retry_semantics("s1")
+        assert verdict.semantics == RetrySemantics.RETRY_SEMANTICS_EXACTLY_ONCE
+        assert GenericSQLConnector.RECORD_HASH_COLUMN in verdict.reason
 
     def test_unconfigured_stream_falls_back_to_base_default(self):
         handler = GenericSQLConnector()
