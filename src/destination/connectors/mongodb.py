@@ -357,6 +357,16 @@ class MongoDbDestinationHandler(BaseDestinationHandler):
                 committed_cursor=Cursor(token=stored_token),
             )
 
+        # Truncate-insert empties the collection ONCE per run -- on the read's
+        # first batch (batch_seq == 1), not per batch, which would keep only the
+        # final batch of a multi-batch refresh (mirrors the SQL path, #311). A
+        # committed batch_seq==1 replay is caught by the idempotency guard above,
+        # so the delete never re-runs within a run; an empty first batch still
+        # truncates so an emptied source produces an empty collection (#312).
+        truncate_now = (
+            state.write_mode == WriteMode.WRITE_MODE_TRUNCATE_INSERT and batch_seq == 1
+        )
+
         try:
             docs = _arrow_to_doc_list(record_batch)
             if state.json_fields:
@@ -374,12 +384,15 @@ class MongoDbDestinationHandler(BaseDestinationHandler):
             )
         if not docs:
             try:
+                if truncate_now:
+                    await target_coll.delete_many({})
                 await commits_coll.insert_one(
                     {**commit_key, "cursor_token": cursor.token}
                 )
             except Exception as exc:
                 logger.error(
-                    "Failed to record empty-batch commit (run=%s stream=%s seq=%d): %s",
+                    "Failed to truncate/record empty-batch commit "
+                    "(run=%s stream=%s seq=%d): %s",
                     run_id, stream_id, batch_seq, exc,
                     exc_info=True,
                 )
@@ -396,7 +409,7 @@ class MongoDbDestinationHandler(BaseDestinationHandler):
 
         try:
             records_written = await self._write_docs(
-                target_coll, docs, state.write_mode, state.conflict_keys
+                target_coll, docs, state.write_mode, state.conflict_keys, truncate_now
             )
         except Exception as exc:
             logger.error(
@@ -443,9 +456,11 @@ class MongoDbDestinationHandler(BaseDestinationHandler):
         docs: List[Dict[str, Any]],
         write_mode: WriteMode,
         conflict_keys: List[str],
+        truncate_now: bool,
     ) -> int:
         if write_mode == WriteMode.WRITE_MODE_TRUNCATE_INSERT:
-            await collection.delete_many({})
+            if truncate_now:
+                await collection.delete_many({})
             result = await collection.insert_many(docs, ordered=False)
             return len(result.inserted_ids)
 

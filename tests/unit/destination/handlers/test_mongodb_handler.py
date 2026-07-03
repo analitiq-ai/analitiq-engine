@@ -342,7 +342,31 @@ async def test_write_batch_upsert_without_conflict_keys_returns_retryable():
 
 
 @pytest.mark.asyncio
-async def test_write_batch_truncate_insert():
+async def test_write_batch_truncate_insert_first_batch_truncates():
+    rt, commits_coll, target_coll, db_mock = _make_runtime()
+    target_coll.insert_many = AsyncMock(return_value=MagicMock(inserted_ids=["x"]))
+
+    handler, _ = await _connected_handler(rt)
+    handler._streams["s1"] = _MongoStreamState(
+        "testdb", "snapshots", WriteMode.WRITE_MODE_TRUNCATE_INSERT
+    )
+    handler._batch_commits_ready.add("testdb")
+
+    batch = _make_batch({"v": 42})
+    result = await handler.write_batch(
+        run_id="r", stream_id="s1", batch_seq=1,
+        record_batch=batch, record_ids=["r1"], cursor=_cursor(),
+    )
+
+    assert result.status == AckStatus.ACK_STATUS_SUCCESS
+    target_coll.delete_many.assert_awaited_once_with({})
+    target_coll.insert_many.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_write_batch_truncate_insert_later_batch_appends():
+    """A multi-batch refresh truncates only once (batch_seq==1); later batches
+    append, or the collection would keep only the final batch (#311)."""
     rt, commits_coll, target_coll, db_mock = _make_runtime()
     target_coll.insert_many = AsyncMock(return_value=MagicMock(inserted_ids=["x"]))
 
@@ -359,8 +383,31 @@ async def test_write_batch_truncate_insert():
     )
 
     assert result.status == AckStatus.ACK_STATUS_SUCCESS
-    target_coll.delete_many.assert_awaited_once_with({})
+    target_coll.delete_many.assert_not_awaited()
     target_coll.insert_many.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_write_batch_truncate_insert_empty_first_batch_truncates():
+    """An emptied source yields an empty first batch (#312); it must still
+    truncate so the target ends empty, not retaining the previous refresh."""
+    rt, commits_coll, target_coll, db_mock = _make_runtime()
+
+    handler, _ = await _connected_handler(rt)
+    handler._streams["s1"] = _MongoStreamState(
+        "testdb", "snapshots", WriteMode.WRITE_MODE_TRUNCATE_INSERT
+    )
+    handler._batch_commits_ready.add("testdb")
+
+    empty = _make_batch({"v": 42}).slice(0, 0)
+    result = await handler.write_batch(
+        run_id="r", stream_id="s1", batch_seq=1,
+        record_batch=empty, record_ids=[], cursor=_cursor(),
+    )
+
+    assert result.status == AckStatus.ACK_STATUS_SUCCESS
+    target_coll.delete_many.assert_awaited_once_with({})
+    target_coll.insert_many.assert_not_called()
 
 
 @pytest.mark.asyncio
