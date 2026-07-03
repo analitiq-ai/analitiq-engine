@@ -623,10 +623,13 @@ class TestBuildMongoDbFromSpec:
         fake_asyncio_module = ModuleType("motor.motor_asyncio")
         fake_asyncio_module.AsyncIOMotorClient = MagicMock(return_value=fake_client)
 
-        with patch.dict(sys.modules, {
-            "motor": fake_motor_module,
-            "motor.motor_asyncio": fake_asyncio_module,
-        }):
+        with patch.dict(
+            sys.modules,
+            {
+                "motor": fake_motor_module,
+                "motor.motor_asyncio": fake_asyncio_module,
+            },
+        ):
             with pytest.raises(RuntimeError, match="connection refused"):
                 await build_mongodb_from_spec(
                     {

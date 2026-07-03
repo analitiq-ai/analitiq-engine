@@ -30,10 +30,11 @@ from typing import Any, AsyncIterator, Dict, List, Optional
 
 import pyarrow as pa
 
-from .base import BaseConnector, ConnectionError, ReadError, TransientReadError
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.schema_contract import SchemaContract
 from cdk.types import CheckpointStore
+
+from .base import BaseConnector, ConnectionError, ReadError, TransientReadError
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,7 @@ try:
         ServerSelectionTimeoutError,
         WaitQueueTimeoutError,
     )
+
     _TRANSIENT_MOTOR_ERRORS: tuple = (
         AutoReconnect,
         CursorNotFound,
@@ -61,7 +63,7 @@ except ImportError:
 def _coerce_bson(value: Any) -> Any:
     """Convert BSON-specific types to Python primitives Arrow can handle."""
     try:
-        from bson import ObjectId, Decimal128, Binary
+        from bson import Binary, Decimal128, ObjectId
     except ImportError:
         return value
 
@@ -94,7 +96,7 @@ _DECIMAL128_CURSOR_TAG = "$numberDecimal"
 def _encode_cursor_value(value: Any) -> Any:
     """Make a cursor value JSON-safe while preserving its BSON type."""
     try:
-        from bson import ObjectId, Decimal128
+        from bson import Decimal128, ObjectId
     except ImportError:
         return value
     if isinstance(value, ObjectId):
@@ -123,7 +125,7 @@ def _decode_cursor_value(value: Any) -> Any:
         raise ReadError(
             f"Checkpoint holds a {cls_name} cursor but bson is not installed; "
             "cannot rehydrate the cursor for the incremental filter"
-        )
+        ) from None
     return getattr(bson, cls_name)(raw)
 
 
@@ -139,10 +141,8 @@ def _resolve_records_schema(endpoint_doc: Dict[str, Any]) -> Dict[str, Any]:
     """
     if "properties" in endpoint_doc or "columns" in endpoint_doc:
         return endpoint_doc
-    read_op = ((endpoint_doc.get("operations") or {}).get("read") or {})
-    items = (
-        ((read_op.get("response") or {}).get("records") or {}).get("items") or {}
-    )
+    read_op = (endpoint_doc.get("operations") or {}).get("read") or {}
+    items = ((read_op.get("response") or {}).get("records") or {}).get("items") or {}
     return items
 
 
@@ -223,17 +223,22 @@ class MongoDbSourceConnector(BaseConnector):
     ) -> AsyncIterator[pa.RecordBatch]:
         endpoint_doc = config.get("endpoint_document")
         if not endpoint_doc:
-            raise ReadError("MongoDbSourceConnector: config missing 'endpoint_document'")
+            raise ReadError(
+                "MongoDbSourceConnector: config missing 'endpoint_document'"
+            )
 
         collection_name = endpoint_doc.get("collection")
-        database_name = endpoint_doc.get("database") or self._runtime.mongo_default_database
+        database_name = (
+            endpoint_doc.get("database") or self._runtime.mongo_default_database
+        )
         if not collection_name:
             raise ReadError(
                 "MongoDbSourceConnector: endpoint_document missing 'collection' field"
             )
         if not database_name:
             raise ReadError(
-                "MongoDbSourceConnector: no database specified in endpoint or connector definition"
+                "MongoDbSourceConnector: no database specified in "
+                "endpoint or connector definition"
             )
 
         stream_source = config.get("stream_source") or {}
@@ -271,7 +276,9 @@ class MongoDbSourceConnector(BaseConnector):
         if safety_window_seconds > 0 and cursor_value is not None:
             if isinstance(cursor_value, datetime):
                 cutoff = datetime.now(tz=timezone.utc)
-                cursor_value = _subtract_safety_window(cursor_value, safety_window_seconds)
+                cursor_value = _subtract_safety_window(
+                    cursor_value, safety_window_seconds
+                )
             else:
                 logger.warning(
                     "safety_window_seconds configured for stream %r but cursor "
@@ -281,7 +288,11 @@ class MongoDbSourceConnector(BaseConnector):
                 )
 
         incremental_filter: Dict[str, Any] = {}
-        if replication_method == "incremental" and cursor_field and cursor_value is not None:
+        if (
+            replication_method == "incremental"
+            and cursor_field
+            and cursor_value is not None
+        ):
             incremental_filter = {cursor_field: {"$gte": cursor_value}}
 
         # Keyset paging on _id. Start with None so the first page has no _id
@@ -296,11 +307,7 @@ class MongoDbSourceConnector(BaseConnector):
             if last_id is not None:
                 page_filter["_id"] = {"$gt": last_id}
 
-            cursor_obj = (
-                collection.find(page_filter)
-                .sort("_id", 1)
-                .limit(batch_size)
-            )
+            cursor_obj = collection.find(page_filter).sort("_id", 1).limit(batch_size)
 
             docs: List[Dict[str, Any]] = []
             try:
@@ -310,18 +317,28 @@ class MongoDbSourceConnector(BaseConnector):
                 logger.warning(
                     "Transient Motor error reading '%s' "
                     "(stream=%s, database=%s, last_id=%r): %s",
-                    collection_name, stream_name, database_name, last_id, exc,
+                    collection_name,
+                    stream_name,
+                    database_name,
+                    last_id,
+                    exc,
                     exc_info=True,
                 )
                 raise TransientReadError(
                     f"Transient Motor error reading '{collection_name}' "
                     f"(stream={stream_name!r}, database={database_name!r}): {exc}"
                 ) from exc
-            except Exception as exc:  # CancelledError is BaseException in 3.8+; propagates freely
+            except (
+                Exception
+            ) as exc:  # CancelledError is BaseException in 3.8+; propagates freely
                 logger.error(
                     "Unexpected error reading '%s' "
                     "(stream=%s, database=%s, last_id=%r): %s",
-                    collection_name, stream_name, database_name, last_id, exc,
+                    collection_name,
+                    stream_name,
+                    database_name,
+                    last_id,
+                    exc,
                     exc_info=True,
                 )
                 raise ReadError(
@@ -362,7 +379,11 @@ class MongoDbSourceConnector(BaseConnector):
 
         # Advance the checkpoint, capped by the safety-window cutoff so the
         # next run always re-reads the lookback window.
-        if replication_method == "incremental" and cursor_field and max_cursor_seen is not None:
+        if (
+            replication_method == "incremental"
+            and cursor_field
+            and max_cursor_seen is not None
+        ):
             value_to_save = (
                 min(max_cursor_seen, cutoff)
                 if cutoff is not None and isinstance(max_cursor_seen, datetime)

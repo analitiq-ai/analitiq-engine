@@ -761,7 +761,8 @@ class ConnectionRuntime:
                     self._mongo_transport.client.close()
                 except Exception as e:
                     logger.error(
-                        f"Failed to close MongoDB client for {self._connection_id}: {e}",
+                        f"Failed to close MongoDB client for "
+                        f"{self._connection_id}: {e}",
                         exc_info=True,
                     )
                 self._mongo_transport = None

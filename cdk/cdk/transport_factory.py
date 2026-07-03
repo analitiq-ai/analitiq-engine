@@ -773,7 +773,7 @@ class MongoDbTransport:
     """
 
     client: "AsyncIOMotorClient"
-    default_database: Optional[str]
+    default_database: str | None
 
     def __post_init__(self) -> None:
         if self.default_database is not None and not self.default_database:
@@ -784,7 +784,7 @@ class MongoDbTransport:
 
 def resolve_mongodb_spec(
     spec: Mapping[str, Any], *, resolver: Resolver
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Resolve a mongodb transport spec to JSON-safe values (no objects)."""
     raw_dsn = spec.get("dsn")
     if not isinstance(raw_dsn, Mapping):
@@ -794,7 +794,7 @@ def resolve_mongodb_spec(
         )
     uri = _render_url_template_dsn(raw_dsn, resolver)
 
-    default_database: Optional[str] = None
+    default_database: str | None = None
     raw_db = spec.get("database")
     if raw_db is not None:
         resolved_db = resolver.resolve(raw_db)
@@ -923,7 +923,9 @@ register_transport_kind(
     "http", resolve_spec=resolve_http_spec, build_from_spec=build_http_from_spec
 )
 register_transport_kind(
-    "mongodb", resolve_spec=resolve_mongodb_spec, build_from_spec=build_mongodb_from_spec
+    "mongodb",
+    resolve_spec=resolve_mongodb_spec,
+    build_from_spec=build_mongodb_from_spec,
 )
 
 

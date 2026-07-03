@@ -20,10 +20,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # Helpers: build a stub bson module so tests run without installing motor
 # ---------------------------------------------------------------------------
+
 
 def _make_bson_stub() -> ModuleType:
     """Return a minimal bson stub with ObjectId, Decimal128, Binary."""
@@ -78,17 +78,17 @@ def _inject_bson_stub(monkeypatch):
 # Import under test (after bson stub is in place)
 # ---------------------------------------------------------------------------
 
-from src.source.connectors.mongodb import (
+from src.source.connectors.mongodb import (  # noqa: E402
     MongoDbSourceConnector,
     _coerce_bson,
     _coerce_document,
     _subtract_safety_window,
 )
 
-
 # ---------------------------------------------------------------------------
 # _coerce_bson unit tests
 # ---------------------------------------------------------------------------
+
 
 class TestCoerceBson:
     def test_object_id_to_str(self):
@@ -150,14 +150,17 @@ class TestCoerceDocument:
 # _subtract_safety_window
 # ---------------------------------------------------------------------------
 
+
 class TestSubtractSafetyWindow:
     def test_tz_aware_input(self):
         base = datetime.datetime(2024, 1, 1, 12, 0, 0, tzinfo=datetime.timezone.utc)
         result = _subtract_safety_window(base, 3600)
-        assert result == datetime.datetime(2024, 1, 1, 11, 0, 0, tzinfo=datetime.timezone.utc)
+        assert result == datetime.datetime(
+            2024, 1, 1, 11, 0, 0, tzinfo=datetime.timezone.utc
+        )
 
     def test_naive_input_gets_utc(self):
-        base = datetime.datetime(2024, 6, 15, 10, 0, 0)
+        base = datetime.datetime(2024, 6, 15, 10, 0, 0)  # noqa: DTZ001
         result = _subtract_safety_window(base, 60)
         assert result.tzinfo == datetime.timezone.utc
         assert result.minute == 59
@@ -166,6 +169,7 @@ class TestSubtractSafetyWindow:
 # ---------------------------------------------------------------------------
 # Motor cursor / client stubs
 # ---------------------------------------------------------------------------
+
 
 def _make_runtime(db_name: str = "mydb"):
     rt = MagicMock()
@@ -234,6 +238,7 @@ def _make_checkpoint(cursor_value=None):
 # Full-refresh reads
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_read_batches_full_refresh_single_page():
     bson = sys.modules["bson"]
@@ -266,8 +271,13 @@ async def test_read_batches_full_refresh_single_page():
 @pytest.mark.asyncio
 async def test_read_batches_multi_page():
     bson = sys.modules["bson"]
-    page1 = [{"_id": bson.ObjectId(f"507f191e810c19729de8600{i}"), "v": i} for i in range(3)]
-    page2 = [{"_id": bson.ObjectId(f"507f191e810c19729de8601{i}"), "v": i + 10} for i in range(2)]
+    page1 = [
+        {"_id": bson.ObjectId(f"507f191e810c19729de8600{i}"), "v": i} for i in range(3)
+    ]
+    page2 = [
+        {"_id": bson.ObjectId(f"507f191e810c19729de8601{i}"), "v": i + 10}
+        for i in range(2)
+    ]
 
     client, _ = _make_motor_client([page1, page2, []])
 
@@ -282,7 +292,11 @@ async def test_read_batches_multi_page():
     connector = MongoDbSourceConnector()
     batches = []
     async for batch in connector.read_batches(
-        runtime, config, checkpoint=_make_checkpoint(), stream_name="items", batch_size=3
+        runtime,
+        config,
+        checkpoint=_make_checkpoint(),
+        stream_name="items",
+        batch_size=3,
     ):
         batches.append(batch)
 
@@ -320,6 +334,7 @@ async def test_read_batches_empty_collection_yields_no_batches():
 # Incremental reads + checkpoint protocol
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_read_batches_incremental_saves_cursor():
     """Incremental: checkpoint.get_cursor and save_cursor are awaited."""
@@ -353,8 +368,8 @@ async def test_read_batches_incremental_saves_cursor():
     # save_cursor should be awaited with the high-water mark wrapped in a dict
     cp.save_cursor.assert_awaited_once()
     call_args = cp.save_cursor.call_args
-    assert call_args[0][0] == "events"   # stream_name
-    assert call_args[0][1] is None        # partition
+    assert call_args[0][0] == "events"  # stream_name
+    assert call_args[0][1] is None  # partition
     saved = call_args[0][2]
     assert isinstance(saved, dict) and saved.get("cursor") == now
 
@@ -364,7 +379,13 @@ async def test_read_batches_incremental_uses_stored_cursor():
     """Stored cursor is unpacked from {"cursor": value} and used in the filter."""
     bson = sys.modules["bson"]
     prev_cursor = datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc)
-    docs = [{"_id": bson.ObjectId("507f191e810c19729de860aa"), "updated_at": prev_cursor, "v": 5}]
+    docs = [
+        {
+            "_id": bson.ObjectId("507f191e810c19729de860aa"),
+            "updated_at": prev_cursor,
+            "v": 5,
+        }
+    ]
 
     client, coll = _make_motor_client([docs, []])
     runtime = _make_runtime()
@@ -392,11 +413,14 @@ async def test_read_batches_incremental_uses_stored_cursor():
 
 @pytest.mark.asyncio
 async def test_read_batches_incremental_safety_window_caps_saved_cursor():
-    """Safety window: cursor is rolled back for querying; saved value is capped at cutoff."""
+    """Safety window: cursor is rolled back for querying;
+    saved value is capped at cutoff."""
     bson = sys.modules["bson"]
     base_cursor = datetime.datetime(2024, 6, 1, 12, 0, 0, tzinfo=datetime.timezone.utc)
     future_val = datetime.datetime(2024, 6, 1, 13, 0, 0, tzinfo=datetime.timezone.utc)
-    docs = [{"_id": bson.ObjectId("507f191e810c19729de860bb"), "ts": future_val, "v": 1}]
+    docs = [
+        {"_id": bson.ObjectId("507f191e810c19729de860bb"), "ts": future_val, "v": 1}
+    ]
 
     client, _ = _make_motor_client([docs, []])
     runtime = _make_runtime()
@@ -430,6 +454,7 @@ async def test_read_batches_incremental_safety_window_caps_saved_cursor():
 # Error cases
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_read_batches_missing_endpoint_raises():
     runtime = _make_runtime()
@@ -438,6 +463,7 @@ async def test_read_batches_missing_endpoint_raises():
     config = {}
     connector = MongoDbSourceConnector()
     from src.source.connectors.base import ReadError
+
     with pytest.raises(ReadError, match="endpoint_document"):
         async for _ in connector.read_batches(
             runtime, config, checkpoint=_make_checkpoint(), stream_name="x"
@@ -456,6 +482,7 @@ async def test_read_batches_missing_collection_raises():
     }
     connector = MongoDbSourceConnector()
     from src.source.connectors.base import ReadError
+
     with pytest.raises(ReadError, match="collection"):
         async for _ in connector.read_batches(
             runtime, config, checkpoint=_make_checkpoint(), stream_name="x"
@@ -470,8 +497,10 @@ async def test_incremental_tz_naive_cursor_no_crash_with_safety_window():
     bson = sys.modules["bson"]
     prev_cursor = datetime.datetime(2024, 1, 1, 0, 0, 0, tzinfo=datetime.timezone.utc)
     # Motor returns tz-naive datetimes (no tzinfo)
-    tz_naive_ts = datetime.datetime(2024, 1, 1, 1, 0, 0)
-    docs = [{"_id": bson.ObjectId("507f191e810c19729de860cc"), "ts": tz_naive_ts, "v": 1}]
+    tz_naive_ts = datetime.datetime(2024, 1, 1, 1, 0, 0)  # noqa: DTZ001
+    docs = [
+        {"_id": bson.ObjectId("507f191e810c19729de860cc"), "ts": tz_naive_ts, "v": 1}
+    ]
 
     client, _ = _make_motor_client([docs, []])
     runtime = _make_runtime()
@@ -506,6 +535,7 @@ async def test_incremental_tz_naive_cursor_no_crash_with_safety_window():
 # ---------------------------------------------------------------------------
 # Safety-window: cursor must not move backwards on empty result
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_safety_window_empty_result_does_not_move_cursor_backwards():
@@ -555,6 +585,7 @@ async def test_safety_window_empty_result_does_not_move_cursor_backwards():
 # Schema contract path
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_read_batches_with_properties_schema():
     """Endpoint with a 'properties' key must pass the full endpoint doc to
@@ -594,6 +625,7 @@ async def test_read_batches_with_properties_schema():
 # Missing database raises ReadError
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_read_batches_missing_database_raises():
     """No database in endpoint AND no default database on runtime → ReadError."""
@@ -607,6 +639,7 @@ async def test_read_batches_missing_database_raises():
     }
     connector = MongoDbSourceConnector()
     from src.source.connectors.base import ReadError
+
     with pytest.raises(ReadError, match="database"):
         async for _ in connector.read_batches(
             runtime, config, checkpoint=_make_checkpoint(), stream_name="x"
@@ -617,6 +650,7 @@ async def test_read_batches_missing_database_raises():
 # ---------------------------------------------------------------------------
 # cursor_field as list: first element is used
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_incremental_cursor_field_as_list_uses_first_element():
@@ -653,6 +687,7 @@ async def test_incremental_cursor_field_as_list_uses_first_element():
 # ---------------------------------------------------------------------------
 # Safety window with non-datetime cursor → warning only, no crash
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_safety_window_with_non_datetime_cursor_no_crash():
@@ -694,6 +729,7 @@ async def test_safety_window_with_non_datetime_cursor_no_crash():
 # connect() failure in source connector
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_source_connect_failure_propagates():
     """A materialize() failure must propagate as ConnectionError from connect()."""
@@ -703,6 +739,7 @@ async def test_source_connect_failure_propagates():
 
     connector = MongoDbSourceConnector()
     from src.source.connectors.base import ConnectionError as ConnectorConnectionError
+
     with pytest.raises(ConnectorConnectionError, match="MongoDB connection failed"):
         await connector.connect(runtime)
 
@@ -711,12 +748,11 @@ async def test_source_connect_failure_propagates():
 # ObjectId incremental cursor round-trip (issue #92 review P1)
 # ---------------------------------------------------------------------------
 
+
 def test_objectid_cursor_encode_decode_roundtrip():
     """An ObjectId cursor must survive the JSON checkpoint layer as an ObjectId."""
-    from src.source.connectors.mongodb import (
-        _encode_cursor_value,
-        _decode_cursor_value,
-    )
+    from src.source.connectors.mongodb import _decode_cursor_value, _encode_cursor_value
+
     bson = sys.modules["bson"]
     oid = bson.ObjectId("507f1f77bcf86cd799439011")
 
@@ -730,10 +766,8 @@ def test_objectid_cursor_encode_decode_roundtrip():
 
 def test_non_objectid_cursor_values_pass_through():
     """Plain JSON-safe cursor values (and non-envelope dicts) are untouched."""
-    from src.source.connectors.mongodb import (
-        _encode_cursor_value,
-        _decode_cursor_value,
-    )
+    from src.source.connectors.mongodb import _decode_cursor_value, _encode_cursor_value
+
     for value in ("2024-01-01T00:00:00Z", 42):
         assert _encode_cursor_value(value) == value
         assert _decode_cursor_value(value) == value
@@ -802,10 +836,8 @@ async def test_objectid_cursor_rehydrated_into_filter_on_reload():
 def test_decimal128_cursor_encode_decode_roundtrip():
     """A Decimal128 cursor must also survive the JSON layer with its type, since
     a string {$gte: ...} bound would not match Decimal128-valued fields."""
-    from src.source.connectors.mongodb import (
-        _encode_cursor_value,
-        _decode_cursor_value,
-    )
+    from src.source.connectors.mongodb import _decode_cursor_value, _encode_cursor_value
+
     bson = sys.modules["bson"]
     dec = bson.Decimal128("3.14159")
 
@@ -820,6 +852,7 @@ def test_decimal128_cursor_encode_decode_roundtrip():
 # ---------------------------------------------------------------------------
 # Cursor iteration error handling
 # ---------------------------------------------------------------------------
+
 
 class _FakeAutoReconnect(Exception):
     """Stand-in for pymongo.errors.AutoReconnect in cursor error tests."""
@@ -852,8 +885,10 @@ def _make_error_motor_client(exc: Exception):
 
 @pytest.mark.asyncio
 async def test_cursor_transient_error_raises_transient_read_error(monkeypatch):
-    """A transient Motor error during cursor iteration must surface as TransientReadError."""
+    """A transient Motor error during cursor iteration must surface
+    as TransientReadError."""
     import src.source.connectors.mongodb as _mod
+
     monkeypatch.setattr(_mod, "_TRANSIENT_MOTOR_ERRORS", (_FakeAutoReconnect,))
 
     runtime = _make_runtime()
@@ -865,6 +900,7 @@ async def test_cursor_transient_error_raises_transient_read_error(monkeypatch):
     }
 
     from src.source.connectors.base import TransientReadError
+
     connector = MongoDbSourceConnector()
     with pytest.raises(TransientReadError, match="Transient Motor error"):
         async for _ in connector.read_batches(
@@ -875,8 +911,10 @@ async def test_cursor_transient_error_raises_transient_read_error(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_cursor_transient_error_mid_page_raises_transient_read_error(monkeypatch):
-    """TransientReadError is raised even when a cursor error fires after yielding some docs."""
+    """TransientReadError is raised even when a cursor error fires
+    after yielding some docs."""
     import src.source.connectors.mongodb as _mod
+
     monkeypatch.setattr(_mod, "_TRANSIENT_MOTOR_ERRORS", (_FakeAutoReconnect,))
 
     bson = sys.modules["bson"]
@@ -916,6 +954,7 @@ async def test_cursor_transient_error_mid_page_raises_transient_read_error(monke
     }
 
     from src.source.connectors.base import TransientReadError
+
     connector = MongoDbSourceConnector()
     with pytest.raises(TransientReadError, match="Transient Motor error"):
         async for _ in connector.read_batches(
@@ -925,9 +964,12 @@ async def test_cursor_transient_error_mid_page_raises_transient_read_error(monke
 
 
 @pytest.mark.asyncio
-async def test_cursor_transient_error_in_incremental_mode_does_not_save_cursor(monkeypatch):
+async def test_cursor_transient_error_in_incremental_mode_does_not_save_cursor(
+    monkeypatch,
+):
     """A cursor error in incremental mode must not advance the checkpoint."""
     import src.source.connectors.mongodb as _mod
+
     monkeypatch.setattr(_mod, "_TRANSIENT_MOTOR_ERRORS", (_FakeAutoReconnect,))
 
     runtime = _make_runtime()
@@ -942,6 +984,7 @@ async def test_cursor_transient_error_in_incremental_mode_does_not_save_cursor(m
     }
 
     from src.source.connectors.base import TransientReadError
+
     cp = _make_checkpoint(cursor_value=prev_cursor)
     connector = MongoDbSourceConnector()
     with pytest.raises(TransientReadError):
@@ -956,6 +999,7 @@ async def test_cursor_transient_error_in_incremental_mode_does_not_save_cursor(m
 @pytest.mark.asyncio
 async def test_cursor_non_transient_error_raises_read_error():
     """An unexpected exception during cursor iteration must surface as ReadError."""
+
     class _WeirdError(Exception):
         pass
 
@@ -968,6 +1012,7 @@ async def test_cursor_non_transient_error_raises_read_error():
     }
 
     from src.source.connectors.base import ReadError
+
     connector = MongoDbSourceConnector()
     with pytest.raises(ReadError, match="MongoDB read error"):
         async for _ in connector.read_batches(
@@ -978,11 +1023,13 @@ async def test_cursor_non_transient_error_raises_read_error():
 
 @pytest.mark.asyncio
 async def test_cursor_transient_error_with_empty_tuple_raises_read_error(monkeypatch):
-    """When pymongo is absent (_TRANSIENT_MOTOR_ERRORS=()), Motor errors become fatal ReadErrors.
+    """When pymongo is absent (_TRANSIENT_MOTOR_ERRORS=()), Motor errors
+    become fatal ReadErrors.
 
     This documents the known degraded behavior when pymongo is not installed.
     """
     import src.source.connectors.mongodb as _mod
+
     monkeypatch.setattr(_mod, "_TRANSIENT_MOTOR_ERRORS", ())
 
     runtime = _make_runtime()
@@ -994,6 +1041,7 @@ async def test_cursor_transient_error_with_empty_tuple_raises_read_error(monkeyp
     }
 
     from src.source.connectors.base import ReadError
+
     connector = MongoDbSourceConnector()
     with pytest.raises(ReadError, match="MongoDB read error"):
         async for _ in connector.read_batches(
@@ -1011,6 +1059,7 @@ async def test_source_connect_failure_clears_runtime():
 
     connector = MongoDbSourceConnector()
     from src.source.connectors.base import ConnectionError as ConnectorConnectionError
+
     with pytest.raises(ConnectorConnectionError):
         await connector.connect(runtime)
 

@@ -2,7 +2,8 @@
 
 Covers:
 * connect / health_check (including failure path)
-* configure_schema: collection + index creation, missing endpoint, create_collection error
+* configure_schema: collection + index creation, missing endpoint,
+  create_collection error
 * write_batch: insert, upsert (with and without conflict_keys), truncate-insert
 * Idempotency: ALREADY_COMMITTED on replayed (run_id, stream_id, batch_seq)
 * Empty batch, unconfigured stream (RETRYABLE_FAILURE), insert error (RETRYABLE)
@@ -21,14 +22,14 @@ import pytest
 from cdk.types import AckStatus, Cursor, SchemaSpec, WriteMode
 from src.destination.connectors.mongodb import (
     MongoDbDestinationHandler,
-    _MongoStreamState,
     _arrow_to_doc_list,
+    _MongoStreamState,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_runtime(db_name: str = "testdb"):
     rt = MagicMock()
@@ -114,12 +115,15 @@ async def _connected_handler(rt=None):
 # _arrow_to_doc_list
 # ---------------------------------------------------------------------------
 
+
 class TestArrowToDocList:
     def test_basic(self):
-        batch = pa.RecordBatch.from_pylist([
-            {"id": 1, "name": "Alice"},
-            {"id": 2, "name": "Bob"},
-        ])
+        batch = pa.RecordBatch.from_pylist(
+            [
+                {"id": 1, "name": "Alice"},
+                {"id": 2, "name": "Bob"},
+            ]
+        )
         docs = _arrow_to_doc_list(batch)
         assert len(docs) == 2
         assert docs[0] == {"id": 1, "name": "Alice"}
@@ -133,6 +137,7 @@ class TestArrowToDocList:
 # ---------------------------------------------------------------------------
 # Lifecycle
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_connect_sets_connected():
@@ -176,13 +181,16 @@ async def test_disconnect_clears_runtime():
 # configure_schema
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_configure_schema_insert_mode():
     rt, commits_coll, target_coll, db_mock = _make_runtime()
     handler, _ = await _connected_handler(rt)
     handler.set_stream_endpoints({"s1": _endpoint()})
 
-    result = await handler.configure_schema(_schema_spec("s1", WriteMode.WRITE_MODE_INSERT))
+    result = await handler.configure_schema(
+        _schema_spec("s1", WriteMode.WRITE_MODE_INSERT)
+    )
 
     assert result is True
     assert handler._streams["s1"].database_name == "testdb"
@@ -214,6 +222,7 @@ async def test_configure_schema_missing_endpoint_returns_false():
 @pytest.mark.asyncio
 async def test_configure_schema_before_connect_returns_false(caplog):
     import logging
+
     handler = MongoDbDestinationHandler()
     handler.set_stream_endpoints({"s1": _endpoint()})
     with caplog.at_level(logging.ERROR):
@@ -238,10 +247,12 @@ async def test_configure_schema_per_database_batch_commits():
     """Two streams on different databases each get their own _batch_commits."""
     rt, commits_coll, target_coll, db_mock = _make_runtime()
     handler, _ = await _connected_handler(rt)
-    handler.set_stream_endpoints({
-        "s1": _endpoint(db="db_a"),
-        "s2": _endpoint(db="db_b"),
-    })
+    handler.set_stream_endpoints(
+        {
+            "s1": _endpoint(db="db_a"),
+            "s2": _endpoint(db="db_b"),
+        }
+    )
 
     await handler.configure_schema(_schema_spec("s1"))
     await handler.configure_schema(_schema_spec("s2"))
@@ -254,6 +265,7 @@ async def test_configure_schema_per_database_batch_commits():
 # write_batch
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_write_batch_insert_success():
     rt, commits_coll, target_coll, db_mock = _make_runtime()
@@ -261,13 +273,19 @@ async def test_write_batch_insert_success():
         return_value=MagicMock(inserted_ids=["id1", "id2"])
     )
     handler, _ = await _connected_handler(rt)
-    handler._streams["s1"] = _MongoStreamState("testdb", "orders", WriteMode.WRITE_MODE_INSERT)
+    handler._streams["s1"] = _MongoStreamState(
+        "testdb", "orders", WriteMode.WRITE_MODE_INSERT
+    )
     handler._batch_commits_ready.add("testdb")
 
     batch = _make_batch({"id": 1, "amount": 100}, {"id": 2, "amount": 200})
     result = await handler.write_batch(
-        run_id="run1", stream_id="s1", batch_seq=0,
-        record_batch=batch, record_ids=["r1", "r2"], cursor=_cursor(),
+        run_id="run1",
+        stream_id="s1",
+        batch_seq=0,
+        record_batch=batch,
+        record_ids=["r1", "r2"],
+        cursor=_cursor(),
     )
 
     assert result.status == AckStatus.ACK_STATUS_SUCCESS
@@ -280,15 +298,26 @@ async def test_write_batch_insert_success():
 async def test_write_batch_already_committed():
     rt, commits_coll, target_coll, db_mock = _make_runtime()
     commits_coll.find_one = AsyncMock(
-        return_value={"run_id": "r", "stream_id": "s1", "batch_seq": 0, "cursor_token": b"old"}
+        return_value={
+            "run_id": "r",
+            "stream_id": "s1",
+            "batch_seq": 0,
+            "cursor_token": b"old",
+        }
     )
     handler, _ = await _connected_handler(rt)
-    handler._streams["s1"] = _MongoStreamState("testdb", "orders", WriteMode.WRITE_MODE_INSERT)
+    handler._streams["s1"] = _MongoStreamState(
+        "testdb", "orders", WriteMode.WRITE_MODE_INSERT
+    )
     handler._batch_commits_ready.add("testdb")
 
     result = await handler.write_batch(
-        run_id="r", stream_id="s1", batch_seq=0,
-        record_batch=_make_batch({"id": 1}), record_ids=["r1"], cursor=_cursor(),
+        run_id="r",
+        stream_id="s1",
+        batch_seq=0,
+        record_batch=_make_batch({"id": 1}),
+        record_ids=["r1"],
+        cursor=_cursor(),
     )
 
     assert result.status == AckStatus.ACK_STATUS_ALREADY_COMMITTED
@@ -300,9 +329,14 @@ async def test_write_batch_already_committed():
 async def test_write_batch_upsert_with_conflict_keys():
     rt, commits_coll, target_coll, db_mock = _make_runtime()
 
-    with patch.dict(sys.modules, {
-        "pymongo": MagicMock(UpdateOne=lambda filter, update, **kw: (filter, update)),
-    }):
+    with patch.dict(
+        sys.modules,
+        {
+            "pymongo": MagicMock(
+                UpdateOne=lambda filter, update, **kw: (filter, update)
+            ),
+        },
+    ):
         handler, _ = await _connected_handler(rt)
         handler._streams["s1"] = _MongoStreamState(
             "testdb", "users", WriteMode.WRITE_MODE_UPSERT, conflict_keys=["email"]
@@ -311,8 +345,12 @@ async def test_write_batch_upsert_with_conflict_keys():
 
         batch = _make_batch({"email": "a@b.com", "name": "Alice"})
         result = await handler.write_batch(
-            run_id="r", stream_id="s1", batch_seq=1,
-            record_batch=batch, record_ids=["r1"], cursor=_cursor(),
+            run_id="r",
+            stream_id="s1",
+            batch_seq=1,
+            record_batch=batch,
+            record_ids=["r1"],
+            cursor=_cursor(),
         )
 
     assert result.status == AckStatus.ACK_STATUS_SUCCESS
@@ -332,8 +370,12 @@ async def test_write_batch_upsert_without_conflict_keys_returns_retryable():
 
     batch = _make_batch({"v": 1})
     result = await handler.write_batch(
-        run_id="r", stream_id="s1", batch_seq=0,
-        record_batch=batch, record_ids=["r1"], cursor=_cursor(),
+        run_id="r",
+        stream_id="s1",
+        batch_seq=0,
+        record_batch=batch,
+        record_ids=["r1"],
+        cursor=_cursor(),
     )
 
     assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
@@ -354,8 +396,12 @@ async def test_write_batch_truncate_insert_first_batch_truncates():
 
     batch = _make_batch({"v": 42})
     result = await handler.write_batch(
-        run_id="r", stream_id="s1", batch_seq=1,
-        record_batch=batch, record_ids=["r1"], cursor=_cursor(),
+        run_id="r",
+        stream_id="s1",
+        batch_seq=1,
+        record_batch=batch,
+        record_ids=["r1"],
+        cursor=_cursor(),
     )
 
     assert result.status == AckStatus.ACK_STATUS_SUCCESS
@@ -378,8 +424,12 @@ async def test_write_batch_truncate_insert_later_batch_appends():
 
     batch = _make_batch({"v": 42})
     result = await handler.write_batch(
-        run_id="r", stream_id="s1", batch_seq=2,
-        record_batch=batch, record_ids=["r1"], cursor=_cursor(),
+        run_id="r",
+        stream_id="s1",
+        batch_seq=2,
+        record_batch=batch,
+        record_ids=["r1"],
+        cursor=_cursor(),
     )
 
     assert result.status == AckStatus.ACK_STATUS_SUCCESS
@@ -401,8 +451,12 @@ async def test_write_batch_truncate_insert_empty_first_batch_truncates():
 
     empty = _make_batch({"v": 42}).slice(0, 0)
     result = await handler.write_batch(
-        run_id="r", stream_id="s1", batch_seq=1,
-        record_batch=empty, record_ids=[], cursor=_cursor(),
+        run_id="r",
+        stream_id="s1",
+        batch_seq=1,
+        record_batch=empty,
+        record_ids=[],
+        cursor=_cursor(),
     )
 
     assert result.status == AckStatus.ACK_STATUS_SUCCESS
@@ -425,8 +479,12 @@ async def test_write_batch_truncate_insert_commit_failure_returns_retryable():
 
     batch = _make_batch({"v": 1})
     result = await handler.write_batch(
-        run_id="r", stream_id="s1", batch_seq=0,
-        record_batch=batch, record_ids=["r1"], cursor=_cursor(),
+        run_id="r",
+        stream_id="s1",
+        batch_seq=0,
+        record_batch=batch,
+        record_ids=["r1"],
+        cursor=_cursor(),
     )
 
     assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
@@ -437,13 +495,18 @@ async def test_write_batch_empty_records():
     rt, commits_coll, target_coll, db_mock = _make_runtime()
 
     handler, _ = await _connected_handler(rt)
-    handler._streams["s1"] = _MongoStreamState("testdb", "items", WriteMode.WRITE_MODE_INSERT)
+    handler._streams["s1"] = _MongoStreamState(
+        "testdb", "items", WriteMode.WRITE_MODE_INSERT
+    )
     handler._batch_commits_ready.add("testdb")
 
     result = await handler.write_batch(
-        run_id="r", stream_id="s1", batch_seq=3,
+        run_id="r",
+        stream_id="s1",
+        batch_seq=3,
         record_batch=pa.RecordBatch.from_pylist([]),
-        record_ids=[], cursor=_cursor(),
+        record_ids=[],
+        cursor=_cursor(),
     )
 
     assert result.status == AckStatus.ACK_STATUS_SUCCESS
@@ -458,8 +521,12 @@ async def test_write_batch_unconfigured_stream():
     handler, _ = await _connected_handler(rt)
 
     result = await handler.write_batch(
-        run_id="r", stream_id="missing", batch_seq=0,
-        record_batch=_make_batch({"id": 1}), record_ids=["r1"], cursor=_cursor(),
+        run_id="r",
+        stream_id="missing",
+        batch_seq=0,
+        record_batch=_make_batch({"id": 1}),
+        record_ids=["r1"],
+        cursor=_cursor(),
     )
     assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
 
@@ -470,12 +537,18 @@ async def test_write_batch_retryable_on_insert_error():
     target_coll.insert_many = AsyncMock(side_effect=RuntimeError("network error"))
 
     handler, _ = await _connected_handler(rt)
-    handler._streams["s1"] = _MongoStreamState("testdb", "items", WriteMode.WRITE_MODE_INSERT)
+    handler._streams["s1"] = _MongoStreamState(
+        "testdb", "items", WriteMode.WRITE_MODE_INSERT
+    )
     handler._batch_commits_ready.add("testdb")
 
     result = await handler.write_batch(
-        run_id="r", stream_id="s1", batch_seq=5,
-        record_batch=_make_batch({"id": 99}), record_ids=["r1"], cursor=_cursor(),
+        run_id="r",
+        stream_id="s1",
+        batch_seq=5,
+        record_batch=_make_batch({"id": 99}),
+        record_ids=["r1"],
+        cursor=_cursor(),
     )
 
     assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
@@ -491,12 +564,18 @@ async def test_write_batch_insert_commit_failure_returns_retryable():
     commits_coll.insert_one = AsyncMock(side_effect=RuntimeError("timeout"))
 
     handler, _ = await _connected_handler(rt)
-    handler._streams["s1"] = _MongoStreamState("testdb", "orders", WriteMode.WRITE_MODE_INSERT)
+    handler._streams["s1"] = _MongoStreamState(
+        "testdb", "orders", WriteMode.WRITE_MODE_INSERT
+    )
     handler._batch_commits_ready.add("testdb")
 
     result = await handler.write_batch(
-        run_id="r", stream_id="s1", batch_seq=0,
-        record_batch=_make_batch({"id": 1}), record_ids=["r1"], cursor=_cursor(),
+        run_id="r",
+        stream_id="s1",
+        batch_seq=0,
+        record_batch=_make_batch({"id": 1}),
+        record_ids=["r1"],
+        cursor=_cursor(),
     )
 
     assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
@@ -509,13 +588,18 @@ async def test_write_batch_empty_records_commit_failure_returns_retryable():
     commits_coll.insert_one = AsyncMock(side_effect=RuntimeError("write timeout"))
 
     handler, _ = await _connected_handler(rt)
-    handler._streams["s1"] = _MongoStreamState("testdb", "items", WriteMode.WRITE_MODE_INSERT)
+    handler._streams["s1"] = _MongoStreamState(
+        "testdb", "items", WriteMode.WRITE_MODE_INSERT
+    )
     handler._batch_commits_ready.add("testdb")
 
     result = await handler.write_batch(
-        run_id="r", stream_id="s1", batch_seq=9,
+        run_id="r",
+        stream_id="s1",
+        batch_seq=9,
         record_batch=pa.RecordBatch.from_pylist([]),
-        record_ids=[], cursor=_cursor(),
+        record_ids=[],
+        cursor=_cursor(),
     )
 
     assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
@@ -524,12 +608,15 @@ async def test_write_batch_empty_records_commit_failure_returns_retryable():
 
 @pytest.mark.asyncio
 async def test_configure_schema_upsert_without_conflict_keys_returns_false():
-    """UPSERT with no conflict_keys must fail configure_schema — no silent INSERT fallback."""
+    """UPSERT with no conflict_keys must fail configure_schema —
+    no silent INSERT fallback."""
     rt, commits_coll, target_coll, db_mock = _make_runtime()
     handler, _ = await _connected_handler(rt)
     handler.set_stream_endpoints({"s1": _endpoint(conflict_keys=[])})
 
-    result = await handler.configure_schema(_schema_spec("s1", WriteMode.WRITE_MODE_UPSERT))
+    result = await handler.configure_schema(
+        _schema_spec("s1", WriteMode.WRITE_MODE_UPSERT)
+    )
 
     assert result is False
     assert "s1" not in handler._streams
@@ -537,7 +624,8 @@ async def test_configure_schema_upsert_without_conflict_keys_returns_false():
 
 @pytest.mark.asyncio
 async def test_write_batch_all_duplicate_insert_returns_zero_written():
-    """All-duplicate BulkWriteError should be treated as idempotent success, not RETRYABLE."""
+    """All-duplicate BulkWriteError should be treated as idempotent
+    success, not RETRYABLE."""
     import sys
     from types import ModuleType
 
@@ -553,19 +641,27 @@ async def test_write_batch_all_duplicate_insert_returns_zero_written():
     fake_pymongo = ModuleType("pymongo")
     fake_pymongo.errors = fake_pymongo_errors
 
-    with patch.dict(sys.modules, {"pymongo": fake_pymongo, "pymongo.errors": fake_pymongo_errors}):
+    with patch.dict(
+        sys.modules, {"pymongo": fake_pymongo, "pymongo.errors": fake_pymongo_errors}
+    ):
         bulk_exc = FakeBulkWriteError(
             {"nInserted": 0, "writeErrors": [{"code": 11000, "errmsg": "dup"}]}
         )
         target_coll.insert_many = AsyncMock(side_effect=bulk_exc)
 
         handler, _ = await _connected_handler(rt)
-        handler._streams["s1"] = _MongoStreamState("testdb", "items", WriteMode.WRITE_MODE_INSERT)
+        handler._streams["s1"] = _MongoStreamState(
+            "testdb", "items", WriteMode.WRITE_MODE_INSERT
+        )
         handler._batch_commits_ready.add("testdb")
 
         result = await handler.write_batch(
-            run_id="r", stream_id="s1", batch_seq=0,
-            record_batch=_make_batch({"id": 1}), record_ids=["r1"], cursor=_cursor(),
+            run_id="r",
+            stream_id="s1",
+            batch_seq=0,
+            record_batch=_make_batch({"id": 1}),
+            record_ids=["r1"],
+            cursor=_cursor(),
         )
 
     assert result.status == AckStatus.ACK_STATUS_SUCCESS
@@ -589,20 +685,27 @@ async def test_write_batch_partial_duplicate_insert_returns_n_inserted():
     fake_pymongo = ModuleType("pymongo")
     fake_pymongo.errors = fake_pymongo_errors
 
-    with patch.dict(sys.modules, {"pymongo": fake_pymongo, "pymongo.errors": fake_pymongo_errors}):
+    with patch.dict(
+        sys.modules, {"pymongo": fake_pymongo, "pymongo.errors": fake_pymongo_errors}
+    ):
         bulk_exc = FakeBulkWriteError(
             {"nInserted": 1, "writeErrors": [{"code": 11000, "errmsg": "dup"}]}
         )
         target_coll.insert_many = AsyncMock(side_effect=bulk_exc)
 
         handler, _ = await _connected_handler(rt)
-        handler._streams["s1"] = _MongoStreamState("testdb", "items", WriteMode.WRITE_MODE_INSERT)
+        handler._streams["s1"] = _MongoStreamState(
+            "testdb", "items", WriteMode.WRITE_MODE_INSERT
+        )
         handler._batch_commits_ready.add("testdb")
 
         result = await handler.write_batch(
-            run_id="r", stream_id="s1", batch_seq=0,
+            run_id="r",
+            stream_id="s1",
+            batch_seq=0,
             record_batch=_make_batch({"id": 1}, {"id": 2}),
-            record_ids=["r1", "r2"], cursor=_cursor(),
+            record_ids=["r1", "r2"],
+            cursor=_cursor(),
         )
 
     assert result.status == AckStatus.ACK_STATUS_SUCCESS
@@ -612,6 +715,7 @@ async def test_write_batch_partial_duplicate_insert_returns_n_inserted():
 # ---------------------------------------------------------------------------
 # Properties
 # ---------------------------------------------------------------------------
+
 
 def test_connector_type():
     assert MongoDbDestinationHandler().connector_type == "mongodb"
@@ -627,6 +731,7 @@ def test_supports_properties():
 # ---------------------------------------------------------------------------
 # _write_conflict_keys preference
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_configure_schema_uses_enriched_conflict_keys():
@@ -652,14 +757,18 @@ async def test_configure_schema_uses_enriched_conflict_keys():
 # Upsert: reject missing conflict keys and exclude _id from $set
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_write_batch_upsert_missing_conflict_key_returns_retryable():
     """A document missing a conflict key must return RETRYABLE, not crash."""
     rt, commits_coll, target_coll, db_mock = _make_runtime()
 
-    with patch.dict(sys.modules, {
-        "pymongo": MagicMock(UpdateOne=lambda f, u, **kw: (f, u)),
-    }):
+    with patch.dict(
+        sys.modules,
+        {
+            "pymongo": MagicMock(UpdateOne=lambda f, u, **kw: (f, u)),
+        },
+    ):
         handler, _ = await _connected_handler(rt)
         handler._streams["s1"] = _MongoStreamState(
             "testdb", "users", WriteMode.WRITE_MODE_UPSERT, conflict_keys=["email"]
@@ -669,8 +778,12 @@ async def test_write_batch_upsert_missing_conflict_key_returns_retryable():
         # Document is missing the "email" conflict key
         batch = _make_batch({"name": "Alice"})
         result = await handler.write_batch(
-            run_id="r", stream_id="s1", batch_seq=0,
-            record_batch=batch, record_ids=["r1"], cursor=_cursor(),
+            run_id="r",
+            stream_id="s1",
+            batch_seq=0,
+            record_batch=batch,
+            record_ids=["r1"],
+            cursor=_cursor(),
         )
 
     assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
@@ -679,6 +792,7 @@ async def test_write_batch_upsert_missing_conflict_key_returns_retryable():
 # ---------------------------------------------------------------------------
 # JSON field decoding
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_configure_schema_collects_json_fields():
@@ -716,15 +830,21 @@ async def test_write_batch_decodes_json_fields():
 
     handler, _ = await _connected_handler(rt)
     handler._streams["s1"] = _MongoStreamState(
-        "testdb", "events", WriteMode.WRITE_MODE_INSERT,
+        "testdb",
+        "events",
+        WriteMode.WRITE_MODE_INSERT,
         json_fields={"payload"},
     )
     handler._batch_commits_ready.add("testdb")
 
     batch = _make_batch({"id": "e1", "payload": _json.dumps({"key": "value"})})
     result = await handler.write_batch(
-        run_id="r", stream_id="s1", batch_seq=0,
-        record_batch=batch, record_ids=["r1"], cursor=_cursor(),
+        run_id="r",
+        stream_id="s1",
+        batch_seq=0,
+        record_batch=batch,
+        record_ids=["r1"],
+        cursor=_cursor(),
     )
 
     assert result.status == AckStatus.ACK_STATUS_SUCCESS
@@ -735,6 +855,7 @@ async def test_write_batch_decodes_json_fields():
 # find_one error handling
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_write_batch_find_one_failure_returns_retryable():
     """A network error during the idempotency find_one must return RETRYABLE,
@@ -743,12 +864,18 @@ async def test_write_batch_find_one_failure_returns_retryable():
     commits_coll.find_one = AsyncMock(side_effect=RuntimeError("connection reset"))
 
     handler, _ = await _connected_handler(rt)
-    handler._streams["s1"] = _MongoStreamState("testdb", "orders", WriteMode.WRITE_MODE_INSERT)
+    handler._streams["s1"] = _MongoStreamState(
+        "testdb", "orders", WriteMode.WRITE_MODE_INSERT
+    )
     handler._batch_commits_ready.add("testdb")
 
     result = await handler.write_batch(
-        run_id="r", stream_id="s1", batch_seq=0,
-        record_batch=_make_batch({"id": 1}), record_ids=["r1"], cursor=_cursor(),
+        run_id="r",
+        stream_id="s1",
+        batch_seq=0,
+        record_batch=_make_batch({"id": 1}),
+        record_ids=["r1"],
+        cursor=_cursor(),
     )
 
     assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
@@ -760,6 +887,7 @@ async def test_write_batch_find_one_failure_returns_retryable():
 # Malformed JSON field returns FATAL
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_write_batch_malformed_json_field_returns_fatal():
     """A batch with a malformed Json column must return FATAL_FAILURE — it
@@ -768,15 +896,21 @@ async def test_write_batch_malformed_json_field_returns_fatal():
 
     handler, _ = await _connected_handler(rt)
     handler._streams["s1"] = _MongoStreamState(
-        "testdb", "events", WriteMode.WRITE_MODE_INSERT,
+        "testdb",
+        "events",
+        WriteMode.WRITE_MODE_INSERT,
         json_fields={"payload"},
     )
     handler._batch_commits_ready.add("testdb")
 
     batch = _make_batch({"id": "e1", "payload": "not-valid-json{"})
     result = await handler.write_batch(
-        run_id="r", stream_id="s1", batch_seq=0,
-        record_batch=batch, record_ids=["r1"], cursor=_cursor(),
+        run_id="r",
+        stream_id="s1",
+        batch_seq=0,
+        record_batch=batch,
+        record_ids=["r1"],
+        cursor=_cursor(),
     )
 
     assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
@@ -786,6 +920,7 @@ async def test_write_batch_malformed_json_field_returns_fatal():
 # ---------------------------------------------------------------------------
 # UPSERT with empty conflict_keys at write time
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_write_batch_upsert_empty_conflict_keys_at_write_time_returns_retryable():
@@ -802,8 +937,12 @@ async def test_write_batch_upsert_empty_conflict_keys_at_write_time_returns_retr
 
     batch = _make_batch({"id": 1})
     result = await handler.write_batch(
-        run_id="r", stream_id="s1", batch_seq=0,
-        record_batch=batch, record_ids=["r1"], cursor=_cursor(),
+        run_id="r",
+        stream_id="s1",
+        batch_seq=0,
+        record_batch=batch,
+        record_ids=["r1"],
+        cursor=_cursor(),
     )
 
     assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
@@ -814,6 +953,7 @@ async def test_write_batch_upsert_empty_conflict_keys_at_write_time_returns_retr
 # ---------------------------------------------------------------------------
 # connect() failure path
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_connect_failure_leaves_handler_not_connected():
@@ -847,11 +987,13 @@ async def test_connect_failure_clears_runtime():
 # WRITE_MODE_UNSPECIFIED warning
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_configure_schema_unspecified_mode_logs_warning(caplog):
     """WRITE_MODE_UNSPECIFIED must log a warning at configure_schema time (once per
     stream, not once per batch) and still return True."""
     import logging
+
     rt, *_ = _make_runtime()
     handler, _ = await _connected_handler(rt)
     handler.set_stream_endpoints({"s1": _endpoint()})
@@ -863,7 +1005,8 @@ async def test_configure_schema_unspecified_mode_logs_warning(caplog):
 
     assert result is True
     assert any(
-        "WRITE_MODE_UNSPECIFIED" in r.message and "s1" in r.message
+        "WRITE_MODE_UNSPECIFIED" in r.message
+        and "s1" in r.message
         and r.levelno == logging.WARNING
         for r in caplog.records
     )
@@ -873,15 +1016,19 @@ async def test_configure_schema_unspecified_mode_logs_warning(caplog):
 # UPSERT commit-record failure
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_write_batch_upsert_commit_failure_returns_retryable():
     """Upsert mode: a lost commit record must return RETRYABLE, same as INSERT."""
     rt, commits_coll, target_coll, db_mock = _make_runtime()
     commits_coll.insert_one = AsyncMock(side_effect=RuntimeError("write conflict"))
 
-    with patch.dict(sys.modules, {
-        "pymongo": MagicMock(UpdateOne=lambda f, u, **kw: (f, u)),
-    }):
+    with patch.dict(
+        sys.modules,
+        {
+            "pymongo": MagicMock(UpdateOne=lambda f, u, **kw: (f, u)),
+        },
+    ):
         handler, _ = await _connected_handler(rt)
         handler._streams["s1"] = _MongoStreamState(
             "testdb", "users", WriteMode.WRITE_MODE_UPSERT, conflict_keys=["email"]
@@ -890,8 +1037,12 @@ async def test_write_batch_upsert_commit_failure_returns_retryable():
 
         batch = _make_batch({"email": "a@b.com", "name": "Alice"})
         result = await handler.write_batch(
-            run_id="r", stream_id="s1", batch_seq=0,
-            record_batch=batch, record_ids=["r1"], cursor=_cursor(),
+            run_id="r",
+            stream_id="s1",
+            batch_seq=0,
+            record_batch=batch,
+            record_ids=["r1"],
+            cursor=_cursor(),
         )
 
     assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
@@ -902,15 +1053,19 @@ async def test_write_batch_upsert_commit_failure_returns_retryable():
 # (issue #92 review P1s)
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_write_batch_upsert_excludes_id_from_set_when_id_is_conflict_key():
     """_id must never appear in $set, even when it is the conflict key — Mongo
     rejects an in-place _id update with ImmutableField."""
     rt, commits_coll, target_coll, db_mock = _make_runtime()
 
-    with patch.dict(sys.modules, {
-        "pymongo": MagicMock(UpdateOne=lambda f, u, **kw: (f, u)),
-    }):
+    with patch.dict(
+        sys.modules,
+        {
+            "pymongo": MagicMock(UpdateOne=lambda f, u, **kw: (f, u)),
+        },
+    ):
         handler, _ = await _connected_handler(rt)
         handler._streams["s1"] = _MongoStreamState(
             "testdb", "users", WriteMode.WRITE_MODE_UPSERT, conflict_keys=["_id"]
@@ -919,8 +1074,12 @@ async def test_write_batch_upsert_excludes_id_from_set_when_id_is_conflict_key()
 
         batch = _make_batch({"_id": "u1", "name": "Alice"})
         result = await handler.write_batch(
-            run_id="r", stream_id="s1", batch_seq=0,
-            record_batch=batch, record_ids=["r1"], cursor=_cursor(),
+            run_id="r",
+            stream_id="s1",
+            batch_seq=0,
+            record_batch=batch,
+            record_ids=["r1"],
+            cursor=_cursor(),
         )
 
     assert result.status == AckStatus.ACK_STATUS_SUCCESS
@@ -936,9 +1095,12 @@ async def test_write_batch_upsert_id_only_doc_uses_set_on_insert():
     $setOnInsert so the upsert is still valid ($set rejects an empty document)."""
     rt, commits_coll, target_coll, db_mock = _make_runtime()
 
-    with patch.dict(sys.modules, {
-        "pymongo": MagicMock(UpdateOne=lambda f, u, **kw: (f, u)),
-    }):
+    with patch.dict(
+        sys.modules,
+        {
+            "pymongo": MagicMock(UpdateOne=lambda f, u, **kw: (f, u)),
+        },
+    ):
         handler, _ = await _connected_handler(rt)
         handler._streams["s1"] = _MongoStreamState(
             "testdb", "users", WriteMode.WRITE_MODE_UPSERT, conflict_keys=["_id"]
@@ -947,8 +1109,12 @@ async def test_write_batch_upsert_id_only_doc_uses_set_on_insert():
 
         batch = _make_batch({"_id": "u1"})
         result = await handler.write_batch(
-            run_id="r", stream_id="s1", batch_seq=0,
-            record_batch=batch, record_ids=["r1"], cursor=_cursor(),
+            run_id="r",
+            stream_id="s1",
+            batch_seq=0,
+            record_batch=batch,
+            record_ids=["r1"],
+            cursor=_cursor(),
         )
 
     assert result.status == AckStatus.ACK_STATUS_SUCCESS
@@ -964,9 +1130,12 @@ async def test_write_batch_upsert_null_conflict_key_returns_retryable():
     missing-field docs in Mongo and would collapse unrelated records."""
     rt, commits_coll, target_coll, db_mock = _make_runtime()
 
-    with patch.dict(sys.modules, {
-        "pymongo": MagicMock(UpdateOne=lambda f, u, **kw: (f, u)),
-    }):
+    with patch.dict(
+        sys.modules,
+        {
+            "pymongo": MagicMock(UpdateOne=lambda f, u, **kw: (f, u)),
+        },
+    ):
         handler, _ = await _connected_handler(rt)
         handler._streams["s1"] = _MongoStreamState(
             "testdb", "users", WriteMode.WRITE_MODE_UPSERT, conflict_keys=["email"]
@@ -975,8 +1144,12 @@ async def test_write_batch_upsert_null_conflict_key_returns_retryable():
 
         batch = _make_batch({"email": None, "name": "Alice"})
         result = await handler.write_batch(
-            run_id="r", stream_id="s1", batch_seq=0,
-            record_batch=batch, record_ids=["r1"], cursor=_cursor(),
+            run_id="r",
+            stream_id="s1",
+            batch_seq=0,
+            record_batch=batch,
+            record_ids=["r1"],
+            cursor=_cursor(),
         )
 
     assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
@@ -992,9 +1165,12 @@ async def test_write_batch_upsert_duplicate_key_returns_retryable_not_success():
         side_effect=RuntimeError("E11000 duplicate key error")
     )
 
-    with patch.dict(sys.modules, {
-        "pymongo": MagicMock(UpdateOne=lambda f, u, **kw: (f, u)),
-    }):
+    with patch.dict(
+        sys.modules,
+        {
+            "pymongo": MagicMock(UpdateOne=lambda f, u, **kw: (f, u)),
+        },
+    ):
         handler, _ = await _connected_handler(rt)
         handler._streams["s1"] = _MongoStreamState(
             "testdb", "users", WriteMode.WRITE_MODE_UPSERT, conflict_keys=["email"]
@@ -1003,8 +1179,12 @@ async def test_write_batch_upsert_duplicate_key_returns_retryable_not_success():
 
         batch = _make_batch({"email": "a@b.com", "name": "Alice"})
         result = await handler.write_batch(
-            run_id="r", stream_id="s1", batch_seq=0,
-            record_batch=batch, record_ids=["r1"], cursor=_cursor(),
+            run_id="r",
+            stream_id="s1",
+            batch_seq=0,
+            record_batch=batch,
+            record_ids=["r1"],
+            cursor=_cursor(),
         )
 
     assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
@@ -1020,9 +1200,12 @@ async def test_write_batch_upsert_preserves_source_id_on_insert():
     source's."""
     rt, commits_coll, target_coll, db_mock = _make_runtime()
 
-    with patch.dict(sys.modules, {
-        "pymongo": MagicMock(UpdateOne=lambda f, u, **kw: (f, u)),
-    }):
+    with patch.dict(
+        sys.modules,
+        {
+            "pymongo": MagicMock(UpdateOne=lambda f, u, **kw: (f, u)),
+        },
+    ):
         handler, _ = await _connected_handler(rt)
         handler._streams["s1"] = _MongoStreamState(
             "testdb", "users", WriteMode.WRITE_MODE_UPSERT, conflict_keys=["email"]
@@ -1031,8 +1214,12 @@ async def test_write_batch_upsert_preserves_source_id_on_insert():
 
         batch = _make_batch({"_id": "x1", "email": "a@b.com", "name": "Alice"})
         result = await handler.write_batch(
-            run_id="r", stream_id="s1", batch_seq=0,
-            record_batch=batch, record_ids=["r1"], cursor=_cursor(),
+            run_id="r",
+            stream_id="s1",
+            batch_seq=0,
+            record_batch=batch,
+            record_ids=["r1"],
+            cursor=_cursor(),
         )
 
     assert result.status == AckStatus.ACK_STATUS_SUCCESS
