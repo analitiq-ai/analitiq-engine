@@ -32,6 +32,8 @@ jobs:
           node-version: "20"
       - run: npm ci --no-audit --no-fund
       - run: npm run build
+      - name: Unit tests (arrowFamily / getConversion) gate the package
+        run: npm test
       - name: Packaged grid is byte-identical to the engine source
         run: cmp dist/conversion_matrix.json ../../cdk/cdk/type_map/conversion_matrix.json
 
