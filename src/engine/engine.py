@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import pyarrow as pa
+
 from cdk.contract import Readable
 from cdk.types import CheckpointStore
 
@@ -435,9 +436,13 @@ class StreamingEngine:
                         )
                         await asyncio.sleep(delay)
                         continue
-                    raise StreamProcessingError(
-                        f"Stream {stream_name}: zero-batch truncate failed: "
-                        f"{result.failure_summary}"
+                    raise tag_failure(
+                        StreamProcessingError(
+                            f"Stream {stream_name}: zero-batch truncate failed: "
+                            f"{result.failure_summary}"
+                        ),
+                        code=ErrorCode.DESTINATION_WRITE_FAILED,
+                        stage=FailureStage.DESTINATION_LOAD,
                     )
 
             if stream_metrics["records_failed"] > 0:

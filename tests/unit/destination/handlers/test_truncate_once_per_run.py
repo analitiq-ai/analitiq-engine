@@ -498,18 +498,14 @@ class TestZeroBatchTruncate:
     async def test_load_stage_sets_no_flag_for_zero_batch_insert(self):
         """Non-truncate_insert streams do not set the flag."""
         engine = self._engine()
-        _, sm = await self._run_zero_batch_load_stage(
-            engine, self._config("insert")
-        )
+        _, sm = await self._run_zero_batch_load_stage(engine, self._config("insert"))
         assert "_zero_batch_truncate_needed" not in sm
 
     @pytest.mark.asyncio
     async def test_load_stage_sets_no_flag_for_zero_batch_upsert(self):
         """Upsert streams do not set the flag either."""
         engine = self._engine()
-        _, sm = await self._run_zero_batch_load_stage(
-            engine, self._config("upsert")
-        )
+        _, sm = await self._run_zero_batch_load_stage(engine, self._config("upsert"))
         assert "_zero_batch_truncate_needed" not in sm
 
     # ------------------------------------------------------------------ #
@@ -533,17 +529,16 @@ class TestZeroBatchTruncate:
         engine.dlq.dlq_path = "/tmp/test-dlq"
         return engine
 
-    async def _invoke_process_stream(self, engine, ack_statuses, write_mode="truncate_insert"):
+    async def _invoke_process_stream(
+        self, engine, ack_statuses, write_mode="truncate_insert"
+    ):
         """Drive the zero-batch truncate section of _process_stream.
 
         Replaces all pipeline stages with a no-op task that sets the
         deferred-truncate flag and returns immediately, so gather
         completes synchronously and the post-gather code runs.
         """
-        import asyncio
         from unittest.mock import patch
-
-        from src.grpc.generated.analitiq.v1 import AckStatus
 
         grpc_client = MagicMock()
         grpc_client.connect = AsyncMock(return_value=True)
@@ -635,9 +630,8 @@ class TestZeroBatchTruncate:
     async def test_outer_scope_retryable_exhausted_raises(self):
         """When RETRYABLE_FAILURE persists beyond max_retries the stream
         fails loud — stale data must not survive silently."""
-        from src.grpc.generated.analitiq.v1 import AckStatus
-
         from src.engine.exceptions import StreamProcessingError
+        from src.grpc.generated.analitiq.v1 import AckStatus
 
         engine = self._process_stream_engine(max_retries=0)
         with pytest.raises(StreamProcessingError, match="zero-batch truncate"):
@@ -648,9 +642,8 @@ class TestZeroBatchTruncate:
     @pytest.mark.asyncio
     async def test_outer_scope_fatal_failure_raises(self):
         """FATAL_FAILURE on the synthetic batch raises StreamProcessingError."""
-        from src.grpc.generated.analitiq.v1 import AckStatus
-
         from src.engine.exceptions import StreamProcessingError
+        from src.grpc.generated.analitiq.v1 import AckStatus
 
         engine = self._process_stream_engine()
         with pytest.raises(StreamProcessingError, match="zero-batch truncate"):
@@ -663,9 +656,7 @@ class TestZeroBatchTruncate:
         """When write_mode is not truncate_insert, no synthetic batch is
         ever sent regardless of how many batches the source produced."""
         engine = self._process_stream_engine()
-        grpc_client = await self._invoke_process_stream(
-            engine, [], write_mode="insert"
-        )
+        grpc_client = await self._invoke_process_stream(engine, [], write_mode="insert")
         grpc_client.send_batch.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -706,12 +697,12 @@ class TestZeroBatchTruncate:
         }
         pipeline_config = {"pipeline_id": "p1"}
 
-        from src.engine.exceptions import StreamProcessingError
-
         with (
             patch.object(engine, "_create_source_connector", return_value=MagicMock()),
             patch.object(engine, "_create_grpc_client", return_value=grpc_client),
-            patch.object(engine, "_create_pipeline_stages", side_effect=_failing_stages),
+            patch.object(
+                engine, "_create_pipeline_stages", side_effect=_failing_stages
+            ),
             patch("src.engine.engine.DeadLetterQueue"),
             patch("src.engine.engine.create_metrics_record", return_value=MagicMock()),
         ):
