@@ -815,3 +815,188 @@ def test_decimal128_cursor_encode_decode_roundtrip():
     decoded = _decode_cursor_value(encoded)
     assert isinstance(decoded, bson.Decimal128)
     assert str(decoded) == "3.14159"
+
+
+# ---------------------------------------------------------------------------
+# Cursor iteration error handling
+# ---------------------------------------------------------------------------
+
+class _FakeAutoReconnect(Exception):
+    """Stand-in for pymongo.errors.AutoReconnect in cursor error tests."""
+
+
+def _make_error_motor_client(exc: Exception):
+    """Build a stub motor client whose cursor raises *exc* on the first iteration."""
+
+    class _ErrorCursor:
+        def sort(self, *args, **kwargs):
+            return self
+
+        def limit(self, n):
+            return self
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise exc
+
+    collection_mock = MagicMock()
+    collection_mock.find.return_value = _ErrorCursor()
+    db_mock = MagicMock()
+    db_mock.__getitem__ = MagicMock(return_value=collection_mock)
+    client_mock = MagicMock()
+    client_mock.__getitem__ = MagicMock(return_value=db_mock)
+    return client_mock
+
+
+@pytest.mark.asyncio
+async def test_cursor_transient_error_raises_transient_read_error(monkeypatch):
+    """A transient Motor error during cursor iteration must surface as TransientReadError."""
+    import src.source.connectors.mongodb as _mod
+    monkeypatch.setattr(_mod, "_TRANSIENT_MOTOR_ERRORS", (_FakeAutoReconnect,))
+
+    runtime = _make_runtime()
+    runtime.mongo_client = _make_error_motor_client(_FakeAutoReconnect("network blip"))
+
+    config = {
+        "endpoint_document": {"collection": "users", "database": "mydb"},
+        "stream_source": {"replication": {"method": "full_refresh"}},
+    }
+
+    from src.source.connectors.base import TransientReadError
+    connector = MongoDbSourceConnector()
+    with pytest.raises(TransientReadError, match="Transient Motor error"):
+        async for _ in connector.read_batches(
+            runtime, config, checkpoint=_make_checkpoint(), stream_name="users"
+        ):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_cursor_transient_error_mid_page_raises_transient_read_error(monkeypatch):
+    """TransientReadError is raised even when a cursor error fires after yielding some docs."""
+    import src.source.connectors.mongodb as _mod
+    monkeypatch.setattr(_mod, "_TRANSIENT_MOTOR_ERRORS", (_FakeAutoReconnect,))
+
+    bson = sys.modules["bson"]
+
+    class _PartialCursor:
+        def __init__(self):
+            self._count = 0
+
+        def sort(self, *args, **kwargs):
+            return self
+
+        def limit(self, n):
+            return self
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if self._count == 0:
+                self._count += 1
+                return {"_id": bson.ObjectId("507f191e810c19729de860e1"), "v": 1}
+            raise _FakeAutoReconnect("cursor gone mid-page")
+
+    collection_mock = MagicMock()
+    collection_mock.find.return_value = _PartialCursor()
+    db_mock = MagicMock()
+    db_mock.__getitem__ = MagicMock(return_value=collection_mock)
+    client_mock = MagicMock()
+    client_mock.__getitem__ = MagicMock(return_value=db_mock)
+
+    runtime = _make_runtime()
+    runtime.mongo_client = client_mock
+
+    config = {
+        "endpoint_document": {"collection": "users", "database": "mydb"},
+        "stream_source": {"replication": {"method": "full_refresh"}},
+    }
+
+    from src.source.connectors.base import TransientReadError
+    connector = MongoDbSourceConnector()
+    with pytest.raises(TransientReadError, match="Transient Motor error"):
+        async for _ in connector.read_batches(
+            runtime, config, checkpoint=_make_checkpoint(), stream_name="users"
+        ):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_cursor_transient_error_in_incremental_mode_does_not_save_cursor(monkeypatch):
+    """A cursor error in incremental mode must not advance the checkpoint."""
+    import src.source.connectors.mongodb as _mod
+    monkeypatch.setattr(_mod, "_TRANSIENT_MOTOR_ERRORS", (_FakeAutoReconnect,))
+
+    runtime = _make_runtime()
+    runtime.mongo_client = _make_error_motor_client(_FakeAutoReconnect("network blip"))
+
+    prev_cursor = datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc)
+    config = {
+        "endpoint_document": {"collection": "events", "database": "mydb"},
+        "stream_source": {
+            "replication": {"method": "incremental", "cursor_field": "updated_at"}
+        },
+    }
+
+    from src.source.connectors.base import TransientReadError
+    cp = _make_checkpoint(cursor_value=prev_cursor)
+    connector = MongoDbSourceConnector()
+    with pytest.raises(TransientReadError):
+        async for _ in connector.read_batches(
+            runtime, config, checkpoint=cp, stream_name="events"
+        ):
+            pass
+
+    cp.save_cursor.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_cursor_non_transient_error_raises_read_error():
+    """An unexpected exception during cursor iteration must surface as ReadError."""
+    class _WeirdError(Exception):
+        pass
+
+    runtime = _make_runtime()
+    runtime.mongo_client = _make_error_motor_client(_WeirdError("bad things"))
+
+    config = {
+        "endpoint_document": {"collection": "users", "database": "mydb"},
+        "stream_source": {"replication": {"method": "full_refresh"}},
+    }
+
+    from src.source.connectors.base import ReadError
+    connector = MongoDbSourceConnector()
+    with pytest.raises(ReadError, match="MongoDB read error"):
+        async for _ in connector.read_batches(
+            runtime, config, checkpoint=_make_checkpoint(), stream_name="users"
+        ):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_cursor_transient_error_with_empty_tuple_raises_read_error(monkeypatch):
+    """When pymongo is absent (_TRANSIENT_MOTOR_ERRORS=()), Motor errors become fatal ReadErrors.
+
+    This documents the known degraded behavior when pymongo is not installed.
+    """
+    import src.source.connectors.mongodb as _mod
+    monkeypatch.setattr(_mod, "_TRANSIENT_MOTOR_ERRORS", ())
+
+    runtime = _make_runtime()
+    runtime.mongo_client = _make_error_motor_client(_FakeAutoReconnect("network blip"))
+
+    config = {
+        "endpoint_document": {"collection": "users", "database": "mydb"},
+        "stream_source": {"replication": {"method": "full_refresh"}},
+    }
+
+    from src.source.connectors.base import ReadError
+    connector = MongoDbSourceConnector()
+    with pytest.raises(ReadError, match="MongoDB read error"):
+        async for _ in connector.read_batches(
+            runtime, config, checkpoint=_make_checkpoint(), stream_name="users"
+        ):
+            pass
