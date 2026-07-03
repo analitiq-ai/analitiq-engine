@@ -1000,3 +1000,20 @@ async def test_cursor_transient_error_with_empty_tuple_raises_read_error(monkeyp
             runtime, config, checkpoint=_make_checkpoint(), stream_name="users"
         ):
             pass
+
+
+@pytest.mark.asyncio
+async def test_source_connect_failure_clears_runtime():
+    """After connect() failure _runtime is None and runtime.close() was called to
+    release the ref taken by acquire()."""
+    runtime = _make_runtime()
+    runtime.materialize = AsyncMock(side_effect=RuntimeError("auth failed"))
+
+    connector = MongoDbSourceConnector()
+    from src.source.connectors.base import ConnectionError as ConnectorConnectionError
+    with pytest.raises(ConnectorConnectionError):
+        await connector.connect(runtime)
+
+    assert connector._runtime is None
+    assert not connector.is_connected
+    runtime.close.assert_awaited_once()
