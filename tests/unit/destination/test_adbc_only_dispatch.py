@@ -20,7 +20,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from decimal import Decimal, localcontext
+from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pyarrow as pa
@@ -33,7 +33,6 @@ from cdk.sql.generic import (
     AdbcConfigurationError,
     GenericSQLConnector,
     SchemaConfigurationError,
-    _canonical_json_default,
     _is_fatal_adbc_error,
     _reclassify_as_fatal,
     _StreamState,
@@ -1031,37 +1030,50 @@ class TestWriteBatchAdbcOnlyKeylessInsert:
         assert captured[0] == captured[1]
 
 
-class TestCanonicalJsonDefaultDecimal:
-    """``_canonical_json_default`` strips trailing zeros WITHOUT context
-    rounding: a scale change stays idempotent, but distinct high-precision
-    values keep distinct canonical strings (issue #285 review P1)."""
+class TestRecordHashDecimalPrecision:
+    """Decimal values hash via json ``default=str`` -- the deployed SQLAlchemy
+    behaviour. No context rounding and no zero-stripping, so distinct
+    high-precision values keep distinct ``_record_hash`` digests and existing
+    rows keep the digest they were written with (issue #285 review)."""
 
-    def test_scale_change_is_idempotent(self):
-        # Same value at different scale -> same canonical string -> same hash.
-        assert _canonical_json_default(Decimal("3.14")) == _canonical_json_default(
-            Decimal("3.1400")
+    def _state(self):
+        state = _StreamState(
+            schema_name="public",
+            table_name="t",
+            write_mode="insert",
+            primary_keys=[],
         )
+        sc = MagicMock()
+        sc.cast_arrow_batch.side_effect = lambda b: b
+        state.schema_contract = sc
+        return state
+
+    def _hash(self, arr):
+        h = _FixtureConnector()
+        h._adbc_only = True
+        out = h._attach_record_hash_to_batch(
+            pa.RecordBatch.from_pydict({"v": arr}), self._state()
+        )
+        return out.column(GenericSQLConnector.RECORD_HASH_COLUMN).to_pylist()[0]
 
     def test_distinct_high_precision_values_do_not_collide(self):
-        # NUMERIC(38) values differing past the 28-digit default context must
-        # not collapse to one string (that would drop a row on the dedup MERGE).
-        a = Decimal("123456789012345678901234567890.00")
-        b = Decimal("123456789012345678901234567891.00")
-        assert _canonical_json_default(a) != _canonical_json_default(b)
+        # NUMERIC(38) values differing past the 28-digit context must not share a
+        # hash (Decimal.normalize would have collapsed them and dropped a row).
+        t = pa.decimal128(38, 2)
+        a = self._hash(pa.array([Decimal("123456789012345678901234567890.00")], type=t))
+        b = self._hash(pa.array([Decimal("123456789012345678901234567891.00")], type=t))
+        assert a != b
 
-    def test_active_context_precision_does_not_round(self):
-        # A low active precision must not truncate the canonical form.
-        with localcontext() as ctx:
-            ctx.prec = 5
-            s = _canonical_json_default(Decimal("123456789012345678901234567890"))
-        assert s == "123456789012345678901234567890"
-
-    def test_integer_trailing_zeros_preserved(self):
-        # Only fractional trailing zeros are stripped; 100 stays 100.
-        assert _canonical_json_default(Decimal("100")) == "100"
-
-    def test_non_finite_decimal_passes_through(self):
-        assert _canonical_json_default(Decimal("NaN")) == "NaN"
+    def test_digest_uses_str_form(self):
+        # The hash input for a Decimal is its str() form (default=str), matching
+        # the deployed SQLAlchemy path -- not a zero-stripped form. Guards against
+        # re-hashing existing rows on deploy (issue #285 review P2).
+        arr = pa.array([Decimal("3.1400")], type=pa.decimal128(10, 4))
+        val = arr[0].as_py()
+        expected = hashlib.sha256(
+            json.dumps({"v": val}, sort_keys=True, default=str).encode()
+        ).hexdigest()
+        assert self._hash(arr) == expected
 
 
 class _NoMergeAdbcDialect(_FixtureAdbcDialect):

@@ -32,7 +32,6 @@ import threading
 from collections.abc import AsyncIterator, Mapping
 from contextlib import AbstractAsyncContextManager, AsyncExitStack, nullcontext
 from dataclasses import dataclass, field
-from decimal import Decimal
 from typing import Any, Literal
 
 import pyarrow as pa
@@ -77,32 +76,6 @@ from .exceptions import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-def _canonical_json_default(v: Any) -> str:
-    """JSON serialization fallback for content-hash canonicalization.
-
-    Normalizes ``Decimal`` values by stripping trailing zeros so that
-    ``Decimal('3.14')`` and ``Decimal('3.1400')`` produce the same canonical
-    string and therefore the same ``_record_hash``. Without normalization a
-    schema scale change between runs would assign a new hash to an already-stored
-    row and silently duplicate it on retry.
-
-    The trailing-zero strip must be context-free: ``Decimal.normalize()`` applies
-    the active decimal context precision (default 28), which rounds high-precision
-    values such as ``NUMERIC(38)`` and would collapse two distinct rows onto the
-    same hash -- the dedup MERGE would then drop one. Fixed-point ``format`` renders
-    the exact coefficient with no rounding; stripping only the fractional trailing
-    zeros keeps the scale-change idempotency without losing precision.
-    """
-    if isinstance(v, Decimal):
-        if not v.is_finite():
-            return str(v)
-        text = format(v, "f")
-        if "." in text:
-            text = text.rstrip("0").rstrip(".")
-        return text
-    return str(v)
 
 
 # Tracks (table, column) pairs already warned about ORDER BY fallback so a
@@ -1344,9 +1317,7 @@ class GenericSQLConnector(BaseDestinationHandler):
         if not self._needs_record_hash(state):
             return
         for record in records:
-            canonical = json.dumps(
-                record, sort_keys=True, default=_canonical_json_default
-            )
+            canonical = json.dumps(record, sort_keys=True, default=str)
             digest = hashlib.sha256(canonical.encode()).hexdigest()
             record[self.RECORD_HASH_COLUMN] = digest
 
@@ -1374,7 +1345,7 @@ class GenericSQLConnector(BaseDestinationHandler):
         keep: list[int] = []
         for i in range(batch.num_rows):
             row = {name: batch.column(name)[i].as_py() for name in batch.schema.names}
-            canonical = json.dumps(row, sort_keys=True, default=_canonical_json_default)
+            canonical = json.dumps(row, sort_keys=True, default=str)
             digest = hashlib.sha256(canonical.encode()).hexdigest()
             if digest not in seen:
                 seen.add(digest)
