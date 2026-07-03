@@ -16,20 +16,20 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any
 
 import pytest
 
 from cdk.types import EndpointScope
 from src.config.schema_validator import ContractValidationError, _load_schema
-from src.engine.pipeline_config_prep import PipelineConfigPrep
+from src.engine.pipeline_config_prep import PipelineConfigPrep, _split_stream_ref
 
 # ---------------------------------------------------------------------------
 # Schema-mirror infrastructure
 # ---------------------------------------------------------------------------
 
 
-_PERMISSIVE_SCHEMA: Dict[str, Any] = {
+_PERMISSIVE_SCHEMA: dict[str, Any] = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
 }
@@ -81,9 +81,7 @@ def real_schema_mirror(monkeypatch: pytest.MonkeyPatch) -> Path:
     contracts fails loudly instead of slipping through the permissive
     ``type: "object"`` mirror (#96).
     """
-    monkeypatch.setenv(
-        "ANALITIQ_SCHEMA_BASE_URL", _VENDORED_SCHEMAS_DIR.as_uri()
-    )
+    monkeypatch.setenv("ANALITIQ_SCHEMA_BASE_URL", _VENDORED_SCHEMAS_DIR.as_uri())
     return _VENDORED_SCHEMAS_DIR
 
 
@@ -110,7 +108,7 @@ def _write_json(path: Path, payload: Any) -> None:
     path.write_text(json.dumps(payload))
 
 
-def _connector_doc() -> Dict[str, Any]:
+def _connector_doc() -> dict[str, Any]:
     return {
         "$schema": "https://schemas.analitiq.ai/connector/latest.json",
         "kind": "api",
@@ -129,7 +127,7 @@ def _connector_doc() -> Dict[str, Any]:
     }
 
 
-def _connection_doc(connection_id: str) -> Dict[str, Any]:
+def _connection_doc(connection_id: str) -> dict[str, Any]:
     return {
         "$schema": "https://schemas.analitiq.ai/connection/latest.json",
         "connection_id": connection_id,
@@ -139,7 +137,7 @@ def _connection_doc(connection_id: str) -> Dict[str, Any]:
     }
 
 
-def _endpoint_doc(endpoint_id: str) -> Dict[str, Any]:
+def _endpoint_doc(endpoint_id: str) -> dict[str, Any]:
     return {
         "$schema": "https://schemas.analitiq.ai/api-endpoint/latest.json",
         "endpoint_id": endpoint_id,
@@ -180,7 +178,7 @@ def _connection_type_map_rules() -> list:
     ]
 
 
-def _stream_doc(stream_id: str, *, dst_scope: str = "connector") -> Dict[str, Any]:
+def _stream_doc(stream_id: str, *, dst_scope: str = "connector") -> dict[str, Any]:
     return {
         "$schema": "https://schemas.analitiq.ai/stream/latest.json",
         "stream_id": stream_id,
@@ -209,7 +207,7 @@ def _stream_doc(stream_id: str, *, dst_scope: str = "connector") -> Dict[str, An
     }
 
 
-def _pipeline_doc() -> Dict[str, Any]:
+def _pipeline_doc() -> dict[str, Any]:
     return {
         "$schema": "https://schemas.analitiq.ai/pipeline/latest.json",
         "pipeline_id": PIPELINE_ID,
@@ -224,7 +222,7 @@ def _pipeline_doc() -> Dict[str, Any]:
     }
 
 
-def _manifest(status: str = "active") -> Dict[str, Any]:
+def _manifest(status: str = "active") -> dict[str, Any]:
     return {
         "pipelines": [
             {
@@ -294,9 +292,7 @@ def _build_tree(
         private_doc = _endpoint_doc(ENDPOINT_DST)
         private_doc["description"] = "connection-scoped private endpoint"
         _write_json(dst_definition / "endpoints" / f"{ENDPOINT_DST}.json", private_doc)
-        _write_json(
-            dst_definition / "type-map-read.json", _connection_type_map_rules()
-        )
+        _write_json(dst_definition / "type-map-read.json", _connection_type_map_rules())
     for endpoint_id in connector_endpoints:
         _write_json(
             root
@@ -341,15 +337,19 @@ class TestCreateConfigHappyPath:
         assert pipeline_config.pipeline_id == PIPELINE_ID
         assert pipeline_config.display_name == "Demo Pipeline"
         assert pipeline_config.status == "active"
-        assert pipeline_config.connections["source"] == CONNECTION_SRC_ID
-        assert pipeline_config.connections["destinations"] == [CONNECTION_DST_ID]
+        assert pipeline_config.connections.source == CONNECTION_SRC_ID
+        assert pipeline_config.connections.destinations == [CONNECTION_DST_ID]
 
         assert len(stream_configs) == 1
         stream = stream_configs[0]
         assert stream.stream_id == STREAM_ID
+        # A bare reference (no ``_v{n}`` suffix) resolves to version 1.
+        assert stream.stream_version == 1
         assert stream.source.connection_ref == CONNECTION_SRC_ID
         assert stream.source.runtime is connections[CONNECTION_SRC_ID]
         assert stream.source.endpoint_document["endpoint_id"] == ENDPOINT_SRC
+        assert stream.source.primary_keys == ["id"]
+        assert stream.source.replication is None  # fixture stream omits replication
         assert stream.destinations[0].runtime is connections[CONNECTION_DST_ID]
         assert stream.destinations[0].endpoint_document["endpoint_id"] == ENDPOINT_DST
 
@@ -392,10 +392,129 @@ class TestCreateConfigHappyPath:
         assert "_runtime" not in source_config.get("stream_source", {})
         # Must be JSON-serialisable (no ConnectionRuntime objects inside)
         for v in source_config.values():
-            assert not isinstance(v, ConnectionRuntime), (
-                f"to_source_config() must not embed ConnectionRuntime; got {type(v)}"
-            )
+            assert not isinstance(
+                v, ConnectionRuntime
+            ), f"to_source_config() must not embed ConnectionRuntime; got {type(v)}"
         json.dumps(source_config)  # raises if not serialisable
+
+
+# ---------------------------------------------------------------------------
+# Stream version parsing — the ``_v{n}`` suffix rides onto the checkpoint line
+# ---------------------------------------------------------------------------
+
+
+class TestStreamVersionParsing:
+    @pytest.mark.parametrize(
+        "ref,expected",
+        [
+            ("abc-123", ("abc-123", 1)),
+            ("abc-123_v2", ("abc-123", 2)),
+            ("abc-123_v17", ("abc-123", 17)),
+            # A uuid with internal underscores keeps everything but the suffix.
+            ("a_b_c_v3", ("a_b_c", 3)),
+            # No trailing integer -> treated as bare (version 1).
+            ("abc_vX", ("abc_vX", 1)),
+            ("abc_v", ("abc_v", 1)),
+        ],
+    )
+    def test_split_stream_ref(self, ref, expected) -> None:
+        assert _split_stream_ref(ref) == expected
+
+    def test_versioned_ref_resolves_bare_record_and_carries_version(
+        self, pipeline_tree: Path
+    ) -> None:
+        """A ``{uuid}_v{n}`` reference in pipeline.streams resolves the bare
+        stream document and surfaces version ``n`` on the resolved stream."""
+        pipeline_doc = _pipeline_doc()
+        pipeline_doc["streams"] = [f"{STREAM_ID}_v4"]
+        _write_json(
+            pipeline_tree / "pipelines" / PIPELINE_ID / "pipeline.json", pipeline_doc
+        )
+
+        prep = PipelineConfigPrep()
+        _, stream_configs, _, _, _ = prep.create_config()
+
+        assert len(stream_configs) == 1
+        assert stream_configs[0].stream_id == STREAM_ID  # bare, unchanged
+        assert stream_configs[0].stream_version == 4
+
+    def test_versioned_ref_without_matching_record_raises_naming_both_ids(
+        self, pipeline_tree: Path
+    ) -> None:
+        """A versioned ref whose bare id has no stream file fails loud, and the
+        message names both the full ref and the bare id it looked up."""
+        missing_bare = "00000000-0000-4000-8000-000000000000"
+        pipeline_doc = _pipeline_doc()
+        pipeline_doc["streams"] = [f"{missing_bare}_v4"]
+        _write_json(
+            pipeline_tree / "pipelines" / PIPELINE_ID / "pipeline.json", pipeline_doc
+        )
+
+        prep = PipelineConfigPrep()
+        with pytest.raises(ValueError) as exc:
+            prep.create_config()
+        message = str(exc.value)
+        assert f"{missing_bare}_v4" in message  # the full reference
+        assert missing_bare in message  # the bare id actually looked up
+
+    def test_two_versioned_refs_of_one_stream_fail_loud(
+        self, pipeline_tree: Path
+    ) -> None:
+        """Distinct versioned refs that strip to the same bare id pass the
+        schema's uniqueItems but would silently collide downstream -- the
+        loader must reject them instead of dropping one."""
+        pipeline_doc = _pipeline_doc()
+        pipeline_doc["streams"] = [f"{STREAM_ID}_v1", f"{STREAM_ID}_v2"]
+        _write_json(
+            pipeline_tree / "pipelines" / PIPELINE_ID / "pipeline.json", pipeline_doc
+        )
+
+        prep = PipelineConfigPrep()
+        with pytest.raises(ValueError, match="same stream twice") as exc:
+            prep.create_config()
+        message = str(exc.value)
+        assert f"{STREAM_ID}_v1" in message and f"{STREAM_ID}_v2" in message
+
+    def test_omitted_pipeline_id_falls_back_to_manifest_id(
+        self, pipeline_tree: Path
+    ) -> None:
+        """pipeline_id is nullable in the contract; an authored pipeline.json
+        that omits it must resolve to the manifest/env id (the executable
+        identity), not be rejected by ResolvedPipeline's non-empty guard."""
+        pipeline_doc = _pipeline_doc()
+        pipeline_doc.pop("pipeline_id", None)
+        _write_json(
+            pipeline_tree / "pipelines" / PIPELINE_ID / "pipeline.json", pipeline_doc
+        )
+
+        prep = PipelineConfigPrep()
+        pipeline_config, _, _, _, _ = prep.create_config()
+
+        assert pipeline_config.pipeline_id == PIPELINE_ID
+
+    def test_source_replication_is_typed(self, pipeline_tree: Path) -> None:
+        """A stream source's replication block is parsed into a typed
+        ReplicationConfig on the resolved source (engine-internal view)."""
+        stream_doc = _stream_doc(STREAM_ID)
+        stream_doc["source"]["replication"] = {
+            "method": "incremental",
+            "cursor_field": "updated_at",
+            "tie_breaker_fields": ["id"],
+        }
+        _write_json(
+            pipeline_tree / "pipelines" / PIPELINE_ID / "streams" / f"{STREAM_ID}.json",
+            stream_doc,
+        )
+
+        prep = PipelineConfigPrep()
+        _, stream_configs, _, _, _ = prep.create_config()
+
+        src = stream_configs[0].source
+        assert src.primary_keys == ["id"]
+        assert src.replication is not None
+        assert src.replication.method == "incremental"
+        assert src.replication.cursor_field == "updated_at"
+        assert src.replication.tie_breaker_fields == ["id"]
 
 
 # ---------------------------------------------------------------------------
@@ -500,11 +619,7 @@ class TestCreateConfigErrorPaths:
         else:
             del stream_doc["destinations"][0]["endpoint_ref"]
         _write_json(
-            pipeline_tree
-            / "pipelines"
-            / PIPELINE_ID
-            / "streams"
-            / f"{STREAM_ID}.json",
+            pipeline_tree / "pipelines" / PIPELINE_ID / "streams" / f"{STREAM_ID}.json",
             stream_doc,
         )
         prep = PipelineConfigPrep()
@@ -514,9 +629,7 @@ class TestCreateConfigErrorPaths:
             prep.create_config()
 
     @pytest.mark.parametrize("kind", ["", None])
-    def test_unusable_connector_kind_rejected(
-        self, pipeline_tree: Path, kind
-    ) -> None:
+    def test_unusable_connector_kind_rejected(self, pipeline_tree: Path, kind) -> None:
         """A connector document whose ``kind`` is missing or empty must
         fail loudly naming the connector."""
         connector_doc = _connector_doc()
@@ -578,9 +691,7 @@ class TestEndpointSchemaDispatch:
     instead of a hard-coded two-branch check, so non-built-in endpoint kinds
     fail at schema validation rather than at URL parsing (#165)."""
 
-    def test_missing_endpoint_path_segment_rejected(
-        self, pipeline_tree: Path
-    ) -> None:
+    def test_missing_endpoint_path_segment_rejected(self, pipeline_tree: Path) -> None:
         """An endpoint whose $schema URL has no *-endpoint path segment must
         raise with a message pointing to the problem."""
         bad_endpoint = _endpoint_doc(ENDPOINT_SRC)
@@ -622,9 +733,9 @@ class TestEndpointSchemaDispatch:
         correctly; failure comes from schema validation (unknown kind), not
         from the URL-parsing step — confirming the extraction succeeded."""
         bad_endpoint = _endpoint_doc(ENDPOINT_SRC)
-        bad_endpoint["$schema"] = (
-            "https://schemas.analitiq.ai/nosql-endpoint/latest.json"
-        )
+        bad_endpoint[
+            "$schema"
+        ] = "https://schemas.analitiq.ai/nosql-endpoint/latest.json"
         _write_json(
             pipeline_tree
             / "connectors"
@@ -671,9 +782,7 @@ class TestEndpointSchemaDispatch:
         trailing slash) must still have its kind extracted correctly."""
         bad_endpoint = _endpoint_doc(ENDPOINT_SRC)
         # No trailing slash — regex must still match via the (?:/|$) boundary.
-        bad_endpoint["$schema"] = (
-            "https://schemas.analitiq.ai/nosql-endpoint"
-        )
+        bad_endpoint["$schema"] = "https://schemas.analitiq.ai/nosql-endpoint"
         _write_json(
             pipeline_tree
             / "connectors"

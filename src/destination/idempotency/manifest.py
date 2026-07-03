@@ -7,11 +7,10 @@ allowing the handler to detect and skip duplicate batches.
 import json
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timezone
+from typing import Any
 
 from ..storage.base import BaseStorageBackend
-
 
 logger = logging.getLogger(__name__)
 
@@ -26,9 +25,11 @@ class BatchCommit:
     records_written: int
     cursor_bytes: bytes
     file_path: str
-    committed_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    committed_at: str = field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
         return {
             "run_id": self.run_id,
@@ -41,7 +42,7 @@ class BatchCommit:
         }
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "BatchCommit":
+    def from_dict(cls, data: dict[str, Any]) -> "BatchCommit":
         """Create from dictionary."""
         return cls(
             run_id=data["run_id"],
@@ -96,7 +97,7 @@ class ManifestTracker:
         self._storage = storage
         self._base_path = base_path
         self._manifest_path = f"{base_path}/{self.MANIFEST_FILENAME}"
-        self._commits: Dict[str, BatchCommit] = {}
+        self._commits: dict[str, BatchCommit] = {}
         self._loaded = False
 
     def _make_key(self, run_id: str, stream_id: str, batch_seq: int) -> str:
@@ -150,7 +151,7 @@ class ManifestTracker:
         run_id: str,
         stream_id: str,
         batch_seq: int,
-    ) -> Optional[BatchCommit]:
+    ) -> BatchCommit | None:
         """
         Check if a batch has already been committed.
 
@@ -204,11 +205,3 @@ class ManifestTracker:
         await self.save()
 
         logger.debug(f"Recorded commit: {key}")
-
-    def get_all_commits(self) -> List[BatchCommit]:
-        """Get all commits in the manifest."""
-        return list(self._commits.values())
-
-    def get_commits_for_stream(self, stream_id: str) -> List[BatchCommit]:
-        """Get all commits for a specific stream."""
-        return [c for c in self._commits.values() if c.stream_id == stream_id]

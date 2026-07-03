@@ -9,28 +9,39 @@ or drops the prefix would ship silently without this test.
 
 from __future__ import annotations
 
-import io
-from typing import AsyncIterator
+import asyncio
+from collections.abc import AsyncIterator
 from unittest.mock import AsyncMock, MagicMock
 
 import pyarrow as pa
 import pytest
 
-from src.destination.connectors.api import ApiDestinationHandler
-from src.destination.server import DestinationServicer
 from cdk.base_handler import BatchWriteResult
 from cdk.type_map import InvalidTypeMapError, UnmappedTypeError
 from cdk.types import Cursor as CdkCursor
+from cdk.types import RetrySemantics, RetryVerdict
+from src.destination.connectors.api import ApiDestinationHandler
+from src.destination.server import DestinationServicer
 from src.grpc.generated.analitiq.v1 import (
     AckStatus,
     Cursor,
     GetCapabilitiesRequest,
     PayloadFormat,
     RecordBatch,
-    SchemaMessage,
-    StreamRequest,
-    WriteMode,
 )
+from src.grpc.generated.analitiq.v1 import RetrySemantics as WireRetrySemantics
+from src.grpc.generated.analitiq.v1 import SchemaMessage, StreamRequest, WriteMode
+
+
+def _stub_retry_semantics(handler) -> None:
+    """Give a MagicMock handler a real verdict: the servicer stamps it into
+    the accepted SchemaAck, and protobuf rejects a MagicMock value."""
+    handler.retry_semantics = MagicMock(
+        return_value=RetryVerdict(
+            semantics=RetrySemantics.RETRY_SEMANTICS_AT_LEAST_ONCE,
+            reason="test stub",
+        )
+    )
 
 
 async def _iter_once(msg: StreamRequest) -> AsyncIterator[StreamRequest]:
@@ -66,9 +77,7 @@ def _arrow_ipc(batch: pa.RecordBatch) -> bytes:
     return sink.getvalue().to_pybytes()
 
 
-def _batch_request(
-    *, stream_id: str = "s1", token: bytes = b""
-) -> StreamRequest:
+def _batch_request(*, stream_id: str = "s1", token: bytes = b"") -> StreamRequest:
     batch = pa.RecordBatch.from_pydict({"id": [1]})
     return StreamRequest(
         batch=RecordBatch(
@@ -266,6 +275,7 @@ class TestSchemaAckBudget:
             return True
 
         handler.configure_schema = AsyncMock(side_effect=_configure)
+        _stub_retry_semantics(handler)
         servicer = DestinationServicer(handler, server=MagicMock())
 
         async for _ in servicer.StreamRecords(
@@ -316,9 +326,17 @@ class TestSchemaAckBudget:
 
 
 class TestGetCapabilities:
-    def _make_handler(self, *, supports_upsert: bool) -> MagicMock:
+    def _make_handler(
+        self,
+        *,
+        supports_upsert: bool,
+        supports_truncate: bool = True,
+        supports_auto_create: bool = True,
+    ) -> MagicMock:
         handler = MagicMock()
         handler.supports_upsert = supports_upsert
+        handler.supports_truncate = supports_truncate
+        handler.supports_auto_create = supports_auto_create
         handler.connector_type = "database"
         handler.supports_transactions = True
         handler.supports_bulk_load = False
@@ -355,12 +373,41 @@ class TestGetCapabilities:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("supports_upsert", [True, False])
-    async def test_truncate_insert_always_present(self, supports_upsert: bool):
+    async def test_truncate_insert_present_when_handler_supports_it(
+        self, supports_upsert: bool
+    ):
         servicer = DestinationServicer(
-            self._make_handler(supports_upsert=supports_upsert), server=MagicMock()
+            self._make_handler(supports_upsert=supports_upsert, supports_truncate=True),
+            server=MagicMock(),
         )
         resp = await servicer.GetCapabilities(GetCapabilitiesRequest(), MagicMock())
         assert WriteMode.WRITE_MODE_TRUNCATE_INSERT in resp.supported_write_modes
+
+    @pytest.mark.asyncio
+    async def test_truncate_insert_absent_when_handler_lacks_it(self):
+        """A handler that cannot truncate (API/file/stdout) must not advertise
+        WRITE_MODE_TRUNCATE_INSERT — the capability follows the handler
+        property, never a constructor literal."""
+        servicer = DestinationServicer(
+            self._make_handler(supports_upsert=False, supports_truncate=False),
+            server=MagicMock(),
+        )
+        resp = await servicer.GetCapabilities(GetCapabilitiesRequest(), MagicMock())
+        assert WriteMode.WRITE_MODE_TRUNCATE_INSERT not in resp.supported_write_modes
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("supports_auto_create", [True, False])
+    async def test_auto_create_follows_handler_property(
+        self, supports_auto_create: bool
+    ):
+        servicer = DestinationServicer(
+            self._make_handler(
+                supports_upsert=False, supports_auto_create=supports_auto_create
+            ),
+            server=MagicMock(),
+        )
+        resp = await servicer.GetCapabilities(GetCapabilitiesRequest(), MagicMock())
+        assert resp.supports_auto_create is supports_auto_create
 
     @pytest.mark.asyncio
     async def test_missing_capability_attribute_aborts_with_detail(self):
@@ -435,13 +482,12 @@ class TestWireToCdkTranslation:
 
         handler = MagicMock()
         handler.configure_schema = AsyncMock(return_value=True)
+        _stub_retry_semantics(handler)
         servicer = DestinationServicer(handler, server=MagicMock())
 
         async for _ in servicer.StreamRecords(
             _iter_once(
-                _schema_request(
-                    "s9", version=7, write_mode=WriteMode.WRITE_MODE_UPSERT
-                )
+                _schema_request("s9", version=7, write_mode=WriteMode.WRITE_MODE_UPSERT)
             ),
             context=MagicMock(),
         ):
@@ -465,6 +511,7 @@ class TestWireToCdkTranslation:
                 committed_cursor=CdkCursor(token=b"committed-xyz"),
             )
         )
+        _stub_retry_semantics(handler)
         servicer = DestinationServicer(handler, server=MagicMock())
 
         responses = []
@@ -500,6 +547,7 @@ class TestWireToCdkTranslation:
                 failure_summary="transient",
             )
         )
+        _stub_retry_semantics(handler)
         servicer = DestinationServicer(handler, server=MagicMock())
 
         responses = []
@@ -527,7 +575,8 @@ class TestServerPingProtection:
     async def test_server_options_include_ping_protection(self):
         """grpc.http2.min_ping_interval_without_data_ms and
         grpc.http2.max_ping_strikes must be present in the server options."""
-        from unittest.mock import patch, MagicMock
+        from unittest.mock import MagicMock, patch
+
         from src.destination.server import DestinationGRPCServer
 
         captured_options = []
@@ -535,6 +584,7 @@ class TestServerPingProtection:
         class _FakeServer:
             def add_insecure_port(self, addr):
                 pass
+
             async def start(self):
                 pass
 
@@ -545,8 +595,9 @@ class TestServerPingProtection:
         handler = MagicMock()
         server = DestinationGRPCServer(handler, port=9999)
 
-        with patch("src.destination.server.grpc_aio.server", side_effect=fake_grpc_server), \
-             patch("src.destination.server.add_DestinationServiceServicer_to_server"):
+        with patch(
+            "src.destination.server.grpc_aio.server", side_effect=fake_grpc_server
+        ), patch("src.destination.server.add_DestinationServiceServicer_to_server"):
             await server.start()
 
         option_map = dict(captured_options)
@@ -570,12 +621,127 @@ class TestServerUdsBind:
         # that on macOS, so build a short one the way spawn_worker does.
         workdir = Path(tempfile.mkdtemp(prefix="uds-test-", dir="/tmp"))
         sock = workdir / "worker.sock"
-        server = DestinationGRPCServer(
-            handler=MagicMock(), address=f"unix:{sock}"
-        )
+        server = DestinationGRPCServer(handler=MagicMock(), address=f"unix:{sock}")
         await server.start()
         try:
             assert sock.exists()
         finally:
             await server.stop(grace_period=0)
             shutil.rmtree(workdir, ignore_errors=True)
+
+
+class TestShutdownFinalizeRun:
+    """Shutdown runs the handler's optional finalize_run hook (connection-
+    dependent run-completion cleanup) while still connected -- the worker is
+    SIGTERM'd right after, so this is the last reliable point for that cleanup.
+    """
+
+    @pytest.mark.asyncio
+    async def test_success_reason_finalizes_with_succeeded_true(self):
+        handler = MagicMock()
+        handler.finalize_run = AsyncMock()
+        server = MagicMock()
+        servicer = DestinationServicer(handler, server=server)
+
+        ack = await servicer.Shutdown(
+            MagicMock(reason="pipeline_completed"), MagicMock()
+        )
+
+        handler.finalize_run.assert_awaited_once_with(succeeded=True)
+        server.signal_shutdown.assert_called_once()
+        assert ack.acknowledged is True
+
+    @pytest.mark.asyncio
+    async def test_non_success_reason_finalizes_with_succeeded_false(self):
+        # A failed/aborted (or generic teardown) reason must not signal success,
+        # so the handler can skip success-only cleanup for a possible resume.
+        handler = MagicMock()
+        handler.finalize_run = AsyncMock()
+        server = MagicMock()
+        servicer = DestinationServicer(handler, server=server)
+
+        ack = await servicer.Shutdown(MagicMock(reason="pipeline_failed"), MagicMock())
+
+        handler.finalize_run.assert_awaited_once_with(succeeded=False)
+        server.signal_shutdown.assert_called_once()
+        assert ack.acknowledged is True
+
+    @pytest.mark.asyncio
+    async def test_finalize_failure_does_not_block_shutdown(self):
+        handler = MagicMock()
+        handler.finalize_run = AsyncMock(side_effect=RuntimeError("prune failed"))
+        server = MagicMock()
+        servicer = DestinationServicer(handler, server=server)
+
+        ack = await servicer.Shutdown(MagicMock(reason="x"), MagicMock())
+
+        server.signal_shutdown.assert_called_once()
+        assert ack.acknowledged is True
+
+    @pytest.mark.asyncio
+    async def test_finalize_cancelled_still_signals_shutdown(self):
+        # The client's send_shutdown deadline can fire while the prune is still
+        # running, cancelling this handler. CancelledError is not an Exception,
+        # so without the finally signal_shutdown would be skipped and the server
+        # would keep running after the engine has finished.
+        handler = MagicMock()
+        handler.finalize_run = AsyncMock(side_effect=asyncio.CancelledError())
+        server = MagicMock()
+        servicer = DestinationServicer(handler, server=server)
+
+        with pytest.raises(asyncio.CancelledError):
+            await servicer.Shutdown(MagicMock(reason="pipeline_completed"), MagicMock())
+
+        server.signal_shutdown.assert_called_once()
+
+
+class TestSchemaAckRetrySemantics:
+    """An accepted SchemaAck carries the handler's retry-safety verdict
+    (issue #286); a rejected one carries none (unspecified on the wire)."""
+
+    @pytest.mark.asyncio
+    async def test_accepted_ack_carries_handler_verdict(self):
+        handler = MagicMock()
+        handler.configure_schema = AsyncMock(return_value=True)
+        handler.retry_semantics = MagicMock(
+            return_value=RetryVerdict(
+                semantics=RetrySemantics.RETRY_SEMANTICS_EXACTLY_ONCE,
+                reason="the manifest dedups replays",
+            )
+        )
+
+        servicer = DestinationServicer(handler, server=MagicMock())
+        responses = []
+        async for resp in servicer.StreamRecords(
+            _iter_once(_schema_request()), context=MagicMock()
+        ):
+            responses.append(resp)
+
+        ack = responses[0].schema_ack
+        assert ack.accepted is True
+        assert ack.retry_semantics == WireRetrySemantics.Value(
+            "RETRY_SEMANTICS_EXACTLY_ONCE"
+        )
+        assert ack.retry_semantics_reason == "the manifest dedups replays"
+        handler.retry_semantics.assert_called_once_with("s1")
+
+    @pytest.mark.asyncio
+    async def test_rejected_ack_carries_no_verdict(self):
+        handler = MagicMock()
+        handler.configure_schema = AsyncMock(return_value=False)
+        handler.last_schema_rejection = None
+
+        servicer = DestinationServicer(handler, server=MagicMock())
+        responses = []
+        async for resp in servicer.StreamRecords(
+            _iter_once(_schema_request()), context=MagicMock()
+        ):
+            responses.append(resp)
+
+        ack = responses[0].schema_ack
+        assert ack.accepted is False
+        assert ack.retry_semantics == WireRetrySemantics.Value(
+            "RETRY_SEMANTICS_UNSPECIFIED"
+        )
+        assert ack.retry_semantics_reason == ""
+        handler.retry_semantics.assert_not_called()

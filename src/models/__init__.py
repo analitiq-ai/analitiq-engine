@@ -1,78 +1,16 @@
 """Data models for configuration and state."""
 
-from .stream import (
-    Assignment,
-    AssignmentTarget,
-    AssignmentValue,
-    ConstantValue,
-    DatabasePagination,
-    DestinationConfig,
-    EndpointRef,
-    ExecutionConfig,
-    ExpressionOp,
-    GetExpression,
-    MappingConfig,
-    ReplicationConfig,
-    ReplicationMethod,
-    SourceConfig,
-    StreamConfig,
-    StreamFilter,
-    TargetType,
-    ValidationConfig,
-    ValidationRule,
-    ValidationType,
-    ValueKind,
-    WriteConfig,
-    WriteMode,
-)
-
-# Transformation models
-from .transformations import (
-    TransformationConfig,
-    TransformationType,
-)
-
 # Metrics models
 from .metrics import PipelineMetrics
-
-from .state import (
-    CursorField,
-    StreamCursor,
-    StreamStats,
-    StreamState as SimpleStreamState,
-    DestinationConfig as StateDestinationConfig,
-    ReplicationConfig as StateReplicationConfig,
-    SourceConfig as StateSourceConfig,
-)
+from .state import CursorField, StreamCursor
+from .state import StreamState as SimpleStreamState
+from .state import StreamStats
+from .stream import EndpointRef, WriteMode
 
 __all__ = [
     # Stream models
-    "Assignment",
-    "AssignmentTarget",
-    "AssignmentValue",
-    "ConstantValue",
-    "DatabasePagination",
-    "DestinationConfig",
     "EndpointRef",
-    "ExecutionConfig",
-    "ExpressionOp",
-    "GetExpression",
-    "MappingConfig",
-    "ReplicationConfig",
-    "ReplicationMethod",
-    "SourceConfig",
-    "StreamConfig",
-    "StreamFilter",
-    "TargetType",
-    "ValidationConfig",
-    "ValidationRule",
-    "ValidationType",
-    "ValueKind",
-    "WriteConfig",
     "WriteMode",
-    # Transformation models
-    "TransformationConfig",
-    "TransformationType",
     # Metrics models
     "PipelineMetrics",
     # State models
@@ -80,7 +18,4 @@ __all__ = [
     "StreamCursor",
     "StreamStats",
     "SimpleStreamState",
-    "StateDestinationConfig",
-    "StateReplicationConfig",
-    "StateSourceConfig",
 ]

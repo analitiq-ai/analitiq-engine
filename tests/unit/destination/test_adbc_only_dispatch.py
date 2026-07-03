@@ -17,22 +17,26 @@ dialect's output reaches the right call site.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
-from unittest.mock import AsyncMock, MagicMock
+from decimal import Decimal
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import pyarrow as pa
 import pytest
 
 from cdk.sql import generic as database_module
 from cdk.sql.dialects import SqlDialect
 from cdk.sql.generic import (
-    AdbcCommitRecordError,
+    _FATAL_ADBC_ERROR_NAMES,
     AdbcConfigurationError,
     GenericSQLConnector,
-    _FATAL_ADBC_ERROR_NAMES,
+    SchemaConfigurationError,
     _is_fatal_adbc_error,
     _reclassify_as_fatal,
+    _StreamState,
 )
-
 
 # --- fixture dialects + connector (stand in for a connector package) --------
 
@@ -42,10 +46,10 @@ class _FixtureAdbcDialect(SqlDialect):
 
     Stands in for a connector package's dialect: renders canonical Arrow types
     to canned native DDL strings (overriding ``render_column_type`` — the single
-    write surface — rather than the old per-purpose ADBC hooks), keys
-    ``_batch_commits`` text columns on a bounded type, supports ADBC upsert, and
-    folds schema names upper-case (the way Snowflake's package dialect would) so
-    the normalize-reaches-the-ingest-site coverage has something to assert.
+    write surface — rather than the old per-purpose ADBC hooks), supports ADBC
+    upsert, and folds schema names upper-case (the way Snowflake's package
+    dialect would) so the normalize-reaches-the-ingest-site coverage has
+    something to assert.
     """
 
     name = "fixture"
@@ -66,11 +70,6 @@ class _FixtureAdbcDialect(SqlDialect):
 
     def render_column_type(self, canonical, type_mapper, *, params=None) -> str:
         return self._CANONICAL_TO_DDL[canonical]
-
-    def batch_commits_key_type(self, type_mapper) -> str:
-        # Bounded text type for the PK text columns (as MySQL/MariaDB would
-        # need, and as the old adbc_text_type hook returned).
-        return "VARCHAR(255)"
 
     def adbc_stage_table_sql(self, stage_qualified, target_qualified) -> str:
         return (
@@ -133,12 +132,14 @@ class TestFatalClassifier:
         assert not _is_fatal_adbc_error(RuntimeError("transient"))
 
     def test_set_kept_in_sync(self):
-        assert _FATAL_ADBC_ERROR_NAMES == frozenset({
-            "ProgrammingError",
-            "NotSupportedError",
-            "IntegrityError",
-            "DataError",
-        })
+        assert _FATAL_ADBC_ERROR_NAMES == frozenset(
+            {
+                "ProgrammingError",
+                "NotSupportedError",
+                "IntegrityError",
+                "DataError",
+            }
+        )
 
 
 class TestReclassify:
@@ -149,33 +150,6 @@ class TestReclassify:
         assert "ProgrammingError" in str(wrapped)
         assert "missing table foo" in str(wrapped)
         assert wrapped.__cause__ is inner
-
-
-class TestAdbcCommitRecordError:
-    def test_insert_message_warns_duplication(self):
-        err = AdbcCommitRecordError(RuntimeError("commit failed"), "insert")
-        assert "duplicate" in str(err)
-        assert err.write_mode == "insert"
-
-    def test_truncate_insert_message_is_idempotent(self):
-        err = AdbcCommitRecordError(
-            RuntimeError("commit failed"), "truncate_insert",
-        )
-        assert "idempotent" in str(err)
-        assert err.write_mode == "truncate_insert"
-
-    def test_upsert_message_is_idempotent_under_keys(self):
-        err = AdbcCommitRecordError(RuntimeError("commit failed"), "upsert")
-        assert "MERGE" in str(err) or "idempotent" in str(err)
-        assert err.write_mode == "upsert"
-
-    def test_unknown_mode_rejected_at_runtime(self):
-        # ``Literal`` constrains callers at type-check time; the runtime
-        # check catches code that bypasses typing (tests, dynamic
-        # dispatch) so a typo doesn't produce a misleading "unknown
-        # retry semantics" message in production failure summaries.
-        with pytest.raises(ValueError, match="write_mode must be one of"):
-            AdbcCommitRecordError(RuntimeError("x"), "weird_mode")
 
 
 class TestUnsupportedHooksAreFatal:
@@ -204,8 +178,12 @@ class TestUnsupportedHooksAreFatal:
         h = GenericSQLConnector()  # carries the ANSI-neutral base dialect
         with pytest.raises(CreateTableError) as exc:
             build_create_table_sql(
-                h.dialect, read_only, "public", "t",
-                [ColumnDef("id", "Int64")], [],
+                h.dialect,
+                read_only,
+                "public",
+                "t",
+                [ColumnDef("id", "Int64")],
+                [],
             )
         assert isinstance(exc.value.__cause__, InvalidTypeMapError)
 
@@ -255,17 +233,18 @@ class TestStageTokenUniqueness:
         # Mirror the construction at the call site so a regression in
         # either location is caught here.
         import hashlib
-        return "b" + hashlib.sha256(
-            f"{run_id}|{stream_id}|{batch_seq}".encode("utf-8")
-        ).hexdigest()[:16]
+
+        return (
+            "b"
+            + hashlib.sha256(f"{run_id}|{stream_id}|{batch_seq}".encode()).hexdigest()[
+                :16
+            ]
+        )
 
     def test_distinct_across_batch_seq_with_uuid_stream_id(self):
         run_id = "20260527T120000Z-a1b2c3d4"
         stream_id = "2ac5e363-ec12-49f7-a8b2-b3782cf6af59"
-        tokens = {
-            self._build_token(run_id, stream_id, bs)
-            for bs in (0, 1, 100, 9999)
-        }
+        tokens = {self._build_token(run_id, stream_id, bs) for bs in (0, 1, 100, 9999)}
         assert len(tokens) == 4, f"stage token collided across batch_seq: {tokens}"
 
     def test_distinct_across_stream_ids(self):
@@ -285,176 +264,9 @@ class TestStageTokenUniqueness:
         assert len(token) == 17  # "b" + 16 hex digits
         for table_name in ("wise_transfers", "public_transfers", "orders"):
             stage_name = f"_analitiq_stage_{table_name}_{token}"
-            assert len(stage_name) <= 63, (
-                f"stage name {stage_name!r} exceeds Postgres NAMEDATALEN"
-            )
-
-
-class TestCommitCollisionHandling:
-    """`_handle_commit_collision` must raise AdbcCommitRecordError for
-    insert mode (which would silently duplicate) and return silently for
-    upsert / truncate_insert (which are idempotent on re-ingest)."""
-
-    def _state(self, write_mode):
-        from cdk.sql.generic import _StreamState
-        return _StreamState(schema_name="analytics", table_name="t", write_mode=write_mode)
-
-    def test_insert_mode_raises(self):
-        h = GenericSQLConnector()
-        cause = RuntimeError("collision")
-        with pytest.raises(AdbcCommitRecordError) as exc:
-            h._handle_commit_collision(
-                self._state("insert"), "r", "s", 1, cause,
-            )
-        assert exc.value.write_mode == "insert"
-        assert exc.value.__cause__ is cause
-
-    def test_upsert_mode_returns_silently(self):
-        h = GenericSQLConnector()
-        h._handle_commit_collision(
-            self._state("upsert"), "r", "s", 1, RuntimeError("collision"),
-        )
-
-    def test_truncate_insert_mode_returns_silently(self):
-        h = GenericSQLConnector()
-        h._handle_commit_collision(
-            self._state("truncate_insert"), "r", "s", 1, RuntimeError("collision"),
-        )
-
-
-class TestRecordBatchCommitViaAdbc:
-    """The base ``_record_batch_commit_via_adbc`` emits a plain INSERT and
-    treats an IntegrityError *cause* as a concurrent-retry collision (via
-    ``_handle_commit_collision`` semantics). The MERGE-based commit-record
-    specialization (BigQuery's PK-not-enforced path) lives in that connector
-    package, not here."""
-
-    def _state(self, write_mode="insert"):
-        from cdk.sql.generic import _StreamState
-        return _StreamState(
-            schema_name="analytics", table_name="t", write_mode=write_mode
-        )
-
-    @pytest.mark.asyncio
-    async def test_emits_plain_insert(self, monkeypatch):
-        captured = {}
-
-        def fake_execute(self, sql, params):
-            captured["sql"] = sql
-            captured["params"] = params
-            return -1
-
-        monkeypatch.setattr(
-            GenericSQLConnector, "_execute_adbc_dml_sync", fake_execute
-        )
-        h = GenericSQLConnector()
-        await h._record_batch_commit_via_adbc(
-            self._state(), "r", "s", 3, b"cur", 7,
-        )
-        assert captured["sql"].startswith("INSERT INTO")
-        assert '"_batch_commits"' in captured["sql"]
-        assert captured["params"] == ("r", "s", 3, b"cur", 7)
-
-    @pytest.mark.asyncio
-    async def test_integrity_error_cause_is_collision_not_fatal(self, monkeypatch):
-        # The INSERT raises AdbcConfigurationError whose cause is an
-        # IntegrityError → treated as a concurrent-retry collision. For
-        # truncate_insert (idempotent) the handler returns silently.
-        # The class name must be exactly "IntegrityError" — the collision
-        # branch matches on the MRO class name, not the type identity.
-        class IntegrityError(Exception):
-            pass
-
-        def fake_execute(self, sql, params):
-            wrapped = AdbcConfigurationError("IntegrityError: dup pk")
-            wrapped.__cause__ = IntegrityError("dup pk")
-            raise wrapped
-
-        monkeypatch.setattr(
-            GenericSQLConnector, "_execute_adbc_dml_sync", fake_execute
-        )
-        h = GenericSQLConnector()
-        # truncate_insert collision → idempotent → returns silently.
-        await h._record_batch_commit_via_adbc(
-            self._state("truncate_insert"), "r", "s", 1, b"cur", 1,
-        )
-
-    @pytest.mark.asyncio
-    async def test_integrity_error_cause_insert_mode_raises(self, monkeypatch):
-        class IntegrityError(Exception):
-            pass
-
-        def fake_execute(self, sql, params):
-            wrapped = AdbcConfigurationError("IntegrityError: dup pk")
-            wrapped.__cause__ = IntegrityError("dup pk")
-            raise wrapped
-
-        monkeypatch.setattr(
-            GenericSQLConnector, "_execute_adbc_dml_sync", fake_execute
-        )
-        h = GenericSQLConnector()
-        with pytest.raises(AdbcCommitRecordError) as exc:
-            await h._record_batch_commit_via_adbc(
-                self._state("insert"), "r", "s", 1, b"cur", 1,
-            )
-        assert exc.value.write_mode == "insert"
-
-    @pytest.mark.asyncio
-    async def test_non_integrity_fatal_propagates(self, monkeypatch):
-        # A ProgrammingError cause is genuinely fatal, not a collision.
-        class _ProgrammingError(Exception):
-            pass
-
-        def fake_execute(self, sql, params):
-            wrapped = AdbcConfigurationError("ProgrammingError: bad sql")
-            wrapped.__cause__ = _ProgrammingError("bad sql")
-            raise wrapped
-
-        monkeypatch.setattr(
-            GenericSQLConnector, "_execute_adbc_dml_sync", fake_execute
-        )
-        h = GenericSQLConnector()
-        with pytest.raises(AdbcConfigurationError):
-            await h._record_batch_commit_via_adbc(
-                self._state("insert"), "r", "s", 1, b"cur", 1,
-            )
-
-
-class TestIntegrityErrorMroDetection:
-    """Driver-side subclasses of IntegrityError must still trigger the
-    commit-collision branch. The detection walks ``type(cause).__mro__``
-    so a driver that wraps PEP-249 IntegrityError in its own subclass
-    cannot slip past the branch and be re-raised as fatal — which
-    would orphan ingested rows on idempotent write modes."""
-
-    def test_bare_integrity_error_detected(self):
-        # Locally-defined class with the right name → direct match.
-        class IntegrityError(Exception):
-            pass
-        exc = IntegrityError()
-        assert any(
-            cls.__name__ == "IntegrityError" for cls in type(exc).__mro__
-        )
-
-    def test_subclassed_integrity_error_detected(self):
-        # A driver wrapping IntegrityError in its own subclass — must
-        # still trigger collision handling, NOT be re-raised as fatal.
-        class IntegrityError(Exception):
-            pass
-        class MyDriverIntegrityError(IntegrityError):
-            pass
-        exc = MyDriverIntegrityError()
-        assert any(
-            cls.__name__ == "IntegrityError" for cls in type(exc).__mro__
-        )
-
-    def test_unrelated_exception_not_detected(self):
-        class ProgrammingError(Exception):
-            pass
-        exc = ProgrammingError()
-        assert not any(
-            cls.__name__ == "IntegrityError" for cls in type(exc).__mro__
-        )
+            assert (
+                len(stage_name) <= 63
+            ), f"stage name {stage_name!r} exceeds Postgres NAMEDATALEN"
 
 
 class TestAdbcModeReset:
@@ -506,16 +318,23 @@ class TestAdbcIngestSchemaNormalization:
         captured: dict = {}
 
         class _FakeCursor:
-            def adbc_ingest(self, table, batch, mode, db_schema_name):
+            # ``db_schema_name`` is an optional kwarg on the real ADBC cursor
+            # (default None); the empty-schema path omits it entirely
+            # (adbc_ingest_schema_kwargs returns {}), so it must default here.
+            def adbc_ingest(self, table, batch, mode, db_schema_name=None):
                 captured["table"] = table
                 captured["mode"] = mode
                 captured["db_schema_name"] = db_schema_name
 
-            def close(self): pass
+            def close(self):
+                pass
 
         class _FakeConn:
-            def cursor(self): return _FakeCursor()
-            def commit(self): pass
+            def cursor(self):
+                return _FakeCursor()
+
+            def commit(self):
+                pass
 
         return _FakeConn(), captured
 
@@ -524,9 +343,11 @@ class TestAdbcIngestSchemaNormalization:
         h._adbc_only = True
         h._adbc_conn, captured = self._captured_ingest()
         import pyarrow as pa
+
         h._adbc_only_ingest_sync(
             pa.record_batch([pa.array([1])], names=["id"]),
-            "public", "orders",
+            "public",
+            "orders",
         )
         assert captured["db_schema_name"] == "PUBLIC"
 
@@ -536,9 +357,11 @@ class TestAdbcIngestSchemaNormalization:
         h._adbc_only = True
         h._adbc_conn, captured = self._captured_ingest()
         import pyarrow as pa
+
         h._adbc_only_ingest_sync(
             pa.record_batch([pa.array([1])], names=["id"]),
-            "analytics", "orders",
+            "analytics",
+            "orders",
         )
         assert captured["db_schema_name"] == "analytics"
 
@@ -547,9 +370,11 @@ class TestAdbcIngestSchemaNormalization:
         h._adbc_only = True
         h._adbc_conn, captured = self._captured_ingest()
         import pyarrow as pa
+
         h._adbc_only_ingest_sync(
             pa.record_batch([pa.array([1])], names=["id"]),
-            "", "orders",
+            "",
+            "orders",
         )
         assert captured["db_schema_name"] is None
 
@@ -644,7 +469,6 @@ class TestAdbcDdlBuilders:
     * synthetic ``_synced_at`` audit column appears when the contract doesn't
       declare it (and uses the dialect's timestamp type)
     * PRIMARY KEY clause is emitted when the contract declares primary keys
-    * ``_batch_commits`` uses the dialect's binary / text / timestamp types
     * the PK clause carries the dialect's NOT ENFORCED variant when set
     """
 
@@ -695,7 +519,9 @@ class TestAdbcDdlBuilders:
 
         class _TypeMapperStub:
             def to_arrow_type(self, native: str) -> str:
-                return {"BIGINT": "Int64", "TIMESTAMP": "Timestamp(MICROSECOND)"}[native]
+                return {"BIGINT": "Int64", "TIMESTAMP": "Timestamp(MICROSECOND)"}[
+                    native
+                ]
 
         state = _StreamState(
             schema_name="analytics",
@@ -703,7 +529,11 @@ class TestAdbcDdlBuilders:
             endpoint_document={
                 "columns": [
                     {"name": "id", "native_type": "BIGINT", "nullable": False},
-                    {"name": "_synced_at", "native_type": "TIMESTAMP", "nullable": True},
+                    {
+                        "name": "_synced_at",
+                        "native_type": "TIMESTAMP",
+                        "nullable": True,
+                    },
                 ],
             },
             primary_keys=["id"],
@@ -713,29 +543,59 @@ class TestAdbcDdlBuilders:
         # Exactly one _synced_at declaration
         assert ddl.count('"_synced_at"') == 1
 
-    def test_batch_commits_ddl_uses_dialect_types(self):
-        h = _FixtureConnector()
-        # The fixture dialect renders types from canonical strings, ignoring
-        # the mapper, so any object satisfies the signature here.
-        ddl = h._build_batch_commits_ddl("analytics", object())
-        assert '"_batch_commits"' in ddl
-        assert "VARBINARY" in ddl  # render_column_type("Binary")
-        assert "TIMESTAMP" in ddl  # render_column_type("Timestamp(MICROSECOND)")
-        assert "VARCHAR(255)" in ddl  # batch_commits_key_type
-        # Folding dialect normalizes the schema in the qualified name.
-        assert '"ANALYTICS"."_batch_commits"' in ddl
-
     def test_pk_clause_not_enforced_variant(self):
         # The backtick fixture sets pk_not_enforced; the bare fixture doesn't.
         bq = _FixtureBacktickConnector()
         assert "NOT ENFORCED" in bq.dialect.pk_clause(["id"])
-        bq_commits = bq._build_batch_commits_ddl("analytics", object())
-        assert "NOT ENFORCED" in bq_commits
 
         snow = _FixtureConnector()
         assert "NOT ENFORCED" not in snow.dialect.pk_clause(["id"])
-        snow_commits = snow._build_batch_commits_ddl("analytics", object())
-        assert "NOT ENFORCED" not in snow_commits
+
+    def test_keyless_insert_ddl_includes_record_hash_as_primary_key(self):
+        """``_record_hash`` must appear as NOT NULL PRIMARY KEY in the generated
+        DDL for a keyless insert stream on either transport. This is the
+        structural guarantee the stage-MERGE relies on: the database enforces
+        hash uniqueness in the target table.
+
+        Production code passes ``_identity_columns(state)`` as the PK list;
+        for keyless insert this returns ``[RECORD_HASH_COLUMN]`` so the
+        ``_record_hash`` column is the table's sole primary key.
+        """
+        from cdk.sql.ddl import build_create_table_sql
+
+        class _TypeMapperStub:
+            def to_arrow_type(self, native: str) -> str:
+                return {"TEXT": "Utf8"}[native]
+
+        state = _StreamState(
+            schema_name="public",
+            table_name="events",
+            write_mode="insert",
+            primary_keys=[],  # keyless
+            endpoint_document={
+                "columns": [
+                    {"name": "payload", "native_type": "TEXT", "nullable": True}
+                ]
+            },
+        )
+        h = _FixtureConnector()
+        h._adbc_only = True
+        # Use _identity_columns (as production code does in _ensure_tables_exist)
+        # not state.primary_keys — for keyless insert this returns [_record_hash].
+        ddl = build_create_table_sql(
+            h.dialect,
+            _TypeMapperStub(),
+            state.schema_name,
+            state.table_name,
+            h._build_column_defs(state, _TypeMapperStub()),
+            h._identity_columns(state),
+            if_not_exists=True,
+        )
+        assert '"_record_hash"' in ddl
+        assert '"_record_hash" STRING NOT NULL' in ddl
+        assert "PRIMARY KEY" in ddl
+        pk_pos = ddl.index("PRIMARY KEY")
+        assert "_record_hash" in ddl[pk_pos:]
 
 
 class TestDisconnectClosesAdbc:
@@ -777,8 +637,7 @@ class TestDisconnectClosesAdbc:
             await handler.disconnect()
 
         errors = [
-            r for r in caplog.records
-            if "Failed to close ADBC connection" in r.message
+            r for r in caplog.records if "Failed to close ADBC connection" in r.message
         ]
         assert errors and errors[0].levelno == logging.ERROR
         assert errors[0].exc_info is not None
@@ -804,8 +663,462 @@ class TestDisconnectClosesAdbc:
             await handler.disconnect()
 
         errors = [
-            r for r in caplog.records
+            r
+            for r in caplog.records
             if "Failed to close SQLAlchemy runtime" in r.message
         ]
         assert errors and errors[0].levelno == logging.ERROR
         assert handler._connected is False
+
+
+class TestNeedsRecordHash:
+    """``_needs_record_hash`` must return True for keyless insert on both
+    SQLAlchemy and ADBC transports, and False for keyed insert, upsert, and
+    truncate_insert."""
+
+    def _state(self, write_mode, primary_keys=None):
+        return _StreamState(
+            schema_name="public",
+            table_name="t",
+            write_mode=write_mode,
+            primary_keys=primary_keys or [],
+        )
+
+    def test_keyless_insert_sa_needs_hash(self):
+        h = _FixtureConnector()
+        h._adbc_only = False
+        assert h._needs_record_hash(self._state("insert")) is True
+
+    def test_keyless_insert_adbc_needs_hash(self):
+        h = _FixtureConnector()
+        h._adbc_only = True
+        assert h._needs_record_hash(self._state("insert")) is True
+
+    def test_keyed_insert_does_not_need_hash(self):
+        h = _FixtureConnector()
+        h._adbc_only = True
+        assert h._needs_record_hash(self._state("insert", primary_keys=["id"])) is False
+
+    def test_upsert_does_not_need_hash(self):
+        h = _FixtureConnector()
+        h._adbc_only = True
+        assert h._needs_record_hash(self._state("upsert")) is False
+
+    def test_truncate_insert_does_not_need_hash(self):
+        h = _FixtureConnector()
+        h._adbc_only = True
+        assert h._needs_record_hash(self._state("truncate_insert")) is False
+
+
+class TestAttachRecordHashToBatch:
+    """``_attach_record_hash_to_batch`` adds a ``_record_hash`` Arrow column
+    computed from each row's JSON-serialized content, matching the same digest
+    produced by ``_attach_record_hash`` on the SQLAlchemy path."""
+
+    def _state(self, write_mode="insert", primary_keys=None):
+        return _StreamState(
+            schema_name="public",
+            table_name="t",
+            write_mode=write_mode,
+            primary_keys=primary_keys or [],
+        )
+
+    def _expected_hash(self, row: dict) -> str:
+        canonical = json.dumps(row, sort_keys=True, default=str)
+        return hashlib.sha256(canonical.encode()).hexdigest()
+
+    def test_appends_hash_column_to_keyless_insert_batch(self):
+        h = _FixtureConnector()
+        h._adbc_only = True
+        batch = pa.RecordBatch.from_pydict(
+            {"id": [1, 2], "name": ["alice", "bob"]},
+        )
+        result = h._attach_record_hash_to_batch(batch, self._state())
+        assert GenericSQLConnector.RECORD_HASH_COLUMN in result.schema.names
+        assert result.num_rows == 2
+
+    def test_hash_matches_sqlalchemy_path_digest(self):
+        h = _FixtureConnector()
+        h._adbc_only = True
+        batch = pa.RecordBatch.from_pydict({"x": [10], "y": ["z"]})
+        result = h._attach_record_hash_to_batch(batch, self._state())
+        arrow_hash = result.column(GenericSQLConnector.RECORD_HASH_COLUMN)[0].as_py()
+        expected = self._expected_hash({"x": 10, "y": "z"})
+        assert arrow_hash == expected
+
+    def test_intra_batch_duplicate_rows_are_deduplicated(self):
+        # Two byte-identical rows produce the same hash and are collapsed to
+        # one so the stage table never carries two rows with the same conflict
+        # key (which would make MERGE raise "multiple source rows match").
+        h = _FixtureConnector()
+        h._adbc_only = True
+        batch = pa.RecordBatch.from_pydict({"v": [42, 42]})
+        result = h._attach_record_hash_to_batch(batch, self._state())
+        assert result.num_rows == 1
+
+    def test_two_different_rows_get_different_hashes(self):
+        h = _FixtureConnector()
+        h._adbc_only = True
+        batch = pa.RecordBatch.from_pydict({"v": [1, 2]})
+        result = h._attach_record_hash_to_batch(batch, self._state())
+        hashes = result.column(GenericSQLConnector.RECORD_HASH_COLUMN).to_pylist()
+        assert hashes[0] != hashes[1]
+
+    def test_null_value_produces_stable_hash(self):
+        h = _FixtureConnector()
+        h._adbc_only = True
+        batch = pa.RecordBatch.from_pydict(
+            {"v": pa.array([None], type=pa.int64()), "name": ["alice"]}
+        )
+        result = h._attach_record_hash_to_batch(batch, self._state())
+        arrow_hash = result.column(GenericSQLConnector.RECORD_HASH_COLUMN)[0].as_py()
+        expected = self._expected_hash({"v": None, "name": "alice"})
+        assert arrow_hash == expected
+
+    def test_null_and_string_none_produce_different_hashes(self):
+        h = _FixtureConnector()
+        h._adbc_only = True
+        b1 = pa.RecordBatch.from_pydict({"v": pa.array([None], type=pa.int64())})
+        b2 = pa.RecordBatch.from_pydict({"v": pa.array(["None"])})
+        h1 = (
+            h._attach_record_hash_to_batch(b1, self._state())
+            .column(GenericSQLConnector.RECORD_HASH_COLUMN)[0]
+            .as_py()
+        )
+        h2 = (
+            h._attach_record_hash_to_batch(b2, self._state())
+            .column(GenericSQLConnector.RECORD_HASH_COLUMN)[0]
+            .as_py()
+        )
+        assert h1 != h2
+
+    def test_noop_for_keyed_insert(self):
+        h = _FixtureConnector()
+        h._adbc_only = True
+        batch = pa.RecordBatch.from_pydict({"id": [1]})
+        result = h._attach_record_hash_to_batch(batch, self._state(primary_keys=["id"]))
+        assert result is batch
+
+    def test_noop_for_upsert(self):
+        h = _FixtureConnector()
+        h._adbc_only = True
+        batch = pa.RecordBatch.from_pydict({"id": [1]})
+        result = h._attach_record_hash_to_batch(batch, self._state("upsert"))
+        assert result is batch
+
+
+class TestMergeIngestInsertOnly:
+    """``_merge_ingest_sync`` with ``insert_only=True`` emits a MERGE with only
+    a ``WHEN NOT MATCHED THEN INSERT`` clause — no ``WHEN MATCHED THEN UPDATE``.
+    The no-warning path for the ``update_cols`` check must fire correctly."""
+
+    def _build_conn(self):
+        executed: list[str] = []
+
+        class _FakeCursor:
+            def execute(self, sql, *args):
+                executed.append(sql)
+
+            def adbc_ingest(self, table, batch, mode, db_schema_name=None):
+                pass
+
+            def close(self):
+                pass
+
+        class _FakeConn:
+            def cursor(self):
+                return _FakeCursor()
+
+            def commit(self):
+                pass
+
+        return _FakeConn(), executed
+
+    def test_insert_only_omits_when_matched_update(self):
+        h = _FixtureConnector()
+        h._adbc_only = True
+        conn, executed = self._build_conn()
+        h._adbc_conn = conn
+
+        batch = pa.RecordBatch.from_pydict(
+            {"_record_hash": ["abc123"], "name": ["alice"]},
+        )
+        h._merge_ingest_sync(
+            batch,
+            "public",
+            "orders",
+            ["_record_hash", "name"],
+            ["_record_hash"],
+            "bdeadbeef1234567",
+            insert_only=True,
+        )
+        merge_sql = next(s for s in executed if "MERGE INTO" in s)
+        assert "WHEN NOT MATCHED THEN INSERT" in merge_sql
+        assert "WHEN MATCHED THEN UPDATE" not in merge_sql
+        assert '"_record_hash"' in merge_sql
+
+    def test_insert_only_does_not_warn_about_missing_update_cols(self, caplog):
+        h = _FixtureConnector()
+        h._adbc_only = True
+        conn, _ = self._build_conn()
+        h._adbc_conn = conn
+
+        batch = pa.RecordBatch.from_pydict({"_record_hash": ["abc123"]})
+        with caplog.at_level(logging.WARNING, logger=database_module.logger.name):
+            h._merge_ingest_sync(
+                batch,
+                "public",
+                "t",
+                ["_record_hash"],
+                ["_record_hash"],
+                "bdeadbeef1234567",
+                insert_only=True,
+            )
+        warnings = [r for r in caplog.records if "no non-key columns" in r.message]
+        assert not warnings
+
+    def test_insert_only_false_still_warns_when_all_cols_are_conflict_keys(
+        self, caplog
+    ):
+        h = _FixtureConnector()
+        h._adbc_only = True
+        conn, _ = self._build_conn()
+        h._adbc_conn = conn
+
+        batch = pa.RecordBatch.from_pydict({"id": [1]})
+        with caplog.at_level(logging.WARNING, logger=database_module.logger.name):
+            h._merge_ingest_sync(
+                batch,
+                "public",
+                "t",
+                ["id"],
+                ["id"],
+                "bdeadbeef1234567",
+                insert_only=False,
+            )
+        warnings = [r for r in caplog.records if "no non-key columns" in r.message]
+        assert warnings
+
+
+class TestWriteBatchAdbcOnlyKeylessInsert:
+    """``_write_batch_adbc_only`` routes a keyless insert through
+    ``_merge_ingest_sync`` with ``insert_only=True`` and ``_record_hash`` as
+    the conflict key, not through plain ``_adbc_only_ingest_sync``."""
+
+    def _make_state(self, write_mode="insert", primary_keys=None):
+        from unittest.mock import MagicMock
+
+        state = _StreamState(
+            schema_name="public",
+            table_name="orders",
+            write_mode=write_mode,
+            primary_keys=primary_keys or [],
+        )
+        sc = MagicMock()
+        sc.cast_arrow_batch.side_effect = lambda b: b
+        state.schema_contract = sc
+        return state
+
+    @pytest.mark.asyncio
+    async def test_keyless_insert_calls_merge_not_plain_ingest(self):
+        h = _FixtureConnector()
+        h._adbc_only = True
+        state = self._make_state("insert")
+        batch = pa.RecordBatch.from_pydict({"name": ["alice"]})
+
+        with (
+            patch.object(h, "_merge_ingest_sync") as mock_merge,
+            patch.object(h, "_adbc_only_ingest_sync") as mock_plain,
+        ):
+            await h._write_batch_adbc_only(
+                state, "run1", "stream1", 1, batch, truncate_now=False
+            )
+
+        mock_merge.assert_called_once()
+        mock_plain.assert_not_called()
+        args, kwargs = mock_merge.call_args
+        assert kwargs.get("insert_only") is True
+        # args: (batch, schema, table, all_columns, conflict_keys, stage_token)
+        assert args[4] == [GenericSQLConnector.RECORD_HASH_COLUMN]
+
+    @pytest.mark.asyncio
+    async def test_keyless_insert_batch_includes_hash_column(self):
+        h = _FixtureConnector()
+        h._adbc_only = True
+        state = self._make_state("insert")
+        batch = pa.RecordBatch.from_pydict({"name": ["alice"]})
+
+        captured_batches: list[pa.RecordBatch] = []
+
+        def capture_merge(cb, *args, **kwargs):
+            captured_batches.append(cb)
+
+        with patch.object(h, "_merge_ingest_sync", side_effect=capture_merge):
+            await h._write_batch_adbc_only(
+                state, "run1", "stream1", 1, batch, truncate_now=False
+            )
+
+        assert len(captured_batches) == 1
+        assert (
+            GenericSQLConnector.RECORD_HASH_COLUMN in captured_batches[0].schema.names
+        )
+
+    @pytest.mark.asyncio
+    async def test_keyed_insert_uses_plain_ingest(self):
+        h = _FixtureConnector()
+        h._adbc_only = True
+        state = self._make_state("insert", primary_keys=["id"])
+        batch = pa.RecordBatch.from_pydict({"id": [1], "name": ["alice"]})
+
+        with (
+            patch.object(h, "_merge_ingest_sync") as mock_merge,
+            patch.object(h, "_adbc_only_ingest_sync") as mock_plain,
+        ):
+            await h._write_batch_adbc_only(
+                state, "run1", "stream1", 1, batch, truncate_now=False
+            )
+
+        mock_plain.assert_called_once()
+        mock_merge.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_stage_token_is_stable_per_batch(self):
+        """Same (run_id, stream_id, batch_seq) must produce the same stage token
+        across retries so the pre-flight DROP-IF-EXISTS can clean a leftover stage."""
+        h = _FixtureConnector()
+        h._adbc_only = True
+        state = self._make_state("insert")
+        batch = pa.RecordBatch.from_pydict({"v": [1]})
+
+        tokens: list[str] = []
+
+        def capture(cb, schema, table, all_cols, conflict_keys, token, *, insert_only):
+            tokens.append(token)
+
+        with patch.object(h, "_merge_ingest_sync", side_effect=capture):
+            for _ in range(2):
+                await h._write_batch_adbc_only(
+                    state, "run1", "stream1", 42, batch, truncate_now=False
+                )
+
+        assert len(tokens) == 2
+        assert tokens[0] == tokens[1]
+
+    @pytest.mark.asyncio
+    async def test_retry_produces_identical_hashed_batch(self):
+        """Same batch retried twice must produce identical _record_hash values
+        so the stage-MERGE skips rows already committed on the first attempt."""
+        h = _FixtureConnector()
+        h._adbc_only = True
+        state = self._make_state("insert")
+        batch = pa.RecordBatch.from_pydict({"name": ["alice"], "v": [42]})
+
+        captured: list[list[str]] = []
+
+        def capture(cb, *args, **kwargs):
+            captured.append(
+                cb.column(GenericSQLConnector.RECORD_HASH_COLUMN).to_pylist()
+            )
+
+        with patch.object(h, "_merge_ingest_sync", side_effect=capture):
+            for _ in range(2):
+                await h._write_batch_adbc_only(
+                    state, "run1", "s1", 7, batch, truncate_now=False
+                )
+
+        assert len(captured) == 2
+        assert captured[0] == captured[1]
+
+
+class TestRecordHashDecimalPrecision:
+    """Decimal values hash via json ``default=str`` -- the deployed SQLAlchemy
+    behaviour. No context rounding and no zero-stripping, so distinct
+    high-precision values keep distinct ``_record_hash`` digests and existing
+    rows keep the digest they were written with (issue #285 review)."""
+
+    def _state(self):
+        state = _StreamState(
+            schema_name="public",
+            table_name="t",
+            write_mode="insert",
+            primary_keys=[],
+        )
+        sc = MagicMock()
+        sc.cast_arrow_batch.side_effect = lambda b: b
+        state.schema_contract = sc
+        return state
+
+    def _hash(self, arr):
+        h = _FixtureConnector()
+        h._adbc_only = True
+        out = h._attach_record_hash_to_batch(
+            pa.RecordBatch.from_pydict({"v": arr}), self._state()
+        )
+        return out.column(GenericSQLConnector.RECORD_HASH_COLUMN).to_pylist()[0]
+
+    def test_distinct_high_precision_values_do_not_collide(self):
+        # NUMERIC(38) values differing past the 28-digit context must not share a
+        # hash (Decimal.normalize would have collapsed them and dropped a row).
+        t = pa.decimal128(38, 2)
+        a = self._hash(pa.array([Decimal("123456789012345678901234567890.00")], type=t))
+        b = self._hash(pa.array([Decimal("123456789012345678901234567891.00")], type=t))
+        assert a != b
+
+    def test_digest_uses_str_form(self):
+        # The hash input for a Decimal is its str() form (default=str), matching
+        # the deployed SQLAlchemy path -- not a zero-stripped form. Guards against
+        # re-hashing existing rows on deploy (issue #285 review P2).
+        arr = pa.array([Decimal("3.1400")], type=pa.decimal128(10, 4))
+        val = arr[0].as_py()
+        expected = hashlib.sha256(
+            json.dumps({"v": val}, sort_keys=True, default=str).encode()
+        ).hexdigest()
+        assert self._hash(arr) == expected
+
+
+class _NoMergeAdbcDialect(_FixtureAdbcDialect):
+    """ADBC dialect that ingests but cannot MERGE (base default)."""
+
+    supports_upsert_adbc = False
+
+
+class _NoMergeConnector(GenericSQLConnector):
+    dialect_class = _NoMergeAdbcDialect
+
+
+class TestKeylessInsertRequiresMergeSupport:
+    """Keyless ADBC insert dedups via stage-MERGE; a dialect that cannot MERGE
+    must fail loud at configure, not fatal on the first write (issue #285 P2)."""
+
+    def _state(self, primary_keys=None):
+        return _StreamState(
+            schema_name="public",
+            table_name="orders",
+            write_mode="insert",
+            primary_keys=primary_keys or [],
+        )
+
+    @pytest.mark.asyncio
+    async def test_keyless_insert_without_merge_support_fails_configure(self):
+        h = _NoMergeConnector()
+        h._adbc_only = True
+        with pytest.raises(AdbcConfigurationError, match="MERGE"):
+            await h._ensure_tables_exist(self._state(), MagicMock())
+
+    @pytest.mark.asyncio
+    async def test_merge_capable_dialect_is_not_gated(self):
+        # Same keyless insert on a MERGE-capable dialect clears the guard and
+        # fails later on the (deliberately absent) endpoint document instead.
+        h = _FixtureConnector()
+        h._adbc_only = True
+        with pytest.raises(SchemaConfigurationError):
+            await h._ensure_tables_exist(self._state(), MagicMock())
+
+    @pytest.mark.asyncio
+    async def test_keyed_insert_is_not_gated(self):
+        # Keyed insert needs no _record_hash dedup, so the guard is bypassed
+        # even on a non-MERGE dialect.
+        h = _NoMergeConnector()
+        h._adbc_only = True
+        with pytest.raises(SchemaConfigurationError):
+            await h._ensure_tables_exist(self._state(primary_keys=["id"]), MagicMock())

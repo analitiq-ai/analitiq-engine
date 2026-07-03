@@ -14,7 +14,7 @@ import logging
 from datetime import date, datetime, time, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 from uuid import UUID, uuid4
 
 from src.shared.run_id import get_run_id
@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 def emit_dlq_log(
     pipeline_id: str,
-    stream_id: Optional[str],
+    stream_id: str | None,
     added: int,
     total: int,
 ) -> None:
@@ -35,7 +35,7 @@ def emit_dlq_log(
     ISO-8601 UTC ``timestamp`` are included so downstream consumers can
     correlate the summary back to the run that produced it.
     """
-    data: Dict[str, Any] = {
+    data: dict[str, Any] = {
         "type": "dlq",
         "run_id": get_run_id() or 0,
         "pipeline_id": pipeline_id,
@@ -57,7 +57,7 @@ class DLQRecordEncoder(json.JSONEncoder):
     ``TypeError`` and lose the record the DLQ exists to preserve.
     """
 
-    def default(self, obj):
+    def default(self, obj: Any) -> Any:
         if isinstance(obj, Decimal):
             return str(obj)
         if isinstance(obj, (datetime, date, time)):
@@ -87,7 +87,7 @@ class LocalDLQStorage:
         self.dlq_path.mkdir(parents=True, exist_ok=True)
 
         # Current file tracking
-        self.current_file: Optional[Path] = None
+        self.current_file: Path | None = None
         self.current_file_size = 0
         self.lock = asyncio.Lock()
 
@@ -107,7 +107,9 @@ class LocalDLQStorage:
         self.current_file.touch()
         logger.debug(f"Created new DLQ file: {self.current_file}")
 
-    async def write_record(self, record: Dict[str, Any], stream_id: Optional[str] = None) -> bool:
+    async def write_record(
+        self, record: dict[str, Any], stream_id: str | None = None
+    ) -> bool:
         """Write a DLQ record to local file.
 
         Returns True when the record reached disk (primary or fallback
@@ -118,6 +120,9 @@ class LocalDLQStorage:
             try:
                 if self._need_new_file():
                     await self._create_new_file()
+                # _need_new_file()/_create_new_file() together guarantee a
+                # current file; narrow Path | None for the writer below.
+                assert self.current_file is not None
 
                 record_json = json.dumps(record, cls=DLQRecordEncoder) + "\n"
                 record_bytes = record_json.encode("utf-8")
@@ -141,10 +146,8 @@ class LocalDLQStorage:
                 # clear / cleanup (which glob dlq_*.jsonl) still see the
                 # record — a counted record must stay visible to the DLQ
                 # read APIs.
-                fallback_file = (
-                    self.dlq_path
-                    / f"dlq_fallback_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}.jsonl"
-                )
+                timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
+                fallback_file = self.dlq_path / f"dlq_fallback_{timestamp}.jsonl"
                 try:
                     with open(fallback_file, "w", encoding="utf-8") as f:
                         f.write(json.dumps(record, cls=DLQRecordEncoder) + "\n")
@@ -158,24 +161,32 @@ class LocalDLQStorage:
                     return False
 
     async def get_records(
-        self, pipeline_id: Optional[str] = None, stream_id: Optional[str] = None
-    ) -> List[Dict[str, Any]]:
-        """Get DLQ records from local files, optionally filtered by
-        ``pipeline_id`` and/or ``stream_id``."""
+        self, pipeline_id: str | None = None, stream_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Get DLQ records from local files.
+
+        Optionally filtered by ``pipeline_id`` and/or ``stream_id``.
+        """
         records = []
 
         try:
             dlq_files = list(self.dlq_path.glob("dlq_*.jsonl"))
 
             for dlq_file in dlq_files:
-                with open(dlq_file, "r", encoding="utf-8") as f:
+                with open(dlq_file, encoding="utf-8") as f:
                     for line in f:
                         if line.strip():
                             try:
                                 record = json.loads(line.strip())
-                                if pipeline_id is not None and record.get("pipeline_id") != pipeline_id:
+                                if (
+                                    pipeline_id is not None
+                                    and record.get("pipeline_id") != pipeline_id
+                                ):
                                     continue
-                                if stream_id is not None and record.get("stream_id") != stream_id:
+                                if (
+                                    stream_id is not None
+                                    and record.get("stream_id") != stream_id
+                                ):
                                     continue
                                 records.append(record)
                             except json.JSONDecodeError:
@@ -186,9 +197,9 @@ class LocalDLQStorage:
 
         return records
 
-    async def get_stats(self) -> Dict[str, Any]:
+    async def get_stats(self) -> dict[str, Any]:
         """Get DLQ statistics."""
-        stats = {
+        stats: dict[str, Any] = {
             "total_records": 0,
             "records_by_pipeline": {},
             "records_by_error_type": {},
@@ -205,7 +216,7 @@ class LocalDLQStorage:
             for dlq_file in dlq_files:
                 stats["total_size_bytes"] += dlq_file.stat().st_size
 
-                with open(dlq_file, "r", encoding="utf-8") as f:
+                with open(dlq_file, encoding="utf-8") as f:
                     for line in f:
                         if line.strip():
                             try:
@@ -217,16 +228,25 @@ class LocalDLQStorage:
                                     stats["records_by_pipeline"].get(pipeline_id, 0) + 1
                                 )
 
-                                error_type = record.get("error", {}).get("type", "unknown")
+                                error_type = record.get("error", {}).get(
+                                    "type", "unknown"
+                                )
                                 stats["records_by_error_type"][error_type] = (
-                                    stats["records_by_error_type"].get(error_type, 0) + 1
+                                    stats["records_by_error_type"].get(error_type, 0)
+                                    + 1
                                 )
 
                                 timestamp = record.get("timestamp")
                                 if timestamp:
-                                    if stats["oldest_record"] is None or timestamp < stats["oldest_record"]:
+                                    if (
+                                        stats["oldest_record"] is None
+                                        or timestamp < stats["oldest_record"]
+                                    ):
                                         stats["oldest_record"] = timestamp
-                                    if stats["newest_record"] is None or timestamp > stats["newest_record"]:
+                                    if (
+                                        stats["newest_record"] is None
+                                        or timestamp > stats["newest_record"]
+                                    ):
                                         stats["newest_record"] = timestamp
 
                             except json.JSONDecodeError:
@@ -237,8 +257,13 @@ class LocalDLQStorage:
 
         return stats
 
-    async def clear(self, pipeline_id: Optional[str] = None) -> None:
-        """Clear DLQ records."""
+    async def clear(self, pipeline_id: str | None = None) -> None:
+        """Clear DLQ records.
+
+        With no ``pipeline_id`` every DLQ file is removed. Selective
+        per-pipeline clearing is not implemented and raises rather than
+        silently reporting success.
+        """
         if pipeline_id is None:
             dlq_files = list(self.dlq_path.glob("dlq_*.jsonl"))
             for dlq_file in dlq_files:
@@ -247,7 +272,10 @@ class LocalDLQStorage:
             self.current_file_size = 0
             logger.info("Cleared all DLQ records")
         else:
-            logger.info(f"Selective DLQ clearing for pipeline {pipeline_id} not implemented")
+            raise NotImplementedError(
+                "Selective DLQ clearing by pipeline_id is not implemented; "
+                "call clear() with no pipeline_id to clear all records"
+            )
 
     async def cleanup_old_records(self, retention_days: int) -> None:
         """Clean up old DLQ files."""
@@ -257,12 +285,14 @@ class LocalDLQStorage:
 
             # Remove files beyond max_files limit
             if len(dlq_files) > self.max_files:
-                for file_to_remove in dlq_files[self.max_files:]:
+                for file_to_remove in dlq_files[self.max_files :]:
                     file_to_remove.unlink()
                     logger.info(f"Removed old DLQ file: {file_to_remove}")
 
             # Remove files older than retention period
-            cutoff_time = datetime.now(timezone.utc).timestamp() - (retention_days * 24 * 60 * 60)
+            cutoff_time = datetime.now(timezone.utc).timestamp() - (
+                retention_days * 24 * 60 * 60
+            )
             for dlq_file in dlq_files:
                 if dlq_file.stat().st_ctime < cutoff_time:
                     dlq_file.unlink()
@@ -307,11 +337,11 @@ class DeadLetterQueue:
 
     async def send_to_dlq(
         self,
-        record: Dict[str, Any],
+        record: dict[str, Any],
         error: Exception,
         pipeline_id: str,
-        stream_id: Optional[str] = None,
-        additional_context: Optional[Dict[str, Any]] = None,
+        stream_id: str | None = None,
+        additional_context: dict[str, Any] | None = None,
     ) -> bool:
         """Send a failed record to the Dead Letter Queue.
 
@@ -342,12 +372,12 @@ class DeadLetterQueue:
 
     async def send_batch(
         self,
-        batch: List[Dict[str, Any]],
+        batch: list[dict[str, Any]],
         error_message: str,
         pipeline_id: str = "unknown",
-        stream_id: Optional[str] = None,
-        additional_context: Optional[Dict[str, Any]] = None,
-    ):
+        stream_id: str | None = None,
+        additional_context: dict[str, Any] | None = None,
+    ) -> None:
         """Send a batch of failed records to the Dead Letter Queue."""
         written_count = 0
         for record in batch:
@@ -365,7 +395,9 @@ class DeadLetterQueue:
         if written_count < len(batch):
             logger.critical(
                 "DLQ batch for pipeline %s: %d of %d records lost permanently",
-                pipeline_id, len(batch) - written_count, len(batch),
+                pipeline_id,
+                len(batch) - written_count,
+                len(batch),
             )
         logger.warning(
             f"Sent batch of {written_count}/{len(batch)} records to DLQ "
@@ -378,8 +410,8 @@ class DeadLetterQueue:
             total=self._record_count,
         )
 
-    def _get_traceback(self, error: Exception) -> Optional[str]:
-        """Get traceback string from exception."""
+    def _get_traceback(self, error: Exception) -> list[str] | None:
+        """Get formatted traceback lines from exception."""
         import traceback
 
         try:
@@ -388,8 +420,8 @@ class DeadLetterQueue:
             return None
 
     async def get_failed_records(
-        self, pipeline_id: Optional[str] = None, stream_id: Optional[str] = None
-    ) -> List[Dict[str, Any]]:
+        self, pipeline_id: str | None = None, stream_id: str | None = None
+    ) -> list[dict[str, Any]]:
         """Get failed records from DLQ."""
         return await self.storage.get_records(pipeline_id, stream_id)
 
@@ -403,18 +435,18 @@ class DeadLetterQueue:
             f"DLQ record retry is not implemented (requested: {dlq_record_id})"
         )
 
-    async def get_dlq_stats(self) -> Dict[str, Any]:
+    async def get_dlq_stats(self) -> dict[str, Any]:
         """Get DLQ statistics."""
         return await self.storage.get_stats()
 
-    async def clear_dlq(self, pipeline_id: Optional[str] = None):
+    async def clear_dlq(self, pipeline_id: str | None = None) -> None:
         """Clear DLQ records."""
         await self.storage.clear(pipeline_id)
 
-    async def cleanup(self):
+    async def cleanup(self) -> None:
         """Clean up old DLQ files based on retention policy."""
         await self.storage.cleanup_old_records(self.retention_days)
 
-    async def flush(self):
+    async def flush(self) -> None:
         """Flush any buffered records to storage."""
         await self.storage.flush()

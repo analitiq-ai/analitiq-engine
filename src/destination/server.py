@@ -10,18 +10,33 @@ This server implements the DestinationService gRPC interface, handling:
 import asyncio
 import io
 import logging
-import os
-from typing import Any, AsyncIterator, Dict, Optional
+from collections.abc import AsyncIterator
+from typing import Any, Optional
+
+import pyarrow as pa
 
 import grpc
-import pyarrow as pa
+from cdk.adbc_registry import AdbcConfigurationError
+from cdk.base_handler import BaseDestinationHandler
+from cdk.secrets.exceptions import PlaceholderExpansionError
+from cdk.sql.exceptions import (
+    SchemaConfigurationError,
+    UnsupportedDialectOperationError,
+)
+from cdk.type_map import InvalidTypeMapError, UnmappedTypeError
+from cdk.types import Cursor as CdkCursor
+from cdk.types import SchemaSpec
+from cdk.types import WriteMode as CdkWriteMode
 from grpc import aio as grpc_aio
 
+from ..config import settings
+from ..grpc import DEFAULT_MAX_MESSAGE_SIZE
 from ..grpc.generated.analitiq.v1 import (
     AckStatus,
     BatchAck,
     ConnectionStatus,
     Cursor,
+    DestinationServiceServicer,
     GetCapabilitiesRequest,
     GetCapabilitiesResponse,
     HealthCheckRequest,
@@ -34,24 +49,18 @@ from ..grpc.generated.analitiq.v1 import (
     StreamResponse,
     WriteMode,
     add_DestinationServiceServicer_to_server,
-    DestinationServiceServicer,
 )
-from cdk.adbc_registry import AdbcConfigurationError
-from cdk.base_handler import BaseDestinationHandler
-from cdk.secrets.exceptions import PlaceholderExpansionError
-from cdk.sql.exceptions import (
-    SchemaConfigurationError,
-    UnsupportedDialectOperationError,
-)
-from cdk.types import Cursor as CdkCursor, SchemaSpec, WriteMode as CdkWriteMode
-from cdk.type_map import InvalidTypeMapError, UnmappedTypeError
-
-from ..grpc import DEFAULT_MAX_MESSAGE_SIZE
 
 logger = logging.getLogger(__name__)
 
-# Default configuration from environment
-DEFAULT_GRPC_PORT = int(os.getenv("GRPC_PORT", "50051"))
+# Default configuration (resolved from src.config.settings, env-overridable).
+DEFAULT_GRPC_PORT = settings.grpc_server_port()
+
+# Shutdown reason that marks a terminal, fully-successful run -- the only case
+# where the destination prunes its idempotency ledger. Any other reason
+# (failure, abort, generic teardown) leaves the ledger intact so a resumed run
+# can still skip already-committed batches.
+SHUTDOWN_REASON_SUCCESS = "pipeline_completed"
 
 # A destination SQL statement is cancelled before the sender's gRPC ack
 # timeout, so the database returns the cancelled statement instead of the
@@ -67,10 +76,10 @@ _STATEMENT_TIMEOUT_BUDGET_FRACTION = 0.5
 
 
 def derive_statement_timeout_seconds(ack_timeout_seconds: int) -> float:
-    """Per-statement budget kept strictly below the sender's gRPC ack timeout
-    so a blocked DDL/write is cancelled before the sender gives up waiting for
-    the ack.
+    """Derive a per-statement budget strictly below the sender's ack timeout.
 
+    A blocked DDL/write is then cancelled before the sender gives up waiting
+    for the ack.
     Returns the full ack budget minus a fixed margin where the budget is large
     enough, otherwise half the budget. Both candidates are strictly below the
     ack budget for any positive budget, so the statement timeout can never
@@ -101,7 +110,7 @@ class DestinationGRPCServer:
         handler: BaseDestinationHandler,
         port: int = DEFAULT_GRPC_PORT,
         max_message_size: int = DEFAULT_MAX_MESSAGE_SIZE,
-        address: Optional[str] = None,
+        address: str | None = None,
     ):
         self.handler = handler
         self.port = port
@@ -109,7 +118,7 @@ class DestinationGRPCServer:
         # ``unix:/path/worker.sock`` so the channel never leaves the host.
         self.address = address
         self.max_message_size = max_message_size
-        self._server: Optional[grpc_aio.Server] = None
+        self._server: grpc_aio.Server | None = None
         self._servicer: Optional["DestinationServicer"] = None
         self._shutdown_event = asyncio.Event()
 
@@ -202,7 +211,7 @@ class DestinationServicer(DestinationServiceServicer):
         # ``schema_configured`` / ``current_stream_id`` on ``self`` would
         # let one stream's bookkeeping clobber another's.
         schema_configured = False
-        current_stream_id: Optional[str] = None
+        current_stream_id: str | None = None
 
         try:
             async for request in request_iterator:
@@ -312,13 +321,29 @@ class DestinationServicer(DestinationServiceServicer):
                         ack_message = f"{type(e).__name__}: {e}"
                     schema_configured = accepted
 
-                    yield StreamResponse(
-                        schema_ack=SchemaAck(
+                    if accepted:
+                        # The handler decides the stream's retry safety
+                        # (write mode, keys, transport, declared
+                        # idempotency); the ack carries the verdict so the
+                        # engine can log which streams may duplicate on a
+                        # same-run restart (issue #286). The worker proxy
+                        # forwards the worker's verdict, so this holds
+                        # across both hops.
+                        verdict = self.handler.retry_semantics(schema_msg.stream_id)
+                        schema_ack = SchemaAck(
                             stream_id=schema_msg.stream_id,
-                            accepted=accepted,
+                            accepted=True,
+                            message=ack_message,
+                            retry_semantics=verdict.semantics,
+                            retry_semantics_reason=verdict.reason,
+                        )
+                    else:
+                        schema_ack = SchemaAck(
+                            stream_id=schema_msg.stream_id,
+                            accepted=False,
                             message=ack_message,
                         )
-                    )
+                    yield StreamResponse(schema_ack=schema_ack)
 
                 elif msg_type == "batch":
                     # Handle record batch
@@ -426,13 +451,14 @@ class DestinationServicer(DestinationServiceServicer):
             supported_modes = [WriteMode.WRITE_MODE_INSERT]
             if self.handler.supports_upsert:
                 supported_modes.append(WriteMode.WRITE_MODE_UPSERT)
-            supported_modes.append(WriteMode.WRITE_MODE_TRUNCATE_INSERT)
+            if self.handler.supports_truncate:
+                supported_modes.append(WriteMode.WRITE_MODE_TRUNCATE_INSERT)
 
             return GetCapabilitiesResponse(
                 connector_type=self.handler.connector_type,
                 supported_write_modes=supported_modes,
                 supports_transactions=self.handler.supports_transactions,
-                supports_auto_create=True,
+                supports_auto_create=self.handler.supports_auto_create,
                 supports_upsert=self.handler.supports_upsert,
                 supports_bulk_load=self.handler.supports_bulk_load,
                 max_batch_size=self.handler.max_batch_size,
@@ -462,7 +488,27 @@ class DestinationServicer(DestinationServiceServicer):
     ) -> ShutdownAck:
         """Handle shutdown request from engine."""
         logger.info(f"Received shutdown request: reason={request.reason}")
-        self._server.signal_shutdown()
+        # Let the handler finalize the run while it is still connected -- the
+        # worker process is SIGTERM'd shortly after this acks, so any
+        # connection-dependent cleanup (e.g. pruning the idempotency ledger)
+        # must happen here, not at disconnect. finalize_run is a no-op on the
+        # base handler; only handlers that need it (SQL connectors) override.
+        # The reason carries the terminal-run outcome: cleanup that would break
+        # a resume of a failed run runs only when the run actually succeeded.
+        # Best-effort: a failure must not block the shutdown ack.
+        succeeded = request.reason == SHUTDOWN_REASON_SUCCESS
+        try:
+            await self.handler.finalize_run(succeeded=succeeded)
+        except Exception:
+            logger.warning("handler finalize_run failed during shutdown", exc_info=True)
+        finally:
+            # Always signal shutdown -- even if finalize_run raised or the
+            # handler was cancelled (the client's send_shutdown deadline can
+            # fire while the ledger prune is still running). CancelledError is
+            # not an Exception, so without this finally a cancelled finalize
+            # would skip signaling and leave the server running after the
+            # engine has finished.
+            self._server.signal_shutdown()
         return ShutdownAck(acknowledged=True, message="Shutting down")
 
     @staticmethod
@@ -483,5 +529,3 @@ class DestinationServicer(DestinationServiceServicer):
         if table.num_rows == 0:
             return pa.RecordBatch.from_pylist([], schema=table.schema)
         return table.combine_chunks().to_batches()[0]
-
-

@@ -10,10 +10,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from cdk.secrets.exceptions import SecretNotFoundError
 from cdk.connection_runtime import ConnectionRuntime
+from cdk.secrets.exceptions import SecretNotFoundError
 from cdk.transport_factory import HttpTransport, SqlAlchemyTransport
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -105,7 +104,9 @@ class TestConnectionRuntimeMetadata:
 
     @pytest.mark.parametrize("connector_type", ["", None, 42])
     def test_non_string_connector_type_raises(self, connector_type):
-        with pytest.raises(ValueError, match="connector_type must be a non-empty string"):
+        with pytest.raises(
+            ValueError, match="connector_type must be a non-empty string"
+        ):
             ConnectionRuntime(
                 raw_config={},
                 connection_id="conn-1",
@@ -139,7 +140,9 @@ class TestConnectionRuntimeMaterialize:
     async def test_materialize_database_uses_transport_factory(self):
         engine = AsyncMock()
         transport = SqlAlchemyTransport(
-            engine=engine, driver="postgresql+asyncpg", dialect="postgresql",
+            engine=engine,
+            driver="postgresql+asyncpg",
+            dialect="postgresql",
             is_async=True,
         )
         runtime = ConnectionRuntime(
@@ -282,7 +285,9 @@ class TestConnectionRuntimeSyncEngine:
     async def test_async_runtime_refuses_sync_engine_accessor(self):
         engine = AsyncMock()
         transport = SqlAlchemyTransport(
-            engine=engine, driver="postgresql+asyncpg", dialect="postgresql",
+            engine=engine,
+            driver="postgresql+asyncpg",
+            dialect="postgresql",
             is_async=True,
         )
         runtime = self._materializable_runtime()
@@ -314,7 +319,9 @@ class TestConnectionRuntimeClose:
     async def test_close_disposes_engine(self):
         engine = AsyncMock()
         transport = SqlAlchemyTransport(
-            engine=engine, driver="postgresql+asyncpg", dialect="postgresql",
+            engine=engine,
+            driver="postgresql+asyncpg",
+            dialect="postgresql",
             is_async=True,
         )
         runtime = ConnectionRuntime(
@@ -363,7 +370,9 @@ class TestConnectionRuntimeClose:
     async def test_double_close_is_safe(self):
         engine = AsyncMock()
         transport = SqlAlchemyTransport(
-            engine=engine, driver="postgresql+asyncpg", dialect="postgresql",
+            engine=engine,
+            driver="postgresql+asyncpg",
+            dialect="postgresql",
             is_async=True,
         )
         runtime = ConnectionRuntime(
@@ -487,7 +496,9 @@ class TestScrubResolvedConfig:
         materialized."""
         engine = AsyncMock()
         transport = SqlAlchemyTransport(
-            engine=engine, driver="postgresql+asyncpg", dialect="postgresql",
+            engine=engine,
+            driver="postgresql+asyncpg",
+            dialect="postgresql",
             is_async=True,
         )
         runtime = ConnectionRuntime(

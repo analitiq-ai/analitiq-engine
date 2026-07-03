@@ -5,10 +5,9 @@ import logging
 import os
 import threading
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 from ..shared.run_id import get_or_generate_run_id
-from .batch_commit_tracker import BatchCommitTracker
 from .state_emission import emit_state_log
 from .store import CursorStore
 
@@ -20,8 +19,9 @@ class StateManager:
     Manages pipeline run state and emits checkpoints to structured logs.
 
     Checkpoints are emitted as ANALITIQ_STATE:: log lines for
-    cross-run observability. Batch commit tracking uses local
-    filesystem for in-run idempotency.
+    cross-run observability. Idempotency is enforced at the destination on
+    content-derived row identity, not by an engine-side batch ledger
+    (issue #282), so this manager owns only cursor state.
     """
 
     def __init__(
@@ -37,30 +37,23 @@ class StateManager:
         self.lock = threading.RLock()
 
         # Current run ID (from env var RUN_ID if available)
-        self.current_run_id: Optional[str] = os.environ.get("RUN_ID")
+        self.current_run_id: str | None = os.environ.get("RUN_ID")
 
-        # In-run batch commit tracker (initialized by init_commit_tracker)
-        self._commit_tracker: Optional[BatchCommitTracker] = None
-
-        # In-run cursor cache keyed by (stream_name, partition_key). Backed by
-        # an on-disk checkpoint so a fresh process resumes from where the last
-        # run left off instead of re-scanning the whole source.
-        self._cursors: Dict[str, Dict[str, Any]] = {}
+        # In-run cursor cache keyed by (stream_name, partition_key). Read by
+        # get_cursor and backed by the per-stream committed checkpoint, so a fresh
+        # process resumes from the prior run's ACKed bookmark instead of
+        # re-scanning the whole source.
+        self._cursors: dict[str, dict[str, Any]] = {}
+        # Per-stream committed-cursor checkpoint files: one
+        # state/{pipeline_id}/{stream_id}.json per stream, written on each
+        # destination ACK and read at the next run's start. Each stream owns its
+        # file (no contention), and the value is the ACKed watermark -- never the
+        # source's pre-ACK position. On a fresh container the config bundle
+        # delivers these same files; there is no env var and no single shared
+        # file.
         self._cursor_store = CursorStore(self.base_dir)
 
-    def init_commit_tracker(self, run_id: str) -> None:
-        """Initialize batch commit tracker for the current run."""
-        self._commit_tracker = BatchCommitTracker(
-            pipeline_dir=str(self.pipeline_dir),
-            run_id=run_id,
-        )
-
-    @property
-    def commit_tracker(self) -> Optional[BatchCommitTracker]:
-        """Get the batch commit tracker (if initialized)."""
-        return self._commit_tracker
-
-    def start_run(self, config: Dict[str, Any], run_id: Optional[str] = None) -> str:
+    def start_run(self, config: dict[str, Any], run_id: str | None = None) -> str:
         """
         Start a new pipeline run.
 
@@ -81,13 +74,14 @@ class StateManager:
     def save_stream_checkpoint(
         self,
         stream_name: str,
-        partition: Dict[str, Any],
-        cursor: Dict[str, Any],
+        partition: dict[str, Any],
+        cursor: dict[str, Any],
         hwm: str,
-        page_state: Optional[Dict[str, Any]] = None,
-        http_conditionals: Optional[Dict[str, Any]] = None,
-        stats: Optional[Dict[str, Any]] = None,
-    ):
+        stream_version: int,
+        page_state: dict[str, Any] | None = None,
+        http_conditionals: dict[str, Any] | None = None,
+        stats: dict[str, Any] | None = None,
+    ) -> None:
         """
         Emit checkpoint for a specific stream to structured logs.
 
@@ -96,31 +90,54 @@ class StateManager:
             partition: Partition key dict (ignored)
             cursor: Cursor state with primary/tiebreaker fields
             hwm: High-water mark timestamp
+            stream_version: Version the manifest pins for this stream. Carried
+                on the line so the deployment can scope the durable bookmark to
+                the version that produced it; the engine never acts on it.
             page_state: Unused, kept for call-site compatibility
             http_conditionals: Unused, kept for call-site compatibility
             stats: Unused, kept for call-site compatibility
+
+        The engine still emits and keys its in-run cursor by bare
+        ``stream_id``; ``stream_version`` is pass-through metadata. The
+        emission-time ``emitted_at`` ordering key is not stamped here -- it is
+        added to every record centrally by
+        :func:`src.state.log_emitter.emit_log`.
+
+        This runs only on a destination ACK (the engine's committed-watermark
+        path), so it is also where the per-stream checkpoint advances: persisting
+        the committed value here, never the source's pre-ACK cursor, is what
+        keeps a failed stream from resuming past rows that never landed. The
+        write goes to this stream's own file, so concurrent streams never
+        contend.
         """
         emit_state_log(
             run_id=self.current_run_id or "",
             pipeline_id=self.pipeline_id,
             stream_id=stream_name,
+            stream_version=stream_version,
             cursor_hex=json.dumps(cursor).encode().hex() if cursor else "",
             cursor_value=hwm,
         )
+        committed_value = cursor.get("primary", {}).get("value") if cursor else None
+        if committed_value is not None:
+            with self.lock:
+                self._cursor_store.set(self.pipeline_id, stream_name, committed_value)
 
     @staticmethod
-    def _cursor_key(stream_name: str, partition: Dict[str, Any]) -> str:
+    def _cursor_key(stream_name: str, partition: dict[str, Any]) -> str:
         """Build a deterministic key from stream name and partition dict."""
         suffix = json.dumps(partition, sort_keys=True) if partition else "{}"
         return f"{stream_name}::{suffix}"
 
     async def get_cursor(
-        self, stream_name: str, partition: Optional[Dict[str, Any]] = None
-    ) -> Optional[Dict[str, Any]]:
-        """Return the last saved cursor for a stream/partition, or None.
+        self, stream_name: str, partition: dict[str, Any] | None = None
+    ) -> dict[str, Any] | None:
+        """Return the resume cursor for a stream/partition, or None.
 
-        Falls back to the on-disk checkpoint when the in-run cache is empty so
-        a newly started process resumes from the previous run's bookmark.
+        Falls back to the per-stream committed checkpoint when the in-run cache
+        is empty, so a newly started process (or a fresh container holding only
+        the bundle-delivered files) resumes from the previous run's ACKed
+        bookmark. A stream with no checkpoint resumes with a full re-scan.
         """
         key = self._cursor_key(stream_name, partition or {})
         with self.lock:
@@ -137,21 +154,21 @@ class StateManager:
     async def save_cursor(
         self,
         stream_name: str,
-        partition: Optional[Dict[str, Any]],
-        cursor: Dict[str, Any],
+        partition: dict[str, Any] | None,
+        cursor: dict[str, Any],
     ) -> None:
-        """Persist cursor state for a stream/partition.
+        """Update the in-run cursor cache for a stream/partition.
 
-        Written both to the in-run cache and to the on-disk checkpoint so the
-        next run resumes from it. Partitioned cursors share one document per
-        ``(pipeline, stream)`` (the store's documented scope); partitions are
-        not exercised today.
+        Records the source's latest (pre-ACK) cursor for the duration of the run
+        only; it is never persisted. The durable per-stream checkpoint advances
+        solely on a destination ACK (see :meth:`save_stream_checkpoint`), so the
+        source running ahead of the ACK can't push the on-disk bookmark past rows
+        that have not landed.
         """
         key = self._cursor_key(stream_name, partition or {})
         with self.lock:
             self._cursors[key] = cursor
-            self._cursor_store.set(self.pipeline_id, stream_name, cursor.get("cursor"))
 
-    def get_run_info(self) -> Dict[str, Any]:
+    def get_run_info(self) -> dict[str, Any]:
         """Get current run information."""
         return {"run_id": self.current_run_id} if self.current_run_id else {}

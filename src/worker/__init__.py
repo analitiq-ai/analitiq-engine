@@ -14,24 +14,22 @@ installed connector packages add themselves via entry points.
 
 from __future__ import annotations
 
-from typing import Tuple
-
 from cdk.registry import ConnectorRegistry, build_registries
 
 
-def build_worker_registries() -> Tuple[ConnectorRegistry, ConnectorRegistry]:
+def build_worker_registries() -> tuple[ConnectorRegistry, ConnectorRegistry]:
     """Seed the kind defaults and discover installed connector packages."""
     # Imports are local so importing src.worker stays cheap for the shells
     # (they only need the spawn helpers, not the handler graph).
     from cdk.sql.generic import GenericSQLConnector
-    from src.source.connectors.api import APIConnector
-    from src.source.connectors.mongodb import MongoDbSourceConnector
     from src.destination.connectors import (
         ApiDestinationHandler,
         FileDestinationHandler,
         MongoDbDestinationHandler,
         StreamDestinationHandler,
     )
+    from src.source.connectors.api import APIConnector
+    from src.source.connectors.mongodb import MongoDbSourceConnector
 
     return build_registries(
         source_builtins={

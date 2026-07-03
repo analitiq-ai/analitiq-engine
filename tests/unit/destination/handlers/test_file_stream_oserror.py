@@ -39,8 +39,12 @@ async def _drive_file(handler: FileDestinationHandler, raise_exc: BaseException)
     handler._path_template = None
     handler._config = {"path": "/tmp", "prefix": "out/"}
     return await handler.write_batch(
-        run_id="r", stream_id="s", batch_seq=1,
-        record_batch=_record_batch(), record_ids=["1"], cursor=_cursor(),
+        run_id="r",
+        stream_id="s",
+        batch_seq=1,
+        record_batch=_record_batch(),
+        record_ids=["1"],
+        cursor=_cursor(),
     )
 
 
@@ -54,15 +58,25 @@ async def _drive_stream(handler: StreamDestinationHandler, raise_exc: BaseExcept
         fake_sys.stdout.buffer.write = MagicMock(side_effect=raise_exc)
         fake_sys.stdout.buffer.flush = MagicMock()
         return await handler.write_batch(
-            run_id="r", stream_id="s", batch_seq=1,
-            record_batch=_record_batch(), record_ids=["1"], cursor=_cursor(),
+            run_id="r",
+            stream_id="s",
+            batch_seq=1,
+            record_batch=_record_batch(),
+            record_ids=["1"],
+            cursor=_cursor(),
         )
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("errno_code", [
-    errno.ENOSPC, errno.EACCES, errno.EROFS, errno.EDQUOT,
-])
+@pytest.mark.parametrize(
+    "errno_code",
+    [
+        errno.ENOSPC,
+        errno.EACCES,
+        errno.EROFS,
+        errno.EDQUOT,
+    ],
+)
 async def test_file_handler_fatal_errnos(errno_code):
     """Disk-full, permission, read-only fs, quota: never recoverable."""
     exc = OSError(errno_code, "fatal i/o")
@@ -89,9 +103,15 @@ async def test_file_handler_non_oserror_is_fatal():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("errno_code", [
-    errno.EPIPE, errno.ENOSPC, errno.EACCES, errno.EBADF,
-])
+@pytest.mark.parametrize(
+    "errno_code",
+    [
+        errno.EPIPE,
+        errno.ENOSPC,
+        errno.EACCES,
+        errno.EBADF,
+    ],
+)
 async def test_stream_handler_fatal_errnos(errno_code):
     """Closed pipe, disk-full on redirect, permission, bad-fd: never
     recoverable by retry."""

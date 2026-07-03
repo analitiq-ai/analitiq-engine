@@ -18,12 +18,12 @@ import sys
 async def check_grpc_health(port: int) -> bool:
     """Check if gRPC destination server is healthy."""
     try:
+        from grpc import aio as grpc_aio
         from src.grpc.generated.analitiq.v1 import (
+            DestinationServiceStub,
             HealthCheckRequest,
             HealthCheckResponse,
-            DestinationServiceStub,
         )
-        from grpc import aio as grpc_aio
 
         address = f"localhost:{port}"
         async with grpc_aio.insecure_channel(address) as channel:
@@ -32,8 +32,12 @@ async def check_grpc_health(port: int) -> bool:
                 stub.HealthCheck(HealthCheckRequest()),
                 timeout=5.0,
             )
-            is_healthy = response.status == HealthCheckResponse.ServingStatus.SERVING
-            print(f"gRPC health: {'OK' if is_healthy else 'FAILED'} - {response.message}")
+            is_healthy = bool(
+                response.status == HealthCheckResponse.ServingStatus.SERVING
+            )
+            print(
+                f"gRPC health: {'OK' if is_healthy else 'FAILED'} - {response.message}"
+            )
             return is_healthy
 
     except Exception as e:

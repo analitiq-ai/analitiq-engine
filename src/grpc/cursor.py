@@ -13,12 +13,20 @@ Cursor format (internal to engine):
 }
 
 This is JSON-encoded and stored as bytes for simplicity and debuggability.
+A ``datetime``/``date``/``time``/``Decimal`` value is tagged via ``encode_value``
+(``{"__type__": "datetime", "value": ...}``) so its type survives the JSON
+round trip through the destination ACK and into the durable resume state,
+instead of being flattened to an ambiguous ISO string or a lossy float. The
+destination still treats the whole token as opaque, so the tagging is internal
+to the engine.
 """
 
 import json
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any
+
+from src.state.store import encode_value
 
 from .generated.analitiq.v1 import Cursor
 
@@ -28,8 +36,8 @@ logger = logging.getLogger(__name__)
 def encode_cursor(
     cursor_field: str,
     cursor_value: Any,
-    tie_breaker_fields: Optional[List[str]] = None,
-    tie_breaker_values: Optional[Dict[str, Any]] = None,
+    tie_breaker_fields: list[str] | None = None,
+    tie_breaker_values: dict[str, Any] | None = None,
 ) -> Cursor:
     """
     Encode cursor information into an opaque Cursor message.
@@ -45,22 +53,27 @@ def encode_cursor(
     """
     cursor_data = {
         "field": cursor_field,
-        "value": _serialize_value(cursor_value),
+        "value": encode_value(cursor_value),
         "encoded_at": datetime.now(timezone.utc).isoformat(),
     }
 
     if tie_breaker_fields and tie_breaker_values:
         cursor_data["tie_breakers"] = [
-            {"field": field, "value": _serialize_value(tie_breaker_values.get(field))}
+            {"field": field, "value": encode_value(tie_breaker_values.get(field))}
             for field in tie_breaker_fields
             if field in tie_breaker_values
         ]
 
+    # ``encode_value`` tags every JSON-unsupported scalar the engine presents
+    # as a cursor value (datetime/date/time/Decimal) so it round-trips
+    # losslessly. No ``default=`` fallback: an unforeseen non-JSON type must
+    # fail loud here rather than be silently stringified into a type the next
+    # run cannot restore, which would change the bind in the source filter.
     token = json.dumps(cursor_data, separators=(",", ":")).encode("utf-8")
     return Cursor(token=token)
 
 
-def decode_cursor(cursor: Cursor) -> Dict[str, Any]:
+def decode_cursor(cursor: Cursor) -> dict[str, Any]:
     """
     Decode an opaque Cursor message back to its components.
 
@@ -73,21 +86,33 @@ def decode_cursor(cursor: Cursor) -> Dict[str, Any]:
         - value: cursor value
         - tie_breakers: list of tie-breaker dicts (optional)
         - encoded_at: timestamp when cursor was encoded
+        An empty token (no cursor yet) returns ``{}``.
+
+    Raises:
+        ValueError: the token is non-empty but cannot be decoded (corrupt
+            JSON / bytes). A corrupt cursor must fail loud rather than wipe a
+            good watermark.
     """
     if not cursor.token:
         return {}
 
     try:
-        return json.loads(cursor.token.decode("utf-8"))
+        decoded: dict[str, Any] = json.loads(cursor.token.decode("utf-8"))
+        return decoded
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
-        logger.error(f"Failed to decode cursor: {e}")
-        return {}
+        # A non-empty but undecodable token is a corruption signal, not an
+        # absent cursor. Returning {} here would let it collapse to "no
+        # cursor" and overwrite a good watermark with empty/now() state on the
+        # next checkpoint. Raise so the load stage fails loud and the prior
+        # durable bookmark survives untouched.
+        logger.error("Failed to decode cursor token", exc_info=True)
+        raise ValueError(f"undecodable cursor token: {e}") from e
 
 
 def compute_max_cursor(
-    batch: List[Dict[str, Any]],
+    batch: list[dict[str, Any]],
     cursor_field: str,
-    tie_breaker_fields: Optional[List[str]] = None,
+    tie_breaker_fields: list[str] | None = None,
 ) -> Cursor:
     """Compute the maximum cursor value from a batch of records.
 
@@ -108,7 +133,7 @@ def compute_max_cursor(
     if not batch:
         return Cursor(token=b"")
 
-    max_record = None
+    max_record: dict[str, Any] | None = None
     max_cursor_value = None
 
     for record in batch:
@@ -122,7 +147,11 @@ def compute_max_cursor(
         elif _compare_values(cursor_value, max_cursor_value) > 0:
             max_cursor_value = cursor_value
             max_record = record
-        elif _compare_values(cursor_value, max_cursor_value) == 0 and tie_breaker_fields:
+        elif (
+            max_record is not None
+            and _compare_values(cursor_value, max_cursor_value) == 0
+            and tie_breaker_fields
+        ):
             # Same cursor value, compare tie-breakers
             if _compare_tie_breakers(record, max_record, tie_breaker_fields) > 0:
                 max_record = record
@@ -144,7 +173,7 @@ def compute_max_cursor(
     )
 
 
-def cursor_to_state_dict(cursor: Cursor) -> Dict[str, Any]:
+def cursor_to_state_dict(cursor: Cursor) -> dict[str, Any]:
     """
     Convert a Cursor to a state dictionary for persistence.
 
@@ -160,7 +189,7 @@ def cursor_to_state_dict(cursor: Cursor) -> Dict[str, Any]:
     if not decoded:
         return {}
 
-    state = {
+    state: dict[str, Any] = {
         "cursor": {
             "primary": {
                 "field": decoded.get("field"),
@@ -178,13 +207,6 @@ def cursor_to_state_dict(cursor: Cursor) -> Dict[str, Any]:
         ]
 
     return state
-
-
-def _serialize_value(value: Any) -> Any:
-    """Serialize a value for JSON encoding."""
-    if isinstance(value, datetime):
-        return value.isoformat()
-    return value
 
 
 def _compare_values(a: Any, b: Any) -> int:
@@ -219,9 +241,9 @@ def _compare_values(a: Any, b: Any) -> int:
 
 
 def _compare_tie_breakers(
-    record_a: Dict[str, Any],
-    record_b: Dict[str, Any],
-    tie_breaker_fields: List[str],
+    record_a: dict[str, Any],
+    record_b: dict[str, Any],
+    tie_breaker_fields: list[str],
 ) -> int:
     """
     Compare two records by tie-breaker fields.

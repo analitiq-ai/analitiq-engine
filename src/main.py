@@ -35,16 +35,17 @@ import asyncio
 import logging
 import os
 import sys
-from typing import Any, Dict
+from typing import Any
 
-from src.models.stream import WriteConfig, WriteMode
+from src.config import settings
+from src.models.stream import WriteMode
 
 # Set up logging
-log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+log_level = settings.log_level()
 logging.basicConfig(
     level=getattr(logging, log_level, logging.INFO),
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)]
+    handlers=[logging.StreamHandler(sys.stdout)],
 )
 logger = logging.getLogger(__name__)
 
@@ -65,25 +66,38 @@ async def run_engine_mode() -> bool:
     from src.runner import PipelineRunner
 
     success = False
+    fully_successful = False
     try:
         runner = PipelineRunner()
         success = await runner.run()
+        # run() returns True for both "success" and "partial" runs (a partial
+        # run exits 0). Pruning keys off the stricter status: only a fully
+        # successful run prunes the ledger.
+        fully_successful = runner.status == "success"
     except Exception as e:
         logger.error(f"Engine failed: {e}", exc_info=True)
     finally:
-        # Always send shutdown to destination after pipeline completes
-        await _send_shutdown_to_destination()
+        # Always send shutdown to destination after pipeline completes; the
+        # outcome is carried so the destination prunes its idempotency ledger
+        # only on a FULLY successful run. A partial run (some streams failed or
+        # records were dead-lettered) must NOT prune -- a resume with the same
+        # RUN_ID still needs the ledger to skip already-committed batches.
+        await _send_shutdown_to_destination(fully_successful)
 
     return success
 
 
-async def _send_shutdown_to_destination() -> None:
+async def _send_shutdown_to_destination(succeeded: bool) -> None:
     """
     Send shutdown signal to destination container.
 
     This signals the destination gRPC server to shut down gracefully,
-    allowing both engine and destination containers to exit cleanly.
+    allowing both engine and destination containers to exit cleanly. The
+    ``succeeded`` flag is carried as the shutdown reason so the destination
+    prunes its idempotency ledger only on a fully successful run.
     """
+    from src.destination.server import SHUTDOWN_REASON_SUCCESS
+
     grpc_host = os.getenv("DESTINATION_GRPC_HOST")
     if not grpc_host:
         logger.debug("No DESTINATION_GRPC_HOST set, skipping shutdown signal")
@@ -100,13 +114,16 @@ async def _send_shutdown_to_destination() -> None:
     try:
         connected = await client.connect(max_connect_retries=1, retry_delay_seconds=1.0)
         if connected:
-            await client.send_shutdown("pipeline_completed")
+            reason = SHUTDOWN_REASON_SUCCESS if succeeded else "pipeline_failed"
+            await client.send_shutdown(reason)
         else:
             logger.warning("Could not connect to destination to send shutdown signal")
     except Exception as e:
         logger.warning(
             "Failed to send shutdown signal: %s: %s",
-            type(e).__name__, e, exc_info=True,
+            type(e).__name__,
+            e,
+            exc_info=True,
         )
     finally:
         await client.disconnect()
@@ -139,16 +156,22 @@ async def run_destination_mode() -> None:
     from src.engine.pipeline_config_prep import PipelineConfigPrep
     from src.worker.proxy import WorkerProxyHandler
 
-    grpc_port = int(os.getenv("GRPC_PORT", "50051"))
-    destination_index = int(os.getenv("DESTINATION_INDEX", "0"))
+    grpc_port = settings.grpc_server_port()
+    destination_index = settings.destination_index()
 
     # Load configuration using PipelineConfigPrep (same as engine)
     logger.info("Loading pipeline configuration via PipelineConfigPrep")
     config_prep = PipelineConfigPrep()
-    pipeline_config, stream_configs, resolved_connections, resolved_endpoints, _connectors = config_prep.create_config()
+    (
+        pipeline_config,
+        stream_configs,
+        resolved_connections,
+        resolved_endpoints,
+        _connectors,
+    ) = config_prep.create_config()
 
     # Get destination connection from pipeline config
-    destinations = pipeline_config.connections["destinations"]
+    destinations = pipeline_config.connections.destinations
     if not destinations:
         logger.error("Pipeline has no destinations configured")
         sys.exit(1)
@@ -163,11 +186,16 @@ async def run_destination_mode() -> None:
     # Get the connection id for the selected destination
     dest_connection_id = destinations[destination_index]
 
-    logger.info(f"Using destination index {destination_index}: connection_id={dest_connection_id}")
+    logger.info(
+        f"Using destination index {destination_index}: "
+        f"connection_id={dest_connection_id}"
+    )
 
     # Get ConnectionRuntime for selected destination
     if dest_connection_id not in resolved_connections:
-        logger.error(f"Connection '{dest_connection_id}' not found in resolved connections")
+        logger.error(
+            f"Connection '{dest_connection_id}' not found in resolved connections"
+        )
         sys.exit(1)
 
     runtime = resolved_connections[dest_connection_id]
@@ -183,8 +211,8 @@ async def run_destination_mode() -> None:
     #     document. Engine and destination both load these via
     #     PipelineConfigPrep, so handlers read schema details from this
     #     map instead of unpacking them off the wire.
-    endpoint_refs: Dict[str, Dict[str, Any]] = {}
-    stream_endpoints: Dict[str, Dict[str, Any]] = {}
+    endpoint_refs: dict[str, dict[str, Any]] = {}
+    stream_endpoints: dict[str, dict[str, Any]] = {}
     for stream in stream_configs:
         for dest in stream.destinations:
             if dest.connection_ref != dest_connection_id:
@@ -192,29 +220,24 @@ async def run_destination_mode() -> None:
             stream_id = stream.stream_id
             endpoint_refs[stream_id] = dest.endpoint_ref.to_dict()
             endpoint_doc = dest.endpoint_document
-            # Resolve effective conflict keys via WriteConfig. The
-            # database handler uses a single flat list, so we flatten
-            # the first composite returned by the helper. Errors
-            # (unknown mode, UPSERT without keys) propagate so a
-            # misconfigured pipeline fails at startup instead of
-            # silently downgrading UPSERT to INSERT.
+            # Infra validates and supplies the upsert conflict target on
+            # the stream; the engine copies it verbatim. The mode is
+            # parsed only to reject an unknown value at startup (format
+            # validation) — the engine no longer derives or enforces
+            # conflict keys, so a misconfigured upsert surfaces loudly at
+            # the write path rather than being silently downgraded here.
             mode_value = dest.write.get("mode") or "upsert"
-            primary_keys = list(endpoint_doc.get("primary_keys") or [])
             try:
-                write_mode = WriteMode(mode_value)
+                WriteMode(mode_value)
             except ValueError as e:
                 raise ValueError(
                     f"Stream {stream_id!r} destination has unknown write.mode "
                     f"{mode_value!r}; expected one of {[m.value for m in WriteMode]}"
                 ) from e
-            wc = WriteConfig(
-                mode=write_mode,
-                conflict_keys=dest.write.get("conflict_keys"),
-            )
-            composites = wc.effective_conflict_keys(primary_keys) or []
-            conflict_keys: list[str] = list(composites[0]) if composites else []
             enriched_endpoint = dict(endpoint_doc)
-            enriched_endpoint["_write_conflict_keys"] = conflict_keys
+            enriched_endpoint["_write_conflict_keys"] = list(
+                dest.write.get("conflict_keys") or []
+            )
             stream_endpoints[stream_id] = enriched_endpoint
             break
     logger.info(
@@ -251,20 +274,21 @@ async def run_destination_mode() -> None:
 
 async def main() -> int:
     """
-    Main entrypoint - dispatch based on RUN_MODE.
+    Dispatch based on RUN_MODE (main entrypoint).
 
     Returns:
         Exit code (0 for success, 1 for failure)
     """
     # Initialize run_id if not already set (cloud_entrypoint sets it first)
     from src.shared.run_id import initialize_run_id
+
     initialize_run_id()
 
     logger.info("=" * 60)
     logger.info("Analitiq Stream Starting")
     logger.info("=" * 60)
 
-    run_mode = os.getenv("RUN_MODE", "source").lower()
+    run_mode = settings.run_mode()
     logger.info(f"Run mode: {run_mode}")
 
     try:

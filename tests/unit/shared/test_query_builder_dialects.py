@@ -3,8 +3,9 @@
 Exercises:
 
 * Built-in dialect resolution (postgresql, mysql, mssql, sqlite).
-* Third-party dialect lookup falls through ``importlib`` with a clear
-  error when the package is missing.
+* Non-builtin dialects resolve through SQLAlchemy's registry (by the
+  connector-supplied registry name), with a clear error when the
+  dialect is not registered (the connector's package is missing).
 * Pushing ``limit`` / ``offset`` into ``QueryConfig`` produces
   dialect-correct paging SQL (PG ``LIMIT ... OFFSET ...`` vs MSSQL
   ``OFFSET ... ROWS FETCH NEXT ... ROWS ONLY``).
@@ -14,6 +15,7 @@ Exercises:
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 import pytest
@@ -46,21 +48,27 @@ class TestBuiltinDialectResolution:
         d = _get_sqlalchemy_dialect("sqlite")
         assert d.name == "sqlite"
 
-    def test_unknown_raises_value_error(self):
-        with pytest.raises(ValueError, match="Unsupported dialect"):
+    def test_unknown_dialect_raises_actionable_import_error(self):
+        # An unregistered dialect surfaces as an actionable ImportError --
+        # the connector's SA dialect package would register it.
+        with pytest.raises(ImportError, match="not registered"):
             _get_sqlalchemy_dialect("nonexistent")
 
 
-class TestLazyDialectLoading:
-    def test_missing_third_party_package_raises_actionable_import_error(self):
-        # Patch importlib so the lookup acts as if the package isn't
-        # installed even when it actually is (or vice versa).
-        with patch("cdk.query_builder.importlib.import_module") as imp:
-            imp.side_effect = ImportError("not installed")
-            with pytest.raises(ImportError, match="snowflake") as exc_info:
+class TestUnregisteredDialect:
+    def test_missing_dialect_package_raises_actionable_import_error(self):
+        # Simulate the connector's SA dialect package not being installed:
+        # registry.load raises NoSuchModuleError, which must surface as an
+        # actionable ImportError (not the raw SQLAlchemy error).
+        from sqlalchemy.exc import NoSuchModuleError
+
+        with patch(
+            "sqlalchemy.dialects.registry.load",
+            side_effect=NoSuchModuleError("not installed"),
+        ):
+            with pytest.raises(ImportError, match="install the connector") as exc_info:
                 _get_sqlalchemy_dialect("snowflake")
-        # The message names the missing package but does not suggest a
-        # poetry extra — extras naming lives in pyproject and would rot
+        # No poetry-extra naming -- extras live in pyproject and would rot
         # here silently (issue #90).
         assert "poetry install -E" not in str(exc_info.value)
 
@@ -108,7 +116,9 @@ class TestPaging:
         )
         upper = sql.upper()
         # Either modern OFFSET/FETCH or legacy ROW_NUMBER pagination is fine.
-        assert any(token in upper for token in ("FETCH NEXT", "FETCH FIRST", "ROW_NUMBER"))
+        assert any(
+            token in upper for token in ("FETCH NEXT", "FETCH FIRST", "ROW_NUMBER")
+        )
         # The naive ``LIMIT N OFFSET M`` form is what we were producing
         # before; assert it does NOT appear (T-SQL doesn't accept it).
         assert "LIMIT 50" not in upper
@@ -139,9 +149,7 @@ class TestPaging:
         """A connector-supplied fallback hook provides the ordering for
         paged queries that declare none (the mssql connector returns
         ``(SELECT NULL)``, Microsoft's documented no-op order)."""
-        builder = QueryBuilder(
-            "mssql", paging_order_fallback=lambda: "(SELECT NULL)"
-        )
+        builder = QueryBuilder("mssql", paging_order_fallback=lambda: "(SELECT NULL)")
         sql, _ = builder.build_select_query(
             QueryConfig(
                 schema_name="dbo",
@@ -275,9 +283,7 @@ class TestMssqlParamstyle:
         The fallback hook stands in for the mssql connector dialect so
         the unordered paged query compiles at all.
         """
-        builder = QueryBuilder(
-            "mssql", paging_order_fallback=lambda: "(SELECT NULL)"
-        )
+        builder = QueryBuilder("mssql", paging_order_fallback=lambda: "(SELECT NULL)")
         sql, params = builder.build_select_query(
             QueryConfig(
                 schema_name="dbo",
@@ -413,6 +419,46 @@ class TestPositionalParamConversion:
         )
         assert sql.count("$") == 2
         assert params == [10, 0]
+
+
+class TestCursorBoundOperator:
+    """The resume bound's operator is the single source of truth for whether a
+    no-change re-run re-reads the boundary row. Exclusive (>) is what makes
+    that re-run return zero rows; pin both renderings so a silent flip back to
+    >= is caught here, at the cheapest layer.
+    """
+
+    def _cursor_sql(self, mode, value="2024-01-01"):
+        builder = QueryBuilder("postgresql")
+        return builder.build_select_query(
+            QueryConfig(
+                schema_name="public",
+                table_name="events",
+                columns=["id"],
+                cursor_field="updated_at",
+                cursor_value=value,
+                cursor_mode=mode,
+            )
+        )
+
+    def test_exclusive_renders_strict_greater_than(self):
+        sql, params = self._cursor_sql("exclusive")
+        assert "updated_at >" in sql
+        assert "updated_at >=" not in sql
+        assert params == ["2024-01-01"]
+
+    def test_inclusive_renders_greater_or_equal(self):
+        sql, _ = self._cursor_sql("inclusive")
+        assert "updated_at >=" in sql
+
+    def test_datetime_cursor_value_survives_as_datetime_in_params(self):
+        # Restore reconstructs a timestamp to a datetime precisely so the bind
+        # is not a string (asyncpg rejects a string for a timestamp param);
+        # the builder must pass that datetime through to params untouched.
+        value = datetime(2024, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+        _, params = self._cursor_sql("exclusive", value=value)
+        assert params == [value]
+        assert isinstance(params[0], datetime)
 
 
 class TestAdbcQmarkMode:
@@ -640,11 +686,14 @@ class TestRedshiftDriverFlavour:
     sqlalchemy-redshift dialect. The registry default is psycopg2-shaped
     and compiles named ``%(name)s`` params, which redshift_connector
     rejects at execute time with "Only %s and %% are supported in the
-    query" — positional params are the regression signal here."""
+    query" — positional params are the regression signal here. The flavour
+    is supplied by the connector's ``SqlDialect.sqlalchemy_registry_name``
+    (the engine keeps no per-system table); the builder receives it as
+    ``registry_name``."""
 
     def test_redshift_compiles_positional_params(self):
         pytest.importorskip("sqlalchemy_redshift")
-        builder = QueryBuilder("redshift")
+        builder = QueryBuilder("redshift", registry_name="redshift.redshift_connector")
         sql, params = builder.build_select_query(
             QueryConfig(
                 schema_name="public",

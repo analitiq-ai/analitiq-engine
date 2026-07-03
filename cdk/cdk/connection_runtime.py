@@ -28,7 +28,8 @@ from __future__ import annotations
 import asyncio
 import copy
 import logging
-from typing import TYPE_CHECKING, Any, Dict, Mapping, Optional
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any, cast
 
 from sqlalchemy.engine import Engine
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -36,18 +37,16 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 if TYPE_CHECKING:
     import aiohttp
 
-from cdk.exceptions import TransportSpecError
 from cdk.derived_functions import DEFAULT_FUNCTIONS
+from cdk.exceptions import TransportSpecError
+from cdk.rate_limiter import RateLimiter
 from cdk.resolver import ResolutionContext, Resolver
-from cdk.type_map import InvalidTypeMapError, TypeMapper, UnmappedTypeError
-from cdk.types import EndpointScope
-from cdk.secrets.protocol import SecretsResolver
 from cdk.secrets.exceptions import (
     PlaceholderExpansionError,
     SecretNotFoundError,
     SecretResolutionError,
 )
-from cdk.rate_limiter import RateLimiter
+from cdk.secrets.protocol import SecretsResolver
 from cdk.transport_factory import (
     AdbcTransport,
     HttpTransport,
@@ -57,7 +56,8 @@ from cdk.transport_factory import (
     build_transport_from_spec,
     resolve_transport_spec,
 )
-
+from cdk.type_map import InvalidTypeMapError, TypeMapper, UnmappedTypeError
+from cdk.types import EndpointScope
 
 logger = logging.getLogger(__name__)
 
@@ -70,10 +70,10 @@ logger = logging.getLogger(__name__)
 _SECRET_BEARING_CONFIG_KEYS = frozenset({"secret_refs", "auth", "auth_state"})
 
 
-def _derive_dialect(connector_definition: Optional[Mapping[str, Any]]) -> Optional[str]:
-    """Return the base SQL dialect (e.g. ``postgresql``) from a connector
-    definition, or ``None`` if not a database connector.
+def _derive_dialect(connector_definition: Mapping[str, Any] | None) -> str | None:
+    """Return the base SQL dialect (e.g. ``postgresql``) from a definition.
 
+    Returns ``None`` if it is not a database connector.
     Handles both ``sqlalchemy`` (``driver: 'postgresql+asyncpg'``) and
     ``adbc`` (``driver: 'snowflake'``) transports — both store the
     dialect/driver under ``transports[default].driver``; the SQLAlchemy
@@ -96,12 +96,16 @@ def _derive_dialect(connector_definition: Optional[Mapping[str, Any]]) -> Option
 
 
 class _PreResolvedSecretsResolver(SecretsResolver):
-    """Placeholder resolver for worker-side runtimes built from a resolved
-    payload. The worker never touches the secret store — every value it
-    needs arrived resolved in the launch bootstrap — so any resolution
-    attempt is a contract violation and raises."""
+    """Placeholder resolver for worker-side runtimes built from a payload.
 
-    async def resolve(self, connection_id, *, keys=None):
+    The worker never touches the secret store — every value it needs arrived
+    resolved in the launch bootstrap — so any resolution attempt is a contract
+    violation and raises.
+    """
+
+    async def resolve(
+        self, connection_id: str, *, keys: list[str] | None = None
+    ) -> dict[str, str]:
         raise RuntimeError(
             "secret resolution attempted on a pre-resolved worker runtime; "
             "workers receive resolved values in the bootstrap and never "
@@ -130,10 +134,10 @@ class ConnectionRuntime:
         connector_id: str,
         connector_type: str,
         resolver: SecretsResolver,
-        connector_definition: Optional[Mapping[str, Any]] = None,
-        driver: Optional[str] = None,
-        connector_type_mapper: Optional[TypeMapper] = None,
-        connection_type_mapper: Optional[TypeMapper] = None,
+        connector_definition: Mapping[str, Any] | None = None,
+        driver: str | None = None,
+        connector_type_mapper: TypeMapper | None = None,
+        connection_type_mapper: TypeMapper | None = None,
     ) -> None:
         # Shape check only. The set of valid kinds is owned by the published
         # connector schema and by the worker registry (an unrunnable kind
@@ -141,55 +145,54 @@ class ConnectionRuntime:
         # parallel frozen set here would block registry-discovered kinds.
         if not connector_type or not isinstance(connector_type, str):
             raise ValueError(
-                f"connector_type must be a non-empty string, "
-                f"got {connector_type!r}"
+                f"connector_type must be a non-empty string, " f"got {connector_type!r}"
             )
         if not connector_id or not isinstance(connector_id, str):
             raise ValueError(
                 f"connector_id must be a non-empty string, got {connector_id!r}"
             )
 
-        self._raw_config: Dict[str, Any] = dict(raw_config)
+        self._raw_config: dict[str, Any] = dict(raw_config)
         self._connection_id = connection_id
         self._connector_id = connector_id
         self._connector_type = connector_type
-        self._connector_definition: Optional[Dict[str, Any]] = (
+        self._connector_definition: dict[str, Any] | None = (
             dict(connector_definition) if connector_definition else None
         )
         self._driver_override = driver
         self._resolver = resolver
         self._connector_type_mapper = connector_type_mapper
         self._connection_type_mapper = connection_type_mapper
-        self._composed_connection_mapper: Optional[TypeMapper] = None
+        self._composed_connection_mapper: TypeMapper | None = None
 
         # Worker-side pre-resolved payload (set by from_resolved_payload):
         # materialize() builds straight from these and never loads secrets.
-        self._pre_resolved_transport: Optional[Dict[str, Any]] = None
-        self._pre_resolved_config: Optional[Dict[str, Any]] = None
+        self._pre_resolved_transport: dict[str, Any] | None = None
+        self._pre_resolved_config: dict[str, Any] | None = None
 
         # Transport state — set by materialize()
         self._materialized = False
-        self._engine: Optional[AsyncEngine] = None
+        self._engine: AsyncEngine | None = None
         # Sync SQLAlchemy engine for sync-only drivers (e.g. Redshift's
         # redshift_connector). Exactly one of _engine / _sync_engine /
         # _adbc_transport / _session is set for a transport-driven runtime.
-        self._sync_engine: Optional[Engine] = None
-        self._session: Optional[aiohttp.ClientSession] = None
-        self._base_url: Optional[str] = None
-        self._rate_limiter: Optional[RateLimiter] = None
-        self._resolved_config: Optional[Dict[str, Any]] = None
-        self._transport_dialect: Optional[str] = None
-        self._transport_driver: Optional[str] = None
+        self._sync_engine: Engine | None = None
+        self._session: aiohttp.ClientSession | None = None
+        self._base_url: str | None = None
+        self._rate_limiter: RateLimiter | None = None
+        self._resolved_config: dict[str, Any] | None = None
+        self._transport_dialect: str | None = None
+        self._transport_driver: str | None = None
         # Set when materialize() built an AdbcTransport. Callers query
         # ``is_adbc`` to choose between the SA path (engine-backed) and
         # the ADBC-only path (cursor-backed); ``open_adbc_connection()``
         # hands them a fresh DBAPI connection from the closure baked at
         # materialize time.
-        self._adbc_transport: Optional[AdbcTransport] = None
+        self._adbc_transport: AdbcTransport | None = None
         # Set when materialize() built a MongoDbTransport. Connectors
         # access the client via ``mongo_client`` and the configured
         # default database via ``mongo_default_database``.
-        self._mongo_transport: Optional[MongoDbTransport] = None
+        self._mongo_transport: MongoDbTransport | None = None
 
         # Reference counting for shared ownership across streams
         self._ref_count = 0
@@ -214,7 +217,7 @@ class ConnectionRuntime:
         return self._connection_id
 
     @property
-    def driver(self) -> Optional[str]:
+    def driver(self) -> str | None:
         """Base SQL dialect (``postgresql``, ``mysql``, …) or ``None``."""
         if self._transport_dialect is not None:
             return self._transport_dialect
@@ -223,7 +226,7 @@ class ConnectionRuntime:
         return _derive_dialect(self._connector_definition)
 
     @property
-    def driver_string(self) -> Optional[str]:
+    def driver_string(self) -> str | None:
         """Driver identifier as materialised.
 
         SA transports return the full SQLAlchemy driver string
@@ -235,12 +238,16 @@ class ConnectionRuntime:
         return self._transport_driver
 
     @property
-    def raw_config(self) -> Dict[str, Any]:
+    def raw_config(self) -> dict[str, Any]:
         return copy.deepcopy(self._raw_config)
 
     @property
-    def connector_definition(self) -> Optional[Dict[str, Any]]:
-        return copy.deepcopy(self._connector_definition) if self._connector_definition else None
+    def connector_definition(self) -> dict[str, Any] | None:
+        return (
+            copy.deepcopy(self._connector_definition)
+            if self._connector_definition
+            else None
+        )
 
     @property
     def connector_type_mapper(self) -> TypeMapper:
@@ -252,7 +259,7 @@ class ConnectionRuntime:
         return self._connector_type_mapper
 
     @property
-    def connection_type_mapper(self) -> Optional[TypeMapper]:
+    def connection_type_mapper(self) -> TypeMapper | None:
         return self._connection_type_mapper
 
     def type_mapper_for(self, *, scope: EndpointScope) -> TypeMapper:
@@ -300,11 +307,11 @@ class ConnectionRuntime:
     # ------------------------------------------------------------------
 
     def request_resolver(
-        self, *, runtime_values: Optional[Mapping[str, Any]] = None
+        self, *, runtime_values: Mapping[str, Any] | None = None
     ) -> Resolver:
-        """Resolver for per-request value expressions (param defaults,
-        request bodies), with the default derived functions registered.
+        """Resolve per-request value expressions (param defaults, bodies).
 
+        The default derived functions are registered.
         Scopes: ``connection.{parameters,selections,discovered}`` from the
         connection config, plus ``runtime`` (``connection_id`` and any
         caller-supplied per-invocation values such as ``batch_size``).
@@ -318,7 +325,7 @@ class ConnectionRuntime:
         means the same expression behaves the same wherever the connector
         executes.
         """
-        runtime_scope: Dict[str, Any] = {"connection_id": self._connection_id}
+        runtime_scope: dict[str, Any] = {"connection_id": self._connection_id}
         if runtime_values:
             runtime_scope.update(runtime_values)
         context = ResolutionContext(
@@ -335,9 +342,7 @@ class ConnectionRuntime:
     # Materialization
     # ------------------------------------------------------------------
 
-    async def materialize(
-        self, *, sql_dialect: Any = None
-    ) -> None:
+    async def materialize(self, *, sql_dialect: Any = None) -> None:
         """Resolve secrets, build the resolution context, build the transport.
 
         Two ways in:
@@ -358,7 +363,10 @@ class ConnectionRuntime:
         if self._materialized:
             return
 
-        if self._pre_resolved_transport is not None or self._pre_resolved_config is not None:
+        if (
+            self._pre_resolved_transport is not None
+            or self._pre_resolved_config is not None
+        ):
             if self._pre_resolved_transport is not None:
                 transport = await build_transport_from_spec(
                     self._pre_resolved_transport, sql_dialect=sql_dialect
@@ -373,16 +381,14 @@ class ConnectionRuntime:
         self._validate_secret_refs(secrets)
         self._validate_connection_contract(secrets)
 
-        has_transports = bool(
-            self._connector_definition
-            and self._connector_definition.get("transports")
-        )
+        definition = self._connector_definition
+        has_transports = bool(definition and definition.get("transports"))
 
-        if has_transports:
+        if has_transports and definition is not None:
             context = self._build_resolution_context(secrets)
             try:
                 transport = await build_transport(
-                    self._connector_definition,
+                    definition,
                     context=context,
                     sql_dialect=sql_dialect,
                 )
@@ -402,10 +408,14 @@ class ConnectionRuntime:
     def _apply_transport(self, transport: Any) -> None:
         """Wire a built transport's objects onto this runtime."""
         if isinstance(transport, SqlAlchemyTransport):
+            # ``is_async`` is the transport's authoritative flavour flag (set
+            # by build_sqlalchemy_from_spec alongside the engine); the engine
+            # field's static union can't be tied to that runtime bool, so cast
+            # to the slot type the flag guarantees.
             if transport.is_async:
-                self._engine = transport.engine
+                self._engine = cast(AsyncEngine, transport.engine)
             else:
-                self._sync_engine = transport.engine
+                self._sync_engine = cast(Engine, transport.engine)
             self._transport_driver = transport.driver
             self._transport_dialect = transport.dialect
         elif isinstance(transport, AdbcTransport):
@@ -427,7 +437,7 @@ class ConnectionRuntime:
     # Worker bootstrap: resolve on the trusted side, build in the worker
     # ------------------------------------------------------------------
 
-    async def resolve_spec(self) -> Dict[str, Any]:
+    async def resolve_spec(self) -> dict[str, Any]:
         """Resolve this connection into a JSON-safe worker payload.
 
         Runs on the trusted side. Loads secrets, resolves the connector's
@@ -440,12 +450,10 @@ class ConnectionRuntime:
         self._validate_secret_refs(secrets)
         self._validate_connection_contract(secrets)
 
-        has_transports = bool(
-            self._connector_definition
-            and self._connector_definition.get("transports")
-        )
+        definition = self._connector_definition
+        has_transports = bool(definition and definition.get("transports"))
 
-        payload: Dict[str, Any] = {
+        payload: dict[str, Any] = {
             "connection_id": self._connection_id,
             "connector_id": self._connector_id,
             "connector_type": self._connector_type,
@@ -462,11 +470,11 @@ class ConnectionRuntime:
             "transport_spec": None,
             "resolved_config": None,
         }
-        if has_transports:
+        if has_transports and definition is not None:
             context = self._build_resolution_context(secrets)
             try:
                 payload["transport_spec"] = resolve_transport_spec(
-                    self._connector_definition, context=context
+                    definition, context=context
                 )
             finally:
                 self._scrub_secrets()
@@ -479,9 +487,9 @@ class ConnectionRuntime:
         cls,
         payload: Mapping[str, Any],
         *,
-        connector_type_mapper: Optional[TypeMapper] = None,
-        connection_type_mapper: Optional[TypeMapper] = None,
-    ) -> "ConnectionRuntime":
+        connector_type_mapper: TypeMapper | None = None,
+        connection_type_mapper: TypeMapper | None = None,
+    ) -> ConnectionRuntime:
         """Rebuild a runtime in a connector worker from a resolved payload.
 
         The worker side of :meth:`resolve_spec`: no connector definition and
@@ -515,9 +523,7 @@ class ConnectionRuntime:
     @property
     def engine(self) -> AsyncEngine:
         if not self._materialized:
-            raise RuntimeError(
-                "engine not available: call materialize() first"
-            )
+            raise RuntimeError("engine not available: call materialize() first")
         if self._adbc_transport is not None and self._engine is None:
             raise RuntimeError(
                 f"engine not available for {self._connection_id}: this runtime "
@@ -547,9 +553,7 @@ class ConnectionRuntime:
         async handler interface is preserved.
         """
         if not self._materialized:
-            raise RuntimeError(
-                "sync_engine not available: call materialize() first"
-            )
+            raise RuntimeError("sync_engine not available: call materialize() first")
         if self._sync_engine is None:
             raise RuntimeError(
                 f"sync_engine not available for {self._connection_id}: this "
@@ -588,9 +592,7 @@ class ConnectionRuntime:
         making this method async.
         """
         if not self._materialized:
-            raise RuntimeError(
-                "open_adbc_connection() requires materialize() first"
-            )
+            raise RuntimeError("open_adbc_connection() requires materialize() first")
         if self._adbc_transport is None:
             raise RuntimeError(
                 f"open_adbc_connection() called on non-ADBC runtime "
@@ -603,7 +605,8 @@ class ConnectionRuntime:
     def session(self) -> aiohttp.ClientSession:
         if not self._materialized or self._session is None:
             raise RuntimeError(
-                "session not available: call materialize() first or wrong connector_type"
+                "session not available: call materialize() first or wrong "
+                "connector_type"
             )
         return self._session
 
@@ -611,12 +614,13 @@ class ConnectionRuntime:
     def base_url(self) -> str:
         if not self._materialized or self._base_url is None:
             raise RuntimeError(
-                "base_url not available: call materialize() first or wrong connector_type"
+                "base_url not available: call materialize() first or wrong "
+                "connector_type"
             )
         return self._base_url
 
     @property
-    def rate_limiter(self) -> Optional[RateLimiter]:
+    def rate_limiter(self) -> RateLimiter | None:
         if not self._materialized:
             raise RuntimeError("rate_limiter not available: call materialize() first")
         return self._rate_limiter
@@ -632,7 +636,7 @@ class ConnectionRuntime:
         return self._mongo_transport.client
 
     @property
-    def mongo_default_database(self) -> Optional[str]:
+    def mongo_default_database(self) -> str | None:
         """Default database name from the connector definition, or ``None``."""
         if not self._materialized or self._mongo_transport is None:
             raise RuntimeError(
@@ -642,7 +646,7 @@ class ConnectionRuntime:
         return self._mongo_transport.default_database
 
     @property
-    def resolved_config(self) -> Dict[str, Any]:
+    def resolved_config(self) -> dict[str, Any]:
         if not self._materialized:
             raise RuntimeError(
                 "resolved_config not available: call materialize() first"
@@ -650,7 +654,8 @@ class ConnectionRuntime:
         if self._resolved_config is None:
             raise RuntimeError(
                 f"resolved_config for {self._connection_id} was already scrubbed "
-                f"(scrub_requests={self._scrub_requests}, ref_count={self._ref_count}). "
+                f"(scrub_requests={self._scrub_requests}, "
+                f"ref_count={self._ref_count}). "
                 f"Access resolved_config before calling scrub_resolved_config()."
             )
         return self._resolved_config
@@ -765,7 +770,7 @@ class ConnectionRuntime:
     # Private helpers
     # ------------------------------------------------------------------
 
-    async def _load_secrets(self) -> Dict[str, Any]:
+    async def _load_secrets(self) -> dict[str, Any]:
         """Fetch the connection's secret store contents.
 
         Returns an empty dict when the connection has no secrets file —
@@ -786,8 +791,11 @@ class ConnectionRuntime:
         return dict(secrets)
 
     def _validate_secret_refs(self, secrets: Mapping[str, Any]) -> None:
-        """Confirm every ``secret_refs.<name>`` declared by the connection
-        resolves to a value in the secret store."""
+        """Confirm every declared ``secret_refs.<name>`` resolves to a value.
+
+        Checks each ``secret_refs.<name>`` declared by the connection against
+        the secret store.
+        """
         secret_refs = self._raw_config.get("secret_refs") or {}
         if not isinstance(secret_refs, Mapping):
             raise TypeError(
@@ -804,8 +812,7 @@ class ConnectionRuntime:
             )
 
     def _validate_connection_contract(self, secrets: Mapping[str, Any]) -> None:
-        """Enforce the connector's connection contract before any binding is
-        resolved.
+        """Enforce the connection contract before any binding is resolved.
 
         The published connector schema defines ``ConnectionContractInput``'s
         ``required`` as "whether resolution must produce a value" — the single
@@ -835,7 +842,7 @@ class ConnectionRuntime:
         if not isinstance(inputs, Mapping):
             return
 
-        scopes: Dict[str, Mapping[str, Any]] = {
+        scopes: dict[str, Mapping[str, Any]] = {
             "connection.parameters": self._raw_config.get("parameters") or {},
             "secrets": secrets,
         }
@@ -846,7 +853,7 @@ class ConnectionRuntime:
             if not spec.get("required"):
                 continue
             storage = spec.get("storage")
-            scope = scopes.get(storage)
+            scope = scopes.get(storage) if isinstance(storage, str) else None
             if scope is None:
                 # A required input must store its value where the connection
                 # carries it (connection.parameters or secrets); the schema's
@@ -890,12 +897,12 @@ class ConnectionRuntime:
             runtime={"connection_id": self._connection_id},
         )
 
-    def _merge_secrets_into_config(
-        self, secrets: Mapping[str, Any]
-    ) -> Dict[str, Any]:
-        """Merge secrets into a flat resolved-config dict for file/s3/stdout
-        consumers, which expose ``resolved_config`` directly instead of
-        a transport object."""
+    def _merge_secrets_into_config(self, secrets: Mapping[str, Any]) -> dict[str, Any]:
+        """Merge secrets into a flat resolved-config dict.
+
+        Serves file/s3/stdout consumers, which expose ``resolved_config``
+        directly instead of a transport object.
+        """
         resolved = copy.deepcopy(self._raw_config)
         resolved.setdefault("parameters", {})
         # Surface secrets at the top level for handlers that look them up
@@ -935,7 +942,7 @@ DETERMINISTIC_CONNECT_ERRORS: tuple = (
 
 
 async def materialize_runtime(
-    runtime: "ConnectionRuntime", *, sql_dialect: Any = None
+    runtime: ConnectionRuntime, *, sql_dialect: Any = None
 ) -> None:
     """Acquire and materialize a runtime.
 

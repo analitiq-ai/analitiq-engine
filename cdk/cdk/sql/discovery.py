@@ -14,7 +14,7 @@ calls these directly.
 
 from __future__ import annotations
 
-from typing import Any, List, Tuple
+from typing import Any
 
 from ..contract import ColumnDef
 from ..type_map.exceptions import UnmappedTypeError
@@ -44,7 +44,7 @@ def _col(row: Row, name: str) -> Any:
     )
 
 
-async def list_schemas(runtime: Any, *, dialect: SqlDialect) -> List[str]:
+async def list_schemas(runtime: Any, *, dialect: SqlDialect) -> list[str]:
     """List the non-system schemas visible to *runtime*.
 
     *dialect* is the connector's dialect strategy — supplied by the
@@ -56,9 +56,7 @@ async def list_schemas(runtime: Any, *, dialect: SqlDialect) -> List[str]:
     return [_col(row, "schema_name") for row in rows]
 
 
-async def list_tables(
-    runtime: Any, schema: str, *, dialect: SqlDialect
-) -> List[str]:
+async def list_tables(runtime: Any, schema: str, *, dialect: SqlDialect) -> list[str]:
     """List the tables (and views) in *schema*."""
     sql, params = dialect.tables_query(schema)
     rows = await fetch_rows(runtime, sql, params)
@@ -67,7 +65,7 @@ async def list_tables(
 
 async def list_columns(
     runtime: Any, schema: str, table: str, *, dialect: SqlDialect
-) -> Tuple[List[ColumnDef], List[str]]:
+) -> tuple[list[ColumnDef], list[str]]:
     """Describe *table*: its columns (canonical types) and its primary keys.
 
     Returns ``(columns, primary_keys)``. Each column's native type is mapped to
@@ -85,7 +83,7 @@ async def list_columns(
     col_sql, col_params = dialect.columns_query(schema, table)
     col_rows = await fetch_rows(runtime, col_sql, col_params)
 
-    columns: List[ColumnDef] = []
+    columns: list[ColumnDef] = []
     for row in col_rows:
         name = _col(row, "column_name")
         native = _col(row, "data_type")

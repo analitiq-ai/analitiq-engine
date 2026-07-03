@@ -19,11 +19,6 @@ pre-materialized ``ConnectionRuntime`` to verify:
 and connects/disconnects internally, so these tests pass the runtime directly
 rather than calling ``connect()`` first.
 
-Tie-breaker dedup is intentionally not exercised here: ``read_batches``
-initialises ``state["bookmarks"]`` empty, so the dedup comparators are
-unreachable through this entry point. They are pinned directly as pure
-functions in ``test_api_dedup_helpers.py``.
-
 No live HTTP. The session is a ``MagicMock`` with ``request`` returning
 an async context manager that yields a stub response.
 """
@@ -31,15 +26,16 @@ an async context manager that yields a stub response.
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Optional, Tuple
+from decimal import Decimal
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pyarrow as pa
 import pytest
 
-from cdk.secrets import InMemorySecretsResolver
 from cdk.connection_runtime import ConnectionRuntime
-from src.source.connectors.api import APIConnector
+from cdk.secrets import InMemorySecretsResolver
+from src.source.connectors.api import APIConnector, _extract_next_cursor
 from src.source.connectors.base import ReadError, TransientReadError
 
 # ---------------------------------------------------------------------------
@@ -54,14 +50,17 @@ class _FakeResponse:
         self.status = status
         self._body = body
 
-    async def __aenter__(self) -> "_FakeResponse":
+    async def __aenter__(self) -> _FakeResponse:
         return self
 
     async def __aexit__(self, *_exc) -> None:
         return None
 
-    async def json(self) -> Any:
-        return self._body
+    async def json(self, *, loads: Any = json.loads) -> Any:
+        # aiohttp decodes the raw body text through ``loads``; model that so the
+        # connector's custom decoder (e.g. parse_float=Decimal) actually runs.
+        raw = self._body if isinstance(self._body, str) else json.dumps(self._body)
+        return loads(raw)
 
     async def text(self) -> str:
         return json.dumps(self._body) if not isinstance(self._body, str) else self._body
@@ -75,14 +74,16 @@ class _FakeSession:
     tests can assert on the URL + params actually sent.
     """
 
-    def __init__(self, responses: List[_FakeResponse]):
+    def __init__(self, responses: list[_FakeResponse]):
         self._responses = list(responses)
-        self.calls: List[Tuple[str, str, Dict[str, Any]]] = []
+        self.calls: list[tuple[str, str, dict[str, Any]]] = []
         # JSON body per request (None when the connector sent none),
         # parallel to ``calls``.
-        self.bodies: List[Any] = []
+        self.bodies: list[Any] = []
 
-    def request(self, method: str, url: str, *, params: Dict[str, Any], json: Any = None):
+    def request(
+        self, method: str, url: str, *, params: dict[str, Any], json: Any = None
+    ):
         self.calls.append((method, url, dict(params)))
         self.bodies.append(json)
         if not self._responses:
@@ -91,7 +92,7 @@ class _FakeSession:
 
 
 def _runtime_with_session(
-    session: _FakeSession, *, parameters: Optional[Dict[str, Any]] = None
+    session: _FakeSession, *, parameters: dict[str, Any] | None = None
 ) -> ConnectionRuntime:
     """Build a ``ConnectionRuntime`` whose transport is already
     materialized with ``session`` so ``connect()`` adopts it.
@@ -111,10 +112,10 @@ def _runtime_with_session(
 
 
 def _endpoint_doc_with_records(
-    pagination: Optional[Dict[str, Any]] = None,
-    replication: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    read_block: Dict[str, Any] = {
+    pagination: dict[str, Any] | None = None,
+    replication: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    read_block: dict[str, Any] = {
         "request": {"method": "GET", "path": "/items"},
         "response": {
             "schema": {
@@ -149,11 +150,10 @@ def _endpoint_doc_with_records(
 def _stream_source(
     *,
     replication_method: str = "full_refresh",
-    cursor_field: Optional[str] = None,
-    safety_window: Optional[int] = None,
-    tie_breaker_fields: Optional[List[str]] = None,
-) -> Dict[str, Any]:
-    block: Dict[str, Any] = {
+    cursor_field: str | None = None,
+    safety_window: int | None = None,
+) -> dict[str, Any]:
+    block: dict[str, Any] = {
         "endpoint_ref": {
             "scope": "connector",
             "connection_id": "test-conn",
@@ -166,8 +166,6 @@ def _stream_source(
         block["replication"]["cursor_field"] = cursor_field
     if safety_window is not None:
         block["replication"]["safety_window_seconds"] = safety_window
-    if tie_breaker_fields:
-        block["replication"]["tie_breaker_fields"] = tie_breaker_fields
     return block
 
 
@@ -175,19 +173,19 @@ async def _consume(
     connector: APIConnector,
     runtime: ConnectionRuntime,
     *,
-    config: Dict[str, Any],
+    config: dict[str, Any],
     state_manager: Any,
     stream_name: str,
-    partition: Optional[Dict[str, Any]] = None,
+    partition: dict[str, Any] | None = None,
     batch_size: int = 1000,
-) -> List[pa.RecordBatch]:
+) -> list[pa.RecordBatch]:
     """Drive ``read_batches`` with the runtime it now owns.
 
     ``read_batches`` connects and disconnects internally, so callers pass the
     runtime directly (no prior ``connect()``); ``state_manager`` is forwarded as
     the ``checkpoint`` argument.
     """
-    batches: List[pa.RecordBatch] = []
+    batches: list[pa.RecordBatch] = []
     async for batch in connector.read_batches(
         runtime,
         config,
@@ -257,8 +255,8 @@ class TestReadBatchesNoPagination:
 
 
 def _endpoint_doc_with_ref(
-    records_ref: str, response_schema: Dict[str, Any]
-) -> Dict[str, Any]:
+    records_ref: str, response_schema: dict[str, Any]
+) -> dict[str, Any]:
     """Endpoint document with an explicit ``records.ref`` + response schema."""
     return {
         "$schema": "https://schemas.analitiq.ai/api-endpoint/latest.json",
@@ -275,7 +273,7 @@ def _endpoint_doc_with_ref(
     }
 
 
-_RECORD_ITEMS_SCHEMA: Dict[str, Any] = {
+_RECORD_ITEMS_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "id": {"type": "integer", "arrow_type": "Int64"},
@@ -373,9 +371,9 @@ class TestReadBatchesRecordsRefShapes:
         connector = APIConnector("test")
 
         endpoint = _endpoint_doc_with_records()
-        endpoint["operations"]["read"]["response"]["records"]["ref"] = (
-            "response.body.does_not_exist"
-        )
+        endpoint["operations"]["read"]["response"]["records"][
+            "ref"
+        ] = "response.body.does_not_exist"
         with pytest.raises(
             ReadError,
             match=r"does_not_exist.*not declared under properties.*"
@@ -575,6 +573,8 @@ class TestReadBatchesKeysetPagination:
 
         assert [b.num_rows for b in batches] == [2, 1]
         # First request carries no key; second carries the last id of page 1.
+        # An int key stays native (yarl renders it faithfully); only Decimals
+        # are stringified at the query boundary.
         assert "after_id" not in session.calls[0][2]
         assert session.calls[1][2]["after_id"] == 2
 
@@ -881,9 +881,7 @@ class TestReadBatchesParamDefaults:
         session = _FakeSession(
             [_FakeResponse(status=200, body={"records": [{"id": 1, "name": "a"}]})]
         )
-        runtime = _runtime_with_session(
-            session, parameters={"api_token": "tok-123"}
-        )
+        runtime = _runtime_with_session(session, parameters={"api_token": "tok-123"})
         connector = APIConnector("test")
 
         endpoint = _endpoint_doc_with_records()
@@ -987,7 +985,9 @@ class TestReadBatchesParamDefaults:
                 "type": "string",
                 "required": False,
                 "default": {
-                    "template": "${connection.parameters.org}/${connection.parameters.gone}"
+                    "template": (
+                        "${connection.parameters.org}/" "${connection.parameters.gone}"
+                    )
                 },
             },
         }
@@ -1292,3 +1292,243 @@ class TestReadBatchesRequestBody:
             {"paging": {"offset": 0, "limit": 2}},
             {"paging": {"offset": 2, "limit": 2}},
         ]
+
+
+class TestExtractNextCursor:
+    """``_extract_next_cursor`` is exercised end-to-end by the cursor-pagination
+    tests above; these pin its edge cases directly, restoring the direct
+    coverage that moved out with the removed dedup-helper test module."""
+
+    @pytest.mark.unit
+    def test_extracts_token_from_body_path(self):
+        assert _extract_next_cursor({"next": "abc"}, "response.body.next") == "abc"
+
+    @pytest.mark.unit
+    def test_non_dict_data_returns_none(self):
+        assert _extract_next_cursor("not-a-dict", "response.body.next") is None
+
+    @pytest.mark.unit
+    def test_none_token_returns_none(self):
+        assert _extract_next_cursor({"next": None}, "response.body.next") is None
+
+    @pytest.mark.unit
+    def test_empty_string_token_returns_none(self):
+        assert _extract_next_cursor({"next": ""}, "response.body.next") is None
+
+    @pytest.mark.unit
+    def test_body_only_ref_returns_none(self):
+        # ``response.body`` with no trailing field can never name a cursor.
+        assert _extract_next_cursor({"next": "abc"}, "response.body") is None
+
+    @pytest.mark.unit
+    def test_integer_token_coerced_to_str(self):
+        assert _extract_next_cursor({"next": 42}, "response.body.next") == "42"
+
+
+# ---------------------------------------------------------------------------
+# Decimal precision at the JSON boundary (#288)
+# ---------------------------------------------------------------------------
+
+
+_HIGH_PRECISION_RECORDS_SCHEMA: dict[str, Any] = {
+    "type": "array",
+    "items": {
+        "type": "object",
+        "properties": {
+            # 18 significant digits -- more than a float64 can represent, so a
+            # default json.loads would round it before Arrow ever sees it.
+            "amount": {"type": "number", "arrow_type": "Decimal128(20,8)"},
+            "rate": {"type": "number", "arrow_type": "Float64"},
+        },
+    },
+}
+
+
+class TestReadBatchesDecimalPrecision:
+    @pytest.mark.asyncio
+    async def test_decimal_column_keeps_exact_source_digits(self):
+        # Body is delivered as raw JSON text (not a pre-parsed dict) so the
+        # connector's decoder governs how the numeric token is parsed -- the
+        # whole point of the fix is to parse it losslessly.
+        body = '[{"amount": 1234567890.12345678, "rate": 3.14159265358979}]'
+        session = _FakeSession([_FakeResponse(status=200, body=body)])
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_ref(
+            "response.body", _HIGH_PRECISION_RECORDS_SCHEMA
+        )
+        batches = await _consume(
+            connector,
+            runtime,
+            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=100,
+        )
+
+        assert len(batches) == 1
+        amount = batches[0].column("amount").to_pylist()[0]
+        # Every digit survives the boundary -- the value the default parser
+        # would have rounded to 1234567890.1234567.
+        assert amount == Decimal("1234567890.12345678")
+        # The Float64 column still narrows to a double without erroring on the
+        # Decimal the lossless parse produced.
+        assert batches[0].schema.field("rate").type == pa.float64()
+        assert batches[0].column("rate").to_pylist()[0] == pytest.approx(
+            3.14159265358979
+        )
+
+    @pytest.mark.asyncio
+    async def test_keyset_decimal_key_sent_with_full_precision(self):
+        # A fractional keyset key parses to Decimal; it must reach the next
+        # request as its full-precision string. yarl would otherwise truncate
+        # the Decimal to its integer part and silently skip rows.
+        page1 = '{"records": [{"score": 10.5}, {"score": 1234567890.12345678}]}'
+        page2 = '{"records": [{"score": 1234567890.99999999}]}'
+        session = _FakeSession(
+            [
+                _FakeResponse(status=200, body=page1),
+                _FakeResponse(status=200, body=page2),
+            ]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_ref(
+            "response.body.records",
+            {
+                "type": "object",
+                "properties": {
+                    "records": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "score": {"type": "number", "arrow_type": "Float64"},
+                            },
+                        },
+                    },
+                },
+            },
+        )
+        endpoint["operations"]["read"]["pagination"] = {
+            "type": "keyset",
+            "keyset": {"param": "after", "from_record": "score"},
+            "limit": {"param": "limit"},
+        }
+        await _consume(
+            connector,
+            runtime,
+            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=2,
+        )
+
+        assert "after" not in session.calls[0][2]
+        assert session.calls[1][2]["after"] == "1234567890.12345678"
+
+    @pytest.mark.asyncio
+    async def test_keyset_body_param_keeps_native_numeric_type(self):
+        # A keyset param declared ``in: body`` must reach the JSON body as its
+        # native type. Stringifying it (to dodge yarl in the query) would send
+        # an integer key as a string, which a numeric body schema can reject.
+        session = _FakeSession(
+            [
+                _FakeResponse(
+                    status=200,
+                    body={"records": [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]},
+                ),
+                _FakeResponse(status=200, body={"records": [{"id": 3, "name": "c"}]}),
+            ]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(
+            pagination={
+                "type": "keyset",
+                "keyset": {"param": "after", "from_record": "id"},
+                "limit": {"param": "limit"},
+            },
+        )
+        endpoint["operations"]["read"]["params"] = {
+            "after": {"in": "body", "type": "integer", "required": False},
+        }
+        endpoint["operations"]["read"]["request"] = {
+            "method": "POST",
+            "path": "/items/search",
+            "body": {"after": {"from_param": "after"}},
+        }
+        await _consume(
+            connector,
+            runtime,
+            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=2,
+        )
+
+        # Body param stays out of the query and keeps its native int type.
+        assert "after" not in session.calls[1][2]
+        assert session.bodies[1] == {"after": 2}
+
+    @pytest.mark.asyncio
+    async def test_keyset_body_param_narrows_fractional_decimal_to_float(self):
+        # A fractional keyset key parses to Decimal. In the body it must become
+        # a float (a JSON number) -- stdlib json.dumps, which aiohttp uses for
+        # the body, cannot serialize a Decimal and would raise on page 2.
+        page1 = '{"records": [{"score": 1.5}, {"score": 2.5}]}'
+        page2 = '{"records": [{"score": 3.5}]}'
+        session = _FakeSession(
+            [
+                _FakeResponse(status=200, body=page1),
+                _FakeResponse(status=200, body=page2),
+            ]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_ref(
+            "response.body.records",
+            {
+                "type": "object",
+                "properties": {
+                    "records": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "score": {"type": "number", "arrow_type": "Float64"},
+                            },
+                        },
+                    },
+                },
+            },
+        )
+        endpoint["operations"]["read"]["params"] = {
+            "after": {"in": "body", "type": "number", "required": False},
+        }
+        endpoint["operations"]["read"]["request"] = {
+            "method": "POST",
+            "path": "/items/search",
+            "body": {"after": {"from_param": "after"}},
+        }
+        endpoint["operations"]["read"]["pagination"] = {
+            "type": "keyset",
+            "keyset": {"param": "after", "from_record": "score"},
+            "limit": {"param": "limit"},
+        }
+        await _consume(
+            connector,
+            runtime,
+            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=2,
+        )
+
+        body = session.bodies[1]
+        assert body == {"after": 2.5}
+        assert isinstance(body["after"], float)

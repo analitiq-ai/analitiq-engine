@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from cdk.types import AckStatus, SchemaSpec, WriteMode
+from cdk.types import AckStatus, RetrySemantics, SchemaSpec, WriteMode
 from src.worker.proxy import WorkerProxyHandler
 
 
@@ -58,7 +58,11 @@ class TestProxyConnectFailures:
         handle = _handle()
         control = MagicMock()
         control.connect = AsyncMock(return_value=True)
-        control.get_capabilities = AsyncMock(return_value=None)
+        # get_capabilities now raises on a transport/RPC failure instead of
+        # collapsing to None; the proxy must still tear down and re-raise.
+        control.get_capabilities = AsyncMock(
+            side_effect=ConnectionError("worker channel dropped")
+        )
         control.disconnect = AsyncMock()
         control.send_shutdown = AsyncMock()
 
@@ -84,6 +88,7 @@ class TestProxyConfigureSchema:
         client = MagicMock()
         client.connect = AsyncMock(return_value=True)
         client.start_stream = AsyncMock(return_value=True)
+        client.stream_retry_semantics = None
 
         with patch(
             "src.worker.proxy.DestinationGRPCClient", return_value=client
@@ -104,6 +109,56 @@ class TestProxyConfigureSchema:
         schema_config = client.start_stream.call_args.kwargs["schema_config"]
         assert schema_config["ack_timeout_seconds"] == 300
         assert schema_config["write_mode"] == "upsert"
+
+    async def test_re_reports_worker_retry_verdict(self):
+        """The shell's engine-facing ack must carry the worker's verdict
+        (issue #286), not the base handler default."""
+        proxy = _proxy()
+        proxy._handle = _handle()
+        client = MagicMock()
+        client.connect = AsyncMock(return_value=True)
+        client.start_stream = AsyncMock(return_value=True)
+        client.stream_retry_semantics = (
+            int(RetrySemantics.RETRY_SEMANTICS_EXACTLY_ONCE),
+            "upsert merges on conflict keys",
+        )
+
+        with patch("src.worker.proxy.DestinationGRPCClient", return_value=client):
+            accepted = await proxy.configure_schema(
+                SchemaSpec(
+                    stream_id="s1",
+                    version=1,
+                    write_mode=WriteMode.WRITE_MODE_UPSERT,
+                    ack_timeout_seconds=300,
+                )
+            )
+
+        assert accepted is True
+        verdict = proxy.retry_semantics("s1")
+        assert verdict.semantics == RetrySemantics.RETRY_SEMANTICS_EXACTLY_ONCE
+        assert verdict.reason == "upsert merges on conflict keys"
+
+    async def test_unspecified_worker_verdict_falls_back_to_base_default(self):
+        proxy = _proxy()
+        proxy._handle = _handle()
+        client = MagicMock()
+        client.connect = AsyncMock(return_value=True)
+        client.start_stream = AsyncMock(return_value=True)
+        client.stream_retry_semantics = None
+
+        with patch("src.worker.proxy.DestinationGRPCClient", return_value=client):
+            await proxy.configure_schema(
+                SchemaSpec(
+                    stream_id="s1",
+                    version=1,
+                    write_mode=WriteMode.WRITE_MODE_INSERT,
+                    ack_timeout_seconds=300,
+                )
+            )
+
+        verdict = proxy.retry_semantics("s1")
+        assert verdict.semantics == RetrySemantics.RETRY_SEMANTICS_AT_LEAST_ONCE
+        assert "declares no retry-safety" in verdict.reason
 
 
 class TestProxyWriteBatch:
@@ -362,3 +417,31 @@ class TestProxyCapabilities:
         assert proxy.max_batch_size == 500
         # Zero means "worker did not declare" — fall back to the base default.
         assert proxy.max_batch_bytes == 8 * 1024 * 1024
+
+    def test_auto_create_and_truncate_forwarded_from_capabilities(self):
+        proxy = _proxy()
+        # Before connect: both default False, no crash.
+        assert proxy.supports_auto_create is False
+        assert proxy.supports_truncate is False
+        # supports_truncate is derived from the advertised write-mode list, not
+        # a dedicated bool — mirror exactly what the worker advertised.
+        caps = MagicMock(
+            supports_auto_create=True,
+            supported_write_modes=[
+                WriteMode.WRITE_MODE_INSERT,
+                WriteMode.WRITE_MODE_TRUNCATE_INSERT,
+            ],
+        )
+        proxy._capabilities = caps
+        assert proxy.supports_auto_create is True
+        assert proxy.supports_truncate is True
+
+    def test_truncate_absent_and_auto_create_false_when_not_advertised(self):
+        proxy = _proxy()
+        caps = MagicMock(
+            supports_auto_create=False,
+            supported_write_modes=[WriteMode.WRITE_MODE_INSERT],
+        )
+        proxy._capabilities = caps
+        assert proxy.supports_auto_create is False
+        assert proxy.supports_truncate is False

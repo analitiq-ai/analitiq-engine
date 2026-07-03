@@ -11,11 +11,11 @@ connector classes execute: in the worker, by
 """
 
 from cdk.sql.generic import GenericSQLConnector
-from .stream import StreamDestinationHandler
-from .file import FileDestinationHandler
-from .api import ApiDestinationHandler
-from .mongodb import MongoDbDestinationHandler
 
+from .api import ApiDestinationHandler
+from .file import FileDestinationHandler
+from .mongodb import MongoDbDestinationHandler
+from .stream import StreamDestinationHandler
 
 __all__ = [
     "GenericSQLConnector",

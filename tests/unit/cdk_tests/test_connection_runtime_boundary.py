@@ -55,9 +55,7 @@ def _http_runtime():
                     "transport_type": "http",
                     "base_url": "https://api.example.com",
                     "headers": {
-                        "Authorization": {
-                            "template": "Bearer ${secrets.API_TOKEN}"
-                        }
+                        "Authorization": {"template": "Bearer ${secrets.API_TOKEN}"}
                     },
                 }
             },
@@ -217,10 +215,16 @@ class TestConnectionContractValidation:
         runtime = self._runtime(
             parameters={"warehouse": "wh"},
             contract_inputs={
-                "account": {"required": True, "source": "user",
-                            "storage": "connection.parameters"},
-                "warehouse": {"required": False, "source": "user",
-                              "storage": "connection.parameters"},
+                "account": {
+                    "required": True,
+                    "source": "user",
+                    "storage": "connection.parameters",
+                },
+                "warehouse": {
+                    "required": False,
+                    "source": "user",
+                    "storage": "connection.parameters",
+                },
             },
         )
         with pytest.raises(TransportSpecError, match="account"):
@@ -230,10 +234,16 @@ class TestConnectionContractValidation:
         runtime = self._runtime(
             parameters={"account": "abc"},
             contract_inputs={
-                "account": {"required": True, "source": "user",
-                            "storage": "connection.parameters"},
-                "role": {"required": False, "source": "user",
-                         "storage": "connection.parameters"},
+                "account": {
+                    "required": True,
+                    "source": "user",
+                    "storage": "connection.parameters",
+                },
+                "role": {
+                    "required": False,
+                    "source": "user",
+                    "storage": "connection.parameters",
+                },
             },
         )
         runtime._validate_connection_contract({})  # no raise
@@ -242,10 +252,12 @@ class TestConnectionContractValidation:
         runtime = self._runtime(
             parameters={"account": "abc"},
             contract_inputs={
-                "account": {"required": True, "source": "user",
-                            "storage": "connection.parameters"},
-                "password": {"required": True, "source": "user",
-                             "storage": "secrets"},
+                "account": {
+                    "required": True,
+                    "source": "user",
+                    "storage": "connection.parameters",
+                },
+                "password": {"required": True, "source": "user", "storage": "secrets"},
             },
         )
         with pytest.raises(TransportSpecError, match="password"):
@@ -260,19 +272,28 @@ class TestConnectionContractValidation:
         # (The transport-resolution drop logic relies on *every* required
         # input being present, not just the user-sourced ones.)
         inputs = {
-            "account": {"required": True, "source": "user",
-                        "storage": "connection.parameters"},
-            "region": {"required": True, "source": "platform",
-                       "storage": "connection.parameters"},
+            "account": {
+                "required": True,
+                "source": "user",
+                "storage": "connection.parameters",
+            },
+            "region": {
+                "required": True,
+                "source": "platform",
+                "storage": "connection.parameters",
+            },
         }
         with pytest.raises(TransportSpecError, match="region"):
-            self._runtime(parameters={"account": "abc"},
-                          contract_inputs=inputs)._validate_connection_contract({})
+            self._runtime(
+                parameters={"account": "abc"}, contract_inputs=inputs
+            )._validate_connection_contract({})
         # Present -> passes.
         self._runtime(
             parameters={"account": "abc", "region": "eu"},
             contract_inputs=inputs,
-        )._validate_connection_contract({})  # no raise
+        )._validate_connection_contract(
+            {}
+        )  # no raise
 
     def test_required_input_unknown_storage_fails_loud(self):
         # A required input whose storage is not one the connection carries
@@ -282,10 +303,16 @@ class TestConnectionContractValidation:
         runtime = self._runtime(
             parameters={"account": "abc"},
             contract_inputs={
-                "account": {"required": True, "source": "user",
-                            "storage": "connection.parameters"},
-                "bogus": {"required": True, "source": "user",
-                          "storage": "connection.discovered"},
+                "account": {
+                    "required": True,
+                    "source": "user",
+                    "storage": "connection.parameters",
+                },
+                "bogus": {
+                    "required": True,
+                    "source": "user",
+                    "storage": "connection.discovered",
+                },
             },
         )
         with pytest.raises(TransportSpecError, match="unknown storage"):
@@ -298,8 +325,11 @@ class TestConnectionContractValidation:
         runtime = self._runtime(
             parameters=None,
             contract_inputs={
-                "account": {"required": True, "source": "user",
-                            "storage": "connection.parameters"},
+                "account": {
+                    "required": True,
+                    "source": "user",
+                    "storage": "connection.parameters",
+                },
             },
         )
         with pytest.raises(TransportSpecError, match="account"):
@@ -312,8 +342,11 @@ class TestConnectionContractValidation:
         runtime = self._runtime(
             parameters={},
             contract_inputs={
-                "account": {"required": True, "source": "user",
-                            "storage": "connection.parameters"},
+                "account": {
+                    "required": True,
+                    "source": "user",
+                    "storage": "connection.parameters",
+                },
             },
         )
         with pytest.raises(TransportSpecError, match="account"):

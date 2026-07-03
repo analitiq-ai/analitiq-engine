@@ -15,19 +15,25 @@ from __future__ import annotations
 import io
 import json
 import logging
+from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any, AsyncIterator, Dict, Optional
+from typing import Any
 
-import grpc
 import pyarrow as pa
 
+import grpc
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.sql.exceptions import ReadError
 from cdk.types import CheckpointStore
-
 from src.grpc import DEFAULT_MAX_MESSAGE_SIZE
-from src.grpc.generated.analitiq.v1.source_service_pb2 import ReadRequest
+from src.grpc.generated.analitiq.v1 import ReadRequest
 from src.grpc.generated.analitiq.v1.source_service_pb2_grpc import SourceServiceStub
+from src.state.error_classification import (
+    ErrorCode,
+    FailureStage,
+    classify_source_extract,
+    tag_failure,
+)
 from src.state.store import decode_cursor_state, encode_cursor_state
 from src.worker.shell import build_bootstrap
 from src.worker.spawn import spawn_worker
@@ -53,11 +59,11 @@ class WorkerReadable:
     async def read_batches(
         self,
         runtime: ConnectionRuntime,
-        config: Dict[str, Any],
+        config: dict[str, Any],
         *,
         checkpoint: CheckpointStore,
         stream_name: str,
-        partition: Optional[Dict[str, Any]] = None,
+        partition: dict[str, Any] | None = None,
         batch_size: int = 1000,
     ) -> AsyncIterator[pa.RecordBatch]:
         partition = partition or {}
@@ -97,9 +103,7 @@ class WorkerReadable:
                     # back from the store as a datetime and must survive
                     # the JSON hop as one.
                     initial_cursor_json=(
-                        json.dumps(
-                            encode_cursor_state(initial_cursor), default=str
-                        )
+                        json.dumps(encode_cursor_state(initial_cursor), default=str)
                         if initial_cursor
                         else ""
                     ),
@@ -120,9 +124,24 @@ class WorkerReadable:
                     elif kind == "error":
                         err = response.error
                         if err.deterministic:
-                            raise ReadError(
+                            exc = ReadError(
                                 f"{err.error_type}: {err.message} "
                                 f"(worker {label}, deterministic)"
+                            )
+                            # The worker's `deterministic` flag is the structured
+                            # signal that retrying cannot help -- a config/contract
+                            # defect. Preserve it across the boundary as a tag so a
+                            # deterministic source error classifies as CONFIG_INVALID
+                            # regardless of the collapsed wrapper's class name; the
+                            # engine otherwise only sees ReadError text. The original
+                            # connector class survives in the error_type prefix, so
+                            # the source classifier reads it; an opaque one floors to
+                            # CONFIG_INVALID (deterministic == a setup defect).
+                            code = classify_source_extract(exc)
+                            if code is ErrorCode.INTERNAL:
+                                code = ErrorCode.CONFIG_INVALID
+                            raise tag_failure(
+                                exc, code=code, stage=FailureStage.SOURCE_EXTRACT
                             )
                         raise RuntimeError(
                             f"{err.error_type}: {err.message} (worker {label})"

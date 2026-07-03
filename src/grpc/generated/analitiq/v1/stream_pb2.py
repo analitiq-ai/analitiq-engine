@@ -14,7 +14,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x18\x61nalitiq/v1/stream.proto\x12\x0b\x61nalitiq.v1\"\x17\n\x06\x43ursor\x12\r\n\x05token\x18\x01 \x01(\x0c\"|\n\rSchemaMessage\x12\x11\n\tstream_id\x18\x01 \x01(\t\x12\x0f\n\x07version\x18\x02 \x01(\r\x12*\n\nwrite_mode\x18\x03 \x01(\x0e\x32\x16.analitiq.v1.WriteMode\x12\x1b\n\x13\x61\x63k_timeout_seconds\x18\x04 \x01(\r\"\xcf\x01\n\x0bRecordBatch\x12\x0e\n\x06run_id\x18\x01 \x01(\t\x12\x11\n\tstream_id\x18\x02 \x01(\t\x12\x11\n\tbatch_seq\x18\x03 \x01(\x04\x12*\n\x06\x66ormat\x18\x04 \x01(\x0e\x32\x1a.analitiq.v1.PayloadFormat\x12\x0f\n\x07payload\x18\x05 \x01(\x0c\x12\x14\n\x0crecord_count\x18\x06 \x01(\r\x12\x12\n\nrecord_ids\x18\x07 \x03(\t\x12#\n\x06\x63ursor\x18\x08 \x01(\x0b\x32\x13.analitiq.v1.Cursor\"\xe4\x01\n\x08\x42\x61tchAck\x12\x0e\n\x06run_id\x18\x01 \x01(\t\x12\x11\n\tstream_id\x18\x02 \x01(\t\x12\x11\n\tbatch_seq\x18\x03 \x01(\x04\x12&\n\x06status\x18\x04 \x01(\x0e\x32\x16.analitiq.v1.AckStatus\x12\x17\n\x0frecords_written\x18\x05 \x01(\r\x12-\n\x10\x63ommitted_cursor\x18\x06 \x01(\x0b\x32\x13.analitiq.v1.Cursor\x12\x19\n\x11\x66\x61iled_record_ids\x18\x07 \x03(\t\x12\x17\n\x0f\x66\x61ilure_summary\x18\x08 \x01(\t\"s\n\rStreamRequest\x12,\n\x06schema\x18\x01 \x01(\x0b\x32\x1a.analitiq.v1.SchemaMessageH\x00\x12)\n\x05\x62\x61tch\x18\x02 \x01(\x0b\x32\x18.analitiq.v1.RecordBatchH\x00\x42\t\n\x07message\"o\n\x0eStreamResponse\x12$\n\x03\x61\x63k\x18\x01 \x01(\x0b\x32\x15.analitiq.v1.BatchAckH\x00\x12,\n\nschema_ack\x18\x02 \x01(\x0b\x32\x16.analitiq.v1.SchemaAckH\x00\x42\t\n\x07message\"A\n\tSchemaAck\x12\x11\n\tstream_id\x18\x01 \x01(\t\x12\x10\n\x08\x61\x63\x63\x65pted\x18\x02 \x01(\x08\x12\x0f\n\x07message\x18\x03 \x01(\t*M\n\rPayloadFormat\x12\x1e\n\x1aPAYLOAD_FORMAT_UNSPECIFIED\x10\x00\x12\x1c\n\x18PAYLOAD_FORMAT_ARROW_IPC\x10\x01*u\n\tWriteMode\x12\x1a\n\x16WRITE_MODE_UNSPECIFIED\x10\x00\x12\x15\n\x11WRITE_MODE_INSERT\x10\x01\x12\x15\n\x11WRITE_MODE_UPSERT\x10\x02\x12\x1e\n\x1aWRITE_MODE_TRUNCATE_INSERT\x10\x03*\xa1\x01\n\tAckStatus\x12\x1a\n\x16\x41\x43K_STATUS_UNSPECIFIED\x10\x00\x12\x16\n\x12\x41\x43K_STATUS_SUCCESS\x10\x01\x12 \n\x1c\x41\x43K_STATUS_ALREADY_COMMITTED\x10\x02\x12 \n\x1c\x41\x43K_STATUS_RETRYABLE_FAILURE\x10\x03\x12\x1c\n\x18\x41\x43K_STATUS_FATAL_FAILURE\x10\x04\x42\x13\n\x0f\x63om.analitiq.v1P\x01\x62\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x18\x61nalitiq/v1/stream.proto\x12\x0b\x61nalitiq.v1\"\x17\n\x06\x43ursor\x12\r\n\x05token\x18\x01 \x01(\x0c\"|\n\rSchemaMessage\x12\x11\n\tstream_id\x18\x01 \x01(\t\x12\x0f\n\x07version\x18\x02 \x01(\r\x12*\n\nwrite_mode\x18\x03 \x01(\x0e\x32\x16.analitiq.v1.WriteMode\x12\x1b\n\x13\x61\x63k_timeout_seconds\x18\x04 \x01(\r\"\xcf\x01\n\x0bRecordBatch\x12\x0e\n\x06run_id\x18\x01 \x01(\t\x12\x11\n\tstream_id\x18\x02 \x01(\t\x12\x11\n\tbatch_seq\x18\x03 \x01(\x04\x12*\n\x06\x66ormat\x18\x04 \x01(\x0e\x32\x1a.analitiq.v1.PayloadFormat\x12\x0f\n\x07payload\x18\x05 \x01(\x0c\x12\x14\n\x0crecord_count\x18\x06 \x01(\r\x12\x12\n\nrecord_ids\x18\x07 \x03(\t\x12#\n\x06\x63ursor\x18\x08 \x01(\x0b\x32\x13.analitiq.v1.Cursor\"\xe4\x01\n\x08\x42\x61tchAck\x12\x0e\n\x06run_id\x18\x01 \x01(\t\x12\x11\n\tstream_id\x18\x02 \x01(\t\x12\x11\n\tbatch_seq\x18\x03 \x01(\x04\x12&\n\x06status\x18\x04 \x01(\x0e\x32\x16.analitiq.v1.AckStatus\x12\x17\n\x0frecords_written\x18\x05 \x01(\r\x12-\n\x10\x63ommitted_cursor\x18\x06 \x01(\x0b\x32\x13.analitiq.v1.Cursor\x12\x19\n\x11\x66\x61iled_record_ids\x18\x07 \x03(\t\x12\x17\n\x0f\x66\x61ilure_summary\x18\x08 \x01(\t\"s\n\rStreamRequest\x12,\n\x06schema\x18\x01 \x01(\x0b\x32\x1a.analitiq.v1.SchemaMessageH\x00\x12)\n\x05\x62\x61tch\x18\x02 \x01(\x0b\x32\x18.analitiq.v1.RecordBatchH\x00\x42\t\n\x07message\"o\n\x0eStreamResponse\x12$\n\x03\x61\x63k\x18\x01 \x01(\x0b\x32\x15.analitiq.v1.BatchAckH\x00\x12,\n\nschema_ack\x18\x02 \x01(\x0b\x32\x16.analitiq.v1.SchemaAckH\x00\x42\t\n\x07message\"\x97\x01\n\tSchemaAck\x12\x11\n\tstream_id\x18\x01 \x01(\t\x12\x10\n\x08\x61\x63\x63\x65pted\x18\x02 \x01(\x08\x12\x0f\n\x07message\x18\x03 \x01(\t\x12\x34\n\x0fretry_semantics\x18\x04 \x01(\x0e\x32\x1b.analitiq.v1.RetrySemantics\x12\x1e\n\x16retry_semantics_reason\x18\x05 \x01(\t*M\n\rPayloadFormat\x12\x1e\n\x1aPAYLOAD_FORMAT_UNSPECIFIED\x10\x00\x12\x1c\n\x18PAYLOAD_FORMAT_ARROW_IPC\x10\x01*u\n\tWriteMode\x12\x1a\n\x16WRITE_MODE_UNSPECIFIED\x10\x00\x12\x15\n\x11WRITE_MODE_INSERT\x10\x01\x12\x15\n\x11WRITE_MODE_UPSERT\x10\x02\x12\x1e\n\x1aWRITE_MODE_TRUNCATE_INSERT\x10\x03*\xa1\x01\n\tAckStatus\x12\x1a\n\x16\x41\x43K_STATUS_UNSPECIFIED\x10\x00\x12\x16\n\x12\x41\x43K_STATUS_SUCCESS\x10\x01\x12 \n\x1c\x41\x43K_STATUS_ALREADY_COMMITTED\x10\x02\x12 \n\x1c\x41\x43K_STATUS_RETRYABLE_FAILURE\x10\x03\x12\x1c\n\x18\x41\x43K_STATUS_FATAL_FAILURE\x10\x04*v\n\x0eRetrySemantics\x12\x1f\n\x1bRETRY_SEMANTICS_UNSPECIFIED\x10\x00\x12 \n\x1cRETRY_SEMANTICS_EXACTLY_ONCE\x10\x01\x12!\n\x1dRETRY_SEMANTICS_AT_LEAST_ONCE\x10\x02\x42\x13\n\x0f\x63om.analitiq.v1P\x01\x62\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -22,12 +22,14 @@ _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'analitiq.v1.stream_pb2', _g
 if _descriptor._USE_C_DESCRIPTORS == False:
   _globals['DESCRIPTOR']._options = None
   _globals['DESCRIPTOR']._serialized_options = b'\n\017com.analitiq.v1P\001'
-  _globals['_PAYLOADFORMAT']._serialized_start=930
-  _globals['_PAYLOADFORMAT']._serialized_end=1007
-  _globals['_WRITEMODE']._serialized_start=1009
-  _globals['_WRITEMODE']._serialized_end=1126
-  _globals['_ACKSTATUS']._serialized_start=1129
-  _globals['_ACKSTATUS']._serialized_end=1290
+  _globals['_PAYLOADFORMAT']._serialized_start=1017
+  _globals['_PAYLOADFORMAT']._serialized_end=1094
+  _globals['_WRITEMODE']._serialized_start=1096
+  _globals['_WRITEMODE']._serialized_end=1213
+  _globals['_ACKSTATUS']._serialized_start=1216
+  _globals['_ACKSTATUS']._serialized_end=1377
+  _globals['_RETRYSEMANTICS']._serialized_start=1379
+  _globals['_RETRYSEMANTICS']._serialized_end=1497
   _globals['_CURSOR']._serialized_start=41
   _globals['_CURSOR']._serialized_end=64
   _globals['_SCHEMAMESSAGE']._serialized_start=66
@@ -40,6 +42,6 @@ if _descriptor._USE_C_DESCRIPTORS == False:
   _globals['_STREAMREQUEST']._serialized_end=748
   _globals['_STREAMRESPONSE']._serialized_start=750
   _globals['_STREAMRESPONSE']._serialized_end=861
-  _globals['_SCHEMAACK']._serialized_start=863
-  _globals['_SCHEMAACK']._serialized_end=928
+  _globals['_SCHEMAACK']._serialized_start=864
+  _globals['_SCHEMAACK']._serialized_end=1015
 # @@protoc_insertion_point(module_scope)

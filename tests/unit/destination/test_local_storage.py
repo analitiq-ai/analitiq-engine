@@ -80,25 +80,6 @@ class TestWriteFile:
         assert (base / "a" / "b" / "c.txt").read_bytes() == b"nested"
 
 
-class TestAppendToFile:
-    async def test_raises_when_not_connected(self, storage):
-        with pytest.raises(IOError, match="Storage not connected"):
-            await storage.append_to_file("file.txt", b"data")
-
-    async def test_appends_data_and_returns_length(self, connected_storage):
-        s, base = connected_storage
-        (base / "f.txt").write_bytes(b"first")
-        n = await s.append_to_file("f.txt", b"_second")
-        assert n == len(b"_second")
-        assert (base / "f.txt").read_bytes() == b"first_second"
-
-    async def test_creates_file_when_absent(self, connected_storage):
-        s, base = connected_storage
-        n = await s.append_to_file("new.txt", b"created")
-        assert n == len(b"created")
-        assert (base / "new.txt").read_bytes() == b"created"
-
-
 class TestFileExists:
     async def test_returns_false_when_not_connected(self, storage):
         result = await storage.file_exists("any.txt")

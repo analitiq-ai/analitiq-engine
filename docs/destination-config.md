@@ -59,7 +59,7 @@ Handler source lives under `src/destination/`:
   - `stream.py` — `StreamDestinationHandler` (stdout).
 - `formatters/` — JSONL / CSV / Parquet serializers.
 - `storage/` — local filesystem backend.
-- `idempotency/` — `_batch_commits` and `_manifest.json` trackers.
+- `idempotency/` — file `_manifest.json` tracker (the SQL destination dedups on row identity, with no commit-ledger table).
 - `server.py` — gRPC server.
 
 Shared building blocks moved to the CDK at `cdk/cdk/`:
@@ -137,13 +137,16 @@ kind enum.
 | Handler | Transactions | Upsert | Bulk Load |
 |---------|--------------|--------|-----------|
 | Database | Yes | Yes (via `ON CONFLICT` / `MERGE` / dialect equivalent) | Yes |
-| API | No | No | `single` / `bulk` / `batch` posting modes |
+| API | No | Contract-driven (`operations.write.upsert`) | Contract-driven (`operations.write.<mode>.batching`) |
 | File / S3 | No | No | Yes |
 | Stdout | No | No | No |
 
-The API handler posts records in one of three modes (`single`, `bulk`,
-`batch` — `BATCH_MODE_*` in `src/destination/connectors/api.py`),
-selected from the endpoint's write configuration.
+The API handler sends one request per record unless the endpoint's
+`operations.write.<mode>` declares a `batching` block. The contract
+shape is `{"max_records": <int >= 2>}` — the provider's maximum records
+per request; with the block present, records are sent in chunks of at
+most `max_records`. A `batching` block of any other shape fails the
+stream at `configure_schema` time.
 
 ## Formatters
 
@@ -234,7 +237,7 @@ tests.
     },
     "write": {
       "mode": "upsert",
-      "conflict_keys": [["id"]]
+      "conflict_keys": ["id"]
     },
     "execution": {
       "batch_size": 1000
@@ -247,7 +250,7 @@ tests.
 |-------|----------|-------------|
 | `endpoint_ref` | Yes | Object `{scope, connection_id, endpoint_id}` (always an object — there is no string form). `scope` is `connection` or `connector`; `connection_id` is the destination connection; `endpoint_id` the endpoint name |
 | `write.mode` | No | `insert`, `upsert`, or `truncate_insert` (default: `upsert`) |
-| `write.conflict_keys` | When `mode = upsert` | List of token-path field references for conflict resolution (e.g. `[["id"]]`) |
+| `write.conflict_keys` | When `mode = upsert` | Single composite conflict-key set: a non-empty list of destination field names (e.g. `["id"]` or `["tenant_id", "id"]`) |
 | `execution.batch_size` | No | Per-destination batch-size override |
 | `execution.max_concurrent_batches` | No | Per-destination concurrency override |
 
@@ -278,29 +281,41 @@ type-mapping and transport detail.
 
 ## Idempotency
 
-All handlers track `(run_id, stream_id, batch_seq)` for exactly-once
-delivery.
+### Database (row identity)
 
-### Database (`_batch_commits` table)
+The SQL destination dedups on **row identity** (content-derived), not
+batch position, and keeps no commit-ledger table. `batch_seq` is only an
+ordering sequence on the wire; it is never the dedup key. How identity is
+enforced depends on the write mode:
 
-```sql
-CREATE TABLE _batch_commits (
-  run_id          VARCHAR(255),
-  stream_id       VARCHAR(255),
-  batch_seq       BIGINT,
-  committed_cursor BYTEA,
-  records_written  INT,
-  committed_at    TIMESTAMPTZ DEFAULT NOW(),
-  PRIMARY KEY (run_id, stream_id, batch_seq)
-);
-```
+- **`upsert`** — MERGE / INSERT-or-UPDATE on the stream's `conflict_keys`.
+- **`truncate_insert`** — full refresh: TRUNCATE on the read's first
+  batch (`batch_seq` 1, issue #307), plain append after that with no
+  row-identity dedup (deduping a full refresh would collapse legitimate
+  duplicate rows). `batch_seq` restarts at 1 only when the engine
+  (re)starts the read, so the decision survives engine and destination
+  restarting independently. The engine never resumes a truncate_insert
+  stream from a cursor — a restart re-reads the source from scratch and
+  re-truncates.
+- **`insert`** — each row is inserted only if its identity is not already
+  present: one `INSERT ... SELECT ... WHERE NOT EXISTS (...)` per row,
+  built with SQLAlchemy core (no dialect-specific SQL). The identity is
+  the contract primary key, or — for a keyless insert stream — a synthetic
+  engine-managed `_record_hash` column (full SHA-256 of the row content)
+  declared as the table's `PRIMARY KEY`, the structural uniqueness
+  backstop. Coalescing is identity-only — a row whose identity already
+  exists is skipped without comparing its other columns: two byte-identical
+  keyless rows collapse to one, and a keyed `insert` likewise drops a
+  same-key row whose content differs (first occurrence wins). `insert` cannot
+  tell a retry's re-read from a genuinely conflicting key; a stream that must
+  reconcile changed rows should use `upsert`. A keyless insert target created
+  before `_record_hash` existed is rejected loudly on the next run (the column
+  is the primary key and cannot be back-filled on existing rows); recreate the
+  table so the engine can manage it.
 
-On batch receipt:
-
-1. Look up `(run_id, stream_id, batch_seq)`.
-2. Hit → return `ALREADY_COMMITTED` with the stored cursor.
-3. Miss → write the batch and the commit record in a single transaction;
-   return `SUCCESS`.
+ADBC-only transports (Snowflake/BigQuery) do not yet do the keyless
+`insert` anti-join — plain `insert` there is at-least-once (a noted
+follow-up); `upsert` remains idempotent.
 
 ### File / S3 (`_manifest.json`)
 
@@ -309,18 +324,68 @@ A single `_manifest.json` in the base path records `commits[]` with
 `file_path`, `committed_at`. Replays match by `(run_id, stream_id,
 batch_seq)` and become no-ops.
 
+This positional match is sound for an in-run replay of the same batch,
+but not across a same-run restart: the source resumes from the committed
+cursor while `batch_seq` restarts, so a committed position can re-arrive
+carrying different rows and be skipped as a replay. The file destination
+therefore reports itself as not replay-safe (at-least-once) in the
+schema ack (issue #286).
+
+### API (per-record idempotency key)
+
+An API `upsert` is idempotent through the endpoint's own `conflict_keys`.
+For `insert`, the api-endpoint contract's
+`operations.write.<mode>.idempotency` block (infra#890) declares where a
+per-request idempotency key lands:
+
+```json
+{ "in": "header", "name": "Idempotency-Key" }
+```
+
+`in` is `"header"` (Stripe-style) or `"body"` (Square-style, requires a
+JSON-object request body); `name` is the header or top-level body field.
+The author declares **placement only** — the key value is engine-owned
+and follows the write mode's identity semantics, mirroring the SQL
+destination:
+
+- **`insert`** — the identity-derived `record_id` (primary-key fields
+  when the source declares them, else the full content): the first
+  occurrence of an identity wins, like the SQL insert anti-join; a
+  stream that must reconcile changed rows uses `upsert`.
+- **`upsert`** — a full-content hash (the `_record_hash`
+  canonicalisation): an identical replay dedups, while a changed row
+  gets a new key so the provider applies the update instead of
+  replaying its cached response.
+
+Either way a re-sent record carries the same key and the provider
+dedups it within its replay window. The key name must not collide with
+an engine- or connection-owned request header (`Content-Type`, auth
+headers, ...) nor with a body field the request body or write input
+schema already declares — `configure_schema` rejects those documents.
+
+The block cannot be combined with a `batching` block — the contract has
+no batching mode; a present block IS the multi-record case. Both the
+published schema and `configure_schema` reject the combination, because
+a restart re-batches records and a per-request key spanning several
+records cannot dedup (issue #286). Without the block, API `insert` is
+at-least-once on a same-run restart. Every destination reports its
+per-stream verdict in the schema ack (`retry_semantics` + reason) and
+the engine logs it at stream start.
+
 ## gRPC Batch Parameters
 
 | Field | Description |
 |-------|-------------|
-| `run_id` | Unique pipeline-run identifier (same value on retries) |
-| `stream_id` | Stream identifier |
-| `batch_seq` | Monotonically increasing batch sequence |
+| `run_id` | Unique pipeline-run identifier (same value on retries); routing/scoping, not a dedup key |
+| `stream_id` | Stream identifier; routing/scoping, not a dedup key |
+| `batch_seq` | Monotonic ordering/log sequence per stream within a run (not a dedup key) |
 | `cursor` | Opaque token produced by the engine, stored verbatim by the destination |
-| `record_ids` | Per-record IDs for DLQ correlation |
+| `record_ids` | Content-derived row identities (SHA-256) for DLQ correlation; the `_record_hash` value for a keyless insert |
 
-Returns `ACK_STATUS_ALREADY_COMMITTED` for replayed batches; full
-protocol semantics are in
+The SQL destination writes idempotently by row identity and returns
+`ACK_STATUS_SUCCESS` on a replay; the file destination returns
+`ACK_STATUS_ALREADY_COMMITTED` for replayed batches. Full protocol
+semantics are in
 [`grpc-streaming-architecture.md`](grpc-streaming-architecture.md).
 
 ## Adding a New Destination

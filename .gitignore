@@ -400,5 +400,22 @@ tests/e2e/reports/
 # would otherwise un-ignore __pycache__/*.pyc and let it be committed).
 **/tests/**/fixtures/**/__pycache__/
 **/tests/**/fixtures/**/*.py[cod]
+
+# Published conversion matrix: a generated contract artifact (built from the
+# canonical table in cdk/cdk/type_map/conversions.py), tracked despite the
+# blanket *.json ignore so Infra/the frontend can consume it.
+!cdk/cdk/type_map/conversion_matrix.json
+
+# conversion-matrix npm package: committed past the blanket *.json and scripts/
+# ignores (its build scripts and config are source, not generated artifacts).
+!packages/conversion-matrix/package.json
+!packages/conversion-matrix/package-lock.json
+!packages/conversion-matrix/tsconfig.json
+!packages/conversion-matrix/scripts/
+!packages/conversion-matrix/scripts/*.mjs
 # Cloud/internal handoff documents — never shared on GitHub.
 github-cloud/
+
+# Local git worktrees used for parallel branches.
+.worktree/
+.worktrees/

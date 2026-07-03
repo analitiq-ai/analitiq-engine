@@ -34,7 +34,7 @@
       },
       {
         "id": 124,
-        "name": "Another Record", 
+        "name": "Another Record",
         "created_at": "2025-08-19T10:35:00Z",
         "status": "pending",
         "amount": 75.25

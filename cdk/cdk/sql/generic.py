@@ -26,54 +26,54 @@ or connector_id; operations with no portable form raise
 
 import asyncio
 import hashlib
+import json
 import logging
 import threading
-from contextlib import AsyncExitStack, nullcontext
+from collections.abc import AsyncIterator, Mapping
+from contextlib import AbstractAsyncContextManager, AsyncExitStack, nullcontext
 from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Any, AsyncIterator, Dict, List, Literal, Mapping, Optional, Tuple
+from typing import Any, Literal
 
 import pyarrow as pa
-from sqlalchemy import MetaData, Table, text
+from sqlalchemy import MetaData, Table, and_, bindparam, literal, select, text
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from cdk.adbc_registry import AdbcConfigurationError
 from cdk.base_handler import BaseDestinationHandler, BatchWriteResult
-from cdk.schema_contract import SchemaContract
-from cdk.type_map import (
-    InvalidTypeMapError,
-    TypeMapper,
-    UnmappedTypeError,
+from cdk.connection_runtime import (
+    DETERMINISTIC_CONNECT_ERRORS,
+    ConnectionRuntime,
+    materialize_runtime,
 )
+from cdk.database_utils import acquire_connection
+from cdk.query_builder import Filter, ParamsLike, QueryBuilder, QueryConfig
+from cdk.schema_contract import SchemaContract
+from cdk.type_map import InvalidTypeMapError, TypeMapper, UnmappedTypeError
 from cdk.types import (
     AckStatus,
     CheckpointStore,
     Cursor,
     EndpointScope,
+    RetrySemantics,
+    RetryVerdict,
     SchemaSpec,
 )
-from cdk.adbc_registry import AdbcConfigurationError
-from cdk.connection_runtime import (
-    ConnectionRuntime,
-    DETERMINISTIC_CONNECT_ERRORS,
-    materialize_runtime,
-)
-from cdk.database_utils import acquire_connection
-from cdk.query_builder import Filter, QueryBuilder, QueryConfig
+
+from ..contract import ColumnDef
+from ._adbc_utils import _close_cursor_quietly
 from .adbc_reader import open_adbc_reader
+from .ddl import build_create_table_sql
+from .ddl import create_table as _sql_create_table
 from .dialects import SqlDialect
 from .discovery import list_columns as _sql_list_columns
 from .discovery import list_schemas as _sql_list_schemas
 from .discovery import list_tables as _sql_list_tables
-from .ddl import build_create_table_sql
-from .ddl import create_table as _sql_create_table
 from .exceptions import (
     ReadError,
     SchemaConfigurationError,
     UnsupportedDialectOperationError,
 )
-from ..contract import ColumnDef
-
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +104,8 @@ def _note_order_by_fallback(table_name: str, column_name: str) -> None:
         "first selected column %r. Set cursor_field on the stream if this "
         "column is a non-orderable type (JSON / STRUCT / VARIANT) -- the "
         "warehouse will otherwise reject the query.",
-        table_name, column_name,
+        table_name,
+        column_name,
     )
 
 
@@ -113,16 +114,18 @@ def _note_order_by_fallback(table_name: str, column_name: str) -> None:
 # objects, permission denials, type mismatches, unsupported operations.
 # Driver modules re-export these names per PEP-249; we match on the
 # class name so the check works without importing the optional driver.
-_FATAL_ADBC_ERROR_NAMES = frozenset({
-    "ProgrammingError",
-    "NotSupportedError",
-    "IntegrityError",
-    "DataError",
-})
+_FATAL_ADBC_ERROR_NAMES = frozenset(
+    {
+        "ProgrammingError",
+        "NotSupportedError",
+        "IntegrityError",
+        "DataError",
+    }
+)
 
 
 def _is_fatal_adbc_error(exc: BaseException) -> bool:
-    """``True`` when *exc* is a class of failure retries cannot heal."""
+    """Return ``True`` when *exc* is a failure class retries cannot heal."""
     for cls in type(exc).__mro__:
         if cls.__name__ in _FATAL_ADBC_ERROR_NAMES:
             return True
@@ -147,51 +150,6 @@ def _reclassify_as_fatal(exc: BaseException) -> AdbcConfigurationError:
 WriteMode = Literal["insert", "upsert", "truncate_insert"]
 
 
-class AdbcCommitRecordError(RuntimeError):
-    """ADBC ingest succeeded, but ``_batch_commits`` recording failed.
-
-    The data is already in the destination table. Retry behavior
-    depends on ``write_mode``:
-
-    * ``insert`` — retry re-ingests, duplicating rows.
-    * ``truncate_insert`` — retry truncates then re-ingests, so the
-      net effect is idempotent (no duplication).
-    * ``upsert`` — retry re-MERGEs on the conflict keys; idempotent
-      provided the conflict-key set is actually unique.
-
-    The exception carries the inner error so the engine's failure
-    summary surfaces the divergence rather than a generic commit
-    error.
-    """
-
-    _RETRY_SEMANTICS: Dict[str, str] = {
-        "insert": "retry will duplicate rows",
-        "truncate_insert": "retry is idempotent (truncate + re-ingest)",
-        "upsert": "retry is idempotent under conflict keys (re-MERGE)",
-    }
-
-    def __init__(
-        self,
-        inner: BaseException,
-        write_mode: WriteMode = "insert",
-    ) -> None:
-        if write_mode not in self._RETRY_SEMANTICS:
-            # The Literal already constrains callers at type-check time;
-            # this guards against runtime values that bypass typing (e.g.
-            # constructed from arbitrary strings in tests). Loud here
-            # beats a misleading "retry semantics unknown" in production.
-            raise ValueError(
-                f"AdbcCommitRecordError.write_mode must be one of "
-                f"{sorted(self._RETRY_SEMANTICS)}; got {write_mode!r}"
-            )
-        super().__init__(
-            f"adbc ingest committed; commit-record failed "
-            f"({self._RETRY_SEMANTICS[write_mode]}): {inner}"
-        )
-        self.__cause__ = inner
-        self.write_mode: WriteMode = write_mode
-
-
 @dataclass
 class _StreamState:
     """Per-stream destination state.
@@ -205,19 +163,17 @@ class _StreamState:
 
     schema_name: str = "public"
     table_name: str = ""
-    table: Optional[Table] = None
-    batch_commits_table: Optional[Table] = None
-    primary_keys: List[str] = field(default_factory=list)
-    # Columns used as the ON CONFLICT target for upsert. Set at
-    # configure_schema time from ``endpoint_doc["_write_conflict_keys"]``
-    # — main.py computes that via WriteConfig.effective_conflict_keys,
-    # which uses the stream's explicit ``write.conflict_keys`` when
-    # set and falls back to ``primary_keys``. Empty here means INSERT
-    # mode or no conflict target available.
-    conflict_keys: List[str] = field(default_factory=list)
+    table: Table | None = None
+    primary_keys: list[str] = field(default_factory=list)
+    # Columns used as the ON CONFLICT / MERGE target for upsert. Set at
+    # configure_schema time from ``endpoint_doc["_write_conflict_keys"]``,
+    # which main.py copies verbatim from the stream's Infra-validated
+    # ``write.conflict_keys``. Empty here means INSERT mode — an upsert
+    # always carries an explicit conflict target under the contract.
+    conflict_keys: list[str] = field(default_factory=list)
     write_mode: WriteMode = "upsert"
-    endpoint_document: Dict[str, Any] = field(default_factory=dict)
-    schema_contract: Optional[SchemaContract] = None
+    endpoint_document: dict[str, Any] = field(default_factory=dict)
+    schema_contract: SchemaContract | None = None
 
 
 class GenericSQLConnector(BaseDestinationHandler):
@@ -247,9 +203,10 @@ class GenericSQLConnector(BaseDestinationHandler):
       native SQL, ingest via ``cursor.adbc_ingest``, upsert via
       stage-table + ``MERGE INTO``.
 
-    Both modes share idempotency tracking (``_batch_commits`` table
-    keyed on ``(run_id, stream_id, batch_seq)``), the schema-contract
-    Arrow cast, and the per-stream state machine. Configuration is
+    Both modes are idempotent on the write mode's own keys (a MERGE on
+    ``conflict_keys`` for upsert, the synthetic ``_record_hash`` key for a
+    keyless insert), not a side ledger; they share the schema-contract
+    Arrow cast and the per-stream state machine. Configuration is
     resolved through ``ConnectionRuntime`` rather than read off the
     raw connection JSON — the handler never inspects host/port/secret
     fields directly.
@@ -260,12 +217,19 @@ class GenericSQLConnector(BaseDestinationHandler):
     carries ``stream_id``, ``version``, and ``write_mode``.
     """
 
-    BATCH_COMMITS_TABLE = "_batch_commits"
-
     # Server-managed column added to every database destination table.
     # Populated by the database via DEFAULT NOW() at INSERT time so the
     # engine never has to ship a per-record timestamp.
     SYNCED_AT_COLUMN = "_synced_at"
+
+    # Engine-managed dedup key for a keyless insert stream (one with no
+    # contract primary key). Holds the content-derived record id and is
+    # declared as the table's primary key, so the database enforces the
+    # uniqueness that both the insert anti-join (SQLAlchemy) and the
+    # stage-MERGE (ADBC) rely on -- a re-read row is never duplicated
+    # (issue #282, issue #285). Absent on streams that carry a primary key
+    # or use upsert/truncate_insert.
+    RECORD_HASH_COLUMN = "_record_hash"
 
     # The dialect strategy carrying every vendor-specific piece of SQL:
     # quoting, upsert statements, pre-DDL, ADBC DDL type names, stage-table
@@ -285,7 +249,7 @@ class GenericSQLConnector(BaseDestinationHandler):
         # and ADBC-only mode; its operations run via asyncio.to_thread,
         # mirroring the ADBC sync-in-thread pattern.
         self._sync_engine: Engine | None = None
-        self._config: Dict[str, Any] = {}
+        self._config: dict[str, Any] = {}
         self._connected: bool = False
         self._driver: str = ""
         # Seconds to bound a destination SQL handler attempt, set by the
@@ -293,7 +257,7 @@ class GenericSQLConnector(BaseDestinationHandler):
         # handshake from the sender-stamped gRPC ack budget. None (source-role
         # instances, or unset) means unbounded - asyncio.timeout(None) never
         # fires. See _statement_deadline.
-        self._statement_timeout_seconds: Optional[float] = None
+        self._statement_timeout_seconds: float | None = None
         # ADBC-only mode: the runtime exposes no SQLAlchemy engine and
         # every write/DDL/idempotency operation runs through the cached
         # ADBC DBAPI connection. Set in ``connect()`` from
@@ -308,7 +272,7 @@ class GenericSQLConnector(BaseDestinationHandler):
         # from the preloaded ``stream_endpoints`` map. Keyed by stream_id
         # so concurrent streams sharing this handler instance do not race
         # on shared mutable fields.
-        self._streams: Dict[str, _StreamState] = {}
+        self._streams: dict[str, _StreamState] = {}
 
         # Serializes CREATE TABLE statements across streams. Even when each
         # stream owns its own SQLAlchemy ``MetaData``, two concurrent
@@ -319,12 +283,12 @@ class GenericSQLConnector(BaseDestinationHandler):
         # Stream-id -> structured endpoint_ref dict so configure_schema()
         # can pick the type-mapper matching the endpoint's scope (connector
         # vs connection). Populated by set_endpoint_refs() at startup.
-        self._endpoint_refs: Dict[str, Dict[str, Any]] = {}
+        self._endpoint_refs: dict[str, dict[str, Any]] = {}
 
         # Stream-id -> contract endpoint document (database_object,
         # columns, primary_keys, …). Populated by set_stream_endpoints()
         # at startup.
-        self._stream_endpoints: Dict[str, Dict[str, Any]] = {}
+        self._stream_endpoints: dict[str, dict[str, Any]] = {}
 
         # Cached ADBC DBAPI connection for ADBC-only mode (Snowflake /
         # BigQuery / Postgres), opened eagerly in connect() via
@@ -359,11 +323,12 @@ class GenericSQLConnector(BaseDestinationHandler):
         # Read-path (Readable role) counters. Not consumed by the engine's
         # pipeline metrics — kept for parity with the source connector's
         # logging and for tests asserting per-stream read volume.
-        self.metrics: Dict[str, int] = {"records_read": 0, "batches_read": 0}
+        self.metrics: dict[str, int] = {"records_read": 0, "batches_read": 0}
 
     def set_endpoint_refs(self, endpoint_refs: Mapping[str, Any]) -> None:
-        """Register stream_id → endpoint_ref for each stream writing to this
-        destination. Called once by ``src.main`` before the gRPC server starts;
+        """Register stream_id → endpoint_ref for each stream writing here.
+
+        Called once by ``src.main`` before the gRPC server starts;
         the handler consults the map per incoming ``SchemaSpec`` to decide
         which ``TypeMapper`` applies (public endpoint → connector's map,
         private endpoint → connection's map).
@@ -377,16 +342,18 @@ class GenericSQLConnector(BaseDestinationHandler):
     def set_stream_endpoints(
         self, stream_endpoints: Mapping[str, Mapping[str, Any]]
     ) -> None:
-        """Register stream_id → contract endpoint document for streams
-        writing to this destination. The handler reads the database object
-        (catalog/schema/name), columns, and primary keys from this map at
-        ``configure_schema`` time rather than unpacking them off the wire.
+        """Register stream_id → contract endpoint document for each stream.
+
+        Covers streams writing to this destination. The handler reads the
+        database object (catalog/schema/name), columns, and primary keys from
+        this map at ``configure_schema`` time rather than unpacking them off
+        the wire.
         """
         self._stream_endpoints = {
             sid: dict(doc) for sid, doc in stream_endpoints.items()
         }
 
-    def set_statement_timeout(self, seconds: Optional[float]) -> None:
+    def set_statement_timeout(self, seconds: float | None) -> None:
         """Bound every destination SQL statement to *seconds* (issue #231).
 
         Called by the destination servicer on each schema handshake, before
@@ -413,13 +380,13 @@ class GenericSQLConnector(BaseDestinationHandler):
                 "ADBC" if self._adbc_only else "sync-engine",
             )
 
-    def _statement_deadline(self):
-        """A statement-timeout deadline for one whole handler attempt - a DDL
-        handshake, or a write with its idempotency read and commit record - so
-        the total database time stays under the sender-stamped gRPC ack budget
-        rather than each phase getting its own full budget that can sum past
-        the ack deadline (issue #231).
+    def _statement_deadline(self) -> AbstractAsyncContextManager[Any]:
+        """Return a statement-timeout deadline for one whole handler attempt.
 
+        An attempt is a DDL handshake, or a write with its idempotency read
+        and commit record - so the total database time stays under the
+        sender-stamped gRPC ack budget rather than each phase getting its own
+        full budget that can sum past the ack deadline (issue #231).
         Async-SQLAlchemy operations get an ``asyncio.timeout``; the ADBC and
         sync-engine paths get a null deadline because their operations run in
         a worker thread that ``asyncio.timeout`` cannot cancel - they rely on
@@ -433,6 +400,29 @@ class GenericSQLConnector(BaseDestinationHandler):
         if self._adbc_only or self._sync_engine is not None:
             return nullcontext()
         return asyncio.timeout(self._statement_timeout_seconds)
+
+    def _require_async_engine(self) -> AsyncEngine:
+        """Return the async SQLAlchemy engine, or fail loud if path is unset.
+
+        ``connect()`` wires exactly one transport per role; the async
+        engine is reached only on the async-SQLAlchemy path. A ``None``
+        here means a method ran on the wrong transport path.
+        """
+        if self._engine is None:
+            raise RuntimeError(
+                "async SQLAlchemy engine not available; this handler is not "
+                "on the async-SQLAlchemy transport path"
+            )
+        return self._engine
+
+    def _require_sync_engine(self) -> Engine:
+        """Return the sync SQLAlchemy engine, or fail loud if path is unset."""
+        if self._sync_engine is None:
+            raise RuntimeError(
+                "sync SQLAlchemy engine not available; this handler is not "
+                "on the sync-SQLAlchemy transport path"
+            )
+        return self._sync_engine
 
     def _type_mapper_for_stream(self, stream_id: str) -> TypeMapper:
         """Resolve the type-mapper appropriate for ``stream_id``'s endpoint."""
@@ -494,6 +484,87 @@ class GenericSQLConnector(BaseDestinationHandler):
         """
         return False
 
+    @property
+    def supports_auto_create(self) -> bool:
+        """Report that auto-create is supported.
+
+        SQL destinations create the target table via ``configure_schema`` DDL
+        (rendered CREATE TABLE).
+        """
+        return True
+
+    @property
+    def supports_truncate(self) -> bool:
+        """Report that the full-refresh write mode is supported.
+
+        SQL destinations implement truncate-insert (TRUNCATE then ingest).
+        """
+        return True
+
+    def retry_semantics(self, stream_id: str) -> RetryVerdict:
+        """Retry-safety verdict per write mode, keys, and transport (#286).
+
+        Upsert is idempotent on its conflict keys on every transport.
+        Keyless insert dedups by content hash on both transports: the
+        SQLAlchemy path uses an anti-join; the ADBC path uses a stage-MERGE
+        keyed on ``_record_hash`` (issue #285). Keyed insert is exactly-once
+        on SQLAlchemy (anti-join on the primary key) but at-least-once on
+        ADBC (plain append; the PK prevents duplicates structurally but a
+        retry that re-reads the inclusive boundary may surface a constraint
+        violation rather than a silent skip). Truncate-insert truncates on
+        the read's first batch only (issue #307) and its append phase is a
+        plain insert with no row-identity dedup — so a replayed
+        already-committed later batch re-inserts its rows.
+        """
+        state = self._streams.get(stream_id)
+        if state is None:
+            return super().retry_semantics(stream_id)
+        if state.write_mode == "upsert":
+            return RetryVerdict(
+                semantics=RetrySemantics.RETRY_SEMANTICS_EXACTLY_ONCE,
+                reason=(
+                    f"upsert merges on conflict keys "
+                    f"{state.conflict_keys}; a re-sent row updates in place"
+                ),
+            )
+        if state.write_mode == "truncate_insert":
+            return RetryVerdict(
+                semantics=RetrySemantics.RETRY_SEMANTICS_AT_LEAST_ONCE,
+                reason=(
+                    "truncate-insert truncates on the run's first batch "
+                    "and appends after that with no row-identity dedup; a "
+                    "replayed already-committed later batch re-inserts its "
+                    "rows"
+                ),
+            )
+        if self._adbc_only and self._needs_record_hash(state):
+            return RetryVerdict(
+                semantics=RetrySemantics.RETRY_SEMANTICS_EXACTLY_ONCE,
+                reason=(
+                    f"keyless insert on the ADBC transport deduplicates via "
+                    f"stage-MERGE on {self.RECORD_HASH_COLUMN} (issue #285); "
+                    f"a re-read row is never duplicated"
+                ),
+            )
+        if self._adbc_only:
+            return RetryVerdict(
+                semantics=RetrySemantics.RETRY_SEMANTICS_AT_LEAST_ONCE,
+                reason=(
+                    "keyed insert on the ADBC transport is plain append; "
+                    "the database PK prevents duplicate rows but a retry "
+                    "re-reading the inclusive boundary may raise a "
+                    "constraint violation"
+                ),
+            )
+        return RetryVerdict(
+            semantics=RetrySemantics.RETRY_SEMANTICS_EXACTLY_ONCE,
+            reason=(
+                f"insert anti-joins on row identity "
+                f"{self._identity_columns(state)}; a re-read row lands "
+                f"only once"
+            ),
+        )
+
     async def connect(self, runtime: ConnectionRuntime) -> None:
         """
         Establish database connection using ConnectionRuntime.
@@ -503,9 +574,7 @@ class GenericSQLConnector(BaseDestinationHandler):
         """
         self._runtime = runtime
         try:
-            await materialize_runtime(
-                runtime, sql_dialect=self.dialect
-            )
+            await materialize_runtime(runtime, sql_dialect=self.dialect)
         except DETERMINISTIC_CONNECT_ERRORS:
             raise
         except Exception as e:
@@ -525,9 +594,7 @@ class GenericSQLConnector(BaseDestinationHandler):
             # the driver-specific exception in ConnectionError to
             # match the materialize() failure shape.
             try:
-                self._adbc_conn = await asyncio.to_thread(
-                    runtime.open_adbc_connection
-                )
+                self._adbc_conn = await asyncio.to_thread(runtime.open_adbc_connection)
             except Exception as e:
                 logger.error(
                     "ADBC eager-open failed during connect: %s", e, exc_info=True
@@ -570,7 +637,7 @@ class GenericSQLConnector(BaseDestinationHandler):
         so a worker thread mid-poison cannot race with disconnect on
         the same handle (libpq double-close risk).
         """
-        cancelled: Optional[BaseException] = None
+        cancelled: BaseException | None = None
         with self._adbc_conn_lock:
             adbc_conn = self._adbc_conn
             self._adbc_conn = None
@@ -647,16 +714,11 @@ class GenericSQLConnector(BaseDestinationHandler):
             return False
 
         primary_keys = list(endpoint_doc.get("primary_keys") or [])
-        # ``_write_conflict_keys`` is populated at startup by main.py
-        # from the stream's WriteConfig (already resolved against the
-        # endpoint's primary keys). A missing key means INSERT mode
-        # — main.py always sets the field for UPSERT streams. An
-        # explicit empty list also means "no conflict target", so we
-        # only fall back to primary_keys when the key is absent.
-        if "_write_conflict_keys" in endpoint_doc:
-            conflict_keys = list(endpoint_doc["_write_conflict_keys"] or [])
-        else:
-            conflict_keys = list(primary_keys)
+        # ``_write_conflict_keys`` is the stream's Infra-validated upsert
+        # conflict target, copied verbatim by main.py. Absent or empty
+        # means no conflict target (INSERT mode); the engine never derives
+        # one from ``primary_keys``.
+        conflict_keys = list(endpoint_doc.get("_write_conflict_keys") or [])
         raw_schema = database_object.get("schema")
         if self._adbc_only:
             # Snowflake's default schema is account-/role-dependent;
@@ -725,8 +787,8 @@ class GenericSQLConnector(BaseDestinationHandler):
         )
         return True
 
-    def _get_write_mode(self, proto_write_mode: int) -> str:
-        mode_map = {
+    def _get_write_mode(self, proto_write_mode: int) -> WriteMode:
+        mode_map: dict[int, WriteMode] = {
             1: "insert",
             2: "upsert",
             3: "truncate_insert",
@@ -740,16 +802,18 @@ class GenericSQLConnector(BaseDestinationHandler):
 
     def _build_column_defs(
         self, state: _StreamState, type_mapper: TypeMapper
-    ) -> List[ColumnDef]:
+    ) -> list[ColumnDef]:
         """Contract endpoint columns -> ColumnDefs for the shared DDL builder.
 
         Each column's native type goes through the READ map to its canonical
         Arrow string; the builder renders it back through the WRITE map for
         this destination — the two declarative surfaces are the entire type
         vocabulary, for every transport. ``_synced_at`` is appended as a
-        server-defaulted audit column when the endpoint doesn't declare it.
+        server-defaulted audit column when the endpoint doesn't declare it; a
+        keyless insert stream also gets ``_record_hash`` as its synthetic
+        primary key (see :meth:`_needs_record_hash`).
         """
-        columns: List[ColumnDef] = []
+        columns: list[ColumnDef] = []
         declared: set[str] = set()
         for index, col_def in enumerate(state.endpoint_document.get("columns") or []):
             col_name = col_def.get("name")
@@ -786,47 +850,80 @@ class GenericSQLConnector(BaseDestinationHandler):
                     default=self.dialect.current_timestamp_default(),
                 )
             )
+        if self._needs_record_hash(state):
+            if self.RECORD_HASH_COLUMN in declared:
+                raise SchemaConfigurationError(
+                    f"keyless insert stream for "
+                    f"{state.schema_name}.{state.table_name} declares a column "
+                    f"named {self.RECORD_HASH_COLUMN!r}, which the engine reserves "
+                    f"as its synthetic dedup primary key; rename the column"
+                )
+            # Keyless insert: the content-derived hash is the row's only
+            # identity. Declared NOT NULL primary key (see _identity_columns)
+            # so the database structurally enforces the dedup the insert
+            # anti-join performs (issue #282).
+            columns.append(
+                ColumnDef(
+                    name=self.RECORD_HASH_COLUMN,
+                    canonical_type="Utf8",
+                    nullable=False,
+                    primary_key=True,
+                )
+            )
         return columns
 
-    def _build_batch_commits_ddl(
-        self, schema_name: str, type_mapper: TypeMapper
-    ) -> str:
-        """``CREATE TABLE IF NOT EXISTS _batch_commits`` for any transport.
+    def _needs_record_hash(self, state: _StreamState) -> bool:
+        """Whether this stream uses the synthetic ``_record_hash`` dedup key.
 
-        Types derive from the connector's write map through the dialect's
-        ``render_column_type`` (key columns via ``batch_commits_key_type``,
-        bounded where unbounded text cannot key); quoting and the PK clause
-        come from the dialect.
+        A keyless ``insert`` stream on either transport: SQLAlchemy anti-joins
+        on the hash; ADBC routes through a stage-MERGE keyed on the hash.
+        Upsert/truncate_insert dedup on their own keys.
         """
-        quote = self.dialect.quote_ident
-        render = self.dialect.render_column_type
-        qualified = self.dialect.quote_qualified(schema_name, self.BATCH_COMMITS_TABLE)
-        key_type = self.dialect.batch_commits_key_type(type_mapper)
-        return (
-            f"CREATE TABLE IF NOT EXISTS {qualified} (\n"
-            f"  {quote('run_id')} {key_type} NOT NULL,\n"
-            f"  {quote('stream_id')} {key_type} NOT NULL,\n"
-            f"  {quote('batch_seq')} {render('Int64', type_mapper)} NOT NULL,\n"
-            f"  {quote('committed_cursor')} {render('Binary', type_mapper)},\n"
-            f"  {quote('records_written')} {render('Int32', type_mapper)},\n"
-            f"  {quote('committed_at')} "
-            f"{render('Timestamp(MICROSECOND)', type_mapper)} "
-            f"DEFAULT {self.dialect.current_timestamp_default()},\n"
-            f"  {self.dialect.pk_clause(['run_id', 'stream_id', 'batch_seq'])}\n"
-            f")"
-        )
+        return state.write_mode == "insert" and not state.primary_keys
+
+    def _identity_columns(self, state: _StreamState) -> list[str]:
+        """Columns the insert anti-join matches a re-read row on.
+
+        The contract primary key when the stream has one; otherwise the
+        synthetic ``_record_hash`` for a keyless insert. Empty for
+        upsert/truncate_insert, which are idempotent on their own terms.
+        """
+        if state.primary_keys:
+            return list(state.primary_keys)
+        if self._needs_record_hash(state):
+            return [self.RECORD_HASH_COLUMN]
+        return []
 
     async def _ensure_tables_exist(
         self, state: _StreamState, type_mapper: TypeMapper
     ) -> None:
-        """Create the target and ``_batch_commits`` tables if absent.
+        """Create the target table if absent.
 
         ONE DDL builder serves every transport: column types come from the
         connector's read+write maps via the dialect, quoting/PK from the
-        dialect, and the rendered statements execute over SQLAlchemy or the
-        ADBC cursor. On the SQLAlchemy path the tables are then REFLECTED so
+        dialect, and the rendered statement executes over SQLAlchemy or the
+        ADBC cursor. On the SQLAlchemy path the table is then REFLECTED so
         DML binding uses the real column types the database reports.
         """
+        if (
+            self._adbc_only
+            and self._needs_record_hash(state)
+            and not self.dialect.supports_upsert_adbc
+        ):
+            # Keyless insert dedups via stage-MERGE (_record_hash). A dialect
+            # that ingests but cannot MERGE (supports_upsert_adbc=False, the base
+            # default) would otherwise reach _merge_ingest_sync and fatal on the
+            # first write via adbc_stage_table_sql. Fail loud at configure time
+            # instead: a keyless insert cannot be made exactly-once on this
+            # dialect, and a silent plain-append fallback would reintroduce the
+            # lost-ack duplication that issue #285 closes.
+            raise AdbcConfigurationError(
+                f"Keyless insert on {state.schema_name}.{state.table_name} "
+                f"requires stage-MERGE dedup, but the ADBC dialect "
+                f"{type(self.dialect).__name__} does not support MERGE "
+                f"(supports_upsert_adbc=False). Declare a primary key for this "
+                f"stream or add MERGE support to the connector's dialect."
+            )
         if not state.endpoint_document:
             raise SchemaConfigurationError(
                 f"destination stream for {state.schema_name}.{state.table_name} "
@@ -838,24 +935,27 @@ class GenericSQLConnector(BaseDestinationHandler):
             state.schema_name,
             state.table_name,
             self._build_column_defs(state, type_mapper),
-            list(state.primary_keys),
+            self._identity_columns(state),
             if_not_exists=True,
         )
-        commits_ddl = self._build_batch_commits_ddl(state.schema_name, type_mapper)
 
         # Announce DDL before it runs (and before any lock wait) so a slow
         # CREATE TABLE is attributable to a schema.table instead of a silent
         # stall between "Received schema" and the SchemaAck. Paired with the
-        # "Destination tables ready" line below, the gap renders as elapsed
+        # "Destination table ready" line below, the gap renders as elapsed
         # time between two INFO logs.
         logger.info(
-            "Ensuring destination tables exist for %s.%s (executing DDL)",
+            "Ensuring destination table exists for %s.%s (executing DDL)",
             state.schema_name,
             state.table_name,
         )
 
         if self._adbc_only:
-            await self._ensure_tables_via_adbc(state, [target_ddl, commits_ddl])
+            await self._ensure_tables_via_adbc(state, [target_ddl])
+            if self._needs_record_hash(state):
+                await asyncio.to_thread(
+                    self._verify_record_hash_column_adbc_sync, state
+                )
             return
 
         if self._engine is None and self._sync_engine is None:
@@ -879,23 +979,37 @@ class GenericSQLConnector(BaseDestinationHandler):
         async with self._statement_deadline():
             async with self._ddl_lock:
                 if self._sync_engine is not None:
-                    state.table, state.batch_commits_table = (
-                        await asyncio.to_thread(
-                            self._ddl_and_reflect_on_sync_engine,
-                            state, target_ddl, commits_ddl,
-                        )
+                    state.table = await asyncio.to_thread(
+                        self._ddl_and_reflect_on_sync_engine,
+                        state,
+                        target_ddl,
                     )
                 else:
-                    async with self._engine.begin() as conn:
-                        state.table, state.batch_commits_table = (
-                            await conn.run_sync(
-                                self._run_ddl_and_reflect,
-                                state, target_ddl, commits_ddl,
-                            )
+                    async with self._require_async_engine().begin() as conn:
+                        state.table = await conn.run_sync(
+                            self._run_ddl_and_reflect,
+                            state,
+                            target_ddl,
                         )
 
+        if self._needs_record_hash(state) and (
+            state.table is None or self.RECORD_HASH_COLUMN not in state.table.c
+        ):
+            # A keyless insert table created before issue #282 has no
+            # _record_hash column; CREATE TABLE IF NOT EXISTS is a no-op and
+            # reflection returns it without the column, so every write would
+            # then fail indexing table.c[_record_hash]. Fail loud with a clear
+            # message instead -- the engine adds no migration (the column is the
+            # primary key, so it cannot be back-filled on existing rows).
+            raise SchemaConfigurationError(
+                f"keyless insert target {state.schema_name}.{state.table_name} "
+                f"has no {self.RECORD_HASH_COLUMN!r} column; it predates the "
+                f"content-hash dedup key (issue #282). Recreate the target so the "
+                f"engine manages {self.RECORD_HASH_COLUMN} as its primary key."
+            )
+
         logger.info(
-            "Destination tables ready for %s.%s",
+            "Destination table ready for %s.%s",
             state.schema_name,
             state.table_name,
         )
@@ -905,13 +1019,13 @@ class GenericSQLConnector(BaseDestinationHandler):
         conn: Connection,
         state: _StreamState,
         target_ddl: str,
-        commits_ddl: str,
-    ) -> Tuple[Table, Table]:
-        """DDL + reflection transaction body, written once against the sync
-        ``Connection`` API. The async engine enters via
-        ``AsyncConnection.run_sync``; the sync engine runs it directly on a
-        worker thread — both transports execute the identical statements.
+    ) -> Table:
+        """Run the DDL + reflection transaction body on a sync connection.
 
+        Written once against the sync ``Connection`` API. The async engine
+        enters via ``AsyncConnection.run_sync``; the sync engine runs it
+        directly on a worker thread — both transports execute the identical
+        statements.
         Reflection matters for DML binding: SQLAlchemy derives the column
         types from what the database actually created, so inserts/upserts
         bind correctly without a second hand-kept type surface.
@@ -922,31 +1036,25 @@ class GenericSQLConnector(BaseDestinationHandler):
         for stmt in self.dialect.sqlalchemy_pre_ddl(state.schema_name):
             conn.execute(text(stmt))
         conn.execute(text(target_ddl))
-        conn.execute(text(commits_ddl))
 
         meta = MetaData()
-        table = Table(
+        return Table(
             state.table_name,
             meta,
             autoload_with=conn,
             schema=state.schema_name or None,
         )
-        commits = Table(
-            self.BATCH_COMMITS_TABLE,
-            meta,
-            autoload_with=conn,
-            schema=state.schema_name or None,
-        )
-        return table, commits
 
     def _ddl_and_reflect_on_sync_engine(
-        self, state: _StreamState, target_ddl: str, commits_ddl: str
-    ) -> Tuple[Table, Table]:
-        """Run the shared DDL + reflection body on the sync engine
-        (worker thread)."""
-        with self._sync_engine.begin() as conn:
-            return self._run_ddl_and_reflect(conn, state, target_ddl, commits_ddl)
+        self, state: _StreamState, target_ddl: str
+    ) -> Table:
+        """Run the shared DDL + reflection body on the sync engine.
 
+        Runs on a worker thread.
+        """
+        engine = self._require_sync_engine()
+        with engine.begin() as conn:
+            return self._run_ddl_and_reflect(conn, state, target_ddl)
 
     async def write_batch(
         self,
@@ -954,7 +1062,7 @@ class GenericSQLConnector(BaseDestinationHandler):
         stream_id: str,
         batch_seq: int,
         record_batch: pa.RecordBatch,
-        record_ids: List[str],
+        record_ids: list[str],
         cursor: Cursor,
     ) -> BatchWriteResult:
         """Write an Arrow record batch to the database.
@@ -969,11 +1077,7 @@ class GenericSQLConnector(BaseDestinationHandler):
                 records_written=0,
                 failure_summary="Handler not connected",
             )
-        if (
-            not self._adbc_only
-            and self._engine is None
-            and self._sync_engine is None
-        ):
+        if not self._adbc_only and self._engine is None and self._sync_engine is None:
             return BatchWriteResult(
                 status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
                 records_written=0,
@@ -981,10 +1085,7 @@ class GenericSQLConnector(BaseDestinationHandler):
             )
 
         state = self._streams.get(stream_id)
-        if state is None or (
-            not self._adbc_only
-            and (state.table is None or state.batch_commits_table is None)
-        ):
+        if state is None or (not self._adbc_only and state.table is None):
             # ADBC writes never build SQLAlchemy table objects; readiness
             # there is the configured state + schema contract.
             return BatchWriteResult(
@@ -994,32 +1095,35 @@ class GenericSQLConnector(BaseDestinationHandler):
             )
 
         try:
-            # One deadline for the whole SQLAlchemy attempt - the idempotency
-            # read, the write, and the commit record - so the total stays under
-            # the ack budget. Bounding each phase separately would give each its
-            # own full budget, which can sum past the ack deadline and let the
-            # engine retry while the first write is still running (issue #231).
-            # The idempotency read and empty-batch commit also touch the same
-            # _batch_commits table the write does and can block on the same
-            # lock, so they belong inside the same deadline.
+            # One deadline for the whole SQLAlchemy attempt so the write stays
+            # under the ack budget. Bounding sub-phases separately would give
+            # each its own full budget, which can sum past the ack deadline and
+            # let the engine retry while the first write is still running
+            # (issue #231).
             async with self._statement_deadline():
-                existing = await self._check_batch_committed(
-                    state, run_id, stream_id, batch_seq
-                )
-                if existing:
-                    logger.info(f"Batch already committed: {run_id}/{stream_id}/{batch_seq}")
-                    return BatchWriteResult(
-                        status=AckStatus.ACK_STATUS_ALREADY_COMMITTED,
-                        records_written=existing["records_written"],
-                        committed_cursor=Cursor(token=existing["committed_cursor"]),
-                    )
-
                 record_count = record_batch.num_rows
+
+                # A full refresh truncates on the read's FIRST batch
+                # (batch_seq 1, issue #307) and appends after that.
+                # batch_seq is the engine's own statement of a fresh read:
+                # it restarts at 1 only when the engine (re)starts the
+                # stream read from scratch, and truncate_insert reads are
+                # never cursor-resumed. Keying on worker-side memory
+                # instead would break when engine and destination restart
+                # independently: a fresh worker joining mid-refresh would
+                # truncate away committed batches, and a surviving worker
+                # would skip the truncate for a restarted read.
+                truncate_now = state.write_mode == "truncate_insert" and batch_seq == 1
+
                 if record_count == 0:
-                    # Empty batch - still record for idempotency
-                    await self._record_batch_commit(
-                        state, run_id, stream_id, batch_seq, cursor.token, 0
-                    )
+                    # Empty batch: nothing to insert. The cursor still
+                    # advances (the watermark moved); idempotency lives in
+                    # the write itself, so there is no separate marker to
+                    # record. An empty FIRST batch (including the synthetic
+                    # one the engine sends when the source yields no batches
+                    # at all — issue #312) must still truncate.
+                    if truncate_now:
+                        await self._truncate_only(state)
                     return BatchWriteResult(
                         status=AckStatus.ACK_STATUS_SUCCESS,
                         records_written=0,
@@ -1028,28 +1132,28 @@ class GenericSQLConnector(BaseDestinationHandler):
 
                 if self._adbc_only:
                     await self._write_batch_adbc_only(
-                        state, run_id, stream_id, batch_seq,
-                        record_batch, cursor.token, record_count,
+                        state,
+                        run_id,
+                        stream_id,
+                        batch_seq,
+                        record_batch,
+                        truncate_now=truncate_now,
                     )
                 elif self._sync_engine is not None:
                     prepared = self._prepare_for_sqlalchemy(state, record_batch)
+                    self._attach_record_hash(state, prepared)
                     await asyncio.to_thread(
                         self._write_batch_on_sync_engine,
-                        state, prepared, run_id, stream_id, batch_seq,
-                        cursor.token, record_count,
+                        state,
+                        prepared,
+                        truncate_now,
                     )
                 else:
                     prepared = self._prepare_for_sqlalchemy(state, record_batch)
-
-                    async with self._engine.begin() as conn:
+                    self._attach_record_hash(state, prepared)
+                    async with self._require_async_engine().begin() as conn:
                         await conn.run_sync(
-                            self._apply_write_in_txn, state, prepared
-                        )
-                        # Record batch commit in the same transaction
-                        await conn.run_sync(
-                            self._record_batch_commit_in_txn,
-                            state, run_id, stream_id, batch_seq,
-                            cursor.token, record_count,
+                            self._apply_write_in_txn, state, prepared, truncate_now
                         )
 
                 logger.info(f"Wrote batch {batch_seq}: {record_count} records")
@@ -1078,6 +1182,16 @@ class GenericSQLConnector(BaseDestinationHandler):
                 records_written=0,
                 failure_summary=f"dialect: {e}",
             )
+        except SchemaConfigurationError as e:
+            # The stream is misconfigured for this write (e.g. upsert with
+            # no conflict_keys). Deterministic — retrying cannot heal it, so
+            # fail fatally instead of silently degrading or looping forever.
+            logger.error("Write configuration error: %s", e, exc_info=True)
+            return BatchWriteResult(
+                status=AckStatus.ACK_STATUS_FATAL_FAILURE,
+                records_written=0,
+                failure_summary=f"write-config: {e}",
+            )
         except AdbcConfigurationError as e:
             # ADBC misconfiguration cannot heal between attempts; bail
             # fatally so the engine does not retry forever.
@@ -1086,16 +1200,6 @@ class GenericSQLConnector(BaseDestinationHandler):
                 status=AckStatus.ACK_STATUS_FATAL_FAILURE,
                 records_written=0,
                 failure_summary=f"adbc: {e}",
-            )
-        except AdbcCommitRecordError as e:
-            # ADBC ingest already committed; the _batch_commits record
-            # write failed. The retry will re-ingest. Stay RETRYABLE so
-            # the engine reconciles, but surface the divergence text in
-            # failure_summary so DLQ / monitoring can route on it.
-            return BatchWriteResult(
-                status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
-                records_written=0,
-                failure_summary=str(e),
             )
         except TimeoutError as e:
             if (
@@ -1139,163 +1243,24 @@ class GenericSQLConnector(BaseDestinationHandler):
                 failure_summary=str(e),
             )
 
-    async def _check_batch_committed(
-        self,
-        state: _StreamState,
-        run_id: str,
-        stream_id: str,
-        batch_seq: int,
-    ) -> Optional[Dict[str, Any]]:
-        """Check if batch was already committed."""
-        if self._adbc_only:
-            return await self._check_batch_committed_via_adbc(
-                state, run_id, stream_id, batch_seq,
-            )
-        if state.batch_commits_table is None:
-            return None
-        if self._sync_engine is not None:
-            return await asyncio.to_thread(
-                self._check_batch_committed_on_sync_engine,
-                state, run_id, stream_id, batch_seq,
-            )
-        if self._engine is None:
-            return None
-
-        # Plain connect: write_batch wraps this read in its statement deadline.
-        async with self._engine.connect() as conn:
-            return await conn.run_sync(
-                self._select_batch_commit, state, run_id, stream_id, batch_seq
-            )
-
-    def _select_batch_commit(
-        self,
-        conn: Connection,
-        state: _StreamState,
-        run_id: str,
-        stream_id: str,
-        batch_seq: int,
-    ) -> Optional[Dict[str, Any]]:
-        """Idempotency read, written once against the sync ``Connection``
-        API (async path via ``run_sync``, sync path on a worker thread)."""
-        commits = state.batch_commits_table
-        result = conn.execute(
-            commits.select().where(
-                (commits.c.run_id == run_id) &
-                (commits.c.stream_id == stream_id) &
-                (commits.c.batch_seq == batch_seq)
-            )
-        )
-        row = result.fetchone()
-        if row:
-            return {
-                "records_written": row.records_written,
-                "committed_cursor": row.committed_cursor,
-            }
-        return None
-
-    def _check_batch_committed_on_sync_engine(
-        self,
-        state: _StreamState,
-        run_id: str,
-        stream_id: str,
-        batch_seq: int,
-    ) -> Optional[Dict[str, Any]]:
-        with self._sync_engine.connect() as conn:
-            return self._select_batch_commit(
-                conn, state, run_id, stream_id, batch_seq
-            )
-
-    async def _record_batch_commit(
-        self,
-        state: _StreamState,
-        run_id: str,
-        stream_id: str,
-        batch_seq: int,
-        cursor_bytes: bytes,
-        records_written: int,
-    ) -> None:
-        """Record batch commit (outside transaction)."""
-        if self._adbc_only:
-            await self._record_batch_commit_via_adbc(
-                state, run_id, stream_id, batch_seq, cursor_bytes, records_written,
-            )
-            return
-        if state.batch_commits_table is None:
-            return
-        if self._sync_engine is not None:
-            await asyncio.to_thread(
-                self._record_batch_commit_on_sync_engine,
-                state, run_id, stream_id, batch_seq,
-                cursor_bytes, records_written,
-            )
-            return
-        if self._engine is None:
-            return
-
-        # Plain begin: write_batch wraps this empty-batch commit in its deadline.
-        async with self._engine.begin() as conn:
-            await conn.run_sync(
-                self._record_batch_commit_in_txn,
-                state, run_id, stream_id, batch_seq,
-                cursor_bytes, records_written,
-            )
-
-    def _record_batch_commit_on_sync_engine(
-        self,
-        state: _StreamState,
-        run_id: str,
-        stream_id: str,
-        batch_seq: int,
-        cursor_bytes: bytes,
-        records_written: int,
-    ) -> None:
-        with self._sync_engine.begin() as conn:
-            self._record_batch_commit_in_txn(
-                conn, state, run_id, stream_id, batch_seq,
-                cursor_bytes, records_written,
-            )
-
-    def _record_batch_commit_in_txn(
-        self,
-        conn: Connection,
-        state: _StreamState,
-        run_id: str,
-        stream_id: str,
-        batch_seq: int,
-        cursor_bytes: bytes,
-        records_written: int,
-    ) -> None:
-        """Record batch commit within an existing transaction (sync
-        ``Connection`` body; async path enters via ``run_sync``)."""
-        if state.batch_commits_table is None:
-            return
-
-        conn.execute(
-            state.batch_commits_table.insert().values(
-                run_id=run_id,
-                stream_id=stream_id,
-                batch_seq=batch_seq,
-                committed_cursor=cursor_bytes,
-                records_written=records_written,
-                committed_at=datetime.utcnow(),
-            )
-        )
-
     def _apply_write_in_txn(
         self,
         conn: Connection,
         state: _StreamState,
-        records: List[Dict[str, Any]],
+        records: list[dict[str, Any]],
+        truncate_now: bool,
     ) -> None:
         """Dispatch one batch's DML on an open transaction.
 
         Written once against the sync ``Connection`` API so both
         SQLAlchemy engine flavours execute identical statements: the
         async engine enters via ``AsyncConnection.run_sync``, the sync
-        engine directly from its worker thread.
+        engine directly from its worker thread. ``truncate_now`` is the
+        first-batch truncate decision made in ``write_batch`` (issue
+        #307); only truncate_insert reads it.
         """
         if state.write_mode == "truncate_insert":
-            self._truncate_and_insert(conn, state, records)
+            self._truncate_and_insert(conn, state, records, truncate_now)
         elif state.write_mode == "upsert":
             self._upsert_records(conn, state, records)
         else:
@@ -1304,39 +1269,166 @@ class GenericSQLConnector(BaseDestinationHandler):
     def _write_batch_on_sync_engine(
         self,
         state: _StreamState,
-        records: List[Dict[str, Any]],
-        run_id: str,
-        stream_id: str,
-        batch_seq: int,
-        cursor_bytes: bytes,
-        records_written: int,
+        records: list[dict[str, Any]],
+        truncate_now: bool,
     ) -> None:
-        """One write attempt on the sync engine (worker thread): DML and
-        the commit record in a single transaction, exactly like the async
-        path."""
-        with self._sync_engine.begin() as conn:
-            self._apply_write_in_txn(conn, state, records)
-            self._record_batch_commit_in_txn(
-                conn, state, run_id, stream_id, batch_seq,
-                cursor_bytes, records_written,
+        """Run one write attempt on the sync engine (worker thread).
+
+        Mirrors the async path: the DML runs in a single transaction.
+        """
+        with self._require_sync_engine().begin() as conn:
+            self._apply_write_in_txn(conn, state, records, truncate_now)
+
+    async def _truncate_only(self, state: _StreamState) -> None:
+        """Empty the target table with no insert (any transport).
+
+        Runs when a refresh's first batch is delivered with zero rows,
+        including the synthetic empty batch the engine sends when the
+        source yields no batches at all (issue #312).
+        """
+        if self._adbc_only:
+            await asyncio.to_thread(
+                self._adbc_truncate_sync, state.schema_name, state.table_name
             )
+        elif self._sync_engine is not None:
+            await asyncio.to_thread(self._write_batch_on_sync_engine, state, [], True)
+        else:
+            async with self._require_async_engine().begin() as conn:
+                await conn.run_sync(self._apply_write_in_txn, state, [], True)
+
+    def _attach_record_hash(
+        self,
+        state: _StreamState,
+        records: list[dict[str, Any]],
+    ) -> None:
+        """Populate the synthetic ``_record_hash`` for a keyless insert stream.
+
+        A keyless stream has no key identity, so the hash is the row's *content*,
+        computed here at the sink from the cast record -- deliberately not the
+        engine's wire ``record_id``, which derives from the source's declared
+        primary key when it has one. Deriving from content means two
+        byte-identical rows share a hash and collapse to one, while a row whose
+        content differs -- even if it repeats the source primary key -- gets a
+        distinct hash and is kept (issue #282). The record carries only contract
+        columns at this point (no ``_record_hash``/``_synced_at``), so the digest
+        is a stable function of the data and matches across attempts. No-op for
+        any stream that dedups on a real key.
+        """
+        if not self._needs_record_hash(state):
+            return
+        for record in records:
+            canonical = json.dumps(record, sort_keys=True, default=str)
+            digest = hashlib.sha256(canonical.encode()).hexdigest()
+            record[self.RECORD_HASH_COLUMN] = digest
+
+    def _attach_record_hash_to_batch(
+        self,
+        batch: pa.RecordBatch,
+        state: _StreamState,
+    ) -> pa.RecordBatch:
+        """Append a ``_record_hash`` column and deduplicate an Arrow batch.
+
+        Computes a per-row SHA-256 digest from the JSON-serialized row content
+        (same formula as ``_attach_record_hash`` for cross-retry stability),
+        appends it as a new column, and removes intra-batch duplicate rows
+        (first occurrence wins). Intra-batch dedup is necessary because the
+        stage-MERGE keys on ``_record_hash``; if the stage contains two rows
+        sharing the same key the MERGE raises a "multiple source rows match"
+        error on most databases.
+
+        No-op for streams that don't need the synthetic key.
+        """
+        if not self._needs_record_hash(state):
+            return batch
+        hashes: list[str] = []
+        seen: set[str] = set()
+        keep: list[int] = []
+        for i in range(batch.num_rows):
+            row = {name: batch.column(name)[i].as_py() for name in batch.schema.names}
+            canonical = json.dumps(row, sort_keys=True, default=str)
+            digest = hashlib.sha256(canonical.encode()).hexdigest()
+            if digest not in seen:
+                seen.add(digest)
+                keep.append(i)
+                hashes.append(digest)
+        deduped = batch.take(keep) if len(keep) < batch.num_rows else batch
+        hash_col = pa.array(hashes, type=pa.string())
+        return pa.RecordBatch.from_arrays(
+            list(deduped.columns) + [hash_col],
+            names=list(deduped.schema.names) + [self.RECORD_HASH_COLUMN],
+        )
 
     def _insert_records(
         self,
         conn: Connection,
         state: _StreamState,
-        records: List[Dict[str, Any]],
+        records: list[dict[str, Any]],
     ) -> None:
-        """Insert pre-cast records (plain INSERT)."""
+        """Insert pre-cast records, skipping rows whose identity already exists.
+
+        Insert mode is at-least-once at the wire: a same-run retry re-reads the
+        inclusive cursor boundary, so a row can arrive twice. Instead of a
+        positional ledger (issue #282), each row lands only when its identity is
+        absent -- the contract primary key, or the synthetic ``_record_hash``
+        for a keyless stream. The check is one ``INSERT ... SELECT ... WHERE NOT
+        EXISTS`` per row built with SQLAlchemy core, so the engine emits no
+        dialect-specific SQL; the identity column's PRIMARY KEY is the
+        structural backstop. With no identity column (not expected for insert
+        mode) it degrades to a plain INSERT.
+
+        Coalescing is identity-only: a row whose identity already exists is
+        skipped without comparing its other columns. For a keyed insert that
+        means a same-key row with *different* content is dropped (first
+        occurrence wins) -- the same tradeoff as two byte-identical keyless
+        rows. Insert mode cannot tell a retry's re-read from a genuinely
+        conflicting key without a per-row read-back, which would defeat the
+        single-statement anti-join; a stream that must reconcile changed rows
+        should use upsert.
+        """
         if state.table is None or not records:
             return
-        conn.execute(state.table.insert(), records)
+        table = state.table
+        # The anti-join is an insert-mode concern. truncate_insert reaches this
+        # helper too (after the run's first batch emptied the table); deduping
+        # there would silently drop a same-key row in a full-refresh batch
+        # instead of surfacing the PK violation, so it gets a plain INSERT.
+        identity = self._identity_columns(state) if state.write_mode == "insert" else []
+        if not identity:
+            conn.execute(table.insert(), records)
+            return
+
+        # Drop intra-batch duplicates first: two rows sharing an identity both
+        # pass NOT EXISTS (neither is in the table yet) and would then collide
+        # on the primary key. First occurrence wins -- the Fivetran _record_hash
+        # tradeoff for byte-identical keyless rows. The identity columns are the
+        # table's PRIMARY KEY (NOT NULL), so the Python ``None == None`` collapse
+        # that a nullable key could cause here is unreachable in practice.
+        seen: set[tuple[Any, ...]] = set()
+        deduped: list[dict[str, Any]] = []
+        for record in records:
+            key = tuple(record.get(col) for col in identity)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(record)
+
+        columns = list(deduped[0].keys())
+        binds = {col: bindparam(col, type_=table.c[col].type) for col in columns}
+        already_present = (
+            select(literal(1))
+            .where(and_(*(table.c[col] == binds[col] for col in identity)))
+            .exists()
+        )
+        source = select(*(binds[col].label(col) for col in columns)).where(
+            ~already_present
+        )
+        conn.execute(table.insert().from_select(columns, source), deduped)
 
     def _upsert_records(
         self,
         conn: Connection,
         state: _StreamState,
-        records: List[Dict[str, Any]],
+        records: list[dict[str, Any]],
     ) -> None:
         """Upsert pre-cast records via the dialect's INSERT-or-UPDATE form.
 
@@ -1348,25 +1440,24 @@ class GenericSQLConnector(BaseDestinationHandler):
         upsert here in the first place: ``supports_upsert`` gates the
         advertised write modes.
 
-        When no conflict keys resolve (neither ``conflict_keys`` nor
-        ``primary_keys``), there is nothing to match conflicts on; the
-        write falls back to plain INSERT with a WARNING, since duplicates
-        are then possible.
+        ``conflict_keys`` is the stream's Infra-validated upsert target;
+        the contract guarantees it is non-empty for an upsert. If it is
+        empty here the stream is misconfigured — fail loud rather than
+        silently fall back to INSERT, which would duplicate rows.
         """
-        conflict_keys = state.conflict_keys or state.primary_keys
-        if state.table is None or not conflict_keys:
-            logger.warning(
-                "upsert requested for %s.%s but no conflict keys resolved; "
-                "falling back to plain INSERT — duplicates are possible",
-                state.schema_name, state.table_name,
-            )
-            self._insert_records(conn, state, records)
+        if state.table is None:
             return
+        if not state.conflict_keys:
+            raise SchemaConfigurationError(
+                f"upsert requested for {state.schema_name}.{state.table_name} "
+                f"but the stream carries no conflict_keys; refusing to fall back "
+                f"to plain INSERT (would silently duplicate rows)"
+            )
         if not records:
             return
 
         stmt = self.dialect.build_sqlalchemy_upsert(
-            state.table, records, conflict_keys
+            state.table, records, state.conflict_keys
         )
         conn.execute(stmt)
 
@@ -1374,17 +1465,26 @@ class GenericSQLConnector(BaseDestinationHandler):
         self,
         conn: Connection,
         state: _StreamState,
-        records: List[Dict[str, Any]],
+        records: list[dict[str, Any]],
+        truncate_now: bool,
     ) -> None:
-        """Truncate table and insert pre-cast records."""
+        """Insert pre-cast records, emptying the table first when told to.
+
+        The truncate runs only on the read's first batch (``truncate_now``,
+        decided in ``write_batch``): truncating per batch would keep only
+        the final batch of a multi-batch refresh (issue #307). The delete
+        shares the batch's transaction, so a failed first batch rolls the
+        truncate back with it.
+        """
         if state.table is None:
             return
-        conn.execute(state.table.delete())
+        if truncate_now:
+            conn.execute(state.table.delete())
         self._insert_records(conn, state, records)
 
     def _prepare_for_sqlalchemy(
         self, state: _StreamState, record_batch: pa.RecordBatch
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """Materialise a batch for SQLAlchemy via the schema contract.
 
         ``to_db_records`` aligns the batch to the destination schema
@@ -1410,22 +1510,20 @@ class GenericSQLConnector(BaseDestinationHandler):
     # also opt in (e.g. for Redshift via the libpq-compatible driver),
     # but its SA path remains the primary route.
 
-
-
     async def _ensure_tables_via_adbc(
-        self, state: _StreamState, rendered_ddl: List[str]
+        self, state: _StreamState, rendered_ddl: list[str]
     ) -> None:
-        statements: List[str] = []
+        statements: list[str] = []
         if not self.dialect.schema_is_implicit_default(state.schema_name):
             # BigQuery uses ``CREATE SCHEMA`` for datasets (Standard
             # SQL). Snowflake and Postgres both accept the same DDL.
             # Normalize before quoting so a Snowflake ``public`` matches
             # the warehouse's real ``PUBLIC`` schema instead of creating
             # a quoted-lowercase sibling.
-            statements.append(
-                f"CREATE SCHEMA IF NOT EXISTS "
-                f"{self.dialect.quote_ident(self.dialect.normalize_schema(state.schema_name))}"
+            quoted_schema = self.dialect.quote_ident(
+                self.dialect.normalize_schema(state.schema_name)
             )
+            statements.append(f"CREATE SCHEMA IF NOT EXISTS {quoted_schema}")
         statements.extend(rendered_ddl)
         async with self._ddl_lock:
             await asyncio.to_thread(self._execute_adbc_ddl_sync, statements)
@@ -1435,7 +1533,7 @@ class GenericSQLConnector(BaseDestinationHandler):
             state.table_name,
         )
 
-    def _execute_adbc_ddl_sync(self, statements: List[str]) -> None:
+    def _execute_adbc_ddl_sync(self, statements: list[str]) -> None:
         """Run a list of DDL statements on the ADBC connection.
 
         ``_adbc_op_lock`` held for the duration so concurrent batches
@@ -1450,14 +1548,48 @@ class GenericSQLConnector(BaseDestinationHandler):
                         cursor.execute(stmt)
                     conn.commit()
                 finally:
-                    try:
-                        cursor.close()
-                    except Exception:
-                        logger.debug("ADBC cursor close failed", exc_info=True)
+                    _close_cursor_quietly(cursor)
             except Exception as exc:
                 self._poison_adbc_connection()
                 if _is_fatal_adbc_error(exc):
                     raise _reclassify_as_fatal(exc) from exc
+                raise
+
+    def _verify_record_hash_column_adbc_sync(self, state: _StreamState) -> None:
+        """Assert the ADBC target table has a ``_record_hash`` column.
+
+        ``CREATE TABLE IF NOT EXISTS`` is a no-op for pre-existing tables,
+        which may have been created before issue #285 and therefore lack the
+        column. A cheap ``SELECT ... WHERE 1=0`` probes the catalog at
+        configure_schema time so the operator gets a clear error message
+        instead of a cryptic column-not-found DB error at first write.
+        """
+        target_qualified = self.dialect.quote_qualified(
+            state.schema_name, state.table_name
+        )
+        hash_col = self.dialect.quote_ident(self.RECORD_HASH_COLUMN)
+        with self._adbc_op_lock:
+            conn = self._reopen_adbc_if_needed_sync()
+            try:
+                cursor = conn.cursor()
+                try:
+                    cursor.execute(
+                        f"SELECT {hash_col} "  # nosec B608
+                        f"FROM {target_qualified} WHERE 1=0"
+                    )
+                finally:
+                    _close_cursor_quietly(cursor)
+            except Exception as exc:
+                self._poison_adbc_connection()
+                if _is_fatal_adbc_error(exc):
+                    raise SchemaConfigurationError(
+                        f"keyless insert target "
+                        f"{state.schema_name}.{state.table_name} "
+                        f"has no {self.RECORD_HASH_COLUMN!r} column; it predates "
+                        f"the content-hash dedup key (issue #285). Recreate the "
+                        f"target so the engine manages {self.RECORD_HASH_COLUMN} "
+                        f"as its primary key."
+                    ) from exc
                 raise
 
     def _poison_adbc_connection(self) -> None:
@@ -1500,180 +1632,21 @@ class GenericSQLConnector(BaseDestinationHandler):
             if self._adbc_conn is not None:
                 return self._adbc_conn
             if self._runtime is None:
-                raise AdbcConfigurationError(
-                    "Runtime not available for ADBC reconnect"
-                )
+                raise AdbcConfigurationError("Runtime not available for ADBC reconnect")
             # open_adbc_connection is sync; safe to call inside the lock
             # because the lock is fast (no I/O) — only the connect() call
             # itself blocks, but that's the work this method is doing.
             self._adbc_conn = self._runtime.open_adbc_connection()
             return self._adbc_conn
 
-    async def _check_batch_committed_via_adbc(
-        self,
-        state: _StreamState,
-        run_id: str,
-        stream_id: str,
-        batch_seq: int,
-    ) -> Optional[Dict[str, Any]]:
-        qualified = self.dialect.quote_qualified(
-            state.schema_name, self.BATCH_COMMITS_TABLE
-        )
-        sql = (
-            f"SELECT {self.dialect.quote_ident('records_written')}, "
-            f"{self.dialect.quote_ident('committed_cursor')} "
-            f"FROM {qualified} "
-            f"WHERE {self.dialect.quote_ident('run_id')} = ? "
-            f"AND {self.dialect.quote_ident('stream_id')} = ? "
-            f"AND {self.dialect.quote_ident('batch_seq')} = ?"
-        )
-        row = await asyncio.to_thread(
-            self._fetch_one_adbc_sync, sql, (run_id, stream_id, batch_seq),
-        )
-        if row is None:
-            return None
-        records_written, committed_cursor = row
-        return {
-            "records_written": int(records_written) if records_written is not None else 0,
-            "committed_cursor": bytes(committed_cursor) if committed_cursor else b"",
-        }
+    def _execute_adbc_dml_sync(self, sql: str, params: tuple[Any, ...]) -> int:
+        """Execute ``sql`` with ``params`` on the ADBC connection.
 
-    def _fetch_one_adbc_sync(
-        self, sql: str, params: Tuple[Any, ...]
-    ) -> Optional[Tuple[Any, ...]]:
-        with self._adbc_op_lock:
-            conn = self._reopen_adbc_if_needed_sync()
-            try:
-                cursor = conn.cursor()
-                try:
-                    cursor.execute(sql, params)
-                    return cursor.fetchone()
-                finally:
-                    try:
-                        cursor.close()
-                    except Exception:
-                        logger.debug("ADBC cursor close failed", exc_info=True)
-            except Exception as exc:
-                self._poison_adbc_connection()
-                if _is_fatal_adbc_error(exc):
-                    raise _reclassify_as_fatal(exc) from exc
-                raise
-
-    async def _record_batch_commit_via_adbc(
-        self,
-        state: _StreamState,
-        run_id: str,
-        stream_id: str,
-        batch_seq: int,
-        cursor_bytes: bytes,
-        records_written: int,
-    ) -> None:
-        """Record the commit row over ADBC: plain INSERT against the
-        enforced ``(run_id, stream_id, batch_seq)`` primary key.
-
-        This base implementation relies on the destination *enforcing* that
-        PK: a concurrent retry's duplicate INSERT raises IntegrityError,
-        which is the collision signal. A system whose primary keys are not
-        enforced (e.g. BigQuery) must override this method in its connector
-        package with a collision-safe statement (BigQuery uses ``MERGE …
-        WHEN NOT MATCHED THEN INSERT`` plus a rowcount check).
-        """
-        qualified = self.dialect.quote_qualified(
-            state.schema_name, self.BATCH_COMMITS_TABLE
-        )
-        # committed_cursor is BINARY; some ADBC drivers cannot bind a binary
-        # parameter, so the dialect supplies both the placeholder SQL and the
-        # matching bind value (they must agree).
-        cursor_placeholder, cursor_value = self.dialect.adbc_binary_bind(cursor_bytes)
-        sql = (
-            f"INSERT INTO {qualified} ("
-            f"{self.dialect.quote_ident('run_id')}, "
-            f"{self.dialect.quote_ident('stream_id')}, "
-            f"{self.dialect.quote_ident('batch_seq')}, "
-            f"{self.dialect.quote_ident('committed_cursor')}, "
-            f"{self.dialect.quote_ident('records_written')}) "
-            f"VALUES (?, ?, ?, {cursor_placeholder}, ?)"
-        )
-        try:
-            await asyncio.to_thread(
-                self._execute_adbc_dml_sync,
-                sql,
-                (run_id, stream_id, batch_seq, cursor_value, records_written),
-            )
-        except AdbcConfigurationError as exc:
-            # An IntegrityError on the (run_id, stream_id, batch_seq)
-            # PK means a concurrent retry already wrote the commit row.
-            # For idempotent write modes (truncate_insert, upsert) the
-            # destination's rows are unchanged by the retry's re-ingest,
-            # so surfacing fatal would orphan ingested rows without a
-            # _batch_commits entry → cold-start would re-ingest and
-            # duplicate. Treat as success.
-            #
-            # For ``insert`` mode the re-ingest already duplicated rows
-            # in the target table; reporting success would hide the
-            # duplication. Surface as AdbcCommitRecordError so the
-            # engine's failure summary carries the divergence and DLQ
-            # rules can route on it.
-            cause = exc.__cause__
-            # MRO walk (mirroring _is_fatal_adbc_error) so a driver-side
-            # subclass like ``MyDriverIntegrityError(IntegrityError)``
-            # is still recognised. A bare ``type(cause).__name__`` check
-            # would let the subclass slip past and be re-raised as fatal,
-            # orphaning ingested rows on idempotent write modes.
-            if cause is not None and any(
-                cls.__name__ == "IntegrityError" for cls in type(cause).__mro__
-            ):
-                self._handle_commit_collision(
-                    state, run_id, stream_id, batch_seq, cause,
-                )
-                return
-            raise
-
-    def _handle_commit_collision(
-        self,
-        state: _StreamState,
-        run_id: str,
-        stream_id: str,
-        batch_seq: int,
-        cause: BaseException,
-    ) -> None:
-        """Centralise the per-write_mode handling of a concurrent commit
-        collision (whichever driver-specific signal surfaced it — PG/Snow
-        IntegrityError, or BigQuery MERGE rowcount=0).
-
-        For ``insert`` mode the colliding retry already ingested rows
-        and reporting success here would hide the duplication. Raise
-        ``AdbcCommitRecordError`` so the engine's failure summary carries
-        the divergence. For ``upsert`` / ``truncate_insert`` the re-ingest
-        is idempotent, so we treat the collision as already-committed.
-        """
-        if state.write_mode == "insert":
-            logger.error(
-                "ADBC _batch_commits raced concurrent retry for %s/%s/%s "
-                "in insert mode — rows likely duplicated by the loser's "
-                "prior adbc_ingest",
-                run_id, stream_id, batch_seq,
-            )
-            raise AdbcCommitRecordError(cause, state.write_mode) from cause
-        logger.info(
-            "ADBC _batch_commits raced concurrent retry for %s/%s/%s "
-            "(%s mode); idempotent — treating as already-committed",
-            run_id, stream_id, batch_seq, state.write_mode,
-        )
-
-    def _execute_adbc_dml_sync(self, sql: str, params: Tuple[Any, ...]) -> int:
-        """Execute ``sql`` with ``params``; return DBAPI ``rowcount`` or -1.
-
-        ``rowcount`` matters for BigQuery's MERGE-based commit-record
-        path: a successful MERGE that NO-OPs (because the conflict row
-        already exists) returns 0 rows-affected. Without a rowcount
-        check, the BigQuery PK NOT-ENFORCED collision is indistinguishable
-        from a fresh insert, and insert-mode duplication slips through
-        silently — re-introducing exactly the bug the Snowflake/Postgres
-        IntegrityError path catches.
-
-        Some ADBC drivers return -1 when rowcount is unavailable; callers
-        must treat -1 as "unknown" rather than "no rows affected".
+        Commits the statement and returns the DBAPI ``rowcount`` (or -1 when
+        the driver does not report one) for callers that need it; most ADBC
+        writes ignore it. Poison-aware: a failure poisons the cached connection
+        and a fatal driver error is reclassified so the engine does not retry
+        it forever.
         """
         with self._adbc_op_lock:
             conn = self._reopen_adbc_if_needed_sync()
@@ -1685,10 +1658,7 @@ class GenericSQLConnector(BaseDestinationHandler):
                     conn.commit()
                     return rowcount if isinstance(rowcount, int) else -1
                 finally:
-                    try:
-                        cursor.close()
-                    except Exception:
-                        logger.debug("ADBC cursor close failed", exc_info=True)
+                    _close_cursor_quietly(cursor)
             except Exception as exc:
                 self._poison_adbc_connection()
                 if _is_fatal_adbc_error(exc):
@@ -1702,26 +1672,22 @@ class GenericSQLConnector(BaseDestinationHandler):
         stream_id: str,
         batch_seq: int,
         record_batch: pa.RecordBatch,
-        cursor_bytes: bytes,
-        record_count: int,
+        truncate_now: bool,
     ) -> None:
         """Full write path for ADBC-only mode.
 
-        Insert: append via ``adbc_ingest``. Truncate-insert: TRUNCATE
-        TABLE then append. Upsert: ingest into a session-scoped temp
-        table, then ``MERGE INTO`` the target.
+        Keyless insert: MERGE on ``_record_hash`` (insert-if-not-exists,
+        issue #285). Keyed insert: plain append; the database PK prevents
+        duplicate rows, but a retry that re-reads the inclusive cursor
+        boundary may surface a constraint violation rather than a silent
+        skip. Truncate-insert: TRUNCATE TABLE on the read's first batch
+        (``truncate_now``, issue #307), then plain append. Upsert: ingest
+        into a session-scoped temp table, then ``MERGE INTO`` keyed on
+        ``conflict_keys``.
 
-        Unlike the SA path's atomicity (write + commit-record in one
-        transaction), the ADBC path commits the ingest separately from
-        the ``_batch_commits`` INSERT. A crash between the two will
-        cause the next retry to:
-
-        * ``insert`` — re-ingest, duplicating rows.
-        * ``truncate_insert`` — TRUNCATE then re-ingest; idempotent.
-        * ``upsert`` — re-MERGE on conflict keys; idempotent.
-
-        See :class:`AdbcCommitRecordError` for the exception that
-        surfaces this divergence to the engine's failure summary.
+        Idempotent under retry: upsert on conflict keys; truncate_insert
+        via full-refresh semantics; keyless insert via content-hash dedup.
+        Keyed insert is at-least-once on the ADBC transport.
         """
         if state.schema_contract is None:
             raise AdbcConfigurationError(
@@ -1729,14 +1695,32 @@ class GenericSQLConnector(BaseDestinationHandler):
                 "requires a configured SchemaContract; schema alignment was skipped"
             )
         cast_batch = state.schema_contract.cast_arrow_batch(record_batch)
-        conflict_keys = state.conflict_keys or state.primary_keys
 
-        if state.write_mode == "truncate_insert":
+        if state.write_mode == "truncate_insert" and truncate_now:
             await asyncio.to_thread(
                 self._truncate_then_ingest_sync,
-                cast_batch, state.schema_name, state.table_name,
+                cast_batch,
+                state.schema_name,
+                state.table_name,
             )
-        elif state.write_mode == "upsert" and conflict_keys:
+        elif state.write_mode == "truncate_insert":
+            await asyncio.to_thread(
+                self._adbc_only_ingest_sync,
+                cast_batch,
+                state.schema_name,
+                state.table_name,
+            )
+        elif state.write_mode == "upsert":
+            # ``conflict_keys`` is the stream's Infra-validated upsert
+            # target; the contract guarantees it is non-empty for an
+            # upsert. If it is empty the stream is misconfigured — fail
+            # loud rather than silently ingest, which would duplicate rows.
+            if not state.conflict_keys:
+                raise SchemaConfigurationError(
+                    f"upsert requested for {state.schema_name}.{state.table_name} "
+                    f"but the stream carries no conflict_keys; refusing to fall "
+                    f"back to plain ingest (would silently duplicate rows)"
+                )
             # Fingerprint via SHA-256 over (run_id, stream_id, batch_seq)
             # gives a fixed-width collision-resistant token that survives
             # any future identifier-length pressure. Critical here because
@@ -1747,55 +1731,48 @@ class GenericSQLConnector(BaseDestinationHandler):
             # per-(stream, batch) uniqueness within a destination handler's
             # lifetime; "b" prefix keeps the token a valid identifier in
             # every supported dialect.
-            stage_token = "b" + hashlib.sha256(
-                f"{run_id}|{stream_id}|{batch_seq}".encode("utf-8")
-            ).hexdigest()[:16]
+            stage_token = (
+                "b"
+                + hashlib.sha256(
+                    f"{run_id}|{stream_id}|{batch_seq}".encode()
+                ).hexdigest()[:16]
+            )
             await asyncio.to_thread(
                 self._merge_ingest_sync,
-                cast_batch, state.schema_name, state.table_name,
-                list(cast_batch.schema.names), conflict_keys,
+                cast_batch,
+                state.schema_name,
+                state.table_name,
+                list(cast_batch.schema.names),
+                state.conflict_keys,
                 stage_token,
             )
+        elif self._needs_record_hash(state):
+            # Keyless insert: dedup via stage-MERGE keyed on _record_hash so
+            # a same-run retry does not duplicate rows (issue #285).
+            hashed_batch = self._attach_record_hash_to_batch(cast_batch, state)
+            stage_token = (
+                "b"
+                + hashlib.sha256(
+                    f"{run_id}|{stream_id}|{batch_seq}".encode()
+                ).hexdigest()[:16]
+            )
+            await asyncio.to_thread(
+                self._merge_ingest_sync,
+                hashed_batch,
+                state.schema_name,
+                state.table_name,
+                list(hashed_batch.schema.names),
+                [self.RECORD_HASH_COLUMN],
+                stage_token,
+                insert_only=True,
+            )
         else:
-            if state.write_mode == "upsert":
-                # Same fallback semantics as the SQLAlchemy path's
-                # _upsert_records: no conflict keys means nothing to match
-                # conflicts on, so the write degrades loudly to plain ingest.
-                logger.warning(
-                    "upsert requested for %s.%s but no conflict keys resolved; "
-                    "falling back to plain ingest — duplicates are possible",
-                    state.schema_name, state.table_name,
-                )
             await asyncio.to_thread(
                 self._adbc_only_ingest_sync,
-                cast_batch, state.schema_name, state.table_name,
+                cast_batch,
+                state.schema_name,
+                state.table_name,
             )
-
-        try:
-            await self._record_batch_commit_via_adbc(
-                state, run_id, stream_id, batch_seq, cursor_bytes, record_count,
-            )
-        except AdbcConfigurationError:
-            # Already classified as fatal by _record_batch_commit_via_adbc
-            # (PEP-249 ProgrammingError, NotSupportedError, DataError).
-            # Propagate as fatal — wrapping would re-classify as retryable.
-            raise
-        except AdbcCommitRecordError:
-            # The insert-mode IntegrityError-on-PK collision branch in
-            # _record_batch_commit_via_adbc raises this directly with
-            # the right write_mode and "retry will duplicate" message.
-            # Re-wrapping would double-prefix the failure_summary and
-            # collapse the precise insert-race wording into a generic
-            # "commit-record failed".
-            raise
-        except Exception as commit_exc:
-            logger.error(
-                "ADBC-only ingest committed but commit-record failed "
-                "for %s/%s/%s — see AdbcCommitRecordError for retry semantics",
-                run_id, stream_id, batch_seq,
-                exc_info=True,
-            )
-            raise AdbcCommitRecordError(commit_exc, state.write_mode) from commit_exc
 
     def _adbc_only_ingest_sync(
         self,
@@ -1817,10 +1794,25 @@ class GenericSQLConnector(BaseDestinationHandler):
                     )
                     conn.commit()
                 finally:
-                    try:
-                        cursor.close()
-                    except Exception:
-                        logger.debug("ADBC cursor close failed", exc_info=True)
+                    _close_cursor_quietly(cursor)
+            except Exception as exc:
+                self._poison_adbc_connection()
+                if _is_fatal_adbc_error(exc):
+                    raise _reclassify_as_fatal(exc) from exc
+                raise
+
+    def _adbc_truncate_sync(self, schema_name: str, table_name: str) -> None:
+        """TRUNCATE the target table on the ADBC connection (own commit)."""
+        qualified = self.dialect.quote_qualified(schema_name, table_name)
+        with self._adbc_op_lock:
+            conn = self._reopen_adbc_if_needed_sync()
+            try:
+                cursor = conn.cursor()
+                try:
+                    cursor.execute(f"TRUNCATE TABLE {qualified}")
+                finally:
+                    _close_cursor_quietly(cursor)
+                conn.commit()
             except Exception as exc:
                 self._poison_adbc_connection()
                 if _is_fatal_adbc_error(exc):
@@ -1833,26 +1825,10 @@ class GenericSQLConnector(BaseDestinationHandler):
         schema_name: str,
         table_name: str,
     ) -> None:
-        qualified = self.dialect.quote_qualified(schema_name, table_name)
+        # RLock is reentrant: the same-thread acquires inside
+        # _adbc_truncate_sync and _adbc_only_ingest_sync are safe.
         with self._adbc_op_lock:
-            conn = self._reopen_adbc_if_needed_sync()
-            try:
-                cursor = conn.cursor()
-                try:
-                    cursor.execute(f"TRUNCATE TABLE {qualified}")
-                finally:
-                    try:
-                        cursor.close()
-                    except Exception:
-                        logger.debug("ADBC cursor close failed", exc_info=True)
-                conn.commit()
-            except Exception as exc:
-                self._poison_adbc_connection()
-                if _is_fatal_adbc_error(exc):
-                    raise _reclassify_as_fatal(exc) from exc
-                raise
-            # RLock is reentrant: this same-thread acquire inside
-            # _adbc_only_ingest_sync is safe.
+            self._adbc_truncate_sync(schema_name, table_name)
             self._adbc_only_ingest_sync(cast_batch, schema_name, table_name)
 
     def _merge_ingest_sync(
@@ -1860,11 +1836,13 @@ class GenericSQLConnector(BaseDestinationHandler):
         cast_batch: pa.RecordBatch,
         schema_name: str,
         table_name: str,
-        all_columns: List[str],
-        conflict_keys: List[str],
+        all_columns: list[str],
+        conflict_keys: list[str],
         stage_token: str,
+        *,
+        insert_only: bool = False,
     ) -> None:
-        """Upsert via ingest-to-stage + ``MERGE INTO`` target.
+        """Upsert (or insert-if-not-exists) via ingest-to-stage + ``MERGE INTO``.
 
         Creates a stage table named ``_analitiq_stage_<target>_<token>``
         in the target schema, ingests the cast batch via
@@ -1876,11 +1854,13 @@ class GenericSQLConnector(BaseDestinationHandler):
         of the same stream, and across retries overlapping the previous
         attempt's DROP — all within Postgres' 63-char NAMEDATALEN budget.
 
-        When every column is a conflict key (composite-PK table with
-        no non-key columns), MERGE's ``WHEN MATCHED THEN UPDATE`` is
-        omitted and the operation degrades to insert-if-not-exists. A
-        warning surfaces this so operators don't silently see "matched
-        rows unchanged" without an explanation.
+        When every column is a conflict key and ``insert_only=False``,
+        MERGE's ``WHEN MATCHED THEN UPDATE`` is omitted and the operation
+        degrades to insert-if-not-exists; a warning surfaces this so
+        operators don't silently see "matched rows unchanged" without an
+        explanation. When ``insert_only=True`` the UPDATE clause is
+        suppressed without a warning — the caller is asserting intent
+        (e.g. content-hash dedup where a matching row is byte-identical).
         """
         # Suffix with the per-write token so concurrent streams and
         # retries (which may overlap before the previous DROP completes)
@@ -1889,12 +1869,13 @@ class GenericSQLConnector(BaseDestinationHandler):
         target_qualified = self.dialect.quote_qualified(schema_name, table_name)
         stage_qualified = self.dialect.quote_qualified(schema_name, stage_name)
         update_cols = [c for c in all_columns if c not in conflict_keys]
-        if not update_cols:
+        if not update_cols and not insert_only:
             logger.warning(
                 "ADBC upsert into %s.%s has no non-key columns to update "
                 "(all_columns == conflict_keys); MERGE will only INSERT "
                 "new rows. Consider write_mode='insert' for clarity.",
-                schema_name, table_name,
+                schema_name,
+                table_name,
             )
         # _adbc_op_lock serializes the full DROP+CREATE+INGEST+MERGE+DROP
         # sequence so concurrent streams against the same handler don't
@@ -1904,8 +1885,15 @@ class GenericSQLConnector(BaseDestinationHandler):
         # leave the stage table empty.
         with self._adbc_op_lock:
             self._merge_ingest_locked_sync(
-                cast_batch, target_qualified, stage_qualified, stage_name,
-                schema_name, all_columns, conflict_keys, update_cols,
+                cast_batch,
+                target_qualified,
+                stage_qualified,
+                stage_name,
+                schema_name,
+                all_columns,
+                conflict_keys,
+                update_cols,
+                insert_only=insert_only,
             )
 
     def _merge_ingest_locked_sync(
@@ -1915,14 +1903,20 @@ class GenericSQLConnector(BaseDestinationHandler):
         stage_qualified: str,
         stage_name: str,
         schema_name: str,
-        all_columns: List[str],
-        conflict_keys: List[str],
-        update_cols: List[str],
+        all_columns: list[str],
+        conflict_keys: list[str],
+        update_cols: list[str],
+        *,
+        insert_only: bool = False,
     ) -> None:
-        """Body of :meth:`_merge_ingest_sync`, called while
-        ``_adbc_op_lock`` is held. Extracted so the lock acquisition
-        site is small and obvious; the inner method assumes the lock
-        and never reacquires."""
+        """Run the body of :meth:`_merge_ingest_sync` under the held lock.
+
+        Called while ``_adbc_op_lock`` is held. Extracted so the lock
+        acquisition site is small and obvious; the inner method assumes the
+        lock and never reacquires. When ``insert_only`` is ``True``, the
+        ``WHEN MATCHED THEN UPDATE`` clause is omitted from the generated
+        MERGE statement regardless of ``update_cols``.
+        """
         conn = self._reopen_adbc_if_needed_sync()
         try:
             cursor = conn.cursor()
@@ -1963,7 +1957,9 @@ class GenericSQLConnector(BaseDestinationHandler):
                     f"t.{self.dialect.quote_ident(c)} = s.{self.dialect.quote_ident(c)}"
                     for c in update_cols
                 )
-                insert_cols = ", ".join(self.dialect.quote_ident(c) for c in all_columns)
+                insert_cols = ", ".join(
+                    self.dialect.quote_ident(c) for c in all_columns
+                )
                 insert_vals = ", ".join(
                     f"s.{self.dialect.quote_ident(c)}" for c in all_columns
                 )
@@ -1971,8 +1967,10 @@ class GenericSQLConnector(BaseDestinationHandler):
                     f"MERGE INTO {target_qualified} t USING {stage_qualified} s "
                     f"ON {on_clause} "
                 )
-                if update_cols:
-                    merge_sql += f"WHEN MATCHED THEN UPDATE SET {set_clause} "
+                if update_cols and not insert_only:
+                    merge_sql += (
+                        f"WHEN MATCHED THEN UPDATE SET {set_clause} "  # nosec B608
+                    )
                 merge_sql += (
                     f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) "
                     f"VALUES ({insert_vals})"
@@ -1980,10 +1978,7 @@ class GenericSQLConnector(BaseDestinationHandler):
                 cursor.execute(merge_sql)
                 conn.commit()
             finally:
-                try:
-                    cursor.close()
-                except Exception:
-                    logger.debug("ADBC cursor close failed", exc_info=True)
+                _close_cursor_quietly(cursor)
         except Exception as exc:
             # Best-effort stage cleanup using the local ``conn`` (not
             # ``self._adbc_conn``) so a concurrent poisoning by another
@@ -1995,17 +1990,10 @@ class GenericSQLConnector(BaseDestinationHandler):
             try:
                 drop_cursor = conn.cursor()
                 try:
-                    drop_cursor.execute(
-                        f"DROP TABLE IF EXISTS {stage_qualified}"
-                    )
+                    drop_cursor.execute(f"DROP TABLE IF EXISTS {stage_qualified}")
                     conn.commit()
                 finally:
-                    try:
-                        drop_cursor.close()
-                    except Exception:
-                        logger.debug(
-                            "ADBC cursor close failed", exc_info=True
-                        )
+                    _close_cursor_quietly(drop_cursor)
             except Exception:
                 # The next retry's pre-flight DROP-IF-EXISTS will clean
                 # the orphan up; warn so an operator sees the leftover
@@ -2013,7 +2001,8 @@ class GenericSQLConnector(BaseDestinationHandler):
                 logger.warning(
                     "ADBC stage table %s left behind after MERGE failure; "
                     "the next retry's pre-flight DROP-IF-EXISTS will clean it up",
-                    stage_qualified, exc_info=True,
+                    stage_qualified,
+                    exc_info=True,
                 )
             self._poison_adbc_connection()
             if _is_fatal_adbc_error(exc):
@@ -2030,15 +2019,13 @@ class GenericSQLConnector(BaseDestinationHandler):
                 drop_cursor.execute(f"DROP TABLE IF EXISTS {stage_qualified}")
                 conn.commit()
             finally:
-                try:
-                    drop_cursor.close()
-                except Exception:
-                    logger.debug("ADBC cursor close failed", exc_info=True)
+                _close_cursor_quietly(drop_cursor)
         except Exception:
             logger.warning(
                 "ADBC stage table %s post-MERGE DROP failed; next retry of "
                 "this batch will clean it up via pre-flight DROP-IF-EXISTS",
-                stage_qualified, exc_info=True,
+                stage_qualified,
+                exc_info=True,
             )
 
     async def health_check(self) -> bool:
@@ -2074,7 +2061,7 @@ class GenericSQLConnector(BaseDestinationHandler):
 
     def _health_check_sync_engine(self) -> None:
         """Health probe for the sync engine (worker thread)."""
-        with self._sync_engine.connect() as conn:
+        with self._require_sync_engine().connect() as conn:
             conn.execute(text("SELECT 1"))
 
     def _health_check_adbc_sync(self) -> None:
@@ -2097,10 +2084,7 @@ class GenericSQLConnector(BaseDestinationHandler):
                     cursor.execute("SELECT 1")
                     cursor.fetchone()
                 finally:
-                    try:
-                        cursor.close()
-                    except Exception:
-                        logger.debug("ADBC cursor close failed", exc_info=True)
+                    _close_cursor_quietly(cursor)
             except Exception:
                 self._poison_adbc_connection()
                 raise
@@ -2119,11 +2103,11 @@ class GenericSQLConnector(BaseDestinationHandler):
     async def read_batches(
         self,
         runtime: ConnectionRuntime,
-        config: Dict[str, Any],
+        config: dict[str, Any],
         *,
         checkpoint: CheckpointStore,
         stream_name: str,
-        partition: Optional[Dict[str, Any]] = None,
+        partition: dict[str, Any] | None = None,
         batch_size: int = 1000,
     ) -> AsyncIterator[pa.RecordBatch]:
         """Read upstream rows as Arrow batches typed via the endpoint contract."""
@@ -2144,9 +2128,7 @@ class GenericSQLConnector(BaseDestinationHandler):
         schema_name = database_object.get("schema")
 
         try:
-            await materialize_runtime(
-                runtime, sql_dialect=self.dialect
-            )
+            await materialize_runtime(runtime, sql_dialect=self.dialect)
         except DETERMINISTIC_CONNECT_ERRORS:
             raise
         except Exception as e:
@@ -2170,9 +2152,9 @@ class GenericSQLConnector(BaseDestinationHandler):
             filters = self._build_filters(stream_source.get("filters") or [])
 
             replication = stream_source.get("replication") or {}
+            # cursor_field is a contract string|null (validated upstream), so no
+            # list normalization is needed.
             cursor_field = replication.get("cursor_field")
-            if isinstance(cursor_field, list):
-                cursor_field = cursor_field[0] if cursor_field else None
             replication_method = replication.get("method", "full_refresh")
 
             # Stream-declared page ordering (the contract's
@@ -2261,14 +2243,17 @@ class GenericSQLConnector(BaseDestinationHandler):
 
             builder = QueryBuilder(
                 driver,
+                registry_name=self.dialect.sqlalchemy_registry_name,
                 paging_order_fallback=self.dialect.paging_order_fallback,
             )
 
-            def page_query(offset: int):
-                """Build the per-page SELECT. Limit / offset are pushed into
-                ``QueryConfig`` so SQLAlchemy compiles dialect-correct paging.
-                ``params`` is a list for positional dialects and a dict for
-                named ones."""
+            def page_query(offset: int) -> tuple[str, ParamsLike]:
+                """Build the per-page SELECT.
+
+                Limit / offset are pushed into ``QueryConfig`` so SQLAlchemy
+                compiles dialect-correct paging. ``params`` is a list for
+                positional dialects and a dict for named ones.
+                """
                 sql, params = builder.build_select_query(
                     QueryConfig(
                         schema_name=schema_name,
@@ -2281,6 +2266,18 @@ class GenericSQLConnector(BaseDestinationHandler):
                             else None
                         ),
                         cursor_value=cursor_value,
+                        # Resume inclusively (>=), re-reading the boundary row.
+                        # A non-unique cursor (e.g. a coarse timestamp with
+                        # ties) can gain a new row at the last committed value
+                        # between runs; an exclusive > would filter that row out
+                        # at the source and lose it for good. Re-reading is safe
+                        # under the default upsert write mode, which dedups the
+                        # boundary row against its conflict_keys. Under insert
+                        # mode a unique/primary key rejects the re-read duplicate
+                        # loudly; a keyless insert stream has nothing to dedup
+                        # against and would append a duplicate boundary row, so
+                        # insert + an incremental cursor without a uniqueness
+                        # key is an unsafe combination.
                         cursor_mode="inclusive",
                         order_by=order_by_field,
                         limit=batch_size,
@@ -2299,24 +2296,28 @@ class GenericSQLConnector(BaseDestinationHandler):
             # the identical page body (_fetch_page_rows).
             async with AsyncExitStack() as stack:
                 if sa_sync:
-                    sync_conn = await asyncio.to_thread(
-                        runtime.sync_engine.connect
-                    )
+                    sync_conn = await asyncio.to_thread(runtime.sync_engine.connect)
                     stack.push_async_callback(asyncio.to_thread, sync_conn.close)
 
-                    async def fetch_page(sql: str, params: Any) -> List[Dict[str, Any]]:
+                    async def fetch_page(sql: str, params: Any) -> list[dict[str, Any]]:
                         return await asyncio.to_thread(
                             self._fetch_page_rows, sync_conn, sql, params
                         )
-                else:
-                    conn = await stack.enter_async_context(
-                        acquire_connection(engine)
-                    )
 
-                    async def fetch_page(sql: str, params: Any) -> List[Dict[str, Any]]:
-                        return await conn.run_sync(
+                else:
+                    if engine is None:
+                        raise RuntimeError(
+                            "async SQLAlchemy engine not available on the "
+                            "async read path; this indicates a transport "
+                            "dispatch error"
+                        )
+                    conn = await stack.enter_async_context(acquire_connection(engine))
+
+                    async def fetch_page(sql: str, params: Any) -> list[dict[str, Any]]:
+                        rows: list[dict[str, Any]] = await conn.run_sync(
                             self._fetch_page_rows, sql, params
                         )
+                        return rows
 
                 while True:
                     paged_query, paged_params = page_query(offset)
@@ -2356,17 +2357,17 @@ class GenericSQLConnector(BaseDestinationHandler):
         runtime: ConnectionRuntime,
         driver: str,
         schema_contract: SchemaContract,
-        schema_name: Optional[str],
+        schema_name: str | None,
         table_name: str,
-        columns: List[str],
-        filters: List[Filter],
-        cursor_field: Optional[str],
+        columns: list[str],
+        filters: list[Filter],
+        cursor_field: str | None,
         cursor_value: Any,
-        order_by_field: Optional[str],
+        order_by_field: str | None,
         batch_size: int,
         checkpoint: CheckpointStore,
         stream_name: str,
-        partition: Dict[str, Any],
+        partition: dict[str, Any],
     ) -> AsyncIterator[pa.RecordBatch]:
         """Stream Arrow batches via the ADBC-only path.
 
@@ -2386,9 +2387,7 @@ class GenericSQLConnector(BaseDestinationHandler):
             # The first selected column is the ORDER BY fallback and an empty
             # projection compiles to ``SELECT`` with no columns; fail loudly
             # rather than emit an invalid statement.
-            raise ReadError(
-                "ADBC-only source requires a non-empty column projection"
-            )
+            raise ReadError("ADBC-only source requires a non-empty column projection")
 
         # The ADBC path quotes every identifier, so normalize the schema
         # through the connector's dialect — the same rule the destination
@@ -2414,6 +2413,7 @@ class GenericSQLConnector(BaseDestinationHandler):
         builder = QueryBuilder(
             driver,
             paramstyle="qmark",
+            registry_name=self.dialect.sqlalchemy_registry_name,
             quote_identifiers=True,
             inline_paging=True,
         )
@@ -2434,6 +2434,10 @@ class GenericSQLConnector(BaseDestinationHandler):
                         filters=filters,
                         cursor_field=cursor_field,
                         cursor_value=initial_cursor_value if cursor_field else None,
+                        # Inclusive resume bound: see the matching note on the
+                        # SQLAlchemy read path. Re-reading the boundary row is
+                        # what keeps a late row sharing the last cursor value
+                        # from being lost; upsert dedups the re-read.
                         cursor_mode="inclusive",
                         order_by=order_by,
                         limit=batch_size,
@@ -2463,12 +2467,15 @@ class GenericSQLConnector(BaseDestinationHandler):
                     page_rows += cast_batch.num_rows
                     if cursor_field and cast_batch.num_rows > 0:
                         if cursor_field in cast_batch.schema.names:
-                            last_cursor_value = cast_batch.column(cursor_field)[-1].as_py()
+                            last_cursor_value = cast_batch.column(cursor_field)[
+                                -1
+                            ].as_py()
                         elif not cursor_missing_warned:
                             logger.warning(
                                 "stream %r: cursor_field %r not present in "
                                 "result batch; cursor will not advance",
-                                stream_name, cursor_field,
+                                stream_name,
+                                cursor_field,
                             )
                             cursor_missing_warned = True
                     self.metrics["records_read"] += cast_batch.num_rows
@@ -2487,7 +2494,7 @@ class GenericSQLConnector(BaseDestinationHandler):
     @staticmethod
     def _fetch_page_rows(
         conn: Connection, sql: str, params: Any
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """Run one page SELECT on a sync ``Connection`` and return dict rows.
 
         Shared by both SQLAlchemy engine flavours (async via ``run_sync``,
@@ -2509,8 +2516,8 @@ class GenericSQLConnector(BaseDestinationHandler):
 
     @staticmethod
     def _select_columns(
-        endpoint_doc: Dict[str, Any], stream_source: Dict[str, Any]
-    ) -> List[str]:
+        endpoint_doc: dict[str, Any], stream_source: dict[str, Any]
+    ) -> list[str]:
         selected = stream_source.get("selected_columns")
         if selected:
             return list(selected)
@@ -2518,8 +2525,8 @@ class GenericSQLConnector(BaseDestinationHandler):
         return [c["name"] for c in columns if c.get("name")]
 
     @staticmethod
-    def _build_filters(stream_filters: List[Dict[str, Any]]) -> List[Filter]:
-        out: List[Filter] = []
+    def _build_filters(stream_filters: list[dict[str, Any]]) -> list[Filter]:
+        out: list[Filter] = []
         for f in stream_filters:
             field_name = f.get("field")
             if not field_name:
@@ -2543,28 +2550,24 @@ class GenericSQLConnector(BaseDestinationHandler):
     # take a materialized ``ConnectionRuntime`` directly and run no gRPC
     # server or engine orchestration — the control-plane calls them.
 
-    async def list_schemas(self, runtime: ConnectionRuntime) -> List[str]:
+    async def list_schemas(self, runtime: ConnectionRuntime) -> list[str]:
         return await _sql_list_schemas(runtime, dialect=self.dialect)
 
-    async def list_tables(
-        self, runtime: ConnectionRuntime, schema: str
-    ) -> List[str]:
+    async def list_tables(self, runtime: ConnectionRuntime, schema: str) -> list[str]:
         return await _sql_list_tables(runtime, schema, dialect=self.dialect)
 
     async def list_columns(
         self, runtime: ConnectionRuntime, schema: str, table: str
-    ) -> Tuple[List[ColumnDef], List[str]]:
-        return await _sql_list_columns(
-            runtime, schema, table, dialect=self.dialect
-        )
+    ) -> tuple[list[ColumnDef], list[str]]:
+        return await _sql_list_columns(runtime, schema, table, dialect=self.dialect)
 
     async def create_table(
         self,
         runtime: ConnectionRuntime,
         schema: str,
         table: str,
-        columns: List[ColumnDef],
-        primary_keys: List[str],
+        columns: list[ColumnDef],
+        primary_keys: list[str],
     ) -> None:
         await _sql_create_table(
             runtime, schema, table, columns, primary_keys, dialect=self.dialect

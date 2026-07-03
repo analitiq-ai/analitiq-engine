@@ -3,7 +3,7 @@ name = "analitiq-stream"
 version = "0.1.0"
 description = "A fault-tolerant data streaming framework for Python 3.11+"
 authors = ["Analitiq Core Team <dev@analitiq.com>"]
-license = "MIT"
+license = "Apache-2.0"
 readme = "README.md"
 homepage = "https://github.com/analitiq/analitiq-stream"
 repository = "https://github.com/analitiq/analitiq-stream"
@@ -12,7 +12,7 @@ keywords = ["data-streaming", "etl", "pipeline", "async", "fault-tolerant"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
@@ -184,6 +184,11 @@ ensure_newline_before_comments = true
 
 [tool.mypy]
 python_version = "3.11"
+# The CDK is a sibling package (cdk/cdk/), consumed in-tree. Put cdk/ on the
+# type-check path so `import cdk` resolves to cdk/cdk (mirrors pytest's
+# pythonpath and Docker's PYTHONPATH=/app/cdk); without it every cdk import
+# reports import-not-found.
+mypy_path = "cdk"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true
@@ -196,6 +201,19 @@ warn_unused_ignores = true
 warn_no_return = true
 warn_unreachable = true
 strict_equality = true
+# Generated gRPC stubs are machine-emitted, not hand-maintained; keep them out
+# of type checking (mirrors the [tool.flake8] and pre-commit excludes for
+# src/grpc/generated). exclude drops them from the checked set; the override
+# below silences any errors reached by following imports into them.
+exclude = ['^src/grpc/generated/']
+
+[[tool.mypy.overrides]]
+module = [
+    "analitiq.v1.*",
+    "src.grpc.generated.*",
+    "grpc.generated.*",
+]
+ignore_errors = true
 
 [[tool.mypy.overrides]]
 module = [
@@ -209,6 +227,8 @@ module = [
     "grpc.*",
     "google.protobuf.*",
     "msgpack.*",
+    "pyarrow.*",
+    "dateutil.*",
 ]
 ignore_missing_imports = true
 
@@ -259,8 +279,23 @@ exclude_lines = [
 show_missing = true
 skip_covered = true
 
+# Read by flake8 via the Flake8-pyproject plugin (stock flake8 ignores
+# pyproject.toml). The pre-commit flake8 hook also loads flake8-bugbear and
+# flake8-datetimez, which add the B/DTZ checks selected below.
 [tool.flake8]
 max-line-length = 88
+# Checks mapped to issue #265 Part A's recurring families:
+#   - silent failures: E722 bans bare `except:`; B904 (opt-in, selected below)
+#     keeps a re-raise's cause. Broad `except Exception: pass/return None`
+#     suppression is deliberately NOT gated -- the engine uses handled broad
+#     excepts, so that stays a review concern.
+#   - dead code: pyflakes F401/F811/F841 (on by default) flag unused imports,
+#     redefinitions and unused variables in changed files.
+#   - naive datetimes: DTZ (flake8-datetimez) bans datetime.now()/utcnow()
+#     without tzinfo.
+# B0xx (bugbear defaults) and DTZ come on once the plugins are present; E203/W503
+# stay ignored for black compatibility.
+extend-select = ["B904"]
 extend-ignore = ["E203", "W503"]
 exclude = [
     ".git",
@@ -271,4 +306,23 @@ exclude = [
     "dist",
     ".venv",
     "venv",
+    "src/grpc/generated",
 ]
+
+[tool.pydocstyle]
+# Enforce docstring STYLE, not presence. Issue #265 Part A targets three defect
+# families (silent failures, dead code, naive datetimes); mandating a docstring
+# on every public module/class/method is out of scope and would add ~1,700
+# low-signal stubs. The D1xx "missing docstring" family is therefore ignored,
+# while the D2xx/D4xx style rules (blank lines, punctuation, imperative mood)
+# stay enforced wherever a docstring exists.
+add-ignore = "D100,D101,D102,D103,D104,D105,D106,D107"
+
+[tool.bandit]
+# Security scanning of the engine/CDK source. Migrated from the legacy INI
+# .bandit file (which bandit's -c flag cannot parse). Tests are scanned
+# separately-excluded at the hook level.
+exclude_dirs = ["tests", "docs", "examples"]
+# B101 (assert_used): asserts are used for internal invariants, not validation.
+# B601 (paramiko_calls): not applicable; no shell-out via paramiko.
+skips = ["B101", "B601"]

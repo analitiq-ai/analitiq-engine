@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import IntEnum, StrEnum
-from typing import Any, Optional, Protocol, Tuple, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 
 class AckStatus(IntEnum):
@@ -28,10 +28,10 @@ class AckStatus(IntEnum):
     """
 
     ACK_STATUS_UNSPECIFIED = 0
-    ACK_STATUS_SUCCESS = 1            # All records written, cursor advanced
+    ACK_STATUS_SUCCESS = 1  # All records written, cursor advanced
     ACK_STATUS_ALREADY_COMMITTED = 2  # Idempotent replay, batch already committed
     ACK_STATUS_RETRYABLE_FAILURE = 3  # No commit occurred, safe to retry whole batch
-    ACK_STATUS_FATAL_FAILURE = 4      # No commit occurred, do not retry, send to DLQ
+    ACK_STATUS_FATAL_FAILURE = 4  # No commit occurred, do not retry, send to DLQ
 
 
 class WriteMode(IntEnum):
@@ -44,9 +44,51 @@ class WriteMode(IntEnum):
     """
 
     WRITE_MODE_UNSPECIFIED = 0
-    WRITE_MODE_INSERT = 1            # Insert only, fail on conflict
-    WRITE_MODE_UPSERT = 2            # Upsert (insert or update on conflict)
+    WRITE_MODE_INSERT = 1  # Insert only, fail on conflict
+    WRITE_MODE_UPSERT = 2  # Upsert (insert or update on conflict)
     WRITE_MODE_TRUNCATE_INSERT = 3  # Truncate table before insert (full refresh)
+
+
+class RetrySemantics(IntEnum):
+    """Retry safety a destination guarantees on a same-run restart (#286).
+
+    Integer values mirror the ``RetrySemantics`` enum in ``stream.proto``
+    exactly, so the servicer passes the value straight into a protobuf
+    ``SchemaAck`` without a lookup table.
+    """
+
+    RETRY_SEMANTICS_UNSPECIFIED = 0
+    # The handler dedups re-sent records by row identity; a restart can
+    # neither duplicate nor drop.
+    RETRY_SEMANTICS_EXACTLY_ONCE = 1
+    # A restart is not replay-safe: committed records are re-applied, or
+    # re-batched rows are misclassified (skipped / truncated away). The
+    # verdict's reason names the concrete failure mode.
+    RETRY_SEMANTICS_AT_LEAST_ONCE = 2
+
+
+@dataclass(frozen=True)
+class RetryVerdict:
+    """A handler's retry-safety verdict for one configured stream.
+
+    ``reason`` names the mechanism behind the verdict (the dedup key, the
+    manifest, the declared idempotency key, or the gap) so the engine's
+    per-stream log line is actionable, not just a label. A verdict must
+    commit to exactly-once or at-least-once: UNSPECIFIED is the wire's
+    absent value, and letting a handler construct it would silently
+    degrade into the base default downstream instead of failing at the
+    defective handler.
+    """
+
+    semantics: RetrySemantics
+    reason: str
+
+    def __post_init__(self) -> None:
+        if self.semantics == RetrySemantics.RETRY_SEMANTICS_UNSPECIFIED:
+            raise ValueError(
+                "RetryVerdict requires exactly-once or at-least-once; "
+                "a handler must never claim UNSPECIFIED"
+            )
 
 
 @dataclass(frozen=True)
@@ -108,8 +150,8 @@ class BatchWriteResult:
 
     status: AckStatus
     records_written: int
-    committed_cursor: Optional[Cursor] = None
-    failed_record_ids: Tuple[str, ...] = ()
+    committed_cursor: Cursor | None = None
+    failed_record_ids: tuple[str, ...] = ()
     failure_summary: str = ""
 
     def __post_init__(self) -> None:
@@ -126,9 +168,7 @@ class BatchWriteResult:
         # Accept any iterable but store a tuple, so the frozen result is
         # immutable all the way down (a list binding would still allow
         # in-place mutation).
-        object.__setattr__(
-            self, "failed_record_ids", tuple(self.failed_record_ids)
-        )
+        object.__setattr__(self, "failed_record_ids", tuple(self.failed_record_ids))
 
     @property
     def success(self) -> bool:
@@ -162,11 +202,13 @@ class CheckpointStore(Protocol):
 
     async def get_cursor(
         self, stream_name: str, partition: dict[str, Any] | None = None
-    ) -> dict[str, Any] | None: ...
+    ) -> dict[str, Any] | None:
+        ...
 
     async def save_cursor(
         self,
         stream_name: str,
         partition: dict[str, Any] | None,
         cursor: dict[str, Any],
-    ) -> None: ...
+    ) -> None:
+        ...

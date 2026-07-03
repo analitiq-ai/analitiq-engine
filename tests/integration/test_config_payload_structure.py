@@ -8,11 +8,11 @@ These tests verify that:
 2. Resolved config structure matches what connectors expect
 """
 
+from unittest.mock import AsyncMock
+
 import pytest
-from unittest.mock import AsyncMock, Mock
 
 from cdk.connection_runtime import ConnectionRuntime
-
 
 # --- Test UUIDs ---
 PIPELINE_ID = "22ab7b76-b4df-4c68-8b27-82c307436661"
@@ -31,11 +31,24 @@ DB_ALIAS = "conn_db"
 
 # --- Connector definitions ---
 API_CONNECTORS = [
-    {"connector_id": "api-connector", "connector_type": "api", "connector_name": "REST API"},
+    {
+        "connector_id": "api-connector",
+        "connector_type": "api",
+        "connector_name": "REST API",
+    },
 ]
 API_DB_CONNECTORS = [
-    {"connector_id": "api-connector", "connector_type": "api", "connector_name": "REST API"},
-    {"connector_id": "pg-connector", "connector_type": "database", "connector_name": "PostgreSQL", "driver": "postgresql"},
+    {
+        "connector_id": "api-connector",
+        "connector_type": "api",
+        "connector_name": "REST API",
+    },
+    {
+        "connector_id": "pg-connector",
+        "connector_type": "database",
+        "connector_name": "PostgreSQL",
+        "driver": "postgresql",
+    },
 ]
 
 
@@ -178,19 +191,20 @@ def _make_stream_config(source_alias, source_endpoint_id, dest_alias, dest_endpo
                 "cursor_field": ["created"],
             },
         },
-        "destinations": [{
-            "connection_ref": dest_alias,
-            "endpoint_id": dest_endpoint_id,
-            "endpoint_ref": {
-                "scope": "connection",
-                "connection_id": dest_alias,
+        "destinations": [
+            {
+                "connection_ref": dest_alias,
                 "endpoint_id": dest_endpoint_id,
-            },
-            "write": {"mode": "upsert"},
-        }],
+                "endpoint_ref": {
+                    "scope": "connection",
+                    "connection_id": dest_alias,
+                    "endpoint_id": dest_endpoint_id,
+                },
+                "write": {"mode": "upsert"},
+            }
+        ],
         "mapping": {"assignments": []},
     }
-
 
 
 def _make_runtime(connection_id, connector_type, config, driver=None):
@@ -208,10 +222,14 @@ def _api_to_api_resolved_connections():
     """Resolved connections for API-to-API (Wise -> SevDesk)."""
     return {
         WISE_CONNECTION_ID: _make_runtime(
-            WISE_CONNECTION_ID, "api", _wise_connection_config(),
+            WISE_CONNECTION_ID,
+            "api",
+            _wise_connection_config(),
         ),
         SEVDESK_CONNECTION_ID: _make_runtime(
-            SEVDESK_CONNECTION_ID, "api", _sevdesk_connection_config(),
+            SEVDESK_CONNECTION_ID,
+            "api",
+            _sevdesk_connection_config(),
         ),
     }
 
@@ -228,10 +246,15 @@ def _api_to_db_resolved_connections():
     """Resolved connections for API-to-DB (Wise -> Postgres)."""
     return {
         WISE_CONNECTION_ID: _make_runtime(
-            WISE_CONNECTION_ID, "api", _wise_connection_config(),
+            WISE_CONNECTION_ID,
+            "api",
+            _wise_connection_config(),
         ),
         DB_CONNECTION_ID: _make_runtime(
-            DB_CONNECTION_ID, "database", _database_connection_config(), driver="postgresql",
+            DB_CONNECTION_ID,
+            "database",
+            _database_connection_config(),
+            driver="postgresql",
         ),
     }
 
@@ -259,9 +282,9 @@ class TestResolvedConnectionKeys:
         resolved_endpoints = _api_to_api_resolved_endpoints()
 
         for key in resolved_endpoints.keys():
-            assert not key.startswith("path:"), (
-                f"Endpoint key should not have 'path:' prefix, got: {key}"
-            )
+            assert not key.startswith(
+                "path:"
+            ), f"Endpoint key should not have 'path:' prefix, got: {key}"
 
 
 class TestAPIToAPIConfigStructure:
@@ -271,13 +294,19 @@ class TestAPIToAPIConfigStructure:
     def api_to_api_config(self):
         """Construct wise_to_sevdesk config from fixture data."""
         pipeline_config = _make_pipeline_config(
-            WISE_ALIAS, WISE_CONNECTION_ID,
-            SEVDESK_ALIAS, SEVDESK_CONNECTION_ID,
+            WISE_ALIAS,
+            WISE_CONNECTION_ID,
+            SEVDESK_ALIAS,
+            SEVDESK_CONNECTION_ID,
         )
-        stream_configs = [_make_stream_config(
-            WISE_ALIAS, WISE_ENDPOINT_ID,
-            SEVDESK_ALIAS, SEVDESK_ENDPOINT_ID,
-        )]
+        stream_configs = [
+            _make_stream_config(
+                WISE_ALIAS,
+                WISE_ENDPOINT_ID,
+                SEVDESK_ALIAS,
+                SEVDESK_ENDPOINT_ID,
+            )
+        ]
         resolved_connections = _api_to_api_resolved_connections()
         resolved_endpoints = _api_to_api_resolved_endpoints()
         return pipeline_config, stream_configs, resolved_connections, resolved_endpoints
@@ -295,7 +324,9 @@ class TestAPIToAPIConfigStructure:
         config = runtime.raw_config
 
         assert "host" in config, "API connection must have host"
-        assert config["host"].startswith("http"), f"Host should be URL, got: {config['host']}"
+        assert config["host"].startswith(
+            "http"
+        ), f"Host should be URL, got: {config['host']}"
         assert "parameters" in config, "API connection must have parameters"
 
     def test_destination_connection_has_api_fields(self, api_to_api_config):
@@ -321,13 +352,19 @@ class TestAPIToDatabaseConfigStructure:
     def api_to_db_config(self):
         """Construct wise_to_postgres config from fixture data."""
         pipeline_config = _make_pipeline_config(
-            WISE_ALIAS, WISE_CONNECTION_ID,
-            DB_ALIAS, DB_CONNECTION_ID,
+            WISE_ALIAS,
+            WISE_CONNECTION_ID,
+            DB_ALIAS,
+            DB_CONNECTION_ID,
         )
-        stream_configs = [_make_stream_config(
-            WISE_ALIAS, WISE_ENDPOINT_ID,
-            DB_ALIAS, DB_ENDPOINT_ID,
-        )]
+        stream_configs = [
+            _make_stream_config(
+                WISE_ALIAS,
+                WISE_ENDPOINT_ID,
+                DB_ALIAS,
+                DB_ENDPOINT_ID,
+            )
+        ]
         resolved_connections = _api_to_db_resolved_connections()
         resolved_endpoints = _api_to_db_resolved_endpoints()
         return pipeline_config, stream_configs, resolved_connections, resolved_endpoints
@@ -397,4 +434,3 @@ class TestEndToEndConfigFlow:
         params = config.get("parameters", {})
         assert params.get("database"), "Database parameters must have 'database'"
         assert params.get("username"), "Database parameters must have 'username'"
-

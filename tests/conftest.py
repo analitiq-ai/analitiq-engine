@@ -3,28 +3,63 @@
 import asyncio
 import os
 import tempfile
-import json
 from pathlib import Path
-from typing import Dict, Any
 from unittest.mock import AsyncMock, Mock
 
 import pytest
 from dotenv import load_dotenv
 
+from tests.fixtures.api import (
+    mock_api_connector,
+    mock_http_responses,
+    sample_api_config,
+    sample_api_response,
+)
+
+# Import specific fixtures from modules
+from tests.fixtures.database import (
+    mock_database_connector,
+    postgres_driver,
+    sample_database_config,
+)
+from tests.fixtures.pipeline_config_prep import (
+    environment_variables,
+    multi_stream_pipeline_config,
+    sample_database_endpoint_config,
+    sample_database_host_config,
+    sample_invalid_pipeline_config,
+    sample_s3_error_responses,
+    sample_sevdesk_endpoint_config,
+    sample_sevdesk_host_config,
+    sample_wise_endpoint_config,
+    sample_wise_host_config,
+)
+
+# Fixtures imported above are re-exported for pytest discovery, not used here.
+__all__ = [
+    "mock_api_connector",
+    "mock_http_responses",
+    "sample_api_config",
+    "sample_api_response",
+    "mock_database_connector",
+    "postgres_driver",
+    "sample_database_config",
+    "environment_variables",
+    "multi_stream_pipeline_config",
+    "sample_database_endpoint_config",
+    "sample_database_host_config",
+    "sample_invalid_pipeline_config",
+    "sample_s3_error_responses",
+    "sample_sevdesk_endpoint_config",
+    "sample_sevdesk_host_config",
+    "sample_wise_endpoint_config",
+    "sample_wise_host_config",
+]
+
 # Load test environment variables from .env file
 env_file = Path(__file__).parent / ".env"
 if env_file.exists():
     load_dotenv(env_file, override=False)  # Don't override existing env vars
-
-# Import specific fixtures from modules
-from tests.fixtures.database import postgres_driver, mock_database_connector, sample_database_config
-from tests.fixtures.api import mock_api_connector, sample_api_config, mock_http_responses, sample_api_response
-from tests.fixtures.pipeline_config_prep import (
-    sample_wise_host_config, sample_sevdesk_host_config, sample_database_host_config,
-    sample_wise_endpoint_config, sample_sevdesk_endpoint_config, sample_database_endpoint_config,
-    sample_invalid_pipeline_config, sample_s3_error_responses, environment_variables,
-    multi_stream_pipeline_config
-)
 
 
 @pytest.fixture(scope="session")
@@ -54,10 +89,8 @@ def sample_wise_record():
         "status": "outgoing_payment_sent",
         "details": {
             "reference": "Payment for services",
-            "merchant": {
-                "name": "Test Merchant"
-            }
-        }
+            "merchant": {"name": "Test Merchant"},
+        },
     }
 
 
@@ -79,7 +112,6 @@ def mock_state_manager():
     """Mock state manager for testing."""
     state_manager = Mock()
     state_manager.start_run = Mock(return_value="test-run-id")
-    state_manager.finalize_run = Mock()
     state_manager.get_checkpoint = Mock(return_value={})
     state_manager.checkpoint = AsyncMock()
     return state_manager
@@ -91,16 +123,16 @@ def setup_test_env():
     test_vars = {
         "TEST_VAR": "test_value",
         "SEVDESK_BANK_ACCOUNT_ID": "5936402",
-        "API_TOKEN": "test-token"
+        "API_TOKEN": "test-token",
     }
-    
+
     original_values = {}
     for key, value in test_vars.items():
         original_values[key] = os.environ.get(key)
         os.environ[key] = value
-    
+
     yield
-    
+
     # Restore original values
     for key, original_value in original_values.items():
         if original_value is None:

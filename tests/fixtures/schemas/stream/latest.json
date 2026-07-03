@@ -827,11 +827,10 @@
           "anyOf": [
             {
               "items": {
-                "items": {
-                  "type": "string"
-                },
-                "type": "array"
+                "minLength": 1,
+                "type": "string"
               },
+              "minItems": 1,
               "type": "array"
             },
             {
@@ -839,7 +838,7 @@
             }
           ],
           "default": null,
-          "description": "Required when the selected write mode requires conflict targets. Non-empty array of non-empty destination key sets.",
+          "description": "Database upsert conflict target \u2014 a single composite key set (non-empty list of destination field names). Required for a database (`scope=connection`) upsert; forbidden for an API (`scope=connector`) destination, whose conflict key is endpoint-owned (`operations.write.upsert.conflict_keys`). Presence is enforced by `StreamDestination`, which knows the destination scope. Multiple alternative key sets are out of scope until a connector needs them.",
           "title": "Conflict Keys"
         },
         "mode": {
@@ -990,5 +989,5 @@
   ],
   "title": "Analitiq Stream",
   "type": "object",
-  "version": "8.0.0"
+  "version": "9.0.0"
 }

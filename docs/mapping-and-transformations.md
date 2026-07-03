@@ -8,7 +8,9 @@ schema-contract internals see
 
 Streams declare their record-shape transformation under `mapping` in
 `pipelines/{id}/streams/{stream_id}.json`. The implementation lives in
-`src/engine/data_transformer.py` (`AssignmentTransformer`).
+`src/engine/data_transformer.py`: the assignments are compiled once by
+`compile_transform` into vectorized `pyarrow.compute` and applied to each Arrow
+batch.
 
 ## Overview
 
@@ -19,8 +21,9 @@ Target Field (path + type)  ←  Value (const | expr AST)  ←  Optional validat
 ```
 
 Expressions are a **structured AST** (JSON), not source strings. End
-users edit assignments through a UI; the engine evaluates the AST per
-record. Stream-level `source_to_generic` and
+users edit assignments through a UI; the engine compiles the AST once per
+stream and evaluates it as vectorized Arrow compute over each batch -- the
+data never leaves Arrow. Stream-level `source_to_generic` and
 `generic_to_destination` blocks describe canonical typing for the
 destination's schema contract and are independent of the assignment AST.
 
@@ -142,7 +145,7 @@ destination's schema contract and are independent of the assignment AST.
 
 ## Expression AST
 
-Implemented `op` values (see `_evaluate_expression` in
+Implemented `op` values (compiled by `_compile_expr` in
 `data_transformer.py`):
 
 | `op` | Description |
@@ -158,16 +161,39 @@ Implemented `op` values (see `_evaluate_expression` in
 | `concat` | String concatenation of evaluated args (None args dropped) |
 | `coalesce` | First non-null evaluated arg |
 
-Unknown `op` values raise a `TransformationError`. Expression
-evaluation is not subject to per-assignment `on_error` routing (that
-applies only to `validate` rule failures); a single expression error
-fails the entire batch and surfaces as a transform-stage stream
+Unknown `op` values raise a `TransformationError`. A single expression
+error fails the entire batch and surfaces as a transform-stage stream
 failure — keep authoring tooling honest by validating against this
-list.
+list. Because each op is a vectorized column operation, the boolean and
+conditional ops (`and`, `or`, `if`) evaluate every operand over the whole
+batch rather than short-circuiting per row; expressions are pure, so the
+result is unchanged, but a branch that would error only on rows it does
+not feed still fails the batch.
+
+### Vectorized evaluation: known divergences
+
+The transform is a single Arrow-native path (`compile_transform`); each op is a
+`pyarrow.compute` kernel applied to a whole column. This is deliberately steered
+back to the former per-record behavior at the edges (null equality, string
+truthiness, boolean/ISO handling), but a few differences are inherent to typed,
+vectorized evaluation and are accepted:
+
+- **Typed intermediates.** Each pipe stage produces a typed Arrow column, so a
+  value cannot change type mid-pipe the way an untyped Python value could. A
+  `coalesce`/`default` whose alternative has a *different concrete type* than the
+  column (e.g. a string fallback on a numeric column, resolved only by a later
+  stage) fails loud instead of carrying a mixed-type value forward. Author the
+  fallback at the column's type, or convert first.
+- **Boolean truthiness** covers scalars and strings (non-empty is true); a List
+  or Object condition in `if`/`and`/`or` is not supported and fails loud.
+- **`to_string` of a temporal** uses Arrow's ISO formatting, which can differ in
+  notation/precision from Python's `str(datetime)`.
+- **Validation `pattern`** runs on Arrow's RE2 engine (anchored `^(?:...)`),
+  which supports standard regex but not Python-only features such as lookaround.
 
 ## Function Catalog
 
-Built-in functions (`AssignmentTransformer.FUNCTION_CATALOG`):
+Built-in functions (`_FUNCTION_CATALOG` in `data_transformer.py`):
 
 | Name | Version | Purpose |
 |------|---------|---------|
@@ -198,45 +224,71 @@ behaviour.
 }
 ```
 
-Implemented rule types (`_validate_value`):
+Implemented rule types (`_run_validation` in `data_transformer.py`), each
+compiled to a vectorized boolean mask over the batch. A null value is exempt
+from every rule except `not_null`:
 
 | `type` | Required keys | Notes |
 |--------|---------------|-------|
-| `not_null` (alias `required`) | — | Fails when the value is None |
-| `min_length` | `value` | Compares against `len(str(value))` |
+| `not_null` (alias `required`) | — | Fails where the value is null |
+| `min_length` | `value` | Unicode length of the value as a string |
 | `max_length` | `value` | Same |
-| `pattern` | `value` | Python `re.match` against `str(value)` |
+| `pattern` | `value` | Anchored regex match (`^(?:pattern)`) against the value as a string |
 | `range` | `min` and/or `max` | Numeric comparison |
 | `in_list` | `value` | Value must be in the supplied list |
 
-`on_error` actions:
+Validation is **batch-wide and fail-loud**: if any row fails any rule, the
+whole batch fails with a `TransformationError` naming the column and the
+offending rows. The transform does not route individual records — it surfaces
+the failure, and the stream-level `error_strategy` decides retry vs DLQ vs skip
+for the failed batch (see [`engine-architecture.md`](engine-architecture.md)).
+The `validate.on_error` and stream `defaults.on_error` fields are carried in the
+stream contract for the authoring UI and control plane.
 
-- `dlq` — record is sent to the dead-letter queue, processing continues
-- `quarantine` — record is parked for review, processing continues
-- `skip_record` — drop the record, processing continues
-- `default_value` — substitute the rule's `default` and continue
-- `stop_stream` — abort the current stream
+## Type Conversion
 
-A stream-level `defaults.on_error` is used when an assignment does not
-specify `validate.on_error`.
+A field's `target.arrow_type` is the type the engine builds the post-transform
+column to. Whether a given `source arrow_type → target arrow_type` conversion is
+permitted is decided by a single declarative policy — the **conversion matrix**
+(`cdk/cdk/type_map/conversions.py`) — consulted identically at every build
+boundary (the transform retype and the destination
+`SchemaContract.cast_arrow_batch`), so a conversion can never be accepted on one
+boundary and rejected on another. Each pair resolves to one mode:
 
-## Type Coercion
+- `identity` — same type, passthrough.
+- `auto` — lossless, applied implicitly: a width widening (`Int32 → Int64`),
+  numeric interconversion (`Int64 → Float64`), and parsing the JSON-string
+  numbers an API source ships (`"1" → Int64`, `"1.5" → Float64`), which both
+  build paths already perform.
+- `explicit` — permitted only with a declared conversion function. Formatting a
+  scalar as a string (`Int64 → Utf8`, `Boolean → Utf8`, `Float64 → Utf8`,
+  `Timestamp → Utf8`) is a notation choice, not a free widening, so the mapping
+  must wire `to_string`. A boundary that still sees the raw scalar fails loud,
+  naming the function — the destination no longer silently stringifies an int.
+  This gate applies to a scalar leaf *inside* a nested (`Object`/`List`) target
+  too: an `Int64 → Utf8` struct leaf fails loud, not a silent per-child cast.
+- `forbidden` — never permitted: nested and `Json` conversions (`Object → Int64`)
+  and every cross-kind pair outside the stable-cast allowlist (`Binary → Int64`,
+  `Duration → Date32`, `Utf8 → Date32`). The published grid lists only casts the
+  runtime performs identically on every supported pyarrow version, so it never
+  promises a conversion that cannot run.
 
-`target.type` drives a JSON-compatible coercion step before the value is
-written into the result (`_coerce_type`):
+`runtime_checked` marks a permitted conversion a per-row guard may still reject
+(a narrowing that overflows, a string that will not parse); the build runs with
+`safe=True` so a bad row fails loud rather than truncating.
 
-- `string` → `str(value)`
-- `integer` → `int(float(value))` (returns the original value if
-  parsing fails)
-- `decimal`, `number` → `float(value)`
-- `boolean` → bool, with `"true"`/`"false"` string parsing
+The same policy is published as a generated artifact
+(`cdk/cdk/type_map/conversion_matrix.json`, built from the canonical table by
+`build_conversion_matrix()`) so the mapping authoring UI offers exactly the
+conversions the engine accepts and auto-wires the function an `explicit`
+conversion needs. The frontend consumes it as the `@analitiq-ai/conversion-matrix`
+npm package (`packages/conversion-matrix/`), which regenerates from that artifact
+on every build and is republished to GitHub Packages whenever the grid changes.
 
-`datetime`, `date`, and `time` values are intentionally **not** coerced
-in the engine — they pass through as JSON-friendly strings and are
-materialized by the destination handler's Arrow-based schema contract
-(`SchemaContract`, `cdk/cdk/schema_contract.py`), which preserves
-precision. This is deliberate: coercing to native
-Python `datetime` here would lose information during gRPC serialization.
+`datetime`, `date`, and `time` columns are built and carried as typed Arrow
+values, materialized by the destination's Arrow schema contract
+(`SchemaContract`, `cdk/cdk/schema_contract.py`), which preserves precision
+across the gRPC boundary.
 
 ## Versioning Strategy
 

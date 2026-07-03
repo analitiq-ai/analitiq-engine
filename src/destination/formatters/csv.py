@@ -5,7 +5,7 @@ CSV is a widely-supported tabular format, ideal for spreadsheet compatibility.
 
 import csv
 import io
-from typing import Any, BinaryIO, Dict, List, Optional
+from typing import Any
 
 from .base import BaseFormatter
 
@@ -36,16 +36,11 @@ class CsvFormatter(BaseFormatter):
         return ".csv"
 
     @property
-    def is_binary(self) -> bool:
-        """CSV is a text format encoded as UTF-8 bytes."""
-        return False
-
-    @property
     def content_type(self) -> str:
         """Return the MIME content type."""
         return "text/csv"
 
-    def _get_csv_options(self) -> Dict[str, Any]:
+    def _get_csv_options(self) -> dict[str, Any]:
         """Get CSV writer options from configuration."""
         return {
             "delimiter": self._config.get("delimiter", ","),
@@ -55,9 +50,9 @@ class CsvFormatter(BaseFormatter):
 
     def _get_fieldnames(
         self,
-        records: List[Dict[str, Any]],
-        schema: Optional[Dict[str, Any]] = None,
-    ) -> List[str]:
+        records: list[dict[str, Any]],
+        schema: dict[str, Any] | None = None,
+    ) -> list[str]:
         """
         Get column names from schema or first record.
 
@@ -80,8 +75,8 @@ class CsvFormatter(BaseFormatter):
 
     def serialize_batch(
         self,
-        records: List[Dict[str, Any]],
-        schema: Optional[Dict[str, Any]] = None,
+        records: list[dict[str, Any]],
+        schema: dict[str, Any] | None = None,
         append: bool = False,
     ) -> bytes:
         """
@@ -119,32 +114,6 @@ class CsvFormatter(BaseFormatter):
 
         return output.getvalue().encode("utf-8")
 
-    def write_batch_to_stream(
-        self,
-        records: List[Dict[str, Any]],
-        stream: BinaryIO,
-        schema: Optional[Dict[str, Any]] = None,
-        append: bool = True,
-    ) -> int:
-        """
-        Write a batch of records directly to a stream.
-
-        Args:
-            records: List of record dictionaries
-            stream: Binary stream to write to
-            schema: Optional JSON Schema for column ordering
-            append: Whether appending (affects header inclusion)
-
-        Returns:
-            Number of bytes written
-        """
-        if not records:
-            return 0
-
-        data = self.serialize_batch(records, schema, append=append)
-        stream.write(data)
-        return len(data)
-
     def _format_value(self, value: Any) -> str:
         """
         Format a value for CSV output.
@@ -161,5 +130,6 @@ class CsvFormatter(BaseFormatter):
             return str(value).lower()
         if isinstance(value, (list, dict)):
             import json
+
             return json.dumps(value)
         return str(value)

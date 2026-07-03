@@ -1,15 +1,13 @@
 """Local filesystem storage backend implementation."""
 
 import logging
-import os
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
-import aiofiles
-import aiofiles.os
+import aiofiles  # type: ignore[import-untyped]  # types-aiofiles not installed
+import aiofiles.os  # type: ignore[import-untyped]  # types-aiofiles not installed
 
 from .base import BaseStorageBackend
-
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +32,7 @@ class LocalFileStorage(BaseStorageBackend):
         """Return the storage type identifier."""
         return "local"
 
-    async def connect(self, config: Dict[str, Any]) -> None:
+    async def connect(self, config: dict[str, Any]) -> None:
         """
         Initialize local file storage with configuration.
 
@@ -65,14 +63,14 @@ class LocalFileStorage(BaseStorageBackend):
 
     def _require_path(self, path: str) -> Path:
         if not self._connected or self._base_path is None:
-            raise IOError("Storage not connected")
+            raise OSError("Storage not connected")
         return self._base_path / path
 
     async def write_file(
         self,
         path: str,
         data: bytes,
-        content_type: Optional[str] = None,
+        content_type: str | None = None,
     ) -> str:
         """
         Write data to a file at the specified path.
@@ -96,32 +94,6 @@ class LocalFileStorage(BaseStorageBackend):
         logger.debug(f"Wrote {len(data)} bytes to: {full_path}")
         return str(full_path)
 
-    async def append_to_file(
-        self,
-        path: str,
-        data: bytes,
-    ) -> int:
-        """
-        Append data to an existing file.
-
-        Args:
-            path: Relative path from base_path
-            data: Data to append
-
-        Returns:
-            Number of bytes written
-        """
-        full_path = self._require_path(path)
-
-        # Ensure parent directory exists
-        full_path.parent.mkdir(parents=True, exist_ok=True)
-
-        async with aiofiles.open(full_path, "ab") as f:
-            await f.write(data)
-
-        logger.debug(f"Appended {len(data)} bytes to: {full_path}")
-        return len(data)
-
     async def file_exists(self, path: str) -> bool:
         """
         Check if a file exists at the given path.
@@ -135,7 +107,8 @@ class LocalFileStorage(BaseStorageBackend):
         if not self._connected or self._base_path is None:
             return False
         full_path = self._base_path / path
-        return await aiofiles.os.path.exists(full_path)
+        exists: bool = await aiofiles.os.path.exists(full_path)
+        return exists
 
     async def read_file(self, path: str) -> bytes:
         """
@@ -153,7 +126,8 @@ class LocalFileStorage(BaseStorageBackend):
             raise FileNotFoundError(f"File not found: {full_path}")
 
         async with aiofiles.open(full_path, "rb") as f:
-            return await f.read()
+            data: bytes = await f.read()
+            return data
 
     async def delete_file(self, path: str) -> bool:
         """

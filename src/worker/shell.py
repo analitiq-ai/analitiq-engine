@@ -11,7 +11,7 @@ never touches the filesystem config or the secret store.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.type_map.loader import connector_definition_dir, read_raw_type_maps
@@ -22,7 +22,7 @@ def read_type_map_payloads(
     connector_id: str,
     connections_dir: Path,
     connection_id: str,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Raw type-map payloads for the bootstrap (connector + connection scope).
 
     Same directory lookup and JSON validation as the file loaders (one
@@ -46,10 +46,10 @@ async def build_bootstrap(
     role: str,
     connectors_dir: Path,
     connections_dir: Path,
-    endpoint_refs: Optional[Dict[str, Any]] = None,
-    stream_endpoints: Optional[Dict[str, Any]] = None,
-    source_config: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
+    endpoint_refs: dict[str, Any] | None = None,
+    stream_endpoints: dict[str, Any] | None = None,
+    source_config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Resolve *runtime* and assemble the worker bootstrap for *role*.
 
     The returned dict carries resolved credentials in its values: hand it

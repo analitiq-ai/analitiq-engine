@@ -162,11 +162,17 @@ class TestBasicAuth:
 class TestBase64Encode:
     def test_encodes_string(self):
         node = {"function": "base64_encode", "input": {"literal": "hello"}}
-        assert base64_encode_function(node, _resolver()) == base64.b64encode(b"hello").decode()
+        assert (
+            base64_encode_function(node, _resolver())
+            == base64.b64encode(b"hello").decode()
+        )
 
     def test_encodes_bytes(self):
         node = {"function": "base64_encode", "input": {"literal": b"hello"}}
-        assert base64_encode_function(node, _resolver()) == base64.b64encode(b"hello").decode()
+        assert (
+            base64_encode_function(node, _resolver())
+            == base64.b64encode(b"hello").decode()
+        )
 
     def test_rejects_non_string_non_bytes(self):
         node = {"function": "base64_encode", "input": {"literal": 123}}
@@ -229,9 +235,7 @@ class TestFunctionsViaResolver:
     resolver's marker discipline and resolve nested expressions."""
 
     def test_lookup_with_ref_input(self):
-        ctx = ResolutionContext(
-            connection={"parameters": {"ssl_mode": "verify-full"}}
-        )
+        ctx = ResolutionContext(connection={"parameters": {"ssl_mode": "verify-full"}})
         spec = {
             "function": "lookup",
             "input": {"ref": "connection.parameters.ssl_mode"},

@@ -1,0 +1,7 @@
+# The published tarball is the built artifact only (see the "files" allowlist in
+# package.json). This file's presence stops npm from falling back to .gitignore,
+# which ignores dist/ and would otherwise drop the build from the package.
+src/
+scripts/
+tsconfig.json
+*.tsbuildinfo

@@ -21,10 +21,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator, List, Sequence
+from typing import Any
 
 import pyarrow as pa
+
+from ._adbc_utils import _adbc_execute, _close_cursor_quietly
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +75,7 @@ class AdbcReader:
 
     async def fetch_page(
         self, sql: str, params: Sequence[Any] = ()
-    ) -> List[pa.RecordBatch]:
+    ) -> list[pa.RecordBatch]:
         """Run one compiled SELECT and return its Arrow batches.
 
         ``sql`` carries qmark (``?``) placeholders and ``params`` the
@@ -81,9 +84,7 @@ class AdbcReader:
         """
         return await asyncio.to_thread(self._fetch_page_sync, sql, params)
 
-    def _fetch_page_sync(
-        self, sql: str, params: Sequence[Any]
-    ) -> List[pa.RecordBatch]:
+    def _fetch_page_sync(self, sql: str, params: Sequence[Any]) -> list[pa.RecordBatch]:
         if self._conn is None:
             raise AdbcReaderClosedError(
                 "AdbcReader.fetch_page() called after close(); "
@@ -91,23 +92,18 @@ class AdbcReader:
             )
         cursor = self._conn.cursor()
         try:
-            if params:
-                cursor.execute(sql, list(params))
-            else:
-                cursor.execute(sql)
+            _adbc_execute(cursor, sql, params)
             # Some ADBC drivers expose ``fetch_record_batch`` (a streaming
             # iterator). Materialising the whole result via
             # ``fetch_arrow_table`` is simpler; per-page paging keeps
             # memory bounded.
             table = cursor.fetch_arrow_table()
         finally:
-            try:
-                cursor.close()
-            except Exception:
-                logger.debug("ADBC cursor close failed", exc_info=True)
+            _close_cursor_quietly(cursor)
         if table.num_rows == 0:
             return []
-        return table.to_batches()
+        batches: list[pa.RecordBatch] = table.to_batches()
+        return batches
 
     async def close(self) -> None:
         conn = self._conn

@@ -29,7 +29,48 @@ sibling keys next to the marker) is an authoring error and raises.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Mapping, Optional
+import logging
+from collections.abc import Mapping
+from typing import Any
+
+logger = logging.getLogger(__name__)
+
+
+def resolve_param_defaults(
+    params_spec: Mapping[str, Any],
+    resolver: Any,
+    *,
+    context: str = "param",
+) -> dict[str, Any]:
+    """Resolve ``default`` expressions for each declared param.
+
+    Iterates *params_spec*, skips non-dict entries and those without a
+    ``default`` key, calls ``resolver.resolve_for_request`` on each default,
+    and omits params whose default resolves to ``None`` (logging a warning).
+    Returns a ``{name: value}`` dict of all successfully-resolved defaults.
+
+    *resolver* must expose a ``resolve_for_request(expr)`` method
+    (e.g. :class:`cdk.resolver.Resolver`).  Authoring errors such as
+    unknown scopes or conflicting expression markers raise
+    ``TransportSpecError`` and propagate uncaught.
+
+    *context* is the label used in warning messages (e.g. ``"param"`` for
+    read params, ``"write param"`` for destination write params).
+    """
+    values: dict[str, Any] = {}
+    for name, decl in params_spec.items():
+        if not isinstance(decl, dict) or "default" not in decl:
+            continue
+        value = resolver.resolve_for_request(decl["default"])
+        if value is None:
+            logger.warning(
+                "%s %r: default did not resolve; parameter omitted",
+                context,
+                name,
+            )
+            continue
+        values[name] = value
+    return values
 
 
 def bind_param_refs(spec: Any, params: Mapping[str, Any]) -> Any:
@@ -60,7 +101,7 @@ def collect_from_input_selectors(spec: Any) -> set:
 
     Walks the same structure as :func:`bind_record_inputs` (``literal``
     nodes are opaque) without binding anything — used to validate a body
-    spec against its batching mode before any record is in flight.
+    spec against its batching declaration before any record is in flight.
     """
     selectors: set = set()
     if isinstance(spec, Mapping):
@@ -82,15 +123,16 @@ def collect_from_input_selectors(spec: Any) -> set:
 def bind_record_inputs(
     spec: Any,
     *,
-    record: Optional[Dict[str, Any]] = None,
-    records: Optional[List[Dict[str, Any]]] = None,
+    record: dict[str, Any] | None = None,
+    records: list[dict[str, Any]] | None = None,
 ) -> Any:
     """Replace ``{"from_input": ...}`` nodes with the in-flight record data.
 
     ``"record"`` binds the single in-flight record, ``"records"`` binds the
     whole batch, ``"record.<dotted.path>"`` binds one record field. A
-    ``from_input`` that does not match the active batching mode (e.g.
-    ``"record"`` in bulk mode) is an authoring error and raises.
+    ``from_input`` that does not match the stream's batching declaration
+    (e.g. ``"record"`` on a batched stream) is an authoring error and
+    raises.
     """
     if isinstance(spec, Mapping):
         if "from_input" in spec:
@@ -108,16 +150,15 @@ def bind_record_inputs(
         }
     if isinstance(spec, list):
         return [
-            bind_record_inputs(item, record=record, records=records)
-            for item in spec
+            bind_record_inputs(item, record=record, records=records) for item in spec
         ]
     return spec
 
 
 def _record_input_value(
     selector: Any,
-    record: Optional[Dict[str, Any]],
-    records: Optional[List[Dict[str, Any]]],
+    record: dict[str, Any] | None,
+    records: list[dict[str, Any]] | None,
 ) -> Any:
     """Resolve one ``from_input`` selector against the in-flight data."""
     if not isinstance(selector, str) or not selector:
@@ -125,20 +166,21 @@ def _record_input_value(
     if selector == "records":
         if records is None:
             raise ValueError(
-                "`from_input: records` requires batching mode bulk or batch; "
+                "`from_input: records` requires a batching declaration; "
                 "this stream sends one record per request"
             )
         return records
     if selector == "record" or selector.startswith("record."):
         if record is None:
             raise ValueError(
-                f"`from_input: {selector}` requires batching mode single; "
-                f"this stream sends multiple records per request"
+                f"`from_input: {selector}` requires a single-record stream "
+                f"(no batching declaration); this stream sends multiple "
+                f"records per request"
             )
         if selector == "record":
             return record
         cursor: Any = record
-        for segment in selector[len("record."):].split("."):
+        for segment in selector[len("record.") :].split("."):
             if not isinstance(cursor, Mapping) or segment not in cursor:
                 return None
             cursor = cursor[segment]

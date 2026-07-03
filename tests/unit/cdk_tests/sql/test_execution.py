@@ -9,23 +9,35 @@ postgres validation of the SA path is documented in the PR.
 
 from __future__ import annotations
 
+import logging
 from types import SimpleNamespace
 
 import pytest
 
+from cdk.sql._adbc_utils import _close_cursor_quietly
 from cdk.sql.exceptions import CreateTableError, DiscoveryError
-from cdk.sql.execution import (
-    _qmark_to_named,
-    execute_ddl,
-    fetch_rows,
-)
+from cdk.sql.execution import _qmark_to_named, execute_ddl, fetch_rows
 
 from .conftest import FakeAdbcRuntime, FakeSaRuntime
 
 
-def _runtime(*, responder=None, fail_execute=None) -> FakeAdbcRuntime:
+def _runtime(*, responder=None, fail_execute=None, fail_close=None) -> FakeAdbcRuntime:
     return FakeAdbcRuntime(
-        "postgresql", mapper=None, responder=responder, fail_execute=fail_execute
+        "postgresql",
+        mapper=None,
+        responder=responder,
+        fail_execute=fail_execute,
+        fail_close=fail_close,
+    )
+
+
+def _close_warnings(caplog) -> int:
+    """Count the cursor-close WARNINGs the shared helper emitted."""
+    return sum(
+        1
+        for record in caplog.records
+        if record.levelno == logging.WARNING
+        and "cursor close failed" in record.getMessage()
     )
 
 
@@ -54,14 +66,14 @@ class TestAdbcFetch:
         runtime = _runtime(
             responder=lambda sql, params: rows if params == ["arg"] else []
         )
-        out = await fetch_rows(runtime, "SELECT schema_name FROM x WHERE y = ?", ["arg"])
+        out = await fetch_rows(
+            runtime, "SELECT schema_name FROM x WHERE y = ?", ["arg"]
+        )
         assert out == rows
         # One connection opened, the statement ran with the params, conn closed.
         assert len(runtime.connections) == 1
         conn = runtime.connections[0]
-        assert conn.executed == [
-            ("SELECT schema_name FROM x WHERE y = ?", ["arg"])
-        ]
+        assert conn.executed == [("SELECT schema_name FROM x WHERE y = ?", ["arg"])]
         assert conn.closed is True
 
     @pytest.mark.asyncio
@@ -139,7 +151,9 @@ class TestSqlAlchemyRealDriver:
         from sqlalchemy.ext.asyncio import create_async_engine
 
         engine = create_async_engine("sqlite+aiosqlite:///:memory:")
-        runtime = SimpleNamespace(is_adbc=False, is_sync_sqlalchemy=False, engine=engine)
+        runtime = SimpleNamespace(
+            is_adbc=False, is_sync_sqlalchemy=False, engine=engine
+        )
         try:
             await execute_ddl(runtime, "CREATE TABLE t (id INTEGER, label TEXT)")
             # A bound parameter survives the ? -> :_p0 rewrite into the driver.
@@ -249,3 +263,102 @@ class TestErrorWrapping:
         runtime = FakeSaRuntime()
         with pytest.raises(DiscoveryError, match="count mismatch"):
             await fetch_rows(runtime, "WHERE a = ? AND b = ?", ["only-one"])
+
+
+class TestCursorCloseDoesNotMask:
+    """A failing ``cursor.close()`` in the finally must not hide the real error.
+
+    Both ADBC helpers close their cursor in a ``finally``. If the body already
+    raised, a close that also raises would replace it -- the caller would see
+    "cursor close failed" instead of the query/auth/syntax failure. The close
+    is swallowed (logged) so the body's exception stays in flight, and a close
+    that fails on the success path never breaks an otherwise-good run.
+    """
+
+    @pytest.mark.asyncio
+    async def test_fetch_close_failure_preserves_execute_error(self, caplog):
+        execute_boom = RuntimeError("permission denied for relation")
+        close_boom = RuntimeError("cursor already invalidated")
+        runtime = _runtime(fail_execute=execute_boom, fail_close=close_boom)
+        with caplog.at_level(logging.WARNING, logger="cdk.sql._adbc_utils"):
+            with pytest.raises(DiscoveryError) as exc:
+                await fetch_rows(runtime, "SELECT 1 FROM information_schema.tables", [])
+        # The original execute failure is chained, not the close failure.
+        assert exc.value.__cause__ is execute_boom
+        conn = runtime.connections[0]
+        assert conn.cursor_close_attempts == 1
+        assert conn.closed is True
+        # The swallowed close is surfaced at WARNING, not silently dropped.
+        assert _close_warnings(caplog) == 1
+
+    @pytest.mark.asyncio
+    async def test_fetch_close_failure_on_success_returns_rows(self):
+        close_boom = RuntimeError("cursor already invalidated")
+        runtime = _runtime(
+            responder=lambda sql, params: [{"n": 1}], fail_close=close_boom
+        )
+        out = await fetch_rows(runtime, "SELECT 1 AS n", [])
+        assert out == [{"n": 1}]
+        conn = runtime.connections[0]
+        assert conn.cursor_close_attempts == 1
+        assert conn.closed is True
+
+    @pytest.mark.asyncio
+    async def test_ddl_close_failure_preserves_execute_error(self, caplog):
+        execute_boom = RuntimeError("relation already exists")
+        close_boom = RuntimeError("cursor already invalidated")
+        runtime = _runtime(fail_execute=execute_boom, fail_close=close_boom)
+        with caplog.at_level(logging.WARNING, logger="cdk.sql._adbc_utils"):
+            with pytest.raises(CreateTableError) as exc:
+                await execute_ddl(runtime, "CREATE TABLE t (x INT)")
+        # The execute failure survives the close failure, and rollback still ran.
+        assert exc.value.__cause__ is execute_boom
+        conn = runtime.connections[0]
+        assert conn.cursor_close_attempts == 1
+        assert conn.rollbacks == 1
+        assert conn.commits == 0
+        assert conn.closed is True
+        # The swallowed close is surfaced at WARNING, not silently dropped.
+        assert _close_warnings(caplog) == 1
+
+    @pytest.mark.asyncio
+    async def test_ddl_close_failure_on_success_still_commits(self):
+        close_boom = RuntimeError("cursor already invalidated")
+        runtime = _runtime(fail_close=close_boom)
+        await execute_ddl(runtime, "CREATE TABLE t (x INT)")
+        conn = runtime.connections[0]
+        assert conn.cursor_close_attempts == 1
+        assert conn.commits == 1
+        assert conn.rollbacks == 0
+        assert conn.closed is True
+
+
+class _RecordingCursor:
+    """Minimal cursor stand-in: counts close() calls, optionally raises."""
+
+    def __init__(self, fail: Exception | None = None) -> None:
+        self.fail = fail
+        self.close_calls = 0
+
+    def close(self) -> None:
+        self.close_calls += 1
+        if self.fail is not None:
+            raise self.fail
+
+
+class TestCloseCursorQuietly:
+    """The shared helper closes once, swallows a failing close, and logs it."""
+
+    def test_normal_close_is_called_once_without_warning(self, caplog):
+        cursor = _RecordingCursor()
+        with caplog.at_level(logging.WARNING, logger="cdk.sql._adbc_utils"):
+            _close_cursor_quietly(cursor)
+        assert cursor.close_calls == 1
+        assert _close_warnings(caplog) == 0
+
+    def test_failing_close_is_swallowed_and_logged(self, caplog):
+        cursor = _RecordingCursor(fail=RuntimeError("cursor already invalidated"))
+        with caplog.at_level(logging.WARNING, logger="cdk.sql._adbc_utils"):
+            _close_cursor_quietly(cursor)  # must not raise
+        assert cursor.close_calls == 1
+        assert _close_warnings(caplog) == 1

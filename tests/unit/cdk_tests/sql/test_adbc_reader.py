@@ -10,21 +10,20 @@ the engine source connector tests.
 
 from __future__ import annotations
 
-from typing import List, Optional, Tuple
-
 import pyarrow as pa
 import pytest
 
 from cdk.sql import AdbcReader, AdbcReaderClosedError
+from cdk.sql._adbc_utils import _adbc_execute
 
 
 class _FakeCursor:
     def __init__(self, table: pa.Table) -> None:
         self._table = table
-        self.executed: List[Tuple[str, Optional[list]]] = []
+        self.executed: list[tuple[str, list | None]] = []
         self.closed = False
 
-    def execute(self, sql: str, params: Optional[list] = None) -> None:
+    def execute(self, sql: str, params: list | None = None) -> None:
         self.executed.append((sql, params))
 
     def fetch_arrow_table(self) -> pa.Table:
@@ -57,9 +56,7 @@ class TestAdbcReaderExecution:
 
         assert sum(b.num_rows for b in batches) == 2
         # The compiled SQL and positional params are forwarded verbatim.
-        assert conn._cursor.executed == [
-            ('SELECT "id" FROM "t" WHERE "id" >= ?', [1])
-        ]
+        assert conn._cursor.executed == [('SELECT "id" FROM "t" WHERE "id" >= ?', [1])]
         # The per-page cursor is always closed, even on the happy path.
         assert conn._cursor.closed is True
 
@@ -91,3 +88,32 @@ class TestAdbcReaderExecution:
         with pytest.raises(AdbcReaderClosedError):
             await reader.fetch_page("SELECT 1")
         assert conn.closed is True
+
+
+class _RecordingCursor:
+    """Minimal ADBC cursor that records how execute() was called."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, list | None]] = []
+
+    def execute(self, sql: str, params: list | None = None) -> None:
+        self.calls.append((sql, params))
+
+
+class TestAdbcExecuteHelper:
+    def test_binds_params_when_non_empty(self):
+        cursor = _RecordingCursor()
+        _adbc_execute(cursor, "SELECT ?", [42])
+        assert cursor.calls == [("SELECT ?", [42])]
+
+    def test_skips_second_arg_when_params_empty(self):
+        cursor = _RecordingCursor()
+        _adbc_execute(cursor, "SELECT 1", [])
+        # execute() is called with a single argument so drivers that reject
+        # an empty bind list (treating it as "expects 0 params") are not tripped.
+        assert cursor.calls == [("SELECT 1", None)]
+
+    def test_converts_sequence_to_list(self):
+        cursor = _RecordingCursor()
+        _adbc_execute(cursor, "SELECT ?", (99,))
+        assert cursor.calls == [("SELECT ?", [99])]

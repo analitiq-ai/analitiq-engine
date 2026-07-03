@@ -6,23 +6,19 @@ local storage backend.
 
 import errno
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import pyarrow as pa
 
 from cdk.base_handler import BaseDestinationHandler, BatchWriteResult
+from cdk.connection_runtime import ConnectionRuntime
+from cdk.types import AckStatus, Cursor, RetrySemantics, RetryVerdict, SchemaSpec
+
 from ..formatters import get_formatter
 from ..formatters.base import BaseFormatter
+from ..idempotency.manifest import ManifestTracker
 from ..storage import get_storage_backend
 from ..storage.base import BaseStorageBackend
-from ..idempotency.manifest import ManifestTracker
-from cdk.types import (
-    AckStatus,
-    Cursor,
-    SchemaSpec,
-)
-from cdk.connection_runtime import ConnectionRuntime
-
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +48,7 @@ class FileDestinationHandler(BaseDestinationHandler):
         self._storage: BaseStorageBackend | None = None
         self._formatter: BaseFormatter | None = None
         self._manifest: ManifestTracker | None = None
-        self._config: Dict[str, Any] = {}
+        self._config: dict[str, Any] = {}
         self._connector_type: str = "file"
         self._connected: bool = False
         self._path_template: str | None = None
@@ -77,6 +73,27 @@ class FileDestinationHandler(BaseDestinationHandler):
         """File destinations support bulk writes."""
         return True
 
+    def retry_semantics(self, stream_id: str) -> RetryVerdict:
+        """File replay safety does not hold across a restart (issue #286).
+
+        The manifest dedups by batch position (run_id, stream_id,
+        batch_seq), which is sound for an in-run replay of the same batch
+        but not for a same-run restart: the source resumes from the
+        committed cursor while batch_seq restarts, so a committed position
+        can re-arrive carrying different rows and be skipped as a replay
+        (the row-drop class of issue #282). Until the manifest keys on
+        content, the honest claim is that a restart is not replay-safe.
+        """
+        _ = stream_id
+        return RetryVerdict(
+            semantics=RetrySemantics.RETRY_SEMANTICS_AT_LEAST_ONCE,
+            reason=(
+                "the manifest dedups by batch position, and a same-run "
+                "restart re-numbers re-batched rows; a committed position "
+                "carrying different rows would be skipped as a replay"
+            ),
+        )
+
     async def connect(self, runtime: ConnectionRuntime) -> None:
         """
         Initialize the file handler with configuration.
@@ -95,7 +112,9 @@ class FileDestinationHandler(BaseDestinationHandler):
 
         try:
             # Determine storage backend type
-            storage_type = "local" if self._connector_type == "file" else self._connector_type
+            storage_type = (
+                "local" if self._connector_type == "file" else self._connector_type
+            )
 
             # Create storage backend
             self._storage = get_storage_backend(storage_type)
@@ -165,7 +184,7 @@ class FileDestinationHandler(BaseDestinationHandler):
         stream_id: str,
         batch_seq: int,
         record_batch: pa.RecordBatch,
-        record_ids: List[str],
+        record_ids: list[str],
         cursor: Cursor,
     ) -> BatchWriteResult:
         """Write an Arrow record batch to a file.
@@ -189,10 +208,13 @@ class FileDestinationHandler(BaseDestinationHandler):
 
         records = record_batch.to_pylist()
 
-        existing_commit = await self._manifest.check_committed(run_id, stream_id, batch_seq)
+        existing_commit = await self._manifest.check_committed(
+            run_id, stream_id, batch_seq
+        )
         if existing_commit:
             logger.info(
-                f"Batch already committed: run={run_id}, stream={stream_id}, seq={batch_seq}"
+                f"Batch already committed: run={run_id}, stream={stream_id}, "
+                f"seq={batch_seq}"
             )
             return BatchWriteResult(
                 status=AckStatus.ACK_STATUS_ALREADY_COMMITTED,
@@ -266,12 +288,16 @@ class FileDestinationHandler(BaseDestinationHandler):
             if e.errno in fatal_errnos:
                 logger.error(
                     "Fatal filesystem error writing batch (%s): %s",
-                    errno.errorcode.get(e.errno, e.errno), e, exc_info=True,
+                    errno.errorcode.get(e.errno, e.errno),
+                    e,
+                    exc_info=True,
                 )
                 return BatchWriteResult(
                     status=AckStatus.ACK_STATUS_FATAL_FAILURE,
                     records_written=0,
-                    failure_summary=f"OSError[{errno.errorcode.get(e.errno, e.errno)}]: {e}",
+                    failure_summary=(
+                        f"OSError[{errno.errorcode.get(e.errno, e.errno)}]: {e}"
+                    ),
                 )
             logger.error("Retryable I/O error writing batch: %s", e, exc_info=True)
             return BatchWriteResult(

@@ -20,16 +20,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Dict, List, Sequence, Tuple, Union
+from collections.abc import Sequence
+from typing import Any
 
 from sqlalchemy import text
 
 from ..database_utils import acquire_connection
+from ._adbc_utils import _adbc_execute, _close_cursor_quietly
 from .exceptions import CreateTableError, DiscoveryError, SqlIntrospectionError
 
 logger = logging.getLogger(__name__)
 
-Row = Dict[str, Any]
+Row = dict[str, Any]
 
 
 def _one_line(sql: str) -> str:
@@ -41,7 +43,7 @@ def _one_line(sql: str) -> str:
     return sql[:120]
 
 
-def _qmark_to_named(sql: str, params: Sequence[Any]) -> Tuple[str, Dict[str, Any]]:
+def _qmark_to_named(sql: str, params: Sequence[Any]) -> tuple[str, dict[str, Any]]:
     """Rewrite qmark placeholders to SQLAlchemy named binds.
 
     ``"... WHERE a = ? AND b = ?"`` -> ``"... WHERE a = :_p0 AND b = :_p1"`` with
@@ -55,8 +57,8 @@ def _qmark_to_named(sql: str, params: Sequence[Any]) -> Tuple[str, Dict[str, Any
             f"placeholder/parameter count mismatch: {expected} placeholders, "
             f"{len(params)} parameters"
         )
-    rendered: List[str] = []
-    binds: Dict[str, Any] = {}
+    rendered: list[str] = []
+    binds: dict[str, Any] = {}
     for index, segment in enumerate(segments[:-1]):
         key = f"_p{index}"
         rendered.append(segment)
@@ -66,7 +68,7 @@ def _qmark_to_named(sql: str, params: Sequence[Any]) -> Tuple[str, Dict[str, Any
     return "".join(rendered), binds
 
 
-async def fetch_rows(runtime: Any, sql: str, params: Sequence[Any]) -> List[Row]:
+async def fetch_rows(runtime: Any, sql: str, params: Sequence[Any]) -> list[Row]:
     """Run a ``SELECT`` over either transport and return its rows as dicts.
 
     A transport/driver failure (bad credentials, missing catalog view, syntax
@@ -93,38 +95,36 @@ async def fetch_rows(runtime: Any, sql: str, params: Sequence[Any]) -> List[Row]
 
 async def _fetch_rows_sqlalchemy(
     runtime: Any, sql: str, params: Sequence[Any]
-) -> List[Row]:
+) -> list[Row]:
     text_sql, binds = _qmark_to_named(sql, params)
     async with acquire_connection(runtime.engine) as conn:
         result = await conn.execute(text(text_sql), binds)
         return [dict(row) for row in result.mappings().all()]
 
 
-def _fetch_rows_sync_engine(runtime: Any, sql: str, params: Sequence[Any]) -> List[Row]:
+def _fetch_rows_sync_engine(runtime: Any, sql: str, params: Sequence[Any]) -> list[Row]:
     text_sql, binds = _qmark_to_named(sql, params)
     with runtime.sync_engine.connect() as conn:
         result = conn.execute(text(text_sql), binds)
         return [dict(row) for row in result.mappings().all()]
 
 
-def _fetch_rows_adbc_sync(runtime: Any, sql: str, params: Sequence[Any]) -> List[Row]:
+def _fetch_rows_adbc_sync(runtime: Any, sql: str, params: Sequence[Any]) -> list[Row]:
     conn = runtime.open_adbc_connection()
     try:
         cursor = conn.cursor()
         try:
-            if params:
-                cursor.execute(sql, list(params))
-            else:
-                cursor.execute(sql)
+            _adbc_execute(cursor, sql, params)
             table = cursor.fetch_arrow_table()
         finally:
-            cursor.close()
-        return table.to_pylist()
+            _close_cursor_quietly(cursor)
+        rows: list[Row] = table.to_pylist()
+        return rows
     finally:
         conn.close()
 
 
-async def execute_ddl(runtime: Any, statements: Union[str, Sequence[str]]) -> None:
+async def execute_ddl(runtime: Any, statements: str | Sequence[str]) -> None:
     """Run one DDL string or a sequence of them, committed together (atomically).
 
     The SQLAlchemy path wraps the batch in ``engine.begin()`` (one transaction);
@@ -168,7 +168,7 @@ def _execute_ddl_adbc_sync(runtime: Any, statements: Sequence[str]) -> None:
                 for ddl in statements:
                     cursor.execute(ddl)
             finally:
-                cursor.close()
+                _close_cursor_quietly(cursor)
             conn.commit()
         except Exception:
             # Roll back the partially-applied batch so "committed together"

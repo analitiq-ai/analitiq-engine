@@ -7,20 +7,23 @@ including schema negotiation, batch sending, and ACK handling.
 import asyncio
 import hashlib
 import io
+import json
 import logging
-import os
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Dict, List, Optional
+from typing import Any
+
+import pyarrow as pa
 
 import grpc
-import pyarrow as pa
 from grpc import aio as grpc_aio
+from src.config import settings
 
-from .cursor import Cursor, encode_cursor
 from . import DEFAULT_MAX_MESSAGE_SIZE
+from .cursor import Cursor
 from .generated.analitiq.v1 import (
     AckStatus,
     BatchAck,
+    DestinationServiceStub,
     GetCapabilitiesRequest,
     GetCapabilitiesResponse,
     HealthCheckRequest,
@@ -32,54 +35,43 @@ from .generated.analitiq.v1 import (
     ShutdownAck,
     ShutdownRequest,
     StreamRequest,
-    StreamResponse,
     WriteMode,
-    DestinationServiceStub,
 )
 
 logger = logging.getLogger(__name__)
 
 
 _STREAM_TASK_FAILED = object()  # Sentinel pushed onto the response queue when
-                                # the reader/writer task exits abnormally so
-                                # send_batch / start_stream fail fast instead of
-                                # blocking on `response_queue.get` until timeout.
+# the reader/writer task exits abnormally so
+# send_batch / start_stream fail fast instead of
+# blocking on `response_queue.get` until timeout.
 
 
-# Default configuration from environment
-# An empty DESTINATION_GRPC_HOST (the var is set but blank — e.g. baked into the
-# image to mean "gRPC mode not configured") must fall back to localhost rather
-# than yield a hostless ":50051" address. ``or`` covers both unset and blank.
-DEFAULT_GRPC_HOST = os.getenv("DESTINATION_GRPC_HOST") or "localhost"
-DEFAULT_GRPC_PORT = int(os.getenv("DESTINATION_GRPC_PORT", "50051"))
-# Literal fallback (not env-derived) so a non-positive GRPC_TIMEOUT_SECONDS
-# cannot poison it - see resolve_grpc_ack_timeout_seconds.
-_FALLBACK_GRPC_TIMEOUT = 30
+# Default configuration (resolved from src.config.settings, env-overridable).
+DEFAULT_GRPC_HOST = settings.grpc_destination_host()
+DEFAULT_GRPC_PORT = settings.grpc_destination_port()
 
 
 def resolve_grpc_ack_timeout_seconds() -> int:
-    """The engine's gRPC ack budget in seconds (``GRPC_TIMEOUT_SECONDS``).
+    """Return the engine's gRPC ack budget in seconds (``GRPC_TIMEOUT_SECONDS``).
 
     The single source of truth for the handshake/ack deadline on the engine
     side. The client stamps its resolved budget into the schema handshake
     (``SchemaMessage.ack_timeout_seconds``), and the destination derives its
     statement timeout from that wire value rather than reading the env
     directly — a forwarding hop may only tighten the stamp, never widen it —
-    so the bound cannot drift past the engine's wait (issues #231, #234).
-
-    A non-positive value (``GRPC_TIMEOUT_SECONDS=0`` or negative) falls back to
-    the default rather than being used as-is: a zero ack budget makes the
-    schema-ACK ``wait_for`` fire immediately, before the destination can reply.
+    so the bound cannot drift past the engine's wait (issues #231, #234). The
+    non-positive guard (a zero budget would fire the schema-ACK ``wait_for``
+    immediately) lives in :func:`src.config.settings.grpc_ack_timeout_seconds`.
     """
-    raw = int(os.getenv("GRPC_TIMEOUT_SECONDS", str(_FALLBACK_GRPC_TIMEOUT)))
-    return raw if raw > 0 else _FALLBACK_GRPC_TIMEOUT
+    return settings.grpc_ack_timeout_seconds()
 
 
 # Every client defaults to the guarded budget, so a non-positive
 # GRPC_TIMEOUT_SECONDS cannot make a client built without an explicit timeout
 # (e.g. the proxy's UDS client) wait_for(timeout=0) and reject immediately.
 DEFAULT_GRPC_TIMEOUT = resolve_grpc_ack_timeout_seconds()
-DEFAULT_MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
+DEFAULT_MAX_RETRIES = settings.grpc_max_retries()
 
 
 @dataclass
@@ -89,8 +81,8 @@ class BatchResult:
     success: bool
     status: AckStatus
     records_written: int
-    committed_cursor: Optional[Cursor]
-    failed_record_ids: List[str]
+    committed_cursor: Cursor | None
+    failed_record_ids: list[str]
     failure_summary: str
     # True when the stream/channel died before an ACK arrived — the
     # destination never rendered a verdict on the batch. Callers that can
@@ -118,7 +110,7 @@ class DestinationGRPCClient:
         timeout_seconds: int = DEFAULT_GRPC_TIMEOUT,
         max_retries: int = DEFAULT_MAX_RETRIES,
         max_message_size: int = DEFAULT_MAX_MESSAGE_SIZE,
-        target: Optional[str] = None,
+        target: str | None = None,
     ):
         # ``target`` is a full gRPC address and wins over host/port — the
         # destination shell uses it to reach its connector worker over a
@@ -132,21 +124,21 @@ class DestinationGRPCClient:
         self.max_retries = max_retries
         self.max_message_size = max_message_size
 
-        self._channel: Optional[grpc_aio.Channel] = None
-        self._stub: Optional[DestinationServiceStub] = None
+        self._channel: grpc_aio.Channel | None = None
+        self._stub: DestinationServiceStub | None = None
 
         # Stream state
-        self._stream: Optional[grpc_aio.StreamStreamCall] = None
-        self._request_queue: Optional[asyncio.Queue] = None
-        self._response_queue: Optional[asyncio.Queue] = None
-        self._reader_task: Optional[asyncio.Task] = None
-        self._writer_task: Optional[asyncio.Task] = None
+        self._stream: grpc_aio.StreamStreamCall | None = None
+        self._request_queue: asyncio.Queue | None = None
+        self._response_queue: asyncio.Queue | None = None
+        self._reader_task: asyncio.Task | None = None
+        self._writer_task: asyncio.Task | None = None
 
         # Last exception observed by the reader or writer task. Read by
         # send_batch / start_stream after seeing the _STREAM_TASK_FAILED
         # sentinel so the failure reason in the BatchResult is the real
         # underlying error instead of "Timeout waiting for ACK".
-        self._task_failure: Optional[BaseException] = None
+        self._task_failure: BaseException | None = None
         # True when the reader observed the server closing the stream
         # without an error. Distinguishes graceful peer-close from an
         # in-task exception so send_batch / start_stream can surface a
@@ -159,7 +151,13 @@ class DestinationGRPCClient:
         # proxy forwards it so the engine-facing ack carries the worker's real
         # reason (e.g. a statement-timeout cancel) instead of a generic
         # "Schema configuration failed".
-        self._schema_rejection_message: Optional[str] = None
+        self._schema_rejection_message: str | None = None
+
+        # Retry-safety verdict from the most recent accepted SchemaAck
+        # (issue #286): (RetrySemantics wire value, reason), or None when
+        # no accepted ack has been seen. The engine logs it per stream at
+        # startup; the worker proxy re-reports it across the shell hop.
+        self._stream_retry_semantics: tuple[int, str] | None = None
 
         # Connection state
         self._connected = False
@@ -170,7 +168,7 @@ class DestinationGRPCClient:
         # without the caller re-driving start_stream. Survives _teardown_stream
         # (the rebuild needs them); cleared only on deliberate shutdown
         # (end_stream / disconnect). None means no stream was ever started.
-        self._stream_params: Optional[Dict[str, Any]] = None
+        self._stream_params: dict[str, Any] | None = None
 
     async def connect(
         self,
@@ -185,7 +183,8 @@ class DestinationGRPCClient:
         slightly after engine).
 
         Args:
-            max_connect_retries: Maximum connection attempts (default: MAX_RETRIES env var or 3)
+            max_connect_retries: Maximum connection attempts
+                (default: MAX_RETRIES env var or 3)
             retry_delay_seconds: Delay between retries (default: 2s)
 
         Returns:
@@ -201,7 +200,7 @@ class DestinationGRPCClient:
 
         # Attempt 1 failures are expected during concurrent engine/destination
         # startup; attempts 2+ escalate to WARNING.
-        last_failure: Optional[str] = None
+        last_failure: str | None = None
         for attempt in range(1, max_connect_retries + 1):
             log_failure = logger.warning if attempt > 1 else logger.debug
             try:
@@ -215,13 +214,15 @@ class DestinationGRPCClient:
                     return True
                 last_failure = f"not serving: {response.message}"
                 log_failure(
-                    f"Destination not serving (attempt {attempt}/{max_connect_retries}): "
+                    f"Destination not serving "
+                    f"(attempt {attempt}/{max_connect_retries}): "
                     f"{response.message}"
                 )
             except grpc.aio.AioRpcError as e:
                 last_failure = e.code().name
                 log_failure(
-                    f"Connection attempt {attempt}/{max_connect_retries} failed: {e.code()}"
+                    f"Connection attempt {attempt}/{max_connect_retries} "
+                    f"failed: {e.code()}"
                 )
 
             if attempt < max_connect_retries:
@@ -272,17 +273,25 @@ class DestinationGRPCClient:
                 logger.warning("Cannot send shutdown: not connected to destination")
                 return False
 
+        # connect() sets self._stub on success; the guard above guarantees it
+        # is bound here.
+        stub = self._stub
+        if stub is None:
+            logger.warning("Cannot send shutdown: not connected to destination")
+            return False
         try:
-            response: ShutdownAck = await self._stub.Shutdown(
+            response: ShutdownAck = await stub.Shutdown(
                 ShutdownRequest(reason=reason),
                 timeout=10.0,
             )
             logger.info(f"Shutdown acknowledged: {response.message}")
-            return response.acknowledged
+            return bool(response.acknowledged)
         except grpc.aio.AioRpcError as e:
             logger.warning(
                 "Shutdown request failed: code=%s details=%s",
-                e.code(), e.details(), exc_info=True,
+                e.code(),
+                e.details(),
+                exc_info=True,
             )
             return False
 
@@ -291,23 +300,32 @@ class DestinationGRPCClient:
         if not self._stub:
             return False
         try:
-            response = await self._stub.HealthCheck(
-                HealthCheckRequest(), timeout=10.0
-            )
-            return response.status == HealthCheckResponse.ServingStatus.SERVING
+            response = await self._stub.HealthCheck(HealthCheckRequest(), timeout=10.0)
+            return bool(response.status == HealthCheckResponse.ServingStatus.SERVING)
         except Exception as e:
             logger.warning("Destination health check failed: %s", e)
             return False
 
-    async def get_capabilities(self) -> Optional[GetCapabilitiesResponse]:
+    async def get_capabilities(self) -> GetCapabilitiesResponse:
         """
         Query destination capabilities.
 
         Returns:
-            GetCapabilitiesResponse or None if failed
+            GetCapabilitiesResponse. A successful GetCapabilities is always a
+            populated response, so the result is never None.
+
+        Raises:
+            ConnectionError: the channel is not connected.
+            grpc.aio.AioRpcError: the GetCapabilities RPC failed.
+
+        Both failure modes raise rather than collapse to None: a None return
+        was indistinguishable from a real (populated) response and let a
+        transport failure read as "destination has no capabilities".
         """
         if not self._stub:
-            return None
+            raise ConnectionError(
+                "cannot query capabilities: not connected to destination"
+            )
 
         try:
             return await self._stub.GetCapabilities(
@@ -316,16 +334,18 @@ class DestinationGRPCClient:
             )
         except grpc.aio.AioRpcError as e:
             logger.error(
-                "Failed to get capabilities: code=%s details=%s",
-                e.code(), e.details(), exc_info=True,
+                "GetCapabilities RPC failed: code=%s details=%s",
+                e.code(),
+                e.details(),
+                exc_info=True,
             )
-            return None
+            raise
 
     async def start_stream(
         self,
         run_id: str,
         stream_id: str,
-        schema_config: Dict[str, Any],
+        schema_config: dict[str, Any],
     ) -> bool:
         """
         Start bidirectional stream and send initial SCHEMA message.
@@ -338,7 +358,7 @@ class DestinationGRPCClient:
         Returns:
             True if schema accepted by destination
         """
-        if not self._connected:
+        if not self._connected or self._stub is None:
             raise RuntimeError("Not connected to destination")
 
         # Cache the stream parameters so send_batch can rebuild the stream in
@@ -356,6 +376,7 @@ class DestinationGRPCClient:
         self._task_failure = None
         self._peer_closed_stream = False
         self._schema_rejection_message = None
+        self._stream_retry_semantics = None
 
         # Create queues for bidirectional communication
         self._request_queue = asyncio.Queue()
@@ -388,7 +409,11 @@ class DestinationGRPCClient:
             )
 
             if response is _STREAM_TASK_FAILED:
-                cause = self._task_failure
+                # Annotate the local so mypy keeps the declared type: the
+                # reader/writer tasks set self._task_failure concurrently
+                # across the await above, which the narrowing from the
+                # start-of-method reset would otherwise hide.
+                cause: BaseException | None = self._task_failure
                 if cause is not None:
                     self._schema_rejection_message = (
                         f"stream reader/writer exited before schema ACK: {cause}"
@@ -407,6 +432,10 @@ class DestinationGRPCClient:
                 if response.accepted:
                     logger.info(f"Schema accepted for stream {stream_id}")
                     accepted = True
+                    self._stream_retry_semantics = (
+                        response.retry_semantics,
+                        response.retry_semantics_reason,
+                    )
                 else:
                     self._schema_rejection_message = response.message
                     logger.error(f"Schema rejected: {response.message}")
@@ -431,12 +460,23 @@ class DestinationGRPCClient:
         return accepted
 
     @property
-    def schema_rejection_message(self) -> Optional[str]:
-        """Reason the last start_stream did not get an accepted SchemaAck - a
-        rejection message, an ack-wait timeout, or a stream failure before the
-        ack. None when the most recent start_stream was accepted (or none has
-        run)."""
+    def schema_rejection_message(self) -> str | None:
+        """Return why the last start_stream got no accepted SchemaAck.
+
+        The reason is a rejection message, an ack-wait timeout, or a stream
+        failure before the ack. None when the most recent start_stream was
+        accepted (or none has run).
+        """
         return self._schema_rejection_message
+
+    @property
+    def stream_retry_semantics(self) -> tuple[int, str] | None:
+        """Retry-safety verdict from the last accepted SchemaAck (#286).
+
+        ``(RetrySemantics wire value, reason)``, or None when the most
+        recent start_stream was not accepted (or none has run).
+        """
+        return self._stream_retry_semantics
 
     async def send_batch(
         self,
@@ -444,7 +484,7 @@ class DestinationGRPCClient:
         stream_id: str,
         batch_seq: int,
         record_batch: pa.RecordBatch,
-        record_ids: List[str],
+        record_ids: list[str],
         cursor: Cursor,
     ) -> BatchResult:
         """Send a batch and wait for ACK.
@@ -489,7 +529,11 @@ class DestinationGRPCClient:
             cursor=cursor,
         )
 
-        # Send batch
+        # Send batch. An active stream always has its request queue installed
+        # (start_stream / _rebuild_stream set them together); guard so the
+        # Optional attribute narrows and a torn-down stream fails loud.
+        if self._request_queue is None:
+            raise RuntimeError("Stream request queue is not initialized")
         await self._request_queue.put(StreamRequest(batch=batch_msg))
 
         # Wait for ACK with periodic heartbeat logging (strict in-order)
@@ -554,7 +598,7 @@ class DestinationGRPCClient:
                     # _task_failure check below picks up whatever the reader
                     # recorded, so no diagnostic is lost by swallowing here.
                     pass
-                except Exception:
+                except Exception:  # nosec B110
                     # The reader raised inside the grace window. Its exception
                     # was already stored in _task_failure by _read_responses,
                     # so let the recorded-failure path below surface it and run
@@ -655,7 +699,9 @@ class DestinationGRPCClient:
         self._writer_task = None
         self._task_failure = None
         self._peer_closed_stream = False
-        logger.warning("Stream torn down after non-clean exit; channel retained for reconnect")
+        logger.warning(
+            "Stream torn down after non-clean exit; channel retained for reconnect"
+        )
 
     async def _rebuild_stream(self) -> bool:
         """Rebuild the stream after a transport teardown using cached params.
@@ -694,9 +740,7 @@ class DestinationGRPCClient:
             logger.error("Stream rebuild: destination rejected schema on restart")
             return False
 
-        logger.info(
-            "Rebuilt stream %s after transport teardown", params["stream_id"]
-        )
+        logger.info("Rebuilt stream %s after transport teardown", params["stream_id"])
         return True
 
     async def _wait_with_heartbeat(self, batch_seq: int) -> Any:
@@ -709,6 +753,10 @@ class DestinationGRPCClient:
 
         Raises asyncio.TimeoutError after self.timeout seconds.
         """
+        # Called only while a stream is active, where start_stream has
+        # installed the response queue; guard so the Optional narrows.
+        if self._response_queue is None:
+            raise RuntimeError("Stream response queue is not initialized")
         get_task = asyncio.ensure_future(self._response_queue.get())
         heartbeat_interval = 10.0
         elapsed = 0.0
@@ -725,8 +773,7 @@ class DestinationGRPCClient:
                 if elapsed >= self.timeout:
                     raise asyncio.TimeoutError()
                 reader_alive = (
-                    self._reader_task is not None
-                    and not self._reader_task.done()
+                    self._reader_task is not None and not self._reader_task.done()
                 )
                 logger.info(
                     "Still waiting for ACK batch=%d elapsed=%.0fs "
@@ -747,14 +794,20 @@ class DestinationGRPCClient:
 
     async def _write_requests(self) -> None:
         """Write requests from queue to gRPC stream."""
+        # start_stream installs the request queue and stream before creating
+        # this task; bind locals so the Optional attributes narrow.
+        request_queue = self._request_queue
+        stream = self._stream
+        if request_queue is None or stream is None:
+            raise RuntimeError("Writer task started without an active stream")
         try:
             while True:
-                request = await self._request_queue.get()
+                request = await request_queue.get()
                 if request is None:
                     # End of stream signal
-                    await self._stream.done_writing()
+                    await stream.done_writing()
                     break
-                await self._stream.write(request)
+                await stream.write(request)
         except asyncio.CancelledError:
             raise
         except BaseException as e:
@@ -767,13 +820,19 @@ class DestinationGRPCClient:
 
     async def _read_responses(self) -> None:
         """Read responses from gRPC stream and put in queue."""
+        # start_stream installs the stream and response queue before creating
+        # this task; bind locals so the Optional attributes narrow.
+        stream = self._stream
+        response_queue = self._response_queue
+        if stream is None or response_queue is None:
+            raise RuntimeError("Reader task started without an active stream")
         try:
-            async for response in self._stream:
+            async for response in stream:
                 msg_type = response.WhichOneof("message")
                 if msg_type == "ack":
-                    await self._response_queue.put(response.ack)
+                    await response_queue.put(response.ack)
                 elif msg_type == "schema_ack":
-                    await self._response_queue.put(response.schema_ack)
+                    await response_queue.put(response.schema_ack)
                 else:
                     logger.warning(f"Unknown response type: {msg_type}")
         except asyncio.CancelledError:
@@ -794,7 +853,7 @@ class DestinationGRPCClient:
     def _build_schema_message(
         self,
         stream_id: str,
-        config: Dict[str, Any],
+        config: dict[str, Any],
     ) -> SchemaMessage:
         """Build the slim SchemaMessage for ``stream_id``.
 
@@ -866,32 +925,37 @@ class DestinationGRPCClient:
 
 
 def generate_record_id(
-    record: Dict[str, Any],
-    run_id: str,
-    batch_seq: int,
-    index: int,
-    primary_key_fields: Optional[List[str]] = None,
+    record: dict[str, Any],
+    primary_key_fields: list[str] | None = None,
 ) -> str:
-    """
-    Generate a stable record ID for DLQ correlation.
+    """Content-derived, position-independent identity for a record.
 
-    Args:
-        record: The record dict
-        run_id: Current run ID
-        batch_seq: Current batch sequence
-        index: Index of record within batch
-        primary_key_fields: Optional primary key fields to include in hash
+    The id is a function of the record's content alone -- never the run, the
+    batch sequence, or the row's offset in the batch -- so the same logical
+    row hashes to the same id across attempts and across an inclusive cursor
+    re-read. That is what lets a destination enforce idempotency on row
+    identity (a keyed MERGE, or the synthetic ``_record_hash`` column for a
+    keyless insert) instead of a positional ``(run_id, stream_id, batch_seq)``
+    ledger, which a same-run retry from an advanced cursor cannot key
+    correctly (issue #282).
 
-    Returns:
-        Stable record ID string
+    With ``primary_key_fields`` the id derives from those fields (the row's
+    stable business key); without them it derives from the whole record, so
+    two byte-identical keyless rows share an id -- the Fivetran ``_fivetran_id``
+    tradeoff: a keyless stream cannot tell a genuine duplicate from a re-read
+    one. If the configured key fields are absent from the record -- a mapping
+    renamed or dropped them, so the transformed row no longer carries them --
+    the id falls back to the whole record. Without that fallback every row would
+    hash the same all-missing-key value, and the keyless ``_record_hash`` dedup
+    would collapse distinct rows to one and silently drop the rest.
+
+    The full SHA-256 hex digest is returned (not truncated): it doubles as the
+    ``_record_hash`` dedup key for keyless inserts, where a truncated digest's
+    collision odds would silently drop legitimately-distinct rows.
     """
-    if primary_key_fields:
-        # Use primary key values for ID
-        pk_values = [str(record.get(field, "")) for field in primary_key_fields]
-        pk_str = "|".join(pk_values)
-        hash_input = f"{run_id}:{batch_seq}:{pk_str}"
+    if primary_key_fields and all(field in record for field in primary_key_fields):
+        basis: Any = {field: record[field] for field in primary_key_fields}
     else:
-        # Use batch position as ID
-        hash_input = f"{run_id}:{batch_seq}:{index}"
-
-    return hashlib.sha256(hash_input.encode()).hexdigest()[:16]
+        basis = record
+    canonical = json.dumps(basis, sort_keys=True, default=str)
+    return hashlib.sha256(canonical.encode()).hexdigest()

@@ -1,16 +1,18 @@
-"""Unit tests for the filesystem cursor checkpoint store.
+"""Unit tests for the per-stream cursor checkpoint store and value encoding.
 
-The E2E suite covers the happy round-trip (incremental resumes from the
-bookmark), but it cannot reach the corruption / write-failure branches — you
-can't easily torn-write a checkpoint mid-Docker-run. These tests lock those
-branches: a datetime cursor must round-trip with its type intact, and any
-unreadable or unwritable checkpoint must degrade to a logged full re-scan
-rather than crash the run.
+The E2E suite covers the happy round-trip (an incremental stream resumes from
+the committed bookmark), but it cannot reach the corruption / write-failure
+branches -- you can't easily torn-write a checkpoint mid-Docker-run. These tests
+lock those branches: a tagged cursor value must round-trip with its type intact,
+and any unreadable or unwritable checkpoint must degrade to a logged full
+re-scan rather than crash the run.
 """
 from __future__ import annotations
 
+import json
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timezone
+from decimal import Decimal
 
 import pytest
 
@@ -22,7 +24,7 @@ _STREAM = "stream-1"
 
 def test_datetime_cursor_round_trips_with_microseconds(tmp_path):
     store = CursorStore(tmp_path)
-    value = datetime(2026, 2, 5, 0, 1, 0, 10010)
+    value = datetime(2026, 2, 5, 0, 1, 0, 10010, tzinfo=timezone.utc)
 
     store.set(_PIPELINE, _STREAM, value)
     loaded = store.get(_PIPELINE, _STREAM)
@@ -42,6 +44,19 @@ def test_date_cursor_round_trips_as_date(tmp_path):
     assert loaded == value
 
 
+def test_decimal_cursor_round_trips_as_decimal(tmp_path):
+    # A decimal must come back a Decimal (not a bare string), else the source
+    # would mis-bind a NUMERIC/DECIMAL cursor column.
+    store = CursorStore(tmp_path)
+    value = Decimal("123.45")
+
+    store.set(_PIPELINE, _STREAM, value)
+    loaded = store.get(_PIPELINE, _STREAM)
+
+    assert isinstance(loaded, Decimal)
+    assert loaded == value
+
+
 @pytest.mark.parametrize("value", [42, "2026-02-05", 3.5])
 def test_json_native_cursors_pass_through(tmp_path, value):
     store = CursorStore(tmp_path)
@@ -54,8 +69,6 @@ def test_json_native_cursors_pass_through(tmp_path, value):
 def test_unknown_type_tag_passes_through_unchanged(tmp_path):
     # A dict carrying an unrecognized __type__ (e.g. a tag written by a future
     # version) is returned verbatim rather than crashing the decode.
-    import json
-
     store = CursorStore(tmp_path)
     path = tmp_path / _PIPELINE / f"{_STREAM}.json"
     path.parent.mkdir(parents=True)
@@ -77,7 +90,7 @@ def test_set_none_writes_nothing(tmp_path):
 
 def test_set_leaves_no_temp_file(tmp_path):
     store = CursorStore(tmp_path)
-    store.set(_PIPELINE, _STREAM, datetime(2026, 2, 5, 0, 1, 0))
+    store.set(_PIPELINE, _STREAM, datetime(2026, 2, 5, 0, 1, 0, tzinfo=timezone.utc))
 
     pipeline_dir = tmp_path / _PIPELINE
     assert (pipeline_dir / f"{_STREAM}.json").is_file()
@@ -95,6 +108,32 @@ def test_corrupt_json_reverts_to_full_scan_loudly(tmp_path, caplog):
     assert any("unreadable" in r.message for r in caplog.records)
 
 
+def test_non_object_payload_reverts_to_full_scan_loudly(tmp_path, caplog):
+    # A valid-JSON-but-non-object file (a truncation that still parses, or
+    # tampering) must degrade to a re-scan, not raise AttributeError out of get().
+    store = CursorStore(tmp_path)
+    path = tmp_path / _PIPELINE / f"{_STREAM}.json"
+    path.parent.mkdir(parents=True)
+    path.write_text("42")
+
+    with caplog.at_level(logging.WARNING, logger="src.state.store"):
+        assert store.get(_PIPELINE, _STREAM) is None
+    assert any("unreadable" in r.message for r in caplog.records)
+
+
+def test_non_utf8_file_reverts_to_full_scan_loudly(tmp_path, caplog):
+    # A corrupt/binary bundle artifact (invalid UTF-8) makes read_text raise
+    # UnicodeDecodeError (a ValueError); it must degrade to a re-scan, not crash.
+    store = CursorStore(tmp_path)
+    path = tmp_path / _PIPELINE / f"{_STREAM}.json"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"\xff\xfe\x00not utf-8")
+
+    with caplog.at_level(logging.WARNING, logger="src.state.store"):
+        assert store.get(_PIPELINE, _STREAM) is None
+    assert any("unreadable" in r.message for r in caplog.records)
+
+
 @pytest.mark.parametrize("bad_value", ["not-a-date", 123, None])
 def test_bad_tagged_datetime_reverts_to_full_scan_loudly(tmp_path, caplog, bad_value):
     # Valid JSON, valid tag, but a value datetime.fromisoformat cannot parse
@@ -103,9 +142,23 @@ def test_bad_tagged_datetime_reverts_to_full_scan_loudly(tmp_path, caplog, bad_v
     store = CursorStore(tmp_path)
     path = tmp_path / _PIPELINE / f"{_STREAM}.json"
     path.parent.mkdir(parents=True)
-    import json
+    path.write_text(
+        json.dumps({"cursor": {"__type__": "datetime", "value": bad_value}})
+    )
 
-    path.write_text(json.dumps({"cursor": {"__type__": "datetime", "value": bad_value}}))
+    with caplog.at_level(logging.WARNING, logger="src.state.store"):
+        assert store.get(_PIPELINE, _STREAM) is None
+    assert any("unreadable" in r.message for r in caplog.records)
+
+
+def test_bad_tagged_decimal_reverts_to_full_scan_loudly(tmp_path, caplog):
+    # Decimal("garbage") raises InvalidOperation (an ArithmeticError, NOT a
+    # ValueError); decode_value normalizes it to ValueError so a corrupt decimal
+    # checkpoint degrades to a re-scan instead of crashing state load.
+    store = CursorStore(tmp_path)
+    path = tmp_path / _PIPELINE / f"{_STREAM}.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"cursor": {"__type__": "decimal", "value": "garbage"}}))
 
     with caplog.at_level(logging.WARNING, logger="src.state.store"):
         assert store.get(_PIPELINE, _STREAM) is None
@@ -120,8 +173,12 @@ def test_write_failure_is_best_effort_and_warned_once(tmp_path, caplog):
 
     with caplog.at_level(logging.WARNING, logger="src.state.store"):
         # Must not raise despite the write being impossible.
-        store.set(_PIPELINE, _STREAM, datetime(2026, 2, 5, 0, 1, 0))
-        store.set(_PIPELINE, _STREAM, datetime(2026, 2, 6, 0, 1, 0))
+        store.set(
+            _PIPELINE, _STREAM, datetime(2026, 2, 5, 0, 1, 0, tzinfo=timezone.utc)
+        )
+        store.set(
+            _PIPELINE, _STREAM, datetime(2026, 2, 6, 0, 1, 0, tzinfo=timezone.utc)
+        )
 
     warnings = [r for r in caplog.records if "failed to persist" in r.message]
     assert len(warnings) == 1  # warned once per path, not per call
@@ -133,8 +190,8 @@ def test_distinct_failing_paths_each_warn(tmp_path, caplog):
     (tmp_path / "pipe-b").write_text("blocker")
 
     with caplog.at_level(logging.WARNING, logger="src.state.store"):
-        store.set("pipe-a", _STREAM, datetime(2026, 2, 5, 0, 1, 0))
-        store.set("pipe-b", _STREAM, datetime(2026, 2, 5, 0, 1, 0))
+        store.set("pipe-a", _STREAM, datetime(2026, 2, 5, 0, 1, 0, tzinfo=timezone.utc))
+        store.set("pipe-b", _STREAM, datetime(2026, 2, 5, 0, 1, 0, tzinfo=timezone.utc))
 
     warnings = [r for r in caplog.records if "failed to persist" in r.message]
     assert len(warnings) == 2  # a distinct path's failure is not masked

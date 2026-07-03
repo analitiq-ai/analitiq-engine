@@ -11,7 +11,11 @@ from __future__ import annotations
 
 import pytest
 
-from cdk.request_binding import bind_param_refs, bind_record_inputs
+from cdk.request_binding import (
+    bind_param_refs,
+    bind_record_inputs,
+    resolve_param_defaults,
+)
 
 
 class TestBindParamRefs:
@@ -32,9 +36,7 @@ class TestBindParamRefs:
         assert bind_param_refs(spec, {"search": "abc"}) == spec
 
     def test_binds_inside_lists(self):
-        out = bind_param_refs(
-            {"filters": [{"from_param": "a"}, "static"]}, {"a": 1}
-        )
+        out = bind_param_refs({"filters": [{"from_param": "a"}, "static"]}, {"a": 1})
         assert out == {"filters": [{"literal": 1}, "static"]}
 
     def test_siblings_next_to_marker_raise(self):
@@ -76,11 +78,87 @@ class TestBindRecordInputs:
 
     def test_binds_inside_function_inputs(self):
         out = bind_record_inputs(
-            {"token": {"function": "base64_encode", "input": {"from_input": "record.id"}}},
+            {
+                "token": {
+                    "function": "base64_encode",
+                    "input": {"from_input": "record.id"},
+                }
+            },
             record={"id": "abc"},
         )
         assert out == {
             "token": {"function": "base64_encode", "input": {"literal": "abc"}}
+        }
+
+
+class TestResolveParamDefaults:
+    """Tests for :func:`cdk.request_binding.resolve_param_defaults`."""
+
+    def _make_resolver(self, mapping: dict):
+        """Return a minimal resolver stub that looks up values in *mapping*."""
+
+        class _Resolver:
+            def resolve_for_request(self, expr):
+                return mapping.get(expr)
+
+        return _Resolver()
+
+    def test_resolves_defaults(self):
+        resolver = self._make_resolver({"$page": 1, "$size": 50})
+        spec = {
+            "page": {"default": "$page"},
+            "size": {"default": "$size"},
+        }
+        assert resolve_param_defaults(spec, resolver) == {"page": 1, "size": 50}
+
+    def test_omits_none_resolution(self):
+        resolver = self._make_resolver({})
+        spec = {"page": {"default": "$missing"}}
+        assert resolve_param_defaults(spec, resolver) == {}
+
+    def test_omits_none_resolution_logs_warning(self, caplog):
+        import logging
+
+        resolver = self._make_resolver({})
+        spec = {"page": {"default": "$missing"}}
+        with caplog.at_level(logging.WARNING, logger="cdk.request_binding"):
+            resolve_param_defaults(spec, resolver)
+        assert "page" in caplog.text
+        assert "did not resolve" in caplog.text
+
+    def test_skips_entries_without_default(self):
+        resolver = self._make_resolver({"$p": 1})
+        spec = {
+            "has_default": {"default": "$p"},
+            "no_default": {"in": "query"},
+            "non_dict": "literal_string",
+        }
+        assert resolve_param_defaults(spec, resolver) == {"has_default": 1}
+
+    def test_context_label_in_warning(self, caplog):
+        import logging
+
+        resolver = self._make_resolver({})
+        spec = {"amount": {"default": "$missing"}}
+        with caplog.at_level(logging.WARNING, logger="cdk.request_binding"):
+            resolve_param_defaults(spec, resolver, context="write param")
+        assert "write param" in caplog.text
+
+    def test_empty_spec_returns_empty_dict(self):
+        resolver = self._make_resolver({})
+        assert resolve_param_defaults({}, resolver) == {}
+
+    def test_falsy_resolved_values_are_kept(self):
+        resolver = self._make_resolver({"$zero": 0, "$flag": False, "$empty": ""})
+        spec = {
+            "page": {"default": "$zero"},
+            "enabled": {"default": "$flag"},
+            "prefix": {"default": "$empty"},
+        }
+        assert resolve_param_defaults(spec, resolver) == {
+            "page": 0,
+            "enabled": False,
+            "prefix": "",
         }
 
 

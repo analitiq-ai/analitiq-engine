@@ -49,9 +49,14 @@ record_batch
    the type information inline. Anything else (Protobuf-of-rows, JSON)
    would be strictly worse on the wire.
 2. **Schema validation cast.** `SchemaContract.cast_arrow_batch`
-   (`cdk/cdk/schema_contract.py`) uses vectorized
-   `pyarrow.compute.cast` to align incoming columns with the destination
-   schema. Faster and more correct than a per-row Python coercion loop.
+   (`cdk/cdk/schema_contract.py`) aligns incoming columns with the destination
+   schema. Each column conversion is first classified by the conversion matrix
+   (`cdk/cdk/type_map/conversions.py`) — the same policy the engine's transform
+   retype consults, so the two boundaries cannot disagree — then a permitted
+   conversion runs through vectorized `pyarrow.compute.cast(safe=True)`. A
+   `forbidden` or `explicit` conversion (e.g. an `Int64 → Utf8` whose mapping
+   omitted `to_string`) fails loud here instead of silently stringifying.
+   Faster and more correct than a per-row Python coercion loop.
 3. **Type vocabulary.** `TypeMapper` (`cdk/cdk/type_map/mapper.py`) ->
    `parse_arrow_type` (`cdk/cdk/type_map/arrow.py`) ->
    `arrow_to_sqlalchemy` (`cdk/cdk/sql_types.py`) is a clean single

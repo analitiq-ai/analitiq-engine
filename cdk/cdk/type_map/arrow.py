@@ -8,12 +8,15 @@ which only :func:`resolve_arrow_type` has access to.
 from __future__ import annotations
 
 import re
-from typing import Any, Final, Mapping, Pattern
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from re import Pattern
+from typing import Any, Final
 
 import pyarrow as pa
 
+from .conversions import Conversion, classify_conversion
 from .exceptions import InvalidTypeMapError
-
 
 _PARAM_SPLIT: Final[Pattern[str]] = re.compile(r"\s*,\s*")
 
@@ -138,9 +141,7 @@ def resolve_arrow_type(spec: Mapping[str, Any], where: str = "field") -> pa.Data
     """
     arrow_type = spec.get("arrow_type")
     if not arrow_type:
-        raise InvalidTypeMapError(
-            f"{where}: missing 'arrow_type' declaration"
-        )
+        raise InvalidTypeMapError(f"{where}: missing 'arrow_type' declaration")
     if arrow_type == "Object":
         sub = spec.get("properties")
         if not isinstance(sub, dict) or not sub:
@@ -168,9 +169,7 @@ def resolve_arrow_type(spec: Mapping[str, Any], where: str = "field") -> pa.Data
     return parse_arrow_type(arrow_type)
 
 
-def _require_unit(
-    args: tuple[str, ...], head: str, allowed: tuple[str, ...]
-) -> str:
+def _require_unit(args: tuple[str, ...], head: str, allowed: tuple[str, ...]) -> str:
     if len(args) != 1:
         raise InvalidTypeMapError(
             f"{head}{args} requires exactly one unit from {allowed}"
@@ -199,12 +198,12 @@ def _parse_timestamp(args: tuple[str, ...]) -> pa.DataType:
 
 
 def _parse_decimal(
-    args: tuple[str, ...], factory, head: str
+    args: tuple[str, ...],
+    factory: Callable[[int, int], pa.DataType],
+    head: str,
 ) -> pa.DataType:
     if len(args) != 2:
-        raise InvalidTypeMapError(
-            f"{head} requires (precision, scale); got {args}"
-        )
+        raise InvalidTypeMapError(f"{head} requires (precision, scale); got {args}")
     try:
         precision = int(args[0])
         scale = int(args[1])
@@ -225,3 +224,135 @@ def _parse_fixed_binary(args: tuple[str, ...], head: str) -> pa.DataType:
             f"{head}({args[0]}) byte_width is not an integer"
         ) from err
     return pa.binary(width)
+
+
+# Ordered (predicate, family) probes mapping a live DataType back to its
+# conversion-matrix family. Probes are mutually exclusive and first-match-wins.
+# Width/parameter detail is intentionally dropped: a DataType collapses to the
+# family head conversions.classify_conversion keys its policy on (int32 ->
+# "Int32", timestamp[us, tz=UTC] -> "Timestamp"). Kept in step with the family
+# heads parse_arrow_type produces; list and large_list both fold to "List", the
+# single nested-list family the contract emits.
+_FAMILY_PROBES: Final[tuple[tuple[Callable[[pa.DataType], bool], str], ...]] = (
+    (pa.types.is_null, "Null"),
+    (pa.types.is_boolean, "Boolean"),
+    (pa.types.is_int8, "Int8"),
+    (pa.types.is_int16, "Int16"),
+    (pa.types.is_int32, "Int32"),
+    (pa.types.is_int64, "Int64"),
+    (pa.types.is_uint8, "UInt8"),
+    (pa.types.is_uint16, "UInt16"),
+    (pa.types.is_uint32, "UInt32"),
+    (pa.types.is_uint64, "UInt64"),
+    (pa.types.is_float16, "Float16"),
+    (pa.types.is_float32, "Float32"),
+    (pa.types.is_float64, "Float64"),
+    (pa.types.is_string, "Utf8"),
+    (pa.types.is_large_string, "LargeUtf8"),
+    (pa.types.is_fixed_size_binary, "FixedSizeBinary"),
+    (pa.types.is_large_binary, "LargeBinary"),
+    (pa.types.is_binary, "Binary"),
+    (pa.types.is_date32, "Date32"),
+    (pa.types.is_date64, "Date64"),
+    (pa.types.is_time32, "Time32"),
+    (pa.types.is_time64, "Time64"),
+    (pa.types.is_timestamp, "Timestamp"),
+    (pa.types.is_duration, "Duration"),
+    (pa.types.is_decimal128, "Decimal128"),
+    (pa.types.is_decimal256, "Decimal256"),
+    (pa.types.is_struct, "Object"),
+    (pa.types.is_list, "List"),
+    (pa.types.is_large_list, "List"),
+)
+
+
+def arrow_family(dtype: pa.DataType) -> str:
+    """Return the conversion-matrix family name for a PyArrow ``DataType``.
+
+    The inverse of the family head :func:`parse_arrow_type` consumes. An
+    unrecognised type raises :class:`InvalidTypeMapError` rather than resolve to
+    a silent default -- conversions classified against an unknown family would
+    be meaningless.
+    """
+    if pa.types.is_dictionary(dtype):
+        # A dictionary-encoded column (some ADBC drivers return these for
+        # low-cardinality columns) is, for conversion purposes, its value type;
+        # pc.cast transparently decodes it. Classify by the decoded value type
+        # so dict<_, Utf8> is treated exactly like Utf8 rather than rejected.
+        return arrow_family(dtype.value_type)
+    for probe, family in _FAMILY_PROBES:
+        if probe(dtype):
+            return family
+    raise InvalidTypeMapError(
+        f"arrow type {dtype!r} has no conversion-matrix family; it is outside "
+        f"the published arrow_type vocabulary"
+    )
+
+
+def classify_arrow_conversion(source: pa.DataType, target: pa.DataType) -> Conversion:
+    """Classify a live ``source -> target`` DataType conversion via the matrix.
+
+    Bridges the runtime build boundaries (``SchemaContract.cast_arrow_batch``,
+    the Arrow-native transform retype) to the pure-string policy in
+    :mod:`cdk.type_map.conversions` so both consult one source of truth.
+    """
+    return classify_conversion(arrow_family(source), arrow_family(target))
+
+
+@dataclass(frozen=True, slots=True)
+class BlockedLeaf:
+    """A scalar leaf inside a nested conversion the matrix does not permit.
+
+    ``path`` locates the leaf within the nested target (``"addr.zip"``,
+    ``"tags[]"``); ``conversion`` is the offending :class:`Conversion` (its mode
+    is ``explicit`` or ``forbidden``, and ``fn`` names the function an
+    ``explicit`` leaf would require).
+    """
+
+    path: str
+    source: pa.DataType
+    target: pa.DataType
+    conversion: Conversion
+
+
+def _is_list_type(dtype: pa.DataType) -> bool:
+    return bool(pa.types.is_list(dtype) or pa.types.is_large_list(dtype))
+
+
+def first_blocked_nested_leaf(
+    source: pa.DataType, target: pa.DataType, path: str = ""
+) -> BlockedLeaf | None:
+    """Classify every scalar leaf of a nested conversion through the matrix.
+
+    A nested target is materialised structurally, but each scalar leaf inside it
+    is a real ``source -> target`` conversion that must clear the same policy a
+    top-level scalar retype does: an ``Int64 -> Utf8`` leaf is ``explicit``, and
+    an ``Object -> Int64`` leaf is ``forbidden``, whether the leaf sits at the top
+    level or three fields deep. This walks matching struct fields and list
+    elements in lockstep and returns the first leaf whose mode is ``explicit`` or
+    ``forbidden``, or ``None`` when every leaf is ``identity`` or ``auto`` (which
+    the caller's ``pc.cast`` then materialises). A structural mismatch -- a struct
+    facing a list, a scalar facing a struct -- classifies ``forbidden`` at that
+    node and surfaces here too. A field only the target declares has no source
+    leaf to gate and is left to the caller's cast.
+    """
+    if pa.types.is_struct(source) and pa.types.is_struct(target):
+        source_fields = {field.name: field.type for field in source}
+        for field in target:
+            child = source_fields.get(field.name)
+            if child is None:
+                continue
+            leaf_path = f"{path}.{field.name}" if path else field.name
+            blocked = first_blocked_nested_leaf(child, field.type, leaf_path)
+            if blocked is not None:
+                return blocked
+        return None
+    if _is_list_type(source) and _is_list_type(target):
+        elem_path = f"{path}[]" if path else "[]"
+        return first_blocked_nested_leaf(
+            source.value_type, target.value_type, elem_path
+        )
+    conversion = classify_arrow_conversion(source, target)
+    if conversion.mode in ("explicit", "forbidden"):
+        return BlockedLeaf(path, source, target, conversion)
+    return None

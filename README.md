@@ -208,6 +208,15 @@ Connection configs use `${placeholder}` syntax for sensitive values. Actual secr
 
 Placeholders are expanded at connection time (late-binding) — not at config load time. If any `${placeholder}` has no matching key, a `PlaceholderExpansionError` is raised and the connection is never established with raw placeholders.
 
+### Configuration and defaults
+
+Every engine default lives in one place: [`src/config/settings.py`](src/config/settings.py),
+each overridable by an environment variable. The full catalogue - what each
+setting controls, its default, and how to override it - is in
+[docs/configuration.md](docs/configuration.md). Per-pipeline overrides go in the
+`runtime` block of `pipelines/{pipeline_id}/pipeline.json`; precedence is
+**pipeline config > environment variable > built-in default**.
+
 ### Environment Variables
 
 | Variable | Default | Description |
@@ -220,6 +229,22 @@ Placeholders are expanded at connection time (late-binding) — not at config lo
 | `DESTINATION_GRPC_PORT` | `50051` | gRPC port (engine mode) |
 | `GRPC_PORT` | `50051` | gRPC listen port (destination mode) |
 | `DESTINATION_INDEX` | `0` | Which destination from the pipeline config |
+| `ANALITIQ_BATCH_SIZE` | `1000` | Records read and shipped per batch |
+| `ANALITIQ_MAX_CONCURRENT_BATCHES` | `3` | Batches in flight per stream |
+| `ANALITIQ_BUFFER_SIZE` | `5000` | Queue depth between pipeline stages |
+| `ANALITIQ_ERROR_STRATEGY` | `fail` | Exhausted-retry policy: `fail`, `dlq`, or `skip` |
+| `ANALITIQ_MAX_RETRIES` | `3` | Retry attempts before the error strategy applies |
+| `ANALITIQ_RETRY_DELAY_SECONDS` | `5` | Base backoff between retries |
+
+See [docs/configuration.md](docs/configuration.md) for the complete list,
+including gRPC, worker, and schema settings.
+
+Durable incremental cursors resume from per-stream
+`state/{pipeline_id}/{stream_id}.json` checkpoint files rather than an
+environment variable: each stream writes its own committed cursor on every
+destination ACK, and the deployment delivers those same files in the config
+bundle on a fresh container. See
+[engine-architecture.md](docs/engine-architecture.md#incremental-state-restore).
 
 </details>
 

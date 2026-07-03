@@ -4,6 +4,17 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from src.models.resolved import (
+    BatchingConfig,
+    ErrorHandlingConfig,
+    PipelineConnections,
+    ResolvedDestination,
+    ResolvedPipeline,
+    ResolvedSource,
+    ResolvedStream,
+    RuntimeConfig,
+)
+from src.models.stream import EndpointRef
 from src.runner import (
     _build_config_dict,
     _build_destination_config,
@@ -11,17 +22,12 @@ from src.runner import (
     _translate_database_source,
     _translate_source_config,
 )
-from src.models.resolved import (
-    ResolvedDestination,
-    ResolvedPipeline,
-    ResolvedSource,
-    ResolvedStream,
-)
-from src.models.stream import EndpointRef
 
 
 def _make_endpoint_ref(scope="connector", connection_id="conn", endpoint_id="ep"):
-    return EndpointRef(scope=scope, connection_id=connection_id, endpoint_id=endpoint_id)
+    return EndpointRef(
+        scope=scope, connection_id=connection_id, endpoint_id=endpoint_id
+    )
 
 
 def _make_runtime(connector_type="database"):
@@ -43,7 +49,9 @@ def _make_source(connector_type="database", stream_source=None, endpoint_documen
 
 
 def _make_destination(write=None):
-    ref = _make_endpoint_ref(scope="connection", connection_id="dest", endpoint_id="orders")
+    ref = _make_endpoint_ref(
+        scope="connection", connection_id="dest", endpoint_id="orders"
+    )
     rt = _make_runtime("database")
     return ResolvedDestination(
         endpoint_ref=ref,
@@ -54,11 +62,14 @@ def _make_destination(write=None):
     )
 
 
-def _make_stream(stream_id="orders", connector_type="database", mapping=None):
+def _make_stream(
+    stream_id="orders", connector_type="database", mapping=None, stream_version=1
+):
     src = _make_source(connector_type=connector_type)
     dest = _make_destination()
     return ResolvedStream(
         stream_id=stream_id,
+        stream_version=stream_version,
         pipeline_id="test-pipeline",
         display_name=None,
         description=None,
@@ -71,14 +82,17 @@ def _make_stream(stream_id="orders", connector_type="database", mapping=None):
     )
 
 
-def _make_pipeline(pipeline_id="test-pipeline", display_name=None, streams=None):
+def _make_pipeline(
+    pipeline_id="test-pipeline", display_name=None, streams=None, runtime=None
+):
     return ResolvedPipeline(
         pipeline_id=pipeline_id,
         name="Test Pipeline",
         display_name=display_name,
         description=None,
         status="active",
-        runtime={},
+        connections=PipelineConnections(source="src-conn", destinations=["dst-conn"]),
+        runtime=runtime or RuntimeConfig(),
     )
 
 
@@ -111,7 +125,10 @@ class TestTranslateDatabaseSource:
         assert result["stream_source"] is stream_source
 
     def test_passes_documents_through_verbatim(self):
-        endpoint = {"primary_keys": ["id"], "filters": [{"field": "active", "value": True}]}
+        endpoint = {
+            "primary_keys": ["id"],
+            "filters": [{"field": "active", "value": True}],
+        }
         source = _make_source(endpoint_document=endpoint)
 
         result = _translate_database_source(source, endpoint)
@@ -124,7 +141,11 @@ class TestTranslateApiSource:
         filters = [{"field": "status", "op": "eq", "value": "active"}]
         stream_source = {"filters": filters, "replication": {}}
         endpoint = {"operations": {"read": {"request": {"path": "/invoices"}}}}
-        source = _make_source(connector_type="api", stream_source=stream_source, endpoint_document=endpoint)
+        source = _make_source(
+            connector_type="api",
+            stream_source=stream_source,
+            endpoint_document=endpoint,
+        )
         rt = source.runtime
 
         result = _translate_api_source(source, endpoint, rt)
@@ -136,7 +157,11 @@ class TestTranslateApiSource:
     def test_empty_filters_when_absent(self):
         stream_source = {}
         endpoint = {}
-        source = _make_source(connector_type="api", stream_source=stream_source, endpoint_document=endpoint)
+        source = _make_source(
+            connector_type="api",
+            stream_source=stream_source,
+            endpoint_document=endpoint,
+        )
 
         result = _translate_api_source(source, endpoint, source.runtime)
 
@@ -198,7 +223,7 @@ class TestTranslateSourceConfig:
 
     @pytest.mark.parametrize("kind", ["nosql", "graphql", "file", "sftp", "custom-db"])
     def test_non_built_in_kind_never_raises(self, kind):
-        """Regression guard: _translate_source_config must not raise for unknown kinds."""
+        """Regression guard: _translate_source_config never raises on unknown kinds."""
         source = _make_source(connector_type=kind)
         result = _translate_source_config(
             stream=_make_stream(),
@@ -242,6 +267,14 @@ class TestBuildConfigDict:
 
         assert "invoices" in result["streams"]
         assert result["streams"]["invoices"]["name"] == "invoices"
+
+    def test_stream_version_propagated(self):
+        pipeline = _make_pipeline()
+        stream = _make_stream(stream_id="invoices", stream_version=3)
+
+        result = _build_config_dict(pipeline, [stream])
+
+        assert result["streams"]["invoices"]["stream_version"] == 3
 
     def test_pipeline_id_and_name_propagated(self):
         pipeline = _make_pipeline(pipeline_id="wise-to-pg", display_name="Wise → PG")
@@ -290,10 +323,21 @@ class TestBuildConfigDict:
         assert assignments[0]["target"]["path"] == ["id"]
         assert assignments[0]["value"]["kind"] == "expr"
 
-    def test_runtime_propagated(self):
-        pipeline = _make_pipeline()
-        pipeline.runtime["batching"] = {"batch_size": 500}
+    def test_runtime_not_in_config_dict(self):
+        pipeline = _make_pipeline(
+            runtime=RuntimeConfig(
+                batching=BatchingConfig(batch_size=500),
+                error_handling=ErrorHandlingConfig(strategy="dlq"),
+                buffer_size=2048,
+            )
+        )
 
         result = _build_config_dict(pipeline, [])
 
-        assert result["runtime"]["batching"]["batch_size"] == 500
+        # Runtime tuning is no longer threaded through the per-stream config
+        # dict; the runner reads the typed RuntimeConfig off pipeline.runtime
+        # and hands it to the StreamingEngine constructor.
+        assert "runtime" not in result
+        assert pipeline.runtime.batching.batch_size == 500
+        assert pipeline.runtime.error_handling.strategy == "dlq"
+        assert pipeline.runtime.buffer_size == 2048

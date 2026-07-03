@@ -5,13 +5,14 @@ import logging
 import math
 from datetime import date, datetime, time
 from decimal import Decimal
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import pyarrow as pa
 import pyarrow.compute as pc
 
 from .json_utils import decode_json_fields
 from .type_map import resolve_arrow_type
+from .type_map.arrow import classify_arrow_conversion, first_blocked_nested_leaf
 from .type_map.exceptions import InvalidTypeMapError
 
 logger = logging.getLogger(__name__)
@@ -25,20 +26,96 @@ _JSON_ARROW_TYPE: str = "Json"
 # (float64) above these silently overflows to +/-inf when stored in the
 # narrower Arrow array, so it must be rejected per-row instead. float64
 # needs no entry: math.isfinite already covers it.
-_FLOAT_MAX_BY_BIT_WIDTH: Dict[int, float] = {
+_FLOAT_MAX_BY_BIT_WIDTH: dict[int, float] = {
     16: 65504.0,
     32: math.ldexp(2 - 2**-23, 127),  # 3.4028234663852886e+38
 }
 
 
-def _is_json_field(field_def: Dict[str, Any]) -> bool:
+def _is_json_field(field_def: dict[str, Any]) -> bool:
     return field_def.get("arrow_type") == _JSON_ARROW_TYPE
+
+
+def _decimals_to_float(value: Any) -> Any:
+    """Replace every ``Decimal`` with ``float`` inside an opaque ``Json`` blob.
+
+    A ``Json`` column carries no per-field type, so its interior numbers were
+    plain floats before the API reader began parsing JSON with
+    ``parse_float=Decimal``. ``json.dumps`` cannot serialize a ``Decimal``, so
+    narrow them back to float, reproducing the pre-change blob bytes exactly
+    (``float(Decimal(token))`` equals the old ``float(token)``).
+    """
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, dict):
+        return {k: _decimals_to_float(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_decimals_to_float(v) for v in value]
+    return value
+
+
+def _prepare_nested_value(
+    value: Any, arrow_type: pa.DataType, path: str, row: int
+) -> Any:
+    """Fit a nested value to its declared leaf types, failing loud where it can't.
+
+    pyarrow builds ``Object``/``List`` columns directly from Python values
+    (``pa.array(values, type=...)``), which bypasses the per-row guards that
+    ``_build_numeric_column`` applies to top-level scalar columns. Walking the
+    declared type alongside the value restores those guards per leaf:
+
+    - a ``Decimal`` bound for a float leaf is narrowed to ``float`` (the
+      lossless JSON parse hands every floating-point token in as a ``Decimal``,
+      which pyarrow cannot place in a floating field); a decimal leaf keeps its
+      ``Decimal`` and stays exact
+    - a non-integer value bound for an integer leaf is rejected, naming the
+      column path and row -- pyarrow would otherwise silently truncate it
+      (``5.5 -> 5``), unlike a top-level Int column, which fails loud (#290)
+    """
+    if value is None:
+        return None
+    if pa.types.is_struct(arrow_type) and isinstance(value, dict):
+        child = {f.name: f.type for f in arrow_type}
+        return {
+            k: _prepare_nested_value(v, child[k], f"{path}.{k}", row)
+            if k in child
+            else v
+            for k, v in value.items()
+        }
+    if (
+        pa.types.is_list(arrow_type) or pa.types.is_large_list(arrow_type)
+    ) and isinstance(value, list):
+        item_type = arrow_type.value_type
+        return [
+            _prepare_nested_value(v, item_type, f"{path}[{i}]", row)
+            for i, v in enumerate(value)
+        ]
+    if pa.types.is_integer(arrow_type):
+        # bool is a Python int subclass; isinstance(True, int) is True, so guard
+        # it explicitly before the int acceptance check below, matching the
+        # bool rejection _build_numeric_column applies to top-level Int columns.
+        if isinstance(value, bool):
+            raise ValueError(
+                f"column {path!r} at row {row}: got bool {value!r} for "
+                f"{arrow_type}; declare arrow_type='Boolean' or fix the "
+                f"source mapping"
+            )
+        if not isinstance(value, int):
+            raise ValueError(
+                f"column {path!r} at row {row}: value {value!r} "
+                f"({type(value).__name__}) is not an integer for {arrow_type}; "
+                f"pyarrow would silently truncate it"
+            )
+        return value
+    if isinstance(value, Decimal) and pa.types.is_floating(arrow_type):
+        return float(value)
+    return value
 
 
 class SchemaContract:
     """Arrow schema mapping for a connector endpoint."""
 
-    def __init__(self, endpoint_schema: Dict[str, Any]) -> None:
+    def __init__(self, endpoint_schema: dict[str, Any]) -> None:
         if "columns" in endpoint_schema:
             field_defs = endpoint_schema.get("columns") or []
             if not field_defs:
@@ -46,9 +123,7 @@ class SchemaContract:
                     "SchemaContract: 'columns' is present but empty; the "
                     "contract must declare every column"
                 )
-            self._arrow_schema, self._field_defs = self._schema_from_columns(
-                field_defs
-            )
+            self._arrow_schema, self._field_defs = self._schema_from_columns(field_defs)
         elif "properties" in endpoint_schema:
             properties = endpoint_schema.get("properties") or {}
             if not properties:
@@ -67,11 +142,12 @@ class SchemaContract:
                 f"endpoint); got keys {sorted(endpoint_schema.keys())!r}"
             )
 
-        self._column_types: Dict[str, str] = {
+        self._column_types: dict[str, str] = {
             f.name: str(f.type) for f in self._arrow_schema
         }
         logger.debug(
-            "Built schema contract with %d fields", len(self._arrow_schema),
+            "Built schema contract with %d fields",
+            len(self._arrow_schema),
         )
 
     @property
@@ -79,16 +155,14 @@ class SchemaContract:
         return self._arrow_schema
 
     @property
-    def column_types(self) -> Dict[str, str]:
+    def column_types(self) -> dict[str, str]:
         return self._column_types
 
     @property
     def json_columns(self) -> set:
         return {n for n, defn in self._field_defs.items() if _is_json_field(defn)}
 
-    def to_db_records(
-        self, record_batch: pa.RecordBatch
-    ) -> List[Dict[str, Any]]:
+    def to_db_records(self, record_batch: pa.RecordBatch) -> list[dict[str, Any]]:
         """Materialise a batch for a SQL destination.
 
         JSON columns stay as wire-format strings (their Arrow shape is
@@ -98,11 +172,12 @@ class SchemaContract:
         handle them uniformly across dialects.
         """
         record_batch = self.cast_arrow_batch(record_batch)
-        return record_batch.to_pylist()
+        records: list[dict[str, Any]] = record_batch.to_pylist()
+        return records
 
     def decode_json_columns(
-        self, records: List[Dict[str, Any]]
-    ) -> List[Dict[str, Any]]:
+        self, records: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
         """Parse JSON-encoded string values into Python dict/list.
 
         Available for callers that need decoded objects (e.g. an API
@@ -116,12 +191,12 @@ class SchemaContract:
         """
         return decode_json_fields(records, self.json_columns)
 
-    def from_pylist(self, records: List[Dict[str, Any]]) -> pa.RecordBatch:
+    def from_pylist(self, records: list[dict[str, Any]]) -> pa.RecordBatch:
         """Build a record batch from dict rows using this endpoint's schema."""
         if not records:
             return pa.RecordBatch.from_pylist([], schema=self._arrow_schema)
 
-        arrays: List[pa.Array] = []
+        arrays: list[pa.Array] = []
         for field in self._arrow_schema:
             values = [r.get(field.name) for r in records]
             field_def = self._field_defs.get(field.name) or {}
@@ -142,12 +217,7 @@ class SchemaContract:
                     f"{field.type} from source values "
                     f"(first non-null at row {bad_index}): {e}"
                 ) from e
-            if not field.nullable and array.null_count:
-                null_indices = [i for i, v in enumerate(values) if v is None]
-                raise ValueError(
-                    f"column {field.name!r} is non-nullable but rows "
-                    f"{null_indices} carry None"
-                )
+            self._assert_non_nullable(field, array)
             arrays.append(array)
         return pa.RecordBatch.from_arrays(arrays, schema=self._arrow_schema)
 
@@ -160,7 +230,7 @@ class SchemaContract:
             name: record_batch.column(i)
             for i, name in enumerate(record_batch.schema.names)
         }
-        arrays: List[pa.Array] = []
+        arrays: list[pa.Array] = []
         for field in self._arrow_schema:
             col = existing.get(field.name)
             if col is None:
@@ -176,27 +246,101 @@ class SchemaContract:
                 arrays.append(pa.nulls(record_batch.num_rows, type=field.type))
                 continue
             if col.type == field.type:
-                arrays.append(col)
-                continue
-            try:
-                arrays.append(pc.cast(col, field.type, safe=False))
-            except (pa.ArrowInvalid, pa.ArrowTypeError, pa.ArrowNotImplementedError) as e:
-                raise ValueError(
-                    f"column {field.name!r}: cannot cast "
-                    f"{col.type} → {field.type}: {e}"
-                ) from e
+                array = col
+            else:
+                array = self._convert_to_field(field, col)
+            self._assert_non_nullable(field, array)
+            arrays.append(array)
         return pa.RecordBatch.from_arrays(arrays, schema=self._arrow_schema)
 
     @staticmethod
-    def to_dicts(batch: Any) -> List[Dict[str, Any]]:
+    def _convert_to_field(field: pa.Field, col: pa.Array) -> pa.Array:
+        """Cast one incoming column to its destination type via the matrix.
+
+        The conversion matrix (:mod:`cdk.type_map.conversions`) is the single
+        policy both this cast and the engine's transform build consult, so a
+        conversion cannot be accepted on one boundary and rejected on the other.
+        An ``explicit`` conversion reaching this point (e.g. ``Int64 -> Utf8``)
+        means the mapping omitted the function the conversion requires: it fails
+        loud here rather than silently stringifying, matching the transform
+        path's rejection of the same author intent. The same gate reaches inside a
+        nested target: a scalar leaf (``Int64 -> Utf8`` in a struct/list child)
+        clears the matrix too, so the destination cannot silently stringify a leaf
+        the transform's ``_cast_structural`` rejects -- one policy, both
+        boundaries.
+        """
+        conversion = classify_arrow_conversion(col.type, field.type)
+        if conversion.mode == "forbidden":
+            raise ValueError(
+                f"column {field.name!r}: converting {col.type} → {field.type} "
+                f"is not a permitted conversion"
+            )
+        if conversion.mode == "explicit":
+            raise ValueError(
+                f"column {field.name!r}: converting {col.type} → {field.type} "
+                f"requires an explicit '{conversion.fn}' conversion declared in "
+                f"the mapping; the destination does not perform it implicitly"
+            )
+        if pa.types.is_nested(field.type):
+            blocked = first_blocked_nested_leaf(col.type, field.type, field.name)
+            if blocked is not None:
+                leaf = blocked.conversion
+                required = (
+                    f"requires an explicit '{leaf.fn}' conversion declared in the "
+                    f"mapping; the destination does not perform it implicitly"
+                    if leaf.mode == "explicit"
+                    else "is not a permitted conversion"
+                )
+                raise ValueError(
+                    f"column {field.name!r}: nested leaf {blocked.path!r} "
+                    f"converting {blocked.source} → {blocked.target} {required}"
+                )
+        try:
+            # auto / identity (same family differing only in width or unit):
+            # safe=True so an overflow or lossy narrowing fails loud here,
+            # matching the per-row range checks the from_pylist path enforces —
+            # the same author intent cannot saturate on one build path while it
+            # is rejected on the other.
+            return pc.cast(col, field.type, safe=True)
+        except (
+            pa.ArrowInvalid,
+            pa.ArrowTypeError,
+            pa.ArrowNotImplementedError,
+        ) as e:
+            raise ValueError(
+                f"column {field.name!r}: cannot cast {col.type} → {field.type}: {e}"
+            ) from e
+
+    @staticmethod
+    def to_dicts(batch: Any) -> list[dict[str, Any]]:
         """Convert an Arrow ``Table`` or ``RecordBatch`` to dicts."""
-        return batch.to_pylist()
+        rows: list[dict[str, Any]] = batch.to_pylist()
+        return rows
+
+    @staticmethod
+    def _assert_non_nullable(field: pa.Field, array: pa.Array) -> None:
+        """Reject ``None`` in a non-nullable column, naming the offending rows.
+
+        Shared by every build path (``from_pylist`` builds arrays from dict
+        rows, ``cast_arrow_batch`` casts an incoming Arrow batch) so a ``None``
+        in a required column fails loud identically regardless of whether the
+        batch arrived as dict rows or as an Arrow batch. Walking the null mask
+        is O(n), but only on the rejection path — the common case short-circuits
+        on ``null_count``.
+        """
+        if field.nullable or not array.null_count:
+            return
+        null_indices = [i for i in range(len(array)) if not array[i].is_valid]
+        raise ValueError(
+            f"column {field.name!r} is non-nullable but rows "
+            f"{null_indices} carry None"
+        )
 
     @staticmethod
     def _build_column(
         field: pa.Field,
-        values: List[Any],
-        field_def: Dict[str, Any],
+        values: list[Any],
+        field_def: dict[str, Any],
     ) -> pa.Array:
         source_format = field_def.get("source_format")
         if all(v is None for v in values):
@@ -214,12 +358,12 @@ class SchemaContract:
             # the source author can locate the bad value, rather than
             # letting a string round-trip through the decoder where
             # ``json.loads`` would raise far from the source.
-            serialized: List[Any] = []
+            serialized: list[Any] = []
             for row, v in enumerate(values):
                 if v is None:
                     serialized.append(None)
                 elif isinstance(v, (dict, list)):
-                    serialized.append(json.dumps(v))
+                    serialized.append(json.dumps(_decimals_to_float(v)))
                 else:
                     raise ValueError(
                         f"column {field.name!r} declared arrow_type='Json' "
@@ -239,9 +383,8 @@ class SchemaContract:
                         f"source_format only applies to string inputs"
                     )
             string_col = pa.array(values, type=pa.string())
-            unit = (
-                getattr(field.type, "unit", None)
-                or ("us" if pa.types.is_timestamp(field.type) else "s")
+            unit = getattr(field.type, "unit", None) or (
+                "us" if pa.types.is_timestamp(field.type) else "s"
             )
             parsed = pc.strptime(string_col, format=source_format, unit=unit)
             if parsed.type == field.type:
@@ -252,9 +395,7 @@ class SchemaContract:
             return pc.cast(parsed, field.type, safe=False)
 
         if pa.types.is_decimal(field.type):
-            converted = [
-                None if v is None else Decimal(str(v)) for v in values
-            ]
+            converted = [None if v is None else Decimal(str(v)) for v in values]
             return pa.array(converted, type=field.type)
 
         if (
@@ -267,12 +408,26 @@ class SchemaContract:
         if pa.types.is_integer(field.type) or pa.types.is_floating(field.type):
             return SchemaContract._build_numeric_column(field, values)
 
+        if (
+            pa.types.is_struct(field.type)
+            or pa.types.is_list(field.type)
+            or pa.types.is_large_list(field.type)
+        ):
+            # Nested Object/List columns bypass _build_numeric_column's per-row
+            # guards: pyarrow builds the array directly from Python values. Walk
+            # the declared type per leaf to narrow Decimals onto float leaves and
+            # reject a non-integer landing on an Int leaf (which pyarrow would
+            # otherwise silently truncate), naming the column path and row.
+            prepared = [
+                _prepare_nested_value(v, field.type, field.name, row)
+                for row, v in enumerate(values)
+            ]
+            return pa.array(prepared, type=field.type)
+
         return pa.array(values, type=field.type)
 
     @staticmethod
-    def _build_temporal_from_strings(
-        field: pa.Field, values: List[Any]
-    ) -> pa.Array:
+    def _build_temporal_from_strings(field: pa.Field, values: list[Any]) -> pa.Array:
         """Parse ISO-8601 strings into a timestamp / date / time column.
 
         Triggered for JSON-Schema ``format: date-time | date | time`` fields
@@ -285,7 +440,7 @@ class SchemaContract:
         is_date = pa.types.is_date(field.type)
         tz = getattr(field.type, "tz", None) if is_ts else None
 
-        parsed: List[Any] = []
+        parsed: list[Any] = []
         for row, v in enumerate(values):
             if v is None:
                 parsed.append(None)
@@ -315,9 +470,7 @@ class SchemaContract:
         return pa.array(parsed, type=field.type)
 
     @staticmethod
-    def _build_numeric_column(
-        field: pa.Field, values: List[Any]
-    ) -> pa.Array:
+    def _build_numeric_column(field: pa.Field, values: list[Any]) -> pa.Array:
         """Build an integer or float column, validating every value per row.
 
         Handles every integer/float column, whether the source carries
@@ -351,7 +504,7 @@ class SchemaContract:
         else:
             float_max = _FLOAT_MAX_BY_BIT_WIDTH.get(field.type.bit_width)
 
-        converted: List[Any] = []
+        converted: list[Any] = []
         for row, v in enumerate(values):
             if v is None:
                 converted.append(None)
@@ -370,8 +523,12 @@ class SchemaContract:
                         f"column {field.name!r} at row {row}: cannot parse "
                         f"{v!r} as {field.type}: {exc}"
                     ) from exc
-            elif isinstance(v, int) or (not is_int and isinstance(v, float)):
-                parsed = v
+            elif isinstance(v, int) or (not is_int and isinstance(v, (float, Decimal))):
+                # A Decimal is only accepted on a float column; narrow it to
+                # float here -- the intended (lossy) conversion to the declared
+                # double width. A Decimal on an integer column is not matched
+                # here and falls through to the error.
+                parsed = float(v) if isinstance(v, Decimal) else v
             else:
                 raise ValueError(
                     f"column {field.name!r} at row {row}: expected numeric or "
@@ -408,10 +565,10 @@ class SchemaContract:
 
     @staticmethod
     def _schema_from_columns(
-        columns: List[Dict[str, Any]],
-    ) -> tuple[pa.Schema, Dict[str, Dict[str, Any]]]:
+        columns: list[dict[str, Any]],
+    ) -> tuple[pa.Schema, dict[str, dict[str, Any]]]:
         fields = []
-        defs: Dict[str, Dict[str, Any]] = {}
+        defs: dict[str, dict[str, Any]] = {}
         for index, col in enumerate(columns):
             name = col.get("name")
             if not name:
@@ -427,20 +584,19 @@ class SchemaContract:
 
     @staticmethod
     def _schema_from_properties(
-        properties: Dict[str, Any], required: set,
-    ) -> tuple[pa.Schema, Dict[str, Dict[str, Any]]]:
+        properties: dict[str, Any],
+        required: set,
+    ) -> tuple[pa.Schema, dict[str, dict[str, Any]]]:
         fields = []
-        defs: Dict[str, Dict[str, Any]] = {}
+        defs: dict[str, dict[str, Any]] = {}
         for name, prop in properties.items():
             arrow_type = SchemaContract._require_arrow_type(prop, name)
-            fields.append(
-                pa.field(name, arrow_type, nullable=name not in required)
-            )
+            fields.append(pa.field(name, arrow_type, nullable=name not in required))
             defs[name] = prop
         return pa.schema(fields), defs
 
     @staticmethod
-    def _require_arrow_type(field_def: Dict[str, Any], name: str) -> pa.DataType:
+    def _require_arrow_type(field_def: dict[str, Any], name: str) -> pa.DataType:
         if not field_def.get("arrow_type"):
             raise ValueError(
                 f"field {name!r} has no 'arrow_type' declaration; "

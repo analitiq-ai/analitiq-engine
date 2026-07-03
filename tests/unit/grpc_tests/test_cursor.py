@@ -1,14 +1,16 @@
 """Unit tests for cursor utilities."""
 
 import json
-import pytest
 from datetime import datetime, timezone
+from decimal import Decimal
+
+import pytest
 
 from src.grpc.cursor import (
-    encode_cursor,
-    decode_cursor,
     compute_max_cursor,
     cursor_to_state_dict,
+    decode_cursor,
+    encode_cursor,
 )
 from src.grpc.generated.analitiq.v1 import Cursor
 
@@ -50,7 +52,9 @@ class TestEncodeDecode:
         assert decoded["tie_breakers"][1]["value"] == 456
 
     def test_encode_cursor_with_datetime(self):
-        """Test encoding cursor with datetime object."""
+        """A datetime value is tagged so its type survives the JSON round trip."""
+        from src.state.store import decode_value
+
         dt = datetime(2025, 1, 8, 10, 30, 0, tzinfo=timezone.utc)
         cursor = encode_cursor(
             cursor_field="timestamp",
@@ -58,7 +62,11 @@ class TestEncodeDecode:
         )
 
         decoded = json.loads(cursor.token.decode("utf-8"))
-        assert decoded["value"] == dt.isoformat()
+        # Tagged, not flattened to a bare ISO string that restore would have to
+        # guess at.
+        assert decoded["value"] == {"__type__": "datetime", "value": dt.isoformat()}
+        # And it round-trips back to the exact datetime.
+        assert decode_value(decoded["value"]) == dt
 
     def test_decode_cursor(self):
         """Test decoding a cursor back to components."""
@@ -78,11 +86,60 @@ class TestEncodeDecode:
         decoded = decode_cursor(cursor)
         assert decoded == {}
 
-    def test_decode_invalid_cursor(self):
-        """Test decoding invalid cursor returns empty dict."""
+    def test_decode_invalid_cursor_raises(self):
+        """A non-empty but undecodable token raises rather than returning {}.
+
+        Collapsing a corrupt token to {} would let it overwrite a good
+        watermark with empty/now() state on the next checkpoint; raising keeps
+        the prior durable bookmark untouched.
+        """
         cursor = Cursor(token=b"not valid json")
-        decoded = decode_cursor(cursor)
-        assert decoded == {}
+        with pytest.raises(ValueError, match="undecodable cursor token"):
+            decode_cursor(cursor)
+
+    def test_encode_cursor_with_decimal(self):
+        """A Decimal cursor value is tagged so it round-trips losslessly
+        instead of raising TypeError inside json.dumps and aborting the load.
+        """
+        from src.state.store import decode_value
+
+        value = Decimal("123.4500")
+        cursor = encode_cursor(cursor_field="amount", cursor_value=value)
+
+        decoded = json.loads(cursor.token.decode("utf-8"))
+        assert decoded["value"] == {"__type__": "decimal", "value": "123.4500"}
+        assert decode_value(decoded["value"]) == value
+
+    def test_encode_cursor_with_time(self):
+        """A datetime.time cursor (Time32/Time64 column) is tagged and
+        round-trips, rather than being silently stringified by a default= hook.
+        """
+        from datetime import time
+
+        from src.state.store import decode_value
+
+        value = time(13, 45, 30)
+        cursor = encode_cursor(cursor_field="t", cursor_value=value)
+
+        decoded = json.loads(cursor.token.decode("utf-8"))
+        assert decoded["value"] == {"__type__": "time", "value": value.isoformat()}
+        assert decode_value(decoded["value"]) == value
+
+    def test_encode_cursor_unsupported_type_fails_loud(self):
+        """An unforeseen non-JSON cursor type must raise (no default=str
+        backstop) rather than be silently stringified into a type the next run
+        cannot restore."""
+        with pytest.raises(TypeError):
+            encode_cursor(cursor_field="c", cursor_value=object())
+
+    def test_decode_value_malformed_decimal_raises_value_error(self):
+        """A corrupt decimal tag must raise ValueError (not the uncaught
+        ArithmeticError that Decimal() would), so the tolerant restore callers
+        degrade a corrupt checkpoint to a full re-scan."""
+        from src.state.store import decode_value
+
+        with pytest.raises(ValueError, match="malformed decimal"):
+            decode_value({"__type__": "decimal", "value": "not-a-number"})
 
 
 class TestComputeMaxCursor:
@@ -189,3 +246,17 @@ class TestCursorToStateDict:
         cursor = Cursor(token=b"")
         state = cursor_to_state_dict(cursor)
         assert state == {}
+
+    def test_datetime_value_round_trips_through_state_dict(self):
+        """A datetime survives encode -> token -> state dict as a tagged value
+        that decode_value restores exactly -- the durable-resume contract that
+        keeps the engine from guessing the cursor's type on restore."""
+        from src.state.store import decode_value
+
+        dt = datetime(2025, 1, 8, 10, 30, 0, tzinfo=timezone.utc)
+        cursor = encode_cursor(cursor_field="updated_at", cursor_value=dt)
+
+        state = cursor_to_state_dict(cursor)
+        tagged = state["cursor"]["primary"]["value"]
+        assert tagged == {"__type__": "datetime", "value": dt.isoformat()}
+        assert decode_value(tagged) == dt

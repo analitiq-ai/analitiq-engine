@@ -34,20 +34,36 @@ named binds on the SQLAlchemy path.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Tuple
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any
 
 from .exceptions import UnsupportedDialectOperationError
 
+if TYPE_CHECKING:
+    from cdk.type_map.mapper import TypeMapper
+
 # A discovery query: SQL text with ``?`` placeholders + its positional params.
-Query = Tuple[str, List[object]]
+Query = tuple[str, list[object]]
 
 
 class SqlDialect:
-    """ANSI-neutral SQL strategy; per-system subclasses live in connector
-    packages and override exactly the quirks their system has."""
+    """ANSI-neutral SQL strategy.
+
+    Per-system subclasses live in connector packages and override exactly the
+    quirks their system has.
+    """
 
     #: Dialect identifier (the connector package sets its own).
     name: str = "ansi"
+    #: SQLAlchemy registry name used to compile read-path SQL, when it differs
+    #: from ``name`` because the system needs a specific driver *flavour*
+    #: (e.g. Redshift's ``redshift.redshift_connector`` instead of the
+    #: psycopg2-shaped default). ``None`` means "use ``name``" — the common
+    #: case for systems whose registered SA dialect name equals ``name``.
+    #: This keeps the driver-flavour quirk in the connector, not the engine.
+    #: Ignored for built-in dialects (postgresql/mysql/mssql/sqlite), which
+    #: the QueryBuilder resolves by ``name`` before consulting this field.
+    sqlalchemy_registry_name: str | None = None
     #: Identifier quote character. ANSI double-quote by default; backtick for
     #: MySQL/MariaDB and BigQuery (where ``"..."`` is a string literal).
     quote_char: str = '"'
@@ -55,7 +71,7 @@ class SqlDialect:
     #: ``NOT ENFORCED`` qualifier; every other dialect accepts the bare clause.
     pk_not_enforced: bool = False
     #: Schemas hidden from ``list_schemas`` (catalog/internal schemas).
-    system_schemas: Tuple[str, ...] = ()
+    system_schemas: tuple[str, ...] = ()
     #: Whether the dialect implements ``build_sqlalchemy_upsert``.
     supports_upsert_sqlalchemy: bool = False
     #: Whether the dialect supports the ADBC stage-table + MERGE upsert path
@@ -93,7 +109,7 @@ class SqlDialect:
             )
         return self.quote_ident(table)
 
-    def pk_clause(self, columns: List[str]) -> str:
+    def pk_clause(self, columns: list[str]) -> str:
         """Render the table-level ``PRIMARY KEY (...)`` clause."""
         cols = ", ".join(self.quote_ident(c) for c in columns)
         clause = f"PRIMARY KEY ({cols})"
@@ -101,9 +117,9 @@ class SqlDialect:
 
     # ---- paged reads -------------------------------------------------------
     def paging_order_fallback(self) -> str | None:
-        """Raw SQL ordering expression for paged reads that declare no
-        ordering (no cursor field, no ``order_by``).
+        """Return the ordering expression for paged reads that declare none.
 
+        Applies when a paged read has no cursor field and no ``order_by``.
         ANSI SQL accepts ``OFFSET`` without ``ORDER BY``, so the base
         returns ``None`` and no ordering is injected. Systems that refuse
         ``OFFSET`` without ``ORDER BY`` (T-SQL) override this in their
@@ -120,8 +136,8 @@ class SqlDialect:
     def build_sqlalchemy_upsert(
         self,
         table: Any,
-        records: List[Dict[str, Any]],
-        conflict_keys: List[str],
+        records: list[dict[str, Any]],
+        conflict_keys: list[str],
     ) -> Any:
         """Build the dialect's INSERT-or-UPDATE statement for *records*.
 
@@ -135,9 +151,9 @@ class SqlDialect:
         )
 
     def build_tls_connect_arg(self, mode: str, ca_pem: str | None) -> Any:
-        """Turn the connection's stored TLS mode + CA bundle into the
-        driver's connect argument (``connect_args["ssl"]``).
+        """Turn the stored TLS mode and CA bundle into the connect argument.
 
+        The result is the driver's ``connect_args["ssl"]`` value.
         Each driver speaks its own SSL vocabulary (libpq modes, MySQL
         modes); the connector package's dialect implements it, typically
         via :func:`cdk.transport_factory.ca_ssl_context` for the verifying
@@ -148,7 +164,7 @@ class SqlDialect:
             "build_tls_connect_arg", dialect=self.name
         )
 
-    def build_tls_connect_args(self, mode: str, ca_pem: str | None) -> Dict[str, Any]:
+    def build_tls_connect_args(self, mode: str, ca_pem: str | None) -> dict[str, Any]:
         """Full ``connect_args`` mapping for the driver's TLS configuration.
 
         This is the hook the transport factory calls. Most drivers take
@@ -162,15 +178,17 @@ class SqlDialect:
         value = self.build_tls_connect_arg(mode, ca_pem)
         return {} if value is None else {"ssl": value}
 
-    def sqlalchemy_pre_ddl(self, schema_name: str) -> List[str]:
-        """Statements to run before ``MetaData.create_all`` (e.g. postgres'
-        ``CREATE SCHEMA IF NOT EXISTS`` for a non-default schema). None by
-        default."""
+    def sqlalchemy_pre_ddl(self, schema_name: str) -> list[str]:
+        """Return statements to run before ``MetaData.create_all``.
+
+        For example, postgres' ``CREATE SCHEMA IF NOT EXISTS`` for a
+        non-default schema. None by default.
+        """
         return []
 
     # ---- schema semantics ----------------------------------------------------
     def schema_is_implicit_default(self, schema_name: str) -> bool:
-        """True when *schema_name* is the dialect's implicit default namespace.
+        """Return True when *schema_name* is the dialect's implicit default.
 
         Used to skip ``CREATE SCHEMA`` for namespaces that always exist
         (e.g. postgres/snowflake ``public``). The neutral base only treats
@@ -182,9 +200,9 @@ class SqlDialect:
     def render_column_type(
         self,
         canonical: str,
-        type_mapper: Any,
+        type_mapper: TypeMapper,
         *,
-        params: Any = None,
+        params: Mapping[str, Any] | None = None,
     ) -> str:
         """Render a canonical Arrow type to this system's native DDL type.
 
@@ -199,7 +217,7 @@ class SqlDialect:
         return type_mapper.to_native_type(canonical, params=params)
 
     def current_timestamp_default(self) -> str:
-        """SQL DEFAULT expression for server-stamped timestamp columns.
+        """Return the SQL DEFAULT expression for server-stamped timestamps.
 
         ANSI ``CURRENT_TIMESTAMP`` by default. MySQL/MariaDB require the
         expression's fractional-seconds precision to match the column's
@@ -208,26 +226,17 @@ class SqlDialect:
         """
         return "CURRENT_TIMESTAMP"
 
-    def batch_commits_key_type(self, type_mapper: Any) -> str:
-        """Native type for the ``_batch_commits`` primary-key text columns.
+    def adbc_stage_table_sql(self, stage_qualified: str, target_qualified: str) -> str:
+        """Return SQL creating an empty staging table shaped like the target.
 
-        Defaults to the write map's ``Utf8``. Systems whose unbounded text
-        type cannot be a primary key (MySQL/MariaDB: TEXT keys need a
-        prefix length) override with a bounded type.
+        Used for the ADBC upsert's ingest-to-stage + MERGE. Column-copy syntax
+        is vendor-specific; the connector package's dialect implements it.
         """
-        return self.render_column_type("Utf8", type_mapper)
-
-    def adbc_stage_table_sql(
-        self, stage_qualified: str, target_qualified: str
-    ) -> str:
-        """SQL creating an empty staging table shaped like the target (for
-        the ADBC upsert's ingest-to-stage + MERGE). Column-copy syntax is
-        vendor-specific; the connector package's dialect implements it."""
         raise UnsupportedDialectOperationError(
             "adbc_stage_table_sql", dialect=self.name
         )
 
-    def adbc_ingest_schema_kwargs(self, schema_name: str) -> Dict[str, Any]:
+    def adbc_ingest_schema_kwargs(self, schema_name: str) -> dict[str, Any]:
         """Schema-targeting kwargs for ``cursor.adbc_ingest``.
 
         ADBC exposes per-statement ingest targeting through the
@@ -246,23 +255,10 @@ class SqlDialect:
             return {"db_schema_name": self.normalize_schema(schema_name)}
         return {}
 
-    def adbc_binary_bind(self, value: bytes) -> Tuple[str, Any]:
-        """Placeholder SQL + bind value for a binary value in an ADBC
-        parameterized statement (the ``_batch_commits.committed_cursor``).
-
-        Default: a plain ``?`` placeholder bound to the raw bytes, which the
-        postgres driver and most others accept. Drivers that cannot bind a
-        binary parameter (Snowflake rejects it with "Unsupported bind param
-        type binary") override this to bind a hex string and convert it back
-        in SQL (``TO_BINARY(?, 'HEX')``); the column stays BINARY, so reads
-        round-trip to the original bytes either way.
-        """
-        return "?", value
-
     # ---- discovery queries (qmark placeholders + positional params) --------
     def schemas_query(self) -> Query:
         sql = "SELECT schema_name FROM information_schema.schemata"
-        params: List[object] = []
+        params: list[object] = []
         if self.system_schemas:
             placeholders = ", ".join("?" for _ in self.system_schemas)
             sql += f" WHERE schema_name NOT IN ({placeholders})"

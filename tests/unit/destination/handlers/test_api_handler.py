@@ -6,22 +6,25 @@ document's ``operations.write.<mode>`` block selects the path / method
 / batching for the stream's write_mode).
 """
 
-import pytest
-import pyarrow as pa
-from unittest.mock import AsyncMock, MagicMock, patch
-from typing import Dict, Any, List
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock
 
+import aiohttp
+import pyarrow as pa
+import pytest
+
+from cdk.types import RetrySemantics
 from src.destination.connectors.api import (
-    ApiDestinationHandler,
     _API_WRITE_MODE_KEYS,
+    ApiDestinationHandler,
+    _classify_http_error,
     _StreamState,
 )
-from cdk.base_handler import BatchWriteResult
 from src.grpc.generated.analitiq.v1 import AckStatus, SchemaMessage, WriteMode
 
 
-def _to_record_batch(records: List[Dict[str, Any]]) -> pa.RecordBatch:
-    """Helper: build an Arrow batch from sample dicts for the new write_batch contract."""
+def _to_record_batch(records: list[dict[str, Any]]) -> pa.RecordBatch:
+    """Build an Arrow batch from sample dicts for the new write_batch contract."""
     return pa.RecordBatch.from_pylist(records)
 
 
@@ -34,8 +37,6 @@ def api_handler():
     handler._streams["test-stream"] = _StreamState(
         endpoint="/v1/records",
         method="POST",
-        batch_mode=ApiDestinationHandler.BATCH_MODE_SINGLE,
-        batch_size=100,
     )
     return handler
 
@@ -74,8 +75,8 @@ class TestApiHandlerWriteBatchFailures:
         self,
         api_handler: ApiDestinationHandler,
         mock_cursor: MagicMock,
-        sample_records: List[Dict[str, Any]],
-        sample_record_ids: List[str],
+        sample_records: list[dict[str, Any]],
+        sample_record_ids: list[str],
     ):
         """
         Test that when ALL records fail to write, handler returns FATAL_FAILURE.
@@ -87,8 +88,11 @@ class TestApiHandlerWriteBatchFailures:
         api_handler._connected = True
         api_handler._session = MagicMock()
 
-        # Mock _write_single_mode to return 0 (all records failed)
-        api_handler._write_single_mode = AsyncMock(return_value=0)
+        # Mock _write_single_mode to return (0, all-ids, reason) — every
+        # record failed
+        api_handler._write_single_mode = AsyncMock(
+            return_value=(0, list(sample_record_ids), "boom")
+        )
 
         # Execute
         result = await api_handler.write_batch(
@@ -104,15 +108,16 @@ class TestApiHandlerWriteBatchFailures:
         assert result.success is False
         assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
         assert result.records_written == 0
-        assert "All 3 records failed" in result.failure_summary
+        assert "3/3 records failed" in result.failure_summary
+        assert result.failed_record_ids == tuple(sample_record_ids)
 
     @pytest.mark.asyncio
     async def test_write_batch_partial_failure_returns_fatal_failure(
         self,
         api_handler: ApiDestinationHandler,
         mock_cursor: MagicMock,
-        sample_records: List[Dict[str, Any]],
-        sample_record_ids: List[str],
+        sample_records: list[dict[str, Any]],
+        sample_record_ids: list[str],
     ):
         """
         Test that when SOME records fail, handler returns FATAL_FAILURE.
@@ -125,8 +130,9 @@ class TestApiHandlerWriteBatchFailures:
         api_handler._connected = True
         api_handler._session = MagicMock()
 
-        # Mock: 1 out of 3 records succeeded
-        api_handler._write_single_mode = AsyncMock(return_value=1)
+        # Mock: 1 out of 3 records succeeded; the other two ids come back failed
+        failed = list(sample_record_ids[1:])
+        api_handler._write_single_mode = AsyncMock(return_value=(1, failed, "boom"))
 
         # Execute
         result = await api_handler.write_batch(
@@ -143,6 +149,7 @@ class TestApiHandlerWriteBatchFailures:
         assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
         assert result.records_written == 1
         assert "2/3 records failed" in result.failure_summary
+        assert result.failed_record_ids == tuple(failed)
         # A failure result must not advance the checkpoint (#129)
         assert result.committed_cursor is None
 
@@ -151,16 +158,16 @@ class TestApiHandlerWriteBatchFailures:
         self,
         api_handler: ApiDestinationHandler,
         mock_cursor: MagicMock,
-        sample_records: List[Dict[str, Any]],
-        sample_record_ids: List[str],
+        sample_records: list[dict[str, Any]],
+        sample_record_ids: list[str],
     ):
         """Test that when ALL records succeed, handler returns SUCCESS."""
         # Setup
         api_handler._connected = True
         api_handler._session = MagicMock()
 
-        # Mock: all 3 records succeeded
-        api_handler._write_single_mode = AsyncMock(return_value=3)
+        # Mock: all 3 records succeeded, none failed
+        api_handler._write_single_mode = AsyncMock(return_value=(3, [], ""))
 
         # Execute
         result = await api_handler.write_batch(
@@ -209,8 +216,8 @@ class TestApiHandlerWriteBatchFailures:
         self,
         api_handler: ApiDestinationHandler,
         mock_cursor: MagicMock,
-        sample_records: List[Dict[str, Any]],
-        sample_record_ids: List[str],
+        sample_records: list[dict[str, Any]],
+        sample_record_ids: list[str],
     ):
         """Test that disconnected handler returns RETRYABLE_FAILURE."""
         # Setup: handler not connected
@@ -237,8 +244,8 @@ class TestApiHandlerWriteBatchFailures:
         self,
         api_handler: ApiDestinationHandler,
         mock_cursor: MagicMock,
-        sample_records: List[Dict[str, Any]],
-        sample_record_ids: List[str],
+        sample_records: list[dict[str, Any]],
+        sample_record_ids: list[str],
     ):
         """Transport-level errors are transient — classify as RETRYABLE."""
         import aiohttp
@@ -268,8 +275,8 @@ class TestApiHandlerWriteBatchFailures:
         self,
         api_handler: ApiDestinationHandler,
         mock_cursor: MagicMock,
-        sample_records: List[Dict[str, Any]],
-        sample_record_ids: List[str],
+        sample_records: list[dict[str, Any]],
+        sample_record_ids: list[str],
     ):
         """Non-transport exceptions (programming bugs, type errors) are
         deterministic — retrying achieves nothing. Classify as FATAL so
@@ -315,7 +322,8 @@ class TestApiHandlerWriteSingleMode:
         record_ids = ["rec-1", "rec-2", "rec-3"]
 
         call_count = 0
-        async def mock_send_request(state, data):
+
+        async def mock_send_request(state, data, extra_headers=None):
             nonlocal call_count
             call_count += 1
             if call_count == 2:
@@ -325,8 +333,11 @@ class TestApiHandlerWriteSingleMode:
         api_handler._send_request = mock_send_request
         state = api_handler._streams["test-stream"]
 
-        written = await api_handler._write_single_mode(state, records, record_ids)
+        written, failed, _ = await api_handler._write_single_mode(
+            state, records, record_ids
+        )
         assert written == 2
+        assert failed == ["rec-2"]
 
     @pytest.mark.asyncio
     async def test_write_single_mode_all_transport_failures(
@@ -348,8 +359,11 @@ class TestApiHandlerWriteSingleMode:
         )
         state = api_handler._streams["test-stream"]
 
-        written = await api_handler._write_single_mode(state, records, record_ids)
+        written, failed, _ = await api_handler._write_single_mode(
+            state, records, record_ids
+        )
         assert written == 0
+        assert failed == ["rec-1", "rec-2"]
 
     @pytest.mark.asyncio
     async def test_write_single_mode_propagates_programming_errors(
@@ -389,33 +403,37 @@ class TestApiHandlerWriteSingleMode:
         state = api_handler._streams["test-stream"]
 
         # Execute
-        written = await api_handler._write_single_mode(state, records, record_ids)
+        written, failed, _ = await api_handler._write_single_mode(
+            state, records, record_ids
+        )
 
-        # Assert: all 3 succeeded
+        # Assert: all 3 succeeded, none failed
         assert written == 3
+        assert failed == []
 
 
 @pytest.mark.unit
-class TestApiHandlerBatchModes:
-    """Test different batch modes handle failures correctly."""
+class TestApiHandlerChunkedWrites:
+    """A declared ``batching`` block routes writes through the chunked
+    path; its failure handling must classify correctly."""
 
     @pytest.mark.asyncio
-    async def test_bulk_mode_transport_failure_is_retryable(
+    async def test_chunked_transport_failure_is_retryable(
         self,
         api_handler: ApiDestinationHandler,
         mock_cursor: MagicMock,
     ):
-        """Bulk mode transport-level failure → RETRYABLE."""
+        """Chunked-mode transport-level failure → RETRYABLE."""
         import aiohttp
 
         api_handler._connected = True
         api_handler._session = MagicMock()
-        api_handler._streams["test-stream"].batch_mode = ApiDestinationHandler.BATCH_MODE_BULK
+        api_handler._streams["test-stream"].max_records = 2
 
         records = [{"id": i} for i in range(5)]
         record_ids = [f"rec-{i}" for i in range(5)]
 
-        api_handler._write_bulk_mode = AsyncMock(
+        api_handler._write_chunked_mode = AsyncMock(
             side_effect=aiohttp.ClientConnectionError("Bulk insert failed"),
         )
 
@@ -432,23 +450,24 @@ class TestApiHandlerBatchModes:
         assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
 
     @pytest.mark.asyncio
-    async def test_batch_mode_partial_chunk_failure(
+    async def test_chunked_partial_chunk_failure(
         self,
         api_handler: ApiDestinationHandler,
         mock_cursor: MagicMock,
     ):
-        """Test batch mode with chunked requests where some chunks fail."""
+        """Chunked requests where some chunks fail → FATAL with the tail ids."""
         # Setup
         api_handler._connected = True
         api_handler._session = MagicMock()
-        api_handler._streams["test-stream"].batch_mode = ApiDestinationHandler.BATCH_MODE_BATCH
-        api_handler._streams["test-stream"].batch_size = 2
+        api_handler._streams["test-stream"].max_records = 2
 
         records = [{"id": i} for i in range(5)]
         record_ids = [f"rec-{i}" for i in range(5)]
 
-        # Mock: 3 out of 5 records written (first chunk + part of second)
-        api_handler._write_batch_mode = AsyncMock(return_value=3)
+        # Mock: 3 of 5 written; the unsent tail comes back as failed ids
+        api_handler._write_chunked_mode = AsyncMock(
+            return_value=(3, ["rec-3", "rec-4"], "boom")
+        )
 
         # Execute
         result = await api_handler.write_batch(
@@ -460,10 +479,248 @@ class TestApiHandlerBatchModes:
             cursor=mock_cursor,
         )
 
-        # Assert: partial success is still a failure
+        # Assert: partial success is still a failure, and the unsent ids carry
         assert result.success is False
         assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
         assert result.records_written == 3
+        assert result.failed_record_ids == ("rec-3", "rec-4")
+
+    @pytest.mark.asyncio
+    async def test_real_write_chunked_mode_chunk_failure_reports_unsent_ids(
+        self,
+        api_handler: ApiDestinationHandler,
+    ):
+        """Drive the REAL _write_chunked_mode (not a mock): a mid-loop chunk
+        transport failure must report the records actually sent and attribute
+        every record from the failed chunk onward as failed. This is the
+        load-bearing dup-on-retry fix.
+        """
+        import aiohttp
+
+        state = api_handler._streams["test-stream"]
+        state.max_records = 2
+
+        calls = []
+
+        async def _send(state_arg, data, extra_headers=None):
+            calls.append(data)
+            if len(calls) == 2:  # second chunk (rows 2,3) fails
+                raise aiohttp.ClientConnectionError("chunk down")
+            return {}
+
+        api_handler._send_request = _send
+        records = [{"id": i} for i in range(5)]
+        record_ids = [f"r{i}" for i in range(5)]
+
+        written, failed, first_failure = await api_handler._write_chunked_mode(
+            state, records, record_ids
+        )
+        # First chunk (r0, r1) landed; everything from the failed chunk on fails.
+        assert written == 2
+        assert failed == ["r2", "r3", "r4"]
+        assert "chunk down" in first_failure
+        # The third chunk must never be attempted after a chunk fails.
+        assert len(calls) == 2
+
+    @pytest.mark.asyncio
+    async def test_write_batch_chunk_failure_is_fatal_no_cursor_end_to_end(
+        self,
+        api_handler: ApiDestinationHandler,
+        mock_cursor: MagicMock,
+    ):
+        """End-to-end through write_batch: a real chunked-mode chunk failure
+        must be FATAL (not RETRYABLE), carry the true written count and the
+        unsent ids, and drop the cursor so the checkpoint cannot advance past
+        records that were never written."""
+        import aiohttp
+
+        api_handler._connected = True
+        api_handler._session = MagicMock()
+        state = api_handler._streams["test-stream"]
+        state.max_records = 2
+
+        calls = []
+
+        async def _send(state_arg, data, extra_headers=None):
+            calls.append(data)
+            if len(calls) == 2:
+                raise aiohttp.ClientConnectionError("chunk down")
+            return {}
+
+        api_handler._send_request = _send
+
+        result = await api_handler.write_batch(
+            run_id="r",
+            stream_id="test-stream",
+            batch_seq=1,
+            record_batch=_to_record_batch([{"id": i} for i in range(5)]),
+            record_ids=[f"r{i}" for i in range(5)],
+            cursor=mock_cursor,
+        )
+
+        assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+        assert result.records_written == 2
+        assert result.committed_cursor is None
+        assert result.failed_record_ids == ("r2", "r3", "r4")
+
+    @pytest.mark.asyncio
+    async def test_chunk_body_build_failure_stops_and_attributes_tail(
+        self,
+        api_handler: ApiDestinationHandler,
+    ):
+        """A data-dependent body-build failure mid-loop must stop the loop
+        with the true written count: the batch is already doomed to FATAL,
+        the engine replays the whole uncheckpointed batch, and chunked
+        streams have no idempotency key — so every record sent past the
+        failed chunk would land only to be duplicated by that replay."""
+        state = api_handler._streams["test-stream"]
+        state.max_records = 2
+
+        real_build = api_handler._build_body
+
+        def _build(state_arg, *, record=None, records=None):
+            if records and any(r["id"] == 3 for r in records):
+                raise ValueError("record 3 cannot feed the derived field")
+            return real_build(state_arg, record=record, records=records)
+
+        sent = []
+
+        async def _send(state_arg, data, extra_headers=None):
+            sent.append(data)
+            return {}
+
+        api_handler._build_body = _build
+        api_handler._send_request = _send
+        records = [{"id": i} for i in range(6)]
+        record_ids = [f"r{i}" for i in range(6)]
+
+        written, failed, first_failure = await api_handler._write_chunked_mode(
+            state, records, record_ids
+        )
+        # Chunk (r0,r1) landed; the build-failed chunk (r2,r3) stops the
+        # loop, so (r4,r5) is never sent and the whole tail is attributed.
+        assert written == 2
+        assert failed == ["r2", "r3", "r4", "r5"]
+        assert "ValueError" in first_failure
+        assert len(sent) == 1
+
+    @pytest.mark.asyncio
+    async def test_chunk_body_build_failure_with_nothing_landed_is_not_retried(
+        self,
+        api_handler: ApiDestinationHandler,
+    ):
+        """A build failure on the FIRST chunk must not re-raise for retry:
+        it is deterministic, so the honest verdict is FATAL with every id
+        attributed, even though nothing landed."""
+        state = api_handler._streams["test-stream"]
+        state.max_records = 2
+
+        def _build(state_arg, *, record=None, records=None):
+            raise ValueError("no record can feed the derived field")
+
+        api_handler._build_body = _build
+        api_handler._send_request = AsyncMock(return_value={})
+
+        written, failed, first_failure = await api_handler._write_chunked_mode(
+            state, [{"id": i} for i in range(4)], [f"r{i}" for i in range(4)]
+        )
+        assert written == 0
+        assert failed == ["r0", "r1", "r2", "r3"]
+        assert "ValueError" in first_failure
+        api_handler._send_request.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_chunk_body_build_failure_is_fatal_with_detail_end_to_end(
+        self,
+        api_handler: ApiDestinationHandler,
+        mock_cursor: MagicMock,
+    ):
+        """Through write_batch: the true written count, the failed chunk
+        plus unsent tail, and the first-failure reason all reach the
+        engine-facing result."""
+        api_handler._connected = True
+        api_handler._session = MagicMock()
+        state = api_handler._streams["test-stream"]
+        state.max_records = 2
+
+        real_build = api_handler._build_body
+
+        def _build(state_arg, *, record=None, records=None):
+            if records and any(r["id"] == 3 for r in records):
+                raise ValueError("record 3 cannot feed the derived field")
+            return real_build(state_arg, record=record, records=records)
+
+        api_handler._build_body = _build
+        api_handler._send_request = AsyncMock(return_value={})
+
+        result = await api_handler.write_batch(
+            run_id="r",
+            stream_id="test-stream",
+            batch_seq=1,
+            record_batch=_to_record_batch([{"id": i} for i in range(6)]),
+            record_ids=[f"r{i}" for i in range(6)],
+            cursor=mock_cursor,
+        )
+
+        assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+        assert result.records_written == 2
+        assert result.failed_record_ids == ("r2", "r3", "r4", "r5")
+        assert result.committed_cursor is None
+        assert "first failure: ValueError" in result.failure_summary
+
+    @pytest.mark.asyncio
+    async def test_first_chunk_failure_reraises(
+        self,
+        api_handler: ApiDestinationHandler,
+    ):
+        """A transport failure on the FIRST chunk (nothing landed yet) must
+        re-raise so it surfaces as RETRYABLE — there is no landed chunk to
+        duplicate, so it must not be fatally DLQ'd."""
+        import aiohttp
+
+        state = api_handler._streams["test-stream"]
+        state.max_records = 2
+
+        api_handler._send_request = AsyncMock(
+            side_effect=aiohttp.ClientConnectionError("first chunk down")
+        )
+        records = [{"id": i} for i in range(5)]
+        record_ids = [f"r{i}" for i in range(5)]
+
+        with pytest.raises(aiohttp.ClientConnectionError):
+            await api_handler._write_chunked_mode(state, records, record_ids)
+
+    @pytest.mark.asyncio
+    async def test_write_batch_first_chunk_failure_is_retryable_end_to_end(
+        self,
+        api_handler: ApiDestinationHandler,
+        mock_cursor: MagicMock,
+    ):
+        """End-to-end: a first-chunk transport failure is RETRYABLE (no dup
+        risk) instead of FATAL."""
+        import aiohttp
+
+        api_handler._connected = True
+        api_handler._session = MagicMock()
+        state = api_handler._streams["test-stream"]
+        state.max_records = 2
+
+        api_handler._send_request = AsyncMock(
+            side_effect=aiohttp.ClientConnectionError("first chunk down")
+        )
+
+        result = await api_handler.write_batch(
+            run_id="r",
+            stream_id="test-stream",
+            batch_seq=1,
+            record_batch=_to_record_batch([{"id": i} for i in range(5)]),
+            record_ids=[f"r{i}" for i in range(5)],
+            cursor=mock_cursor,
+        )
+
+        assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
+        assert result.records_written == 0
+        assert result.committed_cursor is None
 
 
 @pytest.mark.unit
@@ -472,12 +729,16 @@ class TestApiHandlerConfigureSchemaModeDispatch:
     the preloaded API endpoint document, matching the stream's write_mode."""
 
     def _endpoint_doc(self, *, modes=("insert", "upsert")):
-        operations: Dict[str, Any] = {"write": {}}
+        operations: dict[str, Any] = {"write": {}}
         for mode in modes:
             operations["write"][mode] = {
-                "request": {"method": "PATCH" if mode == "upsert" else "POST", "path": f"/v1/{mode}"},
-                "batching": {"mode": "batch" if mode == "upsert" else "single", "size": 50},
+                "request": {
+                    "method": "PATCH" if mode == "upsert" else "POST",
+                    "path": f"/v1/{mode}",
+                },
             }
+            if mode == "upsert":
+                operations["write"][mode]["batching"] = {"max_records": 50}
         return {"operations": operations}
 
     @pytest.fixture
@@ -500,8 +761,7 @@ class TestApiHandlerConfigureSchemaModeDispatch:
         state = handler._streams["s1"]
         assert state.endpoint == "/v1/insert"
         assert state.method == "POST"
-        assert state.batch_mode == ApiDestinationHandler.BATCH_MODE_SINGLE
-        assert state.batch_size == 50
+        assert state.max_records is None
 
     @pytest.mark.asyncio
     async def test_dispatch_upsert_mode_reads_upsert_block(self, handler):
@@ -514,7 +774,7 @@ class TestApiHandlerConfigureSchemaModeDispatch:
         state = handler._streams["s1"]
         assert state.endpoint == "/v1/upsert"
         assert state.method == "PATCH"
-        assert state.batch_mode == ApiDestinationHandler.BATCH_MODE_BATCH
+        assert state.max_records == 50
 
     @pytest.mark.asyncio
     async def test_dispatch_unsupported_mode_returns_false(self, handler):
@@ -567,10 +827,14 @@ class TestApiHandlerConfigureSchemaModeDispatch:
             {"s1": self._endpoint_doc(), "s2": self._endpoint_doc()}
         )
         await handler.configure_schema(
-            SchemaMessage(stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT)
+            SchemaMessage(
+                stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT
+            )
         )
         await handler.configure_schema(
-            SchemaMessage(stream_id="s2", version=1, write_mode=WriteMode.WRITE_MODE_UPSERT)
+            SchemaMessage(
+                stream_id="s2", version=1, write_mode=WriteMode.WRITE_MODE_UPSERT
+            )
         )
         assert handler._streams["s1"].endpoint == "/v1/insert"
         assert handler._streams["s2"].endpoint == "/v1/upsert"
@@ -583,13 +847,127 @@ class TestApiHandlerConfigureSchemaModeDispatch:
 
 
 @pytest.mark.unit
+class TestApiHandlerContractBatching:
+    """``batching`` parses the published contract shape only (issue #305):
+    absent/null means one request per record; ``{"max_records": <int >= 2>}``
+    means chunked requests; anything else fails the stream at configure
+    time instead of silently running single-record."""
+
+    def _doc(self, batching="absent"):
+        block: dict[str, Any] = {
+            "request": {"method": "POST", "path": "/v1/things"},
+        }
+        if batching != "absent":
+            block["batching"] = batching
+        return {"operations": {"write": {"insert": block}}}
+
+    @pytest.fixture
+    def handler(self):
+        h = ApiDestinationHandler()
+        h._connected = True
+        h._session = MagicMock()
+        return h
+
+    async def _configure(self, handler, doc):
+        handler.set_stream_endpoints({"s1": doc})
+        return await handler.configure_schema(
+            SchemaMessage(
+                stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT
+            )
+        )
+
+    @pytest.mark.asyncio
+    async def test_absent_batching_means_single_record(self, handler):
+        assert await self._configure(handler, self._doc()) is True
+        assert handler._streams["s1"].max_records is None
+
+    @pytest.mark.asyncio
+    async def test_null_batching_means_single_record(self, handler):
+        """The contract's nullable default: ``"batching": null``."""
+        assert await self._configure(handler, self._doc(batching=None)) is True
+        assert handler._streams["s1"].max_records is None
+
+    @pytest.mark.asyncio
+    async def test_contract_batching_block_enables_chunking(self, handler):
+        assert (
+            await self._configure(handler, self._doc(batching={"max_records": 25}))
+            is True
+        )
+        assert handler._streams["s1"].max_records == 25
+
+    @pytest.mark.parametrize(
+        "batching",
+        [
+            {},  # required key missing
+            {"max_records": 1},  # below the contract minimum
+            {"max_records": "10"},  # wrong type
+            {"max_records": True},  # bool is not an integer count
+            {"max_records": None},  # null count
+            {"mode": "bulk", "size": 100},  # the pre-contract shape (#305)
+            {"max_records": 10, "max_record": 5},  # closed shape: typo sibling
+            {"max_records": 100, "mode": "single"},  # closed shape: blended
+            "bulk",  # not an object at all
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_non_contract_batching_fails_the_stream(self, handler, batching):
+        """A batching block that is not ``{"max_records": <int >= 2>}`` must
+        fail configure_schema loud — the silent single-record fallback is
+        exactly the defect in issue #305 — and the reason must ride the
+        SchemaAck channel (issue #231), not just the sidecar log."""
+        assert await self._configure(handler, self._doc(batching=batching)) is False
+        assert "s1" not in handler._streams
+        assert "max_records" in handler.last_schema_rejection
+
+    @pytest.mark.asyncio
+    async def test_accepted_configure_clears_rejection_reason(self, handler):
+        """A rejection reason from an earlier failed configure must not
+        leak into a later accepted stream's ack."""
+        assert await self._configure(handler, self._doc(batching={})) is False
+        assert handler.last_schema_rejection is not None
+        assert (
+            await self._configure(handler, self._doc(batching={"max_records": 2}))
+            is True
+        )
+        assert handler.last_schema_rejection is None
+
+    @pytest.mark.asyncio
+    async def test_chunked_writes_respect_max_records_end_to_end(self, handler):
+        """5 records through a max_records=2 stream land as chunks 2/2/1."""
+        assert (
+            await self._configure(handler, self._doc(batching={"max_records": 2}))
+            is True
+        )
+        sent = []
+
+        async def _capture(state_arg, data, extra_headers=None):
+            sent.append(data)
+            return {}
+
+        handler._send_request = _capture
+        records = [{"id": i} for i in range(5)]
+        result = await handler.write_batch(
+            run_id="r",
+            stream_id="s1",
+            batch_seq=0,
+            record_batch=_to_record_batch(records),
+            record_ids=[f"r{i}" for i in range(5)],
+            cursor=MagicMock(),
+        )
+        assert result.status == AckStatus.ACK_STATUS_SUCCESS
+        assert result.records_written == 5
+        assert [len(chunk) for chunk in sent] == [2, 2, 1]
+        assert sent[0] == [{"id": 0}, {"id": 1}]
+
+
+@pytest.mark.unit
 class TestApiHandlerSupportsUpsert:
     """``supports_upsert`` is contract-driven: it reflects whether a
     registered endpoint declares ``operations.write.upsert``, never a
     hardcoded value. This is what ``GetCapabilities`` advertises."""
 
     def _doc(self, *, modes):
-        write: Dict[str, Any] = {}
+        write: dict[str, Any] = {}
         for mode in modes:
             write[mode] = {"request": {"method": "POST", "path": f"/v1/{mode}"}}
         return {"operations": {"write": write}}
@@ -632,7 +1010,9 @@ class TestApiHandlerSupportsUpsert:
             {"operations": "write"},  # operations not a mapping
             {"operations": {"write": "upsert"}},  # write not a mapping
             {"operations": {"write": {"upsert": "/v1/upsert"}}},  # block not a mapping
-            {"operations": {"write": {"upsert": {"request": "/v1/upsert"}}}},  # request not a mapping
+            {
+                "operations": {"write": {"upsert": {"request": "/v1/upsert"}}}
+            },  # request not a mapping
         ],
     )
     def test_malformed_contract_returns_false_not_raises(self, handler, doc):
@@ -641,6 +1021,61 @@ class TestApiHandlerSupportsUpsert:
         GetCapabilities RPC with AttributeError."""
         handler.set_stream_endpoints({"s1": doc})
         assert handler.supports_upsert is False
+
+
+@pytest.mark.unit
+class TestApiHandlerSupportsBulkLoad:
+    """``supports_bulk_load`` is contract-driven like ``supports_upsert``:
+    it reflects whether any registered endpoint declares a ``batching``
+    block on a usable write mode, never a hardcoded value."""
+
+    def _doc(self, *, batching=None):
+        block: dict[str, Any] = {"request": {"method": "POST", "path": "/v1/x"}}
+        if batching is not None:
+            block["batching"] = batching
+        return {"operations": {"write": {"insert": block}}}
+
+    @pytest.fixture
+    def handler(self):
+        return ApiDestinationHandler()
+
+    def test_false_when_no_endpoints_registered(self, handler):
+        assert handler.supports_bulk_load is False
+
+    def test_false_when_no_endpoint_declares_batching(self, handler):
+        handler.set_stream_endpoints({"s1": self._doc()})
+        assert handler.supports_bulk_load is False
+
+    def test_true_when_any_endpoint_declares_batching(self, handler):
+        handler.set_stream_endpoints(
+            {
+                "s1": self._doc(),
+                "s2": self._doc(batching={"max_records": 10}),
+            }
+        )
+        assert handler.supports_bulk_load is True
+
+    @pytest.mark.parametrize(
+        "batching",
+        [
+            {},
+            {"max_records": 1},
+            {"mode": "bulk", "size": 100},
+            {"max_records": 10, "max_record": 5},
+            "bulk",
+        ],
+    )
+    def test_false_for_batching_block_configure_would_reject(self, handler, batching):
+        """Capability advertisement and configure_schema share one
+        acceptance predicate: a block configure rejects must not be
+        advertised as bulk-load capability."""
+        handler.set_stream_endpoints({"s1": self._doc(batching=batching)})
+        assert handler.supports_bulk_load is False
+
+    def test_malformed_contract_returns_false_not_raises(self, handler):
+        """Capability advertisement over arbitrary docs must not crash."""
+        handler.set_stream_endpoints({"s1": {"operations": "write"}})
+        assert handler.supports_bulk_load is False
 
 
 @pytest.mark.unit
@@ -676,7 +1111,9 @@ class TestApiHandlerJsonFields:
         handler._session = MagicMock()
         handler.set_stream_endpoints({"s1": self._doc_with_json_field()})
         ok = await handler.configure_schema(
-            SchemaMessage(stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT)
+            SchemaMessage(
+                stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT
+            )
         )
         assert ok is True
         assert handler._streams["s1"].json_fields == {"metadata"}
@@ -692,7 +1129,9 @@ class TestApiHandlerJsonFields:
         handler._session = MagicMock()
         handler.set_stream_endpoints({"s1": self._doc_with_json_field()})
         await handler.configure_schema(
-            SchemaMessage(stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT)
+            SchemaMessage(
+                stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT
+            )
         )
 
         # Wire batch — metadata is the JSON-encoded string produced by the
@@ -703,7 +1142,7 @@ class TestApiHandlerJsonFields:
 
         sent_payloads = []
 
-        async def _capture(state, data):
+        async def _capture(state, data, extra_headers=None):
             sent_payloads.append(data)
             return {}
 
@@ -748,7 +1187,9 @@ class TestApiHandlerJsonFields:
         }
         handler.set_stream_endpoints({"s1": doc})
         ok = await handler.configure_schema(
-            SchemaMessage(stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT)
+            SchemaMessage(
+                stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT
+            )
         )
         assert ok is True
         assert handler._streams["s1"].json_fields == {"metadata"}
@@ -764,6 +1205,7 @@ class TestApiHandlerJsonFields:
         """
         from datetime import datetime, timezone
         from decimal import Decimal
+
         import orjson
 
         from src.destination.connectors.api import _orjson_default
@@ -783,14 +1225,18 @@ class TestApiHandlerJsonFields:
         }
         handler.set_stream_endpoints({"s1": doc})
         await handler.configure_schema(
-            SchemaMessage(stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT)
+            SchemaMessage(
+                stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT
+            )
         )
 
-        batch_schema = pa.schema([
-            pa.field("id", pa.int64()),
-            pa.field("created", pa.timestamp("us", tz="UTC")),
-            pa.field("amount", pa.decimal128(18, 4)),
-        ])
+        batch_schema = pa.schema(
+            [
+                pa.field("id", pa.int64()),
+                pa.field("created", pa.timestamp("us", tz="UTC")),
+                pa.field("amount", pa.decimal128(18, 4)),
+            ]
+        )
         batch = pa.RecordBatch.from_arrays(
             [
                 pa.array([1], type=pa.int64()),
@@ -805,7 +1251,7 @@ class TestApiHandlerJsonFields:
 
         sent_payloads = []
 
-        async def _capture(state, data):
+        async def _capture(state, data, extra_headers=None):
             sent_payloads.append(data)
             return {}
 
@@ -842,7 +1288,9 @@ class TestApiHandlerJsonFields:
         handler._session = MagicMock()
         handler.set_stream_endpoints({"s1": self._doc_with_json_field()})
         await handler.configure_schema(
-            SchemaMessage(stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT)
+            SchemaMessage(
+                stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT
+            )
         )
 
         batch = pa.RecordBatch.from_pylist(
@@ -861,6 +1309,7 @@ class TestApiHandlerJsonFields:
         assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
         assert "metadata" in (result.failure_summary or "")
 
+
 @pytest.mark.unit
 class TestOrjsonDefault:
     """The default-hook is the only seam where Decimal and bytes reach
@@ -869,6 +1318,7 @@ class TestOrjsonDefault:
 
     def test_decimal_becomes_canonical_string(self):
         from decimal import Decimal
+
         from src.destination.connectors.api import _orjson_default
 
         assert _orjson_default(Decimal("42.5000")) == "42.5000"
@@ -876,6 +1326,7 @@ class TestOrjsonDefault:
 
     def test_bytes_become_base64(self):
         import base64
+
         from src.destination.connectors.api import _orjson_default
 
         out = _orjson_default(b"hello")
@@ -899,6 +1350,7 @@ class TestOrjsonDefault:
         no Arrow-level recursion needed to handle nested Decimals."""
         from datetime import datetime, timezone
         from decimal import Decimal
+
         import orjson
 
         from src.destination.connectors.api import _orjson_default
@@ -915,6 +1367,365 @@ class TestOrjsonDefault:
         assert '"price":"9.99"' in encoded
         assert '"price":"12.50"' in encoded
         assert '"created":"2026-05-12T10:00:00+00:00"' in encoded
+
+
+@pytest.mark.unit
+class TestClassifyHttpError:
+    """``_classify_http_error`` classifies ClientResponseError by HTTP status
+    and leaves all other exception types as RETRYABLE."""
+
+    def _response_error(self, status: int) -> "aiohttp.ClientResponseError":
+        req = MagicMock()
+        return aiohttp.ClientResponseError(req, (), status=status)
+
+    def test_400_is_fatal(self):
+        assert (
+            _classify_http_error(self._response_error(400))
+            == AckStatus.ACK_STATUS_FATAL_FAILURE
+        )
+
+    def test_408_is_retryable(self):
+        assert (
+            _classify_http_error(self._response_error(408))
+            == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
+        )
+
+    def test_422_is_fatal(self):
+        assert (
+            _classify_http_error(self._response_error(422))
+            == AckStatus.ACK_STATUS_FATAL_FAILURE
+        )
+
+    def test_401_is_fatal(self):
+        assert (
+            _classify_http_error(self._response_error(401))
+            == AckStatus.ACK_STATUS_FATAL_FAILURE
+        )
+
+    def test_404_is_fatal(self):
+        assert (
+            _classify_http_error(self._response_error(404))
+            == AckStatus.ACK_STATUS_FATAL_FAILURE
+        )
+
+    def test_429_is_retryable(self):
+        assert (
+            _classify_http_error(self._response_error(429))
+            == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
+        )
+
+    def test_500_is_retryable(self):
+        assert (
+            _classify_http_error(self._response_error(500))
+            == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
+        )
+
+    def test_503_is_retryable(self):
+        assert (
+            _classify_http_error(self._response_error(503))
+            == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
+        )
+
+    def test_connection_error_is_retryable(self):
+        import aiohttp
+
+        assert (
+            _classify_http_error(aiohttp.ClientConnectionError("refused"))
+            == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
+        )
+
+    def test_timeout_is_retryable(self):
+        import asyncio
+
+        assert (
+            _classify_http_error(asyncio.TimeoutError())
+            == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
+        )
+
+    def test_payload_error_is_retryable(self):
+        import aiohttp
+
+        assert (
+            _classify_http_error(aiohttp.ClientPayloadError("truncated"))
+            == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
+        )
+
+    def test_399_is_retryable_boundary(self):
+        assert (
+            _classify_http_error(self._response_error(399))
+            == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
+        )
+
+    def test_499_is_fatal_boundary(self):
+        assert (
+            _classify_http_error(self._response_error(499))
+            == AckStatus.ACK_STATUS_FATAL_FAILURE
+        )
+
+    def test_non_response_client_error_is_retryable(self):
+        import aiohttp
+
+        assert (
+            _classify_http_error(aiohttp.ClientError())
+            == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
+        )
+
+
+@pytest.mark.unit
+class TestApiHandlerDeterministic4xxClassification:
+    """HTTP 4xx rejections (except 429) are deterministic: the engine must
+    not burn retries on them. Tests cover write_batch's outer exception
+    handler and the _write_chunked_mode re-raise decision.
+
+    Note: in single mode _write_single_mode catches ClientError per-record
+    and never re-raises, so write_batch's outer catch is only exercised in
+    practice by chunked mode's first-chunk re-raise. The outer-catch tests
+    below mock _write_single_mode to raise explicitly, isolating the
+    classification logic from the single/chunked dispatch."""
+
+    def _response_error(self, status: int) -> "aiohttp.ClientResponseError":
+        req = MagicMock()
+        return aiohttp.ClientResponseError(
+            req, (), status=status, message=f"HTTP {status}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_write_batch_outer_catch_4xx_is_fatal(
+        self, api_handler: ApiDestinationHandler, mock_cursor: MagicMock
+    ):
+        """write_batch's outer exception handler classifies a 4xx
+        ClientResponseError as FATAL, not RETRYABLE."""
+        import aiohttp
+
+        api_handler._connected = True
+        api_handler._session = MagicMock()
+        api_handler._write_single_mode = AsyncMock(
+            side_effect=aiohttp.ClientResponseError(
+                MagicMock(), (), status=400, message="Bad Request"
+            )
+        )
+
+        result = await api_handler.write_batch(
+            run_id="r",
+            stream_id="test-stream",
+            batch_seq=1,
+            record_batch=_to_record_batch([{"id": 1}]),
+            record_ids=["r1"],
+            cursor=mock_cursor,
+        )
+
+        assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+        assert result.records_written == 0
+        assert result.committed_cursor is None
+
+    @pytest.mark.asyncio
+    async def test_write_batch_outer_catch_429_is_retryable(
+        self, api_handler: ApiDestinationHandler, mock_cursor: MagicMock
+    ):
+        """write_batch's outer exception handler classifies 429 as RETRYABLE."""
+        import aiohttp
+
+        api_handler._connected = True
+        api_handler._session = MagicMock()
+        api_handler._write_single_mode = AsyncMock(
+            side_effect=aiohttp.ClientResponseError(
+                MagicMock(), (), status=429, message="Too Many Requests"
+            )
+        )
+
+        result = await api_handler.write_batch(
+            run_id="r",
+            stream_id="test-stream",
+            batch_seq=1,
+            record_batch=_to_record_batch([{"id": 1}]),
+            record_ids=["r1"],
+            cursor=mock_cursor,
+        )
+
+        assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
+
+    @pytest.mark.asyncio
+    async def test_write_batch_outer_catch_5xx_is_retryable(
+        self, api_handler: ApiDestinationHandler, mock_cursor: MagicMock
+    ):
+        """write_batch's outer exception handler classifies 5xx as RETRYABLE."""
+        import aiohttp
+
+        api_handler._connected = True
+        api_handler._session = MagicMock()
+        api_handler._write_single_mode = AsyncMock(
+            side_effect=aiohttp.ClientResponseError(
+                MagicMock(), (), status=503, message="Service Unavailable"
+            )
+        )
+
+        result = await api_handler.write_batch(
+            run_id="r",
+            stream_id="test-stream",
+            batch_seq=1,
+            record_batch=_to_record_batch([{"id": 1}]),
+            record_ids=["r1"],
+            cursor=mock_cursor,
+        )
+
+        assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
+
+    @pytest.mark.asyncio
+    async def test_single_mode_4xx_is_fatal_via_failed_records(
+        self, api_handler: ApiDestinationHandler, mock_cursor: MagicMock
+    ):
+        """In single mode, a 4xx from _send_request is caught per-record by
+        _write_single_mode (not re-raised). The record goes into failed_ids
+        and write_batch returns FATAL via _build_write_result, not via the
+        outer exception handler."""
+        import aiohttp
+
+        api_handler._connected = True
+        api_handler._session = MagicMock()
+        api_handler._send_request = AsyncMock(
+            side_effect=aiohttp.ClientResponseError(
+                MagicMock(), (), status=400, message="Bad Request"
+            )
+        )
+
+        result = await api_handler.write_batch(
+            run_id="r",
+            stream_id="test-stream",
+            batch_seq=1,
+            record_batch=_to_record_batch([{"id": 1}]),
+            record_ids=["r1"],
+            cursor=mock_cursor,
+        )
+
+        assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+        assert result.records_written == 0
+        assert result.committed_cursor is None
+        assert result.failed_record_ids == ("r1",)
+
+    @pytest.mark.asyncio
+    async def test_first_chunk_4xx_does_not_reraise(
+        self, api_handler: ApiDestinationHandler
+    ):
+        """A 4xx on the first chunk (nothing landed) must NOT re-raise:
+        the rejection is deterministic, so re-raising as RETRYABLE would
+        burn engine retries on a payload the API will always refuse."""
+        import aiohttp
+
+        state = api_handler._streams["test-stream"]
+        state.max_records = 2
+
+        api_handler._send_request = AsyncMock(
+            side_effect=aiohttp.ClientResponseError(
+                MagicMock(), (), status=400, message="Bad Request"
+            )
+        )
+        records = [{"id": i} for i in range(4)]
+        record_ids = [f"r{i}" for i in range(4)]
+
+        written, failed, first_failure = await api_handler._write_chunked_mode(
+            state, records, record_ids
+        )
+        assert written == 0
+        assert failed == record_ids
+        assert "400" in first_failure or "Bad Request" in first_failure
+
+    @pytest.mark.asyncio
+    async def test_first_chunk_4xx_is_fatal_end_to_end(
+        self, api_handler: ApiDestinationHandler, mock_cursor: MagicMock
+    ):
+        """End-to-end: a 4xx on the first (and only attempted) chunk must
+        yield FATAL with every record id attributed and no cursor advance."""
+        import aiohttp
+
+        api_handler._connected = True
+        api_handler._session = MagicMock()
+        state = api_handler._streams["test-stream"]
+        state.max_records = 2
+
+        api_handler._send_request = AsyncMock(
+            side_effect=aiohttp.ClientResponseError(
+                MagicMock(), (), status=400, message="Bad Request"
+            )
+        )
+
+        result = await api_handler.write_batch(
+            run_id="r",
+            stream_id="test-stream",
+            batch_seq=1,
+            record_batch=_to_record_batch([{"id": i} for i in range(4)]),
+            record_ids=[f"r{i}" for i in range(4)],
+            cursor=mock_cursor,
+        )
+
+        assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+        assert result.records_written == 0
+        assert result.committed_cursor is None
+        assert result.failed_record_ids == ("r0", "r1", "r2", "r3")
+
+    @pytest.mark.asyncio
+    async def test_first_chunk_429_still_reraises(
+        self, api_handler: ApiDestinationHandler
+    ):
+        """429 on the first chunk is RETRYABLE and must still re-raise so
+        write_batch can classify it RETRYABLE — nothing landed, safe to retry."""
+        import aiohttp
+
+        state = api_handler._streams["test-stream"]
+        state.max_records = 2
+
+        api_handler._send_request = AsyncMock(
+            side_effect=aiohttp.ClientResponseError(
+                MagicMock(), (), status=429, message="Too Many Requests"
+            )
+        )
+
+        with pytest.raises(aiohttp.ClientResponseError) as exc_info:
+            await api_handler._write_chunked_mode(
+                state, [{"id": 0}, {"id": 1}], ["r0", "r1"]
+            )
+        assert exc_info.value.status == 429
+
+    @pytest.mark.asyncio
+    async def test_mid_batch_4xx_attributes_tail_as_fatal(
+        self, api_handler: ApiDestinationHandler, mock_cursor: MagicMock
+    ):
+        """A 4xx on a non-first chunk (some records already landed) must
+        attribute the failed chunk plus unsent tail and return FATAL.
+        The 4xx must not re-raise (nothing-landed invariant only applies at
+        written == 0; mid-batch duplication risk doesn't change the rule)."""
+        import aiohttp
+
+        api_handler._connected = True
+        api_handler._session = MagicMock()
+        state = api_handler._streams["test-stream"]
+        state.max_records = 2
+
+        calls = []
+
+        async def _send(state_arg, data, extra_headers=None):
+            calls.append(data)
+            if len(calls) == 2:
+                raise aiohttp.ClientResponseError(
+                    MagicMock(), (), status=400, message="Bad Request"
+                )
+            return {}
+
+        api_handler._send_request = _send
+
+        result = await api_handler.write_batch(
+            run_id="r",
+            stream_id="test-stream",
+            batch_seq=1,
+            record_batch=_to_record_batch([{"id": i} for i in range(5)]),
+            record_ids=[f"r{i}" for i in range(5)],
+            cursor=mock_cursor,
+        )
+
+        assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+        assert result.records_written == 2
+        assert result.committed_cursor is None
+        assert result.failed_record_ids == ("r2", "r3", "r4")
+        assert len(calls) == 2
 
 
 @pytest.mark.unit
@@ -957,7 +1768,9 @@ class TestApiHandlerBodySpec:
         body = {"data": {"from_input": "record"}}
         handler.set_stream_endpoints({"s1": self._doc_with_body(body)})
         ok = await handler.configure_schema(
-            SchemaMessage(stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT)
+            SchemaMessage(
+                stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT
+            )
         )
         assert ok is True
         assert handler._streams["s1"].body_spec == body
@@ -1015,7 +1828,10 @@ class TestApiHandlerBodySpec:
         handler = self._handler_with_resolver()
         state = _StreamState(
             endpoint="/v1/things",
-            body_spec={"id": {"from_input": "record.id"}, "x": {"from_input": "record.nope"}},
+            body_spec={
+                "id": {"from_input": "record.id"},
+                "x": {"from_input": "record.nope"},
+            },
         )
         body = handler._build_body(state, record={"id": 3})
         assert body == {"id": 3}
@@ -1084,22 +1900,22 @@ class TestApiHandlerBodySpec:
         body = handler._build_body(state, records=records)
         assert body == {"items": records}
 
-    def test_from_input_record_in_bulk_mode_raises(self):
+    def test_from_input_record_on_batched_stream_raises(self):
         handler = self._handler_with_resolver()
         state = _StreamState(
             endpoint="/v1/things",
             body_spec={"data": {"from_input": "record"}},
         )
-        with pytest.raises(ValueError, match="requires batching mode single"):
+        with pytest.raises(ValueError, match="requires a single-record stream"):
             handler._build_body(state, records=[{"id": 1}])
 
-    def test_from_input_records_in_single_mode_raises(self):
+    def test_from_input_records_on_single_record_stream_raises(self):
         handler = self._handler_with_resolver()
         state = _StreamState(
             endpoint="/v1/things",
             body_spec={"items": {"from_input": "records"}},
         )
-        with pytest.raises(ValueError, match="bulk or batch"):
+        with pytest.raises(ValueError, match="requires a batching declaration"):
             handler._build_body(state, record={"id": 1})
 
     def test_unknown_from_input_selector_raises(self):
@@ -1145,98 +1961,101 @@ class TestApiHandlerBodySpec:
 
         sent = []
 
-        async def _capture(state_arg, data):
+        async def _capture(state_arg, data, extra_headers=None):
             sent.append(data)
             return {}
 
         handler._send_request = _capture  # type: ignore[assignment]
-        written = await handler._write_single_mode(
+        written, failed, _ = await handler._write_single_mode(
             state, [{"id": 1}, {"id": 2}], ["r1", "r2"]
         )
         assert written == 2
+        assert failed == []
         assert sent == [
             {"data": {"id": 1}, "source": "crm"},
             {"data": {"id": 2}, "source": "crm"},
         ]
 
     @pytest.mark.asyncio
-    async def test_bulk_mode_sends_built_body_once(self):
+    async def test_chunked_mode_sends_one_request_when_batch_fits(self):
         handler = self._handler_with_resolver()
         state = _StreamState(
             endpoint="/v1/things",
-            batch_mode=ApiDestinationHandler.BATCH_MODE_BULK,
+            max_records=10,
             body_spec={"items": {"from_input": "records"}},
         )
 
         sent = []
 
-        async def _capture(state_arg, data):
+        async def _capture(state_arg, data, extra_headers=None):
             sent.append(data)
             return {}
 
         handler._send_request = _capture  # type: ignore[assignment]
-        written = await handler._write_bulk_mode(state, [{"id": 1}, {"id": 2}])
+        written, failed, _ = await handler._write_chunked_mode(
+            state, [{"id": 1}, {"id": 2}], ["r1", "r2"]
+        )
         assert written == 2
+        assert failed == []
         assert sent == [{"items": [{"id": 1}, {"id": 2}]}]
 
     @pytest.mark.asyncio
-    async def test_batch_mode_sends_built_body_per_chunk(self):
+    async def test_chunked_mode_sends_built_body_per_chunk(self):
         handler = self._handler_with_resolver()
         state = _StreamState(
             endpoint="/v1/things",
-            batch_mode=ApiDestinationHandler.BATCH_MODE_BATCH,
-            batch_size=2,
+            max_records=2,
             body_spec={"items": {"from_input": "records"}},
         )
 
         sent = []
 
-        async def _capture(state_arg, data):
+        async def _capture(state_arg, data, extra_headers=None):
             sent.append(data)
             return {}
 
         handler._send_request = _capture  # type: ignore[assignment]
-        written = await handler._write_batch_mode(
-            state, [{"id": 1}, {"id": 2}, {"id": 3}]
+        written, failed, _ = await handler._write_chunked_mode(
+            state, [{"id": 1}, {"id": 2}, {"id": 3}], ["r1", "r2", "r3"]
         )
         assert written == 3
+        assert failed == []
         assert sent == [
             {"items": [{"id": 1}, {"id": 2}]},
             {"items": [{"id": 3}]},
         ]
 
     @pytest.mark.asyncio
-    async def test_configure_schema_rejects_records_selector_in_single_mode(self):
+    async def test_configure_schema_rejects_records_selector_without_batching(self):
         # The mismatch is statically knowable: reject the stream up front
         # instead of failing every record at write time.
         handler = self._handler_with_resolver()
         handler.set_stream_endpoints(
-            {
-                "s1": self._doc_with_body(
-                    {"items": {"from_input": "records"}},
-                    batching={"mode": "single"},
-                )
-            }
+            {"s1": self._doc_with_body({"items": {"from_input": "records"}})}
         )
         ok = await handler.configure_schema(
-            SchemaMessage(stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT)
+            SchemaMessage(
+                stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT
+            )
         )
         assert ok is False
         assert "s1" not in handler._streams
 
     @pytest.mark.asyncio
-    async def test_configure_schema_rejects_record_selector_in_bulk_mode(self):
+    async def test_configure_schema_rejects_record_selector_on_batched_stream(self):
         handler = self._handler_with_resolver()
         handler.set_stream_endpoints(
             {
                 "s1": self._doc_with_body(
                     {"data": {"from_input": "record"}},
-                    batching={"mode": "bulk"},
+                    batching={"max_records": 10},
                 )
             }
         )
         ok = await handler.configure_schema(
-            SchemaMessage(stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT)
+            SchemaMessage(
+                stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT
+            )
         )
         assert ok is False
 
@@ -1248,7 +2067,9 @@ class TestApiHandlerBodySpec:
         handler = self._handler_with_resolver()
         handler._streams["s1"] = _StreamState(
             endpoint="/v1/things",
-            body_spec={"items": {"from_input": "records"}},  # single mode sends one record
+            body_spec={
+                "items": {"from_input": "records"}
+            },  # single mode sends one record
         )
         result = await handler.write_batch(
             run_id="run",
@@ -1259,7 +2080,7 @@ class TestApiHandlerBodySpec:
             cursor=MagicMock(),
         )
         assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
-        assert "All 1 records failed" in result.failure_summary
+        assert "1/1 records failed" in result.failure_summary
 
     @pytest.mark.asyncio
     async def test_bad_record_body_build_keeps_partial_write_counts(self):
@@ -1279,7 +2100,7 @@ class TestApiHandlerBodySpec:
 
         sent = []
 
-        async def _capture(state_arg, data):
+        async def _capture(state_arg, data, extra_headers=None):
             sent.append(data)
             return {}
 
@@ -1303,3 +2124,567 @@ class TestApiHandlerBodySpec:
             {"token": b64.b64encode(b"ok-1").decode("ascii")},
             {"token": b64.b64encode(b"ok-2").decode("ascii")},
         ]
+
+
+@pytest.mark.unit
+class TestApiHandlerIdempotencyConfig:
+    """``configure_schema`` validation of the endpoint's
+    ``operations.write.<mode>.idempotency`` block (infra#890 / issue #286).
+
+    The block declares where the engine-owned per-record key lands; a
+    block that cannot work (non-single batching, non-object body for a
+    body target, a reserved-field collision) must reject the stream at
+    configure time, never at write time.
+    """
+
+    def _doc(
+        self,
+        *,
+        mode="insert",
+        idempotency=None,
+        batching="absent",
+        body=None,
+    ):
+        block: dict[str, Any] = {
+            "request": {"method": "POST", "path": f"/v1/{mode}"},
+        }
+        if batching != "absent":
+            block["batching"] = batching
+        if body is not None:
+            block["request"]["body"] = body
+        if idempotency is not None:
+            block["idempotency"] = idempotency
+        return {"operations": {"write": {mode: block}}}
+
+    @pytest.fixture
+    def handler(self):
+        h = ApiDestinationHandler()
+        h._connected = True
+        h._session = MagicMock()
+        return h
+
+    @pytest.mark.asyncio
+    async def test_header_block_accepted_and_recorded(self, handler):
+        handler.set_stream_endpoints(
+            {"s1": self._doc(idempotency={"in": "header", "name": "Idempotency-Key"})}
+        )
+        ok = await handler.configure_schema(
+            SchemaMessage(
+                stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT
+            )
+        )
+        assert ok is True
+        state = handler._streams["s1"]
+        assert state.idempotency_in == "header"
+        assert state.idempotency_name == "Idempotency-Key"
+
+    @pytest.mark.asyncio
+    async def test_body_block_accepted_on_upsert(self, handler):
+        """The block is allowed on both write modes (a Square-style upsert
+        requires a body idempotency key)."""
+        handler.set_stream_endpoints(
+            {
+                "s1": self._doc(
+                    mode="upsert",
+                    idempotency={"in": "body", "name": "idempotency_key"},
+                )
+            }
+        )
+        ok = await handler.configure_schema(
+            SchemaMessage(
+                stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_UPSERT
+            )
+        )
+        assert ok is True
+        assert handler._streams["s1"].idempotency_in == "body"
+
+    @pytest.mark.asyncio
+    async def test_rejects_when_batching_block_present(self, handler):
+        """The contract has no batching mode — a present block IS the
+        multi-record case. A restart re-batches records, so a per-request
+        key over several records cannot dedup (issue #286 / infra#890)."""
+        handler.set_stream_endpoints(
+            {
+                "s1": self._doc(
+                    idempotency={"in": "header", "name": "Idempotency-Key"},
+                    batching={"max_records": 5},
+                )
+            }
+        )
+        ok = await handler.configure_schema(
+            SchemaMessage(
+                stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT
+            )
+        )
+        assert ok is False
+        assert "s1" not in handler._streams
+
+    @pytest.mark.asyncio
+    async def test_explicit_null_batching_is_accepted(self, handler):
+        """The contract's nullable default: "batching": null means
+        single-record, so the exclusion must not fire on it."""
+        handler.set_stream_endpoints(
+            {
+                "s1": self._doc(
+                    idempotency={"in": "header", "name": "Idempotency-Key"},
+                    batching=None,
+                )
+            }
+        )
+        ok = await handler.configure_schema(
+            SchemaMessage(
+                stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT
+            )
+        )
+        assert ok is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "idempotency",
+        [
+            "Idempotency-Key",  # not an object
+            {"in": "query", "name": "k"},  # unknown target
+            {"name": "k"},  # missing in
+            {"in": "header"},  # missing name
+            {"in": "header", "name": ""},  # empty name
+            {"in": "header", "name": 7},  # non-string name
+        ],
+    )
+    async def test_rejects_malformed_block(self, handler, idempotency):
+        handler.set_stream_endpoints({"s1": self._doc(idempotency=idempotency)})
+        ok = await handler.configure_schema(
+            SchemaMessage(
+                stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT
+            )
+        )
+        assert ok is False
+
+    @pytest.mark.asyncio
+    async def test_rejects_body_target_with_non_object_body_spec(self, handler):
+        """A body key needs a JSON object to land in; a declared array
+        body can never carry it."""
+        handler.set_stream_endpoints(
+            {
+                "s1": self._doc(
+                    idempotency={"in": "body", "name": "idempotency_key"},
+                    body=[{"from_input": "record"}],
+                )
+            }
+        )
+        ok = await handler.configure_schema(
+            SchemaMessage(
+                stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT
+            )
+        )
+        assert ok is False
+
+    @pytest.mark.asyncio
+    async def test_rejects_body_target_when_spec_declares_key_field(self, handler):
+        handler.set_stream_endpoints(
+            {
+                "s1": self._doc(
+                    idempotency={"in": "body", "name": "idempotency_key"},
+                    body={"idempotency_key": {"from_input": "record.id"}},
+                )
+            }
+        )
+        ok = await handler.configure_schema(
+            SchemaMessage(
+                stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT
+            )
+        )
+        assert ok is False
+
+    @pytest.mark.asyncio
+    async def test_body_target_ok_without_body_spec(self, handler):
+        """No declared body: the record dict is the body, which is an
+        object — the key can land."""
+        handler.set_stream_endpoints(
+            {"s1": self._doc(idempotency={"in": "body", "name": "idempotency_key"})}
+        )
+        ok = await handler.configure_schema(
+            SchemaMessage(
+                stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT
+            )
+        )
+        assert ok is True
+
+
+@pytest.mark.unit
+class TestApiHandlerIdempotencyInjection:
+    """Single-mode write path injects the engine-owned key per record."""
+
+    def _handler_with_state(self, **state_kwargs):
+        handler = ApiDestinationHandler()
+        handler._connected = True
+        handler._session = MagicMock()
+        state = _StreamState(
+            endpoint="/v1/records",
+            **state_kwargs,
+        )
+        handler._streams["s1"] = state
+        return handler, state
+
+    @pytest.mark.asyncio
+    async def test_header_target_sends_record_id_per_request(self):
+        handler, state = self._handler_with_state(
+            idempotency_in="header", idempotency_name="Idempotency-Key"
+        )
+        captured = []
+
+        async def _capture(state_arg, data, extra_headers=None):
+            captured.append((data, extra_headers))
+            return {}
+
+        handler._send_request = _capture  # type: ignore[assignment]
+        written, failed, _ = await handler._write_single_mode(
+            state, [{"id": 1}, {"id": 2}], ["r1", "r2"]
+        )
+        assert (written, failed) == (2, [])
+        assert captured == [
+            ({"id": 1}, {"Idempotency-Key": "r1"}),
+            ({"id": 2}, {"Idempotency-Key": "r2"}),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_body_target_adds_key_field_per_request(self):
+        handler, state = self._handler_with_state(
+            idempotency_in="body", idempotency_name="idempotency_key"
+        )
+        captured = []
+
+        async def _capture(state_arg, data, extra_headers=None):
+            captured.append((data, extra_headers))
+            return {}
+
+        handler._send_request = _capture  # type: ignore[assignment]
+        written, failed, _ = await handler._write_single_mode(
+            state, [{"id": 1}], ["r1"]
+        )
+        assert (written, failed) == (1, [])
+        assert captured == [({"id": 1, "idempotency_key": "r1"}, None)]
+
+    @pytest.mark.asyncio
+    async def test_body_target_does_not_mutate_source_record(self):
+        handler, state = self._handler_with_state(
+            idempotency_in="body", idempotency_name="idempotency_key"
+        )
+        handler._send_request = AsyncMock(return_value={})
+        record = {"id": 1}
+        await handler._write_single_mode(state, [record], ["r1"])
+        assert record == {"id": 1}
+
+    @pytest.mark.asyncio
+    async def test_body_target_collision_fails_only_that_record(self):
+        """A record that already carries the reserved field must not be
+        silently overwritten; it fails alone and the rest still write."""
+        handler, state = self._handler_with_state(
+            idempotency_in="body", idempotency_name="idempotency_key"
+        )
+        sent = []
+
+        async def _capture(state_arg, data, extra_headers=None):
+            sent.append(data)
+            return {}
+
+        handler._send_request = _capture  # type: ignore[assignment]
+        written, failed, _ = await handler._write_single_mode(
+            state,
+            [{"id": 1, "idempotency_key": "mine"}, {"id": 2}],
+            ["r1", "r2"],
+        )
+        assert (written, failed) == (1, ["r1"])
+        assert sent == [{"id": 2, "idempotency_key": "r2"}]
+
+    @pytest.mark.asyncio
+    async def test_no_idempotency_sends_no_extra_headers(self):
+        handler, state = self._handler_with_state()
+        captured = []
+
+        async def _capture(state_arg, data, extra_headers=None):
+            captured.append(extra_headers)
+            return {}
+
+        handler._send_request = _capture  # type: ignore[assignment]
+        await handler._write_single_mode(state, [{"id": 1}], ["r1"])
+        assert captured == [None]
+
+    @pytest.mark.asyncio
+    async def test_first_failure_reason_reaches_the_failure_summary(self):
+        """A reserved-field collision on every record must surface its
+        actionable reason in the engine-facing summary, not just this
+        container's per-record warnings."""
+        handler, _state = self._handler_with_state(
+            idempotency_in="body", idempotency_name="idempotency_key"
+        )
+        handler._connected = True
+        result = await handler.write_batch(
+            run_id="run",
+            stream_id="s1",
+            batch_seq=0,
+            record_batch=_to_record_batch([{"id": 1, "idempotency_key": "mine"}]),
+            record_ids=["r1"],
+            cursor=MagicMock(),
+        )
+        assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+        assert "1/1 records failed" in result.failure_summary
+        assert "reserves" in result.failure_summary
+
+
+@pytest.mark.unit
+class TestApiHandlerRetrySemantics:
+    """Per-stream retry-safety verdict (issue #286)."""
+
+    def _doc(self, *, mode="insert", idempotency=None):
+        block: dict[str, Any] = {
+            "request": {"method": "POST", "path": f"/v1/{mode}"},
+        }
+        if idempotency is not None:
+            block["idempotency"] = idempotency
+        return {"operations": {"write": {mode: block}}}
+
+    async def _configured(self, doc, write_mode):
+        handler = ApiDestinationHandler()
+        handler._connected = True
+        handler._session = MagicMock()
+        handler.set_stream_endpoints({"s1": doc})
+        ok = await handler.configure_schema(
+            SchemaMessage(stream_id="s1", version=1, write_mode=write_mode)
+        )
+        assert ok is True
+        return handler
+
+    @pytest.mark.asyncio
+    async def test_upsert_reports_exactly_once(self):
+        handler = await self._configured(
+            self._doc(mode="upsert"), WriteMode.WRITE_MODE_UPSERT
+        )
+        verdict = handler.retry_semantics("s1")
+        assert verdict.semantics == RetrySemantics.RETRY_SEMANTICS_EXACTLY_ONCE
+        assert "conflict keys" in verdict.reason
+
+    @pytest.mark.asyncio
+    async def test_insert_with_idempotency_reports_exactly_once(self):
+        handler = await self._configured(
+            self._doc(idempotency={"in": "header", "name": "Idempotency-Key"}),
+            WriteMode.WRITE_MODE_INSERT,
+        )
+        verdict = handler.retry_semantics("s1")
+        assert verdict.semantics == RetrySemantics.RETRY_SEMANTICS_EXACTLY_ONCE
+        assert "Idempotency-Key" in verdict.reason
+
+    @pytest.mark.asyncio
+    async def test_insert_without_idempotency_reports_at_least_once(self):
+        handler = await self._configured(self._doc(), WriteMode.WRITE_MODE_INSERT)
+        verdict = handler.retry_semantics("s1")
+        assert verdict.semantics == RetrySemantics.RETRY_SEMANTICS_AT_LEAST_ONCE
+
+    def test_unconfigured_stream_falls_back_to_base_default(self):
+        handler = ApiDestinationHandler()
+        verdict = handler.retry_semantics("ghost")
+        assert verdict.semantics == RetrySemantics.RETRY_SEMANTICS_AT_LEAST_ONCE
+        assert "declares no retry-safety" in verdict.reason
+
+
+@pytest.mark.unit
+class TestApiHandlerIdempotencyHeaderCollision:
+    """The engine owns Content-Type on every request; an idempotency key
+    named after it would silently override the header instead of failing."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("name", ["Content-Type", "content-type"])
+    async def test_rejects_content_type_as_key_name(self, name):
+        handler = ApiDestinationHandler()
+        handler._connected = True
+        handler._session = MagicMock()
+        handler.set_stream_endpoints(
+            {
+                "s1": {
+                    "operations": {
+                        "write": {
+                            "insert": {
+                                "request": {"method": "POST", "path": "/v1/insert"},
+                                "idempotency": {"in": "header", "name": name},
+                            }
+                        }
+                    }
+                }
+            }
+        )
+        ok = await handler.configure_schema(
+            SchemaMessage(
+                stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT
+            )
+        )
+        assert ok is False
+
+
+@pytest.mark.unit
+class TestApiHandlerIdempotencyKeyPerMode:
+    """The key value follows the write mode's identity semantics: insert
+    sends the identity-derived record_id (SQL-insert parity); upsert
+    sends a full-content hash so a changed row gets a new key and the
+    provider applies the update instead of replaying its cached
+    response."""
+
+    def _handler(self, write_mode_key):
+        handler = ApiDestinationHandler()
+        handler._connected = True
+        handler._session = MagicMock()
+        state = _StreamState(
+            endpoint="/v1/records",
+            idempotency_in="header",
+            idempotency_name="Idempotency-Key",
+            write_mode_key=write_mode_key,
+        )
+        handler._streams["s1"] = state
+        return handler, state
+
+    @pytest.mark.asyncio
+    async def test_insert_sends_record_id(self):
+        handler, state = self._handler("insert")
+        captured = []
+
+        async def _capture(state_arg, data, extra_headers=None):
+            captured.append(extra_headers)
+            return {}
+
+        handler._send_request = _capture  # type: ignore[assignment]
+        await handler._write_single_mode(state, [{"id": 1}], ["rid-1"])
+        assert captured == [{"Idempotency-Key": "rid-1"}]
+
+    @pytest.mark.asyncio
+    async def test_upsert_sends_content_hash_not_record_id(self):
+        from src.destination.connectors.api import _content_idempotency_key
+
+        handler, state = self._handler("upsert")
+        captured = []
+
+        async def _capture(state_arg, data, extra_headers=None):
+            captured.append(extra_headers)
+            return {}
+
+        handler._send_request = _capture  # type: ignore[assignment]
+        record_v1 = {"id": 1, "name": "a"}
+        record_v2 = {"id": 1, "name": "b"}
+        await handler._write_single_mode(
+            state, [record_v1, record_v2], ["rid-1", "rid-1"]
+        )
+        keys = [h["Idempotency-Key"] for h in captured]
+        assert keys[0] == _content_idempotency_key(record_v1)
+        assert keys[1] == _content_idempotency_key(record_v2)
+        # Same entity (same record_id), changed content: the keys differ,
+        # so the provider applies the update rather than deduping it.
+        assert keys[0] != keys[1]
+        assert "rid-1" not in keys
+
+    @pytest.mark.asyncio
+    async def test_upsert_replay_of_identical_record_reuses_key(self):
+        handler, state = self._handler("upsert")
+        captured = []
+
+        async def _capture(state_arg, data, extra_headers=None):
+            captured.append(extra_headers)
+            return {}
+
+        handler._send_request = _capture  # type: ignore[assignment]
+        record = {"id": 1, "name": "a"}
+        await handler._write_single_mode(
+            state, [record, dict(record)], ["rid-1", "rid-1"]
+        )
+        keys = [h["Idempotency-Key"] for h in captured]
+        assert keys[0] == keys[1]
+
+
+@pytest.mark.unit
+class TestApiHandlerIdempotencyReservedCollisions:
+    """Configure-time rejections for keys that would collide with
+    connection-owned headers or pass-through body fields."""
+
+    def _doc(self, *, idempotency, input_schema=None):
+        block: dict[str, Any] = {
+            "request": {"method": "POST", "path": "/v1/insert"},
+            "idempotency": idempotency,
+        }
+        if input_schema is not None:
+            block["input"] = {"schema": input_schema}
+        return {"operations": {"write": {"insert": block}}}
+
+    def _handler(self, *, session_headers=frozenset()):
+        handler = ApiDestinationHandler()
+        handler._connected = True
+        handler._session = MagicMock()
+        handler._session_header_names = set(session_headers)
+        return handler
+
+    @pytest.mark.asyncio
+    async def test_rejects_key_shadowing_connection_header(self):
+        """An idempotency header named after a connection default header
+        (e.g. Authorization) would send the record id as the credential."""
+        handler = self._handler(session_headers={"authorization"})
+        handler.set_stream_endpoints(
+            {"s1": self._doc(idempotency={"in": "header", "name": "Authorization"})}
+        )
+        ok = await handler.configure_schema(
+            SchemaMessage(
+                stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT
+            )
+        )
+        assert ok is False
+
+    @pytest.mark.asyncio
+    async def test_accepts_header_not_sent_by_connection(self):
+        handler = self._handler(session_headers={"authorization"})
+        handler.set_stream_endpoints(
+            {"s1": self._doc(idempotency={"in": "header", "name": "Idempotency-Key"})}
+        )
+        ok = await handler.configure_schema(
+            SchemaMessage(
+                stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT
+            )
+        )
+        assert ok is True
+
+    @pytest.mark.asyncio
+    async def test_rejects_body_key_declared_in_input_schema(self):
+        """No body template: the record is the body, shaped by the write
+        input schema — a declared field with the reserved name would
+        collide on every record after the ack promised exactly-once."""
+        handler = self._handler()
+        handler.set_stream_endpoints(
+            {
+                "s1": self._doc(
+                    idempotency={"in": "body", "name": "idempotency_key"},
+                    input_schema={
+                        "properties": {
+                            "id": {"arrow_type": "Int64"},
+                            "idempotency_key": {"arrow_type": "Utf8"},
+                        }
+                    },
+                )
+            }
+        )
+        ok = await handler.configure_schema(
+            SchemaMessage(
+                stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT
+            )
+        )
+        assert ok is False
+
+    @pytest.mark.asyncio
+    async def test_accepts_body_key_absent_from_input_schema(self):
+        handler = self._handler()
+        handler.set_stream_endpoints(
+            {
+                "s1": self._doc(
+                    idempotency={"in": "body", "name": "idempotency_key"},
+                    input_schema={"properties": {"id": {"arrow_type": "Int64"}}},
+                )
+            }
+        )
+        ok = await handler.configure_schema(
+            SchemaMessage(
+                stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT
+            )
+        )
+        assert ok is True

@@ -1,70 +1,77 @@
 """Unit tests for gRPC client."""
 
-import grpc
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from src.grpc.client import (
-    DestinationGRPCClient,
-    BatchResult,
-    generate_record_id,
-)
+import pytest
+
+import grpc
+from src.grpc.client import BatchResult, DestinationGRPCClient, generate_record_id
 from src.grpc.generated.analitiq.v1 import AckStatus
 
 
 class TestGenerateRecordId:
-    """Tests for record ID generation."""
+    """Record identity is content-derived and position-independent (#282).
 
-    def test_generate_record_id_with_position(self):
-        """Test generating record ID using batch position."""
+    The id is a function of the record content alone -- never the run, the
+    batch sequence, or the row's offset -- so the same logical row hashes to
+    the same id across attempts and across an inclusive cursor re-read, which
+    is what lets the destination enforce idempotency on row identity instead
+    of a positional ledger.
+    """
+
+    def test_same_record_same_id_regardless_of_position(self):
+        """The same record content always yields the same id; no run/batch/
+        index dimension can move it (positional independence is the point)."""
         record = {"id": 1, "name": "test"}
-        rid = generate_record_id(
-            record=record,
-            run_id="run-123",
-            batch_seq=1,
-            index=0,
+        assert generate_record_id(record) == generate_record_id(dict(record))
+
+    def test_different_content_different_id(self):
+        """Distinct record content hashes to distinct ids."""
+        assert generate_record_id({"id": 1, "name": "a"}) != generate_record_id(
+            {"id": 2, "name": "b"}
         )
 
-        assert rid is not None
-        assert len(rid) == 16  # sha256[:16]
-
-    def test_generate_record_id_with_primary_key(self):
-        """Test generating record ID using primary key fields."""
-        record = {"id": 123, "name": "test", "value": 42}
-        rid = generate_record_id(
-            record=record,
-            run_id="run-456",
-            batch_seq=2,
-            index=5,
-            primary_key_fields=["id"],
+    def test_primary_key_fields_derive_id_from_keys_only(self):
+        """With primary_key_fields the id derives only from those fields, so two
+        rows sharing the key values but differing elsewhere hash equal."""
+        a = {"id": 7, "name": "first", "value": 1}
+        b = {"id": 7, "name": "second", "value": 99}
+        assert generate_record_id(a, primary_key_fields=["id"]) == generate_record_id(
+            b, primary_key_fields=["id"]
+        )
+        # Different key values still diverge.
+        c = {"id": 8, "name": "first", "value": 1}
+        assert generate_record_id(a, primary_key_fields=["id"]) != generate_record_id(
+            c, primary_key_fields=["id"]
         )
 
-        assert rid is not None
-        assert len(rid) == 16
+    def test_missing_primary_key_fields_fall_back_to_full_record(self):
+        """When a mapping renames/drops the configured key it is absent from the
+        (transformed) record; the id falls back to the whole record so distinct
+        rows keep distinct ids instead of all hashing the same missing-key value
+        (issue #282 -- otherwise the keyless ``_record_hash`` dedup would
+        silently drop every row but the first)."""
+        # Configured PK "id" is absent (a mapping renamed it to "user_id").
+        a = {"user_id": 7, "name": "first"}
+        b = {"user_id": 8, "name": "second"}
+        assert generate_record_id(a, primary_key_fields=["id"]) != generate_record_id(
+            b, primary_key_fields=["id"]
+        )
+        # The fallback is exactly the keyless (no-key) hash of the same record.
+        assert generate_record_id(a, primary_key_fields=["id"]) == generate_record_id(a)
 
-    def test_record_id_deterministic(self):
-        """Test that record ID is deterministic for same inputs."""
-        record = {"id": 1, "name": "test"}
-        rid1 = generate_record_id(record, "run-123", 1, 0)
-        rid2 = generate_record_id(record, "run-123", 1, 0)
+    def test_two_identical_keyless_records_share_id(self):
+        """Byte-identical keyless records produce the same id -- the synthetic
+        ``_record_hash`` dedup key for a keyless insert stream."""
+        assert generate_record_id({"id": 1, "name": "test"}) == generate_record_id(
+            {"id": 1, "name": "test"}
+        )
 
-        assert rid1 == rid2
-
-    def test_record_id_differs_by_batch(self):
-        """Test that record ID differs for different batches."""
-        record = {"id": 1, "name": "test"}
-        rid1 = generate_record_id(record, "run-123", 1, 0)
-        rid2 = generate_record_id(record, "run-123", 2, 0)
-
-        assert rid1 != rid2
-
-    def test_record_id_differs_by_run(self):
-        """Test that record ID differs for different runs."""
-        record = {"id": 1, "name": "test"}
-        rid1 = generate_record_id(record, "run-123", 1, 0)
-        rid2 = generate_record_id(record, "run-456", 1, 0)
-
-        assert rid1 != rid2
+    def test_returned_id_is_full_sha256_hex(self):
+        """The id is the full (untruncated) 64-char SHA-256 hex digest."""
+        rid = generate_record_id({"id": 1, "name": "test"})
+        assert len(rid) == 64
+        assert all(c in "0123456789abcdef" for c in rid)
 
 
 class TestBatchResult:
@@ -147,6 +154,44 @@ class TestDestinationGRPCClient:
         assert client._connected is False
 
 
+class TestGetCapabilities:
+    """get_capabilities raises on failure rather than collapsing to None, so a
+    transport failure is never mistaken for a populated empty response."""
+
+    @staticmethod
+    def _rpc_error() -> grpc.aio.AioRpcError:
+        return grpc.aio.AioRpcError(
+            code=grpc.StatusCode.UNAVAILABLE,
+            initial_metadata=grpc.aio.Metadata(),
+            trailing_metadata=grpc.aio.Metadata(),
+            details="destination unreachable",
+        )
+
+    @pytest.mark.asyncio
+    async def test_raises_when_not_connected(self):
+        client = DestinationGRPCClient()  # _stub is None
+        with pytest.raises(ConnectionError, match="not connected"):
+            await client.get_capabilities()
+
+    @pytest.mark.asyncio
+    async def test_raises_on_rpc_error(self):
+        client = DestinationGRPCClient()
+        client._stub = MagicMock()
+        client._stub.GetCapabilities = AsyncMock(side_effect=self._rpc_error())
+        with pytest.raises(grpc.aio.AioRpcError):
+            await client.get_capabilities()
+
+    @pytest.mark.asyncio
+    async def test_returns_response_on_success(self):
+        from src.grpc.generated.analitiq.v1 import GetCapabilitiesResponse
+
+        client = DestinationGRPCClient()
+        client._stub = MagicMock()
+        resp = GetCapabilitiesResponse(connector_type="database")
+        client._stub.GetCapabilities = AsyncMock(return_value=resp)
+        assert await client.get_capabilities() is resp
+
+
 class TestConnectRetryLogLevels:
     """Attempt 1 logs at DEBUG (expected during concurrent startup);
     attempts 2+ log at WARNING.
@@ -168,9 +213,9 @@ class TestConnectRetryLogLevels:
         mock_stub = MagicMock()
         mock_stub.HealthCheck = AsyncMock(side_effect=self._unavailable_error())
 
-        with patch("src.grpc.client.grpc_aio.insecure_channel"), \
-             patch("src.grpc.client.DestinationServiceStub", return_value=mock_stub), \
-             patch("src.grpc.client.logger") as mock_logger:
+        with patch("src.grpc.client.grpc_aio.insecure_channel"), patch(
+            "src.grpc.client.DestinationServiceStub", return_value=mock_stub
+        ), patch("src.grpc.client.logger") as mock_logger:
             result = await client.connect(
                 max_connect_retries=1,
                 retry_delay_seconds=0.0,
@@ -191,9 +236,9 @@ class TestConnectRetryLogLevels:
         mock_stub = MagicMock()
         mock_stub.HealthCheck = AsyncMock(side_effect=self._unavailable_error())
 
-        with patch("src.grpc.client.grpc_aio.insecure_channel"), \
-             patch("src.grpc.client.DestinationServiceStub", return_value=mock_stub), \
-             patch("src.grpc.client.logger") as mock_logger:
+        with patch("src.grpc.client.grpc_aio.insecure_channel"), patch(
+            "src.grpc.client.DestinationServiceStub", return_value=mock_stub
+        ), patch("src.grpc.client.logger") as mock_logger:
             result = await client.connect(
                 max_connect_retries=3,
                 retry_delay_seconds=0.0,
@@ -232,9 +277,9 @@ class TestConnectRetryLogLevels:
             side_effect=[self._unavailable_error(), serving]
         )
 
-        with patch("src.grpc.client.grpc_aio.insecure_channel"), \
-             patch("src.grpc.client.DestinationServiceStub", return_value=mock_stub), \
-             patch("src.grpc.client.logger") as mock_logger:
+        with patch("src.grpc.client.grpc_aio.insecure_channel"), patch(
+            "src.grpc.client.DestinationServiceStub", return_value=mock_stub
+        ), patch("src.grpc.client.logger") as mock_logger:
             result = await client.connect(
                 max_connect_retries=3,
                 retry_delay_seconds=0.0,
@@ -262,9 +307,9 @@ class TestConnectRetryLogLevels:
         mock_stub = MagicMock()
         mock_stub.HealthCheck = AsyncMock(return_value=not_serving)
 
-        with patch("src.grpc.client.grpc_aio.insecure_channel"), \
-             patch("src.grpc.client.DestinationServiceStub", return_value=mock_stub), \
-             patch("src.grpc.client.logger") as mock_logger:
+        with patch("src.grpc.client.grpc_aio.insecure_channel"), patch(
+            "src.grpc.client.DestinationServiceStub", return_value=mock_stub
+        ), patch("src.grpc.client.logger") as mock_logger:
             result = await client.connect(
                 max_connect_retries=1,
                 retry_delay_seconds=0.0,
@@ -288,6 +333,7 @@ class TestClientPayloadEncoding:
         decodes them together.
         """
         import io
+
         import pyarrow as pa
 
         batch = pa.RecordBatch.from_pylist(
@@ -348,8 +394,7 @@ class TestClientSchemaBuilder:
         client = DestinationGRPCClient(timeout_seconds=300)
         schema_msg = client._build_schema_message(
             "s",
-            {"write_mode": "upsert", "schema_version": 1,
-             "ack_timeout_seconds": 30},
+            {"write_mode": "upsert", "schema_version": 1, "ack_timeout_seconds": 30},
         )
         assert schema_msg.ack_timeout_seconds == 30
 
@@ -360,8 +405,7 @@ class TestClientSchemaBuilder:
         client = DestinationGRPCClient(timeout_seconds=30)
         schema_msg = client._build_schema_message(
             "s",
-            {"write_mode": "upsert", "schema_version": 1,
-             "ack_timeout_seconds": 300},
+            {"write_mode": "upsert", "schema_version": 1, "ack_timeout_seconds": 300},
         )
         assert schema_msg.ack_timeout_seconds == 30
 
@@ -379,6 +423,7 @@ class TestStreamTaskFailurePropagation:
     @pytest.mark.asyncio
     async def test_writer_exception_surfaces_as_fatal(self):
         import asyncio
+
         import pyarrow as pa
 
         from src.grpc.client import _STREAM_TASK_FAILED
@@ -415,6 +460,7 @@ class TestStreamTaskFailurePropagation:
         actionable message — not 'NoneType: None' — so operators can
         distinguish premature peer close from in-task errors."""
         import asyncio
+
         import pyarrow as pa
 
         from src.grpc.client import _STREAM_TASK_FAILED
@@ -514,6 +560,7 @@ class TestAckTimeoutAndTeardown:
         pushing onto a zombie stream.
         """
         import asyncio
+
         import pyarrow as pa
 
         from src.grpc.generated.analitiq.v1 import Cursor
@@ -559,6 +606,7 @@ class TestAckTimeoutAndTeardown:
         failure_summary — this is how the 'Too many pings' RPC error surfaces.
         """
         import asyncio
+
         import pyarrow as pa
 
         from src.grpc.generated.analitiq.v1 import Cursor
@@ -617,7 +665,7 @@ class TestAckTimeoutAndTeardown:
 
     @pytest.mark.asyncio
     async def test_wait_with_heartbeat_raises_timeout_on_empty_queue(self):
-        """_wait_with_heartbeat raises asyncio.TimeoutError when self.timeout expires."""
+        """_wait_with_heartbeat raises asyncio.TimeoutError when timeout expires."""
         import asyncio
 
         client = DestinationGRPCClient()
@@ -655,15 +703,17 @@ class TestAckTimeoutAndTeardown:
             client._response_queue.put_nowait(sentinel)
             return await original_wait(fs, timeout=1.0)
 
-        with patch("src.grpc.client.asyncio.wait", patched_wait), \
-             patch("src.grpc.client.logger") as mock_logger:
+        with patch("src.grpc.client.asyncio.wait", patched_wait), patch(
+            "src.grpc.client.logger"
+        ) as mock_logger:
             result = await client._wait_with_heartbeat(batch_seq=7)
 
         assert result is sentinel
         # logger.info("Still waiting for ACK batch=%d ...", batch_seq, ...)
         # The format string and numeric args are separate positional args.
         heartbeat_calls = [
-            c for c in mock_logger.info.call_args_list
+            c
+            for c in mock_logger.info.call_args_list
             if c.args and "Still waiting" in c.args[0]
         ]
         assert heartbeat_calls, "Expected at least one heartbeat INFO log"
@@ -692,14 +742,15 @@ class TestAckTimeoutAndTeardown:
         mock_stub = MagicMock()
         mock_stub.HealthCheck = AsyncMock(return_value=serving)
 
-        with patch("src.grpc.client.grpc_aio.insecure_channel", side_effect=fake_channel), \
-             patch("src.grpc.client.DestinationServiceStub", return_value=mock_stub):
+        with patch(
+            "src.grpc.client.grpc_aio.insecure_channel", side_effect=fake_channel
+        ), patch("src.grpc.client.DestinationServiceStub", return_value=mock_stub):
             await client.connect(max_connect_retries=1)
 
         keepalive_keys = {k for k, _ in captured_options if "keepalive" in k.lower()}
-        assert not keepalive_keys, (
-            f"Channel must not use keepalive options; found: {keepalive_keys}"
-        )
+        assert (
+            not keepalive_keys
+        ), f"Channel must not use keepalive options; found: {keepalive_keys}"
 
     @pytest.mark.asyncio
     async def test_ack_timeout_surfaces_task_failure_set_during_grace(self):
@@ -711,6 +762,7 @@ class TestAckTimeoutAndTeardown:
         cause (e.g. 'Too many pings') finishes just after the ACK timeout fires.
         """
         import asyncio
+
         import pyarrow as pa
 
         from src.grpc.generated.analitiq.v1 import Cursor
@@ -765,6 +817,7 @@ class TestAckTimeoutAndTeardown:
         leak the raw error past the BatchResult contract.
         """
         import asyncio
+
         import pyarrow as pa
 
         from src.grpc.generated.analitiq.v1 import Cursor
@@ -889,6 +942,7 @@ class TestSendBatchSelfHeal:
         reconnects and re-runs start_stream with the cached params, then
         sends successfully."""
         import asyncio
+
         import pyarrow as pa
 
         from src.grpc.generated.analitiq.v1 import AckStatus, Cursor
@@ -913,15 +967,13 @@ class TestSendBatchSelfHeal:
             client._connected = True
             return True
 
-        with patch.object(client, "connect", connect_mock), \
-             patch.object(client, "start_stream", side_effect=fake_start_stream), \
-             patch.object(
-                 client, "_request_queue", new=asyncio.Queue()
-             ), \
-             patch.object(
-                 client, "_wait_with_heartbeat",
-                 AsyncMock(return_value=_batch_ack(AckStatus.ACK_STATUS_SUCCESS)),
-             ):
+        with patch.object(client, "connect", connect_mock), patch.object(
+            client, "start_stream", side_effect=fake_start_stream
+        ), patch.object(client, "_request_queue", new=asyncio.Queue()), patch.object(
+            client,
+            "_wait_with_heartbeat",
+            AsyncMock(return_value=_batch_ack(AckStatus.ACK_STATUS_SUCCESS)),
+        ):
             result = await client.send_batch(
                 run_id="run-1",
                 stream_id="s1",
@@ -976,6 +1028,7 @@ class TestSendBatchSelfHeal:
         """A deliberate end_stream drops cached params so a later send_batch
         raises rather than resurrecting an ended stream."""
         import asyncio
+
         import pyarrow as pa
 
         from src.grpc.generated.analitiq.v1 import Cursor
@@ -1049,12 +1102,9 @@ class TestSendBatchSelfHeal:
         client._stub = MagicMock()
         client._stub.StreamRecords = MagicMock(return_value=MagicMock())
 
-        with patch.object(
-                 client, "_read_responses", new=AsyncMock()
-             ), \
-             patch.object(
-                 client, "_write_requests", new=AsyncMock()
-             ):
+        with patch.object(client, "_read_responses", new=AsyncMock()), patch.object(
+            client, "_write_requests", new=AsyncMock()
+        ):
             accepted = await client.start_stream(
                 run_id="r",
                 stream_id="s",

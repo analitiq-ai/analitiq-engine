@@ -11,11 +11,11 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from cdk.connection_runtime import ConnectionRuntime
 from cdk.sql.exceptions import SchemaConfigurationError
 from cdk.sql.generic import GenericSQLConnector
 from cdk.type_map import TypeMapper
 from cdk.type_map.rules import parse_rules
-from cdk.connection_runtime import ConnectionRuntime
 
 
 def _mapper(label: str) -> TypeMapper:
@@ -48,14 +48,30 @@ def _runtime(
 class TestEndpointRefDispatch:
     def test_pre_connect_raises(self):
         handler = GenericSQLConnector()
-        handler.set_endpoint_refs({"s1": {"scope": "connector", "connection_id": "pg", "endpoint_id": "transfers"}})
+        handler.set_endpoint_refs(
+            {
+                "s1": {
+                    "scope": "connector",
+                    "connection_id": "pg",
+                    "endpoint_id": "transfers",
+                }
+            }
+        )
         with pytest.raises(RuntimeError, match="called before connect"):
             handler._type_mapper_for_stream("s1")
 
     def test_unknown_stream_id_raises(self):
         handler = GenericSQLConnector()
         handler._runtime = _runtime(connector_mapper=_mapper("pg"))
-        handler.set_endpoint_refs({"s1": {"scope": "connector", "connection_id": "pg", "endpoint_id": "transfers"}})
+        handler.set_endpoint_refs(
+            {
+                "s1": {
+                    "scope": "connector",
+                    "connection_id": "pg",
+                    "endpoint_id": "transfers",
+                }
+            }
+        )
         with pytest.raises(RuntimeError, match="no endpoint_ref registered"):
             handler._type_mapper_for_stream("unregistered-stream")
 
@@ -66,7 +82,15 @@ class TestEndpointRefDispatch:
             connector_mapper=connector_map,
             connection_mapper=_mapper("connection:dest-conn"),
         )
-        handler.set_endpoint_refs({"s1": {"scope": "connector", "connection_id": "pg", "endpoint_id": "transfers"}})
+        handler.set_endpoint_refs(
+            {
+                "s1": {
+                    "scope": "connector",
+                    "connection_id": "pg",
+                    "endpoint_id": "transfers",
+                }
+            }
+        )
         assert handler._type_mapper_for_stream("s1") is connector_map
 
     def test_connection_scoped_uses_connection_mapper(self):
@@ -77,19 +101,42 @@ class TestEndpointRefDispatch:
             connector_mapper=_mapper("pg"),
             connection_mapper=_mapper("connection:dest-conn"),
         )
-        handler.set_endpoint_refs({"s1": {"scope": "connection", "connection_id": "dest-conn", "endpoint_id": "orders"}})
-        assert handler._type_mapper_for_stream("s1").connector_slug == "connection:dest-conn"
+        handler.set_endpoint_refs(
+            {
+                "s1": {
+                    "scope": "connection",
+                    "connection_id": "dest-conn",
+                    "endpoint_id": "orders",
+                }
+            }
+        )
+        assert (
+            handler._type_mapper_for_stream("s1").connector_slug
+            == "connection:dest-conn"
+        )
 
     def test_set_endpoint_refs_copies_mapping(self):
         """External mutations must not leak into the handler's state."""
         handler = GenericSQLConnector()
-        source = {"s1": {"scope": "connector", "connection_id": "pg", "endpoint_id": "transfers"}}
+        source = {
+            "s1": {
+                "scope": "connector",
+                "connection_id": "pg",
+                "endpoint_id": "transfers",
+            }
+        }
         handler.set_endpoint_refs(source)
-        source["s1"] = {"scope": "connector", "connection_id": "evil", "endpoint_id": "injected"}
+        source["s1"] = {
+            "scope": "connector",
+            "connection_id": "evil",
+            "endpoint_id": "injected",
+        }
         handler._runtime = _runtime(connector_mapper=_mapper("pg"))
         # Original registration wins — set_endpoint_refs took a defensive copy.
         assert handler._endpoint_refs["s1"] == {
-            "scope": "connector", "connection_id": "pg", "endpoint_id": "transfers",
+            "scope": "connector",
+            "connection_id": "pg",
+            "endpoint_id": "transfers",
         }
 
 
@@ -119,7 +166,7 @@ class TestColumnDefStrictness:
 
 
 class TestWriteBatchFatalOnTypeMapError:
-    """Deterministic configuration and type-map errors in write_batch must not be retried."""
+    """Deterministic config and type-map errors in write_batch must not be retried."""
 
     @pytest.mark.asyncio
     async def test_missing_schema_contract_classified_as_fatal(self):
@@ -134,7 +181,6 @@ class TestWriteBatchFatalOnTypeMapError:
         handler._connected = True
         handler._streams["s1"] = _StreamState(
             table=MagicMock(),
-            batch_commits_table=MagicMock(),
             schema_name="myschema",
             table_name="events",
             write_mode="insert",
@@ -148,12 +194,8 @@ class TestWriteBatchFatalOnTypeMapError:
 
         handler._engine.begin = _fake_begin
 
-        async def _not_committed(*_args, **_kwargs):
-            return False
-
-        handler._check_batch_committed = _not_committed  # type: ignore[method-assign]
-
         import pyarrow as pa
+
         result = await handler.write_batch(
             run_id="run-1",
             stream_id="s1",
@@ -171,19 +213,15 @@ class TestWriteBatchFatalOnTypeMapError:
     @pytest.mark.asyncio
     async def test_type_map_error_classified_as_fatal(self):
         from contextlib import asynccontextmanager
-        from unittest.mock import AsyncMock, MagicMock
+        from unittest.mock import MagicMock
 
-        from cdk.sql.generic import (
-            GenericSQLConnector,
-            _StreamState,
-        )
+        from cdk.sql.generic import GenericSQLConnector, _StreamState
         from cdk.type_map import UnmappedTypeError
         from src.grpc.generated.analitiq.v1 import AckStatus, Cursor
 
         handler = GenericSQLConnector()
-        # Preconditions: connected, schema configured, idempotency check
-        # clean. We don't actually hit the DB because the schema-contract
-        # prepare_records call raises before any SQL runs.
+        # Preconditions: connected, schema configured. We don't actually hit
+        # the DB because the insert raises before any SQL runs.
         contract_mock = MagicMock()
         contract_mock.to_db_records.return_value = [{"id": 1}]
 
@@ -191,7 +229,6 @@ class TestWriteBatchFatalOnTypeMapError:
         handler._connected = True
         handler._streams["s1"] = _StreamState(
             table=MagicMock(),
-            batch_commits_table=MagicMock(),
             write_mode="insert",
             primary_keys=[],
             schema_contract=contract_mock,
@@ -208,11 +245,6 @@ class TestWriteBatchFatalOnTypeMapError:
 
         handler._engine.begin = _fake_begin
 
-        async def _not_committed(*_args, **_kwargs):
-            return False
-
-        handler._check_batch_committed = _not_committed  # type: ignore[method-assign]
-
         # The schema contract's prepare_records is called inside _insert_records;
         # route the UnmappedTypeError through that entry.
         def _raising_insert(_conn, _state, _records):
@@ -221,6 +253,7 @@ class TestWriteBatchFatalOnTypeMapError:
         handler._insert_records = _raising_insert  # type: ignore[method-assign]
 
         import pyarrow as pa
+
         result = await handler.write_batch(
             run_id="run-1",
             stream_id="s1",
@@ -238,7 +271,6 @@ class TestWriteBatchFatalOnTypeMapError:
     async def test_adbc_only_missing_schema_contract_names_table(self):
         # The ADBC-only guard message must carry schema.table context so
         # the failure_summary is actionable in monitoring (issue #149).
-        from unittest.mock import MagicMock
 
         from cdk.sql.generic import GenericSQLConnector, _StreamState
         from src.grpc.generated.analitiq.v1 import AckStatus, Cursor
@@ -254,12 +286,8 @@ class TestWriteBatchFatalOnTypeMapError:
             schema_contract=None,
         )
 
-        async def _not_committed(*_args, **_kwargs):
-            return False
-
-        handler._check_batch_committed = _not_committed  # type: ignore[method-assign]
-
         import pyarrow as pa
+
         result = await handler.write_batch(
             run_id="run-1",
             stream_id="s1",
@@ -273,41 +301,89 @@ class TestWriteBatchFatalOnTypeMapError:
         assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
         assert "myschema.events" in result.failure_summary
 
+    @pytest.mark.asyncio
+    async def test_upsert_without_conflict_keys_classified_as_fatal(self):
+        # End-to-end through write_batch: the _upsert_records raise must be
+        # classified FATAL (deterministic — retrying an unkeyed upsert can
+        # never heal), not retried forever or degraded.
+        from contextlib import asynccontextmanager
+        from unittest.mock import MagicMock
 
-class TestUpsertDowngradeWarns:
-    """Upsert with no resolvable conflict keys falls back to plain INSERT,
-    but never silently (issue #151)."""
+        from cdk.sql.generic import GenericSQLConnector, _StreamState
+        from src.grpc.generated.analitiq.v1 import AckStatus, Cursor
+
+        handler = GenericSQLConnector()
+        contract_mock = MagicMock()
+        contract_mock.to_db_records.return_value = [{"id": 1}]
+
+        handler._engine = MagicMock()
+        handler._connected = True
+        handler._streams["s1"] = _StreamState(
+            table=MagicMock(),
+            write_mode="upsert",
+            conflict_keys=[],
+            schema_contract=contract_mock,
+        )
+
+        class _FakeTxnConn:
+            async def run_sync(self, fn, *args):
+                return fn(MagicMock(), *args)
+
+        @asynccontextmanager
+        async def _fake_begin():
+            yield _FakeTxnConn()
+
+        handler._engine.begin = _fake_begin
+
+        import pyarrow as pa
+
+        result = await handler.write_batch(
+            run_id="run-1",
+            stream_id="s1",
+            batch_seq=1,
+            record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
+            record_ids=["1"],
+            cursor=Cursor(token=b""),
+        )
+
+        assert result.success is False
+        assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+        assert "write-config" in result.failure_summary
+
+
+class TestUpsertFailsLoudWithoutConflictKeys:
+    """Upsert with no conflict keys fails loud — the engine never silently
+    degrades to INSERT (which would duplicate rows) and never derives a
+    target from ``primary_keys`` (issue #254)."""
 
     @pytest.mark.asyncio
-    async def test_upsert_without_conflict_keys_warns_and_inserts(self, caplog):
-        import logging
-        from unittest.mock import AsyncMock, MagicMock
+    async def test_upsert_without_conflict_keys_raises(self):
+        from unittest.mock import MagicMock
 
+        from cdk.sql.exceptions import SchemaConfigurationError
         from cdk.sql.generic import GenericSQLConnector, _StreamState
 
         handler = GenericSQLConnector()
         handler._insert_records = MagicMock()  # type: ignore[method-assign]
+        conn = MagicMock()
         state = _StreamState(
             table=MagicMock(),
             schema_name="public",
             table_name="events",
             write_mode="upsert",
-            primary_keys=[],
+            primary_keys=["id"],  # present, but must NOT be used as a fallback
             conflict_keys=[],
         )
 
-        with caplog.at_level(logging.WARNING, logger="cdk.sql.generic"):
-            handler._upsert_records(MagicMock(), state, [{"id": 1}])
+        with pytest.raises(SchemaConfigurationError, match="no conflict_keys"):
+            handler._upsert_records(conn, state, [{"id": 1}])
 
-        handler._insert_records.assert_called_once()
-        assert any(
-            "duplicates are possible" in r.getMessage() for r in caplog.records
-        )
+        handler._insert_records.assert_not_called()
+        conn.execute.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_upsert_with_conflict_keys_does_not_warn(self, caplog):
-        import logging
-        from unittest.mock import AsyncMock, MagicMock
+    async def test_upsert_with_conflict_keys_executes(self):
+        from unittest.mock import MagicMock
 
         from cdk.sql.generic import GenericSQLConnector, _StreamState
 
@@ -319,15 +395,54 @@ class TestUpsertDowngradeWarns:
             schema_name="public",
             table_name="events",
             write_mode="upsert",
-            primary_keys=["id"],
+            conflict_keys=["id"],
         )
 
         conn = MagicMock()
-        with caplog.at_level(logging.WARNING, logger="cdk.sql.generic"):
-            handler._upsert_records(conn, state, [{"id": 1}])
+        handler._upsert_records(conn, state, [{"id": 1}])
 
+        handler.dialect.build_sqlalchemy_upsert.assert_called_once()
+        # The verbatim conflict target must reach the SQL builder unchanged.
+        args, _ = handler.dialect.build_sqlalchemy_upsert.call_args
+        assert args[2] == ["id"]
         conn.execute.assert_called_once()
-        assert not caplog.records
+
+    @pytest.mark.asyncio
+    async def test_adbc_upsert_without_conflict_keys_raises(self):
+        # ADBC twin of the SQLAlchemy raise: the same fail-loud semantics
+        # must hold on the MERGE path (Snowflake/BigQuery), before any ingest.
+        from unittest.mock import MagicMock
+
+        from cdk.sql.exceptions import SchemaConfigurationError
+        from cdk.sql.generic import GenericSQLConnector, _StreamState
+
+        handler = GenericSQLConnector()
+        handler._adbc_only = True
+        handler._merge_ingest_sync = MagicMock()  # type: ignore[method-assign]
+        handler._adbc_only_ingest_sync = MagicMock()  # type: ignore[method-assign]
+        contract = MagicMock()
+        contract.cast_arrow_batch.return_value = MagicMock()
+        state = _StreamState(
+            schema_name="analytics",
+            table_name="events",
+            write_mode="upsert",
+            conflict_keys=[],
+            schema_contract=contract,
+        )
+
+        with pytest.raises(SchemaConfigurationError, match="no conflict_keys"):
+            await handler._write_batch_adbc_only(
+                state,
+                "run-1",
+                "s1",
+                1,
+                MagicMock(),
+                truncate_now=False,
+            )
+
+        # Fail before any ingest/MERGE — no partial write.
+        handler._merge_ingest_sync.assert_not_called()
+        handler._adbc_only_ingest_sync.assert_not_called()
 
 
 class TestEnsureTablesEngineNoneRaises:
@@ -337,7 +452,8 @@ class TestEnsureTablesEngineNoneRaises:
 
     @pytest.mark.asyncio
     async def test_engine_none_raises_adbc_configuration_error(self):
-        from unittest.mock import MagicMock, patch as mock_patch
+        from unittest.mock import MagicMock
+        from unittest.mock import patch as mock_patch
 
         from cdk.adbc_registry import AdbcConfigurationError
         from cdk.sql.generic import GenericSQLConnector, _StreamState
@@ -354,8 +470,6 @@ class TestEnsureTablesEngineNoneRaises:
             GenericSQLConnector, "_build_column_defs", return_value=[]
         ), mock_patch(
             "cdk.sql.generic.build_create_table_sql", return_value="CREATE ..."
-        ), mock_patch.object(
-            GenericSQLConnector, "_build_batch_commits_ddl", return_value="CREATE ..."
         ):
             with pytest.raises(
                 AdbcConfigurationError, match=r"connect\(\) must be called"
@@ -391,11 +505,9 @@ class TestPrepareForSqlAlchemy:
 
     def test_json_column_kept_as_wire_string(self):
         import pyarrow as pa
-        from cdk.sql.generic import (
-            GenericSQLConnector,
-            _StreamState,
-        )
+
         from cdk.schema_contract import SchemaContract
+        from cdk.sql.generic import GenericSQLConnector, _StreamState
 
         handler = GenericSQLConnector()
         contract = SchemaContract(
@@ -430,11 +542,9 @@ class TestPrepareForSqlAlchemy:
 
     def test_null_json_column_passes_through(self):
         import pyarrow as pa
-        from cdk.sql.generic import (
-            GenericSQLConnector,
-            _StreamState,
-        )
+
         from cdk.schema_contract import SchemaContract
+        from cdk.sql.generic import GenericSQLConnector, _StreamState
 
         handler = GenericSQLConnector()
         contract = SchemaContract(
@@ -451,22 +561,26 @@ class TestPrepareForSqlAlchemy:
         )
         state = _StreamState(schema_contract=contract)
         batch = pa.RecordBatch.from_pylist(
-            [{"metadata": None}], schema=contract.arrow_schema,
+            [{"metadata": None}],
+            schema=contract.arrow_schema,
         )
         records = handler._prepare_for_sqlalchemy(state, batch)
         assert records == [{"metadata": None}]
 
     def test_raises_when_schema_contract_is_none(self):
         import pyarrow as pa
-        from cdk.sql.generic import GenericSQLConnector, _StreamState
+
         from cdk.adbc_registry import AdbcConfigurationError
+        from cdk.sql.generic import GenericSQLConnector, _StreamState
 
         handler = GenericSQLConnector()
         state = _StreamState(
             schema_name="public", table_name="events", schema_contract=None
         )
         batch = pa.RecordBatch.from_pylist([{"id": 1}])
-        with pytest.raises(AdbcConfigurationError, match=r"public\.events.*SchemaContract"):
+        with pytest.raises(
+            AdbcConfigurationError, match=r"public\.events.*SchemaContract"
+        ):
             handler._prepare_for_sqlalchemy(state, batch)
 
 
@@ -480,10 +594,7 @@ class TestDDLLockSerialization:
         import asyncio
 
         from cdk.sql import generic as generic_module
-        from cdk.sql.generic import (
-            GenericSQLConnector,
-            _StreamState,
-        )
+        from cdk.sql.generic import GenericSQLConnector, _StreamState
 
         handler = GenericSQLConnector()
         # Pretend the engine is connected; we intercept the DDL build + the
@@ -494,12 +605,9 @@ class TestDDLLockSerialization:
         # read-only test mapper (no write rules) doesn't raise before the
         # lock is even reached.
         monkeypatch.setattr(
-            generic_module, "build_create_table_sql",
+            generic_module,
+            "build_create_table_sql",
             lambda *a, **k: "CREATE TABLE t (id BIGINT)",
-        )
-        monkeypatch.setattr(
-            GenericSQLConnector, "_build_batch_commits_ddl",
-            lambda self, schema_name, mapper: "CREATE TABLE _batch_commits (x BIGINT)",
         )
 
         in_flight = 0
@@ -514,8 +622,8 @@ class TestDDLLockSerialization:
             # this critical section if the lock isn't holding.
             await asyncio.sleep(0.01)
             in_flight -= 1
-            # Reflection returns (target_table, batch_commits_table).
-            return object(), object()
+            # Reflection returns the single bound target table.
+            return object()
 
         # The handler's _ensure_tables_exist uses engine.begin() as an async
         # context manager; bypass with a coroutine returning a prepared ctx.
@@ -537,7 +645,9 @@ class TestDDLLockSerialization:
                 schema_name="public",
                 table_name=f"t_{stream_id}",
                 endpoint_document={
-                    "columns": [{"name": "id", "native_type": "BIGINT", "nullable": False}],
+                    "columns": [
+                        {"name": "id", "native_type": "BIGINT", "nullable": False}
+                    ],
                     "primary_keys": ["id"],
                     "database_object": {"name": f"t_{stream_id}", "schema": "public"},
                 },
@@ -624,7 +734,9 @@ class TestConfigureSchemaErrorPropagation:
         ):
             await handler.configure_schema(
                 SchemaSpec(
-                    stream_id="s1", version=1, write_mode=99,
+                    stream_id="s1",
+                    version=1,
+                    write_mode=99,
                     ack_timeout_seconds=30,
                 )
             )

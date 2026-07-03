@@ -2,10 +2,12 @@
 
 import json
 from pathlib import Path
-from typing import Any, Dict, Type
+from typing import Any
 
 
-def load_json_file(path: Path, error_cls: Type[Exception] = ValueError) -> Dict[str, Any]:
+def load_json_file(
+    path: Path, error_cls: type[Exception] = ValueError
+) -> dict[str, Any]:
     """Open *path*, parse JSON, and return the result dict.
 
     Raises *error_cls* (default ``ValueError``) with the file path included in
@@ -14,6 +16,7 @@ def load_json_file(path: Path, error_cls: Type[Exception] = ValueError) -> Dict[
     """
     try:
         with path.open() as fh:
-            return json.load(fh)
+            data: dict[str, Any] = json.load(fh)
+            return data
     except json.JSONDecodeError as err:
         raise error_cls(f"Invalid JSON in {path}: {err}") from err

@@ -11,11 +11,12 @@ Layout (rooted at the project containing ``pipelines/manifest.json``):
     pipelines/<pipeline_id>/streams/<stream_id>.json
     connections/<connection_id>/connection.json
     connections/<connection_id>/.secrets/credentials.json
-    connections/<connection_id>/definition/endpoints/<endpoint_id>.json   (private endpoints)
-    connections/<connection_id>/definition/type-map-read.json                  (optional)
+    connections/<connection_id>/definition/endpoints/<endpoint_id>.json
+        (private endpoints)
+    connections/<connection_id>/definition/type-map-read.json (optional)
     connectors/<connector_id>/definition/connector.json
     connectors/<connector_id>/definition/type-map-read.json
-    connectors/<connector_id>/definition/endpoints/<endpoint_id>.json   (public endpoints)
+    connectors/<connector_id>/definition/endpoints/<endpoint_id>.json (public endpoints)
 
 Identity is ``*_id`` throughout. Cross-document references carry the id
 that matches the on-disk directory name:
@@ -36,44 +37,116 @@ from __future__ import annotations
 import logging
 import os
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any
 
-from src.config.schema_validator import ContractValidationError, validate as validate_artifact
-from src.config.endpoint_resolver import (
-    ConnectionLookup,
-    resolve_endpoint_ref,
-)
-from src.config.connection_loader import (
-    load_connection,
-    load_connection_file,
-    load_connector_definition,
-)
-from src.config.utils import load_json_file
+from cdk.connection_runtime import ConnectionRuntime
+from cdk.secrets import LocalFileSecretsResolver, SecretsResolver
 from cdk.type_map import (
     TypeMapNotFoundError,
     TypeMapper,
     load_connection_type_map,
     load_type_map,
 )
-from src.models.stream import EndpointRef
+from src.config.connection_loader import load_connection_file, load_connector_definition
+from src.config.endpoint_resolver import ConnectionLookup, resolve_endpoint_ref
+from src.config.schema_validator import ContractValidationError
+from src.config.schema_validator import validate as validate_artifact
+from src.config.utils import load_json_file
 from src.models.resolved import (
+    BatchingConfig,
+    ErrorHandlingConfig,
+    PipelineConnections,
+    ReplicationConfig,
     ResolvedDestination,
     ResolvedPipeline,
     ResolvedSource,
     ResolvedStream,
+    RuntimeConfig,
 )
-from cdk.secrets import LocalFileSecretsResolver, SecretsResolver
-from cdk.connection_runtime import ConnectionRuntime
+from src.models.stream import EndpointRef
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_runtime_config(raw: Mapping[str, Any]) -> RuntimeConfig:
+    """Build a typed :class:`RuntimeConfig` from the raw pipeline runtime block.
+
+    Only keys the pipeline actually sets are forwarded; every omitted (or
+    ``null``) key falls through to the dataclass default, which sources the
+    value from :mod:`src.config.settings` (env-overridable). The precedence is
+    therefore pipeline config > environment variable > built-in default.
+    """
+    batching = raw.get("batching") or {}
+    error_handling = raw.get("error_handling") or {}
+
+    # A present-but-null key is treated like an omitted one (the contract allows
+    # retry_delay_seconds: null): both fall through to the settings default.
+    batching_kwargs = {
+        key: batching[key]
+        for key in ("batch_size", "max_concurrent_batches")
+        if batching.get(key) is not None
+    }
+    error_kwargs = {
+        key: error_handling[key]
+        for key in ("strategy", "max_retries", "retry_delay_seconds")
+        if error_handling.get(key) is not None
+    }
+    runtime_kwargs: dict[str, Any] = {}
+    if raw.get("buffer_size") is not None:
+        runtime_kwargs["buffer_size"] = raw["buffer_size"]
+
+    return RuntimeConfig(
+        batching=BatchingConfig(**batching_kwargs),
+        error_handling=ErrorHandlingConfig(**error_kwargs),
+        **runtime_kwargs,
+    )
+
+
+def _parse_replication(raw_source: Mapping[str, Any]) -> ReplicationConfig | None:
+    """Build a typed :class:`ReplicationConfig` from a stream's source block.
+
+    Returns ``None`` when no replication policy is present (full-refresh
+    sources may omit it). ``method`` is contract-required, so it is read
+    directly; the optional cursor/tie-breaker fields default to absent.
+    """
+    raw = raw_source.get("replication")
+    if not raw:
+        return None
+    return ReplicationConfig(
+        method=raw["method"],
+        cursor_field=raw.get("cursor_field"),
+        tie_breaker_fields=raw.get("tie_breaker_fields"),
+    )
+
 
 # Matches the endpoint variant name in a $schema URL.
 # The trailing boundary is either "/" or end-of-string so that both
 # "https://schemas.analitiq.ai/api-endpoint/latest.json" and
 # "https://schemas.analitiq.ai/api-endpoint" extract "api-endpoint".
 _ENDPOINT_KIND_RE = re.compile(r"/([A-Za-z][\w-]*-endpoint)(?:/|$)")
+
+# A stream reference in the pipeline's ``streams`` list may carry a trailing
+# version suffix (e.g. ``{uuid}_v2``). The stream document's own ``stream_id``
+# is always bare, so the suffix is split off for the index lookup and the
+# integer rides onto every emitted checkpoint line. The engine never acts on
+# the version; it is metadata the deployment uses to scope the durable cursor.
+_STREAM_VERSION_RE = re.compile(r"_v(\d+)$")
+
+
+def _split_stream_ref(ref: str) -> tuple[str, int]:
+    """Split a stream reference into ``(bare_stream_id, version)``.
+
+    A bare reference (no ``_v{n}`` suffix) is version 1: a stream that was
+    never edited, or any locally hand-authored config with no versioning
+    concept. Resolution and cursor keying use the bare id regardless.
+    """
+    match = _STREAM_VERSION_RE.search(ref)
+    if not match:
+        return ref, 1
+    return ref[: match.start()], int(match.group(1))
 
 
 # ---------------------------------------------------------------------------
@@ -85,9 +158,9 @@ _ENDPOINT_KIND_RE = re.compile(r"/([A-Za-z][\w-]*-endpoint)(?:/|$)")
 class _ConnectionRecord:
     """One entry in the on-disk connection index, keyed by ``connection_id``."""
 
-    connection_id: str       # directory name under connections/
+    connection_id: str  # directory name under connections/
     connector_id: str
-    raw_config: Dict[str, Any]
+    raw_config: dict[str, Any]
 
 
 @dataclass
@@ -96,7 +169,7 @@ class _StreamRecord:
 
     stream_id: str
     file_path: Path
-    raw_document: Dict[str, Any]
+    raw_document: dict[str, Any]
 
 
 # ---------------------------------------------------------------------------
@@ -115,20 +188,22 @@ class PipelineConfigPrep:
             raise RuntimeError("PIPELINE_ID environment variable is required")
 
         # Populated during create_config()
-        self._manifest_entry: Optional[Dict[str, Any]] = None
-        self._pipeline_dir: Optional[Path] = None
-        self._pipeline_document: Optional[Dict[str, Any]] = None
+        self._manifest_entry: dict[str, Any] | None = None
+        self._pipeline_dir: Path | None = None
+        self._pipeline_document: dict[str, Any] | None = None
 
         # Indexes built once per create_config() call, keyed by id.
-        self._connection_records: Dict[str, _ConnectionRecord] = {}      # by connection_id
-        self._stream_records: Dict[str, _StreamRecord] = {}              # by stream_id
+        self._connection_records: dict[str, _ConnectionRecord] = {}  # by connection_id
+        self._stream_records: dict[str, _StreamRecord] = {}  # by stream_id
 
         # Resolved artifacts
-        self._resolved_connections: Dict[str, ConnectionRuntime] = {}    # by connection_id
-        self._resolved_endpoints: Dict[EndpointRef, Dict[str, Any]] = {}
-        self._loaded_connectors: Dict[str, Dict[str, Any]] = {}          # by connector_id
-        self._connector_type_mappers: Dict[str, TypeMapper] = {}
-        self._connection_type_mappers: Dict[str, Optional[TypeMapper]] = {}
+        self._resolved_connections: dict[
+            str, ConnectionRuntime
+        ] = {}  # by connection_id
+        self._resolved_endpoints: dict[EndpointRef, dict[str, Any]] = {}
+        self._loaded_connectors: dict[str, dict[str, Any]] = {}  # by connector_id
+        self._connector_type_mappers: dict[str, TypeMapper] = {}
+        self._connection_type_mappers: dict[str, TypeMapper | None] = {}
 
         logger.info(
             "PipelineConfigPrep initialized: PIPELINE_ID=%s, paths=%s",
@@ -141,7 +216,7 @@ class PipelineConfigPrep:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _discover_paths() -> Dict[str, Path]:
+    def _discover_paths() -> dict[str, Path]:
         """Walk up from CWD until ``pipelines/manifest.json`` is found."""
         current = Path.cwd()
         for _ in range(10):
@@ -164,7 +239,7 @@ class PipelineConfigPrep:
     # Manifest + pipeline document
     # ------------------------------------------------------------------
 
-    def _load_manifest(self) -> Dict[str, Any]:
+    def _load_manifest(self) -> dict[str, Any]:
         manifest_path = self._paths["pipelines"] / "manifest.json"
         if not manifest_path.is_file():
             raise FileNotFoundError(f"Pipeline manifest not found: {manifest_path}")
@@ -173,9 +248,10 @@ class PipelineConfigPrep:
             raise ValueError("manifest.json missing required key: 'pipelines'")
         return manifest
 
-    def _find_manifest_entry(self, manifest: Dict[str, Any]) -> Dict[str, Any]:
+    def _find_manifest_entry(self, manifest: dict[str, Any]) -> dict[str, Any]:
         """Match manifest entry by ``pipeline_id``."""
         target = self.pipeline_id_input
+        entry: dict[str, Any]
         for entry in manifest["pipelines"]:
             if entry.get("pipeline_id") == target:
                 return entry
@@ -184,7 +260,7 @@ class PipelineConfigPrep:
             f"Pipeline id {target!r} not found in manifest. Available: {choices}"
         )
 
-    def _load_pipeline_document(self) -> Dict[str, Any]:
+    def _load_pipeline_document(self) -> dict[str, Any]:
         manifest = self._load_manifest()
         entry = self._find_manifest_entry(manifest)
         status = entry.get("status", "")
@@ -208,7 +284,7 @@ class PipelineConfigPrep:
     # On-disk indexes (id -> directory / file)
     # ------------------------------------------------------------------
 
-    def _build_connection_index(self, referenced_ids: List[str]) -> None:
+    def _build_connection_index(self, referenced_ids: list[str]) -> None:
         """Index only the connections referenced by the active pipeline.
 
         Earlier versions scanned every directory under ``connections/`` and
@@ -228,14 +304,10 @@ class PipelineConfigPrep:
                 continue
             child = connections_dir / connection_id
             if not child.is_dir():
-                raise FileNotFoundError(
-                    f"Connection directory not found: {child}"
-                )
+                raise FileNotFoundError(f"Connection directory not found: {child}")
             connection_file = child / "connection.json"
             if not connection_file.is_file():
-                raise FileNotFoundError(
-                    f"Connection file not found: {connection_file}"
-                )
+                raise FileNotFoundError(f"Connection file not found: {connection_file}")
 
             raw_config = load_connection_file(connection_file)
             validate_artifact("connection", raw_config, source=str(connection_file))
@@ -250,7 +322,8 @@ class PipelineConfigPrep:
             if doc_connection_id != child.name:
                 raise ValueError(
                     f"Connection id mismatch in {connection_file}: "
-                    f"directory={child.name!r} but document connection_id={doc_connection_id!r}"
+                    f"directory={child.name!r} but document "
+                    f"connection_id={doc_connection_id!r}"
                 )
             self._connection_records[child.name] = _ConnectionRecord(
                 connection_id=child.name,
@@ -265,10 +338,15 @@ class PipelineConfigPrep:
         )
 
     def _build_stream_index(self) -> None:
-        """Scan the active pipeline's ``streams/`` and index every stream by ``stream_id``."""
+        """Scan the active pipeline's ``streams/`` and index every stream.
+
+        Streams are indexed by ``stream_id``.
+        """
         self._stream_records.clear()
         if self._pipeline_dir is None:
-            raise RuntimeError("Pipeline document must be loaded before stream indexing")
+            raise RuntimeError(
+                "Pipeline document must be loaded before stream indexing"
+            )
         streams_dir = self._pipeline_dir / "streams"
         if not streams_dir.is_dir():
             raise FileNotFoundError(f"Streams directory not found: {streams_dir}")
@@ -278,9 +356,7 @@ class PipelineConfigPrep:
             validate_artifact("stream", document, source=str(stream_file))
             stream_id = document.get("stream_id")
             if not stream_id:
-                raise ValueError(
-                    f"Stream document {stream_file} missing 'stream_id'"
-                )
+                raise ValueError(f"Stream document {stream_file} missing 'stream_id'")
             if stream_id in self._stream_records:
                 raise ValueError(
                     f"Duplicate stream_id {stream_id!r} in {streams_dir} "
@@ -304,8 +380,7 @@ class PipelineConfigPrep:
                 cid: rec.connection_id for cid, rec in self._connection_records.items()
             },
             connector_id_by_id={
-                cid: rec.connector_id
-                for cid, rec in self._connection_records.items()
+                cid: rec.connector_id for cid, rec in self._connection_records.items()
             },
         )
 
@@ -313,7 +388,7 @@ class PipelineConfigPrep:
     # Connector + connection materialization (in-memory only)
     # ------------------------------------------------------------------
 
-    def _load_connector(self, connector_id: str) -> Dict[str, Any]:
+    def _load_connector(self, connector_id: str) -> dict[str, Any]:
         if connector_id in self._loaded_connectors:
             return self._loaded_connectors[connector_id]
         connector_dir = self._paths["connectors"] / connector_id
@@ -329,9 +404,7 @@ class PipelineConfigPrep:
             raise FileNotFoundError(
                 f"Connector definition not found for {connector_id!r}"
             )
-        document = load_connector_definition(
-            connector_id, self._paths["connectors"]
-        )
+        document = load_connector_definition(connector_id, self._paths["connectors"])
         validate_artifact("connector", document, source=str(connector_file))
         self._loaded_connectors[connector_id] = document
 
@@ -352,11 +425,13 @@ class PipelineConfigPrep:
                 connector_id,
                 err,
             )
-            self._connector_type_mappers[connector_id] = None  # type: ignore[assignment]
+            self._connector_type_mappers[
+                connector_id
+            ] = None  # type: ignore[assignment]
 
         return document
 
-    def _connection_type_mapper(self, directory: str) -> Optional[TypeMapper]:
+    def _connection_type_mapper(self, directory: str) -> TypeMapper | None:
         if directory not in self._connection_type_mappers:
             self._connection_type_mappers[directory] = load_connection_type_map(
                 self._paths["connections"], directory
@@ -373,7 +448,8 @@ class PipelineConfigPrep:
         if record is None:
             raise ValueError(
                 f"Connection id {connection_id!r} is not present under "
-                f"{self._paths['connections']}; known: {sorted(self._connection_records)}"
+                f"{self._paths['connections']}; "
+                f"known: {sorted(self._connection_records)}"
             )
         if connection_id in self._resolved_connections:
             return self._resolved_connections[connection_id]
@@ -413,7 +489,7 @@ class PipelineConfigPrep:
     # Endpoint resolution
     # ------------------------------------------------------------------
 
-    def _resolve_endpoint(self, endpoint_ref: Any) -> Dict[str, Any]:
+    def _resolve_endpoint(self, endpoint_ref: Any) -> dict[str, Any]:
         ref = EndpointRef.from_dict(endpoint_ref)
         if ref in self._resolved_endpoints:
             return self._resolved_endpoints[ref]
@@ -443,7 +519,8 @@ class PipelineConfigPrep:
             # _load_schema raises plain ValueError for unknown artifact kinds;
             # add ref and $schema URL context which that error omits.
             raise ValueError(
-                f"Endpoint {ref!s} ($schema={schema_url!r}, kind={endpoint_kind!r}): {exc}"
+                f"Endpoint {ref!s} ($schema={schema_url!r}, "
+                f"kind={endpoint_kind!r}): {exc}"
             ) from exc
         self._resolved_endpoints[ref] = document
         logger.info("Resolved endpoint: %s", ref)
@@ -455,12 +532,12 @@ class PipelineConfigPrep:
 
     def create_config(
         self,
-    ) -> Tuple[
+    ) -> tuple[
         ResolvedPipeline,
-        List[ResolvedStream],
-        Dict[str, ConnectionRuntime],
-        Dict[EndpointRef, Dict[str, Any]],
-        List[Dict[str, Any]],
+        list[ResolvedStream],
+        dict[str, ConnectionRuntime],
+        dict[EndpointRef, dict[str, Any]],
+        list[dict[str, Any]],
     ]:
         """Load and return the validated, resolved pipeline configuration.
 
@@ -491,20 +568,39 @@ class PipelineConfigPrep:
         for dest_id in dest_ids:
             self._resolve_connection_by_id(dest_id)
 
-        # Stream configs
-        pipeline_stream_ids = list(pipeline_doc.get("streams") or [])
-        stream_configs: List[ResolvedStream] = []
-        for stream_id in pipeline_stream_ids:
-            record = self._stream_records.get(stream_id)
+        # Stream configs. A reference may carry a ``_v{n}`` version suffix;
+        # the bare id resolves the stream record and the version rides onto
+        # the emitted checkpoint line.
+        pipeline_stream_refs = list(pipeline_doc.get("streams") or [])
+        stream_configs: list[ResolvedStream] = []
+        seen_bare: dict[str, str] = {}
+        for stream_ref in pipeline_stream_refs:
+            bare_stream_id, stream_version = _split_stream_ref(stream_ref)
+            # Distinct versioned refs (``abc_v1``, ``abc_v2``) pass the pipeline
+            # schema's uniqueItems but collapse to one bare id. Downstream keys
+            # the stream (and its cursor/commits) by that bare id, so a collision
+            # would silently drop one stream -- fail loud instead.
+            if bare_stream_id in seen_bare:
+                raise ValueError(
+                    f"pipeline.streams lists the same stream twice after version "
+                    f"stripping: {seen_bare[bare_stream_id]!r} and {stream_ref!r} "
+                    f"both resolve to stream_id {bare_stream_id!r}"
+                )
+            seen_bare[bare_stream_id] = stream_ref
+            record = self._stream_records.get(bare_stream_id)
             if record is None:
                 raise ValueError(
-                    f"pipeline.streams references {stream_id!r} but no stream "
-                    f"file in {self._pipeline_dir}/streams declares that id; "
-                    f"known: {sorted(self._stream_records)}"
+                    f"pipeline.streams references {stream_ref!r} but no stream "
+                    f"file in {self._pipeline_dir}/streams declares id "
+                    f"{bare_stream_id!r}; known: {sorted(self._stream_records)}"
                 )
-            stream_configs.append(self._build_stream_config(record))
+            stream_configs.append(self._build_stream_config(record, stream_version))
 
-        pipeline_id = pipeline_doc.get("pipeline_id")
+        # pipeline_id is nullable in the contract: an authored pipeline.json may
+        # omit it and rely on the manifest for executable identity. Fall back to
+        # the manifest/env id (always present) so a schema-valid omitted id is
+        # honored rather than rejected by ResolvedPipeline's guard.
+        pipeline_id = pipeline_doc.get("pipeline_id") or self.pipeline_id_input
         display_name = pipeline_doc.get("display_name")
         pipeline = ResolvedPipeline(
             pipeline_id=pipeline_id,
@@ -513,13 +609,13 @@ class PipelineConfigPrep:
             description=pipeline_doc.get("description"),
             status=pipeline_doc.get("status", "draft"),
             tags=pipeline_doc.get("tags") or [],
-            connections={
-                "source": source_id,
-                "destinations": dest_ids,
-            },
+            connections=PipelineConnections(
+                source=source_id,
+                destinations=dest_ids,
+            ),
             schedule=pipeline_doc.get("schedule") or {"type": "manual"},
             engine_config=pipeline_doc.get("engine") or {"vcpu": 1, "memory": 8192},
-            runtime=pipeline_doc.get("runtime") or {},
+            runtime=_parse_runtime_config(pipeline_doc.get("runtime") or {}),
         )
 
         connectors = list(self._loaded_connectors.values())
@@ -546,7 +642,7 @@ class PipelineConfigPrep:
 
     def _resolve_endpoint_block(
         self, block: Mapping[str, Any], stream_id: str, side: str
-    ) -> Tuple[EndpointRef, ConnectionRuntime, Dict[str, Any]]:
+    ) -> tuple[EndpointRef, ConnectionRuntime, dict[str, Any]]:
         """Resolve one stream side's ``endpoint_ref`` into its parts.
 
         Validates that the block carries an ``endpoint_ref``, then resolves
@@ -555,24 +651,26 @@ class PipelineConfigPrep:
         """
         endpoint_ref_dict = block.get("endpoint_ref")
         if not endpoint_ref_dict:
-            raise ValueError(
-                f"Stream {stream_id} {side} missing 'endpoint_ref'"
-            )
+            raise ValueError(f"Stream {stream_id} {side} missing 'endpoint_ref'")
         endpoint_ref = EndpointRef.from_dict(endpoint_ref_dict)
         runtime = self._resolve_connection_by_id(endpoint_ref.connection_id)
         endpoint = self._resolve_endpoint(endpoint_ref)
         return endpoint_ref, runtime, endpoint
 
-    def _build_stream_config(self, record: _StreamRecord) -> ResolvedStream:
+    def _build_stream_config(
+        self, record: _StreamRecord, stream_version: int
+    ) -> ResolvedStream:
         """Translate a saved stream document into a typed :class:`ResolvedStream`."""
         document = record.raw_document
         stream_id = record.stream_id
 
         # ---- source ----
         raw_source = document["source"]
-        source_endpoint_ref, source_runtime, source_endpoint = (
-            self._resolve_endpoint_block(raw_source, stream_id, "source")
-        )
+        (
+            source_endpoint_ref,
+            source_runtime,
+            source_endpoint,
+        ) = self._resolve_endpoint_block(raw_source, stream_id, "source")
 
         resolved_source = ResolvedSource(
             endpoint_ref=source_endpoint_ref,
@@ -580,25 +678,32 @@ class PipelineConfigPrep:
             runtime=source_runtime,
             endpoint_document=source_endpoint,
             stream_source=dict(raw_source),
+            replication=_parse_replication(raw_source),
+            primary_keys=list(raw_source.get("primary_keys") or []),
         )
 
         # ---- destinations ----
-        resolved_destinations: List[ResolvedDestination] = []
+        resolved_destinations: list[ResolvedDestination] = []
         for raw_dest in document.get("destinations") or []:
-            dest_endpoint_ref, dest_runtime, dest_endpoint = (
-                self._resolve_endpoint_block(raw_dest, stream_id, "destination")
-            )
+            (
+                dest_endpoint_ref,
+                dest_runtime,
+                dest_endpoint,
+            ) = self._resolve_endpoint_block(raw_dest, stream_id, "destination")
 
-            resolved_destinations.append(ResolvedDestination(
-                endpoint_ref=dest_endpoint_ref,
-                connection_ref=dest_runtime.connection_id,
-                runtime=dest_runtime,
-                endpoint_document=dest_endpoint,
-                write=dict(raw_dest.get("write") or {}),
-            ))
+            resolved_destinations.append(
+                ResolvedDestination(
+                    endpoint_ref=dest_endpoint_ref,
+                    connection_ref=dest_runtime.connection_id,
+                    runtime=dest_runtime,
+                    endpoint_document=dest_endpoint,
+                    write=dict(raw_dest.get("write") or {}),
+                )
+            )
 
         return ResolvedStream(
             stream_id=stream_id,
+            stream_version=stream_version,
             display_name=document.get("display_name"),
             description=document.get("description"),
             pipeline_id=document.get("pipeline_id"),
@@ -622,10 +727,10 @@ class PipelineConfigPrep:
             )
         return self._resolved_connections[connection_id]
 
-    def get_connectors(self) -> List[Dict[str, Any]]:
+    def get_connectors(self) -> list[dict[str, Any]]:
         return list(self._loaded_connectors.values())
 
-    def get_connector_for_connection(self, connection_id: str) -> Dict[str, Any]:
+    def get_connector_for_connection(self, connection_id: str) -> dict[str, Any]:
         record = self._connection_records.get(connection_id)
         if record is None:
             raise KeyError(

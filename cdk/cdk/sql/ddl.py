@@ -14,7 +14,8 @@ control-plane "create the table I described" one.
 
 from __future__ import annotations
 
-from typing import Any, List, Optional, Sequence
+from collections.abc import Sequence
+from typing import Any
 
 from ..contract import ColumnDef
 from ..type_map.exceptions import InvalidTypeMapError, UnmappedTypeError
@@ -55,7 +56,7 @@ def build_create_table_sql(
         )
 
     pk_set = set(primary_keys)
-    column_defs: List[str] = []
+    column_defs: list[str] = []
     for col in columns:
         try:
             native = dialect.render_column_type(col.canonical_type, type_mapper)
@@ -92,7 +93,7 @@ async def create_table(
     *,
     dialect: SqlDialect,
     if_not_exists: bool = True,
-    type_mapper: Optional[Any] = None,
+    type_mapper: Any | None = None,
 ) -> None:
     """Build and execute ``CREATE TABLE`` DDL over *runtime*'s transport.
 

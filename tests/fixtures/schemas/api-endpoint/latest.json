@@ -1956,6 +1956,17 @@
             }
           ],
           "default": null
+        },
+        "idempotency": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Idempotency"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -1963,7 +1974,28 @@
         "input"
       ],
       "title": "WriteOperation",
-      "type": "object"
+      "type": "object",
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "batching": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "batching"
+            ]
+          },
+          "then": {
+            "properties": {
+              "idempotency": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
     },
     "WriteRequest": {
       "additionalProperties": false,
@@ -2223,6 +2255,33 @@
         }
       },
       "title": "WriteResponse",
+      "type": "object"
+    },
+    "Idempotency": {
+      "additionalProperties": false,
+      "description": "Per-record idempotency key placement for a write mode. The engine owns the key value (the record's identity-derived record_id); the author declares placement only.",
+      "properties": {
+        "in": {
+          "description": "Where the key lands on each request.",
+          "enum": [
+            "header",
+            "body"
+          ],
+          "title": "In",
+          "type": "string"
+        },
+        "name": {
+          "description": "Header or top-level body field carrying the key.",
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "in",
+        "name"
+      ],
+      "title": "Idempotency",
       "type": "object"
     }
   },

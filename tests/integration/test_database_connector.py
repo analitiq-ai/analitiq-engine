@@ -10,11 +10,9 @@ connector with the contract endpoint document.
 
 import os
 import uuid
-
-import pytest
 from unittest.mock import AsyncMock
 
-from sqlalchemy import text
+import pytest
 
 from cdk.connection_runtime import ConnectionRuntime, materialize_runtime
 from cdk.database_utils import acquire_connection
@@ -25,6 +23,7 @@ from cdk.sql.generic import GenericSQLConnector
 def _postgres_available() -> bool:
     """Check if PostgreSQL is reachable for testing."""
     import socket
+
     host = os.getenv("POSTGRES_HOST", "localhost")
     port = int(os.getenv("POSTGRES_PORT", "5432"))
     try:
@@ -35,8 +34,7 @@ def _postgres_available() -> bool:
 
 
 pytestmark = pytest.mark.skipif(
-    not _postgres_available(),
-    reason="PostgreSQL not reachable"
+    not _postgres_available(), reason="PostgreSQL not reachable"
 )
 
 
@@ -95,7 +93,7 @@ def _read_config(table_name: str):
         },
         "stream_source": {
             "filters": [],
-            "replication": {"method": "incremental", "cursor_field": ["id"]},
+            "replication": {"method": "incremental", "cursor_field": "id"},
         },
     }
 
@@ -152,7 +150,9 @@ class TestGenericSQLSourceRealIntegration:
             ids = {r["id"] for r in all_records}
             assert ids == set(range(1, 26))
             # The cursor advanced to the last id seen.
-            saved = [c.args[2]["cursor"] for c in mock_checkpoint.save_cursor.call_args_list]
+            saved = [
+                c.args[2]["cursor"] for c in mock_checkpoint.save_cursor.call_args_list
+            ]
             assert saved[-1] == 25
         finally:
             # --- Teardown: drop the table via a fresh runtime. ---

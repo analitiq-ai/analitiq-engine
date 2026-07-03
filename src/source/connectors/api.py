@@ -28,26 +28,55 @@ per-stream overrides; nothing else.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+from collections.abc import AsyncIterator, Callable
 from datetime import timezone
-from typing import Any, AsyncIterator, Callable, Dict, List, Optional
+from decimal import Decimal
+from typing import Any
 
+import aiohttp
 import pyarrow as pa
 
-from .base import BaseConnector, ConnectionError, ReadError, TransientReadError
-from cdk.schema_contract import SchemaContract
 from cdk.connection_runtime import ConnectionRuntime
-from cdk.request_binding import bind_param_refs
+from cdk.rate_limiter import RateLimiter
+from cdk.request_binding import bind_param_refs, resolve_param_defaults
 from cdk.resolver import Resolver
-from cdk.types import CheckpointStore
-from ...shared.http_utils import join_url
+from cdk.schema_contract import SchemaContract
+from cdk.type_map import TypeMapper, UnmappedTypeError
+from cdk.types import CheckpointStore, EndpointScope
+
+from ...models.state import ReplicationConfig
 from ...shared.dict_path import walk_path
+from ...shared.http_utils import join_url
+from .base import BaseConnector, ConnectionError, ReadError, TransientReadError
 
 logger = logging.getLogger(__name__)
 
 # HTTP statuses retrying can heal: request timeout, rate limit, upstream
 # outages. Everything else non-200 is a deterministic contract/config error.
 _TRANSIENT_HTTP_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
+
+# Lookback subtracted from the stored cursor on an incremental read when the
+# stream has a prior cursor but declares no safety window of its own. It is an
+# operational safety default, not a per-connector attribute, so connectors
+# never declare it. Sourced from ReplicationConfig; SourceConfig carries the
+# same default independently (models/state.py), so the two move separately.
+_DEFAULT_SAFETY_WINDOW_SECONDS: int = ReplicationConfig.safety_window_seconds
+
+
+def _loads_preserving_decimals(payload: str) -> Any:
+    """Decode a JSON response body without flattening decimals to float.
+
+    The stdlib default parses every floating-point token as a double,
+    discarding digits before Arrow ever sees the value, so a Decimal-typed
+    column lands a rounded number. Parsing those tokens as ``Decimal`` keeps the
+    exact source digits; the schema contract then renders each value per its
+    declared Arrow type (Decimal columns stay exact, Float columns narrow to
+    double on purpose). Integer tokens are untouched -- the default already
+    parses them as arbitrary-precision ``int``.
+    """
+    return json.loads(payload, parse_float=Decimal)
 
 
 class APIConnector(BaseConnector):
@@ -56,11 +85,11 @@ class APIConnector(BaseConnector):
     def __init__(self, name: str = "APIConnector"):
         super().__init__(name)
         self._runtime: ConnectionRuntime | None = None
-        self.session = None
-        self.base_url = None
-        self.rate_limiter = None
+        self.session: aiohttp.ClientSession | None = None
+        self.base_url: str | None = None
+        self.rate_limiter: RateLimiter | None = None
 
-    async def connect(self, runtime: ConnectionRuntime):
+    async def connect(self, runtime: ConnectionRuntime) -> None:
         try:
             self._runtime = runtime
             runtime.acquire()
@@ -74,7 +103,7 @@ class APIConnector(BaseConnector):
             logger.error("Failed to connect to API: %s", e)
             raise ConnectionError(f"API connection failed: {e}") from e
 
-    async def disconnect(self):
+    async def disconnect(self) -> None:
         if self._runtime:
             await self._runtime.close()
             # Brief courtesy delay so aiohttp's transports finish closing. It
@@ -99,11 +128,11 @@ class APIConnector(BaseConnector):
     async def read_batches(
         self,
         runtime: ConnectionRuntime,
-        config: Dict[str, Any],
+        config: dict[str, Any],
         *,
         checkpoint: CheckpointStore,
         stream_name: str,
-        partition: Optional[Dict[str, Any]] = None,
+        partition: dict[str, Any] | None = None,
         batch_size: int = 1000,
     ) -> AsyncIterator[pa.RecordBatch]:
         """Read upstream records as Arrow batches.
@@ -136,21 +165,25 @@ class APIConnector(BaseConnector):
 
     async def _read_batches_impl(
         self,
-        config: Dict[str, Any],
+        config: dict[str, Any],
         *,
         checkpoint: CheckpointStore,
         stream_name: str,
-        partition: Optional[Dict[str, Any]] = None,
+        partition: dict[str, Any] | None = None,
         batch_size: int = 1000,
     ) -> AsyncIterator[pa.RecordBatch]:
         if partition is None:
             partition = {}
 
+        if self._runtime is None or self.base_url is None:
+            raise ReadError(
+                "APIConnector: read attempted before connect() materialized "
+                "the runtime"
+            )
+
         endpoint_doc = config.get("endpoint_document")
         if not endpoint_doc:
-            raise ReadError(
-                "APIConnector: source config missing 'endpoint_document'"
-            )
+            raise ReadError("APIConnector: source config missing 'endpoint_document'")
         stream_source = config.get("stream_source") or {}
         endpoint_ref = stream_source.get("endpoint_ref")
         if not endpoint_ref:
@@ -158,17 +191,20 @@ class APIConnector(BaseConnector):
                 "APIConnector: stream_source missing 'endpoint_ref'; "
                 "the source contract requires it to declare per-field types"
             )
-        read_spec = ((endpoint_doc.get("operations") or {}).get("read") or {})
+        read_spec = (endpoint_doc.get("operations") or {}).get("read") or {}
         records_items_schema = self._resolve_records_items_schema(
-            endpoint_doc, read_spec,
+            endpoint_doc,
+            read_spec,
         )
+        self._apply_read_type_map(records_items_schema, endpoint_ref)
         schema_contract = SchemaContract(records_items_schema)
         request = read_spec.get("request") or {}
         path = request.get("path")
         method = (request.get("method") or "GET").upper()
         if not isinstance(path, str) or not path:
             raise ReadError(
-                f"endpoint {endpoint_doc.get('endpoint_id')!r}: operations.read.request.path is required"
+                f"endpoint {endpoint_doc.get('endpoint_id')!r}: "
+                f"operations.read.request.path is required"
             )
         full_url = join_url(self.base_url, path)
 
@@ -183,17 +219,16 @@ class APIConnector(BaseConnector):
 
         replication_block = stream_source.get("replication") or {}
         replication_method = replication_block.get("method", "full_refresh")
+        # cursor_field is a contract string|null (validated upstream), so no
+        # list normalization is needed.
         cursor_field = replication_block.get("cursor_field")
-        if isinstance(cursor_field, list):
-            cursor_field = cursor_field[0] if cursor_field else None
         safety_window = replication_block.get("safety_window_seconds")
-        tie_breaker_fields = list(replication_block.get("tie_breaker_fields") or [])
 
         # Build the param value table from the declared ``params`` block:
         # defaults via value-expression resolution, then stream-level filter
         # overrides. ``controlled_by: pagination|replication`` params are
         # filled by their respective loops.
-        param_values, param_placements, controlled_params = self._build_base_params(
+        param_values, param_placements = self._build_base_params(
             read_spec, resolver, stream_source.get("filters") or []
         )
 
@@ -222,29 +257,38 @@ class APIConnector(BaseConnector):
         raw_body = request.get("body")
 
         def build_request(
-            page_params: Dict[str, Any],
-        ) -> tuple[Dict[str, Any], Any]:
+            page_params: dict[str, Any],
+        ) -> tuple[dict[str, Any], Any]:
+            # A fractional value from the lossless JSON parse (e.g. a keyset
+            # key) arrives as a Decimal, which neither sink takes as-is, so each
+            # placement converts it to the form its serializer needs; int/str
+            # stay native.
             query = {
-                name: value
+                # yarl truncates a Decimal in the query string; stringify it
+                # (full precision).
+                name: str(value) if isinstance(value, Decimal) else value
                 for name, value in page_params.items()
                 if param_placements.get(name) != "body"
             }
-            body = (
-                resolver.resolve_for_request(bind_param_refs(raw_body, page_params))
-                if raw_body is not None
-                else None
-            )
+            if raw_body is not None:
+                # aiohttp serializes the body via stdlib json.dumps, which
+                # cannot encode a Decimal. Narrow body Decimals to float so the
+                # value stays a JSON number a numeric body schema accepts --
+                # the same float the body carried before the lossless parse.
+                body_params = {
+                    name: float(value) if isinstance(value, Decimal) else value
+                    for name, value in page_params.items()
+                }
+                body = resolver.resolve_for_request(
+                    bind_param_refs(raw_body, body_params)
+                )
+            else:
+                body = None
             return query, body
 
         records_ref = ((read_spec.get("response") or {}).get("records") or {}).get(
             "ref", "response.body"
         )
-
-        state = {
-            "bookmarks": [],
-            "cursor_field": cursor_field,
-            "replication_method": replication_method,
-        }
 
         batch_count = 0
         total_records = 0
@@ -252,7 +296,6 @@ class APIConnector(BaseConnector):
             full_url=full_url,
             method=method,
             base_params=param_values,
-            controlled_params=controlled_params,
             pagination=read_spec.get("pagination") or {},
             batch_size=batch_size,
             records_ref=records_ref,
@@ -260,15 +303,12 @@ class APIConnector(BaseConnector):
         ):
             if not batch:
                 continue
-            deduped = self._deduplicate_records(batch, state, cursor_field, tie_breaker_fields)
-            if not deduped:
-                continue
-            yield schema_contract.from_pylist(deduped)
+            yield schema_contract.from_pylist(batch)
 
             batch_count += 1
-            total_records += len(deduped)
+            total_records += len(batch)
             if cursor_field:
-                cursor_value = deduped[-1].get(cursor_field)
+                cursor_value = batch[-1].get(cursor_field)
                 if cursor_value is not None:
                     await checkpoint.save_cursor(
                         stream_name, partition, {"cursor": cursor_value}
@@ -280,14 +320,17 @@ class APIConnector(BaseConnector):
                     logger.debug(
                         "stream %r: last record has no %r value; "
                         "cursor not advanced for batch %d",
-                        stream_name, cursor_field, batch_count,
+                        stream_name,
+                        cursor_field,
+                        batch_count,
                     )
 
     @staticmethod
     def _resolve_records_items_schema(
-        endpoint_doc: Dict[str, Any], read_spec: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        """Walk operations.read.response.schema via records.ref to the per-record items block.
+        endpoint_doc: dict[str, Any],
+        read_spec: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Walk operations.read.response.schema via records.ref to per-record items.
 
         Accepted records.ref forms: ``response.body`` and
         ``response.body.<field>[.<field>...]``.
@@ -295,18 +338,20 @@ class APIConnector(BaseConnector):
         endpoint_id = endpoint_doc.get("endpoint_id")
         response_block = read_spec.get("response") or {}
         response_schema = response_block.get("schema") or {}
-        records_ref = (response_block.get("records") or {}).get(
-            "ref", "response.body"
-        )
+        records_ref = (response_block.get("records") or {}).get("ref", "response.body")
 
         if records_ref == "response.body":
             node = response_schema
         elif records_ref.startswith("response.body."):
             node = response_schema
-            for field in records_ref[len("response.body."):].split("."):
+            for field in records_ref[len("response.body.") :].split("."):
                 properties = node.get("properties") if isinstance(node, dict) else None
                 if not isinstance(properties, dict) or field not in properties:
-                    available = sorted(properties.keys()) if isinstance(properties, dict) else []
+                    available = (
+                        sorted(properties.keys())
+                        if isinstance(properties, dict)
+                        else []
+                    )
                     raise ReadError(
                         f"endpoint {endpoint_id!r}: records.ref "
                         f"{records_ref!r} references field {field!r} that is "
@@ -329,12 +374,120 @@ class APIConnector(BaseConnector):
             )
         return items
 
+    def _apply_read_type_map(
+        self, items_schema: dict[str, Any], endpoint_ref: dict[str, Any]
+    ) -> None:
+        """Resolve each record field's ``arrow_type`` from the read type-map.
+
+        API endpoints declare per-field JSON ``type``/``format`` and ship a
+        ``type-map-read.json`` mapping those to Arrow types - the same read
+        type-map the database source path consumes (see ``cdk/sql/discovery.py``).
+        ``SchemaContract`` requires an explicit ``arrow_type`` per field and
+        recurses into ``Object``/``List`` children, so resolution walks nested
+        ``properties``/``items`` too. A field that already declares
+        ``arrow_type`` keeps it, so hand-annotated connectors stay valid and the
+        mapper is only consulted when a field needs it; an unmapped JSON type
+        fails loud, naming the field.
+
+        The mapper is chosen by the endpoint's scope so a connection-scoped
+        endpoint's ``type-map-read.json`` composes over the connector defaults,
+        matching the database path
+        (``GenericSQLConnector._type_mapper_for_stream``). A missing or invalid
+        type-map is a deterministic config defect, so it surfaces as
+        ``ReadError`` (fail fast) rather than the raw ``RuntimeError`` the worker
+        would otherwise classify as retryable.
+        """
+        runtime = self._runtime
+        if runtime is None:
+            raise ReadError(
+                "APIConnector: type-map resolution attempted before connect()"
+            )
+        scope = endpoint_ref.get("scope")
+        if not scope:
+            raise ReadError(
+                "APIConnector: stream_source endpoint_ref has no 'scope'; "
+                f"expected one of {[s.value for s in EndpointScope]}"
+            )
+
+        mapper: TypeMapper | None = None
+
+        def get_mapper() -> TypeMapper:
+            # Resolved lazily: an endpoint that hand-annotates every field never
+            # needs a type-map. A missing/unknown mapper is a config defect, so
+            # surface it as a deterministic ReadError, not a retryable error.
+            nonlocal mapper
+            if mapper is None:
+                try:
+                    mapper = runtime.type_mapper_for(scope=EndpointScope(scope))
+                except (RuntimeError, ValueError) as err:
+                    raise ReadError(
+                        f"APIConnector: no usable read type-map for "
+                        f"{scope!r}-scoped endpoint; a field needs arrow_type "
+                        f"resolution but the type-map is absent or invalid"
+                    ) from err
+            return mapper
+
+        for name, prop in (items_schema.get("properties") or {}).items():
+            if isinstance(prop, dict):
+                self._resolve_field_arrow_type(prop, name, get_mapper)
+
+    def _resolve_field_arrow_type(
+        self,
+        field: dict[str, Any],
+        name: str,
+        get_mapper: Callable[[], TypeMapper],
+    ) -> None:
+        """Fill ``field['arrow_type']`` from the type-map if absent, then recurse.
+
+        Recursion is gated to the resolved ``arrow_type`` exactly as
+        ``SchemaContract.resolve_arrow_type`` does: it descends into
+        ``properties`` only for ``Object`` and into ``items`` only for ``List``,
+        and treats everything else (including a ``Json`` blob that keeps
+        ``properties``/``items`` for documentation, and every scalar) as a leaf.
+        A nested child authored with only JSON ``type``/``format`` under a real
+        ``Object``/``List`` must be resolved here too, or the schema build
+        fails; but descending into a ``Json`` blob's documentary children would
+        wrongly fail a read on a child type the schema build never consults.
+        Recursion runs even when a container already carries an ``arrow_type``,
+        because a hand-annotated ``Object``/``List`` can still hold children
+        that do not.
+        """
+        if not field.get("arrow_type"):
+            json_type = field.get("type")
+            if isinstance(json_type, list):
+                json_type = next((t for t in json_type if t != "null"), None)
+            if isinstance(json_type, str):
+                fmt = field.get("format")
+                native = (
+                    f"{json_type}:{fmt}" if isinstance(fmt, str) and fmt else json_type
+                )
+                try:
+                    field["arrow_type"] = get_mapper().to_arrow_type(native)
+                except UnmappedTypeError as err:
+                    raise ReadError(
+                        f"field {name!r}: JSON type {native!r} has no rule in "
+                        f"the connector's read type-map"
+                    ) from err
+        arrow_type = field.get("arrow_type")
+        if arrow_type == "Object":
+            nested = field.get("properties")
+            if isinstance(nested, dict):
+                for child_name, child in nested.items():
+                    if isinstance(child, dict):
+                        self._resolve_field_arrow_type(
+                            child, f"{name}.{child_name}", get_mapper
+                        )
+        elif arrow_type == "List":
+            items = field.get("items")
+            if isinstance(items, dict):
+                self._resolve_field_arrow_type(items, f"{name}[]", get_mapper)
+
     def _build_base_params(
         self,
-        read_spec: Dict[str, Any],
+        read_spec: dict[str, Any],
         resolver: Resolver,
-        stream_filters: List[Dict[str, Any]],
-    ) -> tuple[Dict[str, Any], Dict[str, str], Dict[str, str]]:
+        stream_filters: list[dict[str, Any]],
+    ) -> tuple[dict[str, Any], dict[str, str]]:
         """Resolve declared param defaults and apply stream filter overrides.
 
         Defaults resolve through the full value-expression grammar
@@ -342,37 +495,26 @@ class APIConnector(BaseConnector):
         that does not resolve omits the parameter with a warning rather
         than sending the raw expression structure upstream.
 
-        Returns ``(param_values, placements, controlled_params)``:
-        ``param_values`` is the single value table (body ``from_param``
-        binding reads it whole; the caller filters ``in: body`` params
-        out of the query string via ``placements``), ``placements`` maps
-        param name to its declared ``in`` location, and
-        ``controlled_params`` maps controller name (``pagination`` or
-        ``replication``) to the controlled-by group recorded for the
-        param. Callers use it to keep pagination/replication loops from
-        clobbering each other's values.
+        Returns ``(param_values, placements)``: ``param_values`` is the
+        single value table (body ``from_param`` binding reads it whole;
+        the caller filters ``in: body`` params out of the query string via
+        ``placements``), and ``placements`` maps param name to its declared
+        ``in`` location. Params declared ``controlled_by`` pagination or
+        replication are left out of the defaults so their loops set them.
         """
-        param_values: Dict[str, Any] = {}
-        placements: Dict[str, str] = {}
-        controlled: Dict[str, str] = {}
+        placements: dict[str, str] = {}
         declared = read_spec.get("params") or {}
         for name, decl in declared.items():
             if not isinstance(decl, dict):
                 continue
             placements[name] = decl.get("in") or "query"
-            controlled_by = decl.get("controlled_by")
-            if controlled_by:
-                controlled[name] = controlled_by
-                continue
-            if "default" in decl:
-                value = resolver.resolve_for_request(decl["default"])
-                if value is None:
-                    logger.warning(
-                        "param %r: default did not resolve; parameter omitted",
-                        name,
-                    )
-                    continue
-                param_values[name] = value
+
+        uncontrolled = {
+            n: d
+            for n, d in declared.items()
+            if isinstance(d, dict) and not d.get("controlled_by")
+        }
+        param_values = resolve_param_defaults(uncontrolled, resolver)
 
         for f in stream_filters:
             target = f.get("field")
@@ -381,7 +523,7 @@ class APIConnector(BaseConnector):
             value = f.get("value")
             if value is not None:
                 param_values[target] = value
-        return param_values, placements, controlled
+        return param_values, placements
 
     # ------------------------------------------------------------------
     # Incremental replication
@@ -389,13 +531,13 @@ class APIConnector(BaseConnector):
 
     async def _apply_incremental_replication(
         self,
-        params: Dict[str, Any],
-        read_spec: Dict[str, Any],
+        params: dict[str, Any],
+        read_spec: dict[str, Any],
         checkpoint: CheckpointStore,
         stream_name: str,
-        partition: Dict[str, Any],
-        cursor_field: Optional[str],
-        safety_window_seconds: Optional[int],
+        partition: dict[str, Any],
+        cursor_field: str | None,
+        safety_window_seconds: int | None,
     ) -> None:
         if not cursor_field:
             return
@@ -420,9 +562,12 @@ class APIConnector(BaseConnector):
             )
             return
         if safety_window_seconds is None:
-            raise ReadError(
-                f"stream {stream_name!r}: incremental replication requires "
-                f"safety_window_seconds in the replication block"
+            safety_window_seconds = _DEFAULT_SAFETY_WINDOW_SECONDS
+            logger.info(
+                "stream %r: no safety_window_seconds in the replication block; "
+                "applying engine default of %d seconds",
+                stream_name,
+                safety_window_seconds,
             )
         effective_start = self._compute_effective_start(
             cursor_value, safety_window_seconds
@@ -437,13 +582,13 @@ class APIConnector(BaseConnector):
 
     @staticmethod
     def _compute_effective_start(cursor: Any, safety_window_seconds: int) -> str:
-        from datetime import timedelta
+        from datetime import datetime, timedelta
 
         from dateutil.parser import isoparse
 
         cursor_str = str(cursor)
         try:
-            cursor_dt = isoparse(cursor_str)
+            cursor_dt: datetime = isoparse(cursor_str)
         except (ValueError, TypeError):
             try:
                 cursor_id = int(cursor_str)
@@ -467,17 +612,18 @@ class APIConnector(BaseConnector):
         *,
         full_url: str,
         method: str,
-        base_params: Dict[str, Any],
-        controlled_params: Dict[str, str],
-        pagination: Dict[str, Any],
+        base_params: dict[str, Any],
+        pagination: dict[str, Any],
         batch_size: int,
         records_ref: str,
-        build_request: Callable[[Dict[str, Any]], tuple[Dict[str, Any], Any]],
-    ) -> AsyncIterator[List[Dict[str, Any]]]:
-        """Drive the pagination loop, materializing each page request via
-        ``build_request``: it maps the page's full param table to the
-        ``(query_params, body)`` actually sent, applying declared param
-        placement and per-page body binding."""
+        build_request: Callable[[dict[str, Any]], tuple[dict[str, Any], Any]],
+    ) -> AsyncIterator[list[dict[str, Any]]]:
+        """Drive the pagination loop, building each page request.
+
+        Each page request is built via ``build_request``: it maps the page's
+        full param table to the ``(query_params, body)`` actually sent,
+        applying declared param placement and per-page body binding.
+        """
         p_type = pagination.get("type")
         if not p_type:
             query, body = build_request(dict(base_params))
@@ -543,7 +689,7 @@ class APIConnector(BaseConnector):
                 or cursor_block.get("response_field")
                 or "next_cursor"
             )
-            cursor_token: Optional[str] = None
+            cursor_token: str | None = None
             while True:
                 params = dict(base_params)
                 if cursor_token:
@@ -569,7 +715,11 @@ class APIConnector(BaseConnector):
                 raise ReadError(
                     "keyset pagination requires keyset.from_record (record field)"
                 )
-            last_key: Optional[str] = None
+            # Holds the raw record value (int/str/Decimal). It feeds both the
+            # query string and any body binding through build_request, so it
+            # stays native here; build_request stringifies Decimals only for the
+            # query (where yarl would truncate them) and keeps the body numeric.
+            last_key: Any = None
             while True:
                 params = dict(base_params)
                 if last_key:
@@ -596,11 +746,11 @@ class APIConnector(BaseConnector):
         self,
         url: str,
         method: str,
-        params: Dict[str, Any],
+        params: dict[str, Any],
         records_ref: str,
         *,
         body: Any = None,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         _, records = await self._request_payload(
             url, method, params, records_ref, body=body
         )
@@ -610,15 +760,20 @@ class APIConnector(BaseConnector):
         self,
         url: str,
         method: str,
-        params: Dict[str, Any],
+        params: dict[str, Any],
         records_ref: str,
         *,
         body: Any = None,
-    ) -> tuple[Any, List[Dict[str, Any]]]:
+    ) -> tuple[Any, list[dict[str, Any]]]:
+        if self.session is None:
+            raise ReadError(
+                "APIConnector: HTTP request attempted before connect() opened "
+                "the session"
+            )
         if self.rate_limiter:
             await self.rate_limiter.acquire()
         logger.debug("API %s %s params=%s", method, url, params)
-        request_kwargs: Dict[str, Any] = {"params": params}
+        request_kwargs: dict[str, Any] = {"params": params}
         if body is not None:
             # Resolved ``operations.read.request.body``; only sent when the
             # endpoint declares one, so plain GET reads stay body-less.
@@ -627,7 +782,9 @@ class APIConnector(BaseConnector):
             if response.status != 200:
                 error_text = await response.text()
                 body_snippet = error_text[:500]
-                logger.error("API %d %s %s: %s", response.status, method, url, body_snippet)
+                logger.error(
+                    "API %d %s %s: %s", response.status, method, url, body_snippet
+                )
                 detail = (
                     f"API request failed: {method} {url} -> status {response.status}; "
                     f"params={params}; body[:500]={body_snippet!r}"
@@ -637,7 +794,7 @@ class APIConnector(BaseConnector):
                 if response.status in _TRANSIENT_HTTP_STATUSES:
                     raise TransientReadError(detail)
                 raise ReadError(detail)
-            data = await response.json()
+            data = await response.json(loads=_loads_preserving_decimals)
         self.metrics["records_read"] += 0  # incremented below per page
         records = _extract_records(data, records_ref)
         if records:
@@ -646,31 +803,12 @@ class APIConnector(BaseConnector):
         return data, records
 
     # ------------------------------------------------------------------
-    # Deduplication / checkpointing
-    # ------------------------------------------------------------------
-
-    def _deduplicate_records(
-        self,
-        batch: List[Dict[str, Any]],
-        state: Dict[str, Any],
-        cursor_field: Optional[str],
-        tie_breaker_fields: List[str],
-    ) -> List[Dict[str, Any]]:
-        bookmarks = state.get("bookmarks") or []
-        if not bookmarks or not cursor_field:
-            return batch
-        bookmark = bookmarks[0]
-        return [
-            r
-            for r in batch
-            if _is_record_new(r, bookmark, cursor_field, tie_breaker_fields or [])
-        ]
-
-    # ------------------------------------------------------------------
     # Base interface stubs
     # ------------------------------------------------------------------
 
-    async def write_batch(self, batch: List[Dict[str, Any]], config: Dict[str, Any]):
+    async def write_batch(
+        self, batch: list[dict[str, Any]], config: dict[str, Any]
+    ) -> None:
         raise NotImplementedError("Source connector is read-only")
 
     def supports_incremental_read(self) -> bool:
@@ -685,7 +823,7 @@ class APIConnector(BaseConnector):
 # ----------------------------------------------------------------------
 
 
-def _extract_records(data: Any, records_ref: str) -> List[Dict[str, Any]]:
+def _extract_records(data: Any, records_ref: str) -> list[dict[str, Any]]:
     """Pull records out of a response body according to ``records_ref``.
 
     The ref is expressed as ``response.body[.<dotted.path>]`` per the
@@ -709,7 +847,7 @@ def _extract_records(data: Any, records_ref: str) -> List[Dict[str, Any]]:
     return []
 
 
-def _extract_next_cursor(data: Any, response_field_ref: str) -> Optional[str]:
+def _extract_next_cursor(data: Any, response_field_ref: str) -> str | None:
     """Walk a ``response.body[.<dotted.path>]`` ref to a string cursor."""
     if not isinstance(data, dict):
         return None
@@ -724,80 +862,3 @@ def _extract_next_cursor(data: Any, response_field_ref: str) -> Optional[str]:
     if cursor in (None, ""):
         return None
     return str(cursor)
-
-
-def _get_nested_field(record: Dict[str, Any], field_path: str) -> Any:
-    """Return the value at the dot-delimited *field_path* in *record*, or ``None`` on any miss.
-
-    Field names containing a literal ``"."`` character are not supported.
-    """
-    return walk_path(record, field_path.split("."))
-
-
-def _is_record_new(
-    record: Dict[str, Any],
-    bookmark: Dict[str, Any],
-    cursor_field: str,
-    tie_breaker_fields: List[str],
-) -> bool:
-    """Decide whether ``record`` is past the stored bookmark.
-
-    Cursor values are compared as ISO timestamps when parseable, else as
-    strings. Equal cursors fall through to tie-breaker comparison; in
-    inclusive mode an exact tie-breaker match is treated as a duplicate.
-    """
-    from dateutil.parser import isoparse
-
-    record_cursor_value = record.get(cursor_field)
-    if record_cursor_value is None:
-        return True
-    stored_cursor = bookmark.get("cursor")
-    if stored_cursor is None:
-        return True
-    try:
-        rdt = isoparse(str(record_cursor_value))
-        sdt = isoparse(str(stored_cursor))
-        if rdt.tzinfo is None:
-            rdt = rdt.replace(tzinfo=timezone.utc)
-        if sdt.tzinfo is None:
-            sdt = sdt.replace(tzinfo=timezone.utc)
-        if rdt > sdt:
-            return True
-        if rdt < sdt:
-            return False
-    except (ValueError, TypeError):
-        if str(record_cursor_value) > str(stored_cursor):
-            return True
-        if str(record_cursor_value) < str(stored_cursor):
-            return False
-    # Tie on cursor value: compare tie-breakers (inclusive mode keeps
-    # exact matches out).
-    aux = bookmark.get("aux") or {}
-    stored_tiebreakers = aux.get("tiebreakers") or []
-    for i, field_name in enumerate(tie_breaker_fields):
-        if i >= len(stored_tiebreakers):
-            return True
-        record_value = _get_nested_field(record, field_name)
-        stored_value = stored_tiebreakers[i].get("value")
-        if record_value is None:
-            return True
-        try:
-            if (
-                isinstance(stored_value, str)
-                and str(record_value).isdigit()
-                and stored_value.isdigit()
-            ):
-                if int(record_value) > int(stored_value):
-                    return True
-                if int(record_value) < int(stored_value):
-                    return False
-                continue
-        except (ValueError, TypeError):
-            # Non-integer digit-strings (e.g. Unicode digits) fall through
-            # to the lexicographic compare below.
-            pass
-        if str(record_value) > str(stored_value):
-            return True
-        if str(record_value) < str(stored_value):
-            return False
-    return False

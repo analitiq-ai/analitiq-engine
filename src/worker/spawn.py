@@ -34,17 +34,18 @@ import signal
 import sys
 import tempfile
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any
 
 import grpc
+from src.config import settings
 
 logger = logging.getLogger(__name__)
 
 # Seconds to wait for the worker's socket to accept (covers the worker's
 # connector connect(), which for a destination runs before the bind).
-DEFAULT_READY_TIMEOUT = float(os.getenv("WORKER_READY_TIMEOUT_SECONDS", "300"))
+DEFAULT_READY_TIMEOUT = settings.worker_ready_timeout_seconds()
 # Grace between SIGTERM and SIGKILL on close.
-DEFAULT_KILL_GRACE = float(os.getenv("WORKER_KILL_GRACE_SECONDS", "10"))
+DEFAULT_KILL_GRACE = settings.worker_kill_grace_seconds()
 
 # DSN-shaped credentials: scheme://user:password@host -> scheme://user:***@host
 _DSN_CREDENTIALS = re.compile(r"(://[^:/@\s]+:)[^@\s]+(@)")
@@ -61,17 +62,17 @@ def _child_limits() -> None:
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
     cap = min(1024, hard if hard != resource.RLIM_INFINITY else 1024)
     resource.setrlimit(resource.RLIMIT_NOFILE, (cap, cap))
-    as_mb = os.getenv("WORKER_RLIMIT_AS_MB")
+    as_mb = settings.worker_rlimit_as_mb()
     if as_mb:
-        limit = int(as_mb) * 1024 * 1024
+        limit = as_mb * 1024 * 1024
         resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
 
 
-def _clean_env() -> Dict[str, str]:
+def _clean_env() -> dict[str, str]:
     """Minimal child environment: interpreter needs, nothing of the shell's."""
     env = {
         "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
-        "HOME": os.environ.get("HOME", "/tmp"),
+        "HOME": os.environ.get("HOME", "/tmp"),  # nosec B108
         "LANG": os.environ.get("LANG", "C.UTF-8"),
         "PYTHONUNBUFFERED": "1",
     }
@@ -92,7 +93,7 @@ class WorkerHandle:
     uds_path: str
     workdir: str
     label: str
-    _stderr_task: Optional[asyncio.Task] = None
+    _stderr_task: asyncio.Task | None = None
 
     @property
     def target(self) -> str:
@@ -141,10 +142,14 @@ async def _forward_stderr(handle_label: str, stream: asyncio.StreamReader) -> No
         line = await stream.readline()
         if not line:
             return
-        logger.info("[%s] %s", handle_label, redact(line.decode(errors="replace").rstrip()))
+        logger.info(
+            "[%s] %s", handle_label, redact(line.decode(errors="replace").rstrip())
+        )
 
 
-async def _wait_ready(uds_path: str, proc: asyncio.subprocess.Process, timeout: float) -> None:
+async def _wait_ready(
+    uds_path: str, proc: asyncio.subprocess.Process, timeout: float
+) -> None:
     """Wait until the worker's socket accepts a gRPC channel, or it died."""
     deadline = asyncio.get_event_loop().time() + timeout
     while True:
@@ -171,7 +176,7 @@ async def _wait_ready(uds_path: str, proc: asyncio.subprocess.Process, timeout: 
 
 
 async def spawn_worker(
-    bootstrap: Dict[str, Any],
+    bootstrap: dict[str, Any],
     *,
     label: str,
     ready_timeout: float = DEFAULT_READY_TIMEOUT,
@@ -201,6 +206,9 @@ async def spawn_worker(
         start_new_session=True,
         preexec_fn=_child_limits,
     )
+    if proc.stdin is None or proc.stderr is None:
+        raise RuntimeError("worker subprocess started without stdin/stderr pipes")
+    stdin = proc.stdin
     stderr_task = asyncio.create_task(_forward_stderr(label, proc.stderr))
     handle = WorkerHandle(
         process=proc,
@@ -211,9 +219,9 @@ async def spawn_worker(
     )
     try:
         # One-shot bootstrap: write, close. Never logged.
-        proc.stdin.write(json.dumps(payload).encode())
-        await proc.stdin.drain()
-        proc.stdin.close()
+        stdin.write(json.dumps(payload).encode())
+        await stdin.drain()
+        stdin.close()
         await _wait_ready(uds_path, proc, ready_timeout)
     except BaseException:
         await handle.close(grace=2)

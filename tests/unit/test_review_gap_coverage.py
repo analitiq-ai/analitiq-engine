@@ -7,9 +7,9 @@ discoverable from the test output.
 from __future__ import annotations
 
 import asyncio
-import pytest
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 
 # --------------------------------------------------------------------------- #
 # Gap #12: _write_conflict_keys threads end-to-end through configure_schema   #
@@ -17,15 +17,14 @@ from unittest.mock import AsyncMock, MagicMock
 
 
 class TestWriteConflictKeysWiring:
-    """The destination handler must use ``_write_conflict_keys`` from the
-    enriched endpoint document when present, falling back to primary_keys
-    only when the key is absent entirely (not just empty)."""
+    """The destination handler consumes ``_write_conflict_keys`` from the
+    enriched endpoint document verbatim. When the key is absent or empty
+    the conflict target is empty — the engine never derives one from
+    ``primary_keys``."""
 
     @pytest.mark.asyncio
-    async def test_explicit_conflict_keys_override_primary_keys(self):
-        from cdk.sql.generic import (
-            GenericSQLConnector,
-        )
+    async def test_conflict_keys_consumed_verbatim(self):
+        from cdk.sql.generic import GenericSQLConnector
         from cdk.type_map import TypeMapper
         from cdk.type_map.rules import parse_rules
 
@@ -49,8 +48,18 @@ class TestWriteConflictKeysWiring:
             "s1": {
                 "database_object": {"name": "orders", "schema": "public"},
                 "columns": [
-                    {"name": "tenant_id", "native_type": "BIGINT", "arrow_type": "Int64", "nullable": False},
-                    {"name": "id", "native_type": "BIGINT", "arrow_type": "Int64", "nullable": False},
+                    {
+                        "name": "tenant_id",
+                        "native_type": "BIGINT",
+                        "arrow_type": "Int64",
+                        "nullable": False,
+                    },
+                    {
+                        "name": "id",
+                        "native_type": "BIGINT",
+                        "arrow_type": "Int64",
+                        "nullable": False,
+                    },
                 ],
                 "primary_keys": ["id"],
                 "_write_conflict_keys": ["tenant_id", "id"],
@@ -59,8 +68,11 @@ class TestWriteConflictKeysWiring:
         handler._ensure_tables_exist = AsyncMock()
 
         from src.grpc.generated.analitiq.v1 import SchemaMessage, WriteMode
+
         msg = SchemaMessage(
-            stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_UPSERT,
+            stream_id="s1",
+            version=1,
+            write_mode=WriteMode.WRITE_MODE_UPSERT,
         )
         ok = await handler.configure_schema(msg)
 
@@ -69,10 +81,10 @@ class TestWriteConflictKeysWiring:
         assert handler._streams["s1"].primary_keys == ["id"]
 
     @pytest.mark.asyncio
-    async def test_missing_write_conflict_keys_falls_back_to_primary_keys(self):
-        from cdk.sql.generic import (
-            GenericSQLConnector,
-        )
+    async def test_absent_write_conflict_keys_yields_empty_no_primary_keys_fallback(
+        self,
+    ):
+        from cdk.sql.generic import GenericSQLConnector
         from cdk.type_map import TypeMapper
         from cdk.type_map.rules import parse_rules
 
@@ -95,19 +107,33 @@ class TestWriteConflictKeysWiring:
         handler._stream_endpoints = {
             "s1": {
                 "database_object": {"name": "orders", "schema": "public"},
-                "columns": [{"name": "id", "native_type": "BIGINT", "arrow_type": "Int64", "nullable": False}],
+                "columns": [
+                    {
+                        "name": "id",
+                        "native_type": "BIGINT",
+                        "arrow_type": "Int64",
+                        "nullable": False,
+                    }
+                ],
                 "primary_keys": ["id"],
             },
         }
         handler._ensure_tables_exist = AsyncMock()
 
         from src.grpc.generated.analitiq.v1 import SchemaMessage, WriteMode
+
         msg = SchemaMessage(
-            stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_UPSERT,
+            stream_id="s1",
+            version=1,
+            write_mode=WriteMode.WRITE_MODE_UPSERT,
         )
         await handler.configure_schema(msg)
 
-        assert handler._streams["s1"].conflict_keys == ["id"]
+        # No ``_write_conflict_keys`` on the endpoint doc: the conflict
+        # target is empty. The engine does NOT fabricate one from
+        # ``primary_keys`` (the misconfiguration surfaces loudly later, at
+        # the write path).
+        assert handler._streams["s1"].conflict_keys == []
 
 
 # --------------------------------------------------------------------------- #
@@ -116,34 +142,16 @@ class TestWriteConflictKeysWiring:
 
 
 class TestMainConflictKeysWiring:
-    """Misconfigured pipelines must fail fast at destination startup —
-    silently downgrading UPSERT to INSERT corrupts replication
-    semantics."""
+    """An unknown ``write.mode`` must fail fast at destination startup
+    (format validation). Conflict-key enforcement is no longer the
+    engine's job — Infra validates it, so the engine only rejects a mode
+    string it cannot parse."""
 
     def test_unknown_mode_raises(self):
-        from src.models.stream import WriteConfig, WriteMode
+        from src.models.stream import WriteMode
 
         with pytest.raises(ValueError):
             WriteMode("merge-typo")
-
-        # Confirm the helper's contract: ValueError on UPSERT without keys
-        wc = WriteConfig(mode=WriteMode.UPSERT)
-        with pytest.raises(ValueError, match="UPSERT requires"):
-            wc.effective_conflict_keys([])
-
-    def test_effective_conflict_keys_flattens_for_database_handler(self):
-        """The database handler uses a single flat list. The first
-        composite returned by ``effective_conflict_keys`` is what
-        main.py threads through ``_write_conflict_keys``."""
-        from src.models.stream import WriteConfig, WriteMode
-
-        wc = WriteConfig(
-            mode=WriteMode.UPSERT,
-            conflict_keys=[["tenant_id", "id"]],
-        )
-        composites = wc.effective_conflict_keys(["id"]) or []
-        assert composites == [["tenant_id", "id"]]
-        assert list(composites[0]) == ["tenant_id", "id"]
 
 
 # --------------------------------------------------------------------------- #
@@ -157,11 +165,14 @@ class TestServerConfigureSchemaDeterministicErrors:
     than crashing the stream with a generic 'configuration failed'."""
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("exc", [
-        KeyError("database_object"),
-        TypeError("expected dict"),
-        ValueError("malformed columns"),
-    ])
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            KeyError("database_object"),
+            TypeError("expected dict"),
+            ValueError("malformed columns"),
+        ],
+    )
     async def test_deterministic_exception_in_schema_ack(self, exc):
         from src.destination.server import DestinationServicer
 
@@ -170,10 +181,15 @@ class TestServerConfigureSchemaDeterministicErrors:
         servicer = DestinationServicer(handler, MagicMock())
 
         from src.grpc.generated.analitiq.v1 import (
-            SchemaMessage, StreamRequest, WriteMode,
+            SchemaMessage,
+            StreamRequest,
+            WriteMode,
         )
+
         schema_msg = SchemaMessage(
-            stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_UPSERT,
+            stream_id="s1",
+            version=1,
+            write_mode=WriteMode.WRITE_MODE_UPSERT,
             ack_timeout_seconds=30,
         )
         request = StreamRequest(schema=schema_msg)
@@ -218,6 +234,7 @@ class TestStartStreamStateReset:
         # Make start_stream's schema-ack wait complete immediately via a
         # task that fails — we only care about the pre-send reset.
         import asyncio as _asyncio
+
         original_create_task = _asyncio.create_task
 
         def _capture_create_task(coro, name=None):
@@ -250,54 +267,48 @@ class TestStartStreamStateReset:
 
 class TestIsoTimestampStrictRaise:
     """Returning ``datetime.now()`` on unparseable cursor input would
-    silently re-window incremental replication. The assignment-transformer
-    function must raise so the engine routes via error_strategy."""
+    silently re-window incremental replication. The vectorized iso_* kernels
+    must raise so the engine routes via error_strategy."""
 
-    @pytest.mark.asyncio
-    async def test_fn_iso_to_datetime_raises_on_unparseable(self):
+    def test_iso_to_datetime_raises_on_unparseable(self):
         # A datetime.now() fallback would fabricate timestamps that are
         # indistinguishable from valid data (issue #138).
-        from src.engine.data_transformer import AssignmentTransformer
+        import pyarrow as pa
+
+        from src.engine.data_transformer import _FUNCTION_CATALOG
         from src.engine.exceptions import TransformationError
 
-        t = AssignmentTransformer()
         with pytest.raises(TransformationError, match="iso_to_datetime"):
-            await t._fn_iso_to_datetime("not-a-timestamp")
+            _FUNCTION_CATALOG["iso_to_datetime"][1](pa.array(["not-a-timestamp"]))
 
-    @pytest.mark.asyncio
-    async def test_fn_iso_to_datetime_parses_valid_input(self):
-        from datetime import datetime
-        from src.engine.data_transformer import AssignmentTransformer
+    def test_iso_to_datetime_parses_valid_input_and_passes_null(self):
+        import pyarrow as pa
 
-        t = AssignmentTransformer()
-        result = await t._fn_iso_to_datetime("2026-05-12T10:30:00Z")
-        assert isinstance(result, datetime)
-        assert result.tzinfo is not None
-        assert await t._fn_iso_to_datetime(None) is None
+        from src.engine.data_transformer import _FUNCTION_CATALOG
 
-    @pytest.mark.asyncio
-    async def test_fn_iso_to_date_raises_on_unparseable(self):
-        from src.engine.data_transformer import AssignmentTransformer
+        out = _FUNCTION_CATALOG["iso_to_datetime"][1](
+            pa.array(["2026-05-12T10:30:00Z", None])
+        )
+        assert out.type == pa.timestamp("us", tz="UTC")
+        rows = out.to_pylist()
+        assert rows[0].tzinfo is not None
+        assert rows[1] is None
+
+    def test_iso_to_date_raises_on_unparseable(self):
+        import pyarrow as pa
+
+        from src.engine.data_transformer import _FUNCTION_CATALOG
         from src.engine.exceptions import TransformationError
 
-        t = AssignmentTransformer()
         with pytest.raises(TransformationError, match="iso_to_date"):
-            await t._fn_iso_to_date("not-a-date")
+            _FUNCTION_CATALOG["iso_to_date"][1](pa.array(["not-a-date"]))
 
-    @pytest.mark.asyncio
-    async def test_fn_iso_to_date_raises_on_non_iso_input(self):
-        from src.engine.data_transformer import AssignmentTransformer
-        from src.engine.exceptions import TransformationError
+    def test_iso_to_date_parses_valid_input_and_passes_null(self):
+        import pyarrow as pa
 
-        t = AssignmentTransformer()
-        with pytest.raises(TransformationError, match="iso_to_date"):
-            await t._fn_iso_to_date([1, 2, 3])
+        from src.engine.data_transformer import _FUNCTION_CATALOG
 
-    @pytest.mark.asyncio
-    async def test_fn_iso_to_date_parses_valid_input(self):
-        from src.engine.data_transformer import AssignmentTransformer
-
-        t = AssignmentTransformer()
-        assert await t._fn_iso_to_date("2026-05-12T10:30:00") == "2026-05-12"
-        assert await t._fn_iso_to_date("2026-05-12") == "2026-05-12"
-        assert await t._fn_iso_to_date(None) is None
+        out = _FUNCTION_CATALOG["iso_to_date"][1](
+            pa.array(["2026-05-12T10:30:00", "2026-05-12", None])
+        )
+        assert out.to_pylist() == ["2026-05-12", "2026-05-12", None]

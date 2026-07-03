@@ -16,25 +16,32 @@ from unittest.mock import Mock
 
 import pytest
 
+from cdk.connection_runtime import ConnectionRuntime
 from cdk.type_map import TypeMapper
 from cdk.type_map.rules import parse_rules, parse_write_rules
-from cdk.connection_runtime import ConnectionRuntime
 from cdk.types import EndpointScope
 
-
 CONNECTOR_READ_RULES = [{"match": "exact", "native": "BIGINT", "canonical": "Int64"}]
-CONNECTION_READ_RULES = [{"match": "exact", "native": "CUSTOM_TYPE", "canonical": "Utf8"}]
+CONNECTION_READ_RULES = [
+    {"match": "exact", "native": "CUSTOM_TYPE", "canonical": "Utf8"}
+]
 CONNECTOR_WRITE_RULES = [{"match": "exact", "canonical": "Int64", "native": "BIGINT"}]
-CONNECTION_WRITE_RULES = [{"match": "exact", "canonical": "Utf8", "native": "CUSTOM_NATIVE"}]
+CONNECTION_WRITE_RULES = [
+    {"match": "exact", "canonical": "Utf8", "native": "CUSTOM_NATIVE"}
+]
 
 
 def _connector_mapper(*, with_write: bool = False) -> TypeMapper:
-    write = parse_write_rules(CONNECTOR_WRITE_RULES, source="<cw>") if with_write else None
+    write = (
+        parse_write_rules(CONNECTOR_WRITE_RULES, source="<cw>") if with_write else None
+    )
     return TypeMapper("pg", parse_rules(CONNECTOR_READ_RULES, source="<cr>"), write)
 
 
 def _connection_mapper(*, with_write: bool = False) -> TypeMapper:
-    write = parse_write_rules(CONNECTION_WRITE_RULES, source="<nw>") if with_write else None
+    write = (
+        parse_write_rules(CONNECTION_WRITE_RULES, source="<nw>") if with_write else None
+    )
     return TypeMapper(
         "connection:test-conn",
         parse_rules(CONNECTION_READ_RULES, source="<nr>"),
@@ -76,7 +83,9 @@ class TestTypeMapperFor:
         with pytest.raises(RuntimeError, match="connector_type_mapper not available"):
             _ = rt.connector_type_mapper
 
-    def test_connection_scope_with_mapper_but_no_connector_returns_connection_mapper(self):
+    def test_connection_scope_with_mapper_but_no_connector_returns_connection_mapper(
+        self,
+    ):
         # When no connector map is available, the connection map is returned as-is
         # (no composition possible). This covers API-only connectors that have no
         # type-map.json but whose connection adds one.

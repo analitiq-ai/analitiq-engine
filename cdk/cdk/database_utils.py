@@ -11,8 +11,9 @@ anything provider-specific.
 from __future__ import annotations
 
 import logging
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator, Dict
+from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -40,11 +41,12 @@ def get_full_table_name(schema_name: str, table_name: str) -> str:
     return f"{schema_name}.{table_name}" if schema_name else table_name
 
 
-
 @asynccontextmanager
 async def acquire_connection(engine: AsyncEngine) -> AsyncIterator:
-    """Yield an :class:`AsyncConnection` from *engine* for the lifetime of the
-    context manager. Raises :class:`RuntimeError` when the engine is ``None``.
+    """Yield an :class:`AsyncConnection` for the context manager's lifetime.
+
+    The connection comes from *engine*. Raises :class:`RuntimeError` when the
+    engine is ``None``.
     """
     if engine is None:
         raise RuntimeError("Engine not initialized")
@@ -52,7 +54,7 @@ async def acquire_connection(engine: AsyncEngine) -> AsyncIterator:
         yield conn
 
 
-def get_default_clause(field_def: Dict[str, Any]) -> str:
+def get_default_clause(field_def: dict[str, Any]) -> str:
     """Return the SQL ``DEFAULT`` clause for a JSON-Schema field definition.
 
     Recognized default forms:
