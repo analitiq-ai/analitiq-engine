@@ -138,8 +138,8 @@ class BaseStorageBackend(ABC):
         stream_id: str,
         batch_seq: int,
         extension: str,
-        content_hash: str = "",
         partition_template: str | None = None,
+        content_hash: str = "",
     ) -> str:
         """
         Build a file path with optional partitioning.
@@ -163,10 +163,10 @@ class BaseStorageBackend(ABC):
             stream_id: Stream identifier
             batch_seq: Batch sequence number
             extension: File extension including dot (e.g., '.jsonl')
-            content_hash: First 16 hex chars of SHA-256 of the serialized batch;
-                          omit (or pass "") to use the legacy batch_seq-only stem.
             partition_template: Optional partition template with placeholders
                                (e.g., 'year={year}/month={month}')
+            content_hash: First 16 hex chars of SHA-256 of the serialized batch;
+                          omit (or pass "") to use the legacy batch_seq-only stem.
 
         Returns:
             Constructed file path
