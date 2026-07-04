@@ -138,19 +138,26 @@ class BaseStorageBackend(ABC):
         stream_id: str,
         batch_seq: int,
         extension: str,
+        content_hash: str = "",
         partition_template: str | None = None,
     ) -> str:
         """
         Build a file path with optional partitioning.
 
-        Default format: {base_path}/{stream_id}/{batch_seq}{extension}
-        With partition: {base_path}/{partitions}/{stream_id}_{batch_seq}{extension}
+        Default format: {base_path}/{stream_id}/{batch_seq}_{content_hash}{extension}
+        With partition: {base_path}/{partitions}/{stream_id}_{batch_seq}_{content_hash}{extension}
+
+        The content_hash suffix ensures that two batches with the same sequence
+        number but different content (as happens on a same-RUN_ID restart, where
+        batch_seq resets while the source resumes from the committed cursor) land
+        on distinct files instead of overwriting each other.
 
         Args:
             base_path: Base directory path
             stream_id: Stream identifier
             batch_seq: Batch sequence number
             extension: File extension including dot (e.g., '.jsonl')
+            content_hash: First 16 hex chars of SHA-256 of the serialized batch
             partition_template: Optional partition template with placeholders
                                (e.g., 'year={year}/month={month}')
 
@@ -158,6 +165,7 @@ class BaseStorageBackend(ABC):
             Constructed file path
         """
         now = datetime.now(timezone.utc)
+        stem = f"{batch_seq}_{content_hash}" if content_hash else str(batch_seq)
 
         if partition_template:
             # Replace partition placeholders
@@ -167,6 +175,6 @@ class BaseStorageBackend(ABC):
                 day=f"{now.day:02d}",
                 hour=f"{now.hour:02d}",
             )
-            return f"{base_path}/{partitions}/{stream_id}_{batch_seq}{extension}"
+            return f"{base_path}/{partitions}/{stream_id}_{stem}{extension}"
 
-        return f"{base_path}/{stream_id}/{batch_seq}{extension}"
+        return f"{base_path}/{stream_id}/{stem}{extension}"

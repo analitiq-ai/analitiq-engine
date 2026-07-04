@@ -5,6 +5,7 @@ local storage backend.
 """
 
 import errno
+import hashlib
 import logging
 from typing import Any
 
@@ -81,8 +82,11 @@ class FileDestinationHandler(BaseDestinationHandler):
         but not for a same-run restart: the source resumes from the
         committed cursor while batch_seq restarts, so a committed position
         can re-arrive carrying different rows and be skipped as a replay
-        (the row-drop class of issue #282). Until the manifest keys on
-        content, the honest claim is that a restart is not replay-safe.
+        (the row-drop class of issue #282). File overwrites on restart are
+        prevented by the content hash in the filename (issue #319), but
+        manifest dedup by batch position still drops new rows. Until the
+        manifest keys on content (issue #306), the honest claim is that a
+        restart is not replay-safe.
         """
         _ = stream_id
         return RetryVerdict(
@@ -239,18 +243,23 @@ class FileDestinationHandler(BaseDestinationHandler):
             )
 
         try:
+            # Serialize first so we can derive a content hash for the filename.
+            # The hash prevents same-batch_seq files from overwriting each other
+            # on a same-RUN_ID restart, where batch_seq resets while the source
+            # resumes from the committed cursor (issue #319).
+            data = self._formatter.serialize_batch(records)
+            content_hash = hashlib.sha256(data).hexdigest()[:16]
+
             # Build file path
             base_path = self._config.get("path", "") or self._config.get("prefix", "")
             file_path = self._storage.build_path(
                 base_path=base_path,
                 stream_id=stream_id,
                 batch_seq=batch_seq,
+                content_hash=content_hash,
                 extension=self._formatter.file_extension,
                 partition_template=self._path_template,
             )
-
-            # Serialize records
-            data = self._formatter.serialize_batch(records)
 
             # Write to storage
             written_path = await self._storage.write_file(
