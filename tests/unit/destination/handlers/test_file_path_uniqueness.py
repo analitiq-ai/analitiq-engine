@@ -127,6 +127,7 @@ async def test_write_batch_passes_content_hash_to_build_path():
 
     call_kwargs = handler._storage.build_path.call_args[1]
     assert call_kwargs["content_hash"] == expected_hash
+    assert len(call_kwargs["content_hash"]) == 16
 
 
 @pytest.mark.asyncio
@@ -155,10 +156,10 @@ async def test_same_run_id_restart_different_content_gets_different_path():
             cursor=Cursor(token=b"c"),
         )
 
-    hash_a = handler_a._storage.build_path.call_args[1]["content_hash"]
-    hash_b = handler_b._storage.build_path.call_args[1]["content_hash"]
+    captured_hash_a = handler_a._storage.build_path.call_args[1]["content_hash"]
+    captured_hash_b = handler_b._storage.build_path.call_args[1]["content_hash"]
     # Different hashes guarantee different paths given the deterministic format.
-    assert hash_a != hash_b
+    assert captured_hash_a != captured_hash_b
 
 
 @pytest.mark.asyncio
@@ -202,6 +203,28 @@ async def test_write_batch_result_is_success():
         cursor=Cursor(token=b"c"),
     )
     assert result.status == AckStatus.ACK_STATUS_SUCCESS
+
+
+@pytest.mark.asyncio
+async def test_empty_batch_skips_serialize_and_build_path():
+    """An empty batch returns SUCCESS without serializing or building a path.
+
+    The empty-batch guard fires before the serialize→hash→build_path
+    sequence, so an empty payload never reaches the hashing step.
+    """
+    handler = _make_handler(serialize_return=b"")
+    result = await handler.write_batch(
+        run_id="r",
+        stream_id="s",
+        batch_seq=0,
+        record_batch=pa.RecordBatch.from_pylist([]),
+        record_ids=[],
+        cursor=Cursor(token=b"c"),
+    )
+    assert result.status == AckStatus.ACK_STATUS_SUCCESS
+    assert result.records_written == 0
+    handler._formatter.serialize_batch.assert_not_called()
+    handler._storage.build_path.assert_not_called()
 
 
 @pytest.mark.asyncio
