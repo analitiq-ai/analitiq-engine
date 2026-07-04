@@ -21,7 +21,6 @@ from src.destination.storage.base import BaseStorageBackend
 from src.destination.storage.local import LocalFileStorage
 from src.grpc.generated.analitiq.v1 import AckStatus, Cursor
 
-
 # ---------------------------------------------------------------------------
 # build_path: unit tests on the base class method
 # ---------------------------------------------------------------------------
