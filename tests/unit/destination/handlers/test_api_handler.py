@@ -363,6 +363,47 @@ class TestApiHandlerWriteSingleMode:
         with pytest.raises(aiohttp.ClientResponseError) as exc_info:
             await api_handler._write_single_mode(state, records, record_ids)
         assert exc_info.value.status == 429
+        # Loop aborts immediately on the first RETRYABLE — does not exhaust all records.
+        assert api_handler._send_request.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_write_single_mode_429_mid_batch_reraises_after_partial_writes(
+        self,
+        api_handler: ApiDestinationHandler,
+    ):
+        """429 on record 2-of-3 re-raises even though record 1 already landed.
+
+        The outer write_batch catch has no access to ``written``, so it reports
+        records_written=0 and the engine retries the full batch — the record
+        that already landed will be re-sent (documented duplication trade-off).
+        """
+        import aiohttp
+
+        api_handler._connected = True
+        api_handler._session = MagicMock()
+
+        records = [{"id": 1}, {"id": 2}, {"id": 3}]
+        record_ids = ["rec-1", "rec-2", "rec-3"]
+
+        call_count = 0
+
+        async def mock_send_request(state, data, extra_headers=None):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 2:
+                raise aiohttp.ClientResponseError(
+                    MagicMock(), (), status=429, message="Too Many Requests"
+                )
+            return {"status": "ok"}
+
+        api_handler._send_request = mock_send_request
+        state = api_handler._streams["test-stream"]
+
+        with pytest.raises(aiohttp.ClientResponseError) as exc_info:
+            await api_handler._write_single_mode(state, records, record_ids)
+        assert exc_info.value.status == 429
+        # Loop aborted at record 2; record 3 never attempted.
+        assert call_count == 2
 
     @pytest.mark.asyncio
     async def test_write_single_mode_fatal_4xx_adds_to_failed_ids(

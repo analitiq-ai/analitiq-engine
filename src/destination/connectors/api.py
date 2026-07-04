@@ -867,12 +867,14 @@ class ApiDestinationHandler(BaseDestinationHandler):
         for the whole batch.
 
         Transport error handling applies ``_classify_http_error`` per record:
-        - RETRYABLE (429, 408, connection errors, timeouts): re-raises so
-          ``write_batch``'s outer catch returns RETRYABLE for the whole batch.
-          Trade-off: records that already landed in the same batch may be
-          duplicated on retry (possible duplication vs. permanent DLQ).
-          Streams with a declared idempotency key are protected; AT_LEAST_ONCE
-          streams should account for this in their retry window.
+        - RETRYABLE (429, 408, connection errors, timeouts): re-raises
+          immediately. ``write_batch``'s outer catch has no access to the
+          local ``written`` counter, so it always reports ``records_written=0``
+          and no committed cursor; the engine retries the full batch. Records
+          that already landed before the re-raise will be re-sent (possible
+          duplication). Streams with a declared idempotency key are fully
+          protected; insert-mode streams without one (classified AT_LEAST_ONCE
+          by ``_retry_verdict``) should account for this in their retry window.
         - FATAL (4xx non-429/408): deterministic rejection — the record is
           added to ``failed_ids`` and the loop continues to the next record.
         """
@@ -919,6 +921,15 @@ class ApiDestinationHandler(BaseDestinationHandler):
                 written += 1
             except (aiohttp.ClientError, asyncio.TimeoutError) as e:
                 if _classify_http_error(e) == AckStatus.ACK_STATUS_RETRYABLE_FAILURE:
+                    logger.warning(
+                        "RETRYABLE error on record %s (index %d, %d already written)"
+                        " — aborting batch: %s: %s",
+                        record_ids[i],
+                        i,
+                        written,
+                        type(e).__name__,
+                        e,
+                    )
                     raise
                 logger.warning(
                     "Failed to write record %s: %s: %s",
