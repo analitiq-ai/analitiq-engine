@@ -133,7 +133,14 @@ async def test_serialize_batch_non_empty_succeeds():
     assert result.status == AckStatus.ACK_STATUS_SUCCESS
     assert result.records_written == 1
     handler._storage.write_file.assert_called_once()
-    handler._manifest.record_commit.assert_called_once()
+    handler._manifest.record_commit.assert_called_once_with(
+        run_id="r1",
+        stream_id="s1",
+        batch_seq=1,
+        records_written=1,
+        cursor_bytes=b"tok",
+        file_path="/tmp/output.jsonl",
+    )
 
 
 @pytest.mark.asyncio
