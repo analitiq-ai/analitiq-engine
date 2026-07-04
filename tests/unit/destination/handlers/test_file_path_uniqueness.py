@@ -156,18 +156,21 @@ async def test_same_run_id_restart_different_content_gets_different_path():
             cursor=Cursor(token=b"c"),
         )
 
-    path_a = handler_a._storage.build_path.call_args[1]["content_hash"]
-    path_b = handler_b._storage.build_path.call_args[1]["content_hash"]
-    assert path_a != path_b
+    hash_a = handler_a._storage.build_path.call_args[1]["content_hash"]
+    hash_b = handler_b._storage.build_path.call_args[1]["content_hash"]
+    # Different hashes guarantee different paths given the deterministic format.
+    assert hash_a != hash_b
 
 
 @pytest.mark.asyncio
 async def test_in_run_replay_same_content_gets_same_path():
-    """An in-run replay of the same batch produces the same hash → same path.
+    """Same content always produces the same content hash (hash stability).
 
-    This is the idempotent property: the manifest would gate the duplicate
-    write, but if it somehow reached build_path the path would be identical
-    so an accidental second write is a no-op overwrite of identical bytes.
+    In production an in-run replay is gated by check_committed before
+    serialization runs, so build_path is never reached a second time.
+    This test stubs check_committed to None so both calls reach build_path,
+    verifying the hash-stability property directly: identical data always
+    maps to the same hash and therefore the same file path.
     """
     data = b'{"id":1}\n'
     handler = _make_handler(serialize_return=data)
@@ -200,3 +203,28 @@ async def test_write_batch_result_is_success():
         cursor=Cursor(token=b"c"),
     )
     assert result.status == AckStatus.ACK_STATUS_SUCCESS
+
+
+@pytest.mark.asyncio
+async def test_serialize_exception_is_fatal_and_build_path_not_called():
+    """A formatter error during serialization becomes FATAL_FAILURE.
+
+    Serialization runs before build_path. An exception there must be caught
+    by the outer except block and must never allow build_path to be called
+    with a partial or absent hash.
+    """
+    handler = _make_handler(serialize_return=b"unused")
+    handler._formatter.serialize_batch.side_effect = RuntimeError("encoding failed")
+
+    result = await handler.write_batch(
+        run_id="r",
+        stream_id="s",
+        batch_seq=0,
+        record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
+        record_ids=["r1"],
+        cursor=Cursor(token=b"c"),
+    )
+
+    assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+    assert "RuntimeError" in result.failure_summary
+    handler._storage.build_path.assert_not_called()

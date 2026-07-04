@@ -243,10 +243,8 @@ class FileDestinationHandler(BaseDestinationHandler):
             )
 
         try:
-            # Serialize first so we can derive a content hash for the filename.
-            # The hash prevents same-batch_seq files from overwriting each other
-            # on a same-RUN_ID restart, where batch_seq resets while the source
-            # resumes from the committed cursor (issue #319).
+            # Serialize before building path so the filename includes a content
+            # hash — prevents same-batch_seq overwrites on restart (issue #319).
             data = self._formatter.serialize_batch(records)
             content_hash = hashlib.sha256(data).hexdigest()[:16]
 

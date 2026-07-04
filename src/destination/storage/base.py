@@ -144,8 +144,14 @@ class BaseStorageBackend(ABC):
         """
         Build a file path with optional partitioning.
 
-        Default format: {base_path}/{stream_id}/{batch_seq}_{content_hash}{extension}
-        With partition: {base_path}/{partitions}/{stream_id}_{batch_seq}_{content_hash}{extension}
+        Without hash:
+          {base_path}/{stream_id}/{batch_seq}{extension}
+        With hash:
+          {base_path}/{stream_id}/{batch_seq}_{content_hash}{extension}
+        With partition (without hash):
+          {base_path}/{partitions}/{stream_id}_{batch_seq}{extension}
+        With partition and hash:
+          {base_path}/{partitions}/{stream_id}_{batch_seq}_{content_hash}{extension}
 
         The content_hash suffix ensures that two batches with the same sequence
         number but different content (as happens on a same-RUN_ID restart, where
@@ -157,7 +163,8 @@ class BaseStorageBackend(ABC):
             stream_id: Stream identifier
             batch_seq: Batch sequence number
             extension: File extension including dot (e.g., '.jsonl')
-            content_hash: First 16 hex chars of SHA-256 of the serialized batch
+            content_hash: First 16 hex chars of SHA-256 of the serialized batch;
+                          omit (or pass "") to use the legacy batch_seq-only stem.
             partition_template: Optional partition template with placeholders
                                (e.g., 'year={year}/month={month}')
 
