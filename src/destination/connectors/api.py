@@ -861,11 +861,20 @@ class ApiDestinationHandler(BaseDestinationHandler):
         Returns ``(written, failed_record_ids, first_failure)`` — the first
         per-record failure reason rides the engine-facing failure summary.
         Body construction is data-dependent (a record field can feed a
-        derived function) and transport errors are per-record data issues;
-        both are caught per record so a bad record fails just itself.
-        Authoring and programming errors (TransportSpecError, RuntimeError,
-        KeyError) propagate to write_batch and become FATAL for the whole
-        batch.
+        derived function) and is caught per record so a bad record fails
+        just itself. Authoring and programming errors (TransportSpecError,
+        RuntimeError, KeyError) propagate to write_batch and become FATAL
+        for the whole batch.
+
+        Transport error handling applies ``_classify_http_error`` per record:
+        - RETRYABLE (429, 408, connection errors, timeouts): re-raises so
+          ``write_batch``'s outer catch returns RETRYABLE for the whole batch.
+          Trade-off: records that already landed in the same batch may be
+          duplicated on retry (possible duplication vs. permanent DLQ).
+          Streams with a declared idempotency key are protected; AT_LEAST_ONCE
+          streams should account for this in their retry window.
+        - FATAL (4xx non-429/408): deterministic rejection — the record is
+          added to ``failed_ids`` and the loop continues to the next record.
         """
         written = 0
         failed_ids: list[str] = []
@@ -909,6 +918,8 @@ class ApiDestinationHandler(BaseDestinationHandler):
                 await self._send_request(state, body, extra_headers=idempotency_header)
                 written += 1
             except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                if _classify_http_error(e) == AckStatus.ACK_STATUS_RETRYABLE_FAILURE:
+                    raise
                 logger.warning(
                     "Failed to write record %s: %s: %s",
                     record_ids[i],
