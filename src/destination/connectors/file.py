@@ -287,7 +287,10 @@ class FileDestinationHandler(BaseDestinationHandler):
             fatal_errnos = {errno.ENOSPC, errno.EACCES, errno.EROFS, errno.EDQUOT}
             if e.errno in fatal_errnos:
                 logger.error(
-                    "Fatal filesystem error writing batch (%s): %s",
+                    "Fatal filesystem error writing batch (run=%s, stream=%s, seq=%s, errno=%s): %s",
+                    run_id,
+                    stream_id,
+                    batch_seq,
                     errno.errorcode.get(e.errno, e.errno),
                     e,
                     exc_info=True,
@@ -299,14 +302,28 @@ class FileDestinationHandler(BaseDestinationHandler):
                         f"OSError[{errno.errorcode.get(e.errno, e.errno)}]: {e}"
                     ),
                 )
-            logger.error("Retryable I/O error writing batch: %s", e, exc_info=True)
+            logger.error(
+                "Retryable I/O error writing batch (run=%s, stream=%s, seq=%s): %s",
+                run_id,
+                stream_id,
+                batch_seq,
+                e,
+                exc_info=True,
+            )
             return BatchWriteResult(
                 status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
                 records_written=0,
                 failure_summary=f"{type(e).__name__}: {e}",
             )
         except Exception as e:
-            logger.error("Fatal error writing batch: %s", e, exc_info=True)
+            logger.error(
+                "Fatal error writing batch (run=%s, stream=%s, seq=%s): %s",
+                run_id,
+                stream_id,
+                batch_seq,
+                e,
+                exc_info=True,
+            )
             return BatchWriteResult(
                 status=AckStatus.ACK_STATUS_FATAL_FAILURE,
                 records_written=0,

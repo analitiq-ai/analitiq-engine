@@ -133,3 +133,51 @@ async def test_stream_handler_non_oserror_is_fatal():
     result = await _drive_stream(StreamDestinationHandler(), TypeError("bug"))
     assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
     assert "TypeError" in result.failure_summary
+
+
+@pytest.mark.asyncio
+async def test_file_handler_fatal_errno_log_includes_batch_context(caplog):
+    """Fatal OSError log must include run_id, stream_id, batch_seq."""
+    import logging
+
+    exc = OSError(errno.ENOSPC, "disk full")
+    with caplog.at_level(logging.ERROR, logger="src.destination.connectors.file"):
+        await _drive_file(FileDestinationHandler(), exc)
+
+    assert any(
+        "r" in r.getMessage() and "s" in r.getMessage() and "1" in r.getMessage()
+        for r in caplog.records
+        if r.levelno == logging.ERROR
+    ), f"Expected run/stream/seq in log, got: {[r.getMessage() for r in caplog.records]}"
+    assert any("ENOSPC" in r.getMessage() for r in caplog.records if r.levelno == logging.ERROR)
+
+
+@pytest.mark.asyncio
+async def test_file_handler_retryable_oserror_log_includes_batch_context(caplog):
+    """Retryable OSError log must include run_id, stream_id, batch_seq."""
+    import logging
+
+    exc = OSError(errno.EIO, "transient")
+    with caplog.at_level(logging.ERROR, logger="src.destination.connectors.file"):
+        await _drive_file(FileDestinationHandler(), exc)
+
+    assert any(
+        "r" in r.getMessage() and "s" in r.getMessage() and "1" in r.getMessage()
+        for r in caplog.records
+        if r.levelno == logging.ERROR
+    ), f"Expected run/stream/seq in log, got: {[r.getMessage() for r in caplog.records]}"
+
+
+@pytest.mark.asyncio
+async def test_file_handler_non_oserror_log_includes_batch_context(caplog):
+    """Catch-all Exception log must include run_id, stream_id, batch_seq."""
+    import logging
+
+    with caplog.at_level(logging.ERROR, logger="src.destination.connectors.file"):
+        await _drive_file(FileDestinationHandler(), KeyError("missing"))
+
+    assert any(
+        "r" in r.getMessage() and "s" in r.getMessage() and "1" in r.getMessage()
+        for r in caplog.records
+        if r.levelno == logging.ERROR
+    ), f"Expected run/stream/seq in log, got: {[r.getMessage() for r in caplog.records]}"
