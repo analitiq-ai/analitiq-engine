@@ -4,6 +4,10 @@ Disk-full, permission, EROFS, and EPIPE are not recoverable by retry —
 classifying them as RETRYABLE would burn the DLQ budget and mask the
 root cause. These tests pin the errno → status mapping so a regression
 that drops an errno from the fatal set fails CI loudly.
+
+Also covers the pre-try operations (to_pylist, check_committed, and the
+empty-batch record_commit) that were previously outside the try/except
+and would propagate as bare exceptions instead of BatchWriteResult.
 """
 
 import errno
@@ -133,3 +137,100 @@ async def test_stream_handler_non_oserror_is_fatal():
     result = await _drive_stream(StreamDestinationHandler(), TypeError("bug"))
     assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
     assert "TypeError" in result.failure_summary
+
+
+def _make_file_handler(*, check_committed_result=None, check_committed_exc=None, record_commit_exc=None):
+    """Return a partially-wired FileDestinationHandler for pre-try path tests."""
+    handler = FileDestinationHandler()
+    handler._connected = True
+    handler._formatter = MagicMock()
+    handler._formatter.serialize_batch = MagicMock(return_value=b"data\n")
+    handler._formatter.file_extension = "jsonl"
+    handler._formatter.content_type = "application/jsonl"
+    handler._storage = MagicMock()
+    handler._storage.build_path = MagicMock(return_value="/tmp/out.jsonl")
+    handler._storage.write_file = AsyncMock(return_value="/tmp/out.jsonl")
+    handler._manifest = MagicMock()
+    handler._manifest.check_committed = AsyncMock(
+        return_value=check_committed_result,
+        side_effect=check_committed_exc,
+    )
+    handler._manifest.record_commit = AsyncMock(side_effect=record_commit_exc)
+    handler._path_template = None
+    handler._config = {"path": "/tmp", "prefix": ""}
+    return handler
+
+
+@pytest.mark.asyncio
+async def test_to_pylist_arrow_invalid_is_fatal():
+    """ArrowInvalid from to_pylist must not propagate — returns FATAL."""
+    handler = _make_file_handler()
+    mock_batch = MagicMock(spec=pa.RecordBatch)
+    mock_batch.to_pylist = MagicMock(side_effect=pa.ArrowInvalid("corrupt buffer"))
+
+    result = await handler.write_batch(
+        run_id="r", stream_id="s", batch_seq=1,
+        record_batch=mock_batch, record_ids=[], cursor=_cursor(),
+    )
+
+    assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+    assert "ArrowInvalid" in result.failure_summary
+
+
+@pytest.mark.asyncio
+async def test_check_committed_runtime_error_is_fatal():
+    """RuntimeError from check_committed (corrupted manifest) must not propagate."""
+    handler = _make_file_handler(check_committed_exc=RuntimeError("manifest corrupted"))
+
+    result = await handler.write_batch(
+        run_id="r", stream_id="s", batch_seq=1,
+        record_batch=_record_batch(), record_ids=["1"], cursor=_cursor(),
+    )
+
+    assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+    assert "RuntimeError" in result.failure_summary
+
+
+@pytest.mark.asyncio
+async def test_check_committed_fatal_oserror_is_fatal():
+    """Fatal OSError (ENOSPC) from check_committed must not propagate."""
+    handler = _make_file_handler(
+        check_committed_exc=OSError(errno.ENOSPC, "disk full")
+    )
+
+    result = await handler.write_batch(
+        run_id="r", stream_id="s", batch_seq=1,
+        record_batch=_record_batch(), record_ids=["1"], cursor=_cursor(),
+    )
+
+    assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+    assert "ENOSPC" in result.failure_summary
+
+
+@pytest.mark.asyncio
+async def test_empty_batch_record_commit_io_error_is_retryable():
+    """Transient IOError from empty-batch record_commit must not propagate — returns RETRYABLE."""
+    handler = _make_file_handler(record_commit_exc=OSError(errno.EIO, "storage unreachable"))
+    empty_batch = pa.RecordBatch.from_pylist([])
+
+    result = await handler.write_batch(
+        run_id="r", stream_id="s", batch_seq=1,
+        record_batch=empty_batch, record_ids=[], cursor=_cursor(),
+    )
+
+    assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
+
+
+@pytest.mark.asyncio
+async def test_empty_batch_record_commit_runtime_error_is_fatal():
+    """RuntimeError from empty-batch record_commit must not propagate — returns FATAL."""
+    handler = _make_file_handler(record_commit_exc=RuntimeError("manifest write failed"))
+    empty_batch = pa.RecordBatch.from_pylist([])
+
+    result = await handler.write_batch(
+        run_id="r", stream_id="s", batch_seq=1,
+        record_batch=empty_batch, record_ids=[], cursor=_cursor(),
+    )
+
+    assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+    assert "RuntimeError" in result.failure_summary

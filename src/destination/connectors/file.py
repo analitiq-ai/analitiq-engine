@@ -206,39 +206,39 @@ class FileDestinationHandler(BaseDestinationHandler):
                 failure_summary="Handler components not initialized",
             )
 
-        records = record_batch.to_pylist()
-
-        existing_commit = await self._manifest.check_committed(
-            run_id, stream_id, batch_seq
-        )
-        if existing_commit:
-            logger.info(
-                f"Batch already committed: run={run_id}, stream={stream_id}, "
-                f"seq={batch_seq}"
-            )
-            return BatchWriteResult(
-                status=AckStatus.ACK_STATUS_ALREADY_COMMITTED,
-                records_written=existing_commit.records_written,
-                committed_cursor=Cursor(token=existing_commit.cursor_bytes),
-            )
-
-        if not records:
-            # Empty batch - still record the commit for idempotency
-            await self._manifest.record_commit(
-                run_id=run_id,
-                stream_id=stream_id,
-                batch_seq=batch_seq,
-                records_written=0,
-                cursor_bytes=cursor.token,
-                file_path="",
-            )
-            return BatchWriteResult(
-                status=AckStatus.ACK_STATUS_SUCCESS,
-                records_written=0,
-                committed_cursor=cursor,
-            )
-
         try:
+            records = record_batch.to_pylist()
+
+            existing_commit = await self._manifest.check_committed(
+                run_id, stream_id, batch_seq
+            )
+            if existing_commit:
+                logger.info(
+                    f"Batch already committed: run={run_id}, stream={stream_id}, "
+                    f"seq={batch_seq}"
+                )
+                return BatchWriteResult(
+                    status=AckStatus.ACK_STATUS_ALREADY_COMMITTED,
+                    records_written=existing_commit.records_written,
+                    committed_cursor=Cursor(token=existing_commit.cursor_bytes),
+                )
+
+            if not records:
+                # Empty batch - still record the commit for idempotency
+                await self._manifest.record_commit(
+                    run_id=run_id,
+                    stream_id=stream_id,
+                    batch_seq=batch_seq,
+                    records_written=0,
+                    cursor_bytes=cursor.token,
+                    file_path="",
+                )
+                return BatchWriteResult(
+                    status=AckStatus.ACK_STATUS_SUCCESS,
+                    records_written=0,
+                    committed_cursor=cursor,
+                )
+
             # Build file path
             base_path = self._config.get("path", "") or self._config.get("prefix", "")
             file_path = self._storage.build_path(
