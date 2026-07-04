@@ -153,16 +153,16 @@ class StreamDestinationHandler(BaseDestinationHandler):
                 failure_summary="Handler not connected",
             )
 
-        records = record_batch.to_pylist()
-
-        if not records:
-            return BatchWriteResult(
-                status=AckStatus.ACK_STATUS_SUCCESS,
-                records_written=0,
-                committed_cursor=cursor,
-            )
-
         try:
+            records = record_batch.to_pylist()
+
+            if not records:
+                return BatchWriteResult(
+                    status=AckStatus.ACK_STATUS_SUCCESS,
+                    records_written=0,
+                    committed_cursor=cursor,
+                )
+
             # Serialize and write to stdout
             data = self._formatter.serialize_batch(records)
             sys.stdout.buffer.write(data)
