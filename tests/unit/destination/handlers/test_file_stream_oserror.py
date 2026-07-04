@@ -7,6 +7,7 @@ that drops an errno from the fatal set fails CI loudly.
 """
 
 import errno
+import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pyarrow as pa
@@ -135,49 +136,75 @@ async def test_stream_handler_non_oserror_is_fatal():
     assert "TypeError" in result.failure_summary
 
 
+async def _drive_file_with_context(
+    handler: FileDestinationHandler, raise_exc: BaseException
+):
+    """Like _drive_file but with distinct batch identity values for log assertions."""
+    handler._connected = True
+    handler._formatter = MagicMock()
+    handler._formatter.serialize_batch = MagicMock(return_value=b"data\n")
+    handler._formatter.file_extension = "jsonl"
+    handler._formatter.content_type = "application/jsonl"
+    handler._storage = MagicMock()
+    handler._storage.build_path = MagicMock(return_value="/tmp/output.jsonl")
+    handler._storage.write_file = AsyncMock(side_effect=raise_exc)
+    handler._manifest = MagicMock()
+    handler._manifest.check_committed = AsyncMock(return_value=None)
+    handler._path_template = None
+    handler._config = {"path": "/tmp", "prefix": "out/"}
+    return await handler.write_batch(
+        run_id="run-abc123",
+        stream_id="stream-xyz789",
+        batch_seq=42,
+        record_batch=_record_batch(),
+        record_ids=["1"],
+        cursor=_cursor(),
+    )
+
+
+def _assert_batch_context_in_log(caplog):
+    """Assert that exactly one ERROR record from file.py contains the batch identity fields."""
+    logger_name = "src.destination.connectors.file"
+    msgs = [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelno == logging.ERROR and r.name == logger_name
+    ]
+    assert msgs, f"No ERROR records from {logger_name}; all records: {caplog.records}"
+    assert any("run=run-abc123" in m for m in msgs), f"run_id missing: {msgs}"
+    assert any("stream=stream-xyz789" in m for m in msgs), f"stream_id missing: {msgs}"
+    assert any("seq=42" in m for m in msgs), f"batch_seq missing: {msgs}"
+
+
 @pytest.mark.asyncio
 async def test_file_handler_fatal_errno_log_includes_batch_context(caplog):
     """Fatal OSError log must include run_id, stream_id, batch_seq."""
-    import logging
-
     exc = OSError(errno.ENOSPC, "disk full")
     with caplog.at_level(logging.ERROR, logger="src.destination.connectors.file"):
-        await _drive_file(FileDestinationHandler(), exc)
+        await _drive_file_with_context(FileDestinationHandler(), exc)
 
+    _assert_batch_context_in_log(caplog)
     assert any(
-        "r" in r.getMessage() and "s" in r.getMessage() and "1" in r.getMessage()
+        "ENOSPC" in r.getMessage()
         for r in caplog.records
-        if r.levelno == logging.ERROR
-    ), f"Expected run/stream/seq in log, got: {[r.getMessage() for r in caplog.records]}"
-    assert any("ENOSPC" in r.getMessage() for r in caplog.records if r.levelno == logging.ERROR)
+        if r.levelno == logging.ERROR and r.name == "src.destination.connectors.file"
+    )
 
 
 @pytest.mark.asyncio
 async def test_file_handler_retryable_oserror_log_includes_batch_context(caplog):
     """Retryable OSError log must include run_id, stream_id, batch_seq."""
-    import logging
-
     exc = OSError(errno.EIO, "transient")
     with caplog.at_level(logging.ERROR, logger="src.destination.connectors.file"):
-        await _drive_file(FileDestinationHandler(), exc)
+        await _drive_file_with_context(FileDestinationHandler(), exc)
 
-    assert any(
-        "r" in r.getMessage() and "s" in r.getMessage() and "1" in r.getMessage()
-        for r in caplog.records
-        if r.levelno == logging.ERROR
-    ), f"Expected run/stream/seq in log, got: {[r.getMessage() for r in caplog.records]}"
+    _assert_batch_context_in_log(caplog)
 
 
 @pytest.mark.asyncio
 async def test_file_handler_non_oserror_log_includes_batch_context(caplog):
     """Catch-all Exception log must include run_id, stream_id, batch_seq."""
-    import logging
-
     with caplog.at_level(logging.ERROR, logger="src.destination.connectors.file"):
-        await _drive_file(FileDestinationHandler(), KeyError("missing"))
+        await _drive_file_with_context(FileDestinationHandler(), KeyError("missing"))
 
-    assert any(
-        "r" in r.getMessage() and "s" in r.getMessage() and "1" in r.getMessage()
-        for r in caplog.records
-        if r.levelno == logging.ERROR
-    ), f"Expected run/stream/seq in log, got: {[r.getMessage() for r in caplog.records]}"
+    _assert_batch_context_in_log(caplog)
