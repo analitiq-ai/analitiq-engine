@@ -252,6 +252,16 @@ class FileDestinationHandler(BaseDestinationHandler):
             # Serialize records
             data = self._formatter.serialize_batch(records)
 
+            if not data:
+                return BatchWriteResult(
+                    status=AckStatus.ACK_STATUS_FATAL_FAILURE,
+                    records_written=0,
+                    failure_summary=(
+                        f"{type(self._formatter).__name__}.serialize_batch() "
+                        f"returned empty bytes for {len(records)} records"
+                    ),
+                )
+
             # Write to storage
             written_path = await self._storage.write_file(
                 path=file_path,
