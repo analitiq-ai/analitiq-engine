@@ -133,6 +133,16 @@ async def test_stream_handler_eio_is_retryable():
 
 
 @pytest.mark.asyncio
+async def test_stream_handler_no_errno_oserror_is_retryable():
+    """OSError with no errno renders 'unknown' not 'None' in failure_summary."""
+    exc = OSError("connection reset with no errno")
+    result = await _drive_stream(StreamDestinationHandler(), exc)
+    assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
+    assert "None" not in result.failure_summary
+    assert "unknown" in result.failure_summary
+
+
+@pytest.mark.asyncio
 async def test_stream_handler_non_oserror_is_fatal():
     result = await _drive_stream(StreamDestinationHandler(), TypeError("bug"))
     assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE

@@ -183,7 +183,9 @@ class StreamDestinationHandler(BaseDestinationHandler):
             # Closed/broken stdout (EPIPE), permissions, disk-full on a
             # redirected stream — none are recoverable by retry.
             errno_code = (
-                errno.errorcode.get(e.errno, e.errno) if e.errno is not None else None
+                errno.errorcode.get(e.errno, str(e.errno))
+                if e.errno is not None
+                else "unknown"
             )
             fatal_errnos = {errno.EPIPE, errno.ENOSPC, errno.EACCES, errno.EBADF}
             status = (
