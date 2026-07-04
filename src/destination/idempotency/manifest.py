@@ -26,6 +26,7 @@ class BatchCommit:
     records_written: int
     cursor_bytes: bytes
     file_path: str
+    content_hash: str = ""
     committed_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
@@ -36,6 +37,7 @@ class BatchCommit:
             "run_id": self.run_id,
             "stream_id": self.stream_id,
             "batch_seq": self.batch_seq,
+            "content_hash": self.content_hash,
             "records_written": self.records_written,
             "cursor_bytes": self.cursor_bytes.hex(),
             "file_path": self.file_path,
@@ -49,6 +51,7 @@ class BatchCommit:
             run_id=data["run_id"],
             stream_id=data["stream_id"],
             batch_seq=data["batch_seq"],
+            content_hash=data.get("content_hash", ""),
             records_written=data["records_written"],
             cursor_bytes=bytes.fromhex(data["cursor_bytes"]),
             file_path=data["file_path"],
@@ -85,19 +88,29 @@ class ManifestTracker:
         self._commits: dict[str, BatchCommit] = {}
         self._loaded = False
 
-    def _make_key(self, run_id: str, stream_id: str, record_ids: list[str]) -> str:
-        """Derive a content-based dedup key from the batch's record identities.
+    @staticmethod
+    def _content_hash(record_ids: list[str]) -> str:
+        """SHA-256 of the sorted record IDs, truncated to 16 hex chars.
 
-        Sorting before hashing makes the key independent of record order within
-        the batch.  The same logical rows hash identically across an in-run
-        replay (ACK lost after write) and across a same-RUN_ID restart that
-        re-reads the same cursor window.  A restart that advances past the
-        committed cursor produces different record_ids and therefore a different
-        key, so those new rows are written rather than skipped (issue #306).
+        Sorting before hashing makes the digest independent of record order
+        within the batch.  The same logical rows produce the same digest
+        across an in-run ACK-lost replay and across a same-RUN_ID restart
+        that re-reads the same cursor window.  Rows past the committed cursor
+        produce a different digest, so they are written rather than skipped
+        (issue #306).
+
+        The hash is persisted in the manifest so it can be rehydrated in
+        ``load()`` without re-deriving it from the original ``record_ids``.
         """
         content = "|".join(sorted(record_ids)).encode()
-        content_hash = hashlib.sha256(content).hexdigest()[:16]
-        return f"{run_id}:{stream_id}:{content_hash}"
+        # 16 hex chars = 64-bit hash space.  Birthday collision probability
+        # is ~1% at ~600M distinct (run_id, stream_id, content) pairs per
+        # manifest — well above expected pipeline volumes.
+        return hashlib.sha256(content).hexdigest()[:16]
+
+    def _make_key(self, run_id: str, stream_id: str, record_ids: list[str]) -> str:
+        """Full dedup key: ``run_id:stream_id:<content_hash>``."""
+        return f"{run_id}:{stream_id}:{self._content_hash(record_ids)}"
 
     async def load(self) -> None:
         """Load the manifest from storage.
@@ -122,11 +135,37 @@ class ManifestTracker:
                 f"batches. Inspect the file and remove or repair it manually."
             ) from e
 
-        for commit_data in manifest.get("commits", []):
-            commit = BatchCommit.from_dict(commit_data)
-            key = self._make_key(commit.run_id, commit.stream_id, commit.batch_seq)
+        skipped = 0
+        for i, commit_data in enumerate(manifest.get("commits", [])):
+            try:
+                commit = BatchCommit.from_dict(commit_data)
+            except (KeyError, ValueError, TypeError) as e:
+                raise RuntimeError(
+                    f"Manifest at {self._manifest_path} contains a malformed "
+                    f"commit entry at index {i}: {e!r}. Inspect the file and "
+                    f"repair or remove it manually before restarting."
+                ) from e
+
+            if not commit.content_hash:
+                # Entry written by the old positional-key scheme (before issue
+                # #306). The original record_ids were never persisted, so the
+                # content-based key cannot be reconstructed.  Skip the entry —
+                # the affected batches may be re-written on this run, which is
+                # preferable to the row-drop the old scheme caused.
+                skipped += 1
+                continue
+
+            key = f"{commit.run_id}:{commit.stream_id}:{commit.content_hash}"
             self._commits[key] = commit
 
+        if skipped:
+            logger.warning(
+                "Manifest at %s contained %d legacy positional-key entries that "
+                "could not be migrated to content-based dedup; those batches may "
+                "be re-written this run.",
+                self._manifest_path,
+                skipped,
+            )
         logger.info(f"Loaded manifest with {len(self._commits)} commits")
         self._loaded = True
 
@@ -175,18 +214,27 @@ class ManifestTracker:
         ``batch_seq`` is stored for audit/debugging but is not the dedup key —
         content identity (``record_ids``) is.
         """
+        content_hash = self._content_hash(record_ids)
         commit = BatchCommit(
             run_id=run_id,
             stream_id=stream_id,
             batch_seq=batch_seq,
+            content_hash=content_hash,
             records_written=records_written,
             cursor_bytes=cursor_bytes,
             file_path=file_path,
         )
 
-        key = self._make_key(run_id, stream_id, record_ids)
+        key = f"{run_id}:{stream_id}:{content_hash}"
         self._commits[key] = commit
 
-        await self.save()
+        try:
+            await self.save()
+        except Exception as e:
+            raise RuntimeError(
+                f"Batch data was written successfully but the manifest at "
+                f"{self._manifest_path} could not be updated (key={key}). "
+                f"The next run may re-write this batch. Manual inspection required."
+            ) from e
 
         logger.debug(f"Recorded commit: {key}")

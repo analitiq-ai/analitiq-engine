@@ -208,6 +208,25 @@ class FileDestinationHandler(BaseDestinationHandler):
 
         records = record_batch.to_pylist()
 
+        if records and not record_ids:
+            # record_ids are derived from record content by the engine; an
+            # empty list for a non-empty batch is a caller contract violation
+            # that would bypass dedup entirely and record a constant-key commit
+            # that silently drops all future batches with the same condition.
+            logger.error(
+                "Invariant violated: %d records received but record_ids is empty "
+                "(run=%s stream=%s seq=%d). Cannot dedup; failing batch.",
+                len(records), run_id, stream_id, batch_seq,
+            )
+            return BatchWriteResult(
+                status=AckStatus.ACK_STATUS_FATAL_FAILURE,
+                records_written=0,
+                failure_summary=(
+                    f"Missing record_ids for non-empty batch "
+                    f"(run={run_id}, stream={stream_id}, seq={batch_seq})"
+                ),
+            )
+
         # Content-based dedup: only check/record when there are actual rows to
         # protect.  Empty batches have no record_ids to hash and no rows that
         # could be silently dropped, so they bypass the manifest entirely.
