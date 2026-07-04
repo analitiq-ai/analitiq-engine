@@ -253,13 +253,16 @@ class FileDestinationHandler(BaseDestinationHandler):
             data = self._formatter.serialize_batch(records)
 
             if not data:
+                msg = (
+                    f"{type(self._formatter).__name__}.serialize_batch() "
+                    f"returned empty bytes for {len(records)} records "
+                    f"(run={run_id}, stream={stream_id}, seq={batch_seq})"
+                )
+                logger.error(msg)
                 return BatchWriteResult(
                     status=AckStatus.ACK_STATUS_FATAL_FAILURE,
                     records_written=0,
-                    failure_summary=(
-                        f"{type(self._formatter).__name__}.serialize_batch() "
-                        f"returned empty bytes for {len(records)} records"
-                    ),
+                    failure_summary=msg,
                 )
 
             # Write to storage
