@@ -4,6 +4,7 @@ The manifest file tracks which batches have been successfully committed,
 allowing the handler to detect and skip duplicate batches.
 """
 
+import hashlib
 import json
 import logging
 from dataclasses import dataclass, field
@@ -56,31 +57,15 @@ class BatchCommit:
 
 
 class ManifestTracker:
-    """
-    Tracks committed batches using a manifest file.
+    """Tracks committed batches using a manifest file.
 
-    The manifest is a JSON file that records all successfully committed
-    batches for a given stream. It's used to:
-    1. Detect duplicate batches (idempotency)
-    2. Track the cursor for each committed batch
-    3. Provide audit trail of writes
-
-    Manifest structure:
-    {
-        "version": 1,
-        "stream_id": "...",
-        "commits": [
-            {
-                "run_id": "...",
-                "stream_id": "...",
-                "batch_seq": 1,
-                "records_written": 100,
-                "cursor_bytes": "...",
-                "file_path": "...",
-                "committed_at": "2024-01-01T00:00:00"
-            }
-        ]
-    }
+    Dedup is content-based: the key is a hash of the batch's sorted
+    record_ids, not the positional (run_id, stream_id, batch_seq) tuple.
+    Content-based dedup handles the same-RUN_ID restart correctly: when the
+    source resumes from the committed cursor, new rows have different
+    record_ids and therefore a different key — they are written rather than
+    skipped.  An in-run replay of the exact same batch (ACK lost after write)
+    produces the same record_ids and the same key and is correctly no-op'd.
     """
 
     MANIFEST_VERSION = 1
@@ -100,9 +85,19 @@ class ManifestTracker:
         self._commits: dict[str, BatchCommit] = {}
         self._loaded = False
 
-    def _make_key(self, run_id: str, stream_id: str, batch_seq: int) -> str:
-        """Create a unique key for the batch."""
-        return f"{run_id}:{stream_id}:{batch_seq}"
+    def _make_key(self, run_id: str, stream_id: str, record_ids: list[str]) -> str:
+        """Derive a content-based dedup key from the batch's record identities.
+
+        Sorting before hashing makes the key independent of record order within
+        the batch.  The same logical rows hash identically across an in-run
+        replay (ACK lost after write) and across a same-RUN_ID restart that
+        re-reads the same cursor window.  A restart that advances past the
+        committed cursor produces different record_ids and therefore a different
+        key, so those new rows are written rather than skipped (issue #306).
+        """
+        content = "|".join(sorted(record_ids)).encode()
+        content_hash = hashlib.sha256(content).hexdigest()[:16]
+        return f"{run_id}:{stream_id}:{content_hash}"
 
     async def load(self) -> None:
         """Load the manifest from storage.
@@ -150,23 +145,19 @@ class ManifestTracker:
         self,
         run_id: str,
         stream_id: str,
-        batch_seq: int,
+        record_ids: list[str],
     ) -> BatchCommit | None:
-        """
-        Check if a batch has already been committed.
+        """Check if an identical batch has already been committed.
 
-        Args:
-            run_id: Pipeline run identifier
-            stream_id: Stream identifier
-            batch_seq: Batch sequence number
-
-        Returns:
-            BatchCommit if already committed, None otherwise
+        Dedup is by content (record_ids), not position, so a same-RUN_ID
+        restart that re-sequences the same rows returns the prior commit
+        while new rows (after the committed cursor) produce a new key and
+        return None.
         """
         if not self._loaded:
             await self.load()
 
-        key = self._make_key(run_id, stream_id, batch_seq)
+        key = self._make_key(run_id, stream_id, record_ids)
         return self._commits.get(key)
 
     async def record_commit(
@@ -174,20 +165,15 @@ class ManifestTracker:
         run_id: str,
         stream_id: str,
         batch_seq: int,
+        record_ids: list[str],
         records_written: int,
         cursor_bytes: bytes,
         file_path: str,
     ) -> None:
-        """
-        Record a successful batch commit.
+        """Record a successful batch commit keyed by content.
 
-        Args:
-            run_id: Pipeline run identifier
-            stream_id: Stream identifier
-            batch_seq: Batch sequence number
-            records_written: Number of records written
-            cursor_bytes: Cursor bytes for the batch
-            file_path: Path where data was written
+        ``batch_seq`` is stored for audit/debugging but is not the dedup key —
+        content identity (``record_ids``) is.
         """
         commit = BatchCommit(
             run_id=run_id,
@@ -198,10 +184,9 @@ class ManifestTracker:
             file_path=file_path,
         )
 
-        key = self._make_key(run_id, stream_id, batch_seq)
+        key = self._make_key(run_id, stream_id, record_ids)
         self._commits[key] = commit
 
-        # Save manifest after each commit for durability
         await self.save()
 
         logger.debug(f"Recorded commit: {key}")

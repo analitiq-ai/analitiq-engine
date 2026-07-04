@@ -74,23 +74,23 @@ class FileDestinationHandler(BaseDestinationHandler):
         return True
 
     def retry_semantics(self, stream_id: str) -> RetryVerdict:
-        """File replay safety does not hold across a restart (issue #286).
+        """File destination deduplicates by record content (issue #306).
 
-        The manifest dedups by batch position (run_id, stream_id,
-        batch_seq), which is sound for an in-run replay of the same batch
-        but not for a same-run restart: the source resumes from the
-        committed cursor while batch_seq restarts, so a committed position
-        can re-arrive carrying different rows and be skipped as a replay
-        (the row-drop class of issue #282). Until the manifest keys on
-        content, the honest claim is that a restart is not replay-safe.
+        The manifest keys on a hash of the batch's record_ids, which are
+        content-derived and position-independent (issue #282).  An in-run
+        replay of the same batch re-produces the same record_ids and the
+        same key → ALREADY_COMMITTED, no duplicate write.  A same-RUN_ID
+        restart that reads new rows past the committed cursor produces
+        different record_ids and a different key → those rows are written,
+        not silently dropped.
         """
         _ = stream_id
         return RetryVerdict(
-            semantics=RetrySemantics.RETRY_SEMANTICS_AT_LEAST_ONCE,
+            semantics=RetrySemantics.RETRY_SEMANTICS_EXACTLY_ONCE,
             reason=(
-                "the manifest dedups by batch position, and a same-run "
-                "restart re-numbers re-batched rows; a committed position "
-                "carrying different rows would be skipped as a replay"
+                "the manifest dedups by content hash of record_ids; "
+                "a same-run restart with new rows produces a new key "
+                "and writes rather than skipping"
             ),
         )
 
@@ -208,30 +208,25 @@ class FileDestinationHandler(BaseDestinationHandler):
 
         records = record_batch.to_pylist()
 
-        existing_commit = await self._manifest.check_committed(
-            run_id, stream_id, batch_seq
-        )
-        if existing_commit:
-            logger.info(
-                f"Batch already committed: run={run_id}, stream={stream_id}, "
-                f"seq={batch_seq}"
+        # Content-based dedup: only check/record when there are actual rows to
+        # protect.  Empty batches have no record_ids to hash and no rows that
+        # could be silently dropped, so they bypass the manifest entirely.
+        if record_ids:
+            existing_commit = await self._manifest.check_committed(
+                run_id, stream_id, record_ids
             )
-            return BatchWriteResult(
-                status=AckStatus.ACK_STATUS_ALREADY_COMMITTED,
-                records_written=existing_commit.records_written,
-                committed_cursor=Cursor(token=existing_commit.cursor_bytes),
-            )
+            if existing_commit:
+                logger.info(
+                    f"Batch already committed: run={run_id}, stream={stream_id}, "
+                    f"seq={batch_seq}"
+                )
+                return BatchWriteResult(
+                    status=AckStatus.ACK_STATUS_ALREADY_COMMITTED,
+                    records_written=existing_commit.records_written,
+                    committed_cursor=Cursor(token=existing_commit.cursor_bytes),
+                )
 
         if not records:
-            # Empty batch - still record the commit for idempotency
-            await self._manifest.record_commit(
-                run_id=run_id,
-                stream_id=stream_id,
-                batch_seq=batch_seq,
-                records_written=0,
-                cursor_bytes=cursor.token,
-                file_path="",
-            )
             return BatchWriteResult(
                 status=AckStatus.ACK_STATUS_SUCCESS,
                 records_written=0,
@@ -259,11 +254,12 @@ class FileDestinationHandler(BaseDestinationHandler):
                 content_type=self._formatter.content_type,
             )
 
-            # Record commit in manifest
+            # Record commit in manifest keyed by content
             await self._manifest.record_commit(
                 run_id=run_id,
                 stream_id=stream_id,
                 batch_seq=batch_seq,
+                record_ids=record_ids,
                 records_written=len(records),
                 cursor_bytes=cursor.token,
                 file_path=written_path,

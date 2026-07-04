@@ -60,14 +60,14 @@ class TestBaseDefaultVerdict:
 
 @pytest.mark.unit
 class TestFileAndStdoutVerdicts:
-    def test_file_reports_not_replay_safe(self):
-        """The manifest dedups by batch position; a same-run restart
-        re-numbers re-batched rows, so a committed position carrying
-        different rows would be skipped (issue #282 row-drop class) —
-        the verdict must not claim exactly-once."""
+    def test_file_reports_exactly_once(self):
+        """The manifest now dedups by content hash of record_ids (issue #306).
+        A same-run restart that reads new rows past the committed cursor
+        produces a different key and writes them rather than silently dropping
+        them, so the handler can honestly claim exactly-once."""
         verdict = FileDestinationHandler().retry_semantics("s1")
-        assert verdict.semantics == RetrySemantics.RETRY_SEMANTICS_AT_LEAST_ONCE
-        assert "batch position" in verdict.reason
+        assert verdict.semantics == RetrySemantics.RETRY_SEMANTICS_EXACTLY_ONCE
+        assert "content hash" in verdict.reason
 
     def test_stdout_reports_at_least_once(self):
         verdict = StreamDestinationHandler().retry_semantics("s1")
