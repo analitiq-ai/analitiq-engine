@@ -10,6 +10,7 @@ the manifest and a true in-run replay hits it.
 """
 
 import json
+import logging
 from unittest.mock import AsyncMock, MagicMock
 
 import pyarrow as pa
@@ -74,8 +75,9 @@ async def test_same_run_restart_with_new_rows_writes_not_skipped():
     assert result1.records_written == 1
 
     # Restart: same run_id + same batch_seq=0, but DIFFERENT record_ids (new rows).
-    # The manifest returns None → these rows must be written, not skipped.
+    # Reset the mock between calls to test the second write in isolation.
     manifest.check_committed = AsyncMock(return_value=None)
+    manifest.record_commit.reset_mock()
 
     result2 = await handler.write_batch(
         run_id="run-1",
@@ -89,6 +91,7 @@ async def test_same_run_restart_with_new_rows_writes_not_skipped():
     assert result2.records_written == 1
 
     manifest.check_committed.assert_called_once_with("run-1", "s1", ["id-new-after-cursor"])
+    manifest.record_commit.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -120,6 +123,7 @@ async def test_in_run_replay_same_content_returns_already_committed():
     )
     assert result.status == AckStatus.ACK_STATUS_ALREADY_COMMITTED
     assert result.records_written == 1
+    assert result.committed_cursor.token == b"cur-0"
     handler._storage.write_file.assert_not_called()
 
 
@@ -319,7 +323,6 @@ async def test_legacy_positional_entries_skipped_on_load(caplog):
 
     tracker = ManifestTracker(storage, _BASE)
 
-    import logging
     with caplog.at_level(logging.WARNING):
         await tracker.load()
 
@@ -343,3 +346,35 @@ async def test_malformed_commit_entry_raises_runtime_error():
     tracker = ManifestTracker(storage, _BASE)
     with pytest.raises(RuntimeError, match="malformed"):
         await tracker.load()
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_corrupt_json_manifest_raises_runtime_error():
+    """Totally corrupted manifest JSON must raise RuntimeError (not silently start fresh)."""
+    storage, _ = _fake_storage(b"not valid json {{")
+
+    tracker = ManifestTracker(storage, _BASE)
+    with pytest.raises(RuntimeError, match="corrupted"):
+        await tracker.load()
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_same_content_different_run_id_misses_manifest():
+    """Different run_id always produces a different key, even for identical record_ids.
+
+    run_id is part of the key so cross-run dedup never occurs — each run
+    writes its own data independently.
+    """
+    storage, _ = _fake_storage()
+    tracker = ManifestTracker(storage, _BASE)
+
+    await tracker.record_commit(
+        run_id="run-1", stream_id="s", batch_seq=0,
+        record_ids=["id-a"],
+        records_written=1, cursor_bytes=b"c", file_path="/f",
+    )
+
+    result = await tracker.check_committed("run-2", "s", ["id-a"])
+    assert result is None, "Different run_id must not match a commit from run-1"
