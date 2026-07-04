@@ -78,11 +78,17 @@ class FileDestinationHandler(BaseDestinationHandler):
 
         The manifest keys on a hash of the batch's record_ids, which are
         content-derived and position-independent (issue #282).  An in-run
-        replay of the same batch re-produces the same record_ids and the
-        same key → ALREADY_COMMITTED, no duplicate write.  A same-RUN_ID
-        restart that reads new rows past the committed cursor produces
-        different record_ids and a different key → those rows are written,
-        not silently dropped.
+        ACK-lost replay of the same batch re-produces the same record_ids
+        and the same key → ALREADY_COMMITTED, no duplicate write.  A
+        same-RUN_ID restart that reads new rows past the committed cursor
+        produces different record_ids and a different key → those rows are
+        written rather than silently dropped.
+
+        Caveat (issue #319): output file paths are derived from batch_seq,
+        so a same-RUN_ID restart may overwrite the pre-restart file at the
+        same path even though the manifest correctly allows the write.
+        Until #319 is fixed, exactly-once holds for in-run ACK-lost replays
+        but pre-restart file contents may be replaced on engine restart.
         """
         _ = stream_id
         return RetryVerdict(
