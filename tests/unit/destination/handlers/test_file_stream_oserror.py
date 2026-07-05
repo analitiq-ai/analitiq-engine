@@ -156,13 +156,15 @@ async def test_stream_handler_to_pylist_arrow_invalid_is_fatal():
     handler._connected = True
     handler._formatter = MagicMock()
     mock_batch = MagicMock(spec=pa.RecordBatch)
-    mock_batch.to_pylist = MagicMock(
-        side_effect=pa.ArrowInvalid("corrupt buffer")
-    )
+    mock_batch.to_pylist = MagicMock(side_effect=pa.ArrowInvalid("corrupt buffer"))
 
     result = await handler.write_batch(
-        run_id="r", stream_id="s", batch_seq=1,
-        record_batch=mock_batch, record_ids=[], cursor=_cursor(),
+        run_id="r",
+        stream_id="s",
+        batch_seq=1,
+        record_batch=mock_batch,
+        record_ids=[],
+        cursor=_cursor(),
     )
 
     assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
@@ -205,13 +207,15 @@ async def test_to_pylist_arrow_invalid_is_fatal():
     """ArrowInvalid from to_pylist must not propagate — returns FATAL."""
     handler = _make_file_handler()
     mock_batch = MagicMock(spec=pa.RecordBatch)
-    mock_batch.to_pylist = MagicMock(
-        side_effect=pa.ArrowInvalid("corrupt buffer")
-    )
+    mock_batch.to_pylist = MagicMock(side_effect=pa.ArrowInvalid("corrupt buffer"))
 
     result = await handler.write_batch(
-        run_id="r", stream_id="s", batch_seq=1,
-        record_batch=mock_batch, record_ids=[], cursor=_cursor(),
+        run_id="r",
+        stream_id="s",
+        batch_seq=1,
+        record_batch=mock_batch,
+        record_ids=[],
+        cursor=_cursor(),
     )
 
     assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
@@ -226,8 +230,12 @@ async def test_to_pylist_memory_error_is_fatal():
     mock_batch.to_pylist = MagicMock(side_effect=MemoryError("OOM"))
 
     result = await handler.write_batch(
-        run_id="r", stream_id="s", batch_seq=1,
-        record_batch=mock_batch, record_ids=[], cursor=_cursor(),
+        run_id="r",
+        stream_id="s",
+        batch_seq=1,
+        record_batch=mock_batch,
+        record_ids=[],
+        cursor=_cursor(),
     )
 
     assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
@@ -236,13 +244,15 @@ async def test_to_pylist_memory_error_is_fatal():
 @pytest.mark.asyncio
 async def test_check_committed_runtime_error_is_fatal():
     """RuntimeError from check_committed must not propagate — returns FATAL."""
-    handler = _make_file_handler(
-        check_committed_exc=RuntimeError("manifest corrupted")
-    )
+    handler = _make_file_handler(check_committed_exc=RuntimeError("manifest corrupted"))
 
     result = await handler.write_batch(
-        run_id="r", stream_id="s", batch_seq=1,
-        record_batch=_record_batch(), record_ids=["1"], cursor=_cursor(),
+        run_id="r",
+        stream_id="s",
+        batch_seq=1,
+        record_batch=_record_batch(),
+        record_ids=["1"],
+        cursor=_cursor(),
     )
 
     assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
@@ -252,13 +262,15 @@ async def test_check_committed_runtime_error_is_fatal():
 @pytest.mark.asyncio
 async def test_check_committed_fatal_oserror_is_fatal():
     """Fatal OSError (ENOSPC) from check_committed must not propagate."""
-    handler = _make_file_handler(
-        check_committed_exc=OSError(errno.ENOSPC, "disk full")
-    )
+    handler = _make_file_handler(check_committed_exc=OSError(errno.ENOSPC, "disk full"))
 
     result = await handler.write_batch(
-        run_id="r", stream_id="s", batch_seq=1,
-        record_batch=_record_batch(), record_ids=["1"], cursor=_cursor(),
+        run_id="r",
+        stream_id="s",
+        batch_seq=1,
+        record_batch=_record_batch(),
+        record_ids=["1"],
+        cursor=_cursor(),
     )
 
     assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
@@ -273,8 +285,12 @@ async def test_check_committed_eio_is_retryable():
     )
 
     result = await handler.write_batch(
-        run_id="r", stream_id="s", batch_seq=1,
-        record_batch=_record_batch(), record_ids=["1"], cursor=_cursor(),
+        run_id="r",
+        stream_id="s",
+        batch_seq=1,
+        record_batch=_record_batch(),
+        record_ids=["1"],
+        cursor=_cursor(),
     )
 
     assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
@@ -290,8 +306,12 @@ async def test_empty_batch_record_commit_io_error_is_retryable():
     empty_batch = pa.RecordBatch.from_pylist([])
 
     result = await handler.write_batch(
-        run_id="r", stream_id="s", batch_seq=1,
-        record_batch=empty_batch, record_ids=[], cursor=_cursor(),
+        run_id="r",
+        stream_id="s",
+        batch_seq=1,
+        record_batch=empty_batch,
+        record_ids=[],
+        cursor=_cursor(),
     )
 
     assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
@@ -307,8 +327,12 @@ async def test_empty_batch_record_commit_runtime_error_is_fatal():
     empty_batch = pa.RecordBatch.from_pylist([])
 
     result = await handler.write_batch(
-        run_id="r", stream_id="s", batch_seq=1,
-        record_batch=empty_batch, record_ids=[], cursor=_cursor(),
+        run_id="r",
+        stream_id="s",
+        batch_seq=1,
+        record_batch=empty_batch,
+        record_ids=[],
+        cursor=_cursor(),
     )
 
     assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
