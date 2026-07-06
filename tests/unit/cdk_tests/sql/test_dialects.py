@@ -82,6 +82,26 @@ class TestQuoting:
             '"PUBLIC"."orders"'
         )
 
+    def test_catalog_produces_three_part_name(self):
+        assert SqlDialect().quote_qualified(
+            "public", "orders", catalog="my_db"
+        ) == '"my_db"."public"."orders"'
+
+    def test_catalog_without_schema_produces_two_part_name(self):
+        assert SqlDialect().quote_qualified(
+            "", "orders", catalog="my_db"
+        ) == '"my_db"."orders"'
+
+    def test_catalog_with_backtick_dialect(self):
+        assert _BacktickDialect().quote_qualified(
+            "ds", "orders", catalog="proj"
+        ) == "`proj`.`ds`.`orders`"
+
+    def test_catalog_normalizes_schema(self):
+        assert _UpperNormalizingDialect().quote_qualified(
+            "public", "orders", catalog="MY_DB"
+        ) == '"MY_DB"."PUBLIC"."orders"'
+
 
 class TestNormalizeSchema:
     def test_base_is_identity(self):
@@ -160,6 +180,39 @@ class TestDiscoveryQueries:
     def test_primary_keys_query_normalizes_schema(self):
         _, params = _UpperNormalizingDialect().primary_keys_query("public", "orders")
         assert params == ["PUBLIC", "orders"]
+
+    def test_tables_query_with_catalog_adds_filter(self):
+        sql, params = SqlDialect().tables_query("public", catalog="my_db")
+        assert "table_catalog = ?" in sql
+        assert params == ["public", "my_db"]
+        assert sql.count("?") == 2
+
+    def test_tables_query_without_catalog_has_no_catalog_filter(self):
+        sql, params = SqlDialect().tables_query("public")
+        assert "table_catalog" not in sql
+        assert params == ["public"]
+
+    def test_columns_query_with_catalog_adds_filter(self):
+        sql, params = SqlDialect().columns_query("public", "orders", catalog="my_db")
+        assert "table_catalog = ?" in sql
+        assert params == ["public", "orders", "my_db"]
+        assert sql.count("?") == 3
+
+    def test_columns_query_without_catalog_has_no_catalog_filter(self):
+        sql, params = SqlDialect().columns_query("public", "orders")
+        assert "table_catalog" not in sql
+        assert params == ["public", "orders"]
+
+    def test_primary_keys_query_with_catalog_adds_filter(self):
+        sql, params = SqlDialect().primary_keys_query("public", "orders", catalog="my_db")
+        assert "table_catalog = ?" in sql
+        assert params == ["public", "orders", "my_db"]
+        assert sql.count("?") == 3
+
+    def test_primary_keys_query_without_catalog_has_no_catalog_filter(self):
+        sql, params = SqlDialect().primary_keys_query("public", "orders")
+        assert "table_catalog" not in sql
+        assert params == ["public", "orders"]
 
 
 # --- schema semantics --------------------------------------------------------

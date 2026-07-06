@@ -94,6 +94,7 @@ class QueryConfig:
 
     schema_name: str | None = None
     table_name: str = ""
+    catalog_name: str | None = None
     columns: list[str] | None = None
     filters: list[Filter] | None = None
     cursor_field: str | None = None
@@ -297,12 +298,26 @@ class QueryBuilder:
         Callers must dispatch on the returned type before passing to
         ``exec_driver_sql``.
         """
-        # Create table reference with proper schema
+        # Create table reference with proper schema (and optional catalog).
+        # When a catalog is present, compose a compound "catalog.schema" schema
+        # string.  SQLAlchemy dialects for cross-catalog systems (BigQuery,
+        # Snowflake) interpret a dotted schema string as "catalog.schema";
+        # quote=False prevents SA from re-quoting the dot separator.
         metadata = MetaData()
+        if config.catalog_name:
+            if config.schema_name:
+                compound = f"{config.catalog_name}.{config.schema_name}"
+            else:
+                compound = config.catalog_name
+            effective_schema: Any = quoted_name(compound, quote=False)
+        elif config.schema_name:
+            effective_schema = self._ident(config.schema_name)
+        else:
+            effective_schema = None
         table = Table(
             self._ident(config.table_name),
             metadata,
-            schema=self._ident(config.schema_name) if config.schema_name else None,
+            schema=effective_schema,
         )
 
         # Build column list

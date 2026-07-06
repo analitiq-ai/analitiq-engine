@@ -713,3 +713,70 @@ class TestRedshiftDriverFlavour:
         assert "%(" not in sql
         assert "%s" in sql
         assert "LIMIT" in sql.upper()
+
+
+class TestCatalogQualifiedTable:
+    """QueryConfig.catalog_name threads a cross-catalog reference into the
+    generated SELECT.  SQLAlchemy emits ``catalog.schema.table`` as a
+    dot-separated compound when ``quote=False`` is used on the schema arg;
+    cross-catalog systems (BigQuery, Snowflake) interpret it correctly.
+    """
+
+    def test_catalog_and_schema_produce_compound_from(self):
+        builder = QueryBuilder("postgresql")
+        sql, _ = builder.build_select_query(
+            QueryConfig(
+                schema_name="analytics",
+                table_name="orders",
+                catalog_name="my_project",
+                columns=["id"],
+            )
+        )
+        assert "my_project.analytics" in sql
+        assert "orders" in sql
+
+    def test_catalog_without_schema(self):
+        builder = QueryBuilder("postgresql")
+        sql, _ = builder.build_select_query(
+            QueryConfig(
+                schema_name=None,
+                table_name="orders",
+                catalog_name="my_project",
+                columns=["id"],
+            )
+        )
+        assert "my_project" in sql
+        assert "orders" in sql
+
+    def test_no_catalog_behaves_as_before(self):
+        # Absence of catalog_name must not alter existing behaviour.
+        builder = QueryBuilder("postgresql")
+        sql, _ = builder.build_select_query(
+            QueryConfig(
+                schema_name="public",
+                table_name="orders",
+                columns=["id"],
+            )
+        )
+        assert "public" in sql
+        assert "my_project" not in sql
+
+    def test_catalog_adbc_qmark_path_compound_schema(self):
+        # ADBC path (quote_identifiers=True, qmark) still threads the
+        # catalog through the compound schema string.
+        builder = QueryBuilder(
+            "postgresql",
+            paramstyle="qmark",
+            quote_identifiers=True,
+            inline_paging=True,
+        )
+        sql, _ = builder.build_select_query(
+            QueryConfig(
+                schema_name="analytics",
+                table_name="orders",
+                catalog_name="my_project",
+                columns=["id"],
+            )
+        )
+        assert "my_project.analytics" in sql
+        assert "orders" in sql

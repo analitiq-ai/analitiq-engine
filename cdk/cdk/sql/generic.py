@@ -163,6 +163,7 @@ class _StreamState:
 
     schema_name: str = "public"
     table_name: str = ""
+    catalog_name: str = ""
     table: Table | None = None
     primary_keys: list[str] = field(default_factory=list)
     # Columns used as the ON CONFLICT / MERGE target for upsert. Set at
@@ -719,6 +720,7 @@ class GenericSQLConnector(BaseDestinationHandler):
         # means no conflict target (INSERT mode); the engine never derives
         # one from ``primary_keys``.
         conflict_keys = list(endpoint_doc.get("_write_conflict_keys") or [])
+        catalog_name = database_object.get("catalog") or ""
         raw_schema = database_object.get("schema")
         if self._adbc_only:
             # Snowflake's default schema is account-/role-dependent;
@@ -739,6 +741,7 @@ class GenericSQLConnector(BaseDestinationHandler):
         state = _StreamState(
             schema_name=schema_name,
             table_name=table_name,
+            catalog_name=catalog_name,
             endpoint_document=dict(endpoint_doc),
             write_mode=self._get_write_mode(schema_spec.write_mode),
             primary_keys=primary_keys,
@@ -936,6 +939,7 @@ class GenericSQLConnector(BaseDestinationHandler):
             state.table_name,
             self._build_column_defs(state, type_mapper),
             self._identity_columns(state),
+            catalog=state.catalog_name,
             if_not_exists=True,
         )
 
@@ -1038,11 +1042,20 @@ class GenericSQLConnector(BaseDestinationHandler):
         conn.execute(text(target_ddl))
 
         meta = MetaData()
+        # For catalog-qualified tables, compose "catalog.schema" as the
+        # schema argument — BigQuery and Snowflake SA dialects understand
+        # the dotted form as a cross-catalog reference.
+        if state.catalog_name and state.schema_name:
+            reflect_schema: str | None = f"{state.catalog_name}.{state.schema_name}"
+        elif state.catalog_name:
+            reflect_schema = state.catalog_name
+        else:
+            reflect_schema = state.schema_name or None
         return Table(
             state.table_name,
             meta,
             autoload_with=conn,
-            schema=state.schema_name or None,
+            schema=reflect_schema,
         )
 
     def _ddl_and_reflect_on_sync_engine(
@@ -1288,7 +1301,10 @@ class GenericSQLConnector(BaseDestinationHandler):
         """
         if self._adbc_only:
             await asyncio.to_thread(
-                self._adbc_truncate_sync, state.schema_name, state.table_name
+                self._adbc_truncate_sync,
+                state.schema_name,
+                state.table_name,
+                state.catalog_name,
             )
         elif self._sync_engine is not None:
             await asyncio.to_thread(self._write_batch_on_sync_engine, state, [], True)
@@ -1565,7 +1581,7 @@ class GenericSQLConnector(BaseDestinationHandler):
         instead of a cryptic column-not-found DB error at first write.
         """
         target_qualified = self.dialect.quote_qualified(
-            state.schema_name, state.table_name
+            state.schema_name, state.table_name, catalog=state.catalog_name
         )
         hash_col = self.dialect.quote_ident(self.RECORD_HASH_COLUMN)
         with self._adbc_op_lock:
@@ -1702,6 +1718,7 @@ class GenericSQLConnector(BaseDestinationHandler):
                 cast_batch,
                 state.schema_name,
                 state.table_name,
+                state.catalog_name,
             )
         elif state.write_mode == "truncate_insert":
             await asyncio.to_thread(
@@ -1709,6 +1726,7 @@ class GenericSQLConnector(BaseDestinationHandler):
                 cast_batch,
                 state.schema_name,
                 state.table_name,
+                state.catalog_name,
             )
         elif state.write_mode == "upsert":
             # ``conflict_keys`` is the stream's Infra-validated upsert
@@ -1745,6 +1763,7 @@ class GenericSQLConnector(BaseDestinationHandler):
                 list(cast_batch.schema.names),
                 state.conflict_keys,
                 stage_token,
+                state.catalog_name,
             )
         elif self._needs_record_hash(state):
             # Keyless insert: dedup via stage-MERGE keyed on _record_hash so
@@ -1764,6 +1783,7 @@ class GenericSQLConnector(BaseDestinationHandler):
                 list(hashed_batch.schema.names),
                 [self.RECORD_HASH_COLUMN],
                 stage_token,
+                state.catalog_name,
                 insert_only=True,
             )
         else:
@@ -1772,6 +1792,7 @@ class GenericSQLConnector(BaseDestinationHandler):
                 cast_batch,
                 state.schema_name,
                 state.table_name,
+                state.catalog_name,
             )
 
     def _adbc_only_ingest_sync(
@@ -1779,6 +1800,7 @@ class GenericSQLConnector(BaseDestinationHandler):
         cast_batch: pa.RecordBatch,
         schema_name: str,
         table_name: str,
+        catalog_name: str = "",
     ) -> None:
         """ADBC ingest for ADBC-only mode (poison-aware, fatal-reclassifying)."""
         with self._adbc_op_lock:
@@ -1790,7 +1812,9 @@ class GenericSQLConnector(BaseDestinationHandler):
                         table_name,
                         cast_batch,
                         mode="append",
-                        **self.dialect.adbc_ingest_schema_kwargs(schema_name),
+                        **self.dialect.adbc_ingest_schema_kwargs(
+                            schema_name, catalog_name=catalog_name
+                        ),
                     )
                     conn.commit()
                 finally:
@@ -1801,9 +1825,13 @@ class GenericSQLConnector(BaseDestinationHandler):
                     raise _reclassify_as_fatal(exc) from exc
                 raise
 
-    def _adbc_truncate_sync(self, schema_name: str, table_name: str) -> None:
+    def _adbc_truncate_sync(
+        self, schema_name: str, table_name: str, catalog_name: str = ""
+    ) -> None:
         """TRUNCATE the target table on the ADBC connection (own commit)."""
-        qualified = self.dialect.quote_qualified(schema_name, table_name)
+        qualified = self.dialect.quote_qualified(
+            schema_name, table_name, catalog=catalog_name
+        )
         with self._adbc_op_lock:
             conn = self._reopen_adbc_if_needed_sync()
             try:
@@ -1824,12 +1852,13 @@ class GenericSQLConnector(BaseDestinationHandler):
         cast_batch: pa.RecordBatch,
         schema_name: str,
         table_name: str,
+        catalog_name: str = "",
     ) -> None:
         # RLock is reentrant: the same-thread acquires inside
         # _adbc_truncate_sync and _adbc_only_ingest_sync are safe.
         with self._adbc_op_lock:
-            self._adbc_truncate_sync(schema_name, table_name)
-            self._adbc_only_ingest_sync(cast_batch, schema_name, table_name)
+            self._adbc_truncate_sync(schema_name, table_name, catalog_name)
+            self._adbc_only_ingest_sync(cast_batch, schema_name, table_name, catalog_name)
 
     def _merge_ingest_sync(
         self,
@@ -1839,6 +1868,7 @@ class GenericSQLConnector(BaseDestinationHandler):
         all_columns: list[str],
         conflict_keys: list[str],
         stage_token: str,
+        catalog_name: str = "",
         *,
         insert_only: bool = False,
     ) -> None:
@@ -1866,8 +1896,12 @@ class GenericSQLConnector(BaseDestinationHandler):
         # retries (which may overlap before the previous DROP completes)
         # do not collide on the stage table name.
         stage_name = f"_analitiq_stage_{table_name}_{stage_token}"
-        target_qualified = self.dialect.quote_qualified(schema_name, table_name)
-        stage_qualified = self.dialect.quote_qualified(schema_name, stage_name)
+        target_qualified = self.dialect.quote_qualified(
+            schema_name, table_name, catalog=catalog_name
+        )
+        stage_qualified = self.dialect.quote_qualified(
+            schema_name, stage_name, catalog=catalog_name
+        )
         update_cols = [c for c in all_columns if c not in conflict_keys]
         if not update_cols and not insert_only:
             logger.warning(
@@ -1893,6 +1927,7 @@ class GenericSQLConnector(BaseDestinationHandler):
                 all_columns,
                 conflict_keys,
                 update_cols,
+                catalog_name,
                 insert_only=insert_only,
             )
 
@@ -1906,6 +1941,7 @@ class GenericSQLConnector(BaseDestinationHandler):
         all_columns: list[str],
         conflict_keys: list[str],
         update_cols: list[str],
+        catalog_name: str = "",
         *,
         insert_only: bool = False,
     ) -> None:
@@ -1946,7 +1982,9 @@ class GenericSQLConnector(BaseDestinationHandler):
                     stage_name,
                     cast_batch,
                     mode="append",
-                    **self.dialect.adbc_ingest_schema_kwargs(schema_name),
+                    **self.dialect.adbc_ingest_schema_kwargs(
+                        schema_name, catalog_name=catalog_name
+                    ),
                 )
                 conn.commit()
                 on_clause = " AND ".join(
@@ -2126,6 +2164,7 @@ class GenericSQLConnector(BaseDestinationHandler):
         # an unqualified table name and the driver uses the connection's
         # current schema/database.
         schema_name = database_object.get("schema")
+        catalog_name: str = database_object.get("catalog") or ""
 
         try:
             await materialize_runtime(runtime, sql_dialect=self.dialect)
@@ -2225,6 +2264,7 @@ class GenericSQLConnector(BaseDestinationHandler):
                     schema_contract=schema_contract,
                     schema_name=schema_name,
                     table_name=table_name,
+                    catalog_name=catalog_name,
                     columns=column_names,
                     filters=filters,
                     cursor_field=(
@@ -2258,6 +2298,7 @@ class GenericSQLConnector(BaseDestinationHandler):
                     QueryConfig(
                         schema_name=schema_name,
                         table_name=table_name,
+                        catalog_name=catalog_name or None,
                         columns=column_names,
                         filters=filters,
                         cursor_field=(
@@ -2359,6 +2400,7 @@ class GenericSQLConnector(BaseDestinationHandler):
         schema_contract: SchemaContract,
         schema_name: str | None,
         table_name: str,
+        catalog_name: str = "",
         columns: list[str],
         filters: list[Filter],
         cursor_field: str | None,
@@ -2430,6 +2472,7 @@ class GenericSQLConnector(BaseDestinationHandler):
                     QueryConfig(
                         schema_name=effective_schema,
                         table_name=table_name,
+                        catalog_name=catalog_name or None,
                         columns=columns,
                         filters=filters,
                         cursor_field=cursor_field,

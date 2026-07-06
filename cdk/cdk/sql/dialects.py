@@ -100,14 +100,23 @@ class SqlDialect:
         """
         return schema
 
-    def quote_qualified(self, schema: str, table: str) -> str:
-        """Quote a ``schema.table`` (or bare ``table`` when schema is empty)."""
+    def quote_qualified(self, schema: str, table: str, *, catalog: str = "") -> str:
+        """Quote a qualified table name.
+
+        When *catalog* is provided, emits ``catalog.schema.table`` (or
+        ``catalog.table`` when *schema* is empty).  Without *catalog*, falls
+        back to the two-part ``schema.table`` or bare ``table`` form.
+        """
         if schema:
-            return (
+            qualified = (
                 f"{self.quote_ident(self.normalize_schema(schema))}"
                 f".{self.quote_ident(table)}"
             )
-        return self.quote_ident(table)
+        else:
+            qualified = self.quote_ident(table)
+        if catalog:
+            return f"{self.quote_ident(catalog)}.{qualified}"
+        return qualified
 
     def pk_clause(self, columns: list[str]) -> str:
         """Render the table-level ``PRIMARY KEY (...)`` clause."""
@@ -236,14 +245,19 @@ class SqlDialect:
             "adbc_stage_table_sql", dialect=self.name
         )
 
-    def adbc_ingest_schema_kwargs(self, schema_name: str) -> dict[str, Any]:
-        """Schema-targeting kwargs for ``cursor.adbc_ingest``.
+    def adbc_ingest_schema_kwargs(
+        self, schema_name: str, *, catalog_name: str = ""
+    ) -> dict[str, Any]:
+        """Schema- and catalog-targeting kwargs for ``cursor.adbc_ingest``.
 
         ADBC exposes per-statement ingest targeting through the
         ``adbc.ingest.target_db_schema`` option (the ``db_schema_name``
-        kwarg). The postgres driver and most others implement it, so the
-        base targets the normalized schema explicitly — read and write then
-        resolve the same physical schema.
+        kwarg) and ``adbc.ingest.target_catalog`` (the ``db_catalog_name``
+        kwarg).  The postgres driver and most others implement schema
+        targeting, so the base targets the normalized schema explicitly —
+        read and write then resolve the same physical schema.  When
+        *catalog_name* is provided, the base also passes ``db_catalog_name``
+        for drivers that support cross-catalog ingest.
 
         Drivers that do not implement per-statement ingest targeting
         (Snowflake rejects both ``target_db_schema`` and ``target_catalog``)
@@ -251,9 +265,12 @@ class SqlDialect:
         session schema instead, where the stage and target tables already
         live.
         """
+        kwargs: dict[str, Any] = {}
         if schema_name:
-            return {"db_schema_name": self.normalize_schema(schema_name)}
-        return {}
+            kwargs["db_schema_name"] = self.normalize_schema(schema_name)
+        if catalog_name:
+            kwargs["db_catalog_name"] = catalog_name
+        return kwargs
 
     # ---- discovery queries (qmark placeholders + positional params) --------
     def schemas_query(self) -> Query:
@@ -266,24 +283,48 @@ class SqlDialect:
         sql += " ORDER BY schema_name"
         return sql, params
 
-    def tables_query(self, schema: str) -> Query:
-        return (
-            "SELECT table_name FROM information_schema.tables "
-            "WHERE table_schema = ? ORDER BY table_name",
-            [self.normalize_schema(schema)],
-        )
+    def tables_query(self, schema: str, *, catalog: str = "") -> Query:
+        """Return ``(sql, params)`` listing tables in *schema*.
 
-    def columns_query(self, schema: str, table: str) -> Query:
-        return (
+        When *catalog* is provided, an additional ``table_catalog = ?`` filter
+        restricts discovery to that catalog (database / project).
+        """
+        sql = (
+            "SELECT table_name FROM information_schema.tables "
+            "WHERE table_schema = ?"
+        )
+        params: list[object] = [self.normalize_schema(schema)]
+        if catalog:
+            sql += " AND table_catalog = ?"
+            params.append(catalog)
+        sql += " ORDER BY table_name"
+        return sql, params
+
+    def columns_query(self, schema: str, table: str, *, catalog: str = "") -> Query:
+        """Return ``(sql, params)`` describing columns of *schema.table*.
+
+        When *catalog* is provided, an additional ``table_catalog = ?`` filter
+        restricts discovery to that catalog.
+        """
+        sql = (
             "SELECT column_name, data_type, is_nullable "
             "FROM information_schema.columns "
-            "WHERE table_schema = ? AND table_name = ? "
-            "ORDER BY ordinal_position",
-            [self.normalize_schema(schema), table],
+            "WHERE table_schema = ? AND table_name = ?"
         )
+        params: list[object] = [self.normalize_schema(schema), table]
+        if catalog:
+            sql += " AND table_catalog = ?"
+            params.append(catalog)
+        sql += " ORDER BY ordinal_position"
+        return sql, params
 
-    def primary_keys_query(self, schema: str, table: str) -> Query:
-        return (
+    def primary_keys_query(self, schema: str, table: str, *, catalog: str = "") -> Query:
+        """Return ``(sql, params)`` listing PK columns of *schema.table*.
+
+        When *catalog* is provided, an additional ``tc.table_catalog = ?``
+        filter restricts discovery to that catalog.
+        """
+        sql = (
             "SELECT kcu.column_name "
             "FROM information_schema.table_constraints tc "
             "JOIN information_schema.key_column_usage kcu "
@@ -291,7 +332,11 @@ class SqlDialect:
             " AND tc.table_schema = kcu.table_schema "
             " AND tc.table_name = kcu.table_name "
             "WHERE tc.constraint_type = 'PRIMARY KEY' "
-            "  AND tc.table_schema = ? AND tc.table_name = ? "
-            "ORDER BY kcu.ordinal_position",
-            [self.normalize_schema(schema), table],
+            "  AND tc.table_schema = ? AND tc.table_name = ?"
         )
+        params: list[object] = [self.normalize_schema(schema), table]
+        if catalog:
+            sql += " AND tc.table_catalog = ?"
+            params.append(catalog)
+        sql += " ORDER BY kcu.ordinal_position"
+        return sql, params

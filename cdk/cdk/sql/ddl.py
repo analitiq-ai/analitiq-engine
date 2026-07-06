@@ -32,6 +32,7 @@ def build_create_table_sql(
     columns: Sequence[ColumnDef],
     primary_keys: Sequence[str],
     *,
+    catalog: str = "",
     if_not_exists: bool = True,
 ) -> str:
     """Render ``CREATE TABLE`` DDL for *table* (no execution).
@@ -41,6 +42,9 @@ def build_create_table_sql(
     regardless of its declared nullability (matching the streaming handler), and
     the table-level PRIMARY KEY clause is appended when *primary_keys* is
     non-empty.
+
+    When *catalog* is provided, the table name is emitted as a three-part
+    ``catalog.schema.table`` identifier.
     """
     if not columns:
         raise CreateTableError(
@@ -79,7 +83,7 @@ def build_create_table_sql(
     if primary_keys:
         column_defs.append(dialect.pk_clause(list(primary_keys)))
 
-    qualified = dialect.quote_qualified(schema, table)
+    qualified = dialect.quote_qualified(schema, table, catalog=catalog)
     prefix = "CREATE TABLE IF NOT EXISTS" if if_not_exists else "CREATE TABLE"
     return f"{prefix} {qualified} (\n  " + ",\n  ".join(column_defs) + "\n)"
 
@@ -91,6 +95,7 @@ async def create_table(
     columns: Sequence[ColumnDef],
     primary_keys: Sequence[str],
     *,
+    catalog: str = "",
     dialect: SqlDialect,
     if_not_exists: bool = True,
     type_mapper: Any | None = None,
@@ -101,6 +106,9 @@ async def create_table(
     in the connector packages). Uses the connector's write type-map
     (``runtime.connector_type_mapper``) unless an explicit *type_mapper* is
     supplied.
+
+    When *catalog* is provided, the table name is emitted as a three-part
+    ``catalog.schema.table`` identifier.
     """
     mapper = type_mapper if type_mapper is not None else runtime.connector_type_mapper
     ddl = build_create_table_sql(
@@ -110,6 +118,7 @@ async def create_table(
         table,
         columns,
         primary_keys,
+        catalog=catalog,
         if_not_exists=if_not_exists,
     )
     await execute_ddl(runtime, ddl)

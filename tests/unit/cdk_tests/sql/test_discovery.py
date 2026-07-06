@@ -25,6 +25,16 @@ from cdk.type_map.exceptions import UnmappedTypeError
 from .conftest import FakeAdbcRuntime
 
 
+class _StubMapper:
+    """Minimal TypeMapper that maps any native type to Utf8."""
+
+    def to_arrow_type(self, native):
+        return "Utf8"
+
+    def to_native_type(self, canonical, *, params=None):
+        return "TEXT"
+
+
 def _route(rows_by_view):
     """Build a responder that returns rows based on the catalog view hit.
 
@@ -64,7 +74,7 @@ class _StructuralFromDialect(SqlDialect):
 
     name = "structural"
 
-    def tables_query(self, schema):
+    def tables_query(self, schema, *, catalog: str = ""):
         return (
             f"SELECT table_name FROM {self.quote_ident(schema)}"
             ".information_schema.tables ORDER BY table_name",
@@ -319,3 +329,52 @@ class TestStructuralFromDiscovery:
         sql, params = runtime.connections[-1].executed[-1]
         assert '"ds".information_schema.tables' in sql
         assert params == []
+
+
+class TestCatalogFilteredDiscovery:
+    """When catalog= is provided, discovery queries add a table_catalog filter."""
+
+    @pytest.mark.asyncio
+    async def test_list_tables_catalog_appended_to_params(self):
+        runtime = FakeAdbcRuntime(
+            "ansi",
+            responder=_route({"tables": [{"table_name": "orders"}]}),
+        )
+        await list_tables(runtime, "public", dialect=SqlDialect(), catalog="my_db")
+        _sql, params = runtime.connections[-1].executed[-1]
+        assert params == ["public", "my_db"]
+
+    @pytest.mark.asyncio
+    async def test_list_tables_no_catalog_single_param(self):
+        runtime = FakeAdbcRuntime(
+            "ansi",
+            responder=_route({"tables": [{"table_name": "orders"}]}),
+        )
+        await list_tables(runtime, "public", dialect=SqlDialect())
+        _sql, params = runtime.connections[-1].executed[-1]
+        assert params == ["public"]
+
+    @pytest.mark.asyncio
+    async def test_list_columns_catalog_appended_to_pk_and_col_params(self):
+        runtime = FakeAdbcRuntime(
+            "ansi",
+            mapper=_StubMapper(),
+            responder=_route(
+                {
+                    "pks": [{"column_name": "id"}],
+                    "columns": [
+                        {
+                            "column_name": "id",
+                            "data_type": "bigint",
+                            "is_nullable": "NO",
+                        }
+                    ],
+                }
+            ),
+        )
+        await list_columns(
+            runtime, "public", "orders", dialect=SqlDialect(), catalog="my_db"
+        )
+        # Both PK query and column query should have catalog as the last param.
+        for _sql, params in runtime.connections[-1].executed:
+            assert params[-1] == "my_db"
