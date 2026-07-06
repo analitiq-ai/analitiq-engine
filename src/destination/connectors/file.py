@@ -246,6 +246,24 @@ class FileDestinationHandler(BaseDestinationHandler):
             # Serialize before building path so the filename includes a content
             # hash — prevents same-batch_seq overwrites on restart (issue #319).
             data = self._formatter.serialize_batch(records)
+
+            if not data:
+                # A non-empty records list that serialized to empty bytes is a
+                # formatter contract violation; writing a zero-byte file and
+                # committing records_written=N would silently drop all N rows
+                # (issue #322). Fail loud so the batch routes to the DLQ.
+                msg = (
+                    f"{type(self._formatter).__name__}.serialize_batch() "
+                    f"returned empty bytes for {len(records)} records "
+                    f"(run={run_id}, stream={stream_id}, seq={batch_seq})"
+                )
+                logger.error(msg)
+                return BatchWriteResult(
+                    status=AckStatus.ACK_STATUS_FATAL_FAILURE,
+                    records_written=0,
+                    failure_summary=msg,
+                )
+
             content_hash = hashlib.sha256(data).hexdigest()[:16]
 
             # Build file path
