@@ -367,7 +367,7 @@ async def _drive_file_with_context(
 
 
 def _assert_batch_context_in_log(caplog):
-    """Assert that exactly one ERROR record from file.py contains the batch identity fields."""
+    """Assert one ERROR record from file.py carries the batch identity fields."""
     logger_name = "src.destination.connectors.file"
     msgs = [
         r.getMessage()

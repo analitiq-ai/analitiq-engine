@@ -196,7 +196,7 @@ async def test_serialize_batch_failure_summary_includes_record_count():
 
 @pytest.mark.asyncio
 async def test_serialize_batch_failure_summary_includes_run_context():
-    """Failure summary must include run_id, stream_id, and batch_seq for DLQ correlation."""
+    """Failure summary must name run_id, stream_id, and batch_seq for DLQ."""
     handler = _handler_with_formatter_returning(b"")
     result = await handler.write_batch(
         run_id="run-abc",
