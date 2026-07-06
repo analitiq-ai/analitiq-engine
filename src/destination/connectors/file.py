@@ -5,6 +5,7 @@ local storage backend.
 """
 
 import errno
+import hashlib
 import logging
 from typing import Any
 
@@ -81,8 +82,11 @@ class FileDestinationHandler(BaseDestinationHandler):
         but not for a same-run restart: the source resumes from the
         committed cursor while batch_seq restarts, so a committed position
         can re-arrive carrying different rows and be skipped as a replay
-        (the row-drop class of issue #282). Until the manifest keys on
-        content, the honest claim is that a restart is not replay-safe.
+        (the row-drop class of issue #282). File overwrites on restart are
+        prevented by the content hash in the filename (issue #319), but
+        manifest dedup by batch position still drops new rows. Until the
+        manifest keys on content (issue #306), the honest claim is that a
+        restart is not replay-safe.
         """
         _ = stream_id
         return RetryVerdict(
@@ -206,51 +210,72 @@ class FileDestinationHandler(BaseDestinationHandler):
                 failure_summary="Handler components not initialized",
             )
 
-        records = record_batch.to_pylist()
-
-        existing_commit = await self._manifest.check_committed(
-            run_id, stream_id, batch_seq
-        )
-        if existing_commit:
-            logger.info(
-                f"Batch already committed: run={run_id}, stream={stream_id}, "
-                f"seq={batch_seq}"
-            )
-            return BatchWriteResult(
-                status=AckStatus.ACK_STATUS_ALREADY_COMMITTED,
-                records_written=existing_commit.records_written,
-                committed_cursor=Cursor(token=existing_commit.cursor_bytes),
-            )
-
-        if not records:
-            # Empty batch - still record the commit for idempotency
-            await self._manifest.record_commit(
-                run_id=run_id,
-                stream_id=stream_id,
-                batch_seq=batch_seq,
-                records_written=0,
-                cursor_bytes=cursor.token,
-                file_path="",
-            )
-            return BatchWriteResult(
-                status=AckStatus.ACK_STATUS_SUCCESS,
-                records_written=0,
-                committed_cursor=cursor,
-            )
-
         try:
+            records = record_batch.to_pylist()
+
+            existing_commit = await self._manifest.check_committed(
+                run_id, stream_id, batch_seq
+            )
+            if existing_commit:
+                logger.info(
+                    f"Batch already committed: run={run_id}, stream={stream_id}, "
+                    f"seq={batch_seq}"
+                )
+                return BatchWriteResult(
+                    status=AckStatus.ACK_STATUS_ALREADY_COMMITTED,
+                    records_written=existing_commit.records_written,
+                    committed_cursor=Cursor(token=existing_commit.cursor_bytes),
+                )
+
+            if not records:
+                # Empty batch - still record the commit for idempotency
+                await self._manifest.record_commit(
+                    run_id=run_id,
+                    stream_id=stream_id,
+                    batch_seq=batch_seq,
+                    records_written=0,
+                    cursor_bytes=cursor.token,
+                    file_path="",
+                )
+                return BatchWriteResult(
+                    status=AckStatus.ACK_STATUS_SUCCESS,
+                    records_written=0,
+                    committed_cursor=cursor,
+                )
+
+            # Serialize before building path so the filename includes a content
+            # hash — prevents same-batch_seq overwrites on restart (issue #319).
+            data = self._formatter.serialize_batch(records)
+
+            if not data:
+                # A non-empty records list that serialized to empty bytes is a
+                # formatter contract violation; writing a zero-byte file and
+                # committing records_written=N would silently drop all N rows
+                # (issue #322). Fail loud so the batch routes to the DLQ.
+                msg = (
+                    f"{type(self._formatter).__name__}.serialize_batch() "
+                    f"returned empty bytes for {len(records)} records "
+                    f"(run={run_id}, stream={stream_id}, seq={batch_seq})"
+                )
+                logger.error(msg)
+                return BatchWriteResult(
+                    status=AckStatus.ACK_STATUS_FATAL_FAILURE,
+                    records_written=0,
+                    failure_summary=msg,
+                )
+
+            content_hash = hashlib.sha256(data).hexdigest()[:16]
+
             # Build file path
             base_path = self._config.get("path", "") or self._config.get("prefix", "")
             file_path = self._storage.build_path(
                 base_path=base_path,
                 stream_id=stream_id,
                 batch_seq=batch_seq,
+                content_hash=content_hash,
                 extension=self._formatter.file_extension,
                 partition_template=self._path_template,
             )
-
-            # Serialize records
-            data = self._formatter.serialize_batch(records)
 
             # Write to storage
             written_path = await self._storage.write_file(
@@ -284,29 +309,50 @@ class FileDestinationHandler(BaseDestinationHandler):
             # ENOSPC / EACCES / EROFS / EDQUOT are not transient — retrying
             # without operator intervention is hopeless. Classify as FATAL
             # so the engine routes to DLQ instead of looping.
+            errno_label = (
+                errno.errorcode.get(e.errno, str(e.errno))
+                if e.errno is not None
+                else "unknown"
+            )
             fatal_errnos = {errno.ENOSPC, errno.EACCES, errno.EROFS, errno.EDQUOT}
             if e.errno in fatal_errnos:
                 logger.error(
-                    "Fatal filesystem error writing batch (%s): %s",
-                    errno.errorcode.get(e.errno, e.errno),
+                    "Fatal filesystem error writing batch "
+                    "(run=%s, stream=%s, seq=%s, errno=%s): %s",
+                    run_id,
+                    stream_id,
+                    batch_seq,
+                    errno_label,
                     e,
                     exc_info=True,
                 )
                 return BatchWriteResult(
                     status=AckStatus.ACK_STATUS_FATAL_FAILURE,
                     records_written=0,
-                    failure_summary=(
-                        f"OSError[{errno.errorcode.get(e.errno, e.errno)}]: {e}"
-                    ),
+                    failure_summary=f"OSError[{errno_label}]: {e}",
                 )
-            logger.error("Retryable I/O error writing batch: %s", e, exc_info=True)
+            logger.error(
+                "Retryable I/O error writing batch (run=%s, stream=%s, seq=%s): %s",
+                run_id,
+                stream_id,
+                batch_seq,
+                e,
+                exc_info=True,
+            )
             return BatchWriteResult(
                 status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
                 records_written=0,
-                failure_summary=f"{type(e).__name__}: {e}",
+                failure_summary=f"OSError[{errno_label}]: {e}",
             )
         except Exception as e:
-            logger.error("Fatal error writing batch: %s", e, exc_info=True)
+            logger.error(
+                "Fatal error writing batch (run=%s, stream=%s, seq=%s): %s",
+                run_id,
+                stream_id,
+                batch_seq,
+                e,
+                exc_info=True,
+            )
             return BatchWriteResult(
                 status=AckStatus.ACK_STATUS_FATAL_FAILURE,
                 records_written=0,

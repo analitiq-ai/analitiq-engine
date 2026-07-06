@@ -1,0 +1,252 @@
+"""File-path uniqueness tests for same-RUN_ID restarts (issue #319).
+
+On a same-RUN_ID restart batch_seq resets to 0 while the source resumes
+from the committed cursor, so without a content-derived suffix two batches
+with different content land on the same filename and the storage backend
+(which opens in "wb" mode) silently overwrites the pre-restart data.
+
+The fix: include the first 16 hex chars of SHA-256(serialized data) in the
+filename.  Same content → same path (idempotent for in-run replays); different
+content → different path (restart cannot overwrite).
+"""
+
+import hashlib
+from unittest.mock import AsyncMock, MagicMock
+
+import pyarrow as pa
+import pytest
+
+from src.destination.connectors.file import FileDestinationHandler
+from src.destination.storage.base import BaseStorageBackend
+from src.destination.storage.local import LocalFileStorage
+from src.grpc.generated.analitiq.v1 import AckStatus, Cursor
+
+# ---------------------------------------------------------------------------
+# build_path: unit tests on the base class method
+# ---------------------------------------------------------------------------
+
+
+class TestBuildPathContentHash:
+    """build_path embeds the content hash to avoid same-seq overwrites."""
+
+    def _storage(self) -> BaseStorageBackend:
+        return LocalFileStorage()
+
+    def test_no_hash_falls_back_to_batch_seq_only(self):
+        path = self._storage().build_path(
+            base_path="/out",
+            stream_id="orders",
+            batch_seq=3,
+            extension=".jsonl",
+        )
+        assert path == "/out/orders/3.jsonl"
+
+    def test_hash_included_in_stem(self):
+        path = self._storage().build_path(
+            base_path="/out",
+            stream_id="orders",
+            batch_seq=3,
+            extension=".jsonl",
+            content_hash="abcd1234ef567890",
+        )
+        assert path == "/out/orders/3_abcd1234ef567890.jsonl"
+
+    def test_different_hashes_produce_different_paths(self):
+        s = self._storage()
+        p1 = s.build_path("/out", "s", 0, ".jsonl", content_hash="aaaa0000aaaa0000")
+        p2 = s.build_path("/out", "s", 0, ".jsonl", content_hash="bbbb1111bbbb1111")
+        assert p1 != p2
+
+    def test_same_hash_produces_same_path(self):
+        s = self._storage()
+        h = "deadbeef12345678"
+        p1 = s.build_path("/out", "s", 5, ".jsonl", content_hash=h)
+        p2 = s.build_path("/out", "s", 5, ".jsonl", content_hash=h)
+        assert p1 == p2
+
+    def test_partition_template_includes_hash(self):
+        path = self._storage().build_path(
+            base_path="/out",
+            stream_id="orders",
+            batch_seq=1,
+            extension=".jsonl",
+            content_hash="cafe0000cafe0000",
+            partition_template="year={year}/month={month}",
+        )
+        # Path must contain the hash as part of the final filename stem
+        assert "orders_1_cafe0000cafe0000.jsonl" in path
+        assert path.startswith("/out/year=")
+
+
+# ---------------------------------------------------------------------------
+# write_batch: content hash is derived from serialized data and passed down
+# ---------------------------------------------------------------------------
+
+
+def _make_handler(serialize_return: bytes) -> FileDestinationHandler:
+    """Return a wired-up handler whose formatter returns a fixed byte string."""
+    handler = FileDestinationHandler()
+    handler._connected = True
+
+    mock_formatter = MagicMock()
+    mock_formatter.serialize_batch.return_value = serialize_return
+    mock_formatter.file_extension = ".jsonl"
+    mock_formatter.content_type = "application/jsonl"
+    handler._formatter = mock_formatter
+
+    mock_storage = MagicMock()
+    mock_storage.build_path.return_value = "/tmp/out/s/0_abc.jsonl"
+    mock_storage.write_file = AsyncMock(return_value="/tmp/out/s/0_abc.jsonl")
+    handler._storage = mock_storage
+
+    mock_manifest = MagicMock()
+    mock_manifest.check_committed = AsyncMock(return_value=None)
+    mock_manifest.record_commit = AsyncMock()
+    handler._manifest = mock_manifest
+
+    handler._path_template = None
+    handler._config = {"path": "/tmp/out", "prefix": ""}
+    return handler
+
+
+@pytest.mark.asyncio
+async def test_write_batch_passes_content_hash_to_build_path():
+    """write_batch derives SHA-256[:16] of serialized data and passes it."""
+    data = b'{"id":1}\n'
+    expected_hash = hashlib.sha256(data).hexdigest()[:16]
+
+    handler = _make_handler(serialize_return=data)
+    await handler.write_batch(
+        run_id="r1",
+        stream_id="s",
+        batch_seq=0,
+        record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
+        record_ids=["r1"],
+        cursor=Cursor(token=b"c"),
+    )
+
+    call_kwargs = handler._storage.build_path.call_args[1]
+    assert call_kwargs["content_hash"] == expected_hash
+    assert len(call_kwargs["content_hash"]) == 16
+
+
+@pytest.mark.asyncio
+async def test_same_run_id_restart_different_content_gets_different_path():
+    """Simulates a same-RUN_ID restart: batch_seq=0 on first and second run.
+
+    First run: rows A  → hash_A → path_A
+    Second run: rows B → hash_B → path_B (different file, no overwrite)
+    """
+    data_a = b'{"id":1}\n'
+    data_b = b'{"id":2}\n'
+    hash_a = hashlib.sha256(data_a).hexdigest()[:16]
+    hash_b = hashlib.sha256(data_b).hexdigest()[:16]
+    assert hash_a != hash_b
+
+    handler_a = _make_handler(serialize_return=data_a)
+    handler_b = _make_handler(serialize_return=data_b)
+
+    for handler in (handler_a, handler_b):
+        await handler.write_batch(
+            run_id="run-1",
+            stream_id="s",
+            batch_seq=0,
+            record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
+            record_ids=["r1"],
+            cursor=Cursor(token=b"c"),
+        )
+
+    captured_hash_a = handler_a._storage.build_path.call_args[1]["content_hash"]
+    captured_hash_b = handler_b._storage.build_path.call_args[1]["content_hash"]
+    # Different hashes guarantee different paths given the deterministic format.
+    assert captured_hash_a != captured_hash_b
+
+
+@pytest.mark.asyncio
+async def test_in_run_replay_same_content_gets_same_path():
+    """Same content always produces the same content hash (hash stability).
+
+    In production an in-run replay is gated by check_committed before
+    serialization runs, so build_path is never reached a second time.
+    This test stubs check_committed to None so both calls reach build_path,
+    verifying the hash-stability property directly: identical data always
+    maps to the same hash and therefore the same file path.
+    """
+    data = b'{"id":1}\n'
+    handler = _make_handler(serialize_return=data)
+
+    for _ in range(2):
+        await handler.write_batch(
+            run_id="run-1",
+            stream_id="s",
+            batch_seq=0,
+            record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
+            record_ids=["r1"],
+            cursor=Cursor(token=b"c"),
+        )
+
+    calls = handler._storage.build_path.call_args_list
+    assert len(calls) == 2
+    assert calls[0][1]["content_hash"] == calls[1][1]["content_hash"]
+
+
+@pytest.mark.asyncio
+async def test_write_batch_result_is_success():
+    """Sanity check: the happy path still returns ACK_STATUS_SUCCESS."""
+    handler = _make_handler(serialize_return=b'{"id":1}\n')
+    result = await handler.write_batch(
+        run_id="r",
+        stream_id="s",
+        batch_seq=0,
+        record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
+        record_ids=["r1"],
+        cursor=Cursor(token=b"c"),
+    )
+    assert result.status == AckStatus.ACK_STATUS_SUCCESS
+
+
+@pytest.mark.asyncio
+async def test_empty_batch_skips_serialize_and_build_path():
+    """An empty batch returns SUCCESS without serializing or building a path.
+
+    The empty-batch guard fires before the serialize→hash→build_path
+    sequence, so an empty payload never reaches the hashing step.
+    """
+    handler = _make_handler(serialize_return=b"")
+    result = await handler.write_batch(
+        run_id="r",
+        stream_id="s",
+        batch_seq=0,
+        record_batch=pa.RecordBatch.from_pylist([]),
+        record_ids=[],
+        cursor=Cursor(token=b"c"),
+    )
+    assert result.status == AckStatus.ACK_STATUS_SUCCESS
+    assert result.records_written == 0
+    handler._formatter.serialize_batch.assert_not_called()
+    handler._storage.build_path.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_serialize_exception_is_fatal_and_build_path_not_called():
+    """A formatter error during serialization becomes FATAL_FAILURE.
+
+    Serialization runs before build_path. An exception there must be caught
+    by the outer except block and must never allow build_path to be called
+    with a partial or absent hash.
+    """
+    handler = _make_handler(serialize_return=b"unused")
+    handler._formatter.serialize_batch.side_effect = RuntimeError("encoding failed")
+
+    result = await handler.write_batch(
+        run_id="r",
+        stream_id="s",
+        batch_seq=0,
+        record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
+        record_ids=["r1"],
+        cursor=Cursor(token=b"c"),
+    )
+
+    assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+    assert "RuntimeError" in result.failure_summary
+    handler._storage.build_path.assert_not_called()
