@@ -153,16 +153,16 @@ class StreamDestinationHandler(BaseDestinationHandler):
                 failure_summary="Handler not connected",
             )
 
-        records = record_batch.to_pylist()
-
-        if not records:
-            return BatchWriteResult(
-                status=AckStatus.ACK_STATUS_SUCCESS,
-                records_written=0,
-                committed_cursor=cursor,
-            )
-
         try:
+            records = record_batch.to_pylist()
+
+            if not records:
+                return BatchWriteResult(
+                    status=AckStatus.ACK_STATUS_SUCCESS,
+                    records_written=0,
+                    committed_cursor=cursor,
+                )
+
             # Serialize and write to stdout
             data = self._formatter.serialize_batch(records)
             sys.stdout.buffer.write(data)
@@ -183,7 +183,9 @@ class StreamDestinationHandler(BaseDestinationHandler):
             # Closed/broken stdout (EPIPE), permissions, disk-full on a
             # redirected stream — none are recoverable by retry.
             errno_code = (
-                errno.errorcode.get(e.errno, e.errno) if e.errno is not None else None
+                errno.errorcode.get(e.errno, str(e.errno))
+                if e.errno is not None
+                else "unknown"
             )
             fatal_errnos = {errno.EPIPE, errno.ENOSPC, errno.EACCES, errno.EBADF}
             status = (
