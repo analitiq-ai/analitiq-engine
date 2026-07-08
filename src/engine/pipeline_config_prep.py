@@ -25,8 +25,10 @@ that matches the on-disk directory name:
     pipeline.connections.destinations -> ["<connection_id>", ...]
     pipeline.streams                  -> ["<stream_id>", ...]
     stream.pipeline_id                -> "<pipeline_id>"
-    stream.source.endpoint_ref        -> {scope, connection_id, endpoint_id[, x-*]}
-    stream.destinations[].endpoint_ref-> {scope, connection_id, endpoint_id[, x-*]}
+    stream.source.endpoint_ref        -> {scope, connection_id, endpoint_id}
+    stream.destinations[].endpoint_ref-> {scope, connection_id, endpoint_id}
+        (connection-scoped refs carry database_object; endpoint_id is
+         server-derived from it)
 
 Every artifact is JSON-Schema validated against the published Analitiq
 contract before it is consumed.
@@ -497,9 +499,9 @@ class PipelineConfigPrep:
         # Extract the endpoint variant name from the document's declared
         # ``$schema`` URL. The variant name is the path segment ending in
         # ``-endpoint`` (e.g. ``api-endpoint``, ``database-endpoint``).
-        # ``validate_artifact`` then fetches and validates against that
-        # variant's published schema; an unrecognised variant name fails
-        # loudly there rather than here.
+        # ``validate_artifact`` then validates against that variant's
+        # contract model; an unrecognised variant name fails loudly there
+        # rather than here.
         schema_url = document.get("$schema") or ""
         match = _ENDPOINT_KIND_RE.search(schema_url)
         if not match:
@@ -516,8 +518,8 @@ class PipelineConfigPrep:
             # carries structured per-field errors; re-raise as-is to preserve type.
             raise
         except ValueError as exc:
-            # _load_schema raises plain ValueError for unknown artifact kinds;
-            # add ref and $schema URL context which that error omits.
+            # validate_artifact raises plain ValueError for unknown artifact
+            # kinds; add ref and $schema URL context which that error omits.
             raise ValueError(
                 f"Endpoint {ref!s} ($schema={schema_url!r}, "
                 f"kind={endpoint_kind!r}): {exc}"

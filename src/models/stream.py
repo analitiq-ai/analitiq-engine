@@ -4,6 +4,11 @@ Two engine-side types live here: :class:`WriteMode`, the destination
 write-mode enum, and :class:`EndpointRef`, the structured reference to an
 endpoint definition. Identity is id-based: connections, streams, and
 pipelines are all keyed by their ``*_id`` field (= directory name on disk).
+
+:class:`EndpointRef` delegates all shape/validation to the published
+contract (``k2m.models.stream.validate_endpoint_ref``) -- it is a thin,
+frozen, hashable runtime handle over the validated ref, not a second
+definition of its shape.
 """
 
 from __future__ import annotations
@@ -11,6 +16,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
+
+from k2m.models.stream import (
+    ConnectionEndpointRef,
+    validate_endpoint_ref,
+)
 
 
 class WriteMode(str, Enum):
@@ -26,25 +36,41 @@ class WriteMode(str, Enum):
 
 
 @dataclass(frozen=True)
+class DatabaseObject:
+    """Verbatim provider-native object locator for a ``connection``-scoped
+    endpoint (stream contract: ``endpoint_ref.database_object``).
+
+    Frozen so an :class:`EndpointRef` carrying one stays hashable.
+    """
+
+    schema: str
+    name: str
+    catalog: str | None = None
+    object_type: str | None = None
+
+    def to_dict(self) -> dict[str, str]:
+        payload = {"schema": self.schema, "name": self.name}
+        if self.catalog is not None:
+            payload["catalog"] = self.catalog
+        if self.object_type is not None:
+            payload["object_type"] = self.object_type
+        return payload
+
+
+@dataclass(frozen=True)
 class EndpointRef:
     """Structured reference to an endpoint definition.
 
-    Contract shape (stream document):
+    Two contract variants, discriminated by ``scope``:
 
-        {
-          "scope":         "connector" | "connection",
-          "connection_id": "<connection id selected in the pipeline>",
-          "endpoint_id":   "<stable endpoint id from endpoint discovery>",
-          # plus optional "x-*" extension metadata
-        }
-
-    Resolution rules:
-
-    - ``scope="connector"``: look up the connection by ``connection_id``,
-      read its ``connector_id``, then load
+    - ``scope="connector"``: ``{scope, connection_id, endpoint_id}``. The
+      ``endpoint_id`` is the client-authored connector-registry key. Resolve
+      by looking up the connection's ``connector_id`` and loading
       ``connectors/<connector_id>/definition/endpoints/<endpoint_id>.json``.
-    - ``scope="connection"``: load
-      ``connections/<connection_id>/definition/endpoints/<endpoint_id>.json``.
+    - ``scope="connection"``: ``{scope, connection_id, database_object}``.
+      ``database_object`` is the verbatim provider-native locator; the
+      ``endpoint_id`` is a server-derived opaque handle over it (never
+      client-authored) and is filled in by the contract validator.
 
     Frozen so instances are hashable and usable as dict keys.
     """
@@ -52,58 +78,44 @@ class EndpointRef:
     scope: str
     connection_id: str
     endpoint_id: str
-
-    _VALID_SCOPES = ("connector", "connection")
-
-    def __post_init__(self) -> None:
-        if self.scope not in self._VALID_SCOPES:
-            raise ValueError(
-                f"EndpointRef.scope must be one of {self._VALID_SCOPES}, "
-                f"got {self.scope!r}"
-            )
-        if not self.connection_id:
-            raise ValueError("EndpointRef.connection_id cannot be empty")
-        if not self.endpoint_id:
-            raise ValueError("EndpointRef.endpoint_id cannot be empty")
-
-    def __str__(self) -> str:
-        return f"{self.scope}:{self.connection_id}/{self.endpoint_id}"
+    database_object: DatabaseObject | None = None
 
     @classmethod
     def from_dict(cls, data: Any) -> EndpointRef:
         """Validate and construct from a dict (or pass-through if already typed).
 
-        Accepts ``x-*`` extension keys verbatim per the stream contract —
-        they are not loaded onto the dataclass but do not trigger an
-        unknown-key error either.
+        Shape and cross-field rules -- including derivation of a
+        ``connection``-scoped ``endpoint_id`` from ``database_object`` -- are
+        enforced by the published contract via ``validate_endpoint_ref``.
         """
         if isinstance(data, EndpointRef):
             return data
-        if not isinstance(data, dict):
-            raise TypeError(
-                "endpoint_ref must be an object with keys "
-                "{'scope','connection_id','endpoint_id'} (plus optional 'x-*' "
-                f"extensions), got {type(data).__name__}"
+        parsed = validate_endpoint_ref(data)
+        database_object = None
+        if isinstance(parsed, ConnectionEndpointRef):
+            obj = parsed.database_object
+            database_object = DatabaseObject(
+                schema=obj.schema_,
+                name=obj.name,
+                catalog=obj.catalog,
+                object_type=obj.object_type,
             )
-        required = {"scope", "connection_id", "endpoint_id"}
-        unknown = {k for k in set(data) - required if not k.startswith("x-")}
-        if unknown:
-            raise ValueError(
-                f"endpoint_ref has unknown keys {sorted(unknown)}; allowed: "
-                f"{sorted(required)} plus optional 'x-*' extension keys"
-            )
-        missing = required - set(data)
-        if missing:
-            raise ValueError(f"endpoint_ref is missing required keys {sorted(missing)}")
         return cls(
-            scope=data["scope"],
-            connection_id=data["connection_id"],
-            endpoint_id=data["endpoint_id"],
+            scope=parsed.scope,
+            connection_id=parsed.connection_id,
+            endpoint_id=parsed.endpoint_id,
+            database_object=database_object,
         )
 
-    def to_dict(self) -> dict[str, str]:
-        return {
+    def __str__(self) -> str:
+        return f"{self.scope}:{self.connection_id}/{self.endpoint_id}"
+
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
             "scope": self.scope,
             "connection_id": self.connection_id,
             "endpoint_id": self.endpoint_id,
         }
+        if self.database_object is not None:
+            payload["database_object"] = self.database_object.to_dict()
+        return payload

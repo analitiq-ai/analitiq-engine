@@ -56,7 +56,15 @@ orjson = "^3.9.0"
 
 # Data processing and validation
 pydantic = "^2.0.0"
-jsonschema = "^4.0.0"
+
+# Published Analitiq contract models -- the single source of artifact shape
+# (connector/connection/pipeline/stream/endpoint). The engine validates
+# on-disk artifacts against these offline (src/config/schema_validator.py),
+# so it never fetches a schema at runtime. Pinned by release tag; bump
+# deliberately to adopt a new contract revision. Delivered via the
+# claude-plugin-connector repo-sync channel (subdirectory=contract-models),
+# the same channel the connector-builder plugin and registry CI consume.
+analitiq-contract-models = {git = "https://github.com/analitiq-ai/claude-plugin-connector.git", tag = "validator-v0.2.0", subdirectory = "contract-models"}
 
 # Retry and fault tolerance
 backoff = "^2.0.0"

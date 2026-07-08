@@ -20,69 +20,33 @@ from typing import Any
 
 import pytest
 
+from k2m.models.endpoint_identity import derive_db_endpoint_id
+
 from cdk.types import EndpointScope
-from src.config.schema_validator import ContractValidationError, _load_schema
+from src.config.schema_validator import ContractValidationError
 from src.engine.pipeline_config_prep import PipelineConfigPrep, _split_stream_ref
 
 # ---------------------------------------------------------------------------
-# Schema-mirror infrastructure
+# Contract validation
+#
+# Validation is offline against the pinned analitiq-contract-models
+# (src/config/schema_validator.py) -- no schema mirror, no network fetch.
+# Every fixture document below is kept valid against the real published
+# contracts, so the tests exercise actual contract validation. The two
+# fixtures are retained as no-ops so test signatures stay stable.
 # ---------------------------------------------------------------------------
 
 
-_PERMISSIVE_SCHEMA: dict[str, Any] = {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "type": "object",
-}
-
-_ARTIFACT_KINDS = (
-    "connector",
-    "connection",
-    "pipeline",
-    "stream",
-    "endpoint",
-    "api-endpoint",
-    "database-endpoint",
-)
-
-# Byte-for-byte snapshots of the published schemas.analitiq.ai contracts
-# (see tests/fixtures/schemas/README.md for the refresh procedure).
-_VENDORED_SCHEMAS_DIR = Path(__file__).parents[3] / "fixtures" / "schemas"
-
-
-@pytest.fixture(autouse=True)
-def _reset_schema_cache():
-    """``_load_schema`` is ``@lru_cache``d process-wide; reset between tests
-    so each test's ``file://`` mirror is honoured."""
-    _load_schema.cache_clear()
-    yield
-    _load_schema.cache_clear()
+@pytest.fixture
+def schema_mirror() -> None:
+    """No-op: contract validation runs offline against the pinned models."""
+    return None
 
 
 @pytest.fixture
-def schema_mirror(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Serve permissive ``type: "object"`` schemas for every artifact kind
-    from a local ``file://`` mirror. Validation runs but accepts anything
-    object-shaped, so the tests don't need to track schema-side breakage."""
-    mirror = tmp_path / "schemas"
-    for kind in _ARTIFACT_KINDS:
-        kind_dir = mirror / kind
-        kind_dir.mkdir(parents=True, exist_ok=True)
-        (kind_dir / "latest.json").write_text(json.dumps(_PERMISSIVE_SCHEMA))
-    monkeypatch.setenv("ANALITIQ_SCHEMA_BASE_URL", mirror.as_uri())
-    return mirror
-
-
-@pytest.fixture
-def real_schema_mirror(monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Serve the vendored snapshots of the real published schemas.
-
-    Unlike :func:`schema_mirror` this exercises actual contract
-    validation: a fixture document that drifts from the published
-    contracts fails loudly instead of slipping through the permissive
-    ``type: "object"`` mirror (#96).
-    """
-    monkeypatch.setenv("ANALITIQ_SCHEMA_BASE_URL", _VENDORED_SCHEMAS_DIR.as_uri())
-    return _VENDORED_SCHEMAS_DIR
+def real_schema_mirror() -> None:
+    """No-op: contract validation runs offline against the pinned models."""
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -101,6 +65,13 @@ PIPELINE_ID = "00000000-0000-4000-8000-0000000000aa"
 STREAM_ID = "00000000-0000-4000-8000-0000000000bb"
 ENDPOINT_SRC = "src_endpoint"
 ENDPOINT_DST = "dst_endpoint"
+
+# Connection-scoped destination: a private database endpoint. Its endpoint_id
+# is server-derived from database_object (never client-authored for
+# scope="connection"), and the bundle writes the endpoint doc under that
+# derived handle.
+DST_DATABASE_OBJECT = {"schema": "public", "name": "dst_table"}
+ENDPOINT_DST_CONNECTION = derive_db_endpoint_id(None, "public", "dst_table")
 
 
 def _write_json(path: Path, payload: Any) -> None:
@@ -147,12 +118,15 @@ def _endpoint_doc(endpoint_id: str) -> dict[str, Any]:
                 "request": {"method": "GET", "path": f"/{endpoint_id}"},
                 "response": {
                     "schema": {
-                        "type": "object",
-                        "properties": {
-                            "id": {
-                                "type": "integer",
-                                "arrow_type": "Int64",
-                                "native_type": "integer",
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": {
+                                    "type": "integer",
+                                    "arrow_type": "Int64",
+                                    "native_type": "integer",
+                                },
                             },
                         },
                     },
@@ -178,7 +152,45 @@ def _connection_type_map_rules() -> list:
     ]
 
 
+def _database_endpoint_doc(database_object: dict[str, Any]) -> dict[str, Any]:
+    """A private (connection-scoped) database endpoint document, keyed by the
+    server-derived endpoint_id over its database_object."""
+    endpoint_id = derive_db_endpoint_id(
+        database_object.get("catalog"),
+        database_object["schema"],
+        database_object["name"],
+    )
+    return {
+        "$schema": "https://schemas.analitiq.ai/database-endpoint/latest.json",
+        "endpoint_id": endpoint_id,
+        "database_object": database_object,
+        "columns": [
+            {
+                "name": "id",
+                "native_type": "BIGINT",
+                "arrow_type": "Int64",
+                "nullable": False,
+            },
+        ],
+        "primary_keys": ["id"],
+    }
+
+
 def _stream_doc(stream_id: str, *, dst_scope: str = "connector") -> dict[str, Any]:
+    if dst_scope == "connection":
+        # A connection-scoped ref carries database_object; endpoint_id is
+        # server-derived and must not be client-authored.
+        dst_endpoint_ref = {
+            "scope": "connection",
+            "connection_id": CONNECTION_DST_ID,
+            "database_object": DST_DATABASE_OBJECT,
+        }
+    else:
+        dst_endpoint_ref = {
+            "scope": "connector",
+            "connection_id": CONNECTION_DST_ID,
+            "endpoint_id": ENDPOINT_DST,
+        }
     return {
         "$schema": "https://schemas.analitiq.ai/stream/latest.json",
         "stream_id": stream_id,
@@ -195,11 +207,7 @@ def _stream_doc(stream_id: str, *, dst_scope: str = "connector") -> dict[str, An
         },
         "destinations": [
             {
-                "endpoint_ref": {
-                    "scope": dst_scope,
-                    "connection_id": CONNECTION_DST_ID,
-                    "endpoint_id": ENDPOINT_DST,
-                },
+                "endpoint_ref": dst_endpoint_ref,
                 "write": {"mode": "insert"},
             },
         ],
@@ -289,9 +297,12 @@ def _build_tree(
         connector_endpoints.append(ENDPOINT_DST)
     else:
         dst_definition = root / "connections" / CONNECTION_DST_ID / "definition"
-        private_doc = _endpoint_doc(ENDPOINT_DST)
+        private_doc = _database_endpoint_doc(DST_DATABASE_OBJECT)
         private_doc["description"] = "connection-scoped private endpoint"
-        _write_json(dst_definition / "endpoints" / f"{ENDPOINT_DST}.json", private_doc)
+        _write_json(
+            dst_definition / "endpoints" / f"{ENDPOINT_DST_CONNECTION}.json",
+            private_doc,
+        )
         _write_json(dst_definition / "type-map-read.json", _connection_type_map_rules())
     for endpoint_id in connector_endpoints:
         _write_json(
@@ -460,9 +471,10 @@ class TestStreamVersionParsing:
     def test_two_versioned_refs_of_one_stream_fail_loud(
         self, pipeline_tree: Path
     ) -> None:
-        """Distinct versioned refs that strip to the same bare id pass the
-        schema's uniqueItems but would silently collide downstream -- the
-        loader must reject them instead of dropping one."""
+        """Distinct versioned refs that strip to the same bare id must be
+        rejected instead of silently dropping one. The pipeline contract
+        enforces this: versioned IDs collapse to their base for the
+        duplicate check."""
         pipeline_doc = _pipeline_doc()
         pipeline_doc["streams"] = [f"{STREAM_ID}_v1", f"{STREAM_ID}_v2"]
         _write_json(
@@ -470,10 +482,10 @@ class TestStreamVersionParsing:
         )
 
         prep = PipelineConfigPrep()
-        with pytest.raises(ValueError, match="same stream twice") as exc:
+        with pytest.raises(ContractValidationError, match="duplicate") as exc:
             prep.create_config()
-        message = str(exc.value)
-        assert f"{STREAM_ID}_v1" in message and f"{STREAM_ID}_v2" in message
+        # The contract reports the collapsed base id.
+        assert STREAM_ID in str(exc.value)
 
     def test_omitted_pipeline_id_falls_back_to_manifest_id(
         self, pipeline_tree: Path
@@ -584,7 +596,10 @@ class TestCreateConfigErrorPaths:
         file declares that id``."""
         root = tmp_path / "project"
         root.mkdir()
-        _build_tree(root, stream_id_in_file="different-stream-id")
+        # A valid-but-different stream_id (the contract requires a UUID) so the
+        # mismatch surfaces from the loader's cross-reference check, not from
+        # contract validation of the id shape.
+        _build_tree(root, stream_id_in_file="00000000-0000-4000-8000-0000000000cc")
         monkeypatch.chdir(root)
         monkeypatch.setenv("PIPELINE_ID", PIPELINE_ID)
         prep = PipelineConfigPrep()
@@ -611,9 +626,11 @@ class TestCreateConfigErrorPaths:
     def test_missing_endpoint_ref_names_stream_and_side(
         self, pipeline_tree: Path, side: str
     ) -> None:
-        """A stream side without ``endpoint_ref`` must fail naming both the
-        stream and which side (source vs destination) is malformed."""
+        """A stream side without ``endpoint_ref`` must fail naming which side
+        (source vs destination) is malformed. The stream contract requires
+        endpoint_ref on both sides, so this surfaces at contract validation."""
         stream_doc = _stream_doc(STREAM_ID)
+        location = "source" if side == "source" else "destinations/0"
         if side == "source":
             del stream_doc["source"]["endpoint_ref"]
         else:
@@ -624,14 +641,15 @@ class TestCreateConfigErrorPaths:
         )
         prep = PipelineConfigPrep()
         with pytest.raises(
-            ValueError, match=f"Stream {STREAM_ID} {side} missing 'endpoint_ref'"
+            ContractValidationError, match=f"{location}/endpoint_ref"
         ):
             prep.create_config()
 
     @pytest.mark.parametrize("kind", ["", None])
     def test_unusable_connector_kind_rejected(self, pipeline_tree: Path, kind) -> None:
-        """A connector document whose ``kind`` is missing or empty must
-        fail loudly naming the connector."""
+        """A connector document whose ``kind`` is missing or empty must fail
+        loudly. ``kind`` is the connector contract's discriminator, so a
+        missing/empty value is rejected at contract validation."""
         connector_doc = _connector_doc()
         if kind is None:
             del connector_doc["kind"]
@@ -646,10 +664,7 @@ class TestCreateConfigErrorPaths:
             connector_doc,
         )
         prep = PipelineConfigPrep()
-        with pytest.raises(
-            ValueError,
-            match=f"Connector {CONNECTOR_ID!r} declares no usable 'kind'",
-        ):
+        with pytest.raises(ContractValidationError):
             prep.create_config()
 
 
@@ -659,11 +674,12 @@ class TestCreateConfigErrorPaths:
 
 
 class TestRegistryDiscoveredKinds:
-    def test_schema_valid_plugin_kind_assembles(self, pipeline_tree: Path) -> None:
-        """Config prep pins no kind enum: a kind unknown to the built-ins
-        (an entry-point connector package's kind, accepted by the published
-        connector schema) must assemble — the worker registry is the
-        authority on whether the kind is runnable (#137)."""
+    def test_kind_outside_contract_enum_rejected(self, pipeline_tree: Path) -> None:
+        """Config prep hardcodes no kind enum of its own -- it defers the
+        authoritative kind set to the published connector contract (#137).
+        The contract's ``kind`` is a closed discriminator, so a kind outside
+        it (e.g. an entry-point package inventing ``graphql``) is rejected at
+        contract validation rather than assembling."""
         connector_doc = _connector_doc()
         connector_doc["kind"] = "graphql"
         _write_json(
@@ -675,10 +691,8 @@ class TestRegistryDiscoveredKinds:
             connector_doc,
         )
         prep = PipelineConfigPrep()
-        _, stream_configs, connections, _, _ = prep.create_config()
-
-        assert connections[CONNECTION_SRC_ID].connector_type == "graphql"
-        assert stream_configs[0].source.runtime is connections[CONNECTION_SRC_ID]
+        with pytest.raises(ContractValidationError, match="graphql|discriminator"):
+            prep.create_config()
 
 
 # ---------------------------------------------------------------------------
@@ -831,7 +845,10 @@ class TestConnectionScopedEndpoints:
 
         dest = stream_configs[0].destinations[0]
         assert dest.endpoint_ref.scope == "connection"
-        assert dest.endpoint_document["endpoint_id"] == ENDPOINT_DST
+        # endpoint_id is server-derived from database_object.
+        assert dest.endpoint_ref.endpoint_id == ENDPOINT_DST_CONNECTION
+        assert dest.endpoint_ref.database_object is not None
+        assert dest.endpoint_document["endpoint_id"] == ENDPOINT_DST_CONNECTION
         # The marker proves the connection-scoped file was read, not a
         # same-named connector endpoint.
         assert (
