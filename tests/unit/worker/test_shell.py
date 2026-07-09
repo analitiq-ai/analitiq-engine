@@ -47,16 +47,6 @@ class TestReadTypeMapPayloads:
         }
         assert payloads["connection"] == {"rules": _RULES, "write_rules": None}
 
-    def test_alternate_connector_layout(self, tmp_path):
-        connectors = tmp_path / "connectors"
-        connections = tmp_path / "connections"
-        _write_definition(connectors / "connector-postgres", rules=_RULES)
-        connections.mkdir()
-
-        payloads = read_type_map_payloads(connectors, "postgres", connections, "my-pg")
-        assert payloads["connector"] == {"rules": _RULES, "write_rules": None}
-        assert payloads["connection"] is None
-
     def test_absent_maps_are_none(self, tmp_path):
         payloads = read_type_map_payloads(
             tmp_path / "connectors", "postgres", tmp_path / "connections", "my-pg"

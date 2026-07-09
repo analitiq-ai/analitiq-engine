@@ -393,15 +393,9 @@ class PipelineConfigPrep:
     def _load_connector(self, connector_id: str) -> dict[str, Any]:
         if connector_id in self._loaded_connectors:
             return self._loaded_connectors[connector_id]
-        connector_dir = self._paths["connectors"] / connector_id
-        connector_file = connector_dir / "definition" / "connector.json"
-        if not connector_file.is_file():
-            connector_file = (
-                self._paths["connectors"]
-                / f"connector-{connector_id}"
-                / "definition"
-                / "connector.json"
-            )
+        connector_file = (
+            self._paths["connectors"] / connector_id / "definition" / "connector.json"
+        )
         if not connector_file.is_file():
             raise FileNotFoundError(
                 f"Connector definition not found for {connector_id!r}"
