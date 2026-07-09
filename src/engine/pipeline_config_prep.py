@@ -457,17 +457,11 @@ class PipelineConfigPrep:
             return self._resolved_connections[connection_id]
 
         connector = self._load_connector(record.connector_id)
-        # The kind *value* is owned by the published connector schema
-        # (validated in _load_connector) and, at run time, by the worker
-        # registry (an unrunnable kind raises ConnectorNotRegisteredError
-        # there). Config prep only checks the shape, so registry-discovered
-        # connector kinds are not blocked by a hard-coded engine set.
-        kind = connector.get("kind")
-        if not isinstance(kind, str) or not kind:
-            raise ValueError(
-                f"Connector {record.connector_id!r} declares no usable "
-                f"'kind': {kind!r}"
-            )
+        # kind is a closed-enum discriminator validated by the connector
+        # contract in _load_connector; whether that kind is runnable is the
+        # worker registry's job (ConnectorNotRegisteredError). Config prep
+        # neither re-checks the shape nor hard-codes a kind set.
+        kind = connector["kind"]
 
         runtime = ConnectionRuntime(
             raw_config=record.raw_config,
@@ -559,9 +553,9 @@ class PipelineConfigPrep:
 
         connections = pipeline_doc["connections"]
         source_id = connections["source"]
+        # The pipeline contract requires >= 1 destination (validated when the
+        # pipeline document was loaded), so dest_ids is non-empty here.
         dest_ids = list(connections.get("destinations") or [])
-        if not dest_ids:
-            raise ValueError("Pipeline must declare at least one destination")
 
         self._build_connection_index([source_id, *dest_ids])
         self._build_stream_index()
@@ -687,18 +681,15 @@ class PipelineConfigPrep:
     # ------------------------------------------------------------------
 
     def _resolve_endpoint_block(
-        self, block: Mapping[str, Any], stream_id: str, side: str
+        self, block: Mapping[str, Any]
     ) -> tuple[EndpointRef, ConnectionRuntime, dict[str, Any]]:
         """Resolve one stream side's ``endpoint_ref`` into its parts.
 
-        Validates that the block carries an ``endpoint_ref``, then resolves
-        the connection runtime and the endpoint document it points at.
-        ``side`` ("source" or "destination") only shapes the error message.
+        ``endpoint_ref`` presence is guaranteed by per-document stream
+        validation and the bundle validator; this resolves it to the
+        connection runtime and the endpoint document it points at.
         """
-        endpoint_ref_dict = block.get("endpoint_ref")
-        if not endpoint_ref_dict:
-            raise ValueError(f"Stream {stream_id} {side} missing 'endpoint_ref'")
-        endpoint_ref = EndpointRef.from_dict(endpoint_ref_dict)
+        endpoint_ref = EndpointRef.from_dict(block["endpoint_ref"])
         runtime = self._resolve_connection_by_id(endpoint_ref.connection_id)
         endpoint = self._resolve_endpoint(endpoint_ref)
         return endpoint_ref, runtime, endpoint
@@ -716,7 +707,7 @@ class PipelineConfigPrep:
             source_endpoint_ref,
             source_runtime,
             source_endpoint,
-        ) = self._resolve_endpoint_block(raw_source, stream_id, "source")
+        ) = self._resolve_endpoint_block(raw_source)
 
         resolved_source = ResolvedSource(
             endpoint_ref=source_endpoint_ref,
@@ -735,7 +726,7 @@ class PipelineConfigPrep:
                 dest_endpoint_ref,
                 dest_runtime,
                 dest_endpoint,
-            ) = self._resolve_endpoint_block(raw_dest, stream_id, "destination")
+            ) = self._resolve_endpoint_block(raw_dest)
 
             resolved_destinations.append(
                 ResolvedDestination(
