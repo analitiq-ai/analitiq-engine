@@ -51,11 +51,18 @@ class Discoverable(Protocol):
     async def list_schemas(self, runtime: ConnectionRuntime) -> list[str]:
         ...
 
-    async def list_tables(self, runtime: ConnectionRuntime, schema: str) -> list[str]:
+    async def list_tables(
+        self, runtime: ConnectionRuntime, schema: str, *, catalog: str = ""
+    ) -> list[str]:
         ...
 
     async def list_columns(
-        self, runtime: ConnectionRuntime, schema: str, table: str
+        self,
+        runtime: ConnectionRuntime,
+        schema: str,
+        table: str,
+        *,
+        catalog: str = "",
     ) -> tuple[list[ColumnDef], list[str]]:  # (columns, primary_keys)
         ...
 
@@ -70,6 +77,8 @@ class TableCreator(Protocol):
         table: str,
         columns: list[ColumnDef],
         primary_keys: list[str],
+        *,
+        catalog: str = "",
     ) -> None:
         ...
 

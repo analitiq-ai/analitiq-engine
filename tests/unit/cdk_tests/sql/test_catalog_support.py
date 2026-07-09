@@ -19,7 +19,6 @@ from cdk.type_map.rules import parse_rules
 
 from .conftest import FakeAdbcRuntime
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -86,9 +85,7 @@ class TestQuoteQualifiedCatalog:
 
     def test_catalog_without_schema(self):
         d = SqlDialect()
-        assert d.quote_qualified("", "orders", catalog="my_db") == (
-            '"my_db"."orders"'
-        )
+        assert d.quote_qualified("", "orders", catalog="my_db") == ('"my_db"."orders"')
 
     def test_no_catalog_unchanged(self):
         d = SqlDialect()
@@ -325,7 +322,9 @@ class TestEnsureTablesViaAdbcCatalog:
             table_name="orders",
             catalog_name="my_project",
         )
-        ddl = 'CREATE TABLE IF NOT EXISTS "my_project"."analytics"."orders" (id INTEGER)'
+        ddl = (
+            'CREATE TABLE IF NOT EXISTS "my_project"."analytics"."orders" (id INTEGER)'
+        )
         await handler._ensure_tables_via_adbc(state, [ddl])
 
         schema_stmts = [s for s in executed if "CREATE SCHEMA" in s]
@@ -333,8 +332,9 @@ class TestEnsureTablesViaAdbcCatalog:
         assert schema_stmts[0] == 'CREATE SCHEMA IF NOT EXISTS "my_project"."analytics"'
 
     @pytest.mark.asyncio
-    async def test_schema_ddl_suppressed_when_schema_is_implicit_default_with_catalog(self):
-        from cdk.sql.dialects import SqlDialect
+    async def test_schema_ddl_suppressed_when_schema_is_implicit_default_with_catalog(
+        self,
+    ):
         from cdk.sql.generic import GenericSQLConnector, _StreamState
 
         class _ImplicitPublicDialect(SqlDialect):
@@ -373,7 +373,9 @@ class TestEnsureTablesViaAdbcCatalog:
         await handler._ensure_tables_via_adbc(state, [ddl])
 
         schema_stmts = [s for s in executed if "CREATE SCHEMA" in s]
-        assert not schema_stmts, "CREATE SCHEMA should be suppressed when schema is implicit default"
+        assert (
+            not schema_stmts
+        ), "CREATE SCHEMA should be suppressed when schema is implicit default"
 
     @pytest.mark.asyncio
     async def test_schema_ddl_without_catalog_unchanged(self):
@@ -407,3 +409,179 @@ class TestEnsureTablesViaAdbcCatalog:
         assert schema_stmts, "expected a CREATE SCHEMA statement"
         assert "my_project" not in schema_stmts[0]
         assert schema_stmts[0] == 'CREATE SCHEMA IF NOT EXISTS "analytics"'
+
+
+# ---------------------------------------------------------------------------
+# Read-path quoting: catalog/schema components quoted per dialect
+# ---------------------------------------------------------------------------
+
+
+class TestQueryBuilderCatalogQuoting:
+    def test_quote_identifiers_quotes_each_component(self):
+        builder = QueryBuilder("postgresql", quote_identifiers=True)
+        sql, _ = builder.build_select_query(
+            QueryConfig(
+                schema_name="Analytics",
+                table_name="Orders",
+                catalog_name="my-project",
+                columns=["id"],
+            )
+        )
+        # Hyphenated catalog and mixed-case schema each quoted; dot unquoted.
+        assert '"my-project"."Analytics"' in sql
+
+    def test_no_quote_identifiers_leaves_dotted_raw(self):
+        builder = QueryBuilder("postgresql")
+        sql, _ = builder.build_select_query(
+            QueryConfig(
+                schema_name="analytics",
+                table_name="orders",
+                catalog_name="my_project",
+                columns=["id"],
+            )
+        )
+        assert "my_project.analytics" in sql
+        assert '"my_project"' not in sql
+
+
+# ---------------------------------------------------------------------------
+# primary_keys_query scopes the join to the catalog
+# ---------------------------------------------------------------------------
+
+
+class TestPrimaryKeysQueryCatalog:
+    def test_join_scopes_constraint_and_table_catalog(self):
+        sql, params = SqlDialect().primary_keys_query(
+            "public", "orders", catalog="my_db"
+        )
+        assert "tc.constraint_catalog = kcu.constraint_catalog" in sql
+        assert "tc.constraint_schema = kcu.constraint_schema" in sql
+        assert "tc.table_catalog = kcu.table_catalog" in sql
+        assert "tc.table_catalog = ?" in sql
+        assert params[-1] == "my_db"
+
+
+# ---------------------------------------------------------------------------
+# Discovery catalog filter is normalized like the DDL/name path
+# ---------------------------------------------------------------------------
+
+
+class _UpperDialect(SqlDialect):
+    def normalize_schema(self, schema: str) -> str:
+        return schema.upper()
+
+
+class TestDiscoveryCatalogFilterNormalized:
+    @pytest.mark.asyncio
+    async def test_catalog_filter_folded_for_folding_dialect(self):
+        runtime = FakeAdbcRuntime(
+            "ansi",
+            responder=_route({"tables": [{"table_name": "orders"}]}),
+        )
+        await list_tables(
+            runtime, "analytics", dialect=_UpperDialect(), catalog="my_db"
+        )
+        _sql, params = runtime.connections[-1].executed[-1]
+        assert params[0] == "ANALYTICS"
+        assert params[1] == "MY_DB"
+
+
+# ---------------------------------------------------------------------------
+# Fail loud when a catalog is set but the dialect cannot target it on ingest
+# ---------------------------------------------------------------------------
+
+
+class _NoTargetDialect(SqlDialect):
+    """A Snowflake-like dialect that suppresses per-statement ingest kwargs."""
+
+    def adbc_ingest_schema_kwargs(self, schema_name, *, catalog_name=""):
+        return {}
+
+
+class TestAdbcIngestTargetKwargs:
+    def test_base_threads_catalog(self):
+        from cdk.sql.generic import GenericSQLConnector
+
+        kwargs = GenericSQLConnector()._adbc_ingest_target_kwargs("analytics", "my_db")
+        assert kwargs["db_schema_name"] == "analytics"
+        assert kwargs["catalog_name"] == "my_db"
+
+    def test_no_catalog_never_raises(self):
+        from cdk.sql.generic import GenericSQLConnector
+
+        class _C(GenericSQLConnector):
+            dialect_class = _NoTargetDialect
+
+        assert _C()._adbc_ingest_target_kwargs("analytics") == {}
+
+    def test_raises_when_dialect_drops_a_requested_catalog(self):
+        from cdk.adbc_registry import AdbcConfigurationError
+        from cdk.sql.generic import GenericSQLConnector
+
+        class _C(GenericSQLConnector):
+            dialect_class = _NoTargetDialect
+
+        with pytest.raises(AdbcConfigurationError, match="my_db"):
+            _C()._adbc_ingest_target_kwargs("analytics", "my_db")
+
+
+# ---------------------------------------------------------------------------
+# sqlalchemy_pre_ddl is catalog-aware
+# ---------------------------------------------------------------------------
+
+
+class TestSqlalchemyPreDdlCatalog:
+    def test_base_accepts_catalog_kwarg(self):
+        assert SqlDialect().sqlalchemy_pre_ddl("public", catalog_name="db") == []
+
+    def test_override_can_qualify_schema_with_catalog(self):
+        class _D(SqlDialect):
+            def sqlalchemy_pre_ddl(self, schema_name, *, catalog_name=""):
+                if catalog_name:
+                    return [
+                        f'CREATE SCHEMA IF NOT EXISTS "{catalog_name}".'
+                        f'"{schema_name}"'
+                    ]
+                return [f'CREATE SCHEMA IF NOT EXISTS "{schema_name}"']
+
+        assert _D().sqlalchemy_pre_ddl("analytics", catalog_name="proj") == [
+            'CREATE SCHEMA IF NOT EXISTS "proj"."analytics"'
+        ]
+
+
+# ---------------------------------------------------------------------------
+# Control-plane capability surface threads catalog to the discovery/DDL helpers
+# ---------------------------------------------------------------------------
+
+
+class TestCapabilityCatalogSurface:
+    @pytest.mark.asyncio
+    async def test_list_tables_delegator_threads_catalog(self, monkeypatch):
+        import cdk.sql.generic as gen
+
+        seen: dict[str, str] = {}
+
+        async def _fake(runtime, schema, *, dialect, catalog=""):
+            seen["catalog"] = catalog
+            return []
+
+        monkeypatch.setattr(gen, "_sql_list_tables", _fake)
+        await gen.GenericSQLConnector().list_tables(
+            MagicMock(), "public", catalog="my_db"
+        )
+        assert seen["catalog"] == "my_db"
+
+    @pytest.mark.asyncio
+    async def test_create_table_delegator_threads_catalog(self, monkeypatch):
+        import cdk.sql.generic as gen
+
+        seen: dict[str, str] = {}
+
+        async def _fake(runtime, schema, table, columns, pks, *, dialect, catalog=""):
+            seen["catalog"] = catalog
+
+        monkeypatch.setattr(gen, "_sql_create_table", _fake)
+        await gen.GenericSQLConnector().create_table(
+            MagicMock(), "public", "orders", [], [], catalog="my_db"
+        )
+        assert seen["catalog"] == "my_db"

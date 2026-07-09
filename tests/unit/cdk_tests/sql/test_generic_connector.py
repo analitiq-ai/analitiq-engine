@@ -699,8 +699,10 @@ class TestControlPlaneDelegators:
         # as the required keyword (identity, not ANY).
         dialect = connector.dialect
         ls.assert_awaited_once_with(runtime, dialect=dialect)
-        lt.assert_awaited_once_with(runtime, "public", dialect=dialect)
-        lc.assert_awaited_once_with(runtime, "public", "orders", dialect=dialect)
+        lt.assert_awaited_once_with(runtime, "public", dialect=dialect, catalog="")
+        lc.assert_awaited_once_with(
+            runtime, "public", "orders", dialect=dialect, catalog=""
+        )
         ct.assert_awaited_once_with(
-            runtime, "public", "orders", [], [], dialect=dialect
+            runtime, "public", "orders", [], [], dialect=dialect, catalog=""
         )

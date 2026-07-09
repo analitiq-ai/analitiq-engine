@@ -992,7 +992,17 @@ class TestWriteBatchAdbcOnlyKeylessInsert:
 
         tokens: list[str] = []
 
-        def capture(cb, schema, table, all_cols, conflict_keys, token, catalog="", *, insert_only):
+        def capture(
+            cb,
+            schema,
+            table,
+            all_cols,
+            conflict_keys,
+            token,
+            catalog="",
+            *,
+            insert_only,
+        ):
             tokens.append(token)
 
         with patch.object(h, "_merge_ingest_sync", side_effect=capture):

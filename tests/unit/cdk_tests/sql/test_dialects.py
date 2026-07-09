@@ -83,29 +83,38 @@ class TestQuoting:
         )
 
     def test_catalog_produces_three_part_name(self):
-        assert SqlDialect().quote_qualified(
-            "public", "orders", catalog="my_db"
-        ) == '"my_db"."public"."orders"'
+        assert (
+            SqlDialect().quote_qualified("public", "orders", catalog="my_db")
+            == '"my_db"."public"."orders"'
+        )
 
     def test_catalog_without_schema_produces_two_part_name(self):
-        assert SqlDialect().quote_qualified(
-            "", "orders", catalog="my_db"
-        ) == '"my_db"."orders"'
+        assert (
+            SqlDialect().quote_qualified("", "orders", catalog="my_db")
+            == '"my_db"."orders"'
+        )
 
     def test_catalog_with_backtick_dialect(self):
-        assert _BacktickDialect().quote_qualified(
-            "ds", "orders", catalog="proj"
-        ) == "`proj`.`ds`.`orders`"
+        assert (
+            _BacktickDialect().quote_qualified("ds", "orders", catalog="proj")
+            == "`proj`.`ds`.`orders`"
+        )
 
     def test_catalog_normalizes_schema(self):
-        assert _UpperNormalizingDialect().quote_qualified(
-            "public", "orders", catalog="MY_DB"
-        ) == '"MY_DB"."PUBLIC"."orders"'
+        assert (
+            _UpperNormalizingDialect().quote_qualified(
+                "public", "orders", catalog="MY_DB"
+            )
+            == '"MY_DB"."PUBLIC"."orders"'
+        )
 
     def test_catalog_is_normalized_like_schema(self):
-        assert _UpperNormalizingDialect().quote_qualified(
-            "public", "orders", catalog="my_db"
-        ) == '"MY_DB"."PUBLIC"."orders"'
+        assert (
+            _UpperNormalizingDialect().quote_qualified(
+                "public", "orders", catalog="my_db"
+            )
+            == '"MY_DB"."PUBLIC"."orders"'
+        )
 
 
 class TestNormalizeSchema:
@@ -209,7 +218,9 @@ class TestDiscoveryQueries:
         assert params == ["public", "orders"]
 
     def test_primary_keys_query_with_catalog_adds_filter(self):
-        sql, params = SqlDialect().primary_keys_query("public", "orders", catalog="my_db")
+        sql, params = SqlDialect().primary_keys_query(
+            "public", "orders", catalog="my_db"
+        )
         assert "table_catalog = ?" in sql
         assert params == ["public", "orders", "my_db"]
         assert sql.count("?") == 3

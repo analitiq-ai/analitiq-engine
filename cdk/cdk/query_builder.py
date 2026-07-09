@@ -301,14 +301,24 @@ class QueryBuilder:
         # Create table reference with proper schema (and optional catalog).
         # When a catalog is present, compose a compound "catalog.schema" schema
         # string.  SQLAlchemy dialects for cross-catalog systems (BigQuery,
-        # Snowflake) interpret a dotted schema string as "catalog.schema";
-        # quote=False prevents SA from re-quoting the dot separator.
+        # Snowflake) interpret a dotted schema string as "catalog.schema", so
+        # quote=False on the composed result keeps SA from folding the whole
+        # dotted path into one identifier.  When identifier quoting is on (the
+        # ADBC read path), each component is quoted individually through the
+        # dialect preparer first -- BigQuery backticks a hyphenated project id,
+        # Snowflake double-quotes a mixed-case schema -- so the emitted path is
+        # `catalog`.`schema` rather than a raw catalog.schema that would be
+        # invalid or resolve a different object.
         metadata = MetaData()
         if config.catalog_name:
+            parts = [config.catalog_name]
             if config.schema_name:
-                compound = f"{config.catalog_name}.{config.schema_name}"
+                parts.append(config.schema_name)
+            if self._quote_identifiers:
+                prep = self._sa_dialect.identifier_preparer
+                compound = ".".join(prep.quote(part) for part in parts)
             else:
-                compound = config.catalog_name
+                compound = ".".join(parts)
             effective_schema: Any = quoted_name(compound, quote=False)
         elif config.schema_name:
             effective_schema = self._ident(config.schema_name)

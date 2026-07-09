@@ -187,11 +187,15 @@ class SqlDialect:
         value = self.build_tls_connect_arg(mode, ca_pem)
         return {} if value is None else {"ssl": value}
 
-    def sqlalchemy_pre_ddl(self, schema_name: str) -> list[str]:
+    def sqlalchemy_pre_ddl(
+        self, schema_name: str, *, catalog_name: str = ""
+    ) -> list[str]:
         """Return statements to run before ``MetaData.create_all``.
 
         For example, postgres' ``CREATE SCHEMA IF NOT EXISTS`` for a
-        non-default schema. None by default.
+        non-default schema. When *catalog_name* is set, an override creates
+        the schema in that catalog (database / project) so a subsequent
+        catalog-qualified ``CREATE TABLE`` resolves it. None by default.
         """
         return []
 
@@ -248,7 +252,7 @@ class SqlDialect:
     def adbc_ingest_schema_kwargs(
         self, schema_name: str, *, catalog_name: str = ""
     ) -> dict[str, Any]:
-        """Schema- and catalog-targeting kwargs for ``cursor.adbc_ingest``.
+        """Return schema- and catalog-targeting kwargs for ``cursor.adbc_ingest``.
 
         ADBC exposes per-statement ingest targeting through the
         ``adbc.ingest.target_db_schema`` option (the ``db_schema_name``
@@ -290,13 +294,12 @@ class SqlDialect:
         restricts discovery to that catalog (database / project).
         """
         sql = (
-            "SELECT table_name FROM information_schema.tables "
-            "WHERE table_schema = ?"
+            "SELECT table_name FROM information_schema.tables " "WHERE table_schema = ?"
         )
         params: list[object] = [self.normalize_schema(schema)]
         if catalog:
             sql += " AND table_catalog = ?"
-            params.append(catalog)
+            params.append(self.normalize_schema(catalog))
         sql += " ORDER BY table_name"
         return sql, params
 
@@ -314,11 +317,13 @@ class SqlDialect:
         params: list[object] = [self.normalize_schema(schema), table]
         if catalog:
             sql += " AND table_catalog = ?"
-            params.append(catalog)
+            params.append(self.normalize_schema(catalog))
         sql += " ORDER BY ordinal_position"
         return sql, params
 
-    def primary_keys_query(self, schema: str, table: str, *, catalog: str = "") -> Query:
+    def primary_keys_query(
+        self, schema: str, table: str, *, catalog: str = ""
+    ) -> Query:
         """Return ``(sql, params)`` listing PK columns of *schema.table*.
 
         When *catalog* is provided, an additional ``tc.table_catalog = ?``
@@ -328,7 +333,9 @@ class SqlDialect:
             "SELECT kcu.column_name "
             "FROM information_schema.table_constraints tc "
             "JOIN information_schema.key_column_usage kcu "
-            "  ON tc.constraint_name = kcu.constraint_name "
+            "  ON tc.constraint_catalog = kcu.constraint_catalog "
+            " AND tc.constraint_schema = kcu.constraint_schema "
+            " AND tc.constraint_name = kcu.constraint_name "
             " AND tc.table_schema = kcu.table_schema "
             " AND tc.table_name = kcu.table_name "
             " AND tc.table_catalog = kcu.table_catalog "
@@ -338,6 +345,6 @@ class SqlDialect:
         params: list[object] = [self.normalize_schema(schema), table]
         if catalog:
             sql += " AND tc.table_catalog = ?"
-            params.append(catalog)
+            params.append(self.normalize_schema(catalog))
         sql += " ORDER BY kcu.ordinal_position"
         return sql, params

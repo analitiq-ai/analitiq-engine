@@ -36,9 +36,9 @@ from typing import Any, Literal
 
 import pyarrow as pa
 from sqlalchemy import MetaData, Table, and_, bindparam, literal, select, text
-from sqlalchemy.sql.elements import quoted_name
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.sql.elements import quoted_name
 
 from cdk.adbc_registry import AdbcConfigurationError
 from cdk.base_handler import BaseDestinationHandler, BatchWriteResult
@@ -1040,7 +1040,10 @@ class GenericSQLConnector(BaseDestinationHandler):
         # Dialect-declared preparation (e.g. postgres' CREATE SCHEMA
         # IF NOT EXISTS for a non-default schema). The neutral base
         # declares none.
-        for stmt in self.dialect.sqlalchemy_pre_ddl(state.schema_name):
+        for stmt in self.dialect.sqlalchemy_pre_ddl(
+            state.schema_name,
+            **({"catalog_name": state.catalog_name} if state.catalog_name else {}),
+        ):
             conn.execute(text(stmt))
         conn.execute(text(target_ddl))
 
@@ -1809,6 +1812,34 @@ class GenericSQLConnector(BaseDestinationHandler):
                 state.catalog_name,
             )
 
+    def _adbc_ingest_target_kwargs(
+        self, schema_name: str, catalog_name: str = ""
+    ) -> dict[str, Any]:
+        """Resolve ADBC ingest targeting kwargs, refusing to drop a catalog.
+
+        Delegates to the dialect's ``adbc_ingest_schema_kwargs`` and passes
+        ``catalog_name`` only when set, so dialects predating catalog support
+        keep working for non-catalog streams. When a catalog *is* configured
+        but the dialect returns no ``catalog_name`` targeting -- e.g. one that
+        suppresses per-statement ingest targeting -- the append would resolve
+        the session catalog instead of the requested one, a silent
+        wrong-target write. Fail loud so the misconfiguration surfaces here
+        rather than landing rows in the wrong database.
+        """
+        kwargs = self.dialect.adbc_ingest_schema_kwargs(
+            schema_name,
+            **({"catalog_name": catalog_name} if catalog_name else {}),
+        )
+        if catalog_name and "catalog_name" not in kwargs:
+            raise AdbcConfigurationError(
+                f"stream targets catalog {catalog_name!r} but dialect "
+                f"{self.dialect.name!r} does not honor per-statement catalog "
+                f"targeting for ADBC ingest; the append would resolve the "
+                f"session catalog instead. Use a connection whose default "
+                f"catalog is {catalog_name!r}, or a dialect that targets it."
+            )
+        return kwargs
+
     def _adbc_only_ingest_sync(
         self,
         cast_batch: pa.RecordBatch,
@@ -1826,10 +1857,7 @@ class GenericSQLConnector(BaseDestinationHandler):
                         table_name,
                         cast_batch,
                         mode="append",
-                        **self.dialect.adbc_ingest_schema_kwargs(
-                            schema_name,
-                            **({"catalog_name": catalog_name} if catalog_name else {}),
-                        ),
+                        **self._adbc_ingest_target_kwargs(schema_name, catalog_name),
                     )
                     conn.commit()
                 finally:
@@ -1873,7 +1901,9 @@ class GenericSQLConnector(BaseDestinationHandler):
         # _adbc_truncate_sync and _adbc_only_ingest_sync are safe.
         with self._adbc_op_lock:
             self._adbc_truncate_sync(schema_name, table_name, catalog_name)
-            self._adbc_only_ingest_sync(cast_batch, schema_name, table_name, catalog_name)
+            self._adbc_only_ingest_sync(
+                cast_batch, schema_name, table_name, catalog_name
+            )
 
     def _merge_ingest_sync(
         self,
@@ -1997,10 +2027,7 @@ class GenericSQLConnector(BaseDestinationHandler):
                     stage_name,
                     cast_batch,
                     mode="append",
-                    **self.dialect.adbc_ingest_schema_kwargs(
-                        schema_name,
-                        **({"catalog_name": catalog_name} if catalog_name else {}),
-                    ),
+                    **self._adbc_ingest_target_kwargs(schema_name, catalog_name),
                 )
                 conn.commit()
                 on_clause = " AND ".join(
@@ -2612,13 +2639,24 @@ class GenericSQLConnector(BaseDestinationHandler):
     async def list_schemas(self, runtime: ConnectionRuntime) -> list[str]:
         return await _sql_list_schemas(runtime, dialect=self.dialect)
 
-    async def list_tables(self, runtime: ConnectionRuntime, schema: str) -> list[str]:
-        return await _sql_list_tables(runtime, schema, dialect=self.dialect)
+    async def list_tables(
+        self, runtime: ConnectionRuntime, schema: str, *, catalog: str = ""
+    ) -> list[str]:
+        return await _sql_list_tables(
+            runtime, schema, dialect=self.dialect, catalog=catalog
+        )
 
     async def list_columns(
-        self, runtime: ConnectionRuntime, schema: str, table: str
+        self,
+        runtime: ConnectionRuntime,
+        schema: str,
+        table: str,
+        *,
+        catalog: str = "",
     ) -> tuple[list[ColumnDef], list[str]]:
-        return await _sql_list_columns(runtime, schema, table, dialect=self.dialect)
+        return await _sql_list_columns(
+            runtime, schema, table, dialect=self.dialect, catalog=catalog
+        )
 
     async def create_table(
         self,
@@ -2627,7 +2665,15 @@ class GenericSQLConnector(BaseDestinationHandler):
         table: str,
         columns: list[ColumnDef],
         primary_keys: list[str],
+        *,
+        catalog: str = "",
     ) -> None:
         await _sql_create_table(
-            runtime, schema, table, columns, primary_keys, dialect=self.dialect
+            runtime,
+            schema,
+            table,
+            columns,
+            primary_keys,
+            dialect=self.dialect,
+            catalog=catalog,
         )
