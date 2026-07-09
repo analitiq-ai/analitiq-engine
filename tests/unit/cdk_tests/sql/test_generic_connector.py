@@ -22,6 +22,7 @@ import pyarrow as pa
 import pytest
 
 from cdk.secrets.exceptions import PlaceholderExpansionError
+from cdk.sql.dialects import SqlDialect
 from cdk.sql.exceptions import ReadError
 from cdk.sql.generic import GenericSQLConnector
 
@@ -296,6 +297,35 @@ class TestReadAdbcBranch:
 
         saved = [c.args[2]["cursor"] for c in checkpoint.save_cursor.call_args_list]
         assert saved[-1] == "2024-01-09"
+
+    @pytest.mark.asyncio
+    async def test_adbc_read_normalizes_catalog(self):
+        """catalog_name is case-folded by the dialect before being quoted in SQL."""
+
+        class _UpperNormalizingDialect(SqlDialect):
+            def normalize_schema(self, s: str) -> str:
+                return s.upper()
+
+        class _NormalizingConnector(GenericSQLConnector):
+            dialect_class = _UpperNormalizingDialect
+
+        runtime = _FakeRuntime(is_adbc=True)
+        page = [pa.RecordBatch.from_pydict({"id": [1], "updated_at": ["2024-01-01"]})]
+        reader = _RecordingReader([page, []])
+        connector = _NormalizingConnector()
+
+        config = _endpoint_config()
+        config["endpoint_document"]["database_object"]["catalog"] = "my_db"
+
+        with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()), patch(
+            "cdk.sql.generic.open_adbc_reader", return_value=_adbc_cm(reader)
+        ), patch("cdk.sql.generic.SchemaContract") as sc:
+            sc.return_value.cast_arrow_batch.side_effect = lambda b: b
+            await _drain(connector, runtime, config, _checkpoint())
+
+        sql, _ = reader.calls[0]
+        assert '"MY_DB"' in sql
+        assert '"my_db"' not in sql
 
 
 def _adbc_cm(reader: _RecordingReader):

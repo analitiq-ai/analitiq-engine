@@ -565,6 +565,80 @@ class TestSqlalchemyPreDdlCatalog:
 
 
 # ---------------------------------------------------------------------------
+# _run_ddl_and_reflect composes catalog+schema with per-component quoting
+# ---------------------------------------------------------------------------
+
+
+class TestRunDdlAndReflectCatalogQuoting:
+    def test_catalog_and_schema_produce_per_component_quoted_reflect_schema(
+        self, monkeypatch
+    ):
+        """SQLAlchemy reflection schema uses quoted catalog + schema separately."""
+        from unittest.mock import MagicMock
+
+        import cdk.sql.generic as gen
+        from cdk.sql.generic import GenericSQLConnector, _StreamState
+
+        class _UpperNormalizingDialect(SqlDialect):
+            def normalize_schema(self, s: str) -> str:
+                return s.upper()
+
+        class _C(GenericSQLConnector):
+            dialect_class = _UpperNormalizingDialect
+
+        captured: dict = {}
+
+        def _fake_table(name, meta, *, autoload_with, schema):
+            captured["schema"] = schema
+            return MagicMock()
+
+        monkeypatch.setattr(gen, "Table", _fake_table)
+        conn = MagicMock()
+        conn.execute.return_value = None
+
+        state = _StreamState(
+            schema_name="my-schema",
+            table_name="orders",
+            catalog_name="my-catalog",
+        )
+        _C()._run_ddl_and_reflect(conn, state, "CREATE TABLE orders (id INT)")
+
+        schema_arg = str(captured["schema"])
+        assert '"MY-CATALOG"' in schema_arg
+        assert '"MY-SCHEMA"' in schema_arg
+        assert "my-catalog" not in schema_arg
+        assert "my-schema" not in schema_arg
+
+    def test_catalog_only_uses_quoted_catalog(self, monkeypatch):
+        from unittest.mock import MagicMock
+
+        import cdk.sql.generic as gen
+        from cdk.sql.generic import GenericSQLConnector, _StreamState
+
+        captured: dict = {}
+
+        def _fake_table(name, meta, *, autoload_with, schema):
+            captured["schema"] = schema
+            return MagicMock()
+
+        monkeypatch.setattr(gen, "Table", _fake_table)
+        conn = MagicMock()
+
+        state = _StreamState(
+            schema_name="",
+            table_name="orders",
+            catalog_name="my-catalog",
+        )
+        GenericSQLConnector()._run_ddl_and_reflect(
+            conn, state, "CREATE TABLE orders (id INT)"
+        )
+
+        schema_arg = str(captured["schema"])
+        assert '"my-catalog"' in schema_arg
+        assert "my-catalog" not in schema_arg.replace('"my-catalog"', "")
+
+
+# ---------------------------------------------------------------------------
 # Control-plane capability surface threads catalog to the discovery/DDL helpers
 # ---------------------------------------------------------------------------
 
