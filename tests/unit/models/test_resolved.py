@@ -186,11 +186,14 @@ class TestParseRuntimeConfig:
         assert cfg.error_handling.retry_delay_seconds == 42
         assert cfg.error_handling.strategy == "skip"
 
-    def test_null_retry_delay_normalizes_to_default(self):
-        # The contract allows retry_delay_seconds: null; it must not crash the
-        # typed int field, it normalizes to the default.
+    def test_null_retry_delay_falls_through_to_engine_default(self, monkeypatch):
+        # Explicit null is treated as unset: the field falls through to the
+        # engine's (env-overridable) default, not the contract's injected value.
+        # The env override makes this discriminating -- the engine's built-in
+        # default (5) otherwise coincides with the contract's injected 5.
+        monkeypatch.setenv("ANALITIQ_RETRY_DELAY_SECONDS", "42")
         cfg = _parse_runtime_config({"error_handling": {"retry_delay_seconds": None}})
-        assert cfg.error_handling.retry_delay_seconds == 5
+        assert cfg.error_handling.retry_delay_seconds == 42
 
     def test_skip_strategy_parses(self):
         cfg = _parse_runtime_config({"error_handling": {"strategy": "skip"}})

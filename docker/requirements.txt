@@ -7,6 +7,12 @@ aiofiles>=23.0.0
 # API connectors
 aiohttp>=3.8.0
 aiohttp-retry>=2.8.3
+# Published Analitiq contract packages. The engine imports these at module load
+# and validates artifacts offline against them at runtime (no network fetch), so
+# they must be in the runtime image. Pinned to match pyproject.toml; bump
+# deliberately to adopt a new contract revision.
+analitiq-contract-models==1.0.0rc2
+analitiq-validator==1.0.0rc1
 
 # Retry and fault tolerance
 backoff>=2.0.0
@@ -15,7 +21,6 @@ click>=8.0.0
 # gRPC for destination streaming
 grpcio>=1.60.0
 grpcio-tools>=1.60.0
-jsonschema>=4.0.0
 
 # Serialization formats for gRPC payloads
 msgpack>=1.0.0
