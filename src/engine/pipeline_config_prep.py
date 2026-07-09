@@ -54,7 +54,7 @@ from cdk.type_map import (
 )
 from src.config.connection_loader import load_connection_file, load_connector_definition
 from src.config.endpoint_resolver import ConnectionLookup, resolve_endpoint_ref
-from src.config.schema_validator import ContractValidationError
+from src.config.schema_validator import ContractValidationError, validate_bundle
 from src.config.schema_validator import validate as validate_artifact
 from src.config.utils import load_json_file
 from src.models.resolved import (
@@ -570,39 +570,34 @@ class PipelineConfigPrep:
         for dest_id in dest_ids:
             self._resolve_connection_by_id(dest_id)
 
-        # Stream configs. A reference may carry a ``_v{n}`` version suffix;
-        # the bare id resolves the stream record and the version rides onto
-        # the emitted checkpoint line.
-        pipeline_stream_refs = list(pipeline_doc.get("streams") or [])
-        stream_configs: list[ResolvedStream] = []
-        seen_bare: dict[str, str] = {}
-        for stream_ref in pipeline_stream_refs:
-            bare_stream_id, stream_version = _split_stream_ref(stream_ref)
-            # Distinct versioned refs (``abc_v1``, ``abc_v2``) pass the pipeline
-            # schema's uniqueItems but collapse to one bare id. Downstream keys
-            # the stream (and its cursor/commits) by that bare id, so a collision
-            # would silently drop one stream -- fail loud instead.
-            if bare_stream_id in seen_bare:
-                raise ValueError(
-                    f"pipeline.streams lists the same stream twice after version "
-                    f"stripping: {seen_bare[bare_stream_id]!r} and {stream_ref!r} "
-                    f"both resolve to stream_id {bare_stream_id!r}"
-                )
-            seen_bare[bare_stream_id] = stream_ref
-            record = self._stream_records.get(bare_stream_id)
-            if record is None:
-                raise ValueError(
-                    f"pipeline.streams references {stream_ref!r} but no stream "
-                    f"file in {self._pipeline_dir}/streams declares id "
-                    f"{bare_stream_id!r}; known: {sorted(self._stream_records)}"
-                )
-            stream_configs.append(self._build_stream_config(record, stream_version))
-
         # pipeline_id is nullable in the contract: an authored pipeline.json may
         # omit it and rely on the manifest for executable identity. Fall back to
         # the manifest/env id (always present) so a schema-valid omitted id is
-        # honored rather than rejected by ResolvedPipeline's guard.
+        # honored rather than rejected by ResolvedPipeline's guard. This is the
+        # run-bundle identity, so it is what the bundle validator sees.
         pipeline_id = pipeline_doc.get("pipeline_id") or self.pipeline_id_input
+
+        # Cross-document referential validation (published validator): every
+        # stream/connection/connector/endpoint reference resolves, source and
+        # destination roles are wired correctly, and the pipeline is runnable.
+        # Per-document shape was validated as each artifact was loaded above.
+        validate_bundle(
+            self._assemble_bundle(pipeline_doc, pipeline_id),
+            source=str(self._pipeline_dir),
+        )
+
+        # Stream configs. A reference may carry a ``_v{n}`` version suffix; the
+        # bare id resolves the stream record (referential soundness is already
+        # guaranteed by validate_bundle) and the version rides onto the emitted
+        # checkpoint line.
+        stream_configs: list[ResolvedStream] = [
+            self._build_stream_config(
+                self._stream_records[bare_id], stream_version
+            )
+            for bare_id, stream_version in (
+                _split_stream_ref(ref) for ref in pipeline_doc.get("streams") or []
+            )
+        ]
         display_name = pipeline_doc.get("display_name")
         pipeline = ResolvedPipeline(
             pipeline_id=pipeline_id,
@@ -637,6 +632,55 @@ class PipelineConfigPrep:
             dict(self._resolved_endpoints),
             connectors,
         )
+
+    # ------------------------------------------------------------------
+    # Bundle assembly (for referential validation)
+    # ------------------------------------------------------------------
+
+    def _assemble_bundle(
+        self, pipeline_doc: dict[str, Any], pipeline_id: str
+    ) -> dict[str, Any]:
+        """Assemble the identity-only run bundle the published validator checks.
+
+        ``connectors`` and ``endpoints`` carry identity only (connector ids
+        present; connection-scoped endpoint ``(connection_id, endpoint_id)``) --
+        the validator resolves references between the parsed documents, not their
+        contents. ``pipeline_id`` is the resolved run identity (see
+        :meth:`create_config`) so an authored doc that omits it still validates.
+        """
+        return {
+            "pipeline": {**pipeline_doc, "pipeline_id": pipeline_id},
+            "streams": [rec.raw_document for rec in self._stream_records.values()],
+            "connections": [
+                rec.raw_config for rec in self._connection_records.values()
+            ],
+            "connectors": sorted(self._loaded_connectors),
+            "endpoints": self._connection_scoped_endpoint_identities(),
+        }
+
+    def _connection_scoped_endpoint_identities(self) -> list[dict[str, str]]:
+        """The ``(connection_id, endpoint_id)`` identity of every private
+        endpoint document present under an indexed connection's ``definition/``."""
+        identities: list[dict[str, str]] = []
+        for record in self._connection_records.values():
+            endpoints_dir = (
+                self._paths["connections"]
+                / record.connection_id
+                / "definition"
+                / "endpoints"
+            )
+            if not endpoints_dir.is_dir():
+                continue
+            for endpoint_file in sorted(endpoints_dir.glob("*.json")):
+                document = load_json_file(endpoint_file)
+                identities.append(
+                    {
+                        "scope": "connection",
+                        "connection_id": record.connection_id,
+                        "endpoint_id": document.get("endpoint_id") or endpoint_file.stem,
+                    }
+                )
+        return identities
 
     # ------------------------------------------------------------------
     # Stream config construction

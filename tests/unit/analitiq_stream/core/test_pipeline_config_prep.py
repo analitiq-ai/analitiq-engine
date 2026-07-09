@@ -20,10 +20,10 @@ from typing import Any
 
 import pytest
 
-from k2m.models.endpoint_identity import derive_db_endpoint_id
+from analitiq.contracts.endpoint_identity import derive_db_endpoint_id
 
 from cdk.types import EndpointScope
-from src.config.schema_validator import ContractValidationError
+from src.config.schema_validator import BundleValidationError, ContractValidationError
 from src.engine.pipeline_config_prep import PipelineConfigPrep, _split_stream_ref
 
 # ---------------------------------------------------------------------------
@@ -178,11 +178,12 @@ def _database_endpoint_doc(database_object: dict[str, Any]) -> dict[str, Any]:
 
 def _stream_doc(stream_id: str, *, dst_scope: str = "connector") -> dict[str, Any]:
     if dst_scope == "connection":
-        # A connection-scoped ref carries database_object; endpoint_id is
-        # server-derived and must not be client-authored.
+        # A connection-scoped ref carries database_object plus the server-derived
+        # endpoint_id (the run bundle carries both, keyed by the derived handle).
         dst_endpoint_ref = {
             "scope": "connection",
             "connection_id": CONNECTION_DST_ID,
+            "endpoint_id": ENDPOINT_DST_CONNECTION,
             "database_object": DST_DATABASE_OBJECT,
         }
     else:
@@ -597,15 +598,37 @@ class TestCreateConfigErrorPaths:
         root = tmp_path / "project"
         root.mkdir()
         # A valid-but-different stream_id (the contract requires a UUID) so the
-        # mismatch surfaces from the loader's cross-reference check, not from
-        # contract validation of the id shape.
+        # mismatch surfaces from bundle referential validation (the pipeline ref
+        # resolves to no bundled stream document), not from id-shape validation.
         _build_tree(root, stream_id_in_file="00000000-0000-4000-8000-0000000000cc")
         monkeypatch.chdir(root)
         monkeypatch.setenv("PIPELINE_ID", PIPELINE_ID)
         prep = PipelineConfigPrep()
         with pytest.raises(
-            ValueError, match=r"pipeline\.streams references .* but no stream file"
+            BundleValidationError,
+            match=r"no bundled stream document declares id",
         ):
+            prep.create_config()
+
+    def test_stream_declaring_foreign_pipeline_rejected(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, schema_mirror: Path
+    ) -> None:
+        """A bundled stream that names a different parent pipeline is a
+        cross-document defect the published bundle validator catches (the engine
+        did not check this before delegating referential validation)."""
+        root = tmp_path / "project"
+        root.mkdir()
+        _build_tree(root)
+        stream_doc = _stream_doc(STREAM_ID)
+        stream_doc["pipeline_id"] = "00000000-0000-4000-8000-0000000000ff"
+        _write_json(
+            root / "pipelines" / PIPELINE_ID / "streams" / f"{STREAM_ID}.json",
+            stream_doc,
+        )
+        monkeypatch.chdir(root)
+        monkeypatch.setenv("PIPELINE_ID", PIPELINE_ID)
+        prep = PipelineConfigPrep()
+        with pytest.raises(BundleValidationError, match="different pipeline"):
             prep.create_config()
 
     def test_missing_stream_file_rejected(

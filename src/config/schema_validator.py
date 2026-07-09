@@ -26,11 +26,12 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from k2m.models.connection import ConnectionInput
-from k2m.models.connector import ConnectorConfig
-from k2m.models.endpoints import ApiEndpointDoc, DatabaseEndpointDoc
-from k2m.models.pipelines.config import PipelineInput
-from k2m.models.stream import StreamInput
+from analitiq.contracts.connection import ConnectionInput
+from analitiq.contracts.connector import ConnectorConfig
+from analitiq.contracts.endpoints import ApiEndpointDoc, DatabaseEndpointDoc
+from analitiq.contracts.pipelines.config import PipelineInput
+from analitiq.contracts.stream import StreamInput
+from analitiq.validator import validate_pipeline_bundle
 from pydantic import TypeAdapter, ValidationError
 
 from src.config.utils import load_json_file
@@ -117,3 +118,38 @@ def validate_file(kind: str, path: Path) -> dict[str, Any]:
     document = load_json_file(path)
     validate(kind, document, source=str(path))
     return document
+
+
+class BundleValidationError(ValueError):
+    """Raised when a pipeline run bundle fails referential validation.
+
+    ``findings`` holds the error-severity records the published validator
+    returned (``analitiq.validator.validate_pipeline_bundle``).
+    """
+
+    def __init__(self, source: str, findings: Sequence[dict[str, Any]]):
+        self.source = source
+        self.findings = list(findings)
+        message_lines = [f"pipeline bundle referential validation failed for {source}:"]
+        for f in self.findings[:10]:
+            message_lines.append(f"  - {f.get('path', '')}: {f.get('message', '')}")
+        if len(self.findings) > 10:
+            message_lines.append(f"  ... and {len(self.findings) - 10} more")
+        super().__init__("\n".join(message_lines))
+
+
+def validate_bundle(bundle: dict[str, Any], *, source: str = "<pipeline>") -> None:
+    """Validate cross-document referential integrity of an assembled run bundle.
+
+    Delegates to the published validator's ``validate_pipeline_bundle`` (the
+    single source of the referential rules -- stream/connection/connector/
+    endpoint references resolve, source/destination role wiring, active-gate).
+    Per-document shape is validated separately by :func:`validate`. Raises
+    :class:`BundleValidationError` on any error-severity finding.
+    """
+    findings = [
+        f for f in validate_pipeline_bundle(bundle) if f.get("severity") == "error"
+    ]
+    if findings:
+        raise BundleValidationError(source, findings)
+    logger.debug("Pipeline bundle referentially validated %s", source)

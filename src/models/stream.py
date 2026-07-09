@@ -6,7 +6,7 @@ endpoint definition. Identity is id-based: connections, streams, and
 pipelines are all keyed by their ``*_id`` field (= directory name on disk).
 
 :class:`EndpointRef` delegates all shape/validation to the published
-contract (``k2m.models.stream.validate_endpoint_ref``) -- it is a thin,
+contract (``analitiq.contracts.stream.validate_endpoint_ref``) -- it is a thin,
 frozen, hashable runtime handle over the validated ref, not a second
 definition of its shape.
 """
@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
-from k2m.models.stream import (
+from analitiq.contracts.stream import (
     ConnectionEndpointRef,
     validate_endpoint_ref,
 )

@@ -14,7 +14,7 @@ from src.config.exceptions import (
     ConnectorNotFoundError,
     EndpointNotFoundError,
 )
-from k2m.models.endpoint_identity import derive_db_endpoint_id
+from analitiq.contracts.endpoint_identity import derive_db_endpoint_id
 
 from src.models.stream import EndpointRef
 
