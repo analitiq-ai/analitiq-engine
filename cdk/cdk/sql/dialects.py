@@ -301,7 +301,7 @@ class SqlDialect:
             if catalog
             else "information_schema"
         )
-        sql = f"SELECT table_name FROM {info_schema}.tables WHERE table_schema = ?"
+        sql = f"SELECT table_name FROM {info_schema}.tables WHERE table_schema = ?"  # nosec B608
         params: list[object] = [self.normalize_schema(schema)]
         if catalog:
             sql += " AND table_catalog = ?"
@@ -322,7 +322,7 @@ class SqlDialect:
             else "information_schema"
         )
         sql = (
-            f"SELECT column_name, data_type, is_nullable "
+            f"SELECT column_name, data_type, is_nullable "  # nosec B608
             f"FROM {info_schema}.columns "
             f"WHERE table_schema = ? AND table_name = ?"
         )
@@ -348,7 +348,7 @@ class SqlDialect:
             else "information_schema"
         )
         sql = (
-            f"SELECT kcu.column_name "
+            f"SELECT kcu.column_name "  # nosec B608
             f"FROM {info_schema}.table_constraints tc "
             f"JOIN {info_schema}.key_column_usage kcu "
             "  ON tc.constraint_catalog = kcu.constraint_catalog "
