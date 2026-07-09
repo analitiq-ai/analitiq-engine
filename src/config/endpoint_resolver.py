@@ -84,7 +84,7 @@ def resolve_endpoint_path(
             / "endpoints"
             / f"{parsed.endpoint_id}.json"
         )
-    else:  # pragma: no cover — defended in EndpointRef.__post_init__
+    else:  # pragma: no cover — scope is validated by the contract in from_dict
         raise ValueError(f"Unknown endpoint scope: {parsed.scope!r}")
 
     if not file_path.is_file():

@@ -11,10 +11,13 @@ from pathlib import Path
 
 import pytest
 
+from src.config import schema_validator
 from src.config.schema_validator import (
     ARTIFACT_KINDS,
+    BundleValidationError,
     ContractValidationError,
     validate,
+    validate_bundle,
     validate_file,
 )
 
@@ -112,3 +115,61 @@ class TestArtifactKinds:
             "api-endpoint",
             "database-endpoint",
         }
+
+
+def _finding(severity: str, path: str = "/x", message: str = "boom") -> dict:
+    return {
+        "validator": "bundle-stream-ref",
+        "severity": severity,
+        "path": path,
+        "message": message,
+    }
+
+
+class TestValidateBundle:
+    """``validate_bundle`` wraps the published ``validate_pipeline_bundle``.
+
+    The published referential rules are the validator's own concern; these
+    pin the engine wrapper: which severities block, and that non-blocking
+    findings are surfaced (logged) rather than silently dropped.
+    """
+
+    def _patch(self, monkeypatch, findings: list[dict]) -> None:
+        monkeypatch.setattr(
+            schema_validator, "validate_pipeline_bundle", lambda bundle: findings
+        )
+
+    def test_sound_bundle_passes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._patch(monkeypatch, [])
+        validate_bundle({"pipeline": {}}, source="/p")  # no raise
+
+    def test_error_finding_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._patch(monkeypatch, [_finding("error", "/streams/0", "unresolved")])
+        with pytest.raises(BundleValidationError, match="unresolved") as ei:
+            validate_bundle({}, source="/p")
+        assert ei.value.source == "/p"
+        assert "/streams/0" in str(ei.value)
+        assert len(ei.value.findings) == 1
+
+    def test_warning_finding_does_not_block(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Advisory warnings are logged, not raised.
+        self._patch(monkeypatch, [_finding("warning")])
+        validate_bundle({}, source="/p")  # no raise
+
+    def test_unknown_severity_blocks(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A future higher-than-error severity must not slip through the gate.
+        self._patch(monkeypatch, [_finding("fatal")])
+        with pytest.raises(BundleValidationError):
+            validate_bundle({}, source="/p")
+
+    def test_message_truncated_at_ten(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._patch(
+            monkeypatch, [_finding("error", f"/s/{i}", f"e{i}") for i in range(15)]
+        )
+        with pytest.raises(BundleValidationError) as ei:
+            validate_bundle({}, source="/p")
+        message = str(ei.value)
+        assert message.count("\n  - ") == 10
+        assert "and 5 more" in message

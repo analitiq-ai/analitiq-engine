@@ -360,12 +360,16 @@ class PipelineConfigPrep:
             stream_id = document.get("stream_id")
             if not stream_id:
                 raise ValueError(f"Stream document {stream_file} missing 'stream_id'")
-            if stream_id in self._stream_records:
+            # Key by the version-stripped base id so the index shares one key
+            # space with pipeline.streams lookup (which strips ``_v{n}``) and the
+            # bundle validator (which matches on base form).
+            base_id = _split_stream_ref(stream_id)[0]
+            if base_id in self._stream_records:
                 raise ValueError(
-                    f"Duplicate stream_id {stream_id!r} in {streams_dir} "
-                    f"({self._stream_records[stream_id].file_path}, {stream_file})"
+                    f"Duplicate stream_id {base_id!r} in {streams_dir} "
+                    f"({self._stream_records[base_id].file_path}, {stream_file})"
                 )
-            self._stream_records[stream_id] = _StreamRecord(
+            self._stream_records[base_id] = _StreamRecord(
                 stream_id=stream_id,
                 file_path=stream_file,
                 raw_document=document,
@@ -634,9 +638,21 @@ class PipelineConfigPrep:
         the validator resolves references between the parsed documents, not their
         contents. ``pipeline_id`` is the resolved run identity (see
         :meth:`create_config`) so an authored doc that omits it still validates.
+
+        ``status`` is forced to ``active``: the engine's execution gate is the
+        manifest entry status (checked in :meth:`_load_pipeline_document`), so
+        by construction this pipeline is being run because the manifest marks it
+        active. The pipeline document's own ``status`` is optional/informational,
+        so feeding the manifest-derived status keeps the validator's
+        runnable-pipeline check aligned with the engine's actual gate rather than
+        rejecting a document that omits or under-states its status.
         """
         return {
-            "pipeline": {**pipeline_doc, "pipeline_id": pipeline_id},
+            "pipeline": {
+                **pipeline_doc,
+                "pipeline_id": pipeline_id,
+                "status": "active",
+            },
             "streams": [rec.raw_document for rec in self._stream_records.values()],
             "connections": [
                 rec.raw_config for rec in self._connection_records.values()
@@ -662,13 +678,15 @@ class PipelineConfigPrep:
             if not endpoints_dir.is_dir():
                 continue
             for endpoint_file in sorted(endpoints_dir.glob("*.json")):
-                document = load_json_file(endpoint_file)
+                # Identity is the filename stem: resolution locates the doc as
+                # ``endpoints/{endpoint_id}.json`` (resolve_endpoint_path), so the
+                # stem IS the on-disk endpoint_id. Reading the file is
+                # unnecessary and would let a malformed sibling abort the run.
                 identities.append(
                     {
                         "scope": "connection",
                         "connection_id": record.connection_id,
-                        "endpoint_id": document.get("endpoint_id")
-                        or endpoint_file.stem,
+                        "endpoint_id": endpoint_file.stem,
                     }
                 )
         return identities

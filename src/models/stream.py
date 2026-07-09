@@ -40,13 +40,19 @@ class DatabaseObject:
     Frozen so an :class:`EndpointRef` carrying one stays hashable.
     """
 
-    schema: str
     name: str
+    schema: str | None = None
     catalog: str | None = None
     object_type: str | None = None
 
     def to_dict(self) -> dict[str, str]:
-        payload = {"schema": self.schema, "name": self.name}
+        # Emit only the fields the contract carries: ``name`` is required;
+        # ``schema``/``catalog``/``object_type`` are optional and the contract
+        # rejects explicit nulls, so omit them when absent (keeps to_dict a
+        # valid from_dict input for a schemaless/catalog-less locator).
+        payload = {"name": self.name}
+        if self.schema is not None:
+            payload["schema"] = self.schema
         if self.catalog is not None:
             payload["catalog"] = self.catalog
         if self.object_type is not None:

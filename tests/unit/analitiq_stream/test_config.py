@@ -213,6 +213,25 @@ class TestEndpointRefModel:
         assert EndpointRef.from_dict(d).to_dict() == d
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "database_object",
+        [
+            {"schema": "public", "name": "users"},
+            {"name": "users"},  # schemaless locator: contract allows omitting schema
+        ],
+    )
+    def test_connection_scope_to_dict_roundtrips(self, database_object):
+        d = {
+            "scope": "connection",
+            "connection_id": "prod-pg",
+            "database_object": database_object,
+        }
+        ref = EndpointRef.from_dict(d)
+        # to_dict carries the derived endpoint_id and omits absent locator
+        # fields, so it re-ingests cleanly (no explicit-null database_object key).
+        assert EndpointRef.from_dict(ref.to_dict()) == ref
+
+    @pytest.mark.unit
     def test_str_canonical_form(self):
         ref = EndpointRef(scope="connection", connection_id="conn", endpoint_id="name")
         assert str(ref) == "connection:conn/name"

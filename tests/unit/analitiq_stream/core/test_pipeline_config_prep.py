@@ -630,6 +630,66 @@ class TestCreateConfigErrorPaths:
         with pytest.raises(BundleValidationError, match="different pipeline"):
             prep.create_config()
 
+    def test_source_wired_to_destination_connection_rejected(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, schema_mirror: Path
+    ) -> None:
+        """A stream whose source is wired to the destination connection (role
+        mis-wiring) is caught by the bundle validator — the engine has no other
+        check for source/destination role correctness."""
+        root = tmp_path / "project"
+        root.mkdir()
+        _build_tree(root)
+        stream_doc = _stream_doc(STREAM_ID)
+        stream_doc["source"]["endpoint_ref"]["connection_id"] = CONNECTION_DST_ID
+        _write_json(
+            root / "pipelines" / PIPELINE_ID / "streams" / f"{STREAM_ID}.json",
+            stream_doc,
+        )
+        monkeypatch.chdir(root)
+        monkeypatch.setenv("PIPELINE_ID", PIPELINE_ID)
+        with pytest.raises(BundleValidationError, match="connections.source"):
+            PipelineConfigPrep().create_config()
+
+    def test_active_pipeline_with_no_runnable_stream_rejected(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, schema_mirror: Path
+    ) -> None:
+        """An active pipeline whose only stream is not itself active runs
+        nothing; the bundle validator's active-gate rejects it."""
+        root = tmp_path / "project"
+        root.mkdir()
+        _build_tree(root)
+        stream_doc = _stream_doc(STREAM_ID)
+        stream_doc["status"] = "draft"
+        _write_json(
+            root / "pipelines" / PIPELINE_ID / "streams" / f"{STREAM_ID}.json",
+            stream_doc,
+        )
+        monkeypatch.chdir(root)
+        monkeypatch.setenv("PIPELINE_ID", PIPELINE_ID)
+        with pytest.raises(BundleValidationError, match="runnable stream"):
+            PipelineConfigPrep().create_config()
+
+    def test_connection_scoped_endpoint_missing_rejected(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, schema_mirror: Path
+    ) -> None:
+        """A connection-scoped endpoint_ref with no matching endpoint document
+        on disk is caught by the bundle validator, before file resolution."""
+        root = tmp_path / "project"
+        root.mkdir()
+        _build_tree(root, dst_endpoint_scope="connection")
+        (
+            root
+            / "connections"
+            / CONNECTION_DST_ID
+            / "definition"
+            / "endpoints"
+            / f"{ENDPOINT_DST_CONNECTION}.json"
+        ).unlink()
+        monkeypatch.chdir(root)
+        monkeypatch.setenv("PIPELINE_ID", PIPELINE_ID)
+        with pytest.raises(BundleValidationError, match="no matching bundled endpoint"):
+            PipelineConfigPrep().create_config()
+
     def test_missing_stream_file_rejected(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, schema_mirror: Path
     ) -> None:

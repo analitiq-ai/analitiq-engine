@@ -144,12 +144,23 @@ def validate_bundle(bundle: dict[str, Any], *, source: str = "<pipeline>") -> No
     Delegates to the published validator's ``validate_pipeline_bundle`` (the
     single source of the referential rules -- stream/connection/connector/
     endpoint references resolve, source/destination role wiring, active-gate).
-    Per-document shape is validated separately by :func:`validate`. Raises
-    :class:`BundleValidationError` on any error-severity finding.
+    Per-document shape is validated separately by :func:`validate`. Any finding
+    that is not an advisory ``warning`` blocks (so a future higher-than-error
+    severity cannot slip through the gate); advisory warnings are logged, never
+    silently dropped. Raises :class:`BundleValidationError` on a blocking
+    finding.
     """
-    findings = [
-        f for f in validate_pipeline_bundle(bundle) if f.get("severity") == "error"
-    ]
-    if findings:
-        raise BundleValidationError(source, findings)
+    findings = validate_pipeline_bundle(bundle)
+    blocking = [f for f in findings if f.get("severity") != "warning"]
+    for f in findings:
+        if f not in blocking:
+            logger.warning(
+                "Bundle advisory for %s [%s] %s: %s",
+                source,
+                f.get("severity"),
+                f.get("path", ""),
+                f.get("message", ""),
+            )
+    if blocking:
+        raise BundleValidationError(source, blocking)
     logger.debug("Pipeline bundle referentially validated %s", source)
