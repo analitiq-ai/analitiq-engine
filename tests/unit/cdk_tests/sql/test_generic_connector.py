@@ -307,12 +307,14 @@ class TestReadAdbcBranch:
         saved = [c.args[2]["cursor"] for c in checkpoint.save_cursor.call_args_list]
         assert saved[-1] == "2024-01-09"
 
+    @staticmethod
     @pytest.mark.asyncio
-    async def test_adbc_read_normalizes_catalog(self):
+    async def test_adbc_read_normalizes_catalog():
         """catalog_name is case-folded by the dialect before being quoted in SQL."""
 
         class _UpperNormalizingDialect(SqlDialect):
-            def normalize_schema(self, s: str) -> str:
+            @staticmethod
+            def normalize_schema(s: str) -> str:
                 return s.upper()
 
         class _NormalizingConnector(GenericSQLConnector):

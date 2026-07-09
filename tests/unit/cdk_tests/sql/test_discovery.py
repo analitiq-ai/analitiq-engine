@@ -336,8 +336,9 @@ class TestStructuralFromDiscovery:
 class TestCatalogFilteredDiscovery:
     """When catalog= is provided, discovery queries add a table_catalog filter."""
 
+    @staticmethod
     @pytest.mark.asyncio
-    async def test_list_tables_catalog_appended_to_params(self):
+    async def test_list_tables_catalog_appended_to_params():
         runtime = FakeAdbcRuntime(
             "ansi",
             responder=_route({"tables": [{"table_name": "orders"}]}),
@@ -346,8 +347,9 @@ class TestCatalogFilteredDiscovery:
         _sql, params = runtime.connections[-1].executed[-1]
         assert params == ["public", "my_db"]
 
+    @staticmethod
     @pytest.mark.asyncio
-    async def test_list_tables_no_catalog_single_param(self):
+    async def test_list_tables_no_catalog_single_param():
         runtime = FakeAdbcRuntime(
             "ansi",
             responder=_route({"tables": [{"table_name": "orders"}]}),
@@ -356,8 +358,9 @@ class TestCatalogFilteredDiscovery:
         _sql, params = runtime.connections[-1].executed[-1]
         assert params == ["public"]
 
+    @staticmethod
     @pytest.mark.asyncio
-    async def test_list_columns_catalog_appended_to_pk_and_col_params(self):
+    async def test_list_columns_catalog_appended_to_pk_and_col_params():
         runtime = FakeAdbcRuntime(
             "ansi",
             mapper=_StubMapper(),
