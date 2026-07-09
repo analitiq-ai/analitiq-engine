@@ -44,6 +44,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from analitiq.contracts.pipelines.config import RuntimeConfig as ContractRuntimeConfig
+from analitiq.contracts.stream import ReplicationConfig as ContractReplicationConfig
+from pydantic import BaseModel
+
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.secrets import LocalFileSecretsResolver, SecretsResolver
 from cdk.type_map import (
@@ -74,54 +78,64 @@ from src.models.stream import EndpointRef
 logger = logging.getLogger(__name__)
 
 
-def _parse_runtime_config(raw: Mapping[str, Any]) -> RuntimeConfig:
-    """Build a typed :class:`RuntimeConfig` from the raw pipeline runtime block.
+def _author_set(model: BaseModel, keys: tuple[str, ...]) -> dict[str, Any]:
+    """Return ``{key: value}`` for keys the author explicitly set to a non-null value.
 
-    Only keys the pipeline actually sets are forwarded; every omitted (or
-    ``null``) key falls through to the dataclass default, which sources the
-    value from :mod:`src.config.settings` (env-overridable). The precedence is
-    therefore pipeline config > environment variable > built-in default.
+    The contract models fill omitted fields with their own defaults, so consult
+    ``model_fields_set`` (a reliable author-intent signal as of
+    analitiq-contract-models 1.0.0rc2, infra #938) to forward only
+    author-provided values. A present-but-null value is treated as unset. The
+    engine keeps its own defaults for the rest, so its precedence is preserved.
     """
-    batching = raw.get("batching") or {}
-    error_handling = raw.get("error_handling") or {}
-
-    # A present-but-null key is treated like an omitted one (the contract allows
-    # retry_delay_seconds: null): both fall through to the settings default.
-    batching_kwargs = {
-        key: batching[key]
-        for key in ("batch_size", "max_concurrent_batches")
-        if batching.get(key) is not None
+    return {
+        key: getattr(model, key)
+        for key in keys
+        if key in model.model_fields_set and getattr(model, key) is not None
     }
-    error_kwargs = {
-        key: error_handling[key]
-        for key in ("strategy", "max_retries", "retry_delay_seconds")
-        if error_handling.get(key) is not None
-    }
-    runtime_kwargs: dict[str, Any] = {}
-    if raw.get("buffer_size") is not None:
-        runtime_kwargs["buffer_size"] = raw["buffer_size"]
 
+
+def _parse_runtime_config(raw: Mapping[str, Any]) -> RuntimeConfig:
+    """Build the engine's :class:`RuntimeConfig` from a pipeline's runtime block.
+
+    Reads the validated contract model and forwards only the fields the author
+    explicitly set; every omitted key falls through to the engine's own default
+    (sourced from :mod:`src.config.settings`, env-overridable). The engine
+    deliberately keeps its own defaults -- e.g. error strategy ``fail`` -- rather
+    than the contract's (``dlq``), so it must forward author-set values only, not
+    the contract's defaults. Precedence: pipeline config > env var > engine default.
+    """
+    contract = ContractRuntimeConfig.model_validate(dict(raw))
     return RuntimeConfig(
-        batching=BatchingConfig(**batching_kwargs),
-        error_handling=ErrorHandlingConfig(**error_kwargs),
-        **runtime_kwargs,
+        batching=BatchingConfig(
+            **_author_set(contract.batching, ("batch_size", "max_concurrent_batches"))
+        ),
+        error_handling=ErrorHandlingConfig(
+            **_author_set(
+                contract.error_handling,
+                ("strategy", "max_retries", "retry_delay_seconds"),
+            )
+        ),
+        **_author_set(contract, ("buffer_size",)),
     )
 
 
 def _parse_replication(raw_source: Mapping[str, Any]) -> ReplicationConfig | None:
-    """Build a typed :class:`ReplicationConfig` from a stream's source block.
+    """Build the engine's :class:`ReplicationConfig` from a stream's source block.
 
-    Returns ``None`` when no replication policy is present (full-refresh
-    sources may omit it). ``method`` is contract-required, so it is read
-    directly; the optional cursor/tie-breaker fields default to absent.
+    Returns ``None`` when no replication policy is present (full-refresh sources
+    may omit it). Reads the validated contract model: ``method`` is
+    contract-required; the optional cursor/tie-breaker fields carry through as
+    ``None`` when absent (the engine has no settings default for these, so no
+    author-intent filtering is needed).
     """
     raw = raw_source.get("replication")
     if not raw:
         return None
+    contract = ContractReplicationConfig.model_validate(dict(raw))
     return ReplicationConfig(
-        method=raw["method"],
-        cursor_field=raw.get("cursor_field"),
-        tie_breaker_fields=raw.get("tie_breaker_fields"),
+        method=contract.method,
+        cursor_field=contract.cursor_field,
+        tie_breaker_fields=contract.tie_breaker_fields,
     )
 
 
