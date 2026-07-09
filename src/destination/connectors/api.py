@@ -861,11 +861,22 @@ class ApiDestinationHandler(BaseDestinationHandler):
         Returns ``(written, failed_record_ids, first_failure)`` — the first
         per-record failure reason rides the engine-facing failure summary.
         Body construction is data-dependent (a record field can feed a
-        derived function) and transport errors are per-record data issues;
-        both are caught per record so a bad record fails just itself.
-        Authoring and programming errors (TransportSpecError, RuntimeError,
-        KeyError) propagate to write_batch and become FATAL for the whole
-        batch.
+        derived function) and is caught per record so a bad record fails
+        just itself. Authoring and programming errors (TransportSpecError,
+        RuntimeError, KeyError) propagate to write_batch and become FATAL
+        for the whole batch.
+
+        Transport error handling applies ``_classify_http_error`` per record:
+        - RETRYABLE (429, 408, connection errors, timeouts): re-raises
+          immediately. ``write_batch``'s outer catch has no access to the
+          local ``written`` counter, so it always reports ``records_written=0``
+          and no committed cursor; the engine retries the full batch. Records
+          that already landed before the re-raise will be re-sent (possible
+          duplication). Streams with a declared idempotency key are fully
+          protected; insert-mode streams without one (classified AT_LEAST_ONCE
+          by ``_retry_verdict``) should account for this in their retry window.
+        - FATAL (4xx non-429/408): deterministic rejection — the record is
+          added to ``failed_ids`` and the loop continues to the next record.
         """
         written = 0
         failed_ids: list[str] = []
@@ -909,6 +920,17 @@ class ApiDestinationHandler(BaseDestinationHandler):
                 await self._send_request(state, body, extra_headers=idempotency_header)
                 written += 1
             except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                if _classify_http_error(e) == AckStatus.ACK_STATUS_RETRYABLE_FAILURE:
+                    logger.warning(
+                        "RETRYABLE error on record %s (index %d, %d already written)"
+                        " — aborting batch: %s: %s",
+                        record_ids[i],
+                        i,
+                        written,
+                        type(e).__name__,
+                        e,
+                    )
+                    raise
                 logger.warning(
                     "Failed to write record %s: %s: %s",
                     record_ids[i],
