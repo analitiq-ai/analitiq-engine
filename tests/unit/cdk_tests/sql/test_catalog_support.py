@@ -110,19 +110,19 @@ class TestAdbcIngestSchemaKwargs:
         d = SqlDialect()
         kwargs = d.adbc_ingest_schema_kwargs("public")
         assert kwargs == {"db_schema_name": "public"}
-        assert "db_catalog_name" not in kwargs
+        assert "catalog_name" not in kwargs
 
     def test_schema_and_catalog(self):
         d = SqlDialect()
         kwargs = d.adbc_ingest_schema_kwargs("public", catalog_name="my_db")
         assert kwargs["db_schema_name"] == "public"
-        assert kwargs["db_catalog_name"] == "my_db"
+        assert kwargs["catalog_name"] == "my_db"
 
     def test_empty_schema_no_db_schema_name(self):
         d = SqlDialect()
         kwargs = d.adbc_ingest_schema_kwargs("", catalog_name="my_db")
         assert "db_schema_name" not in kwargs
-        assert kwargs["db_catalog_name"] == "my_db"
+        assert kwargs["catalog_name"] == "my_db"
 
 
 # ---------------------------------------------------------------------------
@@ -288,3 +288,80 @@ class TestQueryBuilderCatalog:
         )
         assert "my_project" not in sql
         assert "public" in sql
+
+
+# ---------------------------------------------------------------------------
+# _ensure_tables_via_adbc emits catalog-qualified CREATE SCHEMA
+# ---------------------------------------------------------------------------
+
+
+class TestEnsureTablesViaAdbcCatalog:
+    @pytest.mark.asyncio
+    async def test_schema_ddl_includes_catalog_when_set(self):
+        from cdk.sql.generic import GenericSQLConnector, _StreamState
+
+        executed: list[str] = []
+
+        class _FakeCursor:
+            def execute(self, sql, *args):
+                executed.append(sql)
+
+            def close(self):
+                pass
+
+        class _FakeConn:
+            def cursor(self):
+                return _FakeCursor()
+
+            def commit(self):
+                pass
+
+        handler = GenericSQLConnector()
+        handler._adbc_only = True
+        handler._adbc_conn = _FakeConn()
+
+        state = _StreamState(
+            schema_name="analytics",
+            table_name="orders",
+            catalog_name="my_project",
+        )
+        ddl = 'CREATE TABLE IF NOT EXISTS "my_project"."analytics"."orders" (id INTEGER)'
+        await handler._ensure_tables_via_adbc(state, [ddl])
+
+        schema_stmts = [s for s in executed if "CREATE SCHEMA" in s]
+        assert schema_stmts, "expected a CREATE SCHEMA statement"
+        assert "my_project" in schema_stmts[0]
+        assert "analytics" in schema_stmts[0]
+
+    @pytest.mark.asyncio
+    async def test_schema_ddl_without_catalog_unchanged(self):
+        from cdk.sql.generic import GenericSQLConnector, _StreamState
+
+        executed: list[str] = []
+
+        class _FakeCursor:
+            def execute(self, sql, *args):
+                executed.append(sql)
+
+            def close(self):
+                pass
+
+        class _FakeConn:
+            def cursor(self):
+                return _FakeCursor()
+
+            def commit(self):
+                pass
+
+        handler = GenericSQLConnector()
+        handler._adbc_only = True
+        handler._adbc_conn = _FakeConn()
+
+        state = _StreamState(schema_name="analytics", table_name="orders")
+        ddl = 'CREATE TABLE IF NOT EXISTS "analytics"."orders" (id INTEGER)'
+        await handler._ensure_tables_via_adbc(state, [ddl])
+
+        schema_stmts = [s for s in executed if "CREATE SCHEMA" in s]
+        assert schema_stmts, "expected a CREATE SCHEMA statement"
+        assert "my_project" not in schema_stmts[0]
+        assert schema_stmts[0] == 'CREATE SCHEMA IF NOT EXISTS "analytics"'

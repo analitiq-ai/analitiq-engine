@@ -64,7 +64,10 @@ async def list_tables(
     When *catalog* is provided, discovery is restricted to that catalog
     (database / project).
     """
-    sql, params = dialect.tables_query(schema, catalog=catalog)
+    if catalog:
+        sql, params = dialect.tables_query(schema, catalog=catalog)
+    else:
+        sql, params = dialect.tables_query(schema)
     rows = await fetch_rows(runtime, sql, params)
     return [_col(row, "table_name") for row in rows]
 
@@ -88,12 +91,13 @@ async def list_columns(
     """
     type_mapper = runtime.connector_type_mapper
 
-    pk_sql, pk_params = dialect.primary_keys_query(schema, table, catalog=catalog)
+    catalog_kwarg = {"catalog": catalog} if catalog else {}
+    pk_sql, pk_params = dialect.primary_keys_query(schema, table, **catalog_kwarg)
     pk_rows = await fetch_rows(runtime, pk_sql, pk_params)
     primary_keys = [_col(row, "column_name") for row in pk_rows]
     pk_set = set(primary_keys)
 
-    col_sql, col_params = dialect.columns_query(schema, table, catalog=catalog)
+    col_sql, col_params = dialect.columns_query(schema, table, **catalog_kwarg)
     col_rows = await fetch_rows(runtime, col_sql, col_params)
 
     columns: list[ColumnDef] = []

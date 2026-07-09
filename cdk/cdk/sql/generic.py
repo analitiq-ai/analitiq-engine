@@ -36,6 +36,7 @@ from typing import Any, Literal
 
 import pyarrow as pa
 from sqlalchemy import MetaData, Table, and_, bindparam, literal, select, text
+from sqlalchemy.sql.elements import quoted_name
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -1046,7 +1047,9 @@ class GenericSQLConnector(BaseDestinationHandler):
         # schema argument — BigQuery and Snowflake SA dialects understand
         # the dotted form as a cross-catalog reference.
         if state.catalog_name and state.schema_name:
-            reflect_schema: str | None = f"{state.catalog_name}.{state.schema_name}"
+            reflect_schema: str | None = quoted_name(
+                f"{state.catalog_name}.{state.schema_name}", quote=False
+            )
         elif state.catalog_name:
             reflect_schema = state.catalog_name
         else:
@@ -1539,7 +1542,15 @@ class GenericSQLConnector(BaseDestinationHandler):
             quoted_schema = self.dialect.quote_ident(
                 self.dialect.normalize_schema(state.schema_name)
             )
-            statements.append(f"CREATE SCHEMA IF NOT EXISTS {quoted_schema}")
+            if state.catalog_name:
+                quoted_catalog = self.dialect.quote_ident(
+                    self.dialect.normalize_schema(state.catalog_name)
+                )
+                statements.append(
+                    f"CREATE SCHEMA IF NOT EXISTS {quoted_catalog}.{quoted_schema}"
+                )
+            else:
+                statements.append(f"CREATE SCHEMA IF NOT EXISTS {quoted_schema}")
         statements.extend(rendered_ddl)
         async with self._ddl_lock:
             await asyncio.to_thread(self._execute_adbc_ddl_sync, statements)
@@ -1813,7 +1824,8 @@ class GenericSQLConnector(BaseDestinationHandler):
                         cast_batch,
                         mode="append",
                         **self.dialect.adbc_ingest_schema_kwargs(
-                            schema_name, catalog_name=catalog_name
+                            schema_name,
+                            **({"catalog_name": catalog_name} if catalog_name else {}),
                         ),
                     )
                     conn.commit()
@@ -1983,7 +1995,8 @@ class GenericSQLConnector(BaseDestinationHandler):
                     cast_batch,
                     mode="append",
                     **self.dialect.adbc_ingest_schema_kwargs(
-                        schema_name, catalog_name=catalog_name
+                        schema_name,
+                        **({"catalog_name": catalog_name} if catalog_name else {}),
                     ),
                 )
                 conn.commit()

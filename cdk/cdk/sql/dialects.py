@@ -115,7 +115,7 @@ class SqlDialect:
         else:
             qualified = self.quote_ident(table)
         if catalog:
-            return f"{self.quote_ident(catalog)}.{qualified}"
+            return f"{self.quote_ident(self.normalize_schema(catalog))}.{qualified}"
         return qualified
 
     def pk_clause(self, columns: list[str]) -> str:
@@ -252,11 +252,11 @@ class SqlDialect:
 
         ADBC exposes per-statement ingest targeting through the
         ``adbc.ingest.target_db_schema`` option (the ``db_schema_name``
-        kwarg) and ``adbc.ingest.target_catalog`` (the ``db_catalog_name``
+        kwarg) and ``adbc.ingest.target_catalog`` (the ``catalog_name``
         kwarg).  The postgres driver and most others implement schema
         targeting, so the base targets the normalized schema explicitly —
         read and write then resolve the same physical schema.  When
-        *catalog_name* is provided, the base also passes ``db_catalog_name``
+        *catalog_name* is provided, the base also passes ``catalog_name``
         for drivers that support cross-catalog ingest.
 
         Drivers that do not implement per-statement ingest targeting
@@ -269,7 +269,7 @@ class SqlDialect:
         if schema_name:
             kwargs["db_schema_name"] = self.normalize_schema(schema_name)
         if catalog_name:
-            kwargs["db_catalog_name"] = catalog_name
+            kwargs["catalog_name"] = catalog_name
         return kwargs
 
     # ---- discovery queries (qmark placeholders + positional params) --------
@@ -331,6 +331,7 @@ class SqlDialect:
             "  ON tc.constraint_name = kcu.constraint_name "
             " AND tc.table_schema = kcu.table_schema "
             " AND tc.table_name = kcu.table_name "
+            " AND tc.table_catalog = kcu.table_catalog "
             "WHERE tc.constraint_type = 'PRIMARY KEY' "
             "  AND tc.table_schema = ? AND tc.table_name = ?"
         )

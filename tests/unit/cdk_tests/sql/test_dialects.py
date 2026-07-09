@@ -102,6 +102,11 @@ class TestQuoting:
             "public", "orders", catalog="MY_DB"
         ) == '"MY_DB"."PUBLIC"."orders"'
 
+    def test_catalog_is_normalized_like_schema(self):
+        assert _UpperNormalizingDialect().quote_qualified(
+            "public", "orders", catalog="my_db"
+        ) == '"MY_DB"."PUBLIC"."orders"'
+
 
 class TestNormalizeSchema:
     def test_base_is_identity(self):
@@ -211,8 +216,12 @@ class TestDiscoveryQueries:
 
     def test_primary_keys_query_without_catalog_has_no_catalog_filter(self):
         sql, params = SqlDialect().primary_keys_query("public", "orders")
-        assert "table_catalog" not in sql
+        assert "table_catalog = ?" not in sql
         assert params == ["public", "orders"]
+
+    def test_primary_keys_query_joins_kcu_on_catalog(self):
+        sql, _ = SqlDialect().primary_keys_query("public", "orders")
+        assert "tc.table_catalog = kcu.table_catalog" in sql
 
 
 # --- schema semantics --------------------------------------------------------
