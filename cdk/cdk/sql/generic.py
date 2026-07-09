@@ -771,8 +771,9 @@ class GenericSQLConnector(BaseDestinationHandler):
             # deterministic schema error the gRPC layer translates into the
             # SchemaAck (server.py), so the operator gets the cancelled
             # CREATE TABLE and reason instead of a bare ACK timeout.
+            _cp = f"{state.catalog_name}." if state.catalog_name else ""
             raise SchemaConfigurationError(
-                f"CREATE TABLE for {state.schema_name}.{state.table_name} did "
+                f"CREATE TABLE for {_cp}{state.schema_name}.{state.table_name} did "
                 f"not complete within the {self._statement_timeout_seconds:g}s "
                 f"destination statement timeout (likely blocked on a lock or a "
                 f"slow catalog); the statement was cancelled"
@@ -781,9 +782,11 @@ class GenericSQLConnector(BaseDestinationHandler):
         state.schema_contract = SchemaContract(state.endpoint_document)
 
         self._streams[stream_id] = state
+        _cp = f"{state.catalog_name}." if state.catalog_name else ""
         logger.info(
-            "Schema configured for stream %r: %s.%s, mode=%s, pk=%s",
+            "Schema configured for stream %r: %s%s.%s, mode=%s, pk=%s",
             stream_id,
+            _cp,
             state.schema_name,
             state.table_name,
             state.write_mode,
@@ -1015,8 +1018,10 @@ class GenericSQLConnector(BaseDestinationHandler):
                 f"engine manages {self.RECORD_HASH_COLUMN} as its primary key."
             )
 
+        _cp = f"{state.catalog_name}." if state.catalog_name else ""
         logger.info(
-            "Destination table ready for %s.%s",
+            "Destination table ready for %s%s.%s",
+            _cp,
             state.schema_name,
             state.table_name,
         )
@@ -1628,8 +1633,7 @@ class GenericSQLConnector(BaseDestinationHandler):
                 self._poison_adbc_connection()
                 if _is_fatal_adbc_error(exc):
                     raise SchemaConfigurationError(
-                        f"keyless insert target "
-                        f"{state.schema_name}.{state.table_name} "
+                        f"keyless insert target {target_qualified} "
                         f"has no {self.RECORD_HASH_COLUMN!r} column; it predates "
                         f"the content-hash dedup key (issue #285). Recreate the "
                         f"target so the engine manages {self.RECORD_HASH_COLUMN} "
@@ -1961,10 +1965,12 @@ class GenericSQLConnector(BaseDestinationHandler):
         )
         update_cols = [c for c in all_columns if c not in conflict_keys]
         if not update_cols and not insert_only:
+            _cp = f"{catalog_name}." if catalog_name else ""
             logger.warning(
-                "ADBC upsert into %s.%s has no non-key columns to update "
+                "ADBC upsert into %s%s.%s has no non-key columns to update "
                 "(all_columns == conflict_keys); MERGE will only INSERT "
                 "new rows. Consider write_mode='insert' for clarity.",
+                _cp,
                 schema_name,
                 table_name,
             )
