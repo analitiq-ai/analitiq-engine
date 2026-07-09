@@ -11,7 +11,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from cdk.contract import ColumnDef
 from cdk.query_builder import QueryBuilder, QueryConfig
+from cdk.sql.ddl import build_create_table_sql
 from cdk.sql.dialects import SqlDialect
 from cdk.sql.discovery import list_columns, list_tables
 from cdk.type_map import TypeMapper
@@ -703,3 +705,29 @@ class TestCapabilityCatalogSurface:
             MagicMock(), "public", "orders", [], [], catalog="my_db"
         )
         assert seen["catalog"] == "my_db"
+
+
+# ---------------------------------------------------------------------------
+# build_create_table_sql emits catalog-qualified identifier
+# ---------------------------------------------------------------------------
+
+
+class TestBuildCreateTableSqlCatalog:
+    @staticmethod
+    def test_three_part_identifier_when_catalog_set():
+        mapper = _StubMapper()
+        col = ColumnDef(name="id", canonical_type="Int64", nullable=False)
+        sql = build_create_table_sql(
+            SqlDialect(), mapper, "analytics", "orders", [col], ["id"], catalog="my_db"
+        )
+        assert '"my_db"."analytics"."orders"' in sql
+
+    @staticmethod
+    def test_two_part_identifier_when_no_catalog():
+        mapper = _StubMapper()
+        col = ColumnDef(name="id", canonical_type="Int64", nullable=False)
+        sql = build_create_table_sql(
+            SqlDialect(), mapper, "public", "orders", [col], ["id"]
+        )
+        assert '"public"."orders"' in sql
+        assert "my_db" not in sql
