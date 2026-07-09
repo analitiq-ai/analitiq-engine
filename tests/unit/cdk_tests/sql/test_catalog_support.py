@@ -323,7 +323,7 @@ class TestEnsureTablesViaAdbcCatalog:
 
             @staticmethod
             def close():
-                pass
+                """No-op ADBC cursor stub."""
 
         class _FakeConn:
             @staticmethod
@@ -332,7 +332,7 @@ class TestEnsureTablesViaAdbcCatalog:
 
             @staticmethod
             def commit():
-                pass
+                """No-op ADBC connection stub."""
 
         handler = GenericSQLConnector()
         handler._adbc_only = True
@@ -373,7 +373,7 @@ class TestEnsureTablesViaAdbcCatalog:
 
             @staticmethod
             def close():
-                pass
+                """No-op ADBC cursor stub."""
 
         class _FakeConn:
             @staticmethod
@@ -382,7 +382,7 @@ class TestEnsureTablesViaAdbcCatalog:
 
             @staticmethod
             def commit():
-                pass
+                """No-op ADBC connection stub."""
 
         handler = _ImplicitConnector()
         handler._adbc_only = True
@@ -415,7 +415,7 @@ class TestEnsureTablesViaAdbcCatalog:
 
             @staticmethod
             def close():
-                pass
+                """No-op ADBC cursor stub."""
 
         class _FakeConn:
             @staticmethod
@@ -424,7 +424,7 @@ class TestEnsureTablesViaAdbcCatalog:
 
             @staticmethod
             def commit():
-                pass
+                """No-op ADBC connection stub."""
 
         handler = GenericSQLConnector()
         handler._adbc_only = True
