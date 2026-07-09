@@ -304,14 +304,14 @@ class TestEnsureTablesViaAdbcCatalog:
                 executed.append(sql)
 
             def close(self):
-                pass
+                ...
 
         class _FakeConn:
             def cursor(self):
                 return _FakeCursor()
 
             def commit(self):
-                pass
+                ...
 
         handler = GenericSQLConnector()
         handler._adbc_only = True
@@ -351,14 +351,14 @@ class TestEnsureTablesViaAdbcCatalog:
                 executed.append(sql)
 
             def close(self):
-                pass
+                ...
 
         class _FakeConn:
             def cursor(self):
                 return _FakeCursor()
 
             def commit(self):
-                pass
+                ...
 
         handler = _ImplicitConnector()
         handler._adbc_only = True
@@ -388,14 +388,14 @@ class TestEnsureTablesViaAdbcCatalog:
                 executed.append(sql)
 
             def close(self):
-                pass
+                ...
 
         class _FakeConn:
             def cursor(self):
                 return _FakeCursor()
 
             def commit(self):
-                pass
+                ...
 
         handler = GenericSQLConnector()
         handler._adbc_only = True
@@ -574,8 +574,6 @@ class TestRunDdlAndReflectCatalogQuoting:
         self, monkeypatch
     ):
         """SQLAlchemy reflection schema uses quoted catalog + schema separately."""
-        from unittest.mock import MagicMock
-
         import cdk.sql.generic as gen
         from cdk.sql.generic import GenericSQLConnector, _StreamState
 
@@ -610,8 +608,6 @@ class TestRunDdlAndReflectCatalogQuoting:
         assert "my-schema" not in schema_arg
 
     def test_catalog_only_uses_quoted_catalog(self, monkeypatch):
-        from unittest.mock import MagicMock
-
         import cdk.sql.generic as gen
         from cdk.sql.generic import GenericSQLConnector, _StreamState
 
