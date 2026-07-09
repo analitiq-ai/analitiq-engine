@@ -981,6 +981,52 @@ class TestConnectionScopedEndpoints:
         assert mapper is runtime.connector_type_mapper
         assert mapper.to_arrow_type("BIGINT") == "Int64"
 
+    def test_connection_without_connection_id_still_resolves(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, schema_mirror: Path
+    ) -> None:
+        """A connection.json may omit connection_id (it is server-assigned; the
+        engine falls back to the directory name). The assembled bundle must
+        still resolve it against pipeline.connections, not report it missing."""
+        root = tmp_path / "project"
+        root.mkdir()
+        _build_tree(root)
+        conn_doc = _connection_doc(CONNECTION_SRC_ID)
+        del conn_doc["connection_id"]
+        _write_json(
+            root / "connections" / CONNECTION_SRC_ID / "connection.json", conn_doc
+        )
+        monkeypatch.chdir(root)
+        monkeypatch.setenv("PIPELINE_ID", PIPELINE_ID)
+        # Assembles with no false "no connection document bundled" error.
+        _, _, connections, _, _ = PipelineConfigPrep().create_config()
+        assert CONNECTION_SRC_ID in connections
+
+    def test_stale_connection_endpoint_document_rejected(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, schema_mirror: Path
+    ) -> None:
+        """A connection-scoped endpoint file named for the ref's derived id but
+        whose contents describe a different table is rejected at resolution,
+        before the SQL code consumes its database_object."""
+        root = tmp_path / "project"
+        root.mkdir()
+        _build_tree(root, dst_endpoint_scope="connection")
+        # Overwrite the endpoint file (named for the ref's derived id) with a
+        # doc for a DIFFERENT table -- internally consistent, wrong identity.
+        stale = _database_endpoint_doc({"schema": "public", "name": "other_table"})
+        _write_json(
+            root
+            / "connections"
+            / CONNECTION_DST_ID
+            / "definition"
+            / "endpoints"
+            / f"{ENDPOINT_DST_CONNECTION}.json",
+            stale,
+        )
+        monkeypatch.chdir(root)
+        monkeypatch.setenv("PIPELINE_ID", PIPELINE_ID)
+        with pytest.raises(ValueError, match="does not match"):
+            PipelineConfigPrep().create_config()
+
 
 # ---------------------------------------------------------------------------
 # Real published schema contracts (#96)

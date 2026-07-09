@@ -531,6 +531,19 @@ class PipelineConfigPrep:
                 f"Endpoint {ref!s} ($schema={schema_url!r}, "
                 f"kind={endpoint_kind!r}): {exc}"
             ) from exc
+        # For a connection-scoped ref the endpoint_id is the server-derived
+        # handle over database_object (the table identity the SQL source/
+        # destination consumes). The bundle validator only proves a file named
+        # {endpoint_id}.json exists; guard against a stale/mismatched file whose
+        # contents point at a different table by requiring the loaded document's
+        # own endpoint_id to equal the ref's.
+        if ref.scope == "connection" and document.get("endpoint_id") != ref.endpoint_id:
+            raise ValueError(
+                f"Endpoint {ref!s}: on-disk document declares endpoint_id "
+                f"{document.get('endpoint_id')!r}, which does not match the "
+                f"reference's server-derived {ref.endpoint_id!r}; the endpoint "
+                f"file does not describe the referenced table."
+            )
         self._resolved_endpoints[ref] = document
         logger.info("Resolved endpoint: %s", ref)
         return document
@@ -650,8 +663,12 @@ class PipelineConfigPrep:
         ``connectors`` and ``endpoints`` carry identity only (connector ids
         present; connection-scoped endpoint ``(connection_id, endpoint_id)``) --
         the validator resolves references between the parsed documents, not their
-        contents. ``pipeline_id`` is the resolved run identity (see
-        :meth:`create_config`) so an authored doc that omits it still validates.
+        contents. ``pipeline_id`` and each connection's ``connection_id`` are the
+        resolved identities (see :meth:`create_config` and
+        :meth:`_build_connection_index`) so an authored doc that omits its id --
+        connection_id is server-assigned and optional in the authored contract,
+        falling back to the directory name -- still resolves against the
+        pipeline's references instead of being reported as a missing connection.
 
         ``status`` is forced to ``active``: the engine's execution gate is the
         manifest entry status (checked in :meth:`_load_pipeline_document`), so
@@ -669,7 +686,8 @@ class PipelineConfigPrep:
             },
             "streams": [rec.raw_document for rec in self._stream_records.values()],
             "connections": [
-                rec.raw_config for rec in self._connection_records.values()
+                {**rec.raw_config, "connection_id": rec.connection_id}
+                for rec in self._connection_records.values()
             ],
             "connectors": sorted(self._loaded_connectors),
             "endpoints": self._connection_scoped_endpoint_identities(),
