@@ -733,10 +733,9 @@ class TestReadSqlAlchemyBranch:
                 connector, runtime, _endpoint_config(), _checkpoint(cursor=None)
             )
 
-        assert (
-            qb.call_args.kwargs["paging_order_fallback"]
-            == connector.dialect.paging_order_fallback
-        )
+        fn = qb.call_args.kwargs["paging_order_fallback"]
+        assert fn.__func__ is SqlDialect.paging_order_fallback
+        assert fn.__self__ is connector.dialect
 
 
 class TestControlPlaneDelegators:
