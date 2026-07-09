@@ -346,8 +346,6 @@ class TestApiHandlerWriteSingleMode:
     ):
         """429 is RETRYABLE — re-raises so write_batch returns RETRYABLE
         instead of permanently DLQ-ing a rate-limited record."""
-        import aiohttp
-
         api_handler._connected = True
         api_handler._session = MagicMock()
 
@@ -377,8 +375,6 @@ class TestApiHandlerWriteSingleMode:
         records_written=0 and the engine retries the full batch — the record
         that already landed will be re-sent (documented duplication trade-off).
         """
-        import aiohttp
-
         api_handler._connected = True
         api_handler._session = MagicMock()
 
@@ -412,8 +408,6 @@ class TestApiHandlerWriteSingleMode:
     ):
         """A deterministic 4xx rejection (non-429) is FATAL per-record:
         the loop continues and the failed record is attributed individually."""
-        import aiohttp
-
         api_handler._connected = True
         api_handler._session = MagicMock()
 
