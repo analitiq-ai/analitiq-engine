@@ -273,7 +273,7 @@ class SqlDialect:
         if schema_name:
             kwargs["db_schema_name"] = self.normalize_schema(schema_name)
         if catalog_name:
-            kwargs["catalog_name"] = catalog_name
+            kwargs["catalog_name"] = self.normalize_schema(catalog_name)
         return kwargs
 
     # ---- discovery queries (qmark placeholders + positional params) --------
@@ -290,12 +290,18 @@ class SqlDialect:
     def tables_query(self, schema: str, *, catalog: str = "") -> Query:
         """Return ``(sql, params)`` listing tables in *schema*.
 
-        When *catalog* is provided, an additional ``table_catalog = ?`` filter
-        restricts discovery to that catalog (database / project).
+        When *catalog* is provided, INFORMATION_SCHEMA is qualified with the
+        catalog so the query targets that catalog's metadata (necessary on
+        Snowflake and similar systems where INFORMATION_SCHEMA is scoped to
+        the current database). An additional ``table_catalog = ?`` filter is
+        also added for double safety.
         """
-        sql = (
-            "SELECT table_name FROM information_schema.tables " "WHERE table_schema = ?"
+        info_schema = (
+            f"{self.quote_ident(self.normalize_schema(catalog))}.information_schema"
+            if catalog
+            else "information_schema"
         )
+        sql = f"SELECT table_name FROM {info_schema}.tables WHERE table_schema = ?"
         params: list[object] = [self.normalize_schema(schema)]
         if catalog:
             sql += " AND table_catalog = ?"
@@ -306,13 +312,19 @@ class SqlDialect:
     def columns_query(self, schema: str, table: str, *, catalog: str = "") -> Query:
         """Return ``(sql, params)`` describing columns of *schema.table*.
 
-        When *catalog* is provided, an additional ``table_catalog = ?`` filter
-        restricts discovery to that catalog.
+        When *catalog* is provided, INFORMATION_SCHEMA is catalog-qualified
+        (same rationale as ``tables_query``). An additional ``table_catalog = ?``
+        filter is also added.
         """
+        info_schema = (
+            f"{self.quote_ident(self.normalize_schema(catalog))}.information_schema"
+            if catalog
+            else "information_schema"
+        )
         sql = (
-            "SELECT column_name, data_type, is_nullable "
-            "FROM information_schema.columns "
-            "WHERE table_schema = ? AND table_name = ?"
+            f"SELECT column_name, data_type, is_nullable "
+            f"FROM {info_schema}.columns "
+            f"WHERE table_schema = ? AND table_name = ?"
         )
         params: list[object] = [self.normalize_schema(schema), table]
         if catalog:
@@ -326,13 +338,19 @@ class SqlDialect:
     ) -> Query:
         """Return ``(sql, params)`` listing PK columns of *schema.table*.
 
-        When *catalog* is provided, an additional ``tc.table_catalog = ?``
-        filter restricts discovery to that catalog.
+        When *catalog* is provided, both INFORMATION_SCHEMA views are
+        catalog-qualified (same rationale as ``tables_query``). An additional
+        ``tc.table_catalog = ?`` filter is also added.
         """
+        info_schema = (
+            f"{self.quote_ident(self.normalize_schema(catalog))}.information_schema"
+            if catalog
+            else "information_schema"
+        )
         sql = (
-            "SELECT kcu.column_name "
-            "FROM information_schema.table_constraints tc "
-            "JOIN information_schema.key_column_usage kcu "
+            f"SELECT kcu.column_name "
+            f"FROM {info_schema}.table_constraints tc "
+            f"JOIN {info_schema}.key_column_usage kcu "
             "  ON tc.constraint_catalog = kcu.constraint_catalog "
             " AND tc.constraint_schema = kcu.constraint_schema "
             " AND tc.constraint_name = kcu.constraint_name "

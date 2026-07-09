@@ -1050,13 +1050,25 @@ class GenericSQLConnector(BaseDestinationHandler):
         meta = MetaData()
         # For catalog-qualified tables, compose "catalog.schema" as the
         # schema argument — BigQuery and Snowflake SA dialects understand
-        # the dotted form as a cross-catalog reference.
+        # the dotted form as a cross-catalog reference.  Use per-component
+        # quoting so catalog/schema names with special characters are handled
+        # correctly (a raw dotted string with quote=False breaks on names
+        # containing dashes, dots, or mixed case on folding dialects).
         if state.catalog_name and state.schema_name:
-            reflect_schema: str | None = quoted_name(
-                f"{state.catalog_name}.{state.schema_name}", quote=False
+            cat = self.dialect.quote_ident(
+                self.dialect.normalize_schema(state.catalog_name)
             )
+            sch = self.dialect.quote_ident(
+                self.dialect.normalize_schema(state.schema_name)
+            )
+            reflect_schema: str | None = quoted_name(f"{cat}.{sch}", quote=False)
         elif state.catalog_name:
-            reflect_schema = state.catalog_name
+            reflect_schema = quoted_name(
+                self.dialect.quote_ident(
+                    self.dialect.normalize_schema(state.catalog_name)
+                ),
+                quote=False,
+            )
         else:
             reflect_schema = state.schema_name or None
         return Table(
@@ -2515,7 +2527,11 @@ class GenericSQLConnector(BaseDestinationHandler):
                     QueryConfig(
                         schema_name=effective_schema,
                         table_name=table_name,
-                        catalog_name=catalog_name or None,
+                        catalog_name=(
+                            self.dialect.normalize_schema(catalog_name)
+                            if catalog_name
+                            else None
+                        ),
                         columns=columns,
                         filters=filters,
                         cursor_field=cursor_field,

@@ -506,6 +506,21 @@ class TestAdbcIngestTargetKwargs:
         assert kwargs["db_schema_name"] == "analytics"
         assert kwargs["catalog_name"] == "my_db"
 
+    def test_catalog_is_normalized(self):
+        """Normalizing dialects apply the same case-folding to catalog as schema."""
+        from cdk.sql.generic import GenericSQLConnector
+
+        class _UpperNormalizingDialect(SqlDialect):
+            def normalize_schema(self, s):
+                return s.upper()
+
+        class _C(GenericSQLConnector):
+            dialect_class = _UpperNormalizingDialect
+
+        kwargs = _C()._adbc_ingest_target_kwargs("analytics", "my_db")
+        assert kwargs["db_schema_name"] == "ANALYTICS"
+        assert kwargs["catalog_name"] == "MY_DB"
+
     def test_no_catalog_never_raises(self):
         from cdk.sql.generic import GenericSQLConnector
 

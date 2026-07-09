@@ -234,6 +234,38 @@ class TestDiscoveryQueries:
         sql, _ = SqlDialect().primary_keys_query("public", "orders")
         assert "tc.table_catalog = kcu.table_catalog" in sql
 
+    def test_tables_query_with_catalog_qualifies_information_schema(self):
+        sql, _ = SqlDialect().tables_query("public", catalog="my_db")
+        assert '"my_db".information_schema.tables' in sql
+        assert "information_schema.tables" not in sql.split('"my_db"')[0]
+
+    def test_tables_query_without_catalog_uses_unqualified_information_schema(self):
+        sql, _ = SqlDialect().tables_query("public")
+        assert sql.startswith("SELECT table_name FROM information_schema.tables")
+
+    def test_columns_query_with_catalog_qualifies_information_schema(self):
+        sql, _ = SqlDialect().columns_query("public", "orders", catalog="my_db")
+        assert '"my_db".information_schema.columns' in sql
+
+    def test_columns_query_without_catalog_uses_unqualified_information_schema(self):
+        sql, _ = SqlDialect().columns_query("public", "orders")
+        assert "FROM information_schema.columns" in sql
+
+    def test_primary_keys_query_with_catalog_qualifies_information_schema(self):
+        sql, _ = SqlDialect().primary_keys_query("public", "orders", catalog="my_db")
+        assert '"my_db".information_schema.table_constraints' in sql
+        assert '"my_db".information_schema.key_column_usage' in sql
+
+    def test_primary_keys_query_without_catalog_uses_unqualified_information_schema(
+        self,
+    ):
+        sql, _ = SqlDialect().primary_keys_query("public", "orders")
+        assert "FROM information_schema.table_constraints" in sql
+
+    def test_tables_query_catalog_normalizes_for_quoting(self):
+        sql, _ = _UpperNormalizingDialect().tables_query("public", catalog="my_db")
+        assert '"MY_DB".information_schema.tables' in sql
+
 
 # --- schema semantics --------------------------------------------------------
 
