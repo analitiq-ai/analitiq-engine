@@ -487,7 +487,8 @@ class TestPrimaryKeysQueryCatalog:
 
 
 class _UpperDialect(SqlDialect):
-    def normalize_schema(self, schema: str) -> str:
+    @staticmethod
+    def normalize_schema(schema: str) -> str:
         return schema.upper()
 
 
@@ -515,7 +516,8 @@ class TestDiscoveryCatalogFilterNormalized:
 class _NoTargetDialect(SqlDialect):
     """A Snowflake-like dialect that suppresses per-statement ingest kwargs."""
 
-    def adbc_ingest_schema_kwargs(self, schema_name, *, catalog_name=""):
+    @staticmethod
+    def adbc_ingest_schema_kwargs(schema_name, *, catalog_name=""):
         return {}
 
 
@@ -534,7 +536,8 @@ class TestAdbcIngestTargetKwargs:
         from cdk.sql.generic import GenericSQLConnector
 
         class _UpperNormalizingDialect(SqlDialect):
-            def normalize_schema(self, s):
+            @staticmethod
+            def normalize_schema(s):
                 return s.upper()
 
         class _C(GenericSQLConnector):
@@ -603,13 +606,13 @@ class TestRunDdlAndReflectCatalogQuoting:
     ):
         """SQLAlchemy reflection schema uses quoted catalog + schema separately."""
         import cdk.sql.generic as gen
-        from cdk.sql.generic import GenericSQLConnector, _StreamState
 
         class _UpperNormalizingDialect(SqlDialect):
-            def normalize_schema(self, s: str) -> str:
+            @staticmethod
+            def normalize_schema(s: str) -> str:
                 return s.upper()
 
-        class _C(GenericSQLConnector):
+        class _C(gen.GenericSQLConnector):
             dialect_class = _UpperNormalizingDialect
 
         captured: dict = {}
@@ -622,7 +625,7 @@ class TestRunDdlAndReflectCatalogQuoting:
         conn = MagicMock()
         conn.execute.return_value = None
 
-        state = _StreamState(
+        state = gen._StreamState(
             schema_name="my-schema",
             table_name="orders",
             catalog_name="my-catalog",
@@ -638,7 +641,6 @@ class TestRunDdlAndReflectCatalogQuoting:
     @staticmethod
     def test_catalog_only_uses_quoted_catalog(monkeypatch):
         import cdk.sql.generic as gen
-        from cdk.sql.generic import GenericSQLConnector, _StreamState
 
         captured: dict = {}
 
@@ -649,12 +651,12 @@ class TestRunDdlAndReflectCatalogQuoting:
         monkeypatch.setattr(gen, "Table", _fake_table)
         conn = MagicMock()
 
-        state = _StreamState(
+        state = gen._StreamState(
             schema_name="",
             table_name="orders",
             catalog_name="my-catalog",
         )
-        GenericSQLConnector()._run_ddl_and_reflect(
+        gen.GenericSQLConnector()._run_ddl_and_reflect(
             conn, state, "CREATE TABLE orders (id INT)"
         )
 
