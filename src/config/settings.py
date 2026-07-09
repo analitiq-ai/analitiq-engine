@@ -171,21 +171,6 @@ def worker_rlimit_as_mb() -> int | None:
 
 
 # ---------------------------------------------------------------------------
-# Schema contract fetching (schema_validator.py)
-# ---------------------------------------------------------------------------
-
-# Timeout for fetching a JSON Schema over the network. Not environment-tunable.
-SCHEMA_FETCH_TIMEOUT_SECONDS = 15
-
-
-def schema_base_url() -> str:
-    """Return the schema contract base URL (``ANALITIQ_SCHEMA_BASE_URL``)."""
-    return (
-        os.getenv("ANALITIQ_SCHEMA_BASE_URL") or "https://schemas.analitiq.ai"
-    ).rstrip("/")
-
-
-# ---------------------------------------------------------------------------
 # Process orchestration (main.py)
 # ---------------------------------------------------------------------------
 

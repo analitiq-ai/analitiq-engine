@@ -41,19 +41,15 @@ for cid in conn_ids:
 paths = ["pipelines/manifest.json", f"pipelines/{pipe_dir}"]
 paths += [f"connections/{c}" for c in sorted(conn_ids)]
 
-# The engine loaders accept both "connectors/{id}" and the prefixed
-# "connectors/connector-{id}" layout; resolve whichever exists on disk so a
-# pipeline using the prefixed form still bundles.
+# Connectors live under "connectors/{id}" only -- the single layout the engine
+# loaders resolve. Bundling any other layout would ship a path the runtime
+# cannot find.
 for cid in sorted(connector_ids):
-    for candidate in (f"connectors/{cid}", f"connectors/connector-{cid}"):
-        if os.path.isdir(os.path.join(root, candidate)):
-            paths.append(candidate)
-            break
+    candidate = f"connectors/{cid}"
+    if os.path.isdir(os.path.join(root, candidate)):
+        paths.append(candidate)
     else:
-        sys.exit(
-            f"connector dir not found for {cid}: tried "
-            f"connectors/{cid} and connectors/connector-{cid}"
-        )
+        sys.exit(f"connector dir not found for {cid}: expected {candidate}")
 print("\n".join(paths))
 PY
 

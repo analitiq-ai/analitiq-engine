@@ -1,77 +1,53 @@
 """Unit tests for src.config.schema_validator.
 
-The validator fetches schemas via HTTP and caches them per-process with
-``functools.lru_cache``. The tests use ``ANALITIQ_SCHEMA_BASE_URL=file://``
-plus a temp directory of fixture schemas so no network access is needed.
+Validation is offline: each artifact kind is checked against a Pydantic
+model from ``analitiq-contract-models``. No network, no schema mirror.
 """
 
 from __future__ import annotations
 
 import json
-import urllib.error
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
 from src.config import schema_validator
 from src.config.schema_validator import (
     ARTIFACT_KINDS,
+    BundleValidationError,
     ContractValidationError,
-    _load_schema,
     validate,
+    validate_bundle,
     validate_file,
 )
 
 
-@pytest.fixture(autouse=True)
-def clear_schema_cache():
-    """LRU cache on _load_schema is process-wide; reset between tests so
-    each test sees its own fixture schemas."""
-    _load_schema.cache_clear()
-    yield
-    _load_schema.cache_clear()
+def _valid_pipeline() -> dict:
+    return {
+        "$schema": "https://schemas.analitiq.ai/pipeline/latest.json",
+        "display_name": "Test Pipeline",
+        "status": "active",
+        "connections": {
+            "source": "00000000-0000-0000-0000-000000000001",
+            "destinations": ["00000000-0000-0000-0000-000000000002"],
+        },
+        "streams": ["00000000-0000-0000-0000-000000000003"],
+        "schedule": {"type": "manual", "timezone": "UTC"},
+    }
 
 
-def _write_schema(base_dir: Path, kind: str, schema: dict) -> None:
-    target = base_dir / kind / "latest.json"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(schema))
-
-
-@pytest.fixture
-def schema_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Point the validator at a local ``file://`` schema mirror."""
-    monkeypatch.setenv("ANALITIQ_SCHEMA_BASE_URL", tmp_path.as_uri())
-    return tmp_path
+def _valid_connection() -> dict:
+    return {
+        "$schema": "https://schemas.analitiq.ai/connection/latest.json",
+        "connector_id": "postgresql",
+    }
 
 
 class TestValidate:
-    def test_valid_document_passes(self, schema_root: Path) -> None:
-        _write_schema(
-            schema_root,
-            "pipeline",
-            {
-                "$schema": "https://json-schema.org/draft/2020-12/schema",
-                "type": "object",
-                "required": ["alias"],
-                "properties": {"alias": {"type": "string"}},
-            },
-        )
-        validate("pipeline", {"alias": "p"})
+    def test_valid_document_passes(self) -> None:
+        validate("pipeline", _valid_pipeline())
 
-    def test_invalid_document_raises_contract_validation_error(
-        self, schema_root: Path
-    ) -> None:
-        _write_schema(
-            schema_root,
-            "pipeline",
-            {
-                "type": "object",
-                "required": ["alias"],
-                "properties": {"alias": {"type": "string"}},
-            },
-        )
+    def test_invalid_document_raises_contract_validation_error(self) -> None:
         with pytest.raises(ContractValidationError) as ei:
             validate("pipeline", {}, source="/tmp/pipeline.json")
         message = str(ei.value)
@@ -80,132 +56,120 @@ class TestValidate:
         assert ei.value.kind == "pipeline"
         assert len(ei.value.errors) >= 1
 
-    def test_error_message_truncated_at_ten_errors(self, schema_root: Path) -> None:
-        _write_schema(
-            schema_root,
-            "pipeline",
-            {
-                "type": "object",
-                "properties": {f"f{i}": {"type": "string"} for i in range(15)},
-            },
-        )
-        bad = {f"f{i}": i for i in range(15)}  # all wrong type
-        with pytest.raises(ContractValidationError) as ei:
-            validate("pipeline", bad)
-        message = str(ei.value)
-        # 10 enumerated + a "... and N more" line
-        assert message.count("\n  - ") == 10
-        assert "and 5 more" in message
+    def test_schema_host_is_ignored(self) -> None:
+        """The ``$schema`` value is an informational host pointer; a document
+        advertising a non-canonical host still validates on its body alone."""
+        doc = _valid_pipeline()
+        doc["$schema"] = "https://schemas.analitiq.work/pipeline/latest.json"
+        validate("pipeline", doc)
 
-    def test_unknown_kind_rejected(self, schema_root: Path) -> None:
+    def test_error_message_truncated_at_ten_errors(self) -> None:
+        # A stream document with many malformed fields yields >10 errors.
+        bad = {f"unexpected_{i}": i for i in range(15)}
+        with pytest.raises(ContractValidationError) as ei:
+            validate("stream", bad)
+        message = str(ei.value)
+        if len(ei.value.errors) > 10:
+            assert message.count("\n  - ") == 10
+            assert "more" in message
+
+    def test_unknown_kind_rejected(self) -> None:
         with pytest.raises(ValueError, match="Unknown artifact kind"):
             validate("not-a-real-kind", {})
 
 
-class TestSchemaFetching:
-    def test_url_error_wrapped_as_runtime_error(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """An unreachable schema host must surface a precise error, not
-        a silent default-true validation."""
-        monkeypatch.setenv("ANALITIQ_SCHEMA_BASE_URL", "http://127.0.0.1:1")
-        with patch.object(
-            schema_validator.urllib.request,
-            "urlopen",
-            side_effect=urllib.error.URLError("connection refused"),
-        ):
-            with pytest.raises(RuntimeError, match="Could not fetch"):
-                validate("pipeline", {})
-
-    def test_malformed_schema_json_wrapped_as_runtime_error(
-        self, schema_root: Path
-    ) -> None:
-        target = schema_root / "pipeline" / "latest.json"
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text("{not json")
-        with pytest.raises(RuntimeError, match="not valid JSON"):
-            validate("pipeline", {})
-
-    def test_env_override_changes_base_url(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Setting ``ANALITIQ_SCHEMA_BASE_URL`` must redirect lookups."""
-        mirror_a = tmp_path / "a"
-        mirror_b = tmp_path / "b"
-        _write_schema(
-            mirror_a,
-            "pipeline",
-            {
-                "type": "object",
-                "required": ["a"],
-                "properties": {"a": {"type": "string"}},
-            },
-        )
-        _write_schema(
-            mirror_b,
-            "pipeline",
-            {
-                "type": "object",
-                "required": ["b"],
-                "properties": {"b": {"type": "string"}},
-            },
-        )
-
-        monkeypatch.setenv("ANALITIQ_SCHEMA_BASE_URL", mirror_a.as_uri())
-        with pytest.raises(ContractValidationError):
-            validate("pipeline", {})  # missing "a"
-        _load_schema.cache_clear()
-
-        monkeypatch.setenv("ANALITIQ_SCHEMA_BASE_URL", mirror_b.as_uri())
-        with pytest.raises(ContractValidationError) as ei:
-            validate("pipeline", {})  # missing "b"
-        assert any("'b' is a required property" in e.message for e in ei.value.errors)
-
-
 class TestValidateFile:
-    def test_valid_file_parses_and_validates(
-        self, schema_root: Path, tmp_path: Path
-    ) -> None:
-        _write_schema(
-            schema_root,
-            "connection",
-            {
-                "type": "object",
-                "required": ["alias", "connector_alias"],
-                "properties": {
-                    "alias": {"type": "string"},
-                    "connector_alias": {"type": "string"},
-                },
-            },
-        )
+    def test_valid_file_parses_and_validates(self, tmp_path: Path) -> None:
         doc_path = tmp_path / "conn.json"
-        doc_path.write_text(json.dumps({"alias": "c", "connector_alias": "k"}))
+        doc_path.write_text(json.dumps(_valid_connection()))
         result = validate_file("connection", doc_path)
-        assert result == {"alias": "c", "connector_alias": "k"}
+        assert result == _valid_connection()
 
     def test_missing_file_raises_file_not_found(self, tmp_path: Path) -> None:
         with pytest.raises(FileNotFoundError):
             validate_file("connection", tmp_path / "missing.json")
 
-    def test_malformed_json_raises_value_error(
-        self, schema_root: Path, tmp_path: Path
-    ) -> None:
+    def test_malformed_json_raises_value_error(self, tmp_path: Path) -> None:
         bad = tmp_path / "bad.json"
         bad.write_text("{not json")
         with pytest.raises(ValueError, match="Invalid JSON"):
             validate_file("connection", bad)
 
+    def test_invalid_document_in_file_raises(self, tmp_path: Path) -> None:
+        doc_path = tmp_path / "conn.json"
+        doc_path.write_text(json.dumps({"$schema": _valid_connection()["$schema"]}))
+        with pytest.raises(ContractValidationError):
+            validate_file("connection", doc_path)
+
 
 class TestArtifactKinds:
     def test_full_kind_coverage(self) -> None:
-        """Every documented artifact kind must be in ARTIFACT_KINDS so the
-        endpoint-resolver dispatch never falls through to 'unknown kind'."""
-        assert set(ARTIFACT_KINDS) >= {
+        """Every artifact kind the engine loads must map to a contract model
+        so the endpoint-resolver dispatch never falls through to 'unknown
+        kind'."""
+        assert set(ARTIFACT_KINDS) == {
             "connector",
             "connection",
             "pipeline",
             "stream",
-            "endpoint",
             "api-endpoint",
             "database-endpoint",
         }
+
+
+def _finding(severity: str, path: str = "/x", message: str = "boom") -> dict:
+    return {
+        "validator": "bundle-stream-ref",
+        "severity": severity,
+        "path": path,
+        "message": message,
+    }
+
+
+class TestValidateBundle:
+    """``validate_bundle`` wraps the published ``validate_pipeline_bundle``.
+
+    The published referential rules are the validator's own concern; these
+    pin the engine wrapper: which severities block, and that non-blocking
+    findings are surfaced (logged) rather than silently dropped.
+    """
+
+    def _patch(self, monkeypatch, findings: list[dict]) -> None:
+        monkeypatch.setattr(
+            schema_validator, "validate_pipeline_bundle", lambda bundle: findings
+        )
+
+    def test_sound_bundle_passes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._patch(monkeypatch, [])
+        validate_bundle({"pipeline": {}}, source="/p")  # no raise
+
+    def test_error_finding_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._patch(monkeypatch, [_finding("error", "/streams/0", "unresolved")])
+        with pytest.raises(BundleValidationError, match="unresolved") as ei:
+            validate_bundle({}, source="/p")
+        assert ei.value.source == "/p"
+        assert "/streams/0" in str(ei.value)
+        assert len(ei.value.findings) == 1
+
+    def test_warning_finding_does_not_block(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Advisory warnings are logged, not raised.
+        self._patch(monkeypatch, [_finding("warning")])
+        validate_bundle({}, source="/p")  # no raise
+
+    def test_unknown_severity_blocks(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A future higher-than-error severity must not slip through the gate.
+        self._patch(monkeypatch, [_finding("fatal")])
+        with pytest.raises(BundleValidationError):
+            validate_bundle({}, source="/p")
+
+    def test_message_truncated_at_ten(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._patch(
+            monkeypatch, [_finding("error", f"/s/{i}", f"e{i}") for i in range(15)]
+        )
+        with pytest.raises(BundleValidationError) as ei:
+            validate_bundle({}, source="/p")
+        message = str(ei.value)
+        assert message.count("\n  - ") == 10
+        assert "and 5 more" in message

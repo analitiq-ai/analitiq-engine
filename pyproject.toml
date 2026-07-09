@@ -56,7 +56,17 @@ orjson = "^3.9.0"
 
 # Data processing and validation
 pydantic = "^2.0.0"
-jsonschema = "^4.0.0"
+
+# Published Analitiq contract packages (PyPI). The engine validates on-disk
+# artifacts against these offline, so it never fetches a schema at runtime:
+#   - contract-models: the single source of artifact shape
+#     (connector/connection/pipeline/stream/endpoint). Per-document validity is
+#     the models' job (src/config/schema_validator.py).
+#   - validator: cross-document referential integrity of an assembled run
+#     bundle (validate_pipeline_bundle, used in src/engine/pipeline_config_prep).
+# Pinned exactly (release candidates); bump deliberately to adopt a new contract.
+analitiq-contract-models = {version = "1.0.0rc2", allow-prereleases = true}
+analitiq-validator = {version = "1.0.0rc1", allow-prereleases = true}
 
 # Retry and fault tolerance
 backoff = "^2.0.0"
@@ -229,6 +239,10 @@ module = [
     "msgpack.*",
     "pyarrow.*",
     "dateutil.*",
+    # Published contract packages (PyPI). Not in the pre-commit mypy hook's
+    # additional_dependencies, so the isolated hook env cannot resolve them.
+    "analitiq.contracts.*",
+    "analitiq.validator.*",
 ]
 ignore_missing_imports = true
 

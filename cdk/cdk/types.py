@@ -180,9 +180,9 @@ class EndpointScope(StrEnum):
 
     The value read off the engine's ``EndpointRef.scope``. Constructing
     ``EndpointScope(value)`` raises ``ValueError`` on an unknown value, which
-    preserves the scope validation that lives in ``EndpointRef.__post_init__``
-    engine-side. The CDK takes this enum (not the engine model) so it never
-    imports ``src/models``.
+    preserves the scope validation the engine gets from the published contract
+    (``validate_endpoint_ref``) engine-side. The CDK takes this enum (not the
+    engine model) so it never imports ``src/models``.
     """
 
     CONNECTOR = "connector"

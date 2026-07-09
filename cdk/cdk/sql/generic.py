@@ -439,8 +439,8 @@ class GenericSQLConnector(BaseDestinationHandler):
             )
         # The CDK takes only the resolved scope string, never the engine's
         # EndpointRef model. ``EndpointScope(scope)`` raises ValueError on an
-        # unknown scope, preserving the validation that lived in
-        # ``EndpointRef.__post_init__`` engine-side.
+        # unknown scope, preserving the validation the engine gets from the
+        # published contract (``validate_endpoint_ref``) engine-side.
         scope = endpoint_ref.get("scope") if isinstance(endpoint_ref, Mapping) else None
         if not scope:
             raise RuntimeError(
