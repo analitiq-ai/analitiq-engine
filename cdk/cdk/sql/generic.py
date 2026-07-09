@@ -949,8 +949,10 @@ class GenericSQLConnector(BaseDestinationHandler):
         # stall between "Received schema" and the SchemaAck. Paired with the
         # "Destination table ready" line below, the gap renders as elapsed
         # time between two INFO logs.
+        _catalog_prefix = f"{state.catalog_name}." if state.catalog_name else ""
         logger.info(
-            "Ensuring destination table exists for %s.%s (executing DDL)",
+            "Ensuring destination table exists for %s%s.%s (executing DDL)",
+            _catalog_prefix,
             state.schema_name,
             state.table_name,
         )
@@ -1555,7 +1557,8 @@ class GenericSQLConnector(BaseDestinationHandler):
         async with self._ddl_lock:
             await asyncio.to_thread(self._execute_adbc_ddl_sync, statements)
         logger.info(
-            "Destination tables ready for %s.%s",
+            "Destination tables ready for %s%s.%s",
+            f"{state.catalog_name}." if state.catalog_name else "",
             state.schema_name,
             state.table_name,
         )

@@ -64,10 +64,8 @@ async def list_tables(
     When *catalog* is provided, discovery is restricted to that catalog
     (database / project).
     """
-    if catalog:
-        sql, params = dialect.tables_query(schema, catalog=catalog)
-    else:
-        sql, params = dialect.tables_query(schema)
+    catalog_kwarg = {"catalog": catalog} if catalog else {}
+    sql, params = dialect.tables_query(schema, **catalog_kwarg)
     rows = await fetch_rows(runtime, sql, params)
     return [_col(row, "table_name") for row in rows]
 

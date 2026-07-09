@@ -330,8 +330,50 @@ class TestEnsureTablesViaAdbcCatalog:
 
         schema_stmts = [s for s in executed if "CREATE SCHEMA" in s]
         assert schema_stmts, "expected a CREATE SCHEMA statement"
-        assert "my_project" in schema_stmts[0]
-        assert "analytics" in schema_stmts[0]
+        assert schema_stmts[0] == 'CREATE SCHEMA IF NOT EXISTS "my_project"."analytics"'
+
+    @pytest.mark.asyncio
+    async def test_schema_ddl_suppressed_when_schema_is_implicit_default_with_catalog(self):
+        from cdk.sql.dialects import SqlDialect
+        from cdk.sql.generic import GenericSQLConnector, _StreamState
+
+        class _ImplicitPublicDialect(SqlDialect):
+            def schema_is_implicit_default(self, schema_name: str) -> bool:
+                return (not schema_name) or schema_name.upper() == "PUBLIC"
+
+        class _ImplicitConnector(GenericSQLConnector):
+            dialect_class = _ImplicitPublicDialect
+
+        executed: list[str] = []
+
+        class _FakeCursor:
+            def execute(self, sql, *args):
+                executed.append(sql)
+
+            def close(self):
+                pass
+
+        class _FakeConn:
+            def cursor(self):
+                return _FakeCursor()
+
+            def commit(self):
+                pass
+
+        handler = _ImplicitConnector()
+        handler._adbc_only = True
+        handler._adbc_conn = _FakeConn()
+
+        state = _StreamState(
+            schema_name="public",
+            table_name="orders",
+            catalog_name="my_project",
+        )
+        ddl = 'CREATE TABLE IF NOT EXISTS "my_project"."public"."orders" (id INTEGER)'
+        await handler._ensure_tables_via_adbc(state, [ddl])
+
+        schema_stmts = [s for s in executed if "CREATE SCHEMA" in s]
+        assert not schema_stmts, "CREATE SCHEMA should be suppressed when schema is implicit default"
 
     @pytest.mark.asyncio
     async def test_schema_ddl_without_catalog_unchanged(self):
