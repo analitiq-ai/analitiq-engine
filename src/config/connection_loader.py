@@ -64,30 +64,16 @@ def load_connection(connection_id: str, connections_dir: Path) -> dict[str, Any]
 def load_connector_definition(
     connector_id: str, connectors_dir: Path
 ) -> dict[str, Any]:
-    """Load a connector definition by ``connector_id``.
-
-    Connector directories may be named either ``{connector_id}`` or
-    ``connector-{connector_id}``; the lookup tries both.
-    """
-    candidates = [
-        connectors_dir / connector_id / "definition" / "connector.json",
-        connectors_dir / f"connector-{connector_id}" / "definition" / "connector.json",
-    ]
-    for candidate in candidates:
-        if candidate.is_file():
-            try:
-                config = load_json_file(candidate)
-            except ValueError as err:
-                raise ConnectorNotFoundError(
-                    connector_id,
-                    detail=str(err),
-                ) from err
-            logger.info("Loaded connector %r from %s", connector_id, candidate)
-            return config
-
-    raise ConnectorNotFoundError(
-        connector_id,
-        detail=(
-            f"Connector definition not found at {candidates[0]} " f"or {candidates[1]}"
-        ),
-    )
+    """Load a connector definition from ``connectors/{connector_id}/``."""
+    connector_file = connectors_dir / connector_id / "definition" / "connector.json"
+    if not connector_file.is_file():
+        raise ConnectorNotFoundError(
+            connector_id,
+            detail=f"Connector definition not found at {connector_file}",
+        )
+    try:
+        config = load_json_file(connector_file)
+    except ValueError as err:
+        raise ConnectorNotFoundError(connector_id, detail=str(err)) from err
+    logger.info("Loaded connector %r from %s", connector_id, connector_file)
+    return config

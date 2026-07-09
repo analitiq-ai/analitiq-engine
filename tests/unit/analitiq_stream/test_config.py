@@ -1,6 +1,7 @@
 """Unit tests for config module."""
 
 import pytest
+from analitiq.contracts.endpoint_identity import derive_db_endpoint_id
 
 from src.config import (
     load_connection,
@@ -83,22 +84,13 @@ class TestConnectionConfigValidator:
 
     @pytest.mark.unit
     def test_valid_connection_passes(self):
-        from src.config.schema_validator import _load_schema
-
-        schema = _load_schema("connection")
-        required = schema.get("required", [])
-        # Build a minimal connection that satisfies the published schema.
-        config = {"$schema": "https://schemas.analitiq.ai/connection/latest.json"}
-        for field in required:
-            config.setdefault(field, "stub")
-        # Override common cases with realistic values.
-        if "connector_id" in config:
-            config["connector_id"] = "postgresql"
-        if "connection_id" in config:
-            config["connection_id"] = "my-conn"
+        # A minimal connection that satisfies the published contract:
+        # connector_id is the only required authored field.
+        config = {
+            "$schema": "https://schemas.analitiq.ai/connection/latest.json",
+            "connector_id": "postgresql",
+        }
         validate_artifact("connection", config)
-        for field in required:
-            assert field in config
 
     @pytest.mark.unit
     def test_invalid_connection_raises(self):
@@ -124,16 +116,34 @@ class TestEndpointRefModel:
 
     @pytest.mark.unit
     def test_from_dict_connection(self):
+        # A connection-scoped ref carries database_object; endpoint_id is
+        # server-derived from it (never client-authored).
         ref = EndpointRef.from_dict(
             {
                 "scope": "connection",
                 "connection_id": "prod-postgres",
-                "endpoint_id": "public_users",
+                "database_object": {"schema": "public", "name": "users"},
             }
         )
         assert ref.scope == "connection"
         assert ref.connection_id == "prod-postgres"
-        assert ref.endpoint_id == "public_users"
+        assert ref.database_object is not None
+        assert ref.database_object.schema == "public"
+        assert ref.database_object.name == "users"
+        assert ref.endpoint_id == derive_db_endpoint_id(None, "public", "users")
+
+    @pytest.mark.unit
+    def test_connection_scope_requires_database_object(self):
+        """The old ``{scope, connection_id, endpoint_id}`` connection shape is
+        no longer valid: connection refs must carry database_object."""
+        with pytest.raises(ValueError):
+            EndpointRef.from_dict(
+                {
+                    "scope": "connection",
+                    "connection_id": "x",
+                    "endpoint_id": "public_users",
+                }
+            )
 
     @pytest.mark.unit
     def test_from_dict_passes_through_existing_instance(self):
@@ -142,7 +152,7 @@ class TestEndpointRefModel:
 
     @pytest.mark.unit
     def test_invalid_scope_raises(self):
-        with pytest.raises(ValueError, match="scope"):
+        with pytest.raises(ValueError):
             EndpointRef.from_dict(
                 {
                     "scope": "unknown",
@@ -152,13 +162,15 @@ class TestEndpointRefModel:
             )
 
     @pytest.mark.unit
-    def test_missing_keys_raises(self):
-        with pytest.raises(ValueError, match="missing required keys"):
+    def test_missing_required_field_raises(self):
+        with pytest.raises(ValueError):
             EndpointRef.from_dict({"scope": "connector"})
 
     @pytest.mark.unit
-    def test_unknown_keys_raises(self):
-        with pytest.raises(ValueError, match="unknown keys"):
+    def test_unknown_keys_raise(self):
+        """endpoint_ref is closed (additionalProperties: false in the
+        contract); any extra key, including ``x-*``, is rejected."""
+        with pytest.raises(ValueError):
             EndpointRef.from_dict(
                 {
                     "scope": "connector",
@@ -169,23 +181,8 @@ class TestEndpointRefModel:
             )
 
     @pytest.mark.unit
-    def test_x_extension_keys_are_accepted(self):
-        """The stream contract allows ``x-*`` extension metadata
-        alongside the required fields."""
-        ref = EndpointRef.from_dict(
-            {
-                "scope": "connector",
-                "connection_id": "x",
-                "endpoint_id": "y",
-                "x-owner": "platform",
-                "x-tags": ["wise", "transfers"],
-            }
-        )
-        assert ref.connection_id == "x"
-
-    @pytest.mark.unit
     def test_empty_connection_id_raises(self):
-        with pytest.raises(ValueError, match="connection_id cannot be empty"):
+        with pytest.raises(ValueError):
             EndpointRef.from_dict(
                 {
                     "scope": "connector",
@@ -196,7 +193,7 @@ class TestEndpointRefModel:
 
     @pytest.mark.unit
     def test_empty_endpoint_id_raises(self):
-        with pytest.raises(ValueError, match="endpoint_id cannot be empty"):
+        with pytest.raises(ValueError):
             EndpointRef.from_dict(
                 {
                     "scope": "connector",
@@ -207,13 +204,32 @@ class TestEndpointRefModel:
 
     @pytest.mark.unit
     def test_non_dict_input_raises(self):
-        with pytest.raises(TypeError, match="endpoint_ref must be"):
+        with pytest.raises(ValueError):
             EndpointRef.from_dict("connector:x/y")
 
     @pytest.mark.unit
     def test_to_dict_roundtrip(self):
         d = {"scope": "connector", "connection_id": "x", "endpoint_id": "y"}
         assert EndpointRef.from_dict(d).to_dict() == d
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "database_object",
+        [
+            {"schema": "public", "name": "users"},
+            {"name": "users"},  # schemaless locator: contract allows omitting schema
+        ],
+    )
+    def test_connection_scope_to_dict_roundtrips(self, database_object):
+        d = {
+            "scope": "connection",
+            "connection_id": "prod-pg",
+            "database_object": database_object,
+        }
+        ref = EndpointRef.from_dict(d)
+        # to_dict carries the derived endpoint_id and omits absent locator
+        # fields, so it re-ingests cleanly (no explicit-null database_object key).
+        assert EndpointRef.from_dict(ref.to_dict()) == ref
 
     @pytest.mark.unit
     def test_str_canonical_form(self):
@@ -417,10 +433,15 @@ class TestEndpointRefResolver:
 
     @pytest.mark.unit
     def test_resolve_connection_endpoint(self, tmp_path, lookup):
-        """Test resolving a private connection endpoint (under definition/)."""
+        """Test resolving a private connection endpoint (under definition/).
+
+        A connection ref carries database_object; the endpoint_id is derived
+        from it, and the bundle writes the doc under that derived handle.
+        """
+        derived_id = derive_db_endpoint_id(None, "public", "users")
         endpoint_dir = tmp_path / "connections" / "prod-pg" / "definition" / "endpoints"
         endpoint_dir.mkdir(parents=True)
-        endpoint_file = endpoint_dir / "public_users.json"
+        endpoint_file = endpoint_dir / f"{derived_id}.json"
         endpoint_file.write_text('{"endpoint": "public/users", "method": "DATABASE"}')
 
         paths = {
@@ -431,7 +452,7 @@ class TestEndpointRefResolver:
             {
                 "scope": "connection",
                 "connection_id": "prod-pg",
-                "endpoint_id": "public_users",
+                "database_object": {"schema": "public", "name": "users"},
             },
             paths,
             lookup,

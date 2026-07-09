@@ -113,18 +113,8 @@ def build_type_mapper(
 
 
 def connector_definition_dir(connectors_dir: Path, slug: str) -> Path:
-    """Return the connector's ``definition/`` directory.
-
-    Honors both the ``{slug}/`` and ``connector-{slug}/`` layouts used
-    elsewhere in the repo.
-    """
-    primary = connectors_dir / slug / "definition"
-    if primary.is_dir():
-        return primary
-    alternate = connectors_dir / f"connector-{slug}" / "definition"
-    if alternate.is_dir():
-        return alternate
-    return primary  # let callers raise with the primary path in the message
+    """Return the connector's ``definition/`` directory (``{slug}/definition``)."""
+    return connectors_dir / slug / "definition"
 
 
 def load_type_map(connectors_dir: Path, slug: str) -> TypeMapper:

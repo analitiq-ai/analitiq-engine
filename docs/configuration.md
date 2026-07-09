@@ -72,8 +72,6 @@ names are an established deployment contract and are unchanged.
 
 | Setting | Env var | Default | Controls |
 |---|---|---|---|
-| Schema base URL | `ANALITIQ_SCHEMA_BASE_URL` | `https://schemas.analitiq.ai` | Base URL for the published contract schemas. |
-| Schema fetch timeout | _(not env-tunable)_ | `15` s | Timeout for fetching a JSON Schema. |
 | Log level | `LOG_LEVEL` | `INFO` | Logging level for the process. |
 | Run mode | `RUN_MODE` | `source` | Process role: `source` (engine) or `destination` (gRPC server). |
 | Destination index | `DESTINATION_INDEX` | `0` | Which destination from the pipeline config to serve. |

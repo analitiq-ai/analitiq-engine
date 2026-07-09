@@ -68,28 +68,12 @@ def resolve_endpoint_path(
 
     if parsed.scope == "connector":
         connector_id = lookup.connector_id_for(parsed.connection_id)
-        # Connector directories may be either ``{connector_id}`` or
-        # ``connector-{connector_id}`` — must match load_connector_definition's
-        # candidate order so a project consistent with one form works for
-        # both connector loading and endpoint resolution.
-        candidates = [
+        file_path = (
             paths["connectors"]
             / connector_id
             / "definition"
             / "endpoints"
-            / f"{parsed.endpoint_id}.json",
-            paths["connectors"]
-            / f"connector-{connector_id}"
-            / "definition"
-            / "endpoints"
-            / f"{parsed.endpoint_id}.json",
-        ]
-        for candidate in candidates:
-            if candidate.is_file():
-                return candidate
-        raise EndpointNotFoundError(
-            parsed,
-            detail=f"File not found: {candidates[0]} or {candidates[1]}",
+            / f"{parsed.endpoint_id}.json"
         )
     elif parsed.scope == "connection":
         directory = lookup.directory_for(parsed.connection_id)
@@ -100,7 +84,7 @@ def resolve_endpoint_path(
             / "endpoints"
             / f"{parsed.endpoint_id}.json"
         )
-    else:  # pragma: no cover — defended in EndpointRef.__post_init__
+    else:  # pragma: no cover — scope is validated by the contract in from_dict
         raise ValueError(f"Unknown endpoint scope: {parsed.scope!r}")
 
     if not file_path.is_file():

@@ -25,8 +25,10 @@ that matches the on-disk directory name:
     pipeline.connections.destinations -> ["<connection_id>", ...]
     pipeline.streams                  -> ["<stream_id>", ...]
     stream.pipeline_id                -> "<pipeline_id>"
-    stream.source.endpoint_ref        -> {scope, connection_id, endpoint_id[, x-*]}
-    stream.destinations[].endpoint_ref-> {scope, connection_id, endpoint_id[, x-*]}
+    stream.source.endpoint_ref        -> {scope, connection_id, endpoint_id}
+    stream.destinations[].endpoint_ref-> {scope, connection_id, endpoint_id}
+        (connection-scoped refs carry database_object; endpoint_id is
+         server-derived from it)
 
 Every artifact is JSON-Schema validated against the published Analitiq
 contract before it is consumed.
@@ -42,6 +44,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from analitiq.contracts.pipelines.config import RuntimeConfig as ContractRuntimeConfig
+from analitiq.contracts.stream import ReplicationConfig as ContractReplicationConfig
+from pydantic import BaseModel
+
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.secrets import LocalFileSecretsResolver, SecretsResolver
 from cdk.type_map import (
@@ -54,6 +60,7 @@ from src.config.connection_loader import load_connection_file, load_connector_de
 from src.config.endpoint_resolver import ConnectionLookup, resolve_endpoint_ref
 from src.config.schema_validator import ContractValidationError
 from src.config.schema_validator import validate as validate_artifact
+from src.config.schema_validator import validate_bundle
 from src.config.utils import load_json_file
 from src.models.resolved import (
     BatchingConfig,
@@ -71,54 +78,64 @@ from src.models.stream import EndpointRef
 logger = logging.getLogger(__name__)
 
 
-def _parse_runtime_config(raw: Mapping[str, Any]) -> RuntimeConfig:
-    """Build a typed :class:`RuntimeConfig` from the raw pipeline runtime block.
+def _author_set(model: BaseModel, keys: tuple[str, ...]) -> dict[str, Any]:
+    """Return ``{key: value}`` for keys the author explicitly set to a non-null value.
 
-    Only keys the pipeline actually sets are forwarded; every omitted (or
-    ``null``) key falls through to the dataclass default, which sources the
-    value from :mod:`src.config.settings` (env-overridable). The precedence is
-    therefore pipeline config > environment variable > built-in default.
+    The contract models fill omitted fields with their own defaults, so consult
+    ``model_fields_set`` (a reliable author-intent signal as of
+    analitiq-contract-models 1.0.0rc2, infra #938) to forward only
+    author-provided values. A present-but-null value is treated as unset. The
+    engine keeps its own defaults for the rest, so its precedence is preserved.
     """
-    batching = raw.get("batching") or {}
-    error_handling = raw.get("error_handling") or {}
-
-    # A present-but-null key is treated like an omitted one (the contract allows
-    # retry_delay_seconds: null): both fall through to the settings default.
-    batching_kwargs = {
-        key: batching[key]
-        for key in ("batch_size", "max_concurrent_batches")
-        if batching.get(key) is not None
+    return {
+        key: getattr(model, key)
+        for key in keys
+        if key in model.model_fields_set and getattr(model, key) is not None
     }
-    error_kwargs = {
-        key: error_handling[key]
-        for key in ("strategy", "max_retries", "retry_delay_seconds")
-        if error_handling.get(key) is not None
-    }
-    runtime_kwargs: dict[str, Any] = {}
-    if raw.get("buffer_size") is not None:
-        runtime_kwargs["buffer_size"] = raw["buffer_size"]
 
+
+def _parse_runtime_config(raw: Mapping[str, Any]) -> RuntimeConfig:
+    """Build the engine's :class:`RuntimeConfig` from a pipeline's runtime block.
+
+    Reads the validated contract model and forwards only the fields the author
+    explicitly set; every omitted key falls through to the engine's own default
+    (sourced from :mod:`src.config.settings`, env-overridable). The engine
+    deliberately keeps its own defaults -- e.g. error strategy ``fail`` -- rather
+    than the contract's (``dlq``), so it must forward author-set values only, not
+    the contract's defaults. Precedence: pipeline config > env var > engine default.
+    """
+    contract = ContractRuntimeConfig.model_validate(dict(raw))
     return RuntimeConfig(
-        batching=BatchingConfig(**batching_kwargs),
-        error_handling=ErrorHandlingConfig(**error_kwargs),
-        **runtime_kwargs,
+        batching=BatchingConfig(
+            **_author_set(contract.batching, ("batch_size", "max_concurrent_batches"))
+        ),
+        error_handling=ErrorHandlingConfig(
+            **_author_set(
+                contract.error_handling,
+                ("strategy", "max_retries", "retry_delay_seconds"),
+            )
+        ),
+        **_author_set(contract, ("buffer_size",)),
     )
 
 
 def _parse_replication(raw_source: Mapping[str, Any]) -> ReplicationConfig | None:
-    """Build a typed :class:`ReplicationConfig` from a stream's source block.
+    """Build the engine's :class:`ReplicationConfig` from a stream's source block.
 
-    Returns ``None`` when no replication policy is present (full-refresh
-    sources may omit it). ``method`` is contract-required, so it is read
-    directly; the optional cursor/tie-breaker fields default to absent.
+    Returns ``None`` when no replication policy is present (full-refresh sources
+    may omit it). Reads the validated contract model: ``method`` is
+    contract-required; the optional cursor/tie-breaker fields carry through as
+    ``None`` when absent (the engine has no settings default for these, so no
+    author-intent filtering is needed).
     """
     raw = raw_source.get("replication")
     if not raw:
         return None
+    contract = ContractReplicationConfig.model_validate(dict(raw))
     return ReplicationConfig(
-        method=raw["method"],
-        cursor_field=raw.get("cursor_field"),
-        tie_breaker_fields=raw.get("tie_breaker_fields"),
+        method=contract.method,
+        cursor_field=contract.cursor_field,
+        tie_breaker_fields=contract.tie_breaker_fields,
     )
 
 
@@ -357,12 +374,16 @@ class PipelineConfigPrep:
             stream_id = document.get("stream_id")
             if not stream_id:
                 raise ValueError(f"Stream document {stream_file} missing 'stream_id'")
-            if stream_id in self._stream_records:
+            # Key by the version-stripped base id so the index shares one key
+            # space with pipeline.streams lookup (which strips ``_v{n}``) and the
+            # bundle validator (which matches on base form).
+            base_id = _split_stream_ref(stream_id)[0]
+            if base_id in self._stream_records:
                 raise ValueError(
-                    f"Duplicate stream_id {stream_id!r} in {streams_dir} "
-                    f"({self._stream_records[stream_id].file_path}, {stream_file})"
+                    f"Duplicate stream_id {base_id!r} in {streams_dir} "
+                    f"({self._stream_records[base_id].file_path}, {stream_file})"
                 )
-            self._stream_records[stream_id] = _StreamRecord(
+            self._stream_records[base_id] = _StreamRecord(
                 stream_id=stream_id,
                 file_path=stream_file,
                 raw_document=document,
@@ -391,15 +412,9 @@ class PipelineConfigPrep:
     def _load_connector(self, connector_id: str) -> dict[str, Any]:
         if connector_id in self._loaded_connectors:
             return self._loaded_connectors[connector_id]
-        connector_dir = self._paths["connectors"] / connector_id
-        connector_file = connector_dir / "definition" / "connector.json"
-        if not connector_file.is_file():
-            connector_file = (
-                self._paths["connectors"]
-                / f"connector-{connector_id}"
-                / "definition"
-                / "connector.json"
-            )
+        connector_file = (
+            self._paths["connectors"] / connector_id / "definition" / "connector.json"
+        )
         if not connector_file.is_file():
             raise FileNotFoundError(
                 f"Connector definition not found for {connector_id!r}"
@@ -455,17 +470,11 @@ class PipelineConfigPrep:
             return self._resolved_connections[connection_id]
 
         connector = self._load_connector(record.connector_id)
-        # The kind *value* is owned by the published connector schema
-        # (validated in _load_connector) and, at run time, by the worker
-        # registry (an unrunnable kind raises ConnectorNotRegisteredError
-        # there). Config prep only checks the shape, so registry-discovered
-        # connector kinds are not blocked by a hard-coded engine set.
-        kind = connector.get("kind")
-        if not isinstance(kind, str) or not kind:
-            raise ValueError(
-                f"Connector {record.connector_id!r} declares no usable "
-                f"'kind': {kind!r}"
-            )
+        # kind is a closed-enum discriminator validated by the connector
+        # contract in _load_connector; whether that kind is runnable is the
+        # worker registry's job (ConnectorNotRegisteredError). Config prep
+        # neither re-checks the shape nor hard-codes a kind set.
+        kind = connector["kind"]
 
         runtime = ConnectionRuntime(
             raw_config=record.raw_config,
@@ -497,9 +506,9 @@ class PipelineConfigPrep:
         # Extract the endpoint variant name from the document's declared
         # ``$schema`` URL. The variant name is the path segment ending in
         # ``-endpoint`` (e.g. ``api-endpoint``, ``database-endpoint``).
-        # ``validate_artifact`` then fetches and validates against that
-        # variant's published schema; an unrecognised variant name fails
-        # loudly there rather than here.
+        # ``validate_artifact`` then validates against that variant's
+        # contract model; an unrecognised variant name fails loudly there
+        # rather than here.
         schema_url = document.get("$schema") or ""
         match = _ENDPOINT_KIND_RE.search(schema_url)
         if not match:
@@ -516,12 +525,25 @@ class PipelineConfigPrep:
             # carries structured per-field errors; re-raise as-is to preserve type.
             raise
         except ValueError as exc:
-            # _load_schema raises plain ValueError for unknown artifact kinds;
-            # add ref and $schema URL context which that error omits.
+            # validate_artifact raises plain ValueError for unknown artifact
+            # kinds; add ref and $schema URL context which that error omits.
             raise ValueError(
                 f"Endpoint {ref!s} ($schema={schema_url!r}, "
                 f"kind={endpoint_kind!r}): {exc}"
             ) from exc
+        # For a connection-scoped ref the endpoint_id is the server-derived
+        # handle over database_object (the table identity the SQL source/
+        # destination consumes). The bundle validator only proves a file named
+        # {endpoint_id}.json exists; guard against a stale/mismatched file whose
+        # contents point at a different table by requiring the loaded document's
+        # own endpoint_id to equal the ref's.
+        if ref.scope == "connection" and document.get("endpoint_id") != ref.endpoint_id:
+            raise ValueError(
+                f"Endpoint {ref!s}: on-disk document declares endpoint_id "
+                f"{document.get('endpoint_id')!r}, which does not match the "
+                f"reference's server-derived {ref.endpoint_id!r}; the endpoint "
+                f"file does not describe the referenced table."
+            )
         self._resolved_endpoints[ref] = document
         logger.info("Resolved endpoint: %s", ref)
         return document
@@ -557,9 +579,9 @@ class PipelineConfigPrep:
 
         connections = pipeline_doc["connections"]
         source_id = connections["source"]
+        # The pipeline contract requires >= 1 destination (validated when the
+        # pipeline document was loaded), so dest_ids is non-empty here.
         dest_ids = list(connections.get("destinations") or [])
-        if not dest_ids:
-            raise ValueError("Pipeline must declare at least one destination")
 
         self._build_connection_index([source_id, *dest_ids])
         self._build_stream_index()
@@ -568,39 +590,32 @@ class PipelineConfigPrep:
         for dest_id in dest_ids:
             self._resolve_connection_by_id(dest_id)
 
-        # Stream configs. A reference may carry a ``_v{n}`` version suffix;
-        # the bare id resolves the stream record and the version rides onto
-        # the emitted checkpoint line.
-        pipeline_stream_refs = list(pipeline_doc.get("streams") or [])
-        stream_configs: list[ResolvedStream] = []
-        seen_bare: dict[str, str] = {}
-        for stream_ref in pipeline_stream_refs:
-            bare_stream_id, stream_version = _split_stream_ref(stream_ref)
-            # Distinct versioned refs (``abc_v1``, ``abc_v2``) pass the pipeline
-            # schema's uniqueItems but collapse to one bare id. Downstream keys
-            # the stream (and its cursor/commits) by that bare id, so a collision
-            # would silently drop one stream -- fail loud instead.
-            if bare_stream_id in seen_bare:
-                raise ValueError(
-                    f"pipeline.streams lists the same stream twice after version "
-                    f"stripping: {seen_bare[bare_stream_id]!r} and {stream_ref!r} "
-                    f"both resolve to stream_id {bare_stream_id!r}"
-                )
-            seen_bare[bare_stream_id] = stream_ref
-            record = self._stream_records.get(bare_stream_id)
-            if record is None:
-                raise ValueError(
-                    f"pipeline.streams references {stream_ref!r} but no stream "
-                    f"file in {self._pipeline_dir}/streams declares id "
-                    f"{bare_stream_id!r}; known: {sorted(self._stream_records)}"
-                )
-            stream_configs.append(self._build_stream_config(record, stream_version))
-
         # pipeline_id is nullable in the contract: an authored pipeline.json may
         # omit it and rely on the manifest for executable identity. Fall back to
         # the manifest/env id (always present) so a schema-valid omitted id is
-        # honored rather than rejected by ResolvedPipeline's guard.
+        # honored rather than rejected by ResolvedPipeline's guard. This is the
+        # run-bundle identity, so it is what the bundle validator sees.
         pipeline_id = pipeline_doc.get("pipeline_id") or self.pipeline_id_input
+
+        # Cross-document referential validation (published validator): every
+        # stream/connection/connector/endpoint reference resolves, source and
+        # destination roles are wired correctly, and the pipeline is runnable.
+        # Per-document shape was validated as each artifact was loaded above.
+        validate_bundle(
+            self._assemble_bundle(pipeline_doc, pipeline_id),
+            source=str(self._pipeline_dir),
+        )
+
+        # Stream configs. A reference may carry a ``_v{n}`` version suffix; the
+        # bare id resolves the stream record (referential soundness is already
+        # guaranteed by validate_bundle) and the version rides onto the emitted
+        # checkpoint line.
+        stream_configs: list[ResolvedStream] = [
+            self._build_stream_config(self._stream_records[bare_id], stream_version)
+            for bare_id, stream_version in (
+                _split_stream_ref(ref) for ref in pipeline_doc.get("streams") or []
+            )
+        ]
         display_name = pipeline_doc.get("display_name")
         pipeline = ResolvedPipeline(
             pipeline_id=pipeline_id,
@@ -637,22 +652,91 @@ class PipelineConfigPrep:
         )
 
     # ------------------------------------------------------------------
+    # Bundle assembly (for referential validation)
+    # ------------------------------------------------------------------
+
+    def _assemble_bundle(
+        self, pipeline_doc: dict[str, Any], pipeline_id: str
+    ) -> dict[str, Any]:
+        """Assemble the identity-only run bundle the published validator checks.
+
+        ``connectors`` and ``endpoints`` carry identity only (connector ids
+        present; connection-scoped endpoint ``(connection_id, endpoint_id)``) --
+        the validator resolves references between the parsed documents, not their
+        contents. ``pipeline_id`` and each connection's ``connection_id`` are the
+        resolved identities (see :meth:`create_config` and
+        :meth:`_build_connection_index`) so an authored doc that omits its id --
+        connection_id is server-assigned and optional in the authored contract,
+        falling back to the directory name -- still resolves against the
+        pipeline's references instead of being reported as a missing connection.
+
+        ``status`` is forced to ``active``: the engine's execution gate is the
+        manifest entry status (checked in :meth:`_load_pipeline_document`), so
+        by construction this pipeline is being run because the manifest marks it
+        active. The pipeline document's own ``status`` is optional/informational,
+        so feeding the manifest-derived status keeps the validator's
+        runnable-pipeline check aligned with the engine's actual gate rather than
+        rejecting a document that omits or under-states its status.
+        """
+        return {
+            "pipeline": {
+                **pipeline_doc,
+                "pipeline_id": pipeline_id,
+                "status": "active",
+            },
+            "streams": [rec.raw_document for rec in self._stream_records.values()],
+            "connections": [
+                {**rec.raw_config, "connection_id": rec.connection_id}
+                for rec in self._connection_records.values()
+            ],
+            "connectors": sorted(self._loaded_connectors),
+            "endpoints": self._connection_scoped_endpoint_identities(),
+        }
+
+    def _connection_scoped_endpoint_identities(self) -> list[dict[str, str]]:
+        """Identify each private endpoint document present on disk.
+
+        Returns ``{scope, connection_id, endpoint_id}`` for every endpoint file
+        under an indexed connection's ``definition/endpoints/``.
+        """
+        identities: list[dict[str, str]] = []
+        for record in self._connection_records.values():
+            endpoints_dir = (
+                self._paths["connections"]
+                / record.connection_id
+                / "definition"
+                / "endpoints"
+            )
+            if not endpoints_dir.is_dir():
+                continue
+            for endpoint_file in sorted(endpoints_dir.glob("*.json")):
+                # Identity is the filename stem: resolution locates the doc as
+                # ``endpoints/{endpoint_id}.json`` (resolve_endpoint_path), so the
+                # stem IS the on-disk endpoint_id. Reading the file is
+                # unnecessary and would let a malformed sibling abort the run.
+                identities.append(
+                    {
+                        "scope": "connection",
+                        "connection_id": record.connection_id,
+                        "endpoint_id": endpoint_file.stem,
+                    }
+                )
+        return identities
+
+    # ------------------------------------------------------------------
     # Stream config construction
     # ------------------------------------------------------------------
 
     def _resolve_endpoint_block(
-        self, block: Mapping[str, Any], stream_id: str, side: str
+        self, block: Mapping[str, Any]
     ) -> tuple[EndpointRef, ConnectionRuntime, dict[str, Any]]:
         """Resolve one stream side's ``endpoint_ref`` into its parts.
 
-        Validates that the block carries an ``endpoint_ref``, then resolves
-        the connection runtime and the endpoint document it points at.
-        ``side`` ("source" or "destination") only shapes the error message.
+        ``endpoint_ref`` presence is guaranteed by per-document stream
+        validation and the bundle validator; this resolves it to the
+        connection runtime and the endpoint document it points at.
         """
-        endpoint_ref_dict = block.get("endpoint_ref")
-        if not endpoint_ref_dict:
-            raise ValueError(f"Stream {stream_id} {side} missing 'endpoint_ref'")
-        endpoint_ref = EndpointRef.from_dict(endpoint_ref_dict)
+        endpoint_ref = EndpointRef.from_dict(block["endpoint_ref"])
         runtime = self._resolve_connection_by_id(endpoint_ref.connection_id)
         endpoint = self._resolve_endpoint(endpoint_ref)
         return endpoint_ref, runtime, endpoint
@@ -670,7 +754,7 @@ class PipelineConfigPrep:
             source_endpoint_ref,
             source_runtime,
             source_endpoint,
-        ) = self._resolve_endpoint_block(raw_source, stream_id, "source")
+        ) = self._resolve_endpoint_block(raw_source)
 
         resolved_source = ResolvedSource(
             endpoint_ref=source_endpoint_ref,
@@ -689,7 +773,7 @@ class PipelineConfigPrep:
                 dest_endpoint_ref,
                 dest_runtime,
                 dest_endpoint,
-            ) = self._resolve_endpoint_block(raw_dest, stream_id, "destination")
+            ) = self._resolve_endpoint_block(raw_dest)
 
             resolved_destinations.append(
                 ResolvedDestination(

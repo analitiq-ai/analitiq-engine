@@ -148,7 +148,7 @@ class TestParseRuntimeConfig:
                 "batching": {"batch_size": 200, "max_concurrent_batches": 4},
                 "error_handling": {
                     "strategy": "dlq",
-                    "max_retries": 9,
+                    "max_retries": 5,
                     "retry_delay_seconds": 1,
                 },
                 "buffer_size": 1234,
@@ -156,17 +156,44 @@ class TestParseRuntimeConfig:
         )
         assert cfg.batching.max_concurrent_batches == 4
         assert cfg.error_handling.strategy == "dlq"
+        assert cfg.error_handling.max_retries == 5
         assert cfg.buffer_size == 1234
 
     def test_invalid_value_fails_loud(self):
-        with pytest.raises(ValueError, match="Unknown error strategy"):
+        # Now validated against the contract model, so an out-of-enum strategy
+        # is rejected by the contract (authority) before the engine type.
+        with pytest.raises(ValueError, match="strategy"):
             _parse_runtime_config({"error_handling": {"strategy": "nope"}})
 
-    def test_null_retry_delay_normalizes_to_default(self):
-        # The contract allows retry_delay_seconds: null; it must not crash the
-        # typed int field, it normalizes to the default.
+    def test_out_of_range_max_retries_fails_loud(self):
+        # The contract caps max_retries (le=5); the parser enforces it.
+        with pytest.raises(ValueError, match="max_retries"):
+            _parse_runtime_config({"error_handling": {"max_retries": 9}})
+
+    def test_omitted_fields_use_engine_defaults_not_contract(self, monkeypatch):
+        """Omitted runtime fields fall through to the engine's (env-overridable)
+        defaults, never the contract model's own defaults.
+
+        Guards the ``model_fields_set`` author-intent signal (infra #938):
+        ``retry_delay_seconds`` in particular must not be forwarded from the
+        contract's injected default when the author omitted it, or the engine's
+        precedence (pipeline > env > engine default) breaks.
+        """
+        monkeypatch.setenv("ANALITIQ_RETRY_DELAY_SECONDS", "42")
+        monkeypatch.setenv("ANALITIQ_ERROR_STRATEGY", "skip")
+        cfg = _parse_runtime_config({})
+        # engine env values, not the contract's retry_delay=5 / strategy='dlq'
+        assert cfg.error_handling.retry_delay_seconds == 42
+        assert cfg.error_handling.strategy == "skip"
+
+    def test_null_retry_delay_falls_through_to_engine_default(self, monkeypatch):
+        # Explicit null is treated as unset: the field falls through to the
+        # engine's (env-overridable) default, not the contract's injected value.
+        # The env override makes this discriminating -- the engine's built-in
+        # default (5) otherwise coincides with the contract's injected 5.
+        monkeypatch.setenv("ANALITIQ_RETRY_DELAY_SECONDS", "42")
         cfg = _parse_runtime_config({"error_handling": {"retry_delay_seconds": None}})
-        assert cfg.error_handling.retry_delay_seconds == 5
+        assert cfg.error_handling.retry_delay_seconds == 42
 
     def test_skip_strategy_parses(self):
         cfg = _parse_runtime_config({"error_handling": {"strategy": "skip"}})
@@ -230,6 +257,7 @@ class TestParseReplication:
         assert cfg.cursor_field is None
 
     def test_missing_method_fails_loud(self):
-        # method is contract-required; a malformed block must not pass silently.
-        with pytest.raises(KeyError):
+        # method is contract-required; the contract model rejects a block that
+        # omits it (a malformed block must not pass silently).
+        with pytest.raises(ValueError, match="method"):
             _parse_replication({"replication": {"cursor_field": "updated_at"}})

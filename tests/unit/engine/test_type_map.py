@@ -507,17 +507,6 @@ class TestLoaders:
         assert mapper.connector_slug == "demo"
         assert mapper.to_arrow_type("text") == "Utf8"
 
-    def test_alternate_connector_dir_layout(self, tmp_path: Path):
-        """``connector-{slug}`` layout also resolves."""
-        definition = tmp_path / "connector-alt" / "definition"
-        definition.mkdir(parents=True)
-        (definition / "connector.json").write_text("{}")
-        (definition / TYPE_MAP_FILENAME).write_text(
-            json.dumps([{"match": "exact", "native": "TEXT", "canonical": "Utf8"}])
-        )
-        mapper = load_type_map(tmp_path, "alt")
-        assert mapper.to_arrow_type("TEXT") == "Utf8"
-
 
 class TestLoadConnectionTypeMap:
     """Connection-scoped type-map lives under ``connections/{alias}/definition/``."""

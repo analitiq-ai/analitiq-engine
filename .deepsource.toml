@@ -1,0 +1,14 @@
+version = 1
+
+# Mark everything under tests/ as test code. DeepSource then applies
+# test-appropriate rules to these files and suppresses checks that are false
+# positives for pytest -- notably PTC-W0049 (no-self-use), since pytest test
+# methods idiomatically take `self` without using it (the class is only a
+# grouping for collection).
+test_patterns = ["tests/**"]
+
+[[analyzers]]
+name = "python"
+
+  [analyzers.meta]
+  runtime_version = "3.x.x"
