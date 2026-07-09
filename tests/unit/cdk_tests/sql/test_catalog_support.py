@@ -321,18 +321,14 @@ class TestEnsureTablesViaAdbcCatalog:
             def execute(sql, *args):
                 executed.append(sql)
 
-            @staticmethod
-            def close():
-                """No-op ADBC cursor stub."""
+            close = MagicMock()
 
         class _FakeConn:
             @staticmethod
             def cursor():
                 return _FakeCursor()
 
-            @staticmethod
-            def commit():
-                """No-op ADBC connection stub."""
+            commit = MagicMock()
 
         handler = GenericSQLConnector()
         handler._adbc_only = True
@@ -371,18 +367,14 @@ class TestEnsureTablesViaAdbcCatalog:
             def execute(sql, *args):
                 executed.append(sql)
 
-            @staticmethod
-            def close():
-                """No-op ADBC cursor stub."""
+            close = MagicMock()
 
         class _FakeConn:
             @staticmethod
             def cursor():
                 return _FakeCursor()
 
-            @staticmethod
-            def commit():
-                """No-op ADBC connection stub."""
+            commit = MagicMock()
 
         handler = _ImplicitConnector()
         handler._adbc_only = True
@@ -413,18 +405,14 @@ class TestEnsureTablesViaAdbcCatalog:
             def execute(sql, *args):
                 executed.append(sql)
 
-            @staticmethod
-            def close():
-                """No-op ADBC cursor stub."""
+            close = MagicMock()
 
         class _FakeConn:
             @staticmethod
             def cursor():
                 return _FakeCursor()
 
-            @staticmethod
-            def commit():
-                """No-op ADBC connection stub."""
+            commit = MagicMock()
 
         handler = GenericSQLConnector()
         handler._adbc_only = True
