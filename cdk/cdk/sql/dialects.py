@@ -301,7 +301,10 @@ class SqlDialect:
             if catalog
             else "information_schema"
         )
-        sql = f"SELECT table_name FROM {info_schema}.tables WHERE table_schema = ?"  # nosec B608
+        sql = (
+            f"SELECT table_name FROM {info_schema}.tables "  # nosec B608
+            f"WHERE table_schema = ?"
+        )
         params: list[object] = [self.normalize_schema(schema)]
         if catalog:
             sql += " AND table_catalog = ?"
