@@ -19,7 +19,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-
 from analitiq.contracts.endpoint_identity import derive_db_endpoint_id
 
 from cdk.types import EndpointScope
@@ -663,9 +662,7 @@ class TestCreateConfigErrorPaths:
             stream_doc,
         )
         prep = PipelineConfigPrep()
-        with pytest.raises(
-            ContractValidationError, match=f"{location}/endpoint_ref"
-        ):
+        with pytest.raises(ContractValidationError, match=f"{location}/endpoint_ref"):
             prep.create_config()
 
     @pytest.mark.parametrize("kind", ["", None])

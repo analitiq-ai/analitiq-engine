@@ -66,7 +66,7 @@ class ContractValidationError(ValueError):
     field (see :func:`validate`).
     """
 
-    def __init__(self, kind: str, source: str, errors: Sequence[dict[str, Any]]):
+    def __init__(self, kind: str, source: str, errors: Sequence[Any]):
         self.kind = kind
         self.source = source
         self.errors = list(errors)

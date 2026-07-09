@@ -54,8 +54,9 @@ from cdk.type_map import (
 )
 from src.config.connection_loader import load_connection_file, load_connector_definition
 from src.config.endpoint_resolver import ConnectionLookup, resolve_endpoint_ref
-from src.config.schema_validator import ContractValidationError, validate_bundle
+from src.config.schema_validator import ContractValidationError
 from src.config.schema_validator import validate as validate_artifact
+from src.config.schema_validator import validate_bundle
 from src.config.utils import load_json_file
 from src.models.resolved import (
     BatchingConfig,
@@ -579,9 +580,7 @@ class PipelineConfigPrep:
         # guaranteed by validate_bundle) and the version rides onto the emitted
         # checkpoint line.
         stream_configs: list[ResolvedStream] = [
-            self._build_stream_config(
-                self._stream_records[bare_id], stream_version
-            )
+            self._build_stream_config(self._stream_records[bare_id], stream_version)
             for bare_id, stream_version in (
                 _split_stream_ref(ref) for ref in pipeline_doc.get("streams") or []
             )
@@ -647,8 +646,11 @@ class PipelineConfigPrep:
         }
 
     def _connection_scoped_endpoint_identities(self) -> list[dict[str, str]]:
-        """The ``(connection_id, endpoint_id)`` identity of every private
-        endpoint document present under an indexed connection's ``definition/``."""
+        """Identify each private endpoint document present on disk.
+
+        Returns ``{scope, connection_id, endpoint_id}`` for every endpoint file
+        under an indexed connection's ``definition/endpoints/``.
+        """
         identities: list[dict[str, str]] = []
         for record in self._connection_records.values():
             endpoints_dir = (
@@ -665,7 +667,8 @@ class PipelineConfigPrep:
                     {
                         "scope": "connection",
                         "connection_id": record.connection_id,
-                        "endpoint_id": document.get("endpoint_id") or endpoint_file.stem,
+                        "endpoint_id": document.get("endpoint_id")
+                        or endpoint_file.stem,
                     }
                 )
         return identities

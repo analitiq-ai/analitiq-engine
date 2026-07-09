@@ -1,6 +1,7 @@
 """Unit tests for config module."""
 
 import pytest
+from analitiq.contracts.endpoint_identity import derive_db_endpoint_id
 
 from src.config import (
     load_connection,
@@ -14,8 +15,6 @@ from src.config.exceptions import (
     ConnectorNotFoundError,
     EndpointNotFoundError,
 )
-from analitiq.contracts.endpoint_identity import derive_db_endpoint_id
-
 from src.models.stream import EndpointRef
 
 

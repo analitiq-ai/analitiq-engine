@@ -17,10 +17,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
-from analitiq.contracts.stream import (
-    ConnectionEndpointRef,
-    validate_endpoint_ref,
-)
+from analitiq.contracts.stream import ConnectionEndpointRef, validate_endpoint_ref
 
 
 class WriteMode(str, Enum):
@@ -37,9 +34,9 @@ class WriteMode(str, Enum):
 
 @dataclass(frozen=True)
 class DatabaseObject:
-    """Verbatim provider-native object locator for a ``connection``-scoped
-    endpoint (stream contract: ``endpoint_ref.database_object``).
+    """Provider-native object locator for a ``connection``-scoped endpoint.
 
+    The verbatim ``endpoint_ref.database_object`` from the stream contract.
     Frozen so an :class:`EndpointRef` carrying one stays hashable.
     """
 
