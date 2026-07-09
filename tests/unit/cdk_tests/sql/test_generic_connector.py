@@ -114,8 +114,9 @@ class TestReadGuards:
         # misconfiguration must fail before any extraction work.
         connector = GenericSQLConnector()
         runtime = _FakeRuntime(is_adbc=True)
-        with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()), patch(
-            "cdk.sql.generic.SchemaContract"
+        with (
+            patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()),
+            patch("cdk.sql.generic.SchemaContract"),
         ):
             config = _endpoint_config(
                 replication={"method": "incremental", "cursor_field": "deleted_at"},
@@ -146,9 +147,11 @@ class TestReadGuards:
                 return False
 
         connector = GenericSQLConnector()
-        with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()), patch(
-            "cdk.sql.generic.open_adbc_reader", return_value=_CM()
-        ), patch("cdk.sql.generic.SchemaContract") as sc:
+        with (
+            patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()),
+            patch("cdk.sql.generic.open_adbc_reader", return_value=_CM()),
+            patch("cdk.sql.generic.SchemaContract") as sc,
+        ):
             sc.return_value.cast_arrow_batch.side_effect = lambda b: b
             config = _endpoint_config(
                 replication={"method": "incremental", "cursor_field": "updated_at"},
@@ -167,8 +170,9 @@ class TestReadGuards:
         # declared in the endpoint contract would never advance.
         connector = GenericSQLConnector()
         runtime = _FakeRuntime(is_adbc=True)
-        with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()), patch(
-            "cdk.sql.generic.SchemaContract"
+        with (
+            patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()),
+            patch("cdk.sql.generic.SchemaContract"),
         ):
             config = _endpoint_config(
                 replication={"method": "incremental", "cursor_field": "modified_ts"},
@@ -230,9 +234,11 @@ class TestReadAdbcBranch:
                 return False
 
         connector = GenericSQLConnector()
-        with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()), patch(
-            "cdk.sql.generic.open_adbc_reader", return_value=_CM()
-        ), patch("cdk.sql.generic.SchemaContract") as sc:
+        with (
+            patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()),
+            patch("cdk.sql.generic.open_adbc_reader", return_value=_CM()),
+            patch("cdk.sql.generic.SchemaContract") as sc,
+        ):
             sc.return_value.cast_arrow_batch.side_effect = lambda b: b
             config = _endpoint_config(
                 filters=[{"field": "status", "operator": "eq", "value": "active"}],
@@ -257,8 +263,9 @@ class TestReadAdbcBranch:
     async def test_empty_columns_rejected(self):
         runtime = _FakeRuntime(is_adbc=True)
         connector = GenericSQLConnector()
-        with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()), patch(
-            "cdk.sql.generic.SchemaContract"
+        with (
+            patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()),
+            patch("cdk.sql.generic.SchemaContract"),
         ):
             config = _endpoint_config(columns=())
             config["endpoint_document"]["columns"] = []
@@ -286,9 +293,11 @@ class TestReadAdbcBranch:
                 return False
 
         connector = GenericSQLConnector()
-        with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()), patch(
-            "cdk.sql.generic.open_adbc_reader", return_value=_CM()
-        ), patch("cdk.sql.generic.SchemaContract") as sc:
+        with (
+            patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()),
+            patch("cdk.sql.generic.open_adbc_reader", return_value=_CM()),
+            patch("cdk.sql.generic.SchemaContract") as sc,
+        ):
             sc.return_value.cast_arrow_batch.side_effect = lambda b: b
             config = _endpoint_config(
                 replication={"method": "incremental", "cursor_field": "updated_at"},
@@ -317,9 +326,11 @@ class TestReadAdbcBranch:
         config = _endpoint_config()
         config["endpoint_document"]["database_object"]["catalog"] = "my_db"
 
-        with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()), patch(
-            "cdk.sql.generic.open_adbc_reader", return_value=_adbc_cm(reader)
-        ), patch("cdk.sql.generic.SchemaContract") as sc:
+        with (
+            patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()),
+            patch("cdk.sql.generic.open_adbc_reader", return_value=_adbc_cm(reader)),
+            patch("cdk.sql.generic.SchemaContract") as sc,
+        ):
             sc.return_value.cast_arrow_batch.side_effect = lambda b: b
             await _drain(connector, runtime, config, _checkpoint())
 
@@ -350,9 +361,11 @@ class TestReadAdbcBranchPaging:
         page = [pa.RecordBatch.from_pydict({"id": [1], "updated_at": ["2024-01-01"]})]
         reader = _RecordingReader([page, []])
         connector = GenericSQLConnector()
-        with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()), patch(
-            "cdk.sql.generic.open_adbc_reader", return_value=_adbc_cm(reader)
-        ), patch("cdk.sql.generic.SchemaContract") as sc:
+        with (
+            patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()),
+            patch("cdk.sql.generic.open_adbc_reader", return_value=_adbc_cm(reader)),
+            patch("cdk.sql.generic.SchemaContract") as sc,
+        ):
             sc.return_value.cast_arrow_batch.side_effect = lambda b: b
             config = _endpoint_config(
                 filters=[{"field": "status", "operator": "eq", "value": "x"}],
@@ -377,9 +390,11 @@ class TestReadAdbcBranchPaging:
         page = [pa.RecordBatch.from_pydict({"id": [1], "updated_at": ["2024-01-01"]})]
         reader = _RecordingReader([page, []])
         connector = GenericSQLConnector()
-        with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()), patch(
-            "cdk.sql.generic.open_adbc_reader", return_value=_adbc_cm(reader)
-        ), patch("cdk.sql.generic.SchemaContract") as sc:
+        with (
+            patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()),
+            patch("cdk.sql.generic.open_adbc_reader", return_value=_adbc_cm(reader)),
+            patch("cdk.sql.generic.SchemaContract") as sc,
+        ):
             sc.return_value.cast_arrow_batch.side_effect = lambda b: b
             config = _endpoint_config(
                 database_pagination={"type": "offset", "order_by_field": "updated_at"},
@@ -400,8 +415,9 @@ class TestReadAdbcBranchPaging:
         # so the stream is rejected before any extraction work.
         runtime = _FakeRuntime(is_adbc=True)
         connector = GenericSQLConnector()
-        with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()), patch(
-            "cdk.sql.generic.SchemaContract"
+        with (
+            patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()),
+            patch("cdk.sql.generic.SchemaContract"),
         ):
             config = _endpoint_config(
                 replication={"method": "incremental", "cursor_field": "updated_at"},
@@ -420,9 +436,11 @@ class TestReadAdbcBranchPaging:
         page = [pa.RecordBatch.from_pydict({"id": [3], "updated_at": ["2024-01-03"]})]
         reader = _RecordingReader([page, []])
         connector = GenericSQLConnector()
-        with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()), patch(
-            "cdk.sql.generic.open_adbc_reader", return_value=_adbc_cm(reader)
-        ), patch("cdk.sql.generic.SchemaContract") as sc:
+        with (
+            patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()),
+            patch("cdk.sql.generic.open_adbc_reader", return_value=_adbc_cm(reader)),
+            patch("cdk.sql.generic.SchemaContract") as sc,
+        ):
             sc.return_value.cast_arrow_batch.side_effect = lambda b: b
             config = _endpoint_config(
                 replication={"method": "incremental", "cursor_field": "updated_at"},
@@ -447,9 +465,11 @@ class TestReadAdbcBranchPaging:
         page = [pa.RecordBatch.from_pydict({"id": [1], "updated_at": ["2024-01-01"]})]
         reader = _RecordingReader([page, []])
         connector = GenericSQLConnector()
-        with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()), patch(
-            "cdk.sql.generic.open_adbc_reader", return_value=_adbc_cm(reader)
-        ), patch("cdk.sql.generic.SchemaContract") as sc:
+        with (
+            patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()),
+            patch("cdk.sql.generic.open_adbc_reader", return_value=_adbc_cm(reader)),
+            patch("cdk.sql.generic.SchemaContract") as sc,
+        ):
             sc.return_value.cast_arrow_batch.side_effect = lambda b: b
             with caplog.at_level("WARNING"):
                 await _drain(connector, runtime, _endpoint_config(), _checkpoint())
@@ -462,9 +482,10 @@ class TestReadAdbcBranchPaging:
 
         generic_mod._order_by_fallback_logged.clear()
         connector = GenericSQLConnector()
-        with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()), patch(
-            "cdk.sql.generic.SchemaContract"
-        ) as sc:
+        with (
+            patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()),
+            patch("cdk.sql.generic.SchemaContract") as sc,
+        ):
             sc.return_value.cast_arrow_batch.side_effect = lambda b: b
             with caplog.at_level("WARNING"):
                 for _ in range(2):
@@ -506,9 +527,11 @@ class TestReadAdbcBranchPaging:
         ]
         reader = _RecordingReader([page1, page2, []])
         connector = GenericSQLConnector()
-        with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()), patch(
-            "cdk.sql.generic.open_adbc_reader", return_value=_adbc_cm(reader)
-        ), patch("cdk.sql.generic.SchemaContract") as sc:
+        with (
+            patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()),
+            patch("cdk.sql.generic.open_adbc_reader", return_value=_adbc_cm(reader)),
+            patch("cdk.sql.generic.SchemaContract") as sc,
+        ):
             sc.return_value.cast_arrow_batch.side_effect = lambda b: b
             config = _endpoint_config(
                 filters=[{"field": "status", "operator": "eq", "value": "active"}],
@@ -531,12 +554,15 @@ class TestReadAdbcBranchPaging:
         # The connector must fail loudly before that happens.
         runtime = _FakeRuntime(is_adbc=True)
         connector = GenericSQLConnector()
-        with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()), patch(
-            "cdk.sql.generic.open_adbc_reader",
-            return_value=_adbc_cm(_RecordingReader([])),
-        ), patch("cdk.sql.generic.SchemaContract") as sc, patch(
-            "cdk.sql.generic.QueryBuilder"
-        ) as qb:
+        with (
+            patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()),
+            patch(
+                "cdk.sql.generic.open_adbc_reader",
+                return_value=_adbc_cm(_RecordingReader([])),
+            ),
+            patch("cdk.sql.generic.SchemaContract") as sc,
+            patch("cdk.sql.generic.QueryBuilder") as qb,
+        ):
             sc.return_value.cast_arrow_batch.side_effect = lambda b: b
             qb.return_value.build_select_query.return_value = (
                 "SELECT 1",
@@ -581,9 +607,11 @@ class TestReadSqlAlchemyBranch:
                 return False
 
         connector = GenericSQLConnector()
-        with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()), patch(
-            "cdk.sql.generic.acquire_connection", return_value=_AcquireCM()
-        ), patch("cdk.sql.generic.SchemaContract") as sc:
+        with (
+            patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()),
+            patch("cdk.sql.generic.acquire_connection", return_value=_AcquireCM()),
+            patch("cdk.sql.generic.SchemaContract") as sc,
+        ):
             sc.return_value.from_pylist.side_effect = lambda rows: rows
             out = await _drain(
                 connector, runtime, _endpoint_config(), checkpoint, batch_size=2
@@ -617,9 +645,11 @@ class TestReadSqlAlchemyBranch:
                 return False
 
         connector = GenericSQLConnector()
-        with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()), patch(
-            "cdk.sql.generic.acquire_connection", return_value=_AcquireCM()
-        ), patch("cdk.sql.generic.SchemaContract") as sc:
+        with (
+            patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()),
+            patch("cdk.sql.generic.acquire_connection", return_value=_AcquireCM()),
+            patch("cdk.sql.generic.SchemaContract") as sc,
+        ):
             sc.return_value.from_pylist.side_effect = lambda rows: rows
             config = _endpoint_config(
                 database_pagination={"type": "offset", "order_by_field": "updated_at"},
@@ -654,9 +684,11 @@ class TestReadSqlAlchemyBranch:
                 return False
 
         connector = GenericSQLConnector()
-        with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()), patch(
-            "cdk.sql.generic.acquire_connection", return_value=_AcquireCM()
-        ), patch("cdk.sql.generic.SchemaContract") as sc:
+        with (
+            patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()),
+            patch("cdk.sql.generic.acquire_connection", return_value=_AcquireCM()),
+            patch("cdk.sql.generic.SchemaContract") as sc,
+        ):
             sc.return_value.from_pylist.side_effect = lambda rows: rows
             config = _endpoint_config(
                 replication={"method": "incremental", "cursor_field": "updated_at"},
@@ -690,11 +722,12 @@ class TestReadSqlAlchemyBranch:
                 return False
 
         connector = GenericSQLConnector()
-        with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()), patch(
-            "cdk.sql.generic.acquire_connection", return_value=_AcquireCM()
-        ), patch("cdk.sql.generic.SchemaContract"), patch(
-            "cdk.sql.generic.QueryBuilder"
-        ) as qb:
+        with (
+            patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()),
+            patch("cdk.sql.generic.acquire_connection", return_value=_AcquireCM()),
+            patch("cdk.sql.generic.SchemaContract"),
+            patch("cdk.sql.generic.QueryBuilder") as qb,
+        ):
             qb.return_value.build_select_query.return_value = ("SELECT 1", [])
             await _drain(
                 connector, runtime, _endpoint_config(), _checkpoint(cursor=None)
@@ -711,15 +744,19 @@ class TestControlPlaneDelegators:
     async def test_discovery_and_create_table_delegate(self):
         connector = GenericSQLConnector()
         runtime = object()
-        with patch(
-            "cdk.sql.generic._sql_list_schemas", new=AsyncMock(return_value=["s"])
-        ) as ls, patch(
-            "cdk.sql.generic._sql_list_tables", new=AsyncMock(return_value=["t"])
-        ) as lt, patch(
-            "cdk.sql.generic._sql_list_columns", new=AsyncMock(return_value=([], []))
-        ) as lc, patch(
-            "cdk.sql.generic._sql_create_table", new=AsyncMock()
-        ) as ct:
+        with (
+            patch(
+                "cdk.sql.generic._sql_list_schemas", new=AsyncMock(return_value=["s"])
+            ) as ls,
+            patch(
+                "cdk.sql.generic._sql_list_tables", new=AsyncMock(return_value=["t"])
+            ) as lt,
+            patch(
+                "cdk.sql.generic._sql_list_columns",
+                new=AsyncMock(return_value=([], [])),
+            ) as lc,
+            patch("cdk.sql.generic._sql_create_table", new=AsyncMock()) as ct,
+        ):
             assert await connector.list_schemas(runtime) == ["s"]
             assert await connector.list_tables(runtime, "public") == ["t"]
             assert await connector.list_columns(runtime, "public", "orders") == ([], [])
