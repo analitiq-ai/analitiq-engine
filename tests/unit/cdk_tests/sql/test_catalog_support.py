@@ -43,10 +43,12 @@ def _route(rows_by_view):
 class _StubMapper:
     """Minimal TypeMapper that maps any native type to Utf8."""
 
-    def to_arrow_type(self, native):
+    @staticmethod
+    def to_arrow_type(native):
         return "Utf8"
 
-    def to_native_type(self, canonical, *, params=None):
+    @staticmethod
+    def to_native_type(canonical, *, params=None):
         return "TEXT"
 
 
@@ -77,21 +79,25 @@ def _make_handler():
 
 
 class TestQuoteQualifiedCatalog:
-    def test_three_part_ansi(self):
+    @staticmethod
+    def test_three_part_ansi():
         d = SqlDialect()
         assert d.quote_qualified("public", "orders", catalog="my_db") == (
             '"my_db"."public"."orders"'
         )
 
-    def test_catalog_without_schema(self):
+    @staticmethod
+    def test_catalog_without_schema():
         d = SqlDialect()
         assert d.quote_qualified("", "orders", catalog="my_db") == ('"my_db"."orders"')
 
-    def test_no_catalog_unchanged(self):
+    @staticmethod
+    def test_no_catalog_unchanged():
         d = SqlDialect()
         assert d.quote_qualified("public", "orders") == '"public"."orders"'
 
-    def test_catalog_is_quoted(self):
+    @staticmethod
+    def test_catalog_is_quoted():
         d = SqlDialect()
         result = d.quote_qualified("public", "orders", catalog="my-db")
         assert '"my-db"' in result
@@ -103,19 +109,22 @@ class TestQuoteQualifiedCatalog:
 
 
 class TestAdbcIngestSchemaKwargs:
-    def test_schema_only_no_catalog(self):
+    @staticmethod
+    def test_schema_only_no_catalog():
         d = SqlDialect()
         kwargs = d.adbc_ingest_schema_kwargs("public")
         assert kwargs == {"db_schema_name": "public"}
         assert "catalog_name" not in kwargs
 
-    def test_schema_and_catalog(self):
+    @staticmethod
+    def test_schema_and_catalog():
         d = SqlDialect()
         kwargs = d.adbc_ingest_schema_kwargs("public", catalog_name="my_db")
         assert kwargs["db_schema_name"] == "public"
         assert kwargs["catalog_name"] == "my_db"
 
-    def test_empty_schema_no_db_schema_name(self):
+    @staticmethod
+    def test_empty_schema_no_db_schema_name():
         d = SqlDialect()
         kwargs = d.adbc_ingest_schema_kwargs("", catalog_name="my_db")
         assert "db_schema_name" not in kwargs
@@ -128,8 +137,9 @@ class TestAdbcIngestSchemaKwargs:
 
 
 class TestConfigureSchemaCatalogWiring:
+    @staticmethod
     @pytest.mark.asyncio
-    async def test_catalog_stored_in_stream_state(self):
+    async def test_catalog_stored_in_stream_state():
         from src.grpc.generated.analitiq.v1 import SchemaMessage, WriteMode
 
         handler = _make_handler()
@@ -168,8 +178,9 @@ class TestConfigureSchemaCatalogWiring:
         assert state.schema_name == "analytics"
         assert state.table_name == "orders"
 
+    @staticmethod
     @pytest.mark.asyncio
-    async def test_no_catalog_gives_empty_string(self):
+    async def test_no_catalog_gives_empty_string():
         from src.grpc.generated.analitiq.v1 import SchemaMessage, WriteMode
 
         handler = _make_handler()
@@ -207,8 +218,9 @@ class TestConfigureSchemaCatalogWiring:
 
 
 class TestDiscoveryCatalogFilter:
+    @staticmethod
     @pytest.mark.asyncio
-    async def test_list_tables_catalog_param_appended(self):
+    async def test_list_tables_catalog_param_appended():
         runtime = FakeAdbcRuntime(
             "ansi",
             responder=_route({"tables": [{"table_name": "orders"}]}),
@@ -221,8 +233,9 @@ class TestDiscoveryCatalogFilter:
         assert params[0] == "analytics"
         assert params[1] == "my_project"
 
+    @staticmethod
     @pytest.mark.asyncio
-    async def test_list_tables_without_catalog_omits_catalog_param(self):
+    async def test_list_tables_without_catalog_omits_catalog_param():
         runtime = FakeAdbcRuntime(
             "ansi",
             responder=_route({"tables": [{"table_name": "orders"}]}),
@@ -231,8 +244,9 @@ class TestDiscoveryCatalogFilter:
         _sql, params = runtime.connections[-1].executed[-1]
         assert params == ["public"]
 
+    @staticmethod
     @pytest.mark.asyncio
-    async def test_list_columns_catalog_param_in_both_queries(self):
+    async def test_list_columns_catalog_param_in_both_queries():
         runtime = FakeAdbcRuntime(
             "ansi",
             mapper=_StubMapper(),
@@ -262,7 +276,8 @@ class TestDiscoveryCatalogFilter:
 
 
 class TestQueryBuilderCatalog:
-    def test_catalog_and_schema_compose_dotted_from(self):
+    @staticmethod
+    def test_catalog_and_schema_compose_dotted_from():
         builder = QueryBuilder("postgresql")
         sql, _ = builder.build_select_query(
             QueryConfig(
@@ -274,7 +289,8 @@ class TestQueryBuilderCatalog:
         )
         assert "my_project.analytics" in sql
 
-    def test_no_catalog_no_dotted_prefix(self):
+    @staticmethod
+    def test_no_catalog_no_dotted_prefix():
         builder = QueryBuilder("postgresql")
         sql, _ = builder.build_select_query(
             QueryConfig(
@@ -293,25 +309,30 @@ class TestQueryBuilderCatalog:
 
 
 class TestEnsureTablesViaAdbcCatalog:
+    @staticmethod
     @pytest.mark.asyncio
-    async def test_schema_ddl_includes_catalog_when_set(self):
+    async def test_schema_ddl_includes_catalog_when_set():
         from cdk.sql.generic import GenericSQLConnector, _StreamState
 
         executed: list[str] = []
 
         class _FakeCursor:
-            def execute(self, sql, *args):
+            @staticmethod
+            def execute(sql, *args):
                 executed.append(sql)
 
-            def close(self):
-                ...
+            @staticmethod
+            def close():
+                pass
 
         class _FakeConn:
-            def cursor(self):
+            @staticmethod
+            def cursor():
                 return _FakeCursor()
 
-            def commit(self):
-                ...
+            @staticmethod
+            def commit():
+                pass
 
         handler = GenericSQLConnector()
         handler._adbc_only = True
@@ -331,10 +352,9 @@ class TestEnsureTablesViaAdbcCatalog:
         assert schema_stmts, "expected a CREATE SCHEMA statement"
         assert schema_stmts[0] == 'CREATE SCHEMA IF NOT EXISTS "my_project"."analytics"'
 
+    @staticmethod
     @pytest.mark.asyncio
-    async def test_schema_ddl_suppressed_when_schema_is_implicit_default_with_catalog(
-        self,
-    ):
+    async def test_schema_ddl_suppressed_when_schema_is_implicit_default_with_catalog():
         from cdk.sql.generic import GenericSQLConnector, _StreamState
 
         class _ImplicitPublicDialect(SqlDialect):
@@ -347,18 +367,22 @@ class TestEnsureTablesViaAdbcCatalog:
         executed: list[str] = []
 
         class _FakeCursor:
-            def execute(self, sql, *args):
+            @staticmethod
+            def execute(sql, *args):
                 executed.append(sql)
 
-            def close(self):
-                ...
+            @staticmethod
+            def close():
+                pass
 
         class _FakeConn:
-            def cursor(self):
+            @staticmethod
+            def cursor():
                 return _FakeCursor()
 
-            def commit(self):
-                ...
+            @staticmethod
+            def commit():
+                pass
 
         handler = _ImplicitConnector()
         handler._adbc_only = True
@@ -377,25 +401,30 @@ class TestEnsureTablesViaAdbcCatalog:
             not schema_stmts
         ), "CREATE SCHEMA should be suppressed when schema is implicit default"
 
+    @staticmethod
     @pytest.mark.asyncio
-    async def test_schema_ddl_without_catalog_unchanged(self):
+    async def test_schema_ddl_without_catalog_unchanged():
         from cdk.sql.generic import GenericSQLConnector, _StreamState
 
         executed: list[str] = []
 
         class _FakeCursor:
-            def execute(self, sql, *args):
+            @staticmethod
+            def execute(sql, *args):
                 executed.append(sql)
 
-            def close(self):
-                ...
+            @staticmethod
+            def close():
+                pass
 
         class _FakeConn:
-            def cursor(self):
+            @staticmethod
+            def cursor():
                 return _FakeCursor()
 
-            def commit(self):
-                ...
+            @staticmethod
+            def commit():
+                pass
 
         handler = GenericSQLConnector()
         handler._adbc_only = True
@@ -417,7 +446,8 @@ class TestEnsureTablesViaAdbcCatalog:
 
 
 class TestQueryBuilderCatalogQuoting:
-    def test_quote_identifiers_quotes_each_component(self):
+    @staticmethod
+    def test_quote_identifiers_quotes_each_component():
         builder = QueryBuilder("postgresql", quote_identifiers=True)
         sql, _ = builder.build_select_query(
             QueryConfig(
@@ -430,7 +460,8 @@ class TestQueryBuilderCatalogQuoting:
         # Hyphenated catalog and mixed-case schema each quoted; dot unquoted.
         assert '"my-project"."Analytics"' in sql
 
-    def test_no_quote_identifiers_leaves_dotted_raw(self):
+    @staticmethod
+    def test_no_quote_identifiers_leaves_dotted_raw():
         builder = QueryBuilder("postgresql")
         sql, _ = builder.build_select_query(
             QueryConfig(
@@ -450,7 +481,8 @@ class TestQueryBuilderCatalogQuoting:
 
 
 class TestPrimaryKeysQueryCatalog:
-    def test_join_scopes_constraint_and_table_catalog(self):
+    @staticmethod
+    def test_join_scopes_constraint_and_table_catalog():
         sql, params = SqlDialect().primary_keys_query(
             "public", "orders", catalog="my_db"
         )
@@ -472,8 +504,9 @@ class _UpperDialect(SqlDialect):
 
 
 class TestDiscoveryCatalogFilterNormalized:
+    @staticmethod
     @pytest.mark.asyncio
-    async def test_catalog_filter_folded_for_folding_dialect(self):
+    async def test_catalog_filter_folded_for_folding_dialect():
         runtime = FakeAdbcRuntime(
             "ansi",
             responder=_route({"tables": [{"table_name": "orders"}]}),
@@ -499,14 +532,16 @@ class _NoTargetDialect(SqlDialect):
 
 
 class TestAdbcIngestTargetKwargs:
-    def test_base_threads_catalog(self):
+    @staticmethod
+    def test_base_threads_catalog():
         from cdk.sql.generic import GenericSQLConnector
 
         kwargs = GenericSQLConnector()._adbc_ingest_target_kwargs("analytics", "my_db")
         assert kwargs["db_schema_name"] == "analytics"
         assert kwargs["catalog_name"] == "my_db"
 
-    def test_catalog_is_normalized(self):
+    @staticmethod
+    def test_catalog_is_normalized():
         """Normalizing dialects apply the same case-folding to catalog as schema."""
         from cdk.sql.generic import GenericSQLConnector
 
@@ -521,7 +556,8 @@ class TestAdbcIngestTargetKwargs:
         assert kwargs["db_schema_name"] == "ANALYTICS"
         assert kwargs["catalog_name"] == "MY_DB"
 
-    def test_no_catalog_never_raises(self):
+    @staticmethod
+    def test_no_catalog_never_raises():
         from cdk.sql.generic import GenericSQLConnector
 
         class _C(GenericSQLConnector):
@@ -529,7 +565,8 @@ class TestAdbcIngestTargetKwargs:
 
         assert _C()._adbc_ingest_target_kwargs("analytics") == {}
 
-    def test_raises_when_dialect_drops_a_requested_catalog(self):
+    @staticmethod
+    def test_raises_when_dialect_drops_a_requested_catalog():
         from cdk.adbc_registry import AdbcConfigurationError
         from cdk.sql.generic import GenericSQLConnector
 
@@ -546,10 +583,12 @@ class TestAdbcIngestTargetKwargs:
 
 
 class TestSqlalchemyPreDdlCatalog:
-    def test_base_accepts_catalog_kwarg(self):
+    @staticmethod
+    def test_base_accepts_catalog_kwarg():
         assert SqlDialect().sqlalchemy_pre_ddl("public", catalog_name="db") == []
 
-    def test_override_can_qualify_schema_with_catalog(self):
+    @staticmethod
+    def test_override_can_qualify_schema_with_catalog():
         class _D(SqlDialect):
             def sqlalchemy_pre_ddl(self, schema_name, *, catalog_name=""):
                 if catalog_name:
@@ -570,8 +609,9 @@ class TestSqlalchemyPreDdlCatalog:
 
 
 class TestRunDdlAndReflectCatalogQuoting:
+    @staticmethod
     def test_catalog_and_schema_produce_per_component_quoted_reflect_schema(
-        self, monkeypatch
+        monkeypatch,
     ):
         """SQLAlchemy reflection schema uses quoted catalog + schema separately."""
         import cdk.sql.generic as gen
@@ -607,7 +647,8 @@ class TestRunDdlAndReflectCatalogQuoting:
         assert "my-catalog" not in schema_arg
         assert "my-schema" not in schema_arg
 
-    def test_catalog_only_uses_quoted_catalog(self, monkeypatch):
+    @staticmethod
+    def test_catalog_only_uses_quoted_catalog(monkeypatch):
         import cdk.sql.generic as gen
         from cdk.sql.generic import GenericSQLConnector, _StreamState
 
@@ -640,8 +681,9 @@ class TestRunDdlAndReflectCatalogQuoting:
 
 
 class TestCapabilityCatalogSurface:
+    @staticmethod
     @pytest.mark.asyncio
-    async def test_list_tables_delegator_threads_catalog(self, monkeypatch):
+    async def test_list_tables_delegator_threads_catalog(monkeypatch):
         import cdk.sql.generic as gen
 
         seen: dict[str, str] = {}
@@ -656,8 +698,9 @@ class TestCapabilityCatalogSurface:
         )
         assert seen["catalog"] == "my_db"
 
+    @staticmethod
     @pytest.mark.asyncio
-    async def test_create_table_delegator_threads_catalog(self, monkeypatch):
+    async def test_create_table_delegator_threads_catalog(monkeypatch):
         import cdk.sql.generic as gen
 
         seen: dict[str, str] = {}

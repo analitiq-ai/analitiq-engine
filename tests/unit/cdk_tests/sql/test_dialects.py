@@ -82,25 +82,29 @@ class TestQuoting:
             '"PUBLIC"."orders"'
         )
 
-    def test_catalog_produces_three_part_name(self):
+    @staticmethod
+    def test_catalog_produces_three_part_name():
         assert (
             SqlDialect().quote_qualified("public", "orders", catalog="my_db")
             == '"my_db"."public"."orders"'
         )
 
-    def test_catalog_without_schema_produces_two_part_name(self):
+    @staticmethod
+    def test_catalog_without_schema_produces_two_part_name():
         assert (
             SqlDialect().quote_qualified("", "orders", catalog="my_db")
             == '"my_db"."orders"'
         )
 
-    def test_catalog_with_backtick_dialect(self):
+    @staticmethod
+    def test_catalog_with_backtick_dialect():
         assert (
             _BacktickDialect().quote_qualified("ds", "orders", catalog="proj")
             == "`proj`.`ds`.`orders`"
         )
 
-    def test_catalog_normalizes_schema(self):
+    @staticmethod
+    def test_catalog_normalizes_schema():
         assert (
             _UpperNormalizingDialect().quote_qualified(
                 "public", "orders", catalog="MY_DB"
@@ -108,7 +112,8 @@ class TestQuoting:
             == '"MY_DB"."PUBLIC"."orders"'
         )
 
-    def test_catalog_is_normalized_like_schema(self):
+    @staticmethod
+    def test_catalog_is_normalized_like_schema():
         assert (
             _UpperNormalizingDialect().quote_qualified(
                 "public", "orders", catalog="my_db"
@@ -195,29 +200,34 @@ class TestDiscoveryQueries:
         _, params = _UpperNormalizingDialect().primary_keys_query("public", "orders")
         assert params == ["PUBLIC", "orders"]
 
-    def test_tables_query_with_catalog_adds_filter(self):
+    @staticmethod
+    def test_tables_query_with_catalog_adds_filter():
         sql, params = SqlDialect().tables_query("public", catalog="my_db")
         assert "table_catalog = ?" in sql
         assert params == ["public", "my_db"]
         assert sql.count("?") == 2
 
-    def test_tables_query_without_catalog_has_no_catalog_filter(self):
+    @staticmethod
+    def test_tables_query_without_catalog_has_no_catalog_filter():
         sql, params = SqlDialect().tables_query("public")
         assert "table_catalog" not in sql
         assert params == ["public"]
 
-    def test_columns_query_with_catalog_adds_filter(self):
+    @staticmethod
+    def test_columns_query_with_catalog_adds_filter():
         sql, params = SqlDialect().columns_query("public", "orders", catalog="my_db")
         assert "table_catalog = ?" in sql
         assert params == ["public", "orders", "my_db"]
         assert sql.count("?") == 3
 
-    def test_columns_query_without_catalog_has_no_catalog_filter(self):
+    @staticmethod
+    def test_columns_query_without_catalog_has_no_catalog_filter():
         sql, params = SqlDialect().columns_query("public", "orders")
         assert "table_catalog" not in sql
         assert params == ["public", "orders"]
 
-    def test_primary_keys_query_with_catalog_adds_filter(self):
+    @staticmethod
+    def test_primary_keys_query_with_catalog_adds_filter():
         sql, params = SqlDialect().primary_keys_query(
             "public", "orders", catalog="my_db"
         )
@@ -225,44 +235,51 @@ class TestDiscoveryQueries:
         assert params == ["public", "orders", "my_db"]
         assert sql.count("?") == 3
 
-    def test_primary_keys_query_without_catalog_has_no_catalog_filter(self):
+    @staticmethod
+    def test_primary_keys_query_without_catalog_has_no_catalog_filter():
         sql, params = SqlDialect().primary_keys_query("public", "orders")
         assert "table_catalog = ?" not in sql
         assert params == ["public", "orders"]
 
-    def test_primary_keys_query_joins_kcu_on_catalog(self):
+    @staticmethod
+    def test_primary_keys_query_joins_kcu_on_catalog():
         sql, _ = SqlDialect().primary_keys_query("public", "orders")
         assert "tc.table_catalog = kcu.table_catalog" in sql
 
-    def test_tables_query_with_catalog_qualifies_information_schema(self):
+    @staticmethod
+    def test_tables_query_with_catalog_qualifies_information_schema():
         sql, _ = SqlDialect().tables_query("public", catalog="my_db")
         assert '"my_db".information_schema.tables' in sql
         assert "information_schema.tables" not in sql.split('"my_db"')[0]
 
-    def test_tables_query_without_catalog_uses_unqualified_information_schema(self):
+    @staticmethod
+    def test_tables_query_without_catalog_uses_unqualified_information_schema():
         sql, _ = SqlDialect().tables_query("public")
         assert sql.startswith("SELECT table_name FROM information_schema.tables")
 
-    def test_columns_query_with_catalog_qualifies_information_schema(self):
+    @staticmethod
+    def test_columns_query_with_catalog_qualifies_information_schema():
         sql, _ = SqlDialect().columns_query("public", "orders", catalog="my_db")
         assert '"my_db".information_schema.columns' in sql
 
-    def test_columns_query_without_catalog_uses_unqualified_information_schema(self):
+    @staticmethod
+    def test_columns_query_without_catalog_uses_unqualified_information_schema():
         sql, _ = SqlDialect().columns_query("public", "orders")
         assert "FROM information_schema.columns" in sql
 
-    def test_primary_keys_query_with_catalog_qualifies_information_schema(self):
+    @staticmethod
+    def test_primary_keys_query_with_catalog_qualifies_information_schema():
         sql, _ = SqlDialect().primary_keys_query("public", "orders", catalog="my_db")
         assert '"my_db".information_schema.table_constraints' in sql
         assert '"my_db".information_schema.key_column_usage' in sql
 
-    def test_primary_keys_query_without_catalog_uses_unqualified_information_schema(
-        self,
-    ):
+    @staticmethod
+    def test_primary_keys_query_without_catalog_uses_unqualified_information_schema():
         sql, _ = SqlDialect().primary_keys_query("public", "orders")
         assert "FROM information_schema.table_constraints" in sql
 
-    def test_tables_query_catalog_normalizes_for_quoting(self):
+    @staticmethod
+    def test_tables_query_catalog_normalizes_for_quoting():
         sql, _ = _UpperNormalizingDialect().tables_query("public", catalog="my_db")
         assert '"MY_DB".information_schema.tables' in sql
 

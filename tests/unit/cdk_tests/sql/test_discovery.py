@@ -28,10 +28,12 @@ from .conftest import FakeAdbcRuntime
 class _StubMapper:
     """Minimal TypeMapper that maps any native type to Utf8."""
 
-    def to_arrow_type(self, native):
+    @staticmethod
+    def to_arrow_type(native):
         return "Utf8"
 
-    def to_native_type(self, canonical, *, params=None):
+    @staticmethod
+    def to_native_type(canonical, *, params=None):
         return "TEXT"
 
 

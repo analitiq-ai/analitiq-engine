@@ -722,7 +722,8 @@ class TestCatalogQualifiedTable:
     cross-catalog systems (BigQuery, Snowflake) interpret it correctly.
     """
 
-    def test_catalog_and_schema_produce_compound_from(self):
+    @staticmethod
+    def test_catalog_and_schema_produce_compound_from():
         builder = QueryBuilder("postgresql")
         sql, _ = builder.build_select_query(
             QueryConfig(
@@ -735,7 +736,8 @@ class TestCatalogQualifiedTable:
         assert "my_project.analytics" in sql
         assert "orders" in sql
 
-    def test_catalog_without_schema(self):
+    @staticmethod
+    def test_catalog_without_schema():
         builder = QueryBuilder("postgresql")
         sql, _ = builder.build_select_query(
             QueryConfig(
@@ -748,7 +750,8 @@ class TestCatalogQualifiedTable:
         assert "my_project" in sql
         assert "orders" in sql
 
-    def test_no_catalog_behaves_as_before(self):
+    @staticmethod
+    def test_no_catalog_behaves_as_before():
         # Absence of catalog_name must not alter existing behaviour.
         builder = QueryBuilder("postgresql")
         sql, _ = builder.build_select_query(
@@ -761,7 +764,8 @@ class TestCatalogQualifiedTable:
         assert "public" in sql
         assert "my_project" not in sql
 
-    def test_catalog_adbc_qmark_path_compound_schema(self):
+    @staticmethod
+    def test_catalog_adbc_qmark_path_compound_schema():
         # ADBC path (quote_identifiers=True, qmark) still threads the
         # catalog through the compound schema string.
         builder = QueryBuilder(
