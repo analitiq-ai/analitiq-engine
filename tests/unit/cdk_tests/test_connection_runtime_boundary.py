@@ -175,7 +175,8 @@ class TestWorkerSideRuntime:
         with pytest.raises(RuntimeError, match="pre-resolved worker runtime"):
             await worker_runtime.materialize()
 
-    async def test_worker_without_artifacts_rejected(self):  # skipcq: PTC-W0049
+    @pytest.mark.asyncio
+    async def test_worker_without_artifacts_rejected(self):
         # A malformed payload with neither transport_spec nor resolved_config
         # (and no secret_refs) must not materialize a degenerate worker runtime:
         # the trusted path always consults the refusing resolver.
