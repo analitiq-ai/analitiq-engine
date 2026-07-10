@@ -140,7 +140,10 @@ class SchemeSecretsResolver(SecretsResolver):
 
     # -- schemes ---------------------------------------------------------
 
-    def _resolve_env(self, connection_id: str, name: str, locator: str) -> str:
+    @staticmethod
+    def _resolve_env(connection_id: str, name: str, locator: str) -> str:
+        # No instance state: the environment is process-global (unlike file:,
+        # sidecar:, s3: which read from the connection dir / resolver config).
         var = locator[len("env:") :]
         try:
             return os.environ[var]
