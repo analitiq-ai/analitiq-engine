@@ -111,7 +111,7 @@ class InMemorySecretsResolver(SecretsResolver):
             )
 
         logger.debug(
-            f"Resolved in-memory secrets for {connection_id} ({len(result)} keys)"
+            "Resolved in-memory secrets for %s (%d keys)", connection_id, len(result)
         )
         return result
 

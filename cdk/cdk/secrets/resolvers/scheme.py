@@ -195,9 +195,11 @@ class SchemeSecretsResolver(SecretsResolver):
         return str(value)
 
     def _resolve_s3(self, connection_id: str, name: str, locator: str) -> str:
+        # Lazy import keeps the core engine cloud-free and dependency-light: boto3
+        # loads only when a connection actually uses an s3:// ref (the [s3] extra).
         try:
-            import boto3
-            from botocore.exceptions import BotoCoreError, ClientError
+            import boto3  # skipcq: PYL-C0415
+            import botocore.exceptions as boto  # skipcq: PYL-C0415
         except ImportError as e:
             raise SecretResolutionError(
                 f"secret_ref {name!r} -> {locator}: the s3:// scheme requires the "
@@ -222,7 +224,7 @@ class SchemeSecretsResolver(SecretsResolver):
         try:
             obj = client.get_object(Bucket=bucket, Key=key)
             body = obj["Body"].read()
-        except (BotoCoreError, ClientError) as e:
+        except (boto.BotoCoreError, boto.ClientError) as e:
             raise SecretResolutionError(
                 f"secret_ref {name!r} -> {locator}: {e}", connection_id
             ) from e
