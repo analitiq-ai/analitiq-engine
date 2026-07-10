@@ -583,10 +583,12 @@ class TestAdbcIngestTargetKwargs:
             dialect_class = _NoTargetDialect
 
         connector = _C()
-        batch = pa.record_batch({"x": pa.array([1])})
+        batch = pa.RecordBatch.from_pydict({"x": [1]})
         with patch.object(connector, "_adbc_truncate_sync") as mock_trunc:
             with pytest.raises(AdbcConfigurationError, match="my_db"):
-                connector._truncate_then_ingest_sync(batch, "analytics", "orders", "my_db")
+                connector._truncate_then_ingest_sync(
+                    batch, "analytics", "orders", "my_db"
+                )
             mock_trunc.assert_not_called()
 
 
