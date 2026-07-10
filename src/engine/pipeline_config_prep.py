@@ -49,13 +49,14 @@ from analitiq.contracts.stream import ReplicationConfig as ContractReplicationCo
 from pydantic import BaseModel
 
 from cdk.connection_runtime import ConnectionRuntime
-from cdk.secrets import LocalFileSecretsResolver, SecretsResolver
+from cdk.secrets import SchemeSecretsResolver, SecretsResolver
 from cdk.type_map import (
     TypeMapNotFoundError,
     TypeMapper,
     load_connection_type_map,
     load_type_map,
 )
+from src.config import settings
 from src.config.connection_loader import load_connection_file, load_connector_definition
 from src.config.endpoint_resolver import ConnectionLookup, resolve_endpoint_ref
 from src.config.schema_validator import ContractValidationError
@@ -454,8 +455,12 @@ class PipelineConfigPrep:
         return self._connection_type_mappers[directory]
 
     def _create_secrets_resolver(self, directory: str) -> SecretsResolver:
-        secrets_dir = self._paths["connections"] / directory / ".secrets"
-        return LocalFileSecretsResolver(secrets_dir)
+        connection_dir = self._paths["connections"] / directory
+        return SchemeSecretsResolver(
+            connection_dir,
+            s3_endpoint_url=settings.s3_secrets_endpoint_url(),
+            s3_region=settings.s3_secrets_region(),
+        )
 
     def _resolve_connection_by_id(self, connection_id: str) -> ConnectionRuntime:
         """Materialize (or return cached) ConnectionRuntime for a ``connection_id``."""

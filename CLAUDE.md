@@ -54,7 +54,12 @@ Streams reference endpoints using scoped paths:
 
 ### Secrets
 
-Credentials use `${placeholder}` syntax in connection configs, resolved from `connections/{alias}/.secrets/credentials.json`. Placeholders are expanded at connection time. Missing placeholders raise `PlaceholderExpansionError`.
+A connection's `secret_refs.<name>` value carries a scheme that names where the
+secret lives: `env:VAR`, `file:./path`, `sidecar:<name>` (an entry in
+`connections/{alias}/.secrets/credentials.json`), or `s3://bucket/key` (the
+`[s3]` extra). `env:`/`file:`/`sidecar:` are built-in and cloud-free. Refs are
+resolved at connection time; an unresolvable ref fails loud, never falling back
+to an empty secret.
 
 ## Environment Variables
 

@@ -188,3 +188,27 @@ def destination_index() -> int:
 def run_mode() -> str:
     """Process role: ``source`` or ``destination`` (``RUN_MODE``)."""
     return os.getenv("RUN_MODE", "source").lower()
+
+
+# ---------------------------------------------------------------------------
+# Secret resolution (s3:// secret_refs; only consulted with the [s3] extra)
+# ---------------------------------------------------------------------------
+
+
+def s3_secrets_endpoint_url() -> str | None:
+    """S3 endpoint for ``s3://`` secret refs (``AWS_ENDPOINT_URL_S3``).
+
+    Lets an S3-compatible store (e.g. MinIO) back ``s3://`` secret refs. Unset
+    (the default) leaves ``boto3`` to use AWS's own endpoint. ``AWS_ENDPOINT_URL``
+    is honoured as a fallback so a single override covers all AWS services.
+    """
+    return os.getenv("AWS_ENDPOINT_URL_S3") or os.getenv("AWS_ENDPOINT_URL") or None
+
+
+def s3_secrets_region() -> str | None:
+    """AWS region for ``s3://`` secret refs (``AWS_REGION``).
+
+    Unset leaves ``boto3`` to resolve the region from its own config chain.
+    ``AWS_DEFAULT_REGION`` is honoured as a fallback.
+    """
+    return os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION") or None
