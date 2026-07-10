@@ -1913,6 +1913,9 @@ class GenericSQLConnector(BaseDestinationHandler):
         table_name: str,
         catalog_name: str = "",
     ) -> None:
+        # Validate catalog targeting before truncating so a misconfigured stream
+        # raises here rather than after the table has already been emptied.
+        self._adbc_ingest_target_kwargs(schema_name, catalog_name)
         # RLock is reentrant: the same-thread acquires inside
         # _adbc_truncate_sync and _adbc_only_ingest_sync are safe.
         with self._adbc_op_lock:

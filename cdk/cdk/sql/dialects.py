@@ -359,7 +359,6 @@ class SqlDialect:
             " AND tc.constraint_name = kcu.constraint_name "
             " AND tc.table_schema = kcu.table_schema "
             " AND tc.table_name = kcu.table_name "
-            " AND tc.table_catalog = kcu.table_catalog "
             "WHERE tc.constraint_type = 'PRIMARY KEY' "
             "  AND tc.table_schema = ? AND tc.table_name = ?"
         )

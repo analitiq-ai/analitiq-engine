@@ -479,7 +479,6 @@ class TestPrimaryKeysQueryCatalog:
         )
         assert "tc.constraint_catalog = kcu.constraint_catalog" in sql
         assert "tc.constraint_schema = kcu.constraint_schema" in sql
-        assert "tc.table_catalog = kcu.table_catalog" in sql
         assert "tc.table_catalog = ?" in sql
         assert params[-1] == "my_db"
 
@@ -569,6 +568,26 @@ class TestAdbcIngestTargetKwargs:
 
         with pytest.raises(AdbcConfigurationError, match="my_db"):
             _C()._adbc_ingest_target_kwargs("analytics", "my_db")
+
+    @staticmethod
+    def test_truncate_then_ingest_validates_before_truncating():
+        """Validation must raise before _adbc_truncate_sync is called."""
+        from unittest.mock import patch
+
+        import pyarrow as pa
+
+        from cdk.adbc_registry import AdbcConfigurationError
+        from cdk.sql.generic import GenericSQLConnector
+
+        class _C(GenericSQLConnector):
+            dialect_class = _NoTargetDialect
+
+        connector = _C()
+        batch = pa.record_batch({"x": pa.array([1])})
+        with patch.object(connector, "_adbc_truncate_sync") as mock_trunc:
+            with pytest.raises(AdbcConfigurationError, match="my_db"):
+                connector._truncate_then_ingest_sync(batch, "analytics", "orders", "my_db")
+            mock_trunc.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

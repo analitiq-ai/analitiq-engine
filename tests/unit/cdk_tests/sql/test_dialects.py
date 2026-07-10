@@ -243,9 +243,11 @@ class TestDiscoveryQueries:
         assert params == ["public", "orders"]
 
     @staticmethod
-    def test_primary_keys_query_joins_kcu_on_catalog():
+    def test_primary_keys_query_joins_kcu_on_constraint_fields():
         sql, _ = SqlDialect().primary_keys_query("public", "orders")
-        assert "tc.table_catalog = kcu.table_catalog" in sql
+        assert "tc.constraint_catalog = kcu.constraint_catalog" in sql
+        assert "tc.constraint_name = kcu.constraint_name" in sql
+        assert "tc.table_catalog = kcu.table_catalog" not in sql
 
     @staticmethod
     def test_tables_query_with_catalog_qualifies_information_schema():
