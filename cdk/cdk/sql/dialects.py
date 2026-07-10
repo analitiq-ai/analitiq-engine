@@ -302,8 +302,9 @@ class SqlDialect:
             else "information_schema"
         )
         sql = (
-            f"SELECT table_name FROM {info_schema}.tables "  # nosec B608  # skipcq: BAN-B608
-            f"WHERE table_schema = ?"
+            "SELECT table_name "
+            f"FROM {info_schema}.tables "  # nosec B608  # skipcq: BAN-B608
+            "WHERE table_schema = ?"
         )
         params: list[object] = [self.normalize_schema(schema)]
         if catalog:
@@ -325,9 +326,9 @@ class SqlDialect:
             else "information_schema"
         )
         sql = (
-            f"SELECT column_name, data_type, is_nullable "  # nosec B608  # skipcq: BAN-B608
-            f"FROM {info_schema}.columns "
-            f"WHERE table_schema = ? AND table_name = ?"
+            "SELECT column_name, data_type, is_nullable "
+            f"FROM {info_schema}.columns "  # nosec B608  # skipcq: BAN-B608
+            "WHERE table_schema = ? AND table_name = ?"
         )
         params: list[object] = [self.normalize_schema(schema), table]
         if catalog:
@@ -351,9 +352,9 @@ class SqlDialect:
             else "information_schema"
         )
         sql = (
-            f"SELECT kcu.column_name "  # nosec B608  # skipcq: BAN-B608
-            f"FROM {info_schema}.table_constraints tc "
-            f"JOIN {info_schema}.key_column_usage kcu "
+            "SELECT kcu.column_name "
+            f"FROM {info_schema}.table_constraints tc "  # nosec B608 # skipcq: BAN-B608
+            f"JOIN {info_schema}.key_column_usage kcu "  # nosec B608 # skipcq: BAN-B608
             "  ON tc.constraint_catalog = kcu.constraint_catalog "
             " AND tc.constraint_schema = kcu.constraint_schema "
             " AND tc.constraint_name = kcu.constraint_name "
