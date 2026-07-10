@@ -346,8 +346,7 @@ class TestEnsureTablesViaAdbcCatalog:
         from cdk.sql.generic import GenericSQLConnector, _StreamState
 
         class _ImplicitPublicDialect(SqlDialect):
-            @staticmethod
-            def schema_is_implicit_default(schema_name: str) -> bool:
+            def schema_is_implicit_default(self, schema_name: str) -> bool:
                 return (not schema_name) or schema_name.upper() == "PUBLIC"
 
         class _ImplicitConnector(GenericSQLConnector):
@@ -459,8 +458,7 @@ class TestPrimaryKeysQueryCatalog:
 
 
 class _UpperDialect(SqlDialect):
-    @staticmethod
-    def normalize_schema(schema: str) -> str:
+    def normalize_schema(self, schema: str) -> str:
         return schema.upper()
 
 
@@ -488,8 +486,7 @@ class TestDiscoveryCatalogFilterNormalized:
 class _NoTargetDialect(SqlDialect):
     """A Snowflake-like dialect that suppresses per-statement ingest kwargs."""
 
-    @staticmethod
-    def adbc_ingest_schema_kwargs(schema_name, *, catalog_name=""):
+    def adbc_ingest_schema_kwargs(self, schema_name, *, catalog_name=""):
         return {}
 
 
@@ -508,8 +505,7 @@ class TestAdbcIngestTargetKwargs:
         from cdk.sql.generic import GenericSQLConnector
 
         class _UpperNormalizingDialect(SqlDialect):
-            @staticmethod
-            def normalize_schema(s):
+            def normalize_schema(self, s):
                 return s.upper()
 
         class _C(GenericSQLConnector):
@@ -575,8 +571,7 @@ class TestSqlalchemyPreDdlCatalog:
     @staticmethod
     def test_override_can_qualify_schema_with_catalog():
         class _D(SqlDialect):
-            @staticmethod
-            def sqlalchemy_pre_ddl(schema_name, *, catalog_name=""):
+            def sqlalchemy_pre_ddl(self, schema_name, *, catalog_name=""):
                 if catalog_name:
                     return [
                         f'CREATE SCHEMA IF NOT EXISTS "{catalog_name}".'
@@ -603,8 +598,7 @@ class TestRunDdlAndReflectCatalogQuoting:
         import cdk.sql.generic as gen
 
         class _UpperNormalizingDialect(SqlDialect):
-            @staticmethod
-            def normalize_schema(s: str) -> str:
+            def normalize_schema(self, s: str) -> str:
                 return s.upper()
 
         class _C(gen.GenericSQLConnector):

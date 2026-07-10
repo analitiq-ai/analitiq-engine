@@ -40,8 +40,7 @@ class _UpperNormalizingDialect(SqlDialect):
 
     name = "upper"
 
-    @staticmethod
-    def normalize_schema(schema: str) -> str:
+    def normalize_schema(self, schema: str) -> str:
         return schema.upper()
 
 
