@@ -94,16 +94,24 @@ class SchemeSecretsResolver(SecretsResolver):
         Fails loud on the first unresolvable ref (missing env var, missing
         file/object, missing sidecar entry, unsupported scheme) -- never falls
         back to an empty or silent secret.
+
+        The sidecar file is cached only for the duration of this call (read once
+        across multiple ``sidecar:`` refs) and dropped before returning, so the
+        resolver holds no secret material between resolutions and a rotated
+        credentials file is picked up on the next call.
         """
         resolved: dict[str, str] = {}
-        for name, locator in secret_refs.items():
-            if not isinstance(locator, str):
-                raise SecretResolutionError(
-                    f"secret_ref {name!r} value must be a string, "
-                    f"got {type(locator).__name__}",
-                    connection_id,
-                )
-            resolved[name] = await self._resolve_one(connection_id, name, locator)
+        try:
+            for name, locator in secret_refs.items():
+                if not isinstance(locator, str):
+                    raise SecretResolutionError(
+                        f"secret_ref {name!r} value must be a string, "
+                        f"got {type(locator).__name__}",
+                        connection_id,
+                    )
+                resolved[name] = await self._resolve_one(connection_id, name, locator)
+        finally:
+            self._sidecar_cache = None
         logger.debug("Resolved %d secret_ref(s) for %s", len(resolved), connection_id)
         return resolved
 
