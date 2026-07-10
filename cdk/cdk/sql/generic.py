@@ -674,7 +674,7 @@ class GenericSQLConnector(BaseDestinationHandler):
         if cancelled is not None:
             raise cancelled
 
-    async def configure_schema(self, schema_spec: SchemaSpec) -> bool:
+    async def configure_schema(self, schema_spec: SchemaSpec) -> bool:  # skipcq: PY-R1000
         """Configure the destination from the preloaded contract endpoint.
 
         The SchemaSpec only carries identification fields; this method
@@ -2202,7 +2202,7 @@ class GenericSQLConnector(BaseDestinationHandler):
     # (``self._engine`` / ``self._adbc_conn``) is untouched; a source-role
     # instance and a write-role instance are distinct objects.
 
-    async def read_batches(
+    async def read_batches(  # skipcq: PY-R1000
         self,
         runtime: ConnectionRuntime,
         config: dict[str, Any],
@@ -2456,7 +2456,7 @@ class GenericSQLConnector(BaseDestinationHandler):
             # closes the cached ADBC handle) whatever the read's outcome.
             await runtime.close()
 
-    async def _read_via_adbc_only(
+    async def _read_via_adbc_only(  # skipcq: PY-R1000
         self,
         *,
         runtime: ConnectionRuntime,
