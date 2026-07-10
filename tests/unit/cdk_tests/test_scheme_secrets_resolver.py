@@ -227,7 +227,7 @@ async def test_s3_missing_extra_fails_loud(connection_dir):
     resolver = SchemeSecretsResolver(connection_dir)
     # Simulate boto3 not installed: import boto3 -> ImportError.
     with patch.dict(sys.modules, {"boto3": None}), pytest.raises(
-        SecretResolutionError, match=r"\[s3\] extra"
+        SecretResolutionError, match=r"'s3' extra"
     ):
         await resolver.resolve("conn", {"tok": "s3://bkt/key"})
 
@@ -266,10 +266,13 @@ async def test_cloud_vault_schemes_are_unsupported(connection_dir, locator):
         await resolver.resolve("conn", {"x": locator})
 
 
-async def test_bare_value_is_rejected(connection_dir):
+async def test_bare_value_is_rejected_without_echoing_it(connection_dir):
+    # A bare value is likely a pasted raw secret; the error (which reaches logs)
+    # must name the ref but never echo the value.
     resolver = SchemeSecretsResolver(connection_dir)
-    with pytest.raises(UnsupportedSecretRefScheme, match="no scheme"):
-        await resolver.resolve("conn", {"x": "just-a-raw-token"})
+    with pytest.raises(UnsupportedSecretRefScheme, match="no scheme") as exc_info:
+        await resolver.resolve("conn", {"x": "s3cr3t-raw-token"})
+    assert "s3cr3t-raw-token" not in str(exc_info.value)
 
 
 async def test_non_string_locator_is_rejected(connection_dir):

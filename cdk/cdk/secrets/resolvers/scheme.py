@@ -118,8 +118,11 @@ class SchemeSecretsResolver(SecretsResolver):
     async def _resolve_one(self, connection_id: str, name: str, locator: str) -> str:
         scheme, sep, _ = locator.partition(":")
         if not sep:
+            # A bare value in this branch is likely a pasted raw secret, so the
+            # locator is NEVER echoed into the error (which reaches logs) -- only
+            # the ref name is named.
             raise UnsupportedSecretRefScheme(
-                locator,
+                "<none>",
                 connection_id,
                 detail=(
                     f"secret_ref {name!r} has no scheme; a bare value is never "
@@ -213,8 +216,10 @@ class SchemeSecretsResolver(SecretsResolver):
             import botocore.exceptions as boto  # skipcq: PYL-C0415
         except ImportError as e:
             raise SecretResolutionError(
-                f"secret_ref {name!r} -> {locator}: the s3:// scheme requires the "
-                "optional [s3] extra (pip install 'analitiq-core[s3]')",
+                f"secret_ref {name!r} -> {locator}: the s3:// scheme requires "
+                "boto3; install the optional 's3' extra of the package that "
+                "supplies this resolver (e.g. analitiq-cdk[s3] or "
+                "analitiq-core[s3])",
                 connection_id,
             ) from e
 
