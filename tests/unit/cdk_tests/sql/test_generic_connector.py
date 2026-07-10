@@ -313,8 +313,8 @@ class TestReadAdbcBranch:
         """catalog_name is case-folded by the dialect before being quoted in SQL."""
 
         class _UpperNormalizingDialect(SqlDialect):
-            def normalize_schema(self, s: str) -> str:
-                return s.upper()
+            def normalize_schema(self, schema: str) -> str:
+                return schema.upper()
 
         class _NormalizingConnector(GenericSQLConnector):
             dialect_class = _UpperNormalizingDialect

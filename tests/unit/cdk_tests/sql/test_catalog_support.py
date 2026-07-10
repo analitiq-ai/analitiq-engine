@@ -505,8 +505,8 @@ class TestAdbcIngestTargetKwargs:
         from cdk.sql.generic import GenericSQLConnector
 
         class _UpperNormalizingDialect(SqlDialect):
-            def normalize_schema(self, s):
-                return s.upper()
+            def normalize_schema(self, schema):
+                return schema.upper()
 
         class _C(GenericSQLConnector):
             dialect_class = _UpperNormalizingDialect
@@ -598,8 +598,8 @@ class TestRunDdlAndReflectCatalogQuoting:
         import cdk.sql.generic as gen
 
         class _UpperNormalizingDialect(SqlDialect):
-            def normalize_schema(self, s: str) -> str:
-                return s.upper()
+            def normalize_schema(self, schema: str) -> str:
+                return schema.upper()
 
         class _C(gen.GenericSQLConnector):
             dialect_class = _UpperNormalizingDialect
