@@ -999,7 +999,7 @@ class TestWriteBatchAdbcOnlyKeylessInsert:
             all_cols,
             conflict_keys,
             token,
-            catalog="",
+            _catalog="",
             *,
             insert_only,
         ):
