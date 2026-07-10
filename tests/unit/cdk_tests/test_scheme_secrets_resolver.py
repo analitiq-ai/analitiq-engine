@@ -61,18 +61,16 @@ def _fake_botocore():
 
 
 @contextmanager
-def _patched_s3(*, body=None, error=None):
+def _patched_s3(*, body=None):
     """Patch ``boto3`` + ``botocore`` in ``sys.modules`` and yield the client mock.
 
-    ``body`` is what ``get_object`` returns; ``error`` (a class) is raised from
-    ``get_object`` instead.
+    Yields ``(boto3, client, exceptions)``; ``body`` is what ``get_object``
+    returns. Tests wanting a failure set ``client.get_object.side_effect`` (or
+    ``boto3.client.side_effect``) with ``exceptions.{BotoCoreError,ClientError}``.
     """
     botocore, exceptions = _fake_botocore()
     client = MagicMock()
-    if error is not None:
-        client.get_object.side_effect = error
-    else:
-        client.get_object.return_value = {"Body": MagicMock(read=lambda: body)}
+    client.get_object.return_value = {"Body": MagicMock(read=lambda: body)}
     boto3 = MagicMock()
     boto3.client.return_value = client
     with patch.dict(
@@ -246,6 +244,16 @@ async def test_s3_malformed_uri_fails_loud(connection_dir):
         SecretResolutionError, match="malformed s3 URI"
     ):
         await resolver.resolve("conn", {"tok": "s3://bucket-only"})
+
+
+async def test_s3_client_construction_failure_is_wrapped(connection_dir):
+    # A bad profile/region/endpoint raises at boto3.client() time; it must
+    # surface as a SecretResolutionError like every other failure.
+    resolver = SchemeSecretsResolver(connection_dir)
+    with _patched_s3() as (boto3, _client, exc):
+        boto3.client.side_effect = exc.BotoCoreError("no region configured")
+        with pytest.raises(SecretResolutionError, match="no region configured"):
+            await resolver.resolve("conn", {"tok": "s3://bkt/key"})
 
 
 # ---------------------------------------------------------------------------

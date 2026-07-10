@@ -730,18 +730,21 @@ class ConnectionRuntime:
 
         Each ``secret_refs.<name>`` value is a scheme-prefixed locator the
         resolver dispatches on (``env:`` / ``file:`` / ``sidecar:`` / ``s3://``).
-        Returns an empty dict when the connection declares no refs -- connectors
-        with no required secrets (e.g. stdout) never touch the resolver. An
-        unresolvable ref fails loud from the resolver; there is no silent
-        fallback to an empty secret.
+        Connectors with no required secrets (e.g. stdout) declare no refs and
+        get an empty result. An unresolvable ref fails loud from the resolver;
+        there is no silent fallback to an empty secret.
+
+        The resolver is always consulted, even for an empty ``secret_refs``: on a
+        worker runtime that is the guard that trips the refusing
+        :class:`_PreResolvedSecretsResolver`, so a malformed worker payload
+        (no pre-resolved artifacts) cannot materialize from an empty config
+        instead of failing its invalid bootstrap.
         """
         secret_refs = self._raw_config.get("secret_refs") or {}
         if not isinstance(secret_refs, Mapping):
             raise TypeError(
                 f"connection {self._connection_id!r}: `secret_refs` must be an object"
             )
-        if not secret_refs:
-            return {}
         secrets = await self._resolver.resolve(self._connection_id, dict(secret_refs))
         if not isinstance(secrets, Mapping):
             raise TypeError(
@@ -761,7 +764,10 @@ class ConnectionRuntime:
                     f"{sorted(missing)!r}"
                 ),
             )
-        return dict(secrets)
+        # Return only the declared refs. An adapted/legacy resolver may hand back
+        # more keys than were declared; undeclared secrets must not leak into
+        # ``resolved_config`` (and thence across the worker boundary).
+        return {name: secrets[name] for name in secret_refs}
 
     def _validate_connection_contract(self, secrets: Mapping[str, Any]) -> None:
         """Enforce the connection contract before any binding is resolved.

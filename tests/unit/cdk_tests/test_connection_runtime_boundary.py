@@ -175,6 +175,23 @@ class TestWorkerSideRuntime:
         with pytest.raises(RuntimeError, match="pre-resolved worker runtime"):
             await worker_runtime.materialize()
 
+    async def test_rebuilt_runtime_without_artifacts_is_rejected(self):
+        # A malformed payload with neither transport_spec nor resolved_config
+        # (and no secret_refs) must not materialize a degenerate worker runtime:
+        # the trusted path always consults the refusing resolver.
+        worker_runtime = ConnectionRuntime.from_resolved_payload(
+            {
+                "connection_id": "my-file",
+                "connector_id": "filedrop",
+                "connector_type": "file",
+                "connection_config": {"path": "/tmp/out"},
+                "transport_spec": None,
+                "resolved_config": None,
+            }
+        )
+        with pytest.raises(RuntimeError, match="pre-resolved worker runtime"):
+            await worker_runtime.materialize()
+
     async def test_rebuilt_runtime_restores_connection_config_as_raw_config(self):
         runtime = ConnectionRuntime(
             raw_config={

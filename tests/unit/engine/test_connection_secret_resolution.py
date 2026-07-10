@@ -278,6 +278,25 @@ class TestConnectionRuntimeMaterialize:
         with pytest.raises(SecretNotFoundError, match="token"):
             await runtime.materialize()
 
+    @pytest.mark.asyncio
+    async def test_undeclared_resolver_keys_do_not_leak(self):
+        """Only declared refs survive: a resolver returning extra keys must not
+        surface undeclared secrets into resolved_config (and the worker)."""
+        runtime = ConnectionRuntime(
+            raw_config={
+                "path": "/tmp/out",
+                "secret_refs": {"declared": "sidecar:declared"},
+            },
+            connection_id="conn-extra",
+            connector_id="test-connector",
+            connector_type="file",
+            resolver=_resolver({"declared": "keep", "undeclared": "LEAK"}),
+        )
+        runtime.acquire()
+        await runtime.materialize()
+        assert runtime.resolved_config["declared"] == "keep"
+        assert "undeclared" not in runtime.resolved_config
+
 
 # ---------------------------------------------------------------------------
 # Lifecycle: close / disposal

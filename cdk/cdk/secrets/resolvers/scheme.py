@@ -251,12 +251,15 @@ class SchemeSecretsResolver(SecretsResolver):
                 "(expected s3://bucket/key)",
                 connection_id,
             )
-        client = boto3.client(
-            "s3",
-            endpoint_url=self._s3_endpoint_url,
-            region_name=self._s3_region,
-        )
+        # Client construction is inside the wrapped block: a bad profile/region/
+        # endpoint raises at client() time, and it must surface as a
+        # SecretResolutionError like every other failure, not a raw boto error.
         try:
+            client = boto3.client(
+                "s3",
+                endpoint_url=self._s3_endpoint_url,
+                region_name=self._s3_region,
+            )
             obj = client.get_object(Bucket=bucket, Key=key)
             body = obj["Body"].read()
         except (boto.BotoCoreError, boto.ClientError) as e:
