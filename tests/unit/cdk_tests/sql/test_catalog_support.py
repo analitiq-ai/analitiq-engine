@@ -356,7 +356,8 @@ class TestEnsureTablesViaAdbcCatalog:
         from cdk.sql.generic import GenericSQLConnector, _StreamState
 
         class _ImplicitPublicDialect(SqlDialect):
-            def schema_is_implicit_default(self, schema_name: str) -> bool:
+            @staticmethod
+            def schema_is_implicit_default(schema_name: str) -> bool:
                 return (not schema_name) or schema_name.upper() == "PUBLIC"
 
         class _ImplicitConnector(GenericSQLConnector):
@@ -583,7 +584,8 @@ class TestSqlalchemyPreDdlCatalog:
     @staticmethod
     def test_override_can_qualify_schema_with_catalog():
         class _D(SqlDialect):
-            def sqlalchemy_pre_ddl(self, schema_name, *, catalog_name=""):
+            @staticmethod
+            def sqlalchemy_pre_ddl(schema_name, *, catalog_name=""):
                 if catalog_name:
                     return [
                         f'CREATE SCHEMA IF NOT EXISTS "{catalog_name}".'
