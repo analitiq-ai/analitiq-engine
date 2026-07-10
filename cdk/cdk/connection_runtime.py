@@ -41,11 +41,7 @@ from cdk.derived_functions import DEFAULT_FUNCTIONS
 from cdk.exceptions import TransportSpecError
 from cdk.rate_limiter import RateLimiter
 from cdk.resolver import ResolutionContext, Resolver
-from cdk.secrets.exceptions import (
-    PlaceholderExpansionError,
-    SecretNotFoundError,
-    SecretResolutionError,
-)
+from cdk.secrets.exceptions import PlaceholderExpansionError, SecretNotFoundError
 from cdk.secrets.protocol import SecretsResolver
 from cdk.transport_factory import (
     AdbcTransport,
@@ -103,7 +99,7 @@ class _PreResolvedSecretsResolver(SecretsResolver):
     """
 
     async def resolve(
-        self, connection_id: str, *, keys: list[str] | None = None
+        self, connection_id: str, secret_refs: Mapping[str, str]
     ) -> dict[str, str]:
         raise RuntimeError(
             "secret resolution attempted on a pre-resolved worker runtime; "
@@ -373,7 +369,6 @@ class ConnectionRuntime:
             return
 
         secrets = await self._load_secrets()
-        self._validate_secret_refs(secrets)
         self._validate_connection_contract(secrets)
 
         definition = self._connector_definition
@@ -440,7 +435,6 @@ class ConnectionRuntime:
         in its launch bootstrap; rebuild with :meth:`from_resolved_payload`.
         """
         secrets = await self._load_secrets()
-        self._validate_secret_refs(secrets)
         self._validate_connection_contract(secrets)
 
         definition = self._connector_definition
@@ -732,45 +726,48 @@ class ConnectionRuntime:
     # ------------------------------------------------------------------
 
     async def _load_secrets(self) -> dict[str, Any]:
-        """Fetch the connection's secret store contents.
+        """Resolve the connection's declared ``secret_refs`` to their values.
 
-        Returns an empty dict when the connection has no secrets file —
-        connectors with no required secrets (e.g. stdout) should not fail
-        materialization.
-        """
-        try:
-            secrets = await self._resolver.resolve(self._connection_id)
-        except SecretNotFoundError:
-            secrets = {}
-        except SecretResolutionError:
-            raise
-        if not isinstance(secrets, Mapping):
-            raise TypeError(
-                f"Secrets resolver for {self._connection_id} returned "
-                f"{type(secrets).__name__}, expected mapping"
-            )
-        return dict(secrets)
+        Each ``secret_refs.<name>`` value is a scheme-prefixed locator the
+        resolver dispatches on (``env:`` / ``file:`` / ``sidecar:`` / ``s3://``).
+        Connectors with no required secrets (e.g. stdout) declare no refs and
+        get an empty result. An unresolvable ref fails loud from the resolver;
+        there is no silent fallback to an empty secret.
 
-    def _validate_secret_refs(self, secrets: Mapping[str, Any]) -> None:
-        """Confirm every declared ``secret_refs.<name>`` resolves to a value.
-
-        Checks each ``secret_refs.<name>`` declared by the connection against
-        the secret store.
+        The resolver is always consulted, even for an empty ``secret_refs``: on a
+        worker runtime that is the guard that trips the refusing
+        :class:`_PreResolvedSecretsResolver`, so a malformed worker payload
+        (no pre-resolved artifacts) cannot materialize from an empty config
+        instead of failing its invalid bootstrap.
         """
         secret_refs = self._raw_config.get("secret_refs") or {}
         if not isinstance(secret_refs, Mapping):
             raise TypeError(
                 f"connection {self._connection_id!r}: `secret_refs` must be an object"
             )
+        secrets = await self._resolver.resolve(self._connection_id, dict(secret_refs))
+        if not isinstance(secrets, Mapping):
+            raise TypeError(
+                f"Secrets resolver for {self._connection_id} returned "
+                f"{type(secrets).__name__}, expected mapping"
+            )
+        # The resolver is a pluggable boundary: enforce that it returned every
+        # declared ref rather than trusting it to. A conforming resolver either
+        # returns all declared refs or raises; a partial result is a defect and
+        # must fail loud here, not surface later as a missing binding.
         missing = [name for name in secret_refs if name not in secrets]
         if missing:
             raise SecretNotFoundError(
                 connection_id=self._connection_id,
                 detail=(
-                    f"connection {self._connection_id!r} declares secret_refs "
-                    f"{missing!r} but none were found in the secret store"
+                    f"resolver returned no value for declared secret_refs "
+                    f"{sorted(missing)!r}"
                 ),
             )
+        # Return only the declared refs. An adapted/legacy resolver may hand back
+        # more keys than were declared; undeclared secrets must not leak into
+        # ``resolved_config`` (and thence across the worker boundary).
+        return {name: secrets[name] for name in secret_refs}
 
     def _validate_connection_contract(self, secrets: Mapping[str, Any]) -> None:
         """Enforce the connection contract before any binding is resolved.

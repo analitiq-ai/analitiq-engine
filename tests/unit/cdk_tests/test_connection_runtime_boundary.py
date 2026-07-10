@@ -88,10 +88,20 @@ class TestResolveSpec:
         assert payload["resolved_config"] is None
 
     async def test_missing_declared_secret_fails_loudly(self):
+        # A resolver that fails loud on a missing source propagates through
+        # resolve_spec -- _load_secrets never swallows the failure into an
+        # empty secret.
         from cdk.secrets.exceptions import SecretNotFoundError
 
-        runtime = _transportless_runtime(resolver=_resolver({}))
-        with pytest.raises(SecretNotFoundError, match="secret_refs"):
+        failing = AsyncMock(
+            resolve=AsyncMock(
+                side_effect=SecretNotFoundError(
+                    "my-file", detail="secret_ref 'API_TOKEN' -> env:X not set"
+                )
+            )
+        )
+        runtime = _transportless_runtime(resolver=failing)
+        with pytest.raises(SecretNotFoundError, match="API_TOKEN"):
             await runtime.resolve_spec()
 
     async def test_connection_config_crosses_without_secret_bearing_blocks(self):
@@ -131,7 +141,7 @@ class TestWorkerSideRuntime:
 
         assert isinstance(worker_runtime._resolver, _PreResolvedSecretsResolver)
         with pytest.raises(RuntimeError, match="never\\s+access the secret store"):
-            await worker_runtime._resolver.resolve("my-file")
+            await worker_runtime._resolver.resolve("my-file", {})
 
     async def test_rebuilt_runtime_materializes_from_payload_without_secrets(self):
         payload = await _transportless_runtime().resolve_spec()
@@ -144,15 +154,38 @@ class TestWorkerSideRuntime:
         assert worker_runtime.connector_type == "file"
         assert worker_runtime.connection_id == "my-file"
 
-    async def test_rebuilt_runtime_without_payload_blocks_trusted_path(self):
-        # A payload with neither transport_spec nor resolved_config forces
-        # materialize() onto the trusted path, which must hit the refusing
-        # resolver instead of silently succeeding with empty secrets.
+    async def test_rebuilt_runtime_refuses_smuggled_secret_ref(self):
+        # resolve_spec strips secret_refs from the payload, so a worker never
+        # has any to resolve. If a malformed/malicious payload smuggles a
+        # secret_ref into connection_config, materialize() takes the trusted
+        # path (no transport_spec / resolved_config) and must hit the refusing
+        # resolver rather than reaching a real secret store.
         worker_runtime = ConnectionRuntime.from_resolved_payload(
             {
                 "connection_id": "my-file",
                 "connector_id": "filedrop",
                 "connector_type": "file",
+                "connection_config": {
+                    "secret_refs": {"API_TOKEN": "sidecar:API_TOKEN"}
+                },
+                "transport_spec": None,
+                "resolved_config": None,
+            }
+        )
+        with pytest.raises(RuntimeError, match="pre-resolved worker runtime"):
+            await worker_runtime.materialize()
+
+    @pytest.mark.asyncio
+    async def test_worker_without_artifacts_rejected(self):
+        # A malformed payload with neither transport_spec nor resolved_config
+        # (and no secret_refs) must not materialize a degenerate worker runtime:
+        # the trusted path always consults the refusing resolver.
+        worker_runtime = ConnectionRuntime.from_resolved_payload(
+            {
+                "connection_id": "my-file",
+                "connector_id": "filedrop",
+                "connector_type": "file",
+                "connection_config": {"path": "/tmp/out"},
                 "transport_spec": None,
                 "resolved_config": None,
             }

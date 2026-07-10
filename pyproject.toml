@@ -65,8 +65,8 @@ pydantic = "^2.0.0"
 #   - validator: cross-document referential integrity of an assembled run
 #     bundle (validate_pipeline_bundle, used in src/engine/pipeline_config_prep).
 # Pinned exactly (release candidates); bump deliberately to adopt a new contract.
-analitiq-contract-models = {version = "1.0.0rc2", allow-prereleases = true}
-analitiq-validator = {version = "1.0.0rc1", allow-prereleases = true}
+analitiq-contract-models = {version = "1.0.0rc3", allow-prereleases = true}
+analitiq-validator = {version = "1.0.0rc3", allow-prereleases = true}
 
 # Retry and fault tolerance
 backoff = "^2.0.0"
@@ -137,6 +137,9 @@ flask = "^3.1.2"
 [tool.poetry.extras]
 kafka = ["kafka-python", "aiokafka"]
 cloud = ["boto3", "azure-storage-blob", "google-cloud-storage"]
+# s3:// secret refs (SchemeSecretsResolver). Lazy boto3 import, so the core
+# engine stays dependency-light and cloud-free unless a connection uses it.
+s3 = ["boto3"]
 analytics = ["pandas", "numpy"]
 nosql = ["motor", "aioredis"]
 mongodb = ["motor"]
@@ -232,6 +235,7 @@ module = [
     "aiohttp.*",
     "kafka.*",
     "boto3.*",
+    "botocore.*",
     "azure.*",
     "google.*",
     "grpc.*",

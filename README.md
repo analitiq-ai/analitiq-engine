@@ -197,16 +197,36 @@ pipelines/
 
 ### Secrets
 
-Connection configs use `${placeholder}` syntax for sensitive values. Actual secrets live in `connections/{alias}/.secrets/credentials.json` as flat key-value pairs:
+A connection's `secret_refs` map declares each secret by a scheme-prefixed
+reference that names *where* the value comes from — resolved at connection time
+(late-binding), not at config load:
 
 ```json
-{
-  "API_TOKEN": "your-token",
-  "API_SECRET": "your-secret"
+"secret_refs": {
+  "password": "env:PG_PASSWORD",
+  "api_token": "sidecar:API_TOKEN"
 }
 ```
 
-Placeholders are expanded at connection time (late-binding) — not at config load time. If any `${placeholder}` has no matching key, a `PlaceholderExpansionError` is raised and the connection is never established with raw placeholders.
+| Scheme | Resolves to |
+|--------|-------------|
+| `env:VAR` | environment variable `VAR` |
+| `file:./path` | a local file, relative to the connection directory |
+| `sidecar:<name>` | entry `<name>` in `connections/{alias}/.secrets/credentials.json` |
+| `s3://bucket/key` | an S3 / S3-compatible object (needs the `[s3]` extra) |
+
+`env:`, `file:` and `sidecar:` are built-in and cloud-free; `s3://` lazily
+imports `boto3` under `pip install 'analitiq-core[s3]'`. The `sidecar:` scheme
+reads a flat, gitignored credentials file — the local-development default:
+
+```json
+{ "PG_PASSWORD": "your-password", "API_TOKEN": "your-token" }
+```
+
+An unresolvable reference (missing env var, missing file/object, missing sidecar
+entry, unsupported scheme) fails loud — the connection is never established with
+an empty secret. See [docs/source-config.md](docs/source-config.md#secret-reference-schemes)
+for the full reference.
 
 ### Configuration and defaults
 
@@ -235,6 +255,8 @@ setting controls, its default, and how to override it - is in
 | `ANALITIQ_ERROR_STRATEGY` | `fail` | Exhausted-retry policy: `fail`, `dlq`, or `skip` |
 | `ANALITIQ_MAX_RETRIES` | `3` | Retry attempts before the error strategy applies |
 | `ANALITIQ_RETRY_DELAY_SECONDS` | `5` | Base backoff between retries |
+| `AWS_ENDPOINT_URL_S3` | | Endpoint for `s3://` secret refs (S3-compatible stores, e.g. MinIO) |
+| `AWS_REGION` | | Region for `s3://` secret refs |
 
 See [docs/configuration.md](docs/configuration.md) for the complete list,
 including gRPC, worker, and schema settings.

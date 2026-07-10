@@ -185,7 +185,7 @@ The connection references its connector by `connector_id` (resolved by
   "display_name": "My Wise",
   "connector_id": "wise",
   "parameters": {},
-  "secret_refs": { "api_key": "connections/my-wise/api_key" }
+  "secret_refs": { "api_key": "env:WISE_API_KEY" }
 }
 ```
 
@@ -195,12 +195,61 @@ The connection references its connector by `connector_id` (resolved by
 | `connector_id` | Yes | Resolves the connector definition under `connectors/{connector_id}/` |
 | `display_name` | No | Human-readable label |
 | `parameters` | Yes | Non-secret user inputs (host, port, database, etc.) |
-| `secret_refs` | No | Map of input name → opaque secret reference resolved by the secrets resolver |
+| `secret_refs` | No | Map of input name → scheme-prefixed secret reference |
 
-Secret references resolve to entries in
-`connections/{connection_id}/.secrets/credentials.json` for the local
-file resolver. Inputs declared as secret in the connector definition
-MUST be supplied via `secret_refs`, not `parameters`.
+Inputs declared as secret in the connector definition MUST be supplied via
+`secret_refs`, not `parameters`.
+
+### Secret reference schemes
+
+Each `secret_refs.<name>` value carries an explicit scheme that names *where*
+its secret comes from. A bare token (a pasted raw secret) is rejected — secret
+material never belongs in a config file.
+
+| Value | Resolves to |
+|-------|-------------|
+| `env:VAR` | environment variable `VAR` |
+| `file:./path` | contents of a local file, relative to the connection directory |
+| `sidecar:<name>` | entry `<name>` in `connections/{connection_id}/.secrets/credentials.json` |
+| `s3://bucket/key` | an object in S3 / an S3-compatible store (needs the `[s3]` extra) |
+
+`env:`, `file:` and `sidecar:` are built-in and need no extra install. `s3://`
+lazily imports `boto3` (installed with `pip install 'analitiq-core[s3]'`) and
+honours `AWS_ENDPOINT_URL_S3` / `AWS_REGION` so an S3-compatible store (e.g.
+MinIO) works. An unresolvable ref — missing env var, missing file/object,
+missing sidecar entry, unsupported scheme — fails loud; the engine never falls
+back to an empty secret. `file:` paths are scope-checked, so a `..` sequence
+cannot read outside the connection directory. A file/object payload has a single
+trailing newline stripped; the value is otherwise verbatim.
+
+The `sidecar:` scheme keeps the local-development flow: put secrets in a flat
+`connections/{connection_id}/.secrets/credentials.json` (gitignored) and point
+each ref at its key.
+
+```json
+{ "PG_PASSWORD": "postgres", "api_key": "sk-..." }
+```
+
+Minimal local-Postgres connection supplying its password from the environment —
+no sidecar file needed:
+
+```json
+{
+  "$schema": "https://schemas.analitiq.ai/connection/latest.json",
+  "connection_id": "my-postgres",
+  "connector_id": "postgresql",
+  "display_name": "My Postgres",
+  "parameters": {
+    "host": "localhost", "port": 5432, "database": "postgres",
+    "username": "postgres", "ssl_mode": "prefer"
+  },
+  "secret_refs": { "password": "env:PG_PASSWORD" }
+}
+```
+
+```shell
+PG_PASSWORD=... PIPELINE_ID=my-pipeline docker compose run --rm source_engine
+```
 
 ## Connector Definition (Source Reading)
 

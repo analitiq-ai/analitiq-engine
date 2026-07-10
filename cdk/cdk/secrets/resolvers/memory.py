@@ -5,6 +5,7 @@ Stores secrets in memory, useful for unit tests and development.
 """
 
 import logging
+from collections.abc import Mapping
 
 from cdk.secrets.exceptions import SecretNotFoundError
 from cdk.secrets.protocol import SecretsResolver
@@ -69,22 +70,30 @@ class InMemorySecretsResolver(SecretsResolver):
     async def resolve(
         self,
         connection_id: str,
-        *,
-        keys: list[str] | None = None,
+        secret_refs: Mapping[str, str],
     ) -> dict[str, str]:
         """
-        Resolve secrets for a connection from memory.
+        Resolve a connection's declared refs from the in-memory store.
+
+        The stored per-connection dict holds already-resolved values keyed by
+        ref name; this returns the values for the declared refs and fails loud
+        when a declared ref has no stored value (mirroring a real resolver).
 
         Args:
             connection_id: Identifier for the connection
-            keys: Optional list of specific keys to retrieve
+            secret_refs: Map of ref name -> locator (only the keys are used)
 
         Returns:
-            Dictionary mapping secret keys to their values
+            Dictionary mapping each declared ref name to its stored value
 
         Raises:
-            SecretNotFoundError: If no secrets exist for the connection
+            SecretNotFoundError: If the connection or a declared ref is unknown
         """
+        if not secret_refs:
+            # No declared refs -> nothing to resolve, mirroring the real
+            # resolver (a connection with no secrets never fails here).
+            return {}
+
         secrets = self._secrets.get(connection_id)
 
         if secrets is None:
@@ -93,15 +102,21 @@ class InMemorySecretsResolver(SecretsResolver):
                 detail="No secrets registered in memory",
             )
 
-        # Convert all values to strings
-        result = {k: str(v) for k, v in secrets.items()}
-
-        # Filter to specific keys if requested
-        if keys:
-            result = {k: v for k, v in result.items() if k in keys}
+        result: dict[str, str] = {}
+        missing = []
+        for name in secret_refs:
+            if name in secrets:
+                result[name] = str(secrets[name])
+            else:
+                missing.append(name)
+        if missing:
+            raise SecretNotFoundError(
+                connection_id=connection_id,
+                detail=f"no in-memory value for declared secret_refs {missing!r}",
+            )
 
         logger.debug(
-            f"Resolved in-memory secrets for {connection_id} ({len(result)} keys)"
+            "Resolved in-memory secrets for %s (%d keys)", connection_id, len(result)
         )
         return result
 

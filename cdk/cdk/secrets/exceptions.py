@@ -38,3 +38,20 @@ class PlaceholderExpansionError(SecretResolutionError):
             message = f"{message}: {detail}"
         super().__init__(message, connection_id)
         self.placeholder = placeholder
+
+
+class UnsupportedSecretRefScheme(SecretResolutionError):
+    """Raised when a ``secret_refs`` value carries a scheme this engine cannot resolve.
+
+    The public contract accepts a wider set of schemes than the open-source
+    engine resolves (it also permits the operator's own cloud-vault pointers).
+    A value with an unknown or unsupported scheme -- or a bare token with no
+    scheme at all -- fails loud here rather than resolving to nothing.
+    """
+
+    def __init__(self, scheme: str, connection_id: str = "", detail: str = ""):
+        message = f"Unsupported secret_ref scheme: {scheme!r}"
+        if detail:
+            message = f"{message} ({detail})"
+        super().__init__(message, connection_id)
+        self.scheme = scheme

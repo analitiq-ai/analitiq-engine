@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from cdk.connection_runtime import ConnectionRuntime
+from cdk.secrets import SchemeSecretsResolver
 from cdk.secrets.exceptions import SecretNotFoundError
 from cdk.transport_factory import HttpTransport, SqlAlchemyTransport
 
@@ -218,22 +219,83 @@ class TestConnectionRuntimeMaterialize:
             _ = runtime.session
 
     @pytest.mark.asyncio
-    async def test_secret_refs_are_validated_against_secret_store(self):
-        """A connection that declares a secret_ref but the store does not
-        contain that key must fail materialization."""
+    async def test_env_secret_resolves_end_to_end_without_sidecar(
+        self, tmp_path, monkeypatch
+    ):
+        """Acceptance: a connection whose password comes from `env:` runs with
+        the value supplied only via the environment -- no sidecar file."""
+        monkeypatch.setenv("PG_PASSWORD", "from-the-env")
+        runtime = ConnectionRuntime(
+            raw_config={
+                "path": "/tmp/out",
+                "secret_refs": {"password": "env:PG_PASSWORD"},
+            },
+            connection_id="conn-env",
+            connector_id="test-connector",
+            connector_type="file",
+            resolver=SchemeSecretsResolver(tmp_path),  # no .secrets/credentials.json
+        )
+        runtime.acquire()
+        await runtime.materialize()
+        assert runtime.resolved_config["password"] == "from-the-env"
+
+    @pytest.mark.asyncio
+    async def test_declared_secret_with_missing_source_fails(
+        self, tmp_path, monkeypatch
+    ):
+        """A declared secret_ref whose source is missing (here an unset env
+        var) fails materialization loudly through the real resolver."""
+        monkeypatch.delenv("ANALITIQ_TEST_UNSET_VAR", raising=False)
         runtime = ConnectionRuntime(
             raw_config={
                 "parameters": {},
-                "secret_refs": {"password": "connections/x/password"},
+                "secret_refs": {"password": "env:ANALITIQ_TEST_UNSET_VAR"},
             },
             connection_id="conn-missing",
             connector_id="test-connector",
             connector_type="database",
-            resolver=_resolver({}),  # no `password` key
+            resolver=SchemeSecretsResolver(tmp_path),
             connector_definition=_db_connector(),
         )
-        with pytest.raises(SecretNotFoundError):
+        with pytest.raises(SecretNotFoundError, match="ANALITIQ_TEST_UNSET_VAR"):
             await runtime.materialize()
+
+    @pytest.mark.asyncio
+    async def test_resolver_returning_subset_fails_loud(self):
+        """The resolver is a pluggable boundary: a result missing a declared
+        ref (a non-conforming resolver) must fail loud, not silently proceed."""
+        runtime = ConnectionRuntime(
+            raw_config={
+                "parameters": {},
+                "secret_refs": {"password": "env:X", "token": "env:Y"},
+            },
+            connection_id="conn-partial",
+            connector_id="test-connector",
+            connector_type="database",
+            resolver=_resolver({"password": "only-this"}),  # `token` missing
+            connector_definition=_db_connector(),
+        )
+        with pytest.raises(SecretNotFoundError, match="token"):
+            await runtime.materialize()
+
+    @pytest.mark.asyncio
+    async def test_undeclared_resolver_keys_do_not_leak(self):
+        """Only declared refs survive: a resolver returning extra keys must not
+        surface undeclared secrets into resolved_config (and the worker)."""
+        runtime = ConnectionRuntime(
+            raw_config={
+                "path": "/tmp/out",
+                "secret_refs": {"declared": "sidecar:declared"},
+            },
+            connection_id="conn-extra",
+            connector_id="test-connector",
+            connector_type="file",
+            resolver=_resolver({"declared": "keep", "undeclared": "LEAK"}),
+        )
+        runtime.acquire()
+        await runtime.materialize()
+        assert runtime.resolved_config["declared"] == "keep"
+        assert "undeclared" not in runtime.resolved_config
 
 
 # ---------------------------------------------------------------------------
@@ -401,7 +463,10 @@ class TestScrubResolvedConfig:
     @pytest.mark.asyncio
     async def test_scrub_clears_resolved_config_for_file_type(self):
         runtime = ConnectionRuntime(
-            raw_config={"path": "/tmp/out"},
+            raw_config={
+                "path": "/tmp/out",
+                "secret_refs": {"SECRET": "sidecar:SECRET"},
+            },
             connection_id="conn-file",
             connector_id="test-connector",
             connector_type="file",
