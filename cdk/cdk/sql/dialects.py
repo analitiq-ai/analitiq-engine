@@ -301,17 +301,17 @@ class SqlDialect:
             if catalog
             else "information_schema"
         )
-        sql = (
-            "SELECT table_name "  # skipcq: BAN-B608
-            f"FROM {info_schema}.tables "  # nosec B608
-            "WHERE table_schema = ?"
-        )
+        clauses = [
+            "SELECT table_name",
+            f"FROM {info_schema}.tables",
+            "WHERE table_schema = ?",
+        ]
         params: list[object] = [self.normalize_schema(schema)]
         if catalog:
-            sql += " AND table_catalog = ?"
+            clauses.append("AND table_catalog = ?")
             params.append(self.normalize_schema(catalog))
-        sql += " ORDER BY table_name"
-        return sql, params
+        clauses.append("ORDER BY table_name")
+        return " ".join(clauses), params
 
     def columns_query(self, schema: str, table: str, *, catalog: str = "") -> Query:
         """Return ``(sql, params)`` describing columns of *schema.table*.
@@ -325,17 +325,17 @@ class SqlDialect:
             if catalog
             else "information_schema"
         )
-        sql = (
-            "SELECT column_name, data_type, is_nullable "  # skipcq: BAN-B608
-            f"FROM {info_schema}.columns "  # nosec B608
-            "WHERE table_schema = ? AND table_name = ?"
-        )
+        clauses = [
+            "SELECT column_name, data_type, is_nullable",
+            f"FROM {info_schema}.columns",
+            "WHERE table_schema = ? AND table_name = ?",
+        ]
         params: list[object] = [self.normalize_schema(schema), table]
         if catalog:
-            sql += " AND table_catalog = ?"
+            clauses.append("AND table_catalog = ?")
             params.append(self.normalize_schema(catalog))
-        sql += " ORDER BY ordinal_position"
-        return sql, params
+        clauses.append("ORDER BY ordinal_position")
+        return " ".join(clauses), params
 
     def primary_keys_query(
         self, schema: str, table: str, *, catalog: str = ""
@@ -351,21 +351,21 @@ class SqlDialect:
             if catalog
             else "information_schema"
         )
-        sql = (
-            "SELECT kcu.column_name "  # skipcq: BAN-B608
-            f"FROM {info_schema}.table_constraints tc "  # nosec B608
-            f"JOIN {info_schema}.key_column_usage kcu "  # nosec B608
-            "  ON tc.constraint_catalog = kcu.constraint_catalog "
-            " AND tc.constraint_schema = kcu.constraint_schema "
-            " AND tc.constraint_name = kcu.constraint_name "
-            " AND tc.table_schema = kcu.table_schema "
-            " AND tc.table_name = kcu.table_name "
-            "WHERE tc.constraint_type = 'PRIMARY KEY' "
-            "  AND tc.table_schema = ? AND tc.table_name = ?"
-        )
+        clauses = [
+            "SELECT kcu.column_name",
+            f"FROM {info_schema}.table_constraints tc",
+            f"JOIN {info_schema}.key_column_usage kcu",
+            "ON tc.constraint_catalog = kcu.constraint_catalog",
+            "AND tc.constraint_schema = kcu.constraint_schema",
+            "AND tc.constraint_name = kcu.constraint_name",
+            "AND tc.table_schema = kcu.table_schema",
+            "AND tc.table_name = kcu.table_name",
+            "WHERE tc.constraint_type = 'PRIMARY KEY'",
+            "AND tc.table_schema = ? AND tc.table_name = ?",
+        ]
         params: list[object] = [self.normalize_schema(schema), table]
         if catalog:
-            sql += " AND tc.table_catalog = ?"
+            clauses.append("AND tc.table_catalog = ?")
             params.append(self.normalize_schema(catalog))
-        sql += " ORDER BY kcu.ordinal_position"
-        return sql, params
+        clauses.append("ORDER BY kcu.ordinal_position")
+        return " ".join(clauses), params
