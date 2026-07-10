@@ -674,9 +674,9 @@ class GenericSQLConnector(BaseDestinationHandler):
         if cancelled is not None:
             raise cancelled
 
-    async def configure_schema(
+    async def configure_schema(  # skipcq: PY-R1000
         self, schema_spec: SchemaSpec
-    ) -> bool:  # skipcq: PY-R1000
+    ) -> bool:
         """Configure the destination from the preloaded contract endpoint.
 
         The SchemaSpec only carries identification fields; this method
