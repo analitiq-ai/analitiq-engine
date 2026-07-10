@@ -254,16 +254,19 @@ async def test_s3_malformed_uri_fails_loud(connection_dir):
 
 
 @pytest.mark.parametrize(
-    "locator",
+    "scheme,locator",
     [
-        "arn:aws:secretsmanager:us-east-1:123456789012:secret:db",
-        "ssm:/analitiq/db/password",
+        ("arn", "arn:aws:secretsmanager:us-east-1:123456789012:secret:db"),
+        ("ssm", "ssm:/analitiq/db/password"),
     ],
 )
-async def test_cloud_vault_schemes_are_unsupported(connection_dir, locator):
+async def test_cloud_vault_schemes_are_unsupported(connection_dir, scheme, locator):
+    # arn:/ssm: are valid contract schemes the engine cannot resolve; the scheme
+    # keyword is named, but the locator (which may carry account ids) is not.
     resolver = SchemeSecretsResolver(connection_dir)
-    with pytest.raises(UnsupportedSecretRefScheme):
+    with pytest.raises(UnsupportedSecretRefScheme, match=scheme) as exc_info:
         await resolver.resolve("conn", {"x": locator})
+    assert locator not in str(exc_info.value)
 
 
 async def test_bare_value_is_rejected_without_echoing_it(connection_dir):
@@ -273,6 +276,17 @@ async def test_bare_value_is_rejected_without_echoing_it(connection_dir):
     with pytest.raises(UnsupportedSecretRefScheme, match="no scheme") as exc_info:
         await resolver.resolve("conn", {"x": "s3cr3t-raw-token"})
     assert "s3cr3t-raw-token" not in str(exc_info.value)
+
+
+async def test_colon_containing_raw_secret_is_not_echoed(connection_dir):
+    # A pasted secret that happens to contain a colon parses as an unknown
+    # scheme; neither the value nor its leading segment may reach the message.
+    resolver = SchemeSecretsResolver(connection_dir)
+    raw = "abc123:def456:ghi789"
+    with pytest.raises(UnsupportedSecretRefScheme, match="unrecognized") as exc_info:
+        await resolver.resolve("conn", {"x": raw})
+    msg = str(exc_info.value)
+    assert raw not in msg and "abc123" not in msg
 
 
 async def test_non_string_locator_is_rejected(connection_dir):

@@ -89,6 +89,11 @@ class InMemorySecretsResolver(SecretsResolver):
         Raises:
             SecretNotFoundError: If the connection or a declared ref is unknown
         """
+        if not secret_refs:
+            # No declared refs -> nothing to resolve, mirroring the real
+            # resolver (a connection with no secrets never fails here).
+            return {}
+
         secrets = self._secrets.get(connection_id)
 
         if secrets is None:

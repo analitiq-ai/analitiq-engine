@@ -260,6 +260,24 @@ class TestConnectionRuntimeMaterialize:
         with pytest.raises(SecretNotFoundError, match="ANALITIQ_TEST_UNSET_VAR"):
             await runtime.materialize()
 
+    @pytest.mark.asyncio
+    async def test_resolver_returning_subset_fails_loud(self):
+        """The resolver is a pluggable boundary: a result missing a declared
+        ref (a non-conforming resolver) must fail loud, not silently proceed."""
+        runtime = ConnectionRuntime(
+            raw_config={
+                "parameters": {},
+                "secret_refs": {"password": "env:X", "token": "env:Y"},
+            },
+            connection_id="conn-partial",
+            connector_id="test-connector",
+            connector_type="database",
+            resolver=_resolver({"password": "only-this"}),  # `token` missing
+            connector_definition=_db_connector(),
+        )
+        with pytest.raises(SecretNotFoundError, match="token"):
+            await runtime.materialize()
+
 
 # ---------------------------------------------------------------------------
 # Lifecycle: close / disposal

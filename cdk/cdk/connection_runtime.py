@@ -41,7 +41,7 @@ from cdk.derived_functions import DEFAULT_FUNCTIONS
 from cdk.exceptions import TransportSpecError
 from cdk.rate_limiter import RateLimiter
 from cdk.resolver import ResolutionContext, Resolver
-from cdk.secrets.exceptions import PlaceholderExpansionError
+from cdk.secrets.exceptions import PlaceholderExpansionError, SecretNotFoundError
 from cdk.secrets.protocol import SecretsResolver
 from cdk.transport_factory import (
     AdbcTransport,
@@ -747,6 +747,19 @@ class ConnectionRuntime:
             raise TypeError(
                 f"Secrets resolver for {self._connection_id} returned "
                 f"{type(secrets).__name__}, expected mapping"
+            )
+        # The resolver is a pluggable boundary: enforce that it returned every
+        # declared ref rather than trusting it to. A conforming resolver either
+        # returns all declared refs or raises; a partial result is a defect and
+        # must fail loud here, not surface later as a missing binding.
+        missing = [name for name in secret_refs if name not in secrets]
+        if missing:
+            raise SecretNotFoundError(
+                connection_id=self._connection_id,
+                detail=(
+                    f"resolver returned no value for declared secret_refs "
+                    f"{sorted(missing)!r}"
+                ),
             )
         return dict(secrets)
 

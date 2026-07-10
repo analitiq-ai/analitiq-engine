@@ -44,6 +44,11 @@ logger = logging.getLogger(__name__)
 _SIDECAR_DIR = ".secrets"
 _SIDECAR_FILENAME = "credentials.json"
 
+# Schemes the public contract permits but the open-source engine cannot resolve
+# (they name the operator's own cloud vault). Their keyword is safe to name in an
+# error; any other unknown scheme is treated as possibly-raw and never echoed.
+_CONTRACT_ONLY_SCHEMES = frozenset({"arn", "ssm"})
+
 
 def _strip_trailing_newline(text: str) -> str:
     r"""Drop a single trailing newline from a file/object payload.
@@ -139,13 +144,27 @@ class SchemeSecretsResolver(SecretsResolver):
             return await asyncio.to_thread(
                 self._resolve_s3, connection_id, name, locator
             )
+        if scheme in _CONTRACT_ONLY_SCHEMES:
+            # Valid public-contract schemes the open-source engine does not
+            # resolve. The scheme keyword is a known token (safe to name); the
+            # locator is not echoed to keep every rejection message leak-proof.
+            raise UnsupportedSecretRefScheme(
+                scheme,
+                connection_id,
+                detail=(
+                    f"secret_ref {name!r} uses the {scheme}: scheme, which this "
+                    "engine does not resolve; supported schemes are env:, file:, "
+                    "sidecar: (built-in) and s3:// (with the s3 extra)"
+                ),
+            )
+        # An unrecognized scheme may be a raw secret that happens to contain a
+        # colon, so neither the scheme token nor the locator is echoed.
         raise UnsupportedSecretRefScheme(
-            scheme,
+            "<unrecognized>",
             connection_id,
             detail=(
-                f"secret_ref {name!r} -> {locator!r} is not resolvable by this "
-                "engine; supported schemes are env:, file:, sidecar: (built-in) "
-                "and s3:// (with the [s3] extra)"
+                f"secret_ref {name!r} has an unrecognized or malformed scheme; a "
+                "raw secret is never accepted -- use env:/file:/sidecar:/s3://"
             ),
         )
 
