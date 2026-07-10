@@ -278,6 +278,29 @@ class QueryBuilder:
         """Wrap *name* so SQLAlchemy quotes it when ``quote_identifiers``."""
         return quoted_name(name, quote=True) if self._quote_identifiers else name
 
+    def _effective_schema(self, config: "QueryConfig") -> Any:
+        """Return the SQLAlchemy schema value for Table(), encoding catalog when set.
+
+        Cross-catalog systems (BigQuery, Snowflake) accept a dotted
+        ``catalog.schema`` string as the SA ``schema`` kwarg.  When identifier
+        quoting is active each component is quoted individually before joining
+        so that hyphens (BigQuery project IDs) and mixed-case names (Snowflake)
+        survive unharmed.
+        """
+        if config.catalog_name:
+            parts = [config.catalog_name]
+            if config.schema_name:
+                parts.append(config.schema_name)
+            if self._quote_identifiers:
+                prep = self._sa_dialect.identifier_preparer
+                compound = ".".join(prep.quote(part) for part in parts)
+            else:
+                compound = ".".join(parts)
+            return quoted_name(compound, quote=False)
+        if config.schema_name:
+            return self._ident(config.schema_name)
+        return None
+
     def _paging_value(self, value: int) -> Any:
         """Render a LIMIT/OFFSET value as a literal int or a bound param."""
         if self._inline_paging:
@@ -298,36 +321,11 @@ class QueryBuilder:
         Callers must dispatch on the returned type before passing to
         ``exec_driver_sql``.
         """
-        # Create table reference with proper schema (and optional catalog).
-        # When a catalog is present, compose a compound "catalog.schema" schema
-        # string.  SQLAlchemy dialects for cross-catalog systems (BigQuery,
-        # Snowflake) interpret a dotted schema string as "catalog.schema", so
-        # quote=False on the composed result keeps SA from folding the whole
-        # dotted path into one identifier.  When identifier quoting is on (the
-        # ADBC read path), each component is quoted individually through the
-        # dialect preparer first -- BigQuery backticks a hyphenated project id,
-        # Snowflake double-quotes a mixed-case schema -- so the emitted path is
-        # `catalog`.`schema` rather than a raw catalog.schema that would be
-        # invalid or resolve a different object.
         metadata = MetaData()
-        if config.catalog_name:
-            parts = [config.catalog_name]
-            if config.schema_name:
-                parts.append(config.schema_name)
-            if self._quote_identifiers:
-                prep = self._sa_dialect.identifier_preparer
-                compound = ".".join(prep.quote(part) for part in parts)
-            else:
-                compound = ".".join(parts)
-            effective_schema: Any = quoted_name(compound, quote=False)
-        elif config.schema_name:
-            effective_schema = self._ident(config.schema_name)
-        else:
-            effective_schema = None
         table = Table(
             self._ident(config.table_name),
             metadata,
-            schema=effective_schema,
+            schema=self._effective_schema(config),
         )
 
         # Build column list
