@@ -317,24 +317,14 @@ class TestEnsureTablesViaAdbcCatalog:
         from cdk.sql.generic import GenericSQLConnector, _StreamState
 
         executed: list[str] = []
-
-        class _FakeCursor:
-            @staticmethod
-            def execute(sql, *args):
-                executed.append(sql)
-
-            close = MagicMock()
-
-        class _FakeConn:
-            @staticmethod
-            def cursor():
-                return _FakeCursor()
-
-            commit = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.execute.side_effect = lambda sql, *args: executed.append(sql)
+        mock_conn = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
 
         handler = GenericSQLConnector()
         handler._adbc_only = True
-        handler._adbc_conn = _FakeConn()
+        handler._adbc_conn = mock_conn
 
         state = _StreamState(
             schema_name="analytics",
@@ -364,24 +354,14 @@ class TestEnsureTablesViaAdbcCatalog:
             dialect_class = _ImplicitPublicDialect
 
         executed: list[str] = []
-
-        class _FakeCursor:
-            @staticmethod
-            def execute(sql, *args):
-                executed.append(sql)
-
-            close = MagicMock()
-
-        class _FakeConn:
-            @staticmethod
-            def cursor():
-                return _FakeCursor()
-
-            commit = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.execute.side_effect = lambda sql, *args: executed.append(sql)
+        mock_conn = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
 
         handler = _ImplicitConnector()
         handler._adbc_only = True
-        handler._adbc_conn = _FakeConn()
+        handler._adbc_conn = mock_conn
 
         state = _StreamState(
             schema_name="public",
@@ -402,24 +382,14 @@ class TestEnsureTablesViaAdbcCatalog:
         from cdk.sql.generic import GenericSQLConnector, _StreamState
 
         executed: list[str] = []
-
-        class _FakeCursor:
-            @staticmethod
-            def execute(sql, *args):
-                executed.append(sql)
-
-            close = MagicMock()
-
-        class _FakeConn:
-            @staticmethod
-            def cursor():
-                return _FakeCursor()
-
-            commit = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.execute.side_effect = lambda sql, *args: executed.append(sql)
+        mock_conn = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
 
         handler = GenericSQLConnector()
         handler._adbc_only = True
-        handler._adbc_conn = _FakeConn()
+        handler._adbc_conn = mock_conn
 
         state = _StreamState(schema_name="analytics", table_name="orders")
         ddl = 'CREATE TABLE IF NOT EXISTS "analytics"."orders" (id INTEGER)'
