@@ -307,7 +307,9 @@ class QueryBuilder:
             return literal_column(str(int(value)))
         return value
 
-    def build_select_query(self, config: QueryConfig) -> tuple[str, ParamsLike]:  # skipcq: PY-R1000
+    def build_select_query(
+        self, config: QueryConfig
+    ) -> tuple[str, ParamsLike]:  # skipcq: PY-R1000
         """Build a SELECT query from configuration.
 
         Returns ``(sql, params)`` where ``params`` is either:
