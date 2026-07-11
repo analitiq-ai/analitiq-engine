@@ -11,8 +11,8 @@ aiohttp-retry>=2.8.3
 # and validates artifacts offline against them at runtime (no network fetch), so
 # they must be in the runtime image. Pinned to match pyproject.toml; bump
 # deliberately to adopt a new contract revision.
-analitiq-contract-models==1.0.0rc3
-analitiq-validator==1.0.0rc3
+analitiq-contract-models==1.0.0rc4
+analitiq-validator==1.0.0rc4
 
 # Retry and fault tolerance
 backoff>=2.0.0
