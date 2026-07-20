@@ -165,6 +165,8 @@ class _ReadPlan:
 _Advance = Callable[[_Page, Resolver], "_NextRequest | None"]
 # What builds one, given the strategy's own block plus the request state.
 _AdvanceBuilder = Callable[[dict[str, Any], _RequestState], _Advance]
+# One materialized request: where it goes, and what it carries.
+_Wire = tuple[str, dict[str, Any], Any]
 # Turns one page's param table into the (query, body) actually sent.
 _RequestBuilder = Callable[[dict[str, Any]], "tuple[dict[str, Any], Any]"]
 
@@ -792,33 +794,98 @@ class APIConnector(BaseConnector):
         records_ref: str,
         metadata_spec: dict[str, Any],
         resolver: Resolver,
-        build_request: Callable[[dict[str, Any]], tuple[dict[str, Any], Any]],
+        build_request: _RequestBuilder,
     ) -> AsyncIterator[list[dict[str, Any]]]:
-        """Drive the pagination loop, building each page request.
+        """Drive the pagination loop: request, decide, emit, advance.
 
-        Each page request is built via ``build_request``: it maps the page's
-        full param table to the ``(query_params, body)`` actually sent,
-        applying declared param placement and per-page body binding.
+        Each page request is built via ``build_request``, which maps the
+        page's full param table to the ``(query, body)`` actually sent.
 
-        Every strategy runs the same loop: read a page, emit it, evaluate the
-        contract's ``stop_when`` predicate against that page's ``response``
-        scope, then ask the strategy where the next page comes from. The
-        engine contributes exactly one termination rule of its own — a page
-        with no records ends the read — because a strategy whose predicate
-        never fires would otherwise request forever, and "the provider
-        returned nothing" is the one signal that means done under every
-        strategy.
+        Every strategy runs this same loop. What differs between them is
+        confined to ``advance``. What the *document* decides -- when the read
+        is done -- is confined to ``_decide_page``. What the *engine* refuses
+        to do regardless of the document -- repeat a request forever, continue
+        past a page with no records -- is the two guards in the loop body.
         """
         p_type = pagination.get("type")
         if not p_type:
-            query, body = build_request(dict(base_params))
-            page = await self._request_page(
-                full_url, method, query, records_ref, body=body
-            )
-            if page.records:
-                yield page.records
+            async for batch in self._read_unpaginated(
+                full_url, method, base_params, records_ref, build_request
+            ):
+                yield batch
             return
 
+        stop_when, advance, params = self._setup_pagination(
+            p_type, pagination, base_params, effective_limit, resolver, full_url
+        )
+
+        url = full_url
+        send_params = True
+        pages = 0
+        records = 0
+        previous_wire: _Wire | None = None
+        while True:
+            query, body = build_request(params)
+            sent_query = query if send_params else {}
+            wire = (url, sent_query, body)
+            self._require_progress(wire, previous_wire, p_type, pages, url)
+            previous_wire = wire
+
+            page = await self._request_page(
+                url, method, sent_query, records_ref, body=body
+            )
+            if not page.records:
+                self._report_empty_page(p_type, page, records_ref, pages, records)
+                return
+
+            pages += 1
+            records += len(page.records)
+            # Decided in full before any of it is emitted: a yielded batch is
+            # enqueued by the extract stage immediately, so emitting first
+            # would let a stream with a deterministic document defect
+            # transform and write its first page and only then fail.
+            stop, following = self._decide_page(
+                page, resolver, stop_when, metadata_spec, advance, p_type
+            )
+
+            yield page.records
+
+            if stop:
+                self._log_read_end(p_type, "stop_when", pages, records)
+                return
+            if following is None:
+                self._log_read_end(p_type, "no further page", pages, records)
+                return
+            url, params, send_params = following
+
+    async def _read_unpaginated(
+        self,
+        url: str,
+        method: str,
+        base_params: dict[str, Any],
+        records_ref: str,
+        build_request: _RequestBuilder,
+    ) -> AsyncIterator[list[dict[str, Any]]]:
+        """Read an endpoint that declares no pagination: one request, one page."""
+        query, body = build_request(dict(base_params))
+        page = await self._request_page(url, method, query, records_ref, body=body)
+        if page.records:
+            yield page.records
+
+    def _setup_pagination(
+        self,
+        p_type: str,
+        pagination: dict[str, Any],
+        base_params: dict[str, Any],
+        effective_limit: int,
+        resolver: Resolver,
+        full_url: str,
+    ) -> tuple[Mapping[str, Any], _Advance, dict[str, Any]]:
+        """Validate the pagination block and seed the first page's params.
+
+        Everything here is settled before the first request goes out, so a
+        malformed document fails without touching the provider.
+        """
         stop_when = pagination.get("stop_when")
         if not isinstance(stop_when, Mapping) or not stop_when:
             raise ReadError(
@@ -848,116 +915,102 @@ class APIConnector(BaseConnector):
                 f"{p_type!r} pagination: a setup expression is not resolvable: "
                 f"{err}"
             ) from err
+        return stop_when, advance, params
 
-        url = full_url
-        send_params = True
-        pages = 0
-        records = 0
-        previous_wire: tuple[str, dict[str, Any], Any] | None = None
-        while True:
-            query, body = build_request(params)
-            # Progress is judged on what actually goes out, not on the param
-            # table. A pagination param declared `in: body` whose `from_param`
-            # the body omits or misnames changes `params` every page while the
-            # wire request stays byte-identical -- so comparing param tables
-            # would call that progress and page forever.
-            wire = (url, query if send_params else {}, body)
-            if wire == previous_wire:
-                raise ReadError(
-                    f"{p_type!r} pagination: page {pages + 1} would send the "
-                    f"identical request again ({url!r}), so the read cannot "
-                    f"advance. Either the provider is returning a next-page "
-                    f"value that does not change, or the value never reaches "
-                    f"the request -- check that a param declared `in: body` is "
-                    f"bound by a matching `from_param` in the body"
+    def _decide_page(
+        self,
+        page: _Page,
+        resolver: Resolver,
+        stop_when: Mapping[str, Any],
+        metadata_spec: dict[str, Any],
+        advance: _Advance,
+        p_type: str,
+    ) -> tuple[bool, _NextRequest | None]:
+        """Ask the document what this page means: stop here, and if not, go where.
+
+        `response.metadata`, the stop predicate and the next-page expression
+        all resolve against the same page scope and are all authoring defects
+        in the same document, so they classify identically. ``stage`` names
+        which of them failed, so the message points at the actual culprit
+        rather than always blaming ``stop_when``.
+        """
+        stage = "response.metadata"
+        try:
+            page_resolver = resolver.with_context(
+                replace(
+                    resolver.context,
+                    response=self._response_scope(page, metadata_spec, resolver),
                 )
-            previous_wire = wire
-            page = await self._request_page(
-                url, method, query if send_params else {}, records_ref, body=body
             )
-            if not page.records:
-                if pages == 0:
-                    # Not a quiet "nothing to sync": the endpoint declared
-                    # where its records live and that address produced none, so
-                    # a mis-declared records.ref and a genuinely empty source
-                    # look identical from here. Name both so the difference is
-                    # diagnosable from the log alone.
-                    logger.warning(
-                        "%r pagination: first page carried no records at %r "
-                        "(HTTP %d, body keys: %s); the stream reads empty",
-                        p_type,
-                        records_ref,
-                        page.status,
-                        (
-                            sorted(page.body)
-                            if isinstance(page.body, dict)
-                            else type(page.body).__name__
-                        ),
-                    )
-                else:
-                    self._log_read_end(p_type, "empty page", pages, records)
-                return
-            pages += 1
-            records += len(page.records)
-
-            # This page is decided in full -- stop condition and next request
-            # both -- before any of it is emitted. A yielded batch is enqueued
-            # by the extract stage immediately, so emitting first would let a
-            # stream with a deterministic document defect (a malformed
-            # stop_when, a keyset order_by_field the records do not carry)
-            # transform and write its first page and only then fail. The
-            # defect is in the document, not the data: it is knowable now, and
-            # nothing should reach the destination on a read that cannot run.
-            #
-            # `response.metadata` resolves inside the same guard as the
-            # predicate: both are authoring defects in the same document and
-            # should not classify differently. `stage` names which one failed,
-            # so the message points at the actual culprit.
-            stage = "response.metadata"
-            try:
-                page_resolver = resolver.with_context(
-                    replace(
-                        resolver.context,
-                        response=self._response_scope(page, metadata_spec, resolver),
-                    )
-                )
-                stage = "the stop_when predicate"
-                stop = evaluate_predicate(stop_when, page_resolver)
-            except (TransportSpecError, KeyError) as err:
-                # KeyError is how the resolver reports an unknown scope name
-                # (`respones.body.next`) — an authoring defect in this same
-                # document, not an engine fault. Left unwrapped it escapes the
-                # connector as a bare KeyError and the extract boundary files
-                # it as an internal failure, pointing whoever reads the log at
-                # the engine instead of at the typo.
-                raise ReadError(
-                    f"{p_type!r} pagination: {stage} is not evaluable against "
-                    f"this response: {err}"
-                ) from err
-
-            following: _NextRequest | None = None
-            if not stop:
-                # Same guard, same reason: `next_cursor` / `next_url` are
-                # expressions from the same document, resolved against the same
-                # page scope, so a typo in one classifies like a typo in the
-                # other.
-                try:
-                    following = advance(page, page_resolver)
-                except (TransportSpecError, KeyError) as err:
-                    raise ReadError(
-                        f"{p_type!r} pagination: the next-page expression is "
-                        f"not evaluable against this response: {err}"
-                    ) from err
-
-            yield page.records
-
+            stage = "the stop_when predicate"
+            stop = evaluate_predicate(stop_when, page_resolver)
             if stop:
-                self._log_read_end(p_type, "stop_when", pages, records)
-                return
-            if following is None:
-                self._log_read_end(p_type, "no further page", pages, records)
-                return
-            url, params, send_params = following
+                return True, None
+            stage = "the next-page expression"
+            return False, advance(page, page_resolver)
+        except (TransportSpecError, KeyError) as err:
+            # KeyError is how the resolver reports an unknown scope name
+            # (`respones.body.next`) -- an authoring defect in this same
+            # document, not an engine fault. Left unwrapped it escapes the
+            # connector as a bare KeyError and the extract boundary files it
+            # as an internal failure, pointing whoever reads the log at the
+            # engine instead of at the typo.
+            raise ReadError(
+                f"{p_type!r} pagination: {stage} is not evaluable against "
+                f"this response: {err}"
+            ) from err
+
+    @staticmethod
+    def _require_progress(
+        wire: _Wire, previous_wire: _Wire | None, p_type: str, pages: int, url: str
+    ) -> None:
+        """Refuse to send a request identical to the one just sent.
+
+        Progress is judged on what actually goes out, not on the param table.
+        A pagination param declared ``in: body`` whose ``from_param`` the body
+        omits or misnames changes the params every page while the wire request
+        stays byte-identical -- comparing param tables would call that progress
+        and page forever, feeding the destination the same records without
+        limit.
+        """
+        if wire != previous_wire:
+            return
+        raise ReadError(
+            f"{p_type!r} pagination: page {pages + 1} would send the "
+            f"identical request again ({url!r}), so the read cannot "
+            f"advance. Either the provider is returning a next-page "
+            f"value that does not change, or the value never reaches "
+            f"the request -- check that a param declared `in: body` is "
+            f"bound by a matching `from_param` in the body"
+        )
+
+    @staticmethod
+    def _report_empty_page(
+        p_type: str, page: _Page, records_ref: str, pages: int, records: int
+    ) -> None:
+        """Record why a read ended on a page with no records.
+
+        A first page with nothing in it is not a quiet "nothing to sync": the
+        endpoint declared where its records live and that address produced
+        none, so a mis-declared ``records.ref`` and a genuinely empty source
+        look identical from here. Name both so the difference is diagnosable
+        from the log alone.
+        """
+        if pages:
+            APIConnector._log_read_end(p_type, "empty page", pages, records)
+            return
+        logger.warning(
+            "%r pagination: first page carried no records at %r "
+            "(HTTP %d, body keys: %s); the stream reads empty",
+            p_type,
+            records_ref,
+            page.status,
+            (
+                sorted(page.body)
+                if isinstance(page.body, dict)
+                else type(page.body).__name__
+            ),
+        )
 
     @staticmethod
     def _log_read_end(p_type: str, reason: str, pages: int, records: int) -> None:
