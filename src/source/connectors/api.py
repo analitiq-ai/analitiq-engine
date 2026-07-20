@@ -1434,38 +1434,42 @@ def _canonical_wire(url: str, query: Mapping[str, Any], body: Any) -> _Wire:
     provider returning its own URL would get one duplicate page emitted before
     the repeat was noticed on the iteration after.
 
-    The merge is ``extend_query`` because that is what aiohttp does on the way
-    to the socket (``client_reqrep.py``: ``url = url.extend_query(params)``),
-    so the two spellings collapse the way the transport collapses them and no
-    other way. ``extend_query`` *appends*: a param whose name the request URL
-    already carries is sent twice, not replaced, and the identity has to say
-    so or a read that never advances would look like it does. That matters in
-    both directions: a self link
-    differing only in host casing or an explicit ``:443`` is the same request
-    and must not read as progress, while a link carrying a genuinely repeated
-    key (``?cursor=a&cursor=b``) is a different request from ``?cursor=b`` and
-    must not be flattened into it. Query order is not part of the identity --
-    a provider reordering its params is not a new page.
+    So the identity is built by handing the URL and the param table to the
+    same call aiohttp makes on the way to the socket -- ``client_reqrep.py``:
+    ``url = url.extend_query(params)`` -- and reading back the URL it
+    produces. Nothing about the request is modelled here: host casing,
+    default ports, percent-encoding, the ``/`` yarl gives a root path once a
+    query is attached, a list value expanded into repeated keys, and
+    ``extend_query``'s *append* (a param the URL already carries is sent
+    twice, not replaced) all come out right because they are not this
+    function's opinions. Every earlier version of this function held one such
+    opinion and each one was a duplicate page.
 
-    Values are stringified because the query string only carries text: a
-    declared ``{"limit": 50}`` and a link's ``limit=50`` are the same request.
+    Query *order* is the single thing normalized, and it has to be: a
+    provider that reorders its params has not produced a new page. Sorting
+    pairs rather than folding them into a dict keeps a genuinely repeated key
+    (``?cursor=a&cursor=b`` is not ``?cursor=b``) distinct.
     """
-    target = _target_url(url).extend_query(
-        {name: str(value) for name, value in query.items()}
-    )
+    try:
+        target = _target_url(url).extend_query(query)
+    except TypeError as err:
+        # A value no query string can carry -- a bool, a nested container.
+        # aiohttp raises the same TypeError one step later from inside the
+        # HTTP layer, where nothing knows which param it was; this is the
+        # first place holding the materialized query, so it is where the
+        # request gets named.
+        raise ReadError(
+            f"the request query cannot be sent: {err}. Query values must be "
+            f"strings, numbers, or lists of them"
+        ) from err
+    canonical = target.with_query(sorted(target.query.items()))
     # Digested rather than kept whole: a long read holds one entry per page,
     # and 16 bytes each keeps that bounded whatever the page count. `default`
     # covers Decimals from the lossless JSON parse.
-    canonical = json.dumps(
-        [
-            str(target.with_query(None).with_fragment(None)),
-            sorted(target.query.items()),
-            body,
-        ],
-        sort_keys=True,
-        default=str,
+    identity = json.dumps(
+        [str(canonical.with_fragment(None)), body], sort_keys=True, default=str
     )
-    return hashlib.blake2b(canonical.encode(), digest_size=16).digest()
+    return hashlib.blake2b(identity.encode(), digest_size=16).digest()
 
 
 def _origin(url: str) -> str:

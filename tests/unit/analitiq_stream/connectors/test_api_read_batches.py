@@ -132,6 +132,7 @@ def _endpoint_doc_with_records(
     metadata: dict[str, Any] | None = None,
     request_body: Any = None,
     params: dict[str, Any] | None = None,
+    path: str = "/items",
 ) -> dict[str, Any]:
     record_properties: dict[str, Any] = {
         "id": {"type": "integer", "arrow_type": "Int64"},
@@ -139,7 +140,7 @@ def _endpoint_doc_with_records(
     }
     record_properties.update(extra_record_properties or {})
     read_block: dict[str, Any] = {
-        "request": {"method": "GET", "path": "/items"},
+        "request": {"method": "GET", "path": path},
         "response": {
             "schema": {
                 "type": "object",
@@ -3140,6 +3141,86 @@ class TestPaginationInvariants:
                     "endpoint_document": endpoint,
                     "stream_source": _stream_source(),
                 },
+                checkpoint=MagicMock(),
+                stream_name="items",
+                batch_size=10,
+            ):
+                emitted.append(batch)
+
+        assert len(session.calls) == 1
+        assert len(emitted) == 1, "the same page was emitted twice"
+
+    @pytest.mark.asyncio
+    async def test_a_list_valued_param_is_compared_as_the_repeated_keys_sent(self):
+        """`tag=["a","b"]` goes on the wire as `tag=a&tag=b`, so it compares that way.
+
+        Stringifying the container instead gives `tag=%5B%27a%27...`, an
+        identity for a request nobody sends — and the provider's own self
+        link, spelled with the repeated keys, then reads as progress.
+        """
+        endpoint = _endpoint_doc_with_records(
+            params={
+                "tag": {"in": "query", "default": {"literal": ["a", "b"]}},
+            },
+            pagination={
+                "type": "link",
+                "link": {"next_url": {"ref": "response.body.next"}},
+                "stop_when": {"missing": {"ref": "response.body.next"}},
+            },
+        )
+        body = {
+            "records": [{"id": 1, "name": "a"}],
+            "next": "https://api.example.test/items?tag=a&tag=b",
+        }
+        session = _FakeSession([_FakeResponse(status=200, body=body) for _ in range(3)])
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        emitted: list[Any] = []
+        with pytest.raises(ReadError, match="would send the identical request again"):
+            async for batch in connector.read_batches(
+                runtime,
+                {"endpoint_document": endpoint, "stream_source": _stream_source()},
+                checkpoint=MagicMock(),
+                stream_name="items",
+                batch_size=10,
+            ):
+                emitted.append(batch)
+
+        assert len(session.calls) == 1
+        assert len(emitted) == 1, "the same page was emitted twice"
+
+    @pytest.mark.asyncio
+    async def test_a_root_path_self_link_emits_no_duplicate(self):
+        """`https://host/` and `https://host` are one request once a query is on it.
+
+        yarl gives a root path its `/` when it attaches a query, so the
+        endpoint's own first request and a provider link written without the
+        slash are the same bytes. Splitting the URL up before hashing lost
+        that and let a duplicate page through.
+        """
+        endpoint = _endpoint_doc_with_records(
+            path="/",
+            params={"limit": {"in": "query", "default": {"literal": 50}}},
+            pagination={
+                "type": "link",
+                "link": {"next_url": {"ref": "response.body.next"}},
+                "stop_when": {"missing": {"ref": "response.body.next"}},
+            },
+        )
+        body = {
+            "records": [{"id": 1, "name": "a"}],
+            "next": "https://api.example.test?limit=50",
+        }
+        session = _FakeSession([_FakeResponse(status=200, body=body) for _ in range(3)])
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        emitted: list[Any] = []
+        with pytest.raises(ReadError, match="would send the identical request again"):
+            async for batch in connector.read_batches(
+                runtime,
+                {"endpoint_document": endpoint, "stream_source": _stream_source()},
                 checkpoint=MagicMock(),
                 stream_name="items",
                 batch_size=10,
