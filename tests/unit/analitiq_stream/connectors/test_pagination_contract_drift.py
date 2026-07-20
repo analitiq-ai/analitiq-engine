@@ -24,9 +24,14 @@ from __future__ import annotations
 from typing import get_args
 
 import pytest
-from analitiq.contracts.endpoints import RESERVED_RESPONSE_SCOPES, Pagination, Predicate
+from analitiq.contracts.endpoints import (
+    RESERVED_RESPONSE_SCOPES,
+    ApiEndpointDoc,
+    Pagination,
+    Predicate,
+)
 from analitiq.contracts.value_expression import RESOLUTION_SCOPES
-from pydantic import Tag
+from pydantic import Tag, TypeAdapter
 
 from cdk.exceptions import UnresolvedValueError
 from cdk.predicate import PREDICATE_OPERATORS
@@ -36,6 +41,9 @@ from src.source.connectors.api import (
     _CONTROL_FIELDS,
     APIConnector,
     _Page,
+)
+from tests.unit.analitiq_stream.connectors.test_api_read_batches import (
+    _endpoint_doc_with_records,
 )
 
 pytestmark = pytest.mark.unit
@@ -174,3 +182,57 @@ def test_every_pagination_expression_field_is_classified():
 def _optional(field: object) -> bool:
     """True when a model field is declared ``X | None`` rather than ``X``."""
     return type(None) in get_args(getattr(field, "annotation", None))
+
+
+# ---------------------------------------------------------------------------
+# The suite's own documents
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "doc",
+    [
+        pytest.param(_endpoint_doc_with_records(), id="plain"),
+        pytest.param(
+            _endpoint_doc_with_records(
+                pagination={
+                    "type": "offset",
+                    "offset": {"param": "offset", "initial": 0},
+                    "limit": {"param": "limit"},
+                    "stop_when": {"empty": {"ref": "response.body.records"}},
+                }
+            ),
+            id="paginated",
+        ),
+        pytest.param(
+            _endpoint_doc_with_records(
+                extra_record_properties={
+                    "updated_at": {
+                        "type": "string",
+                        "native_type": "timestamp",
+                        "arrow_type": "Timestamp(MICROSECOND)",
+                    }
+                },
+                replication={
+                    "cursor_mappings": [
+                        {
+                            "cursor_field": "updated_at",
+                            "param": "since",
+                            "operator": "gte",
+                        }
+                    ]
+                },
+            ),
+            id="incremental",
+        ),
+    ],
+)
+def test_the_suites_endpoint_documents_are_contract_valid(doc):
+    """The helper claims to emit what the contract accepts; hold it to that.
+
+    Every read test asserts against a document this helper builds. If those
+    documents cannot validate, the suite is describing behaviour for shapes
+    that could never ship — and the engine's own load-time validation would
+    reject them before a single request went out.
+    """
+    TypeAdapter(ApiEndpointDoc).validate_python(doc)

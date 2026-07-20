@@ -206,9 +206,11 @@ class _ReadPlan:
     base_url: str
 
 
-# What a strategy answers each page: where the following request comes from,
-# or None when the strategy itself has run out.
-_Advance = Callable[[_Page, Resolver], "_NextRequest | None"]
+# What a strategy answers each page: where the following request comes from.
+# Never None -- a strategy that cannot build the next request raises, because
+# returning "no further page" while stop_when says otherwise is how a read
+# ends early and reports success.
+_Advance = Callable[[_Page, Resolver], "_NextRequest"]
 # What builds one, given the strategy's own block plus the request state.
 _AdvanceBuilder = Callable[[dict[str, Any], _RequestState], _Advance]
 # One materialized request, reduced to a comparable identity.
@@ -1153,10 +1155,10 @@ class APIConnector(BaseConnector):
                 # `link` raise on. Ending quietly here truncated the stream
                 # and reported success.
                 self._report_empty_page(p_type, page, records_ref, pages, records)
-                stop, following = self._decide_page(
+                stop, _following = self._decide_page(
                     page, resolver, stop_when, metadata_spec, advance, p_type
                 )
-                if stop or following is None:
+                if stop:
                     self._log_read_end(p_type, "empty page", pages, records)
                     return
                 raise ReadError(
@@ -1179,11 +1181,12 @@ class APIConnector(BaseConnector):
 
             yield page.records
 
-            if stop:
+            # `following` is None exactly when `stop` is True -- `_decide_page`
+            # does not call `advance` once the predicate fires -- so this is
+            # one condition, not two, and the second half is what lets the
+            # unpacking below be typed as a request rather than an optional.
+            if stop or following is None:
                 self._log_read_end(p_type, "stop_when", pages, records)
-                return
-            if following is None:
-                self._log_read_end(p_type, "no further page", pages, records)
                 return
             override_url, params, send_params = following
 
@@ -1364,11 +1367,11 @@ class APIConnector(BaseConnector):
         """Seed *params* for the first page and return the per-strategy step.
 
         The returned callable receives the page just read plus a resolver
-        scoped to it, and answers where the following page comes from —
-        ``None`` when the strategy itself has run out (an unresolvable next
-        cursor / next link, a last record carrying no key). ``stop_when``
-        remains the declared stop condition; this is only the mechanical
-        "can I even build another request" question.
+        scoped to it, and answers where the following page comes from. It
+        never answers "nowhere": `advance` runs only when ``stop_when`` said
+        the read continues, so a strategy that cannot build the next request
+        is looking at a contradiction and raises. ``stop_when`` remains the
+        one declared stop condition.
         """
         builder = _ADVANCE_BUILDERS.get(p_type)
         if builder is None:
@@ -1978,7 +1981,7 @@ def _build_offset_advance(block: dict[str, Any], state: _RequestState) -> _Advan
         )
     params[param] = position
 
-    def advance(page: _Page, _page_resolver: Resolver) -> _NextRequest | None:
+    def advance(page: _Page, _page_resolver: Resolver) -> _NextRequest:
         nonlocal position
         position += step if step is not None else len(page.records)
         params[param] = position
@@ -1998,7 +2001,7 @@ def _build_page_advance(block: dict[str, Any], state: _RequestState) -> _Advance
     )
     params[param] = number
 
-    def advance(_page: _Page, _page_resolver: Resolver) -> _NextRequest | None:
+    def advance(_page: _Page, _page_resolver: Resolver) -> _NextRequest:
         nonlocal number
         number += step
         params[param] = number
@@ -2021,7 +2024,7 @@ def _build_cursor_advance(block: dict[str, Any], state: _RequestState) -> _Advan
     # one. The param stays absent rather than being sent empty.
     params.pop(param, None)
 
-    def advance(_page: _Page, page_resolver: Resolver) -> _NextRequest | None:
+    def advance(_page: _Page, page_resolver: Resolver) -> _NextRequest:
         # `advance` only runs when stop_when evaluated false -- the document
         # said this is not the last page. A missing token then contradicts it,
         # and ending quietly would drop every remaining page while the run
@@ -2055,7 +2058,7 @@ def _build_link_advance(block: dict[str, Any], state: _RequestState) -> _Advance
             "resolving to the next page's absolute URL)"
         )
 
-    def advance(_page: _Page, page_resolver: Resolver) -> _NextRequest | None:
+    def advance(_page: _Page, page_resolver: Resolver) -> _NextRequest:
         # Same reasoning as cursor: stop_when said this is not the last page,
         # so an absent link is a contradiction, not a quiet ending.
         target = _control_value(
@@ -2124,7 +2127,7 @@ def _build_keyset_advance(block: dict[str, Any], state: _RequestState) -> _Advan
     else:
         params.pop(param, None)
 
-    def advance(page: _Page, _page_resolver: Resolver) -> _NextRequest | None:
+    def advance(page: _Page, _page_resolver: Resolver) -> _NextRequest:
         # The raw record value (int/str/Decimal) feeds both the query string
         # and any body binding through build_request, so it stays native here;
         # build_request stringifies Decimals only for the query (where yarl

@@ -29,9 +29,11 @@ from decimal import Decimal
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import aiohttp
 import pyarrow as pa
 import pytest
 from multidict import CIMultiDict
+from yarl import URL
 
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.secrets import InMemorySecretsResolver
@@ -47,10 +49,20 @@ class _FakeResponse:
     """Drop-in for the ``aiohttp`` response object used by the connector."""
 
     def __init__(
-        self, *, status: int, body: Any, headers: dict[str, str] | None = None
+        self,
+        *,
+        status: int,
+        body: Any,
+        headers: dict[str, str] | None = None,
+        raise_json: BaseException | None = None,
     ):
         self.status = status
         self._body = body
+        # Lets a test model the two ways a 200 response fails to decode --
+        # a non-JSON content type and a truncated body -- which the connector
+        # now classifies oppositely and neither of which this fake could
+        # produce before.
+        self._raise_json = raise_json
         # The connector publishes response headers into the `response`
         # resolution scope, so link pagination can follow a `Link` header.
         self.headers = headers or {}
@@ -62,6 +74,8 @@ class _FakeResponse:
         return None
 
     async def json(self, *, loads: Any = json.loads) -> Any:
+        if self._raise_json is not None:
+            raise self._raise_json
         # aiohttp decodes the raw body text through ``loads``; model that so the
         # connector's custom decoder (e.g. parse_float=Decimal) actually runs.
         raw = self._body if isinstance(self._body, str) else json.dumps(self._body)
@@ -79,8 +93,14 @@ class _FakeSession:
     tests can assert on the URL + params actually sent.
     """
 
+    closed: bool
+
     def __init__(self, responses: list[_FakeResponse]):
         self._responses = list(responses)
+        # Real sessions are closed on teardown. Without this every test exited
+        # through an AttributeError logged at ERROR, so the teardown path was
+        # never actually exercised.
+        self.closed = False
         self.calls: list[tuple[str, str, dict[str, Any]]] = []
         # JSON body per request (None when the connector sent none),
         # parallel to ``calls``.
@@ -101,12 +121,20 @@ class _FakeSession:
         # The connector turns redirect-following off and handles 3xx itself, so
         # the fake has to accept the flag the real session takes.
         assert allow_redirects is False, "the connector must not follow redirects"
+        # aiohttp builds the request with `url.extend_query(params)`, and yarl
+        # refuses a bool, None or a container. Accepting them here let tests
+        # certify requests the real client would reject -- one asserted a
+        # Python `True` reaching the query string.
+        URL(url).extend_query(params)
         self.calls.append((method, url, dict(params)))
         self.bodies.append(json)
         self.headers.append(dict(headers or {}))
         if not self._responses:
             raise AssertionError(f"unexpected extra request: {method} {url} {params}")
         return self._responses.pop(0)
+
+    async def close(self) -> None:
+        self.closed = True
 
 
 def _runtime_with_session(
@@ -154,8 +182,12 @@ def _endpoint_doc_with_records(
     from one that just echoes param names.
     """
     record_properties: dict[str, Any] = {
-        "id": {"type": "integer", "arrow_type": "Int64"},
-        "name": {"type": "string", "arrow_type": "Utf8"},
+        # `native_type` alongside `arrow_type`: the contract requires a typed
+        # field schema to carry both, and a helper that emits documents the
+        # contract rejects makes every test that uses it assert against a
+        # shape that could never ship.
+        "id": {"type": "integer", "native_type": "integer", "arrow_type": "Int64"},
+        "name": {"type": "string", "native_type": "string", "arrow_type": "Utf8"},
     }
     record_properties.update(extra_record_properties or {})
     read_block: dict[str, Any] = {
@@ -183,13 +215,18 @@ def _endpoint_doc_with_records(
     if pagination:
         read_block["pagination"] = pagination
     if replication:
-        read_block["replication"] = replication
+        # `supported_methods` is required and min-length 1 on the contract's
+        # replication block, so a document without it never validates.
+        read_block["replication"] = {
+            "supported_methods": ["full_refresh", "incremental"],
+            **replication,
+        }
 
     declared: dict[str, Any] = dict(params or {})
     for name in _controlled_param_names(pagination, "pagination"):
-        declared.setdefault(name, {"in": "query", "controlled_by": "pagination"})
+        declared.setdefault(name, _controlled_param("pagination"))
     for name in _controlled_param_names(replication, "replication"):
-        declared.setdefault(name, {"in": "query", "controlled_by": "replication"})
+        declared.setdefault(name, _controlled_param("replication"))
     if declared:
         read_block["params"] = declared
 
@@ -211,6 +248,20 @@ def _endpoint_doc_with_records(
         "$schema": "https://schemas.analitiq.ai/api-endpoint/latest.json",
         "endpoint_id": "items",
         "operations": {"read": read_block},
+    }
+
+
+def _controlled_param(kind: str) -> dict[str, Any]:
+    """A pagination/replication param declaration the contract accepts.
+
+    `type` and `required` are both mandatory on `Param`; omitting them made
+    every generated document invalid.
+    """
+    return {
+        "in": "query",
+        "type": "string",
+        "required": False,
+        "controlled_by": kind,
     }
 
 
@@ -3424,6 +3475,98 @@ class TestContractDeclarationsAreHonoured:
                 batch_size=10,
             )
         assert session.calls == []
+
+
+class TestResponseDecodeClassification:
+    """The two ways a 200 response fails to decode classify oppositely."""
+
+    @pytest.mark.asyncio
+    async def test_a_non_json_content_type_is_a_config_error(self):
+        """An endpoint that does not serve JSON never will; retrying is waste."""
+        session = _FakeSession(
+            [
+                _FakeResponse(
+                    status=200,
+                    body={"records": []},
+                    raise_json=aiohttp.ContentTypeError(None, (), message="text/html"),
+                )
+            ]
+        )
+        with pytest.raises(ReadError, match="not JSON"):
+            await _consume(
+                APIConnector("test"),
+                _runtime_with_session(session),
+                config={
+                    "endpoint_document": _endpoint_doc_with_records(),
+                    "stream_source": _stream_source(),
+                },
+                state_manager=MagicMock(),
+                stream_name="items",
+                batch_size=10,
+            )
+
+    @pytest.mark.asyncio
+    async def test_a_truncated_body_is_transient(self):
+        """A mangled transfer is the same cause as ClientPayloadError, which retries."""
+        session = _FakeSession(
+            [
+                _FakeResponse(
+                    status=200,
+                    body={"records": []},
+                    raise_json=json.JSONDecodeError("Expecting value", "{", 1),
+                )
+            ]
+        )
+        with pytest.raises(TransientReadError, match="did not parse"):
+            await _consume(
+                APIConnector("test"),
+                _runtime_with_session(session),
+                config={
+                    "endpoint_document": _endpoint_doc_with_records(),
+                    "stream_source": _stream_source(),
+                },
+                state_manager=MagicMock(),
+                stream_name="items",
+                batch_size=10,
+            )
+
+    @pytest.mark.asyncio
+    async def test_a_header_bound_pagination_param_is_part_of_the_request_identity(
+        self,
+    ):
+        """A provider paginating by header changes nothing else about the request.
+
+        Leaving headers out of the wire identity would read a repeated header
+        page as no progress, and a genuinely advancing one as a repeat.
+        """
+        pages = [
+            {"records": [{"id": 1, "name": "a"}], "next": "p2"},
+            {"records": [{"id": 2, "name": "b"}]},
+        ]
+        session = _FakeSession([_FakeResponse(status=200, body=p) for p in pages])
+        endpoint = _endpoint_doc_with_records(
+            pagination={
+                "type": "cursor",
+                "cursor": {
+                    "param": "page_token",
+                    "next_cursor": {"ref": "response.body.next"},
+                },
+                "stop_when": {"missing": {"ref": "response.body.next"}},
+            },
+            headers={"X-Page-Token": {"from_param": "page_token"}},
+        )
+        endpoint["operations"]["read"]["params"]["page_token"]["in"] = "header"
+        batches = await _consume(
+            APIConnector("test"),
+            _runtime_with_session(session),
+            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=10,
+        )
+        assert [b.num_rows for b in batches] == [1, 1]
+        assert session.headers[1] == {"X-Page-Token": "p2"}
+        assert session.calls[0][2] == {}, "a header param must not also be a query key"
 
 
 class TestRequestBindingMaps:
