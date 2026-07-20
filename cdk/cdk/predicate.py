@@ -31,6 +31,7 @@ operand.
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Mapping
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -207,7 +208,7 @@ def _align_numbers(left: Any, right: Any) -> tuple[Any, Any]:
         # pair are both False and a stop predicate quietly answers "keep
         # going" forever. Only the Decimal pairing raised before; a float NaN
         # against an int answered silently. Neither is a comparison.
-        if isinstance(value, float) and value != value:
+        if isinstance(value, float) and math.isnan(value):
             raise TransportSpecError(
                 f"predicate operand ({side}) is NaN, which orders against "
                 f"nothing: every comparison with it is False, so the "
