@@ -118,6 +118,15 @@ class _NextRequest(NamedTuple):
     send_params: bool
 
 
+# What a strategy answers each page: where the following request comes from,
+# or None when the strategy itself has run out.
+_Advance = Callable[[_Page, Resolver], "_NextRequest | None"]
+# What builds one, given the strategy's own block plus the shared request state.
+_AdvanceBuilder = Callable[
+    [dict[str, Any], dict[str, Any], int, Resolver, str], _Advance
+]
+
+
 class APIConnector(BaseConnector):
     """Modern API connector consuming the contract endpoint document."""
 
@@ -782,15 +791,15 @@ class APIConnector(BaseConnector):
             reason,
         )
 
+    @staticmethod
     def _build_advance(
-        self,
         p_type: str,
         pagination: dict[str, Any],
         params: dict[str, Any],
         effective_limit: int,
         resolver: Resolver,
         full_url: str,
-    ) -> Callable[[_Page, Resolver], _NextRequest | None]:
+    ) -> _Advance:
         """Seed *params* for the first page and return the per-strategy step.
 
         The returned callable receives the page just read plus a resolver
@@ -800,191 +809,16 @@ class APIConnector(BaseConnector):
         remains the declared stop condition; this is only the mechanical
         "can I even build another request" question.
         """
-        if p_type == "offset":
-            block = pagination.get("offset") or {}
-            param = _required_setting(block, "offset", "param")
-            position = _int_setting(block, "offset", "initial", resolver, default=0)
-            # An authored step wins (a provider that counts offsets in pages
-            # declares 1). Otherwise the step is the number of records the page
-            # actually returned — NOT the requested page size. A declared limit
-            # is a request, not an agreement: when the endpoint declares no
-            # limit param, or the provider clamps below the one it was sent,
-            # stepping by the requested size jumps over every record in
-            # between. That loses records from the middle of a stream with no
-            # error, which is worse than the truncation it replaces because it
-            # survives re-runs and passes a row-count glance.
-            step = (
-                _int_setting(
-                    block,
-                    "offset",
-                    "increment_by",
-                    resolver,
-                    default=effective_limit,
-                    positive=True,
-                )
-                if block.get("increment_by") is not None
-                else None
-            )
-            params[param] = position
+        builder = _ADVANCE_BUILDERS.get(p_type)
+        if builder is None:
+            raise ReadError(f"Unsupported pagination type: {p_type!r}")
+        return builder(
+            pagination.get(p_type) or {}, params, effective_limit, resolver, full_url
+        )
 
-            def advance_offset(
-                page: _Page, page_resolver: Resolver
-            ) -> _NextRequest | None:
-                nonlocal position
-                position += step if step is not None else len(page.records)
-                params[param] = position
-                return _NextRequest(full_url, params, True)
-
-            return advance_offset
-
-        if p_type == "page":
-            block = pagination.get("page") or {}
-            param = _required_setting(block, "page", "param")
-            number = _int_setting(block, "page", "initial", resolver, default=1)
-            # A zero step would re-request the same page forever.
-            step = _int_setting(
-                block, "page", "increment_by", resolver, default=1, positive=True
-            )
-            params[param] = number
-
-            def advance_page(
-                page: _Page, page_resolver: Resolver
-            ) -> _NextRequest | None:
-                nonlocal number
-                number += step
-                params[param] = number
-                return _NextRequest(full_url, params, True)
-
-            return advance_page
-
-        if p_type == "cursor":
-            block = pagination.get("cursor") or {}
-            param = _required_setting(block, "cursor", "param")
-            next_cursor = block.get("next_cursor")
-            if next_cursor is None:
-                raise ReadError(
-                    "cursor pagination requires cursor.next_cursor (a value "
-                    "expression resolving to the next page's token)"
-                )
-            # No first-page cursor: the token only exists once a response has
-            # produced one. The param stays absent rather than being sent empty.
-            params.pop(param, None)
-
-            def advance_cursor(
-                page: _Page, page_resolver: Resolver
-            ) -> _NextRequest | None:
-                token = page_resolver.resolve_for_request(next_cursor)
-                if _is_blank(token):
-                    # The declared expression found no token, which is how a
-                    # cursor provider says "last page". Note the difference
-                    # from the old behaviour: the field consulted is the one
-                    # the endpoint declared, never a hardcoded `next_cursor`.
-                    logger.debug(
-                        "cursor pagination: next_cursor expression yielded no "
-                        "token; ending read"
-                    )
-                    return None
-                params[param] = token
-                return _NextRequest(full_url, params, True)
-
-            return advance_cursor
-
-        if p_type == "link":
-            block = pagination.get("link") or {}
-            next_url = block.get("next_url")
-            if next_url is None:
-                raise ReadError(
-                    "link pagination requires link.next_url (a value "
-                    "expression resolving to the next page's absolute URL)"
-                )
-
-            def advance_link(
-                page: _Page, page_resolver: Resolver
-            ) -> _NextRequest | None:
-                target = page_resolver.resolve_for_request(next_url)
-                if _is_blank(target):
-                    logger.debug(
-                        "link pagination: next_url expression yielded no link; "
-                        "ending read"
-                    )
-                    return None
-                if not isinstance(target, str):
-                    raise ReadError(
-                        f"link pagination: next_url resolved to "
-                        f"{type(target).__name__}, expected a URL string"
-                    )
-                # The provider's link already carries the full query, so the
-                # declared params must not be appended again — doing so
-                # duplicates keys (`?limit=100&limit=100`). The body, which
-                # the link cannot express, is still built and sent.
-                return _NextRequest(target, params, False)
-
-            return advance_link
-
-        if p_type == "keyset":
-            block = pagination.get("keyset") or {}
-            param = _required_setting(block, "keyset", "param")
-            order_by_field = block.get("order_by_field")
-            if not order_by_field or not isinstance(order_by_field, str):
-                raise ReadError(
-                    "keyset pagination requires keyset.order_by_field (the "
-                    "dotted record field path the pages are ordered by)"
-                )
-            field_path = order_by_field.split(".")
-            initial = block.get("initial")
-            if initial is not None:
-                seed = resolver.resolve_for_request(initial)
-                if seed is None:
-                    raise ReadError(
-                        "keyset pagination: keyset.initial is declared but "
-                        "did not resolve. Sending it as an empty value would "
-                        "start the read from an arbitrary point; omit "
-                        "keyset.initial to start from the beginning"
-                    )
-                params[param] = seed
-            else:
-                params.pop(param, None)
-
-            def advance_keyset(
-                page: _Page, page_resolver: Resolver
-            ) -> _NextRequest | None:
-                # The raw record value (int/str/Decimal) feeds both the query
-                # string and any body binding through build_request, so it
-                # stays native here; build_request stringifies Decimals only
-                # for the query (where yarl would truncate them) and keeps the
-                # body numeric.
-                last_record = page.records[-1]
-                if not _has_path(last_record, field_path):
-                    # The ordering field is absent from the record entirely.
-                    # Ending here would silently truncate every read of this
-                    # stream to one page — the #346 failure shape — so a
-                    # mis-declared order_by_field fails loud instead.
-                    raise ReadError(
-                        f"keyset pagination: record carries no "
-                        f"{order_by_field!r} field, so the next page cannot be "
-                        f"requested. Declared keys on the record: "
-                        f"{sorted(last_record)}"
-                    )
-                last_key = walk_path(last_record, field_path)
-                if last_key is None:
-                    # Present but null: the provider has no further key to
-                    # advance from. Visible, because a null ordering key in a
-                    # keyset stream is anomalous rather than routine.
-                    logger.warning(
-                        "keyset pagination: last record has a null %r; ending "
-                        "read after this page",
-                        order_by_field,
-                    )
-                    return None
-                params[param] = last_key
-                return _NextRequest(full_url, params, True)
-
-            return advance_keyset
-
-        raise ReadError(f"Unsupported pagination type: {p_type!r}")
-
+    @staticmethod
     def _effective_limit(
-        self, limit_block: dict[str, Any], batch_size: int, resolver: Resolver
+        limit_block: dict[str, Any], batch_size: int, resolver: Resolver
     ) -> int:
         """Page size for this read: the declared default, clamped to the max.
 
@@ -1241,3 +1075,221 @@ def _as_positive_int(value: Any, label: str) -> int:
     if number < 1:
         raise ReadError(f"{label} must be >= 1, got {number}")
     return number
+
+
+# ----------------------------------------------------------------------
+# Pagination strategies
+# ----------------------------------------------------------------------
+#
+# One builder per contract strategy. Each seeds the first page's params and
+# returns the step that answers "where does the following page come from".
+# They share a signature so the dispatch table below stays a plain lookup;
+# a builder ignores the arguments its strategy has no use for.
+
+
+def _build_offset_advance(
+    block: dict[str, Any],
+    params: dict[str, Any],
+    effective_limit: int,
+    resolver: Resolver,
+    full_url: str,
+) -> _Advance:
+    """Offset/start-index pagination."""
+    param = _required_setting(block, "offset", "param")
+    position = _int_setting(block, "offset", "initial", resolver, default=0)
+    # An authored step wins (a provider that counts offsets in pages declares
+    # 1). Otherwise the step is the number of records the page actually
+    # returned — NOT the requested page size. A declared limit is a request,
+    # not an agreement: with no limit param the provider picks the page size,
+    # and with one it may clamp below it. Stepping by the requested size then
+    # jumps over every record in between, losing records from the middle of a
+    # stream with no error — worse than the truncation it replaces, because it
+    # survives re-runs and passes a row-count glance.
+    step = (
+        _int_setting(
+            block,
+            "offset",
+            "increment_by",
+            resolver,
+            default=effective_limit,
+            positive=True,
+        )
+        if block.get("increment_by") is not None
+        else None
+    )
+    params[param] = position
+
+    def advance(page: _Page, _page_resolver: Resolver) -> _NextRequest | None:
+        nonlocal position
+        position += step if step is not None else len(page.records)
+        params[param] = position
+        return _NextRequest(full_url, params, True)
+
+    return advance
+
+
+def _build_page_advance(
+    block: dict[str, Any],
+    params: dict[str, Any],
+    effective_limit: int,
+    resolver: Resolver,
+    full_url: str,
+) -> _Advance:
+    """Page-number pagination."""
+    param = _required_setting(block, "page", "param")
+    number = _int_setting(block, "page", "initial", resolver, default=1)
+    # A zero step would re-request the same page forever.
+    step = _int_setting(
+        block, "page", "increment_by", resolver, default=1, positive=True
+    )
+    params[param] = number
+
+    def advance(_page: _Page, _page_resolver: Resolver) -> _NextRequest | None:
+        nonlocal number
+        number += step
+        params[param] = number
+        return _NextRequest(full_url, params, True)
+
+    return advance
+
+
+def _build_cursor_advance(
+    block: dict[str, Any],
+    params: dict[str, Any],
+    effective_limit: int,
+    resolver: Resolver,
+    full_url: str,
+) -> _Advance:
+    """Opaque-cursor pagination."""
+    param = _required_setting(block, "cursor", "param")
+    next_cursor = block.get("next_cursor")
+    if next_cursor is None:
+        raise ReadError(
+            "cursor pagination requires cursor.next_cursor (a value "
+            "expression resolving to the next page's token)"
+        )
+    # No first-page cursor: the token only exists once a response has produced
+    # one. The param stays absent rather than being sent empty.
+    params.pop(param, None)
+
+    def advance(_page: _Page, page_resolver: Resolver) -> _NextRequest | None:
+        token = page_resolver.resolve_for_request(next_cursor)
+        if _is_blank(token):
+            # The declared expression found no token, which is how a cursor
+            # provider says "last page". Note the difference from the old
+            # behaviour: the field consulted is the one the endpoint declared,
+            # never a hardcoded `next_cursor`.
+            logger.debug("cursor pagination: next_cursor expression yielded no token")
+            return None
+        params[param] = token
+        return _NextRequest(full_url, params, True)
+
+    return advance
+
+
+def _build_link_advance(
+    block: dict[str, Any],
+    params: dict[str, Any],
+    effective_limit: int,
+    resolver: Resolver,
+    full_url: str,
+) -> _Advance:
+    """Next-URL pagination."""
+    next_url = block.get("next_url")
+    if next_url is None:
+        raise ReadError(
+            "link pagination requires link.next_url (a value expression "
+            "resolving to the next page's absolute URL)"
+        )
+
+    def advance(_page: _Page, page_resolver: Resolver) -> _NextRequest | None:
+        target = page_resolver.resolve_for_request(next_url)
+        if _is_blank(target):
+            logger.debug("link pagination: next_url expression yielded no link")
+            return None
+        if not isinstance(target, str):
+            raise ReadError(
+                f"link pagination: next_url resolved to "
+                f"{type(target).__name__}, expected a URL string"
+            )
+        # The provider's link already carries the full query, so the declared
+        # params must not be appended again — doing so duplicates keys
+        # (`?limit=100&limit=100`). The body, which the link cannot express, is
+        # still built and sent.
+        return _NextRequest(target, params, False)
+
+    return advance
+
+
+def _build_keyset_advance(
+    block: dict[str, Any],
+    params: dict[str, Any],
+    effective_limit: int,
+    resolver: Resolver,
+    full_url: str,
+) -> _Advance:
+    """Keyset (advance-from-last-key) pagination."""
+    param = _required_setting(block, "keyset", "param")
+    order_by_field = block.get("order_by_field")
+    if not order_by_field or not isinstance(order_by_field, str):
+        raise ReadError(
+            "keyset pagination requires keyset.order_by_field (the dotted "
+            "record field path the pages are ordered by)"
+        )
+    field_path = order_by_field.split(".")
+    initial = block.get("initial")
+    if initial is not None:
+        seed = resolver.resolve_for_request(initial)
+        if seed is None:
+            raise ReadError(
+                "keyset pagination: keyset.initial is declared but did not "
+                "resolve. Sending it as an empty value would start the read "
+                "from an arbitrary point; omit keyset.initial to start from "
+                "the beginning"
+            )
+        params[param] = seed
+    else:
+        params.pop(param, None)
+
+    def advance(page: _Page, _page_resolver: Resolver) -> _NextRequest | None:
+        # The raw record value (int/str/Decimal) feeds both the query string
+        # and any body binding through build_request, so it stays native here;
+        # build_request stringifies Decimals only for the query (where yarl
+        # would truncate them) and keeps the body numeric.
+        last_record = page.records[-1]
+        if not _has_path(last_record, field_path):
+            # The ordering field is absent from the record entirely. Ending
+            # here would silently truncate every read of this stream to one
+            # page — the #346 failure shape — so a mis-declared order_by_field
+            # fails loud instead.
+            raise ReadError(
+                f"keyset pagination: record carries no {order_by_field!r} "
+                f"field, so the next page cannot be requested. Declared keys "
+                f"on the record: {sorted(last_record)}"
+            )
+        last_key = walk_path(last_record, field_path)
+        if last_key is None:
+            # Present but null: the provider has no further key to advance
+            # from. Visible, because a null ordering key in a keyset stream is
+            # anomalous rather than routine.
+            logger.warning(
+                "keyset pagination: last record has a null %r; ending read "
+                "after this page",
+                order_by_field,
+            )
+            return None
+        params[param] = last_key
+        return _NextRequest(full_url, params, True)
+
+    return advance
+
+
+# Strategy name -> builder. The key is also the name of the strategy's own
+# block in the pagination document, which is what `_build_advance` passes in.
+_ADVANCE_BUILDERS: dict[str, _AdvanceBuilder] = {
+    "offset": _build_offset_advance,
+    "page": _build_page_advance,
+    "cursor": _build_cursor_advance,
+    "link": _build_link_advance,
+    "keyset": _build_keyset_advance,
+}

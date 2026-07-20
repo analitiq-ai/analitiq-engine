@@ -84,13 +84,25 @@ def evaluate_predicate(node: Any, resolver: Any) -> bool:
     key, the wrong operand count, an unresolved comparison operand, or
     operands that cannot be ordered against each other.
     """
+    operator, operand = _single_operator(node)
+
+    if operator in _NESTING:
+        return _nest(operator, operand, resolver)
+    if operator in _ABSENCE:
+        return _absence(operator, operand, resolver)
+    return _compare(operator, operand, resolver)
+
+
+def _single_operator(node: Any) -> tuple[str, Any]:
+    """Extract the one operator key and its operand, or name what is wrong.
+
+    ``x-*`` keys are the contract's extension escape hatch and are never
+    operators; anything else unrecognized is a typo worth surfacing by name.
+    """
     if not isinstance(node, Mapping):
         raise TransportSpecError(
             f"predicate must be an object, got {type(node).__name__}: {node!r}"
         )
-
-    # `x-*` keys are the contract's extension escape hatch and are never
-    # operators; anything else unrecognized is a typo worth surfacing by name.
     operators = [
         key for key in node if isinstance(key, str) and not key.startswith("x-")
     ]
@@ -105,42 +117,34 @@ def evaluate_predicate(node: Any, resolver: Any) -> bool:
             f"predicate must contain exactly one operator key, got "
             f"{sorted(operators)}"
         )
-    operator = operators[0]
-    operand = node[operator]
+    return operators[0], node[operators[0]]
 
-    if operator == "and":
-        return all(
-            evaluate_predicate(child, resolver)
-            for child in _branches(operand, operator)
-        )
-    if operator == "or":
-        return any(
-            evaluate_predicate(child, resolver)
-            for child in _branches(operand, operator)
-        )
+
+def _nest(operator: str, operand: Any, resolver: Any) -> bool:
+    """Evaluate ``and`` / ``or`` / ``not``."""
     if operator == "not":
         return not evaluate_predicate(operand, resolver)
+    branches = _branches(operand, operator)
+    results = (evaluate_predicate(child, resolver) for child in branches)
+    return all(results) if operator == "and" else any(results)
 
-    if operator in _ABSENCE:
-        value = _resolve_operand(operand, resolver)
-        if operator == "exists":
-            return value is not UNRESOLVED
-        if operator == "missing":
-            return value is UNRESOLVED
-        # Only containers and absence count as empty. ``0`` and ``False`` are
-        # values: a page-count of zero conflated with absence is how a caller
-        # ends up stopping on a legitimate result.
-        is_empty = (
-            value is UNRESOLVED
-            or value is None
-            or (
-                isinstance(value, (str, bytes, list, tuple, dict, set))
-                and len(value) == 0
-            )
-        )
-        return is_empty if operator == "empty" else not is_empty
 
-    return _compare(operator, operand, resolver)
+def _absence(operator: str, operand: Any, resolver: Any) -> bool:
+    """Evaluate ``exists`` / ``missing`` / ``empty`` / ``not_empty``."""
+    value = _resolve_operand(operand, resolver)
+    if operator == "exists":
+        return value is not UNRESOLVED
+    if operator == "missing":
+        return value is UNRESOLVED
+    # Only containers and absence count as empty. ``0`` and ``False`` are
+    # values: a page-count of zero conflated with absence is how a caller ends
+    # up stopping on a legitimate result.
+    is_empty = (
+        value is UNRESOLVED
+        or value is None
+        or (isinstance(value, (str, bytes, list, tuple, dict, set)) and len(value) == 0)
+    )
+    return is_empty if operator == "empty" else not is_empty
 
 
 def _branches(operand: Any, operator: str) -> list[Any]:
