@@ -1458,6 +1458,10 @@ class APIConnector(BaseConnector):
     # HTTP
     # ------------------------------------------------------------------
 
+    def _safe(self, text: str) -> str:
+        """Strip resolved secret values out of a diagnostic string."""
+        return self._runtime.redact_secrets(text) if self._runtime else text
+
     async def _request_page(
         self,
         url: str,
@@ -1475,7 +1479,9 @@ class APIConnector(BaseConnector):
             )
         if self.rate_limiter:
             await self.rate_limiter.acquire()
-        logger.debug("API %s %s params=%s", method, url, params)
+        # Redacted: a connector may bind a credential into a query param or a
+        # path segment, and this line names both.
+        logger.debug("API %s %s", method, self._safe(f"{url} params={params}"))
         request_kwargs: dict[str, Any] = {"params": params}
         if headers:
             # Endpoint-declared headers only. The session already carries the
@@ -1508,13 +1514,12 @@ class APIConnector(BaseConnector):
             if response.status != 200:
                 error_text = await response.text()
                 body_snippet = error_text[:500]
-                logger.error(
-                    "API %d %s %s: %s", response.status, method, url, body_snippet
+                detail = self._safe(
+                    f"API request failed: {method} {url} -> "
+                    f"status {response.status}; params={params}; "
+                    f"body[:500]={body_snippet!r}"
                 )
-                detail = (
-                    f"API request failed: {method} {url} -> status {response.status}; "
-                    f"params={params}; body[:500]={body_snippet!r}"
-                )
+                logger.error("%s", detail)
                 # Rate limits and upstream outages heal on retry; other
                 # statuses (bad request, auth, missing endpoint) do not.
                 if response.status in _TRANSIENT_HTTP_STATUSES:

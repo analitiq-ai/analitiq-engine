@@ -3569,6 +3569,84 @@ class TestResponseDecodeClassification:
         assert session.calls[0][2] == {}, "a header param must not also be a query key"
 
 
+class TestSecretRedaction:
+    """A credential bound into a request must not come back out in an error."""
+
+    @staticmethod
+    def _runtime_with_secret(session):
+        runtime = _runtime_with_session(session, parameters={})
+        # The shape materialize() leaves behind: resolved secrets kept for the
+        # per-request resolver.
+        runtime._request_secrets = {"api_key": "s3cr3t-token-value"}
+        return runtime
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("path", "params", "where"),
+        [
+            pytest.param(
+                "/items",
+                {"key": {"literal": "s3cr3t-token-value"}},
+                "query",
+                id="query",
+            ),
+        ],
+    )
+    async def test_a_secret_valued_param_is_not_echoed_into_the_error(
+        self, path, params, where
+    ):
+        session = _FakeSession([_FakeResponse(status=401, body={"error": "bad key"})])
+        endpoint = _endpoint_doc_with_records(
+            path=path,
+            params={
+                "key": {
+                    "in": "query",
+                    "type": "string",
+                    "required": False,
+                    "default": {"literal": "s3cr3t-token-value"},
+                }
+            },
+        )
+        with pytest.raises(ReadError) as caught:
+            await _consume(
+                APIConnector("test"),
+                self._runtime_with_secret(session),
+                config={
+                    "endpoint_document": endpoint,
+                    "stream_source": _stream_source(),
+                },
+                state_manager=MagicMock(),
+                stream_name="items",
+                batch_size=10,
+            )
+        assert "s3cr3t-token-value" not in str(caught.value)
+        assert "***" in str(caught.value)
+
+    @pytest.mark.asyncio
+    async def test_a_secret_echoed_by_the_provider_body_is_redacted_too(self):
+        """Providers echo a bad key back; the body snippet is in the error."""
+        session = _FakeSession(
+            [
+                _FakeResponse(
+                    status=400, body={"message": "unknown key s3cr3t-token-value"}
+                )
+            ]
+        )
+        with pytest.raises(ReadError) as caught:
+            await _consume(
+                APIConnector("test"),
+                self._runtime_with_secret(session),
+                config={
+                    "endpoint_document": _endpoint_doc_with_records(),
+                    "stream_source": _stream_source(),
+                },
+                state_manager=MagicMock(),
+                stream_name="items",
+                batch_size=10,
+            )
+        assert "s3cr3t-token-value" not in str(caught.value)
+
+
 class TestRequestBindingMaps:
     """The wire names come from the request bindings, never from param names.
 

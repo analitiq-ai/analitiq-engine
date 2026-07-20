@@ -848,6 +848,26 @@ class ConnectionRuntime:
                 f"connector's connection contract"
             )
 
+    def redact_secrets(self, text: str) -> str:
+        """Replace any resolved secret or auth value appearing in *text*.
+
+        Request diagnostics name the URL and the param table, and a connector
+        may legitimately bind a credential into either -- an API key as a
+        query param, a token in a path segment. Those strings are raised as
+        errors, cross the worker boundary and are logged, so the value has to
+        come out on the way.
+
+        Applied to the whole message rather than to the param dict, because
+        the same value can reach it through the URL, the params, or a
+        provider error body that echoes the key back. Values shorter than
+        four characters are left alone: they are not credentials, and
+        blanking them would eat ordinary digits out of every message.
+        """
+        for value in (*self._request_secrets.values(), *self._request_auth.values()):
+            if isinstance(value, str) and len(value) >= 4:
+                text = text.replace(value, "***")
+        return text
+
     def _build_resolution_context(
         self, secrets: Mapping[str, Any]
     ) -> ResolutionContext:
