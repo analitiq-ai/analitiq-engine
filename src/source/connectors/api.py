@@ -41,6 +41,7 @@ from dataclasses import dataclass, replace
 from datetime import timezone
 from decimal import Decimal
 from typing import Any, NamedTuple
+from urllib.parse import urlsplit
 
 import aiohttp
 import pyarrow as pa
@@ -725,6 +726,23 @@ class APIConnector(BaseConnector):
         if limit_param:
             base_params[limit_param] = effective_limit
 
+        # From here on `runtime.batch_size` reports the page size actually
+        # requested, not the engine's batch size. `limit.default` has already
+        # resolved against the unclamped value (that is what "track the engine
+        # batch size" means), and `limit.max` may have clamped it below. The
+        # standard stop idiom
+        # `{"lt": [response.record_count, runtime.batch_size]}` means "the page
+        # came back short of what we asked for"; leaving the unclamped size
+        # visible makes every full max-sized page satisfy it, stopping the read
+        # after page one. Rebinding once here covers stop_when and every
+        # strategy expression, which all resolve through this resolver.
+        resolver = resolver.with_context(
+            replace(
+                resolver.context,
+                runtime={**resolver.context.runtime, "batch_size": effective_limit},
+            )
+        )
+
         params = dict(base_params)
         advance = self._build_advance(
             p_type,
@@ -1025,6 +1043,32 @@ def _is_blank(value: Any) -> bool:
     return value is None or (isinstance(value, str) and not value.strip())
 
 
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+def _origin(url: str) -> str:
+    """Scheme/host/port of *url*, normalized for same-origin comparison.
+
+    Scheme and host are case-insensitive per RFC 3986, and an explicit
+    default port names the same origin as an omitted one, so ``HTTPS://API.x``
+    and ``https://api.x:443`` must not read as different hosts. A URL with no
+    scheme or host has no origin and returns ``""``, which never matches a
+    real one.
+    """
+    parts = urlsplit(url)
+    if not parts.scheme or not parts.hostname:
+        return ""
+    scheme = parts.scheme.lower()
+    try:
+        port = parts.port
+    except ValueError:
+        # Unparseable port: no origin rather than a spurious match.
+        return ""
+    return (
+        f"{scheme}://{parts.hostname.lower()}:{port or _DEFAULT_PORTS.get(scheme, 0)}"
+    )
+
+
 def _required_setting(block: dict[str, Any], strategy: str, key: str) -> str:
     """Read a required non-empty string setting off a pagination strategy block."""
     value = block.get(key)
@@ -1086,15 +1130,26 @@ def _optional_int_setting(
 
 
 def _as_int(value: Any, label: str) -> int:
-    """Coerce a resolved pagination setting to ``int``, or fail naming it."""
+    """Coerce a resolved pagination setting to ``int``, or fail naming it.
+
+    A fractional value is rejected rather than truncated. These settings say
+    where a read starts and how far each page steps, so turning ``10.9`` into
+    ``10`` would quietly shift every subsequent page boundary — skipping or
+    repeating records with nothing in the log to show for it.
+    """
     if isinstance(value, bool) or not isinstance(value, (int, float, Decimal, str)):
         raise ReadError(
             f"{label} must be an integer, got {type(value).__name__}: {value!r}"
         )
     try:
-        return int(value)
-    except (TypeError, ValueError) as err:
+        number = Decimal(value)
+    except (ArithmeticError, TypeError, ValueError) as err:
         raise ReadError(f"{label} must be an integer, got {value!r}") from err
+    # is_finite() first: NaN and Infinity both survive the integral check
+    # below (Infinity is its own integral value) and only blow up at int().
+    if not number.is_finite() or number != number.to_integral_value():
+        raise ReadError(f"{label} must be a whole number, got {value!r}")
+    return int(number)
 
 
 def _as_positive_int(value: Any, label: str) -> int:
@@ -1198,7 +1253,7 @@ def _build_cursor_advance(block: dict[str, Any], state: _RequestState) -> _Advan
 
 def _build_link_advance(block: dict[str, Any], state: _RequestState) -> _Advance:
     """Next-URL pagination."""
-    params = state.params
+    params, origin = state.params, _origin(state.url)
     next_url = block.get("next_url")
     if next_url is None:
         raise ReadError(
@@ -1215,6 +1270,25 @@ def _build_link_advance(block: dict[str, Any], state: _RequestState) -> _Advance
             raise ReadError(
                 f"link pagination: next_url resolved to "
                 f"{type(target).__name__}, expected a URL string"
+            )
+        # This is the one place a *response* decides where the next request
+        # goes, and the session carries the connection's auth headers on every
+        # request it makes. An absolute link to another host would therefore
+        # hand the connector's credentials to whoever the provider named, so
+        # the next page must come from the endpoint's own origin.
+        target_origin = _origin(target)
+        if not target_origin:
+            raise ReadError(
+                f"link pagination: next_url resolved to {target!r}, which is "
+                f"not an absolute URL. The next page must be addressed "
+                f"scheme-and-host so it can be checked against the endpoint "
+                f"origin {origin!r}"
+            )
+        if target_origin != origin:
+            raise ReadError(
+                f"link pagination: next_url points at {target_origin!r}, "
+                f"outside the endpoint origin {origin!r}. Refusing to follow "
+                f"it — the request carries this connection's credentials"
             )
         # The provider's link already carries the full query, so the declared
         # params must not be appended again — doing so duplicates keys

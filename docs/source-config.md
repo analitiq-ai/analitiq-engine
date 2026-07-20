@@ -320,6 +320,16 @@ connection).
 | `pagination.type` | `offset`, `page`, `cursor`, `link`, or `keyset`. Each type declares its own block (`offset`/`page`/`cursor`/`link`/`keyset`) naming the param it drives and, for `cursor`/`link`, the value expression that yields the next token or URL. The authoritative field list is the api-endpoint JSON Schema. |
 | `pagination.stop_when` | Required predicate deciding when the read is done, evaluated against each page's `response` scope (`body`, `records`, `record_count`, `status`, `headers`, `metadata`). The engine adds no termination heuristic of its own — it only stops early on a page with no records. |
 | `pagination.limit` | Optional page size: `param` plus a `default` value expression and the provider's `max`, which clamps it |
+
+For `link`, `next_url` must resolve to an absolute URL on the same origin as
+the endpoint. Every request carries the connection's credentials, so a link
+naming another host is refused rather than followed.
+
+Inside a paginated read, `runtime.batch_size` is the page size actually
+requested — `limit.default` after `limit.max` has clamped it. That is what
+makes the usual "short page means last page" stop condition,
+`{"lt": [{"ref": "response.record_count"}, {"ref": "runtime.batch_size"}]}`,
+compare against the size the provider was really asked for.
 | `replication_filter_mapping` | Maps a stream's `cursor_field` to an API filter name |
 
 ### Database endpoint (private example)

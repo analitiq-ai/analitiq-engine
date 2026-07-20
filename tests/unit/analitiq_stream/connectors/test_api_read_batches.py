@@ -2306,3 +2306,204 @@ class TestPaginationSilentTruncationRegressions:
         assert batches == []
         assert "first page carried no records" in caplog.text
         assert "response.body.records" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_stop_when_sees_the_clamped_page_size_not_the_batch_size(self):
+        """`runtime.batch_size` must report the page size actually requested.
+
+        `limit.max` clamps the engine's batch_size of 10 down to 2, so every
+        full page holds 2 records. The standard stop idiom asks "did this page
+        come back short of what we asked for". Against the unclamped batch
+        size that reads 2 < 10 on the very first page and truncates the stream
+        to a fifth of its records, silently.
+        """
+        session = _FakeSession(
+            [
+                _FakeResponse(
+                    status=200,
+                    body={"records": [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]},
+                ),
+                _FakeResponse(
+                    status=200,
+                    body={"records": [{"id": 3, "name": "c"}, {"id": 4, "name": "d"}]},
+                ),
+                _FakeResponse(status=200, body={"records": [{"id": 5, "name": "e"}]}),
+            ]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(
+            pagination={
+                "type": "offset",
+                "offset": {"param": "offset", "initial": 0},
+                "limit": {"param": "limit", "max": 2},
+                "stop_when": {
+                    "lt": [
+                        {"ref": "response.record_count"},
+                        {"ref": "runtime.batch_size"},
+                    ]
+                },
+            },
+        )
+        batches = await _consume(
+            connector,
+            runtime,
+            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=10,
+        )
+
+        assert [r["id"] for b in batches for r in b.to_pylist()] == [1, 2, 3, 4, 5]
+        # The clamp reached the wire too, not just the predicate.
+        assert [c[2].get("limit") for c in session.calls] == [2, 2, 2]
+
+    @pytest.mark.asyncio
+    async def test_fractional_pagination_setting_is_rejected_not_truncated(self):
+        """A non-whole offset would shift every later page boundary in silence."""
+        session = _FakeSession(
+            [_FakeResponse(status=200, body={"records": [{"id": 1, "name": "a"}]})]
+        )
+        runtime = _runtime_with_session(session, parameters={"start": 10.9})
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(
+            pagination={
+                "type": "offset",
+                "offset": {
+                    "param": "offset",
+                    "initial": {"ref": "connection.parameters.start"},
+                },
+                "stop_when": {"empty": {"ref": "response.body.records"}},
+            },
+        )
+        with pytest.raises(ReadError, match="whole number"):
+            await _consume(
+                connector,
+                runtime,
+                config={
+                    "endpoint_document": endpoint,
+                    "stream_source": _stream_source(),
+                },
+                state_manager=MagicMock(),
+                stream_name="items",
+                batch_size=10,
+            )
+
+    @pytest.mark.asyncio
+    async def test_link_refuses_a_cross_origin_next_url(self):
+        """A provider must not be able to redirect the read at another host.
+
+        The session carries this connection's auth headers on every request it
+        makes, so following a provider-named foreign origin would hand the
+        credentials over.
+        """
+        session = _FakeSession(
+            [
+                _FakeResponse(
+                    status=200,
+                    body={
+                        "records": [{"id": 1, "name": "a"}],
+                        "next": "https://evil.example.com/items?page=2",
+                    },
+                ),
+            ]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(
+            pagination={
+                "type": "link",
+                "link": {"next_url": {"ref": "response.body.next"}},
+                "stop_when": {"missing": {"ref": "response.body.next"}},
+            },
+        )
+        with pytest.raises(ReadError, match="outside the endpoint origin"):
+            await _consume(
+                connector,
+                runtime,
+                config={
+                    "endpoint_document": endpoint,
+                    "stream_source": _stream_source(),
+                },
+                state_manager=MagicMock(),
+                stream_name="items",
+                batch_size=10,
+            )
+        # Only the first page was ever requested.
+        assert len(session.calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_link_follows_the_same_origin_spelled_differently(self):
+        """Case and an explicit default port name the same origin, so it is followed."""
+        session = _FakeSession(
+            [
+                _FakeResponse(
+                    status=200,
+                    body={
+                        "records": [{"id": 1, "name": "a"}],
+                        "next": "HTTPS://API.EXAMPLE.TEST:443/items?page=2",
+                    },
+                ),
+                _FakeResponse(status=200, body={"records": [{"id": 2, "name": "b"}]}),
+            ]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(
+            pagination={
+                "type": "link",
+                "link": {"next_url": {"ref": "response.body.next"}},
+                "stop_when": {"missing": {"ref": "response.body.next"}},
+            },
+        )
+        batches = await _consume(
+            connector,
+            runtime,
+            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=10,
+        )
+
+        assert [r["id"] for b in batches for r in b.to_pylist()] == [1, 2]
+
+    @pytest.mark.asyncio
+    async def test_link_rejects_a_relative_next_url(self):
+        """A relative link cannot be origin-checked, so it fails by name."""
+        session = _FakeSession(
+            [
+                _FakeResponse(
+                    status=200,
+                    body={
+                        "records": [{"id": 1, "name": "a"}],
+                        "next": "/items?page=2",
+                    },
+                ),
+            ]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(
+            pagination={
+                "type": "link",
+                "link": {"next_url": {"ref": "response.body.next"}},
+                "stop_when": {"missing": {"ref": "response.body.next"}},
+            },
+        )
+        with pytest.raises(ReadError, match="not an absolute URL"):
+            await _consume(
+                connector,
+                runtime,
+                config={
+                    "endpoint_document": endpoint,
+                    "stream_source": _stream_source(),
+                },
+                state_manager=MagicMock(),
+                stream_name="items",
+                batch_size=10,
+            )
