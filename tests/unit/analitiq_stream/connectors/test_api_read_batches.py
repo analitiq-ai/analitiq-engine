@@ -31,6 +31,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pyarrow as pa
 import pytest
+from multidict import CIMultiDict
 
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.secrets import InMemorySecretsResolver
@@ -1922,3 +1923,386 @@ class TestReadBatchesDecimalPrecision:
         body = session.bodies[1]
         assert body == {"after": 2.5}
         assert isinstance(body["after"], float)
+
+
+# ---------------------------------------------------------------------------
+# Review regressions: every case below silently lost records before the fix
+# ---------------------------------------------------------------------------
+
+
+class TestPaginationSilentTruncationRegressions:
+    @pytest.mark.asyncio
+    async def test_offset_steps_by_records_returned_not_the_requested_size(self):
+        """A provider that ignores the requested page size must not skip records.
+
+        The endpoint declares no limit param, so the provider picks the page
+        size (2 here) while the engine's batch_size is 10. Stepping by the
+        batch size would request offsets 0, 10, 20 and punch a hole through
+        records 3-10 with no error at all.
+        """
+        session = _FakeSession(
+            [
+                _FakeResponse(
+                    status=200,
+                    body={"records": [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]},
+                ),
+                _FakeResponse(
+                    status=200,
+                    body={"records": [{"id": 3, "name": "c"}, {"id": 4, "name": "d"}]},
+                ),
+                _FakeResponse(status=200, body={"records": []}),
+            ]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(
+            pagination={
+                "type": "offset",
+                "offset": {"param": "offset", "initial": 0},
+                "stop_when": {"empty": {"ref": "response.body.records"}},
+            },
+        )
+        batches = await _consume(
+            connector,
+            runtime,
+            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=10,
+        )
+
+        assert [c[2].get("offset") for c in session.calls] == [0, 2, 4]
+        assert [r["id"] for b in batches for r in b.to_pylist()] == [1, 2, 3, 4]
+
+    @pytest.mark.asyncio
+    async def test_offset_declared_increment_by_still_wins(self):
+        # A page-counting provider declares increment_by explicitly; the
+        # records-returned default must not override that.
+        session = _FakeSession(
+            [
+                _FakeResponse(
+                    status=200,
+                    body={"records": [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]},
+                ),
+                _FakeResponse(status=200, body={"records": []}),
+            ]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(
+            pagination={
+                "type": "offset",
+                "offset": {"param": "page", "initial": 0, "increment_by": 1},
+                "stop_when": {"empty": {"ref": "response.body.records"}},
+            },
+        )
+        await _consume(
+            connector,
+            runtime,
+            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=10,
+        )
+
+        assert [c[2].get("page") for c in session.calls] == [0, 1]
+
+    @pytest.mark.parametrize("strategy", ["offset", "page"])
+    @pytest.mark.asyncio
+    async def test_zero_increment_by_is_rejected(self, strategy):
+        # A zero step re-requests the same page forever, re-emitting the same
+        # records to the destination on every iteration.
+        session = _FakeSession(
+            [_FakeResponse(status=200, body={"records": [{"id": 1, "name": "a"}]})]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(
+            pagination={
+                "type": strategy,
+                strategy: {"param": "p", "initial": 0, "increment_by": 0},
+                "stop_when": {"empty": {"ref": "response.body.records"}},
+            },
+        )
+        with pytest.raises(ReadError, match="must be >= 1"):
+            await _consume(
+                connector,
+                runtime,
+                config={
+                    "endpoint_document": endpoint,
+                    "stream_source": _stream_source(),
+                },
+                state_manager=MagicMock(),
+                stream_name="items",
+                batch_size=10,
+            )
+
+    @pytest.mark.asyncio
+    async def test_link_follows_a_header_whose_casing_differs_from_the_declaration(
+        self,
+    ):
+        """HTTP header names are case-insensitive; the response scope must be too.
+
+        The endpoint declares `response.headers.Link`; the provider sends
+        `link`. A case-sensitive copy makes the ref unresolvable, `missing`
+        returns True, and the read ends after page 1 with no error.
+        """
+        session = _FakeSession(
+            [
+                _FakeResponse(
+                    status=200,
+                    body={"records": [{"id": 1, "name": "a"}]},
+                    headers=CIMultiDict({"link": "https://api.example.test/items?p=2"}),
+                ),
+                _FakeResponse(status=200, body={"records": [{"id": 2, "name": "b"}]}),
+            ]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(
+            pagination={
+                "type": "link",
+                "link": {"next_url": {"ref": "response.headers.Link"}},
+                "stop_when": {"missing": {"ref": "response.headers.Link"}},
+            },
+        )
+        batches = await _consume(
+            connector,
+            runtime,
+            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=10,
+        )
+
+        assert [b.num_rows for b in batches] == [1, 1]
+        assert session.calls[1][1] == "https://api.example.test/items?p=2"
+
+    @pytest.mark.asyncio
+    async def test_stop_when_reads_unresolved_metadata_as_missing(self):
+        """`missing` on a metadata key must agree with the same ref written direct.
+
+        Resolving metadata key-by-key leaves an unresolved expression in the
+        scope as a present key holding None, so `missing` answers False and the
+        declared stop condition never fires — the loop then runs until the
+        provider happens to return an empty page.
+        """
+        session = _FakeSession(
+            [
+                _FakeResponse(
+                    status=200,
+                    body={
+                        "records": [{"id": 1, "name": "a"}],
+                        "paging": {"next": "p2"},
+                    },
+                ),
+                _FakeResponse(
+                    status=200,
+                    body={"records": [{"id": 2, "name": "b"}], "paging": {}},
+                ),
+            ]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(
+            pagination={
+                "type": "page",
+                "page": {"param": "page", "initial": 1},
+                "stop_when": {"missing": {"ref": "response.metadata.next_page"}},
+            },
+            metadata={"next_page": {"ref": "response.body.paging.next"}},
+        )
+        batches = await _consume(
+            connector,
+            runtime,
+            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=10,
+        )
+
+        # Page 2's `paging.next` is gone, so the predicate stops the read
+        # there rather than requesting a third page the fake would reject.
+        assert [b.num_rows for b in batches] == [1, 1]
+
+    @pytest.mark.asyncio
+    async def test_metadata_resolves_into_the_response_scope(self):
+        session = _FakeSession(
+            [
+                _FakeResponse(
+                    status=200,
+                    body={"records": [{"id": 1, "name": "a"}], "total": 1},
+                ),
+            ]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(
+            pagination={
+                "type": "page",
+                "page": {"param": "page", "initial": 1},
+                "stop_when": {
+                    "gte": [
+                        {"ref": "response.record_count"},
+                        {"ref": "response.metadata.total"},
+                    ]
+                },
+            },
+            metadata={"total": {"ref": "response.body.total"}},
+        )
+        batches = await _consume(
+            connector,
+            runtime,
+            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=10,
+        )
+
+        assert [b.num_rows for b in batches] == [1]
+
+    @pytest.mark.asyncio
+    async def test_keyset_order_by_field_absent_from_records_raises(self):
+        """A mis-declared order_by_field truncated every read to one page.
+
+        `walk_path` cannot tell "field absent" from "field null", so a typo
+        used to end the read silently and permanently.
+        """
+        session = _FakeSession(
+            [
+                _FakeResponse(
+                    status=200,
+                    body={"records": [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]},
+                ),
+            ]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(
+            pagination={
+                "type": "keyset",
+                "keyset": {"param": "after", "order_by_field": "ident"},
+                "stop_when": {"empty": {"ref": "response.body.records"}},
+            },
+        )
+        with pytest.raises(ReadError, match="carries no 'ident' field"):
+            await _consume(
+                connector,
+                runtime,
+                config={
+                    "endpoint_document": endpoint,
+                    "stream_source": _stream_source(),
+                },
+                state_manager=MagicMock(),
+                stream_name="items",
+                batch_size=10,
+            )
+
+    @pytest.mark.asyncio
+    async def test_keyset_null_order_key_ends_the_read_without_raising(self):
+        # Present but null is the provider having no further key, not a
+        # mis-declaration — it ends the read rather than failing.
+        session = _FakeSession(
+            [
+                _FakeResponse(
+                    status=200,
+                    body={
+                        "records": [
+                            {"id": 1, "name": "a"},
+                            {"id": None, "name": "b"},
+                        ]
+                    },
+                ),
+            ]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(
+            pagination={
+                "type": "keyset",
+                "keyset": {"param": "after", "order_by_field": "id"},
+                "stop_when": {"empty": {"ref": "response.body.records"}},
+            },
+        )
+        batches = await _consume(
+            connector,
+            runtime,
+            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=10,
+        )
+
+        assert [b.num_rows for b in batches] == [2]
+
+    @pytest.mark.asyncio
+    async def test_declared_but_unresolvable_initial_raises(self):
+        # Substituting a default would start the read somewhere the endpoint
+        # never declared, changing which records are returned invisibly.
+        session = _FakeSession(
+            [_FakeResponse(status=200, body={"records": [{"id": 1, "name": "a"}]})]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(
+            pagination={
+                "type": "page",
+                "page": {"param": "page", "initial": {"ref": "state.last_page"}},
+                "stop_when": {"empty": {"ref": "response.body.records"}},
+            },
+        )
+        with pytest.raises(ReadError, match="declared but did not resolve"):
+            await _consume(
+                connector,
+                runtime,
+                config={
+                    "endpoint_document": endpoint,
+                    "stream_source": _stream_source(),
+                },
+                state_manager=MagicMock(),
+                stream_name="items",
+                batch_size=10,
+            )
+
+    @pytest.mark.asyncio
+    async def test_empty_first_page_is_reported(self, caplog):
+        # A records.ref that addresses nothing and a genuinely empty source
+        # are indistinguishable from the outside; the log must name both.
+        session = _FakeSession(
+            [_FakeResponse(status=200, body={"records": None, "error": "quota"})]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(
+            pagination={
+                "type": "offset",
+                "offset": {"param": "offset", "initial": 0},
+                "stop_when": {"empty": {"ref": "response.body.records"}},
+            },
+        )
+        with caplog.at_level("WARNING"):
+            batches = await _consume(
+                connector,
+                runtime,
+                config={
+                    "endpoint_document": endpoint,
+                    "stream_source": _stream_source(),
+                },
+                state_manager=MagicMock(),
+                stream_name="items",
+                batch_size=10,
+            )
+
+        assert batches == []
+        assert "first page carried no records" in caplog.text
+        assert "response.body.records" in caplog.text

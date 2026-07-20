@@ -44,6 +44,7 @@ from typing import Any, NamedTuple
 
 import aiohttp
 import pyarrow as pa
+from multidict import CIMultiDict
 
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.exceptions import TransportSpecError
@@ -101,7 +102,7 @@ class _Page:
     body: Any
     records: list[dict[str, Any]]
     status: int
-    headers: dict[str, str]
+    headers: Mapping[str, str]
 
 
 class _NextRequest(NamedTuple):
@@ -705,23 +706,52 @@ class APIConnector(BaseConnector):
 
         url = full_url
         send_params = True
+        pages = 0
+        records = 0
         while True:
             query, body = build_request(params)
             page = await self._request_page(
                 url, method, query if send_params else {}, records_ref, body=body
             )
             if not page.records:
+                if pages == 0:
+                    # Not a quiet "nothing to sync": the endpoint declared
+                    # where its records live and that address produced none, so
+                    # a mis-declared records.ref and a genuinely empty source
+                    # look identical from here. Name both so the difference is
+                    # diagnosable from the log alone.
+                    logger.warning(
+                        "%r pagination: first page carried no records at %r "
+                        "(HTTP %d, body keys: %s); the stream reads empty",
+                        p_type,
+                        records_ref,
+                        page.status,
+                        (
+                            sorted(page.body)
+                            if isinstance(page.body, dict)
+                            else type(page.body).__name__
+                        ),
+                    )
+                else:
+                    self._log_read_end(p_type, "empty page", pages, records)
                 return
+            pages += 1
+            records += len(page.records)
             yield page.records
 
-            page_resolver = resolver.with_context(
-                replace(
-                    resolver.context,
-                    response=self._response_scope(page, metadata_spec, resolver),
-                )
-            )
+            # Built inside the try so a malformed `response.metadata`
+            # expression surfaces as the same ReadError a malformed
+            # `stop_when` does — both are authoring defects in the same
+            # document, and they should not classify differently.
             try:
+                page_resolver = resolver.with_context(
+                    replace(
+                        resolver.context,
+                        response=self._response_scope(page, metadata_spec, resolver),
+                    )
+                )
                 if evaluate_predicate(stop_when, page_resolver):
+                    self._log_read_end(p_type, "stop_when", pages, records)
                     return
             except TransportSpecError as err:
                 raise ReadError(
@@ -731,8 +761,26 @@ class APIConnector(BaseConnector):
 
             following = advance(page, page_resolver)
             if following is None:
+                self._log_read_end(p_type, "no further page", pages, records)
                 return
             url, params, send_params = following
+
+    @staticmethod
+    def _log_read_end(p_type: str, reason: str, pages: int, records: int) -> None:
+        """Record why a paginated read stopped, and how much it read.
+
+        Every exit from the loop reports itself. A read that ends early is
+        otherwise indistinguishable from one that ends correctly — both just
+        return — and "the source had more rows" is precisely the failure this
+        change exists to remove.
+        """
+        logger.info(
+            "%r pagination: ending read after %d page(s) / %d record(s) — %s",
+            p_type,
+            pages,
+            records,
+            reason,
+        )
 
     def _build_advance(
         self,
@@ -756,11 +804,26 @@ class APIConnector(BaseConnector):
             block = pagination.get("offset") or {}
             param = _required_setting(block, "offset", "param")
             position = _int_setting(block, "offset", "initial", resolver, default=0)
-            # The contract defines the offset step as the effective page size
-            # unless the author overrides it, so a provider that counts in
-            # records and one that counts in pages both stay expressible.
-            step = _int_setting(
-                block, "offset", "increment_by", resolver, default=effective_limit
+            # An authored step wins (a provider that counts offsets in pages
+            # declares 1). Otherwise the step is the number of records the page
+            # actually returned — NOT the requested page size. A declared limit
+            # is a request, not an agreement: when the endpoint declares no
+            # limit param, or the provider clamps below the one it was sent,
+            # stepping by the requested size jumps over every record in
+            # between. That loses records from the middle of a stream with no
+            # error, which is worse than the truncation it replaces because it
+            # survives re-runs and passes a row-count glance.
+            step = (
+                _int_setting(
+                    block,
+                    "offset",
+                    "increment_by",
+                    resolver,
+                    default=effective_limit,
+                    positive=True,
+                )
+                if block.get("increment_by") is not None
+                else None
             )
             params[param] = position
 
@@ -768,7 +831,7 @@ class APIConnector(BaseConnector):
                 page: _Page, page_resolver: Resolver
             ) -> _NextRequest | None:
                 nonlocal position
-                position += step
+                position += step if step is not None else len(page.records)
                 params[param] = position
                 return _NextRequest(full_url, params, True)
 
@@ -778,7 +841,10 @@ class APIConnector(BaseConnector):
             block = pagination.get("page") or {}
             param = _required_setting(block, "page", "param")
             number = _int_setting(block, "page", "initial", resolver, default=1)
-            step = _int_setting(block, "page", "increment_by", resolver, default=1)
+            # A zero step would re-request the same page forever.
+            step = _int_setting(
+                block, "page", "increment_by", resolver, default=1, positive=True
+            )
             params[param] = number
 
             def advance_page(
@@ -867,7 +933,15 @@ class APIConnector(BaseConnector):
             field_path = order_by_field.split(".")
             initial = block.get("initial")
             if initial is not None:
-                params[param] = resolver.resolve_for_request(initial)
+                seed = resolver.resolve_for_request(initial)
+                if seed is None:
+                    raise ReadError(
+                        "keyset pagination: keyset.initial is declared but "
+                        "did not resolve. Sending it as an empty value would "
+                        "start the read from an arbitrary point; omit "
+                        "keyset.initial to start from the beginning"
+                    )
+                params[param] = seed
             else:
                 params.pop(param, None)
 
@@ -879,11 +953,26 @@ class APIConnector(BaseConnector):
                 # stays native here; build_request stringifies Decimals only
                 # for the query (where yarl would truncate them) and keeps the
                 # body numeric.
-                last_key = walk_path(page.records[-1], field_path)
+                last_record = page.records[-1]
+                if not _has_path(last_record, field_path):
+                    # The ordering field is absent from the record entirely.
+                    # Ending here would silently truncate every read of this
+                    # stream to one page — the #346 failure shape — so a
+                    # mis-declared order_by_field fails loud instead.
+                    raise ReadError(
+                        f"keyset pagination: record carries no "
+                        f"{order_by_field!r} field, so the next page cannot be "
+                        f"requested. Declared keys on the record: "
+                        f"{sorted(last_record)}"
+                    )
+                last_key = walk_path(last_record, field_path)
                 if last_key is None:
-                    logger.debug(
-                        "keyset pagination: last record has no %r value; "
-                        "ending read",
+                    # Present but null: the provider has no further key to
+                    # advance from. Visible, because a null ordering key in a
+                    # keyset stream is anomalous rather than routine.
+                    logger.warning(
+                        "keyset pagination: last record has a null %r; ending "
+                        "read after this page",
                         order_by_field,
                     )
                     return None
@@ -910,13 +999,12 @@ class APIConnector(BaseConnector):
         if declared is not None:
             resolved = resolver.resolve_for_request(declared)
             if resolved is None:
-                logger.warning(
-                    "pagination.limit.default did not resolve; falling back to "
-                    "the engine batch size of %d",
-                    batch_size,
+                raise ReadError(
+                    "pagination.limit.default is declared but did not resolve. "
+                    "Falling back to the engine batch size would request a "
+                    "page size the endpoint never declared"
                 )
-            else:
-                value = resolved
+            value = resolved
         limit = _as_positive_int(value, "pagination.limit.default")
 
         max_limit = limit_block.get("max")
@@ -947,10 +1035,17 @@ class APIConnector(BaseConnector):
             metadata_resolver = resolver.with_context(
                 replace(resolver.context, response=scope)
             )
-            scope["metadata"] = {
-                name: metadata_resolver.resolve_for_request(expression)
-                for name, expression in metadata_spec.items()
-            }
+            # Resolved as one dict, not key by key. Per-key resolution returns
+            # None for an unresolved expression, which would land in the scope
+            # as a *present* key holding None — and `missing`/`empty` would
+            # then answer backwards for exactly the field the author declared
+            # metadata to reach. Resolving the whole mapping applies the
+            # resolver's drop policy instead, so an unresolved entry is
+            # genuinely absent and reads identically to the same `{ref}`
+            # written straight into the predicate.
+            scope["metadata"] = metadata_resolver.resolve_for_request(
+                dict(metadata_spec)
+            )
         return scope
 
     # ------------------------------------------------------------------
@@ -996,10 +1091,13 @@ class APIConnector(BaseConnector):
                     raise TransientReadError(detail)
                 raise ReadError(detail)
             data = await response.json(loads=_loads_preserving_decimals)
-            # Read inside the context manager: the headers proxy is tied to the
-            # live response, and pagination expressions address it as
-            # `response.headers.<name>` (a `Link` header, typically).
-            headers = dict(response.headers)
+            # Copied inside the context manager (the proxy is tied to the live
+            # response) but kept case-insensitive: HTTP header names are
+            # case-insensitive per RFC 9110, and pagination expressions address
+            # them as `response.headers.<name>`. A plain dict would make
+            # `response.headers.Link` miss a provider that sends `link:`,
+            # ending a link-paginated read after one page with no error.
+            headers = CIMultiDict(response.headers)
             status = response.status
         records = _extract_records(data, records_ref)
         if records:
@@ -1052,6 +1150,22 @@ def _extract_records(data: Any, records_ref: str) -> list[dict[str, Any]]:
     return []
 
 
+def _has_path(record: Any, path: list[str]) -> bool:
+    """Report whether *path* is present in *record*, even when its value is null.
+
+    ``walk_path`` returns ``None`` for both "key absent" and "key present and
+    null", which for a keyset ordering field are opposite situations: the first
+    is a mis-declared ``order_by_field`` that would truncate every read of the
+    stream, the second is a provider that simply has no further key.
+    """
+    cursor = record
+    for segment in path:
+        if not isinstance(cursor, dict) or segment not in cursor:
+            return False
+        cursor = cursor[segment]
+    return True
+
+
 def _is_blank(value: Any) -> bool:
     """Report whether a resolved next-page token / link carries nothing usable.
 
@@ -1077,26 +1191,31 @@ def _int_setting(
     resolver: Resolver,
     *,
     default: int,
+    positive: bool = False,
 ) -> int:
     """Read an integer pagination setting that may be authored as an expression.
 
     The contract types these ``Any`` because ``{"ref": "..."}`` is as valid an
     initial offset as ``0``. An authored value that resolves to something
     non-integral is a defect worth naming rather than coercing.
+
+    An *undeclared* setting takes *default*. A *declared* one that fails to
+    resolve raises: these values anchor where a read starts and how far it
+    steps, so quietly substituting a guess can skip the first page or stride
+    past records — the difference is invisible in the output.
     """
+    label = f"pagination.{strategy}.{key}"
     declared = block.get(key)
     if declared is None:
         return default
     resolved = resolver.resolve_for_request(declared)
     if resolved is None:
-        logger.warning(
-            "pagination.%s.%s did not resolve; falling back to %d",
-            strategy,
-            key,
-            default,
+        raise ReadError(
+            f"{label} is declared but did not resolve. It anchors where the "
+            f"read starts or how far each page steps, so it cannot fall back "
+            f"to a default without silently changing which records are read"
         )
-        return default
-    return _as_int(resolved, f"pagination.{strategy}.{key}")
+    return _as_positive_int(resolved, label) if positive else _as_int(resolved, label)
 
 
 def _as_int(value: Any, label: str) -> int:
