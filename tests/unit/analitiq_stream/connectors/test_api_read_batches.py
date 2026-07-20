@@ -3051,6 +3051,220 @@ class TestPaginationSilentTruncationRegressions:
             )
 
 
+class TestRecordExtractionAndReplicationWiring:
+    """Defects that end a read early while reporting success."""
+
+    @pytest.mark.asyncio
+    async def test_a_non_object_record_entry_is_a_read_error(self):
+        """`record_count` must be what the provider sent.
+
+        Dropping a `null` entry deflated the count, and the count is the
+        operand of the documented stop predicate — so one bad entry in a full
+        page ended the whole read reporting success.
+        """
+        session = _FakeSession(
+            [
+                _FakeResponse(
+                    status=200,
+                    body={
+                        "records": [
+                            {"id": 1, "name": "a"},
+                            None,
+                            {"id": 2, "name": "b"},
+                        ]
+                    },
+                )
+            ]
+        )
+        endpoint = _endpoint_doc_with_records(
+            pagination={
+                "type": "offset",
+                "offset": {"param": "offset", "initial": 0},
+                "limit": {"param": "limit"},
+                "stop_when": {
+                    "lt": [
+                        {"ref": "response.record_count"},
+                        {"ref": "runtime.batch_size"},
+                    ]
+                },
+            },
+        )
+        with pytest.raises(ReadError, match="not objects"):
+            await _consume(
+                APIConnector("test"),
+                _runtime_with_session(session),
+                config={
+                    "endpoint_document": endpoint,
+                    "stream_source": _stream_source(),
+                },
+                state_manager=MagicMock(),
+                stream_name="items",
+                batch_size=4,
+            )
+
+    @pytest.mark.asyncio
+    async def test_an_empty_object_at_the_records_ref_is_no_records(self):
+        """`{"records": {}}` is an empty collection, not one all-null row."""
+        session = _FakeSession([_FakeResponse(status=200, body={"records": {}})])
+        batches = await _consume(
+            APIConnector("test"),
+            _runtime_with_session(session),
+            config={
+                "endpoint_document": _endpoint_doc_with_records(),
+                "stream_source": _stream_source(),
+            },
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=10,
+        )
+        assert batches == [], "an empty object became a phantom record"
+
+    @pytest.mark.asyncio
+    async def test_a_dotted_cursor_field_resolves(self):
+        """The contract types `cursor_field` as a dotted record path."""
+        session = _FakeSession(
+            [
+                _FakeResponse(
+                    status=200,
+                    body={
+                        "records": [
+                            {
+                                "id": 1,
+                                "name": "a",
+                                "meta": {"updated_at": "2026-01-01T00:00:00Z"},
+                            }
+                        ]
+                    },
+                )
+            ]
+        )
+        checkpoint = MagicMock()
+        checkpoint.get_cursor = AsyncMock(return_value=None)
+        checkpoint.save_cursor = AsyncMock()
+        endpoint = _endpoint_doc_with_records(
+            extra_record_properties={
+                "meta": {
+                    "type": "object",
+                    "arrow_type": "Object",
+                    "properties": {
+                        "updated_at": {"type": "string", "arrow_type": "Utf8"}
+                    },
+                }
+            },
+            replication={
+                "cursor_mappings": [
+                    {
+                        "cursor_field": "meta.updated_at",
+                        "param": "since",
+                        "operator": "gte",
+                        "format": "date-time",
+                    }
+                ]
+            },
+        )
+        await _consume(
+            APIConnector("test"),
+            _runtime_with_session(session),
+            config={
+                "endpoint_document": endpoint,
+                "stream_source": _stream_source(
+                    replication_method="incremental", cursor_field="meta.updated_at"
+                ),
+            },
+            state_manager=checkpoint,
+            stream_name="items",
+            batch_size=10,
+        )
+        checkpoint.save_cursor.assert_awaited()
+        saved = checkpoint.save_cursor.await_args.args
+        assert "2026-01-01T00:00:00Z" in str(saved)
+
+    @pytest.mark.asyncio
+    async def test_an_upper_bound_cursor_operator_is_refused(self):
+        """`lt` on a cursor param would invert the read window every run."""
+        session = _FakeSession([])
+        checkpoint = MagicMock()
+        checkpoint.get_cursor = AsyncMock(
+            return_value={"cursor": "2026-07-01T00:00:00Z"}
+        )
+        checkpoint.save_cursor = AsyncMock()
+        endpoint = _endpoint_doc_with_records(
+            replication={
+                "cursor_mappings": [
+                    {
+                        "cursor_field": "updated_at",
+                        "param": "updated_before",
+                        "operator": "lt",
+                        "format": "date-time",
+                    }
+                ]
+            },
+        )
+        with pytest.raises(ReadError, match="upper bound"):
+            await _consume(
+                APIConnector("test"),
+                _runtime_with_session(session),
+                config={
+                    "endpoint_document": endpoint,
+                    "stream_source": _stream_source(
+                        replication_method="incremental", cursor_field="updated_at"
+                    ),
+                },
+                state_manager=checkpoint,
+                stream_name="items",
+                batch_size=10,
+            )
+        assert session.calls == []
+
+    @pytest.mark.asyncio
+    async def test_a_required_param_with_no_value_stops_the_read(self):
+        """An omitted required param makes the provider answer from its own defaults."""
+        session = _FakeSession([])
+        endpoint = _endpoint_doc_with_records(
+            params={"tenant": {"in": "query", "required": True}},
+        )
+        with pytest.raises(
+            ReadError, match="declared required but resolved to no value"
+        ):
+            await _consume(
+                APIConnector("test"),
+                _runtime_with_session(session),
+                config={
+                    "endpoint_document": endpoint,
+                    "stream_source": _stream_source(),
+                },
+                state_manager=MagicMock(),
+                stream_name="items",
+                batch_size=10,
+            )
+        assert session.calls == []
+
+    @pytest.mark.asyncio
+    async def test_a_filter_operator_the_engine_cannot_express_is_refused(self):
+        """`gte` and `lt` on one param would otherwise send identical requests."""
+        session = _FakeSession([])
+        stream_source = _stream_source()
+        stream_source["filters"] = [
+            {"field": "amount", "operator": "gte", "value": 100}
+        ]
+        endpoint = _endpoint_doc_with_records(
+            params={"amount": {"in": "query"}},
+        )
+        with pytest.raises(ReadError, match="cannot express"):
+            await _consume(
+                APIConnector("test"),
+                _runtime_with_session(session),
+                config={
+                    "endpoint_document": endpoint,
+                    "stream_source": stream_source,
+                },
+                state_manager=MagicMock(),
+                stream_name="items",
+                batch_size=10,
+            )
+        assert session.calls == []
+
+
 class TestRequestBindingMaps:
     """The wire names come from the request bindings, never from param names.
 
@@ -3320,10 +3534,48 @@ class TestPaginationInvariants:
         pytest.param(
             None,
             _stream_source(replication_method="incremental", cursor_field="updated_at"),
-            "records carry no 'updated_at'",
-            id="incremental_cursor_field_absent",
+            "replication.cursor_mappings has no entry",
+            id="incremental_without_a_cursor_mapping",
         ),
     ]
+
+    @pytest.mark.asyncio
+    async def test_a_cursor_field_absent_from_records_emits_nothing(self):
+        """Reached only once a mapping exists, so it is its own case."""
+        session = _FakeSession(
+            [
+                _FakeResponse(
+                    status=200,
+                    body={"records": [{"id": 1, "name": "a"}]},
+                )
+            ]
+        )
+        endpoint = _endpoint_doc_with_records(
+            replication={
+                "cursor_mappings": [
+                    {"cursor_field": "updated_at", "param": "since", "operator": "gte"}
+                ]
+            }
+        )
+        checkpoint = MagicMock()
+        checkpoint.get_cursor = AsyncMock(return_value=None)
+        checkpoint.save_cursor = AsyncMock()
+        emitted: list[Any] = []
+        with pytest.raises(ReadError, match="records carry no 'updated_at'"):
+            async for batch in APIConnector("test").read_batches(
+                _runtime_with_session(session),
+                {
+                    "endpoint_document": endpoint,
+                    "stream_source": _stream_source(
+                        replication_method="incremental", cursor_field="updated_at"
+                    ),
+                },
+                checkpoint=checkpoint,
+                stream_name="items",
+                batch_size=10,
+            ):
+                emitted.append(batch)
+        assert emitted == []
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("pagination,stream_source,message", DOCUMENT_DEFECTS)

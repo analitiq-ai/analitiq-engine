@@ -24,6 +24,7 @@ grpcio-tools>=1.60.0
 
 # Serialization formats for gRPC payloads
 msgpack>=1.0.0
+multidict>=6.0
 
 # Fast JSON serialization (used by models)
 orjson>=3.9.0
@@ -68,6 +69,8 @@ sqlalchemy[asyncio]>=2.0.0
 
 # Logging and monitoring
 structlog>=23.0.0
+# Direct imports in the API source connector (yarl.URL, multidict.CIMultiDict).
+yarl>=1.9
 
 # For NoSQL databases
 # motor>=3.0.0

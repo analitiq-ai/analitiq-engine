@@ -43,6 +43,7 @@ from dataclasses import dataclass, replace
 from datetime import timezone
 from decimal import Decimal
 from typing import Any, NamedTuple, TypeVar
+from urllib.parse import quote
 
 import aiohttp
 import pyarrow as pa
@@ -90,11 +91,12 @@ def _document_errors(context: str, suffix: str = "is not resolvable") -> Iterato
     next-page expression -- is resolved through the same grammar and fails the
     same two ways: ``TransportSpecError`` for a malformed node, and a plain
     ``KeyError`` from the resolver for an unknown scope name (``runtme``,
-    ``respones``). Neither derives from anything the source worker treats as
-    deterministic, so an unwrapped one is reported as an internal, retryable
-    failure: the run is retried until it exhausts its attempts on a typo that
-    cannot fix itself, and the log points at the engine rather than at the
-    document.
+    ``respones``). ``TransportSpecError`` derives from ``Exception`` alone and
+    is *not* in the source worker's deterministic set, so an unwrapped one is
+    reported as an internal, retryable failure and the run is retried until it
+    exhausts its attempts on a typo that cannot fix itself. ``KeyError`` is in
+    that set and would classify correctly on its own; it is wrapped here for
+    the message, which otherwise names neither the document nor the field.
 
     One guard rather than a ``try`` at each call site, so the set of places
     this applies is greppable and a new resolution point is an obvious
@@ -324,7 +326,11 @@ def _fill_path(path: str, segments: Mapping[str, Any], spec: Mapping[str, Any]) 
                 f"value, so the path placeholder {{{name}}} in {path!r} cannot "
                 f"be filled and the request has no address to go to"
             )
-        filled = filled.replace(f"{{{name}}}", str(segments[name]))
+        # Percent-encoded with nothing safe: a path *param* is one segment,
+        # so a value containing `/`, `?` or `#` must not be able to add
+        # segments, start a query string or truncate the path. A team id
+        # `a/b` addresses `/teams/a%2Fb/items`, not `/teams/a/b/items`.
+        filled = filled.replace(f"{{{name}}}", quote(str(segments[name]), safe=""))
     return filled
 
 
@@ -544,14 +550,20 @@ class APIConnector(BaseConnector):
         but the stream is otherwise wired correctly.
         """
         last_record = batch[-1]
-        if cursor_field not in last_record:
+        # Dotted, because the contract types `cursor_field` as a record field
+        # *path* (`RECORD_FIELD_PATH_PATTERN`) and validates nested ones. A
+        # flat key lookup made `meta.updated_at` -- a valid declaration --
+        # fail on the first batch, blaming the provider's records. `keyset`
+        # walks the same shape correctly; this is the same walk.
+        field_path = cursor_field.split(".")
+        if not _has_path(last_record, field_path):
             raise ReadError(
                 f"stream {stream_name!r}: records carry no {cursor_field!r} "
                 f"field, so the incremental cursor can never advance and every "
                 f"run would re-read the whole stream. Declared keys on the "
                 f"record: {sorted(last_record)}"
             )
-        cursor_value = last_record[cursor_field]
+        cursor_value = walk_path(last_record, field_path)
         if cursor_value is None:
             # Safe under at-least-once + upsert (a resume re-reads), but said
             # out loud: an author debugging "incremental stream keeps
@@ -801,10 +813,47 @@ class APIConnector(BaseConnector):
         for f in stream_filters:
             target = f.get("field")
             if not target:
-                continue
-            value = f.get("value")
-            if value is not None:
-                param_values[target] = value
+                raise ReadError(
+                    f"stream filter {f!r} names no field, so it cannot be "
+                    f"bound to a param and the read would silently return "
+                    f"more records than the stream asked for"
+                )
+            operator = f.get("operator")
+            if operator not in (None, "eq"):
+                # A filter reaches the provider as a param value, which
+                # carries no operator of its own -- so `gte` and `lt` on the
+                # same field produce byte-identical requests. Applying one as
+                # if it were the other returns a different record set and
+                # reports success, so an operator the engine cannot express
+                # is refused rather than dropped.
+                raise ReadError(
+                    f"stream filter on {target!r} declares operator "
+                    f"{operator!r}, which this connector cannot express: an "
+                    f"API param carries a value, not a comparison. Only 'eq' "
+                    f"is bindable; encode other comparisons as separate "
+                    f"declared params (for example `updated_after`)"
+                )
+            param_values[target] = f.get("value")
+
+        # A param the document marks required must reach the request. Absent,
+        # the provider either rejects the call opaquely or -- worse -- answers
+        # with its own default scope, which is another tenant's or another
+        # window's data synced as if it were this stream's.
+        missing_required = sorted(
+            name
+            for name, decl in declared.items()
+            if isinstance(decl, dict)
+            and decl.get("required")
+            and not decl.get("controlled_by")
+            and param_values.get(name) is None
+        )
+        if missing_required:
+            raise ReadError(
+                f"operations.read.params: {', '.join(missing_required)} "
+                f"declared required but resolved to no value. A required "
+                f"param missing from the request makes the provider answer "
+                f"from its own defaults, which is a different record set"
+            )
         return param_values
 
     # ------------------------------------------------------------------
@@ -828,18 +877,38 @@ class APIConnector(BaseConnector):
             (m for m in mappings if m.get("cursor_field") == cursor_field), None
         )
         if mapping is None:
-            logger.warning(
-                "No replication.cursor_mappings entry for cursor field %r; "
-                "running full replication",
-                cursor_field,
+            # The stream asked for incremental. Without a mapping the cursor
+            # reaches no request, so every run re-reads the whole source and
+            # reports success -- expensive, and indistinguishable from a
+            # working incremental stream in the logs. The sibling defect
+            # below (a mapping naming no param) already raises; same
+            # contradiction, same answer.
+            raise ReadError(
+                f"stream declares incremental replication on {cursor_field!r} "
+                f"but the endpoint's replication.cursor_mappings has no entry "
+                f"for that field, so the cursor cannot reach the request and "
+                f"every run would re-read the whole stream"
             )
-            return
         # Two mapping forms, distinguished by the contract on which param
         # fields are present: a single bound (`param`) or a bounded window
         # (`start_param`/`end_param`). Looking only for `param` matched the
         # single form and left a window mapping reading as "no mapping" --
         # every incremental run silently re-read the whole stream, at WARNING
         # level, claiming a mapping did not exist when one did.
+        operator = mapping.get("operator") or mapping.get("start_operator")
+        if operator in ("lt", "lte"):
+            # The engine has one thing to give a cursor param: the watermark
+            # to resume *from*. A param declared `lt`/`lte` means "everything
+            # before this", so handing it the resume point makes every run
+            # read strictly older records than the last -- the watermark walks
+            # backwards and new rows are never fetched, with success reported
+            # each time. Refuse rather than invert the stream.
+            raise ReadError(
+                f"replication.cursor_mappings for {cursor_field!r} declares "
+                f"operator {operator!r}, an upper bound. The incremental "
+                f"cursor is the point to resume from, so its param must be a "
+                f"lower bound ('gt' or 'gte')"
+            )
         start_param = mapping.get("param") or mapping.get("start_param")
         if not start_param:
             raise ReadError(
@@ -1368,7 +1437,31 @@ class APIConnector(BaseConnector):
                 if response.status in _TRANSIENT_HTTP_STATUSES:
                     raise TransientReadError(detail)
                 raise ReadError(detail)
-            data = await response.json(loads=_loads_preserving_decimals)
+            try:
+                data = await response.json(loads=_loads_preserving_decimals)
+            except aiohttp.ContentTypeError as err:
+                # The endpoint does not serve JSON. Deterministic: the same
+                # request will answer the same way forever, and aiohttp's
+                # ContentTypeError is a ClientError, which the worker treats
+                # as transient -- so this burned the whole retry budget on a
+                # document defect and then reported a timeout.
+                raise ReadError(
+                    f"API response is not JSON: {method} {url} -> "
+                    f"{err.headers.get('Content-Type') if err.headers else 'no'} "
+                    f"content type. Check the endpoint path and any Accept "
+                    f"header the connector declares"
+                ) from err
+            except json.JSONDecodeError as err:
+                # A body that did not parse is a truncated or mangled
+                # transfer, which retrying can fix. JSONDecodeError subclasses
+                # ValueError, which the worker treats as deterministic, so
+                # this killed healthy runs -- while the identical failure
+                # arriving one layer down as ClientPayloadError was retried.
+                # Same cause, so the same classification.
+                raise TransientReadError(
+                    f"API response body did not parse as JSON: {method} {url} "
+                    f"-> status {response.status}: {err}"
+                ) from err
             # Copied inside the context manager (the proxy is tied to the live
             # response) but kept case-insensitive: HTTP header names are
             # case-insensitive per RFC 9110, and pagination expressions address
@@ -1422,9 +1515,26 @@ def _extract_records(data: Any, records_ref: str) -> list[dict[str, Any]]:
     else:
         cursor = None
     if isinstance(cursor, list):
-        return [r for r in cursor if isinstance(r, dict)]
+        non_records = [r for r in cursor if not isinstance(r, dict)]
+        if non_records:
+            # Dropping these silently deflated `response.record_count`, which
+            # is the operand of the stop predicate the contract documents
+            # (`lt(record_count, runtime.batch_size)`). One `null` in a full
+            # page therefore ended the whole read reporting success, and the
+            # offset step shortened by the same amount. The count has to be
+            # what the provider sent.
+            raise ReadError(
+                f"records at {records_ref!r} include "
+                f"{len(non_records)} entr{'y' if len(non_records) == 1 else 'ies'} "
+                f"that are not objects (first: {non_records[0]!r}). Dropping "
+                f"them would under-report the page size and end the read early"
+            )
+        return list(cursor)
     if isinstance(cursor, dict):
-        return [cursor]
+        # A single-object `records.ref` is legitimate; an empty one is a
+        # provider encoding an empty collection as `{}`, and reading that as
+        # one all-null record writes a phantom row to the destination.
+        return [cursor] if cursor else []
     return []
 
 
@@ -1484,11 +1594,12 @@ def _control_value(
        is absent. That is not blank, so the read would continue from a
        position invented out of configuration that was never there.
     2. *Deterministic classification.* A malformed node raises
-       ``TransportSpecError`` and a typo'd scope (``runtme.batch_size``) a
-       plain ``KeyError``; neither is in the source worker's deterministic
-       set, so an unwrapped one is retried until the attempts run out on a
-       defect that cannot fix itself. Both become ``ReadError`` naming the
-       field.
+       ``TransportSpecError``, which is *not* in the source worker's
+       deterministic set, so an unwrapped one is retried until the attempts
+       run out on a defect that cannot fix itself. A typo'd scope
+       (``runtme.batch_size``) raises a plain ``KeyError``, which is in that
+       set and would classify correctly on its own -- it is wrapped for the
+       message. Both become ``ReadError`` naming the field.
     3. *A sink.* A control value ends up somewhere specific -- a query param,
        an integer step, a URL -- and *sink* is the guard for that
        destination. There is no way to resolve a control value without

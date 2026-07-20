@@ -47,6 +47,12 @@ sqlalchemy = {version = "^2.0.0", extras = ["asyncio"]}
 # API connectors
 aiohttp = "^3.8.0"
 aiohttp-retry = "^2.8.3"
+# Imported directly by the API source connector: `yarl.URL` decides request
+# identity and same-origin, `multidict.CIMultiDict` carries response headers.
+# They arrive with aiohttp, but the connector calls their APIs, so the
+# dependency is declared rather than inherited.
+yarl = "^1.9"
+multidict = "^6.0"
 
 # Fast JSON encoder for API destination bodies. orjson natively handles
 # datetime / date / time / UUID; we wire a default= hook for Decimal

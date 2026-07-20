@@ -54,17 +54,26 @@ class TestResolutionContextLookup:
         with pytest.raises(TransportSpecError, match="non-empty"):
             ctx.lookup("")
 
-    def test_with_runtime_returns_copy(self):
+    def test_replacing_one_scope_carries_every_other_one(self):
+        """The read path rebinds `runtime` and `response` per page.
+
+        Asserted over every scope rather than the two the old test named: a
+        scope dropped from the copy resolves as missing data, which the
+        per-request policy silently omits -- a secret ref would drop the auth
+        header instead of failing.
+        """
+        from dataclasses import replace
+
         original = ResolutionContext(
-            connection={"parameters": {"host": "h"}},
-            runtime={"batch_size": 10},
+            **{name: {"k": name} for name in ResolutionContext._SCOPES}
         )
-        clone = original.with_runtime({"batch_size": 99})
+        clone = replace(original, runtime={"batch_size": 99})
         assert clone is not original
         assert clone.runtime == {"batch_size": 99}
-        assert clone.connection == original.connection
-        # Original is untouched.
-        assert original.runtime == {"batch_size": 10}
+        for name in ResolutionContext._SCOPES:
+            if name != "runtime":
+                assert getattr(clone, name) == {"k": name}, f"{name} was dropped"
+        assert original.runtime == {"k": "runtime"}
 
 
 # ---------------------------------------------------------------------------

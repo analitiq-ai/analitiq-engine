@@ -133,7 +133,12 @@ def sample_wise_endpoint_config():
                 "default": {"ref": "runtime.batch_size"},
                 "max": 1000,
             },
-            "stop_when": {"empty": {"ref": "response.body.objects"}},
+            # The response body *is* the record array (`"type": "array"`
+            # above), so the ref is the body itself. Addressing
+            # `response.body.objects` never resolves, which reads as "empty"
+            # and ends the read after page one -- this fixture is copied into
+            # real documents, so it must not model that.
+            "stop_when": {"empty": {"ref": "response.body"}},
         },
     }
 

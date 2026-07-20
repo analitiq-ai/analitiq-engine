@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from cdk.exceptions import TransportSpecError, UnresolvedValueError
@@ -126,6 +126,15 @@ def _nest(operator: str, operand: Any, resolver: Any) -> bool:
     if operator == "not":
         return not evaluate_predicate(operand, resolver)
     branches = _branches(operand, operator)
+    # Short-circuiting, deliberately. `_compare` refuses an operand that does
+    # not resolve and tells the author to guard it with an absence operator,
+    # so `{"or": [{"missing": A}, {"gte": [A, B]}]}` is the grammar's own
+    # idiom for "stop when the field is gone, otherwise compare it".
+    # Evaluating every branch would raise on the guarded comparison exactly
+    # when the guard says not to look, making the documented pattern
+    # unusable. The cost is that a malformed later branch stays unseen while
+    # an earlier one decides the result; `_absence` logs the unresolved
+    # operands that would otherwise hide a typo.
     results = (evaluate_predicate(child, resolver) for child in branches)
     return all(results) if operator == "and" else any(results)
 
@@ -133,6 +142,19 @@ def _nest(operator: str, operand: Any, resolver: Any) -> bool:
 def _absence(operator: str, operand: Any, resolver: Any) -> bool:
     """Evaluate ``exists`` / ``missing`` / ``empty`` / ``not_empty``."""
     value = _resolve_operand(operand, resolver)
+    if value is UNRESOLVED:
+        # A genuine answer for these operators, so it is not an error -- but
+        # a stop condition on a mistyped sub-path (`response.body.objcts`)
+        # reads as "empty" on every page and ends the read after the first
+        # one, reporting success. The scope token is all the contract can
+        # validate, so this log is the only place the mistake is visible.
+        logger.warning(
+            "predicate %r: operand %r did not resolve; answering from its "
+            "absence. If the read ends earlier than expected, check this "
+            "path against the provider's response",
+            operator,
+            operand,
+        )
     if operator == "exists":
         return value is not UNRESOLVED
     if operator == "missing":
@@ -219,7 +241,12 @@ def _compare(operator: str, operand: Any, resolver: Any) -> bool:
         if operator == "gt":
             return bool(left > right)
         return bool(left >= right)
-    except TypeError as err:
+    except (TypeError, InvalidOperation) as err:
+        # InvalidOperation, not just TypeError: `json.loads` accepts a bare
+        # `NaN` token, and ordering any Decimal against a NaN raises it. It
+        # is an ArithmeticError, so the narrower guard let it escape as an
+        # unclassified failure and the read was retried to exhaustion on a
+        # response that will never parse differently.
         raise TransportSpecError(
             f"predicate {operator!r}: cannot order {type(left).__name__} "
             f"against {type(right).__name__} ({left!r} vs {right!r})"

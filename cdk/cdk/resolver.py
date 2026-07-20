@@ -116,19 +116,6 @@ class ResolutionContext:
             cursor = cursor[segment]
         return cursor
 
-    def with_runtime(self, runtime: Mapping[str, Any]) -> ResolutionContext:
-        """Return a copy with ``runtime`` replaced — useful per-invocation."""
-        return ResolutionContext(
-            connector=self.connector,
-            connection=self.connection,
-            secrets=self.secrets,
-            auth=self.auth,
-            runtime=runtime,
-            state=self.state,
-            request=self.request,
-            response=self.response,
-        )
-
 
 # A registered derived function takes the expression node and the active
 # resolver and returns a JSON-compatible value.

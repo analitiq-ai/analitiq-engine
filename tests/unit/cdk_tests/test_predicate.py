@@ -8,6 +8,7 @@ there, comparison operators refuse to.
 
 from __future__ import annotations
 
+import json
 from decimal import Decimal
 
 import pytest
@@ -277,3 +278,84 @@ def test_exact_decimal_digits_are_not_rounded_to_the_float_literal():
     resolver = _resolver(body={"ratio": Decimal("0.10000000000000001")})
     predicate = {"eq": [{"ref": "response.body.ratio"}, {"literal": 0.1}]}
     assert evaluate_predicate(predicate, resolver) is False
+
+
+# ---------------------------------------------------------------------------
+# Branch evaluation and non-orderable operands
+# ---------------------------------------------------------------------------
+
+
+def test_the_guard_idiom_short_circuits():
+    """`{"or": [{"missing": A}, {"gte": [A, B]}]}` must not raise.
+
+    `_compare` refuses an unresolved operand and its message tells the author
+    to guard it with an absence operator. Evaluating every branch would raise
+    on the guarded comparison exactly when the guard says not to look, making
+    the grammar's own idiom unusable.
+    """
+    resolver = _resolver(headers={})
+    predicate = {
+        "or": [
+            {"missing": {"ref": "response.headers.x-next"}},
+            {
+                "gte": [
+                    {"ref": "response.headers.x-next"},
+                    {"ref": "response.headers.x-total"},
+                ]
+            },
+        ]
+    }
+    assert evaluate_predicate(predicate, resolver) is True
+
+
+def test_and_short_circuits_on_a_false_guard():
+    """The `and` half of the same idiom: guard first, compare second."""
+    resolver = _resolver(headers={})
+    predicate = {
+        "and": [
+            {"exists": {"ref": "response.headers.x-next"}},
+            {
+                "gte": [
+                    {"ref": "response.headers.x-next"},
+                    {"ref": "response.headers.x-total"},
+                ]
+            },
+        ]
+    }
+    assert evaluate_predicate(predicate, resolver) is False
+
+
+@pytest.mark.parametrize("operator", ["lt", "lte", "gt", "gte"])
+def test_a_nan_operand_is_a_document_error_not_an_internal_one(operator):
+    """`json.loads` accepts a bare NaN; ordering a Decimal against it raises.
+
+    `decimal.InvalidOperation` is an ArithmeticError, so the previous
+    `except TypeError` let it escape unclassified and the read was retried to
+    exhaustion on a response that will never parse differently.
+    """
+    body = json.loads('{"score": NaN, "threshold": 1.5}', parse_float=Decimal)
+    resolver = _resolver(body=body)
+    predicate = {
+        operator: [
+            {"ref": "response.body.score"},
+            {"ref": "response.body.threshold"},
+        ]
+    }
+    with pytest.raises(TransportSpecError, match="cannot order"):
+        evaluate_predicate(predicate, resolver)
+
+
+def test_an_unresolved_absence_operand_is_logged(caplog):
+    """A mistyped sub-path reads as "empty" on every page and ends the read.
+
+    The scope token is all the contract can validate, so this log is the only
+    place the mistake is visible.
+    """
+    resolver = _resolver(body={"objects": [1]})
+    with caplog.at_level("WARNING"):
+        assert (
+            evaluate_predicate({"empty": {"ref": "response.body.objcts"}}, resolver)
+            is True
+        )
+    assert "did not resolve" in caplog.text
+    assert "objcts" in caplog.text

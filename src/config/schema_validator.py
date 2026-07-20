@@ -8,7 +8,7 @@ schema it downloaded separately from the models that produced it.
 
 Each artifact kind maps to one model:
 
-    ``connector``          -> ``ConnectorConfig``
+    ``connector``          -> ``Connector``
     ``connection``         -> ``ConnectionInput``
     ``pipeline``           -> ``PipelineInput``
     ``stream``             -> ``StreamInput``
@@ -39,9 +39,10 @@ from src.config.utils import load_json_file
 logger = logging.getLogger(__name__)
 
 
-# One model per artifact kind. The model is the authored-document ("Input")
-# variant, matching what the engine loads from disk and what the published
-# ``{kind}/latest.json`` schema is rendered from.
+# One model per artifact kind, matching what the engine loads from disk and
+# what the published ``{kind}/latest.json`` schema is rendered from. Most are
+# the authored-document ("Input") variant; ``connector`` is the ``kind``-
+# discriminated union, which has no separate Input form.
 _MODELS: dict[str, type] = {
     "connector": Connector,
     "connection": ConnectionInput,
