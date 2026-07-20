@@ -136,15 +136,31 @@ class _Page:
     headers: Mapping[str, str]
 
 
-class _NextRequest(NamedTuple):
-    """Where the following page comes from.
+class _Materialized(NamedTuple):
+    """One page request, with every declared param already on its wire slot.
 
-    ``send_params`` is False only for ``link`` pagination, whose next URL
-    already carries the provider's own query string; re-appending the
-    declared params there would duplicate keys.
+    The four binding maps are resolved together into this, so nothing
+    downstream has to know which param went where -- or that params existed.
     """
 
     url: str
+    query: dict[str, Any]
+    headers: dict[str, str]
+    body: Any
+
+
+class _NextRequest(NamedTuple):
+    """Where the following page comes from.
+
+    ``url`` is None for every strategy but ``link``: the request builder
+    owns the address, since a path-bound param can move it page to page.
+    ``link`` is the exception because the provider names the next URL
+    outright, and ``send_params`` is False there for the same reason -- that
+    URL already carries the provider's own query string, so re-appending the
+    declared params would duplicate keys.
+    """
+
+    url: str | None
     params: dict[str, Any]
     send_params: bool
 
@@ -184,7 +200,8 @@ class _ReadPlan:
     url: str
     records_ref: str
     metadata_spec: dict[str, Any]
-    raw_body: Any
+    request: dict[str, Any]
+    base_url: str
 
 
 # What a strategy answers each page: where the following request comes from,
@@ -194,8 +211,8 @@ _Advance = Callable[[_Page, Resolver], "_NextRequest | None"]
 _AdvanceBuilder = Callable[[dict[str, Any], _RequestState], _Advance]
 # One materialized request, reduced to a comparable identity.
 _Wire = bytes
-# Turns one page's param table into the (query, body) actually sent.
-_RequestBuilder = Callable[[dict[str, Any]], "tuple[dict[str, Any], Any]"]
+# Turns one page's param table into the request actually sent.
+_RequestBuilder = Callable[[dict[str, Any]], "_Materialized"]
 _T = TypeVar("_T")
 # Where a resolved control value has to land -- an integer step, a request
 # param, a URL. Takes (value, label) and returns it, or raises ReadError
@@ -219,47 +236,96 @@ _CONTROL_FIELDS: dict[str, frozenset[str]] = {
 
 
 def _make_request_builder(
-    param_placements: Mapping[str, str],
-    raw_body: Any,
+    request: Mapping[str, Any],
+    base_url: str,
     resolver: Resolver,
 ) -> _RequestBuilder:
-    """Build the per-page ``params -> (query, body)`` step for one read.
+    """Build the per-page ``params -> materialized request`` step for one read.
 
-    Each page request materializes from the full per-page param table
-    (declared defaults + filters + replication + whatever the pagination loop
-    set): the query string carries every param not declared ``in: body``,
-    while the body binds ``{"from_param": ...}`` nodes against that same
-    table. Rebuilt per page so controlled params (limit, offset, cursor)
-    reach a body-paginated endpoint instead of freezing at their first-page
-    values.
+    A declared param is a *value*; where that value goes on the wire is said
+    separately, by the request's four binding maps -- ``path_params``,
+    ``headers``, ``query`` and ``body`` -- each keyed by the name the provider
+    uses and carrying ``{"from_param": ...}`` nodes that name the param. The
+    contract requires every declared param to be referenced by exactly one of
+    them, so the maps are the whole truth about the request and the param
+    names never reach the provider. An endpoint binding ``page_size`` to
+    ``page[size]`` is ordinary, and reading the param name instead sends a key
+    the provider does not know: it serves its own default page size, the short
+    first page trips ``stop_when``, and the stream ends early reporting
+    success.
+
+    All four go through the same ``bind_param_refs`` substitution, so one
+    param table materializes the whole request. Rebuilt per page, because a
+    controlled param (limit, offset, cursor) can be bound into any of the four
+    -- including the path -- and would otherwise freeze at its first-page
+    value.
     """
+    path: str = request["path"]
+    path_spec = request.get("path_params") or {}
+    query_spec = request.get("query") or {}
+    header_spec = request.get("headers") or {}
+    raw_body = request.get("body")
 
-    def build_request(page_params: dict[str, Any]) -> tuple[dict[str, Any], Any]:
+    def bound(spec: Any, values: Mapping[str, Any], where: str) -> Any:
+        with _document_errors(f"operations.read.request.{where}"):
+            return resolver.resolve_for_request(bind_param_refs(spec, values))
+
+    def build_request(page_params: dict[str, Any]) -> _Materialized:
         # A fractional value from the lossless JSON parse (e.g. a keyset key)
-        # arrives as a Decimal, which neither sink takes as-is, so each
-        # placement converts it to the form its serializer needs; int/str stay
-        # native.
-        query = {
-            # yarl truncates a Decimal in the query string; stringify it
-            # (full precision).
+        # arrives as a Decimal, which no sink takes as-is, so each placement
+        # converts it to the form its serializer needs; int/str stay native.
+        # yarl truncates a Decimal in a query string and a path segment, so
+        # both get the full-precision text; aiohttp serializes the body with
+        # stdlib json.dumps, which cannot encode a Decimal at all, so a body
+        # value narrows to the float it was before the lossless parse.
+        as_text = {
             name: str(value) if isinstance(value, Decimal) else value
             for name, value in page_params.items()
-            if param_placements.get(name) != "body"
         }
-        if raw_body is None:
-            return query, None
-        # aiohttp serializes the body via stdlib json.dumps, which cannot
-        # encode a Decimal. Narrow body Decimals to float so the value stays a
-        # JSON number a numeric body schema accepts -- the same float the body
-        # carried before the lossless parse.
-        body_params = {
+        as_json = {
             name: float(value) if isinstance(value, Decimal) else value
             for name, value in page_params.items()
         }
-        body = resolver.resolve_for_request(bind_param_refs(raw_body, body_params))
-        return query, body
+
+        url = join_url(
+            base_url,
+            _fill_path(path, bound(path_spec, as_text, "path_params"), path_spec)
+            if path_spec
+            else path,
+        )
+        query = bound(query_spec, as_text, "query") if query_spec else {}
+        headers = (
+            {
+                name: str(value)
+                for name, value in bound(header_spec, as_text, "headers").items()
+            }
+            if header_spec
+            else {}
+        )
+        body = bound(raw_body, as_json, "body") if raw_body is not None else None
+        return _Materialized(url, query, headers, body)
 
     return build_request
+
+
+def _fill_path(path: str, segments: Mapping[str, Any], spec: Mapping[str, Any]) -> str:
+    """Substitute a request path's ``{name}`` placeholders with bound values.
+
+    The contract keeps ``path_params`` keys and path placeholders in step, so
+    a name missing here is a param whose value did not resolve and was dropped
+    -- not an authoring slip. Leaving the placeholder in would send a literal
+    ``{id}`` (percent-encoded, and a 404 at best), so the read stops instead.
+    """
+    filled = path
+    for name in spec:
+        if name not in segments:
+            raise ReadError(
+                f"operations.read.request.path_params.{name} resolved to no "
+                f"value, so the path placeholder {{{name}}} in {path!r} cannot "
+                f"be filled and the request has no address to go to"
+            )
+        filled = filled.replace(f"{{{name}}}", str(segments[name]))
+    return filled
 
 
 class APIConnector(BaseConnector):
@@ -409,7 +475,7 @@ class APIConnector(BaseConnector):
         # defaults via value-expression resolution, then stream-level filter
         # overrides. ``controlled_by: pagination|replication`` params are
         # filled by their respective loops.
-        param_values, param_placements = self._build_base_params(
+        param_values = self._build_base_params(
             read_spec, resolver, stream_source.get("filters") or []
         )
 
@@ -427,7 +493,7 @@ class APIConnector(BaseConnector):
                 safety_window,
             )
 
-        build_request = _make_request_builder(param_placements, plan.raw_body, resolver)
+        build_request = _make_request_builder(plan.request, plan.base_url, resolver)
 
         batch_count = 0
         async for batch in self._iterate_pages(
@@ -543,7 +609,8 @@ class APIConnector(BaseConnector):
                 "ref", "response.body"
             ),
             metadata_spec=response_block.get("metadata") or {},
-            raw_body=request.get("body"),
+            request=request,
+            base_url=base_url,
         )
 
     @staticmethod
@@ -708,7 +775,7 @@ class APIConnector(BaseConnector):
         read_spec: dict[str, Any],
         resolver: Resolver,
         stream_filters: list[dict[str, Any]],
-    ) -> tuple[dict[str, Any], dict[str, str]]:
+    ) -> dict[str, Any]:
         """Resolve declared param defaults and apply stream filter overrides.
 
         Defaults resolve through the full value-expression grammar
@@ -716,20 +783,13 @@ class APIConnector(BaseConnector):
         that does not resolve omits the parameter with a warning rather
         than sending the raw expression structure upstream.
 
-        Returns ``(param_values, placements)``: ``param_values`` is the
-        single value table (body ``from_param`` binding reads it whole;
-        the caller filters ``in: body`` params out of the query string via
-        ``placements``), and ``placements`` maps param name to its declared
-        ``in`` location. Params declared ``controlled_by`` pagination or
-        replication are left out of the defaults so their loops set them.
+        Returns the single param value table. Where each value lands on the
+        wire is not decided here -- the request's binding maps say that, and
+        ``_make_request_builder`` applies them. Params declared
+        ``controlled_by`` pagination or replication are left out of the
+        defaults so their loops set them.
         """
-        placements: dict[str, str] = {}
         declared = read_spec.get("params") or {}
-        for name, decl in declared.items():
-            if not isinstance(decl, dict):
-                continue
-            placements[name] = decl.get("in") or "query"
-
         uncontrolled = {
             n: d
             for n, d in declared.items()
@@ -745,7 +805,7 @@ class APIConnector(BaseConnector):
             value = f.get("value")
             if value is not None:
                 param_values[target] = value
-        return param_values, placements
+        return param_values
 
     # ------------------------------------------------------------------
     # Incremental replication
@@ -856,7 +916,7 @@ class APIConnector(BaseConnector):
         p_type = pagination.get("type")
         if not p_type:
             async for batch in self._read_unpaginated(
-                full_url, method, base_params, records_ref, build_request
+                method, base_params, records_ref, build_request
             ):
                 yield batch
             return
@@ -865,7 +925,7 @@ class APIConnector(BaseConnector):
             p_type, pagination, base_params, effective_limit, resolver, full_url
         )
 
-        url = full_url
+        override_url: str | None = None
         send_params = True
         pages = 0
         records = 0
@@ -875,15 +935,23 @@ class APIConnector(BaseConnector):
         # all, re-emitting the same pages for as long as stop_when stays false.
         sent_wires: set[_Wire] = set()
         while True:
-            with _document_errors(f"{p_type!r} pagination: the request body"):
-                query, body = build_request(params)
-            sent_query = query if send_params else {}
-            wire = _canonical_wire(url, sent_query, body)
+            built = build_request(params)
+            url = override_url or built.url
+            # A link's next URL already carries the provider's own query, so
+            # the declared params are not appended again; the body and headers,
+            # which a URL cannot express, are still sent.
+            sent_query = built.query if send_params else {}
+            wire = _canonical_wire(url, sent_query, built.headers, built.body)
             self._require_progress(wire, sent_wires, p_type, pages, url)
             sent_wires.add(wire)
 
             page = await self._request_page(
-                url, method, sent_query, records_ref, body=body
+                url,
+                method,
+                sent_query,
+                records_ref,
+                headers=built.headers,
+                body=built.body,
             )
             if not page.records:
                 self._report_empty_page(p_type, page, records_ref, pages, records)
@@ -907,20 +975,25 @@ class APIConnector(BaseConnector):
             if following is None:
                 self._log_read_end(p_type, "no further page", pages, records)
                 return
-            url, params, send_params = following
+            override_url, params, send_params = following
 
     async def _read_unpaginated(
         self,
-        url: str,
         method: str,
         base_params: dict[str, Any],
         records_ref: str,
         build_request: _RequestBuilder,
     ) -> AsyncIterator[list[dict[str, Any]]]:
         """Read an endpoint that declares no pagination: one request, one page."""
-        with _document_errors("operations.read.request.body"):
-            query, body = build_request(dict(base_params))
-        page = await self._request_page(url, method, query, records_ref, body=body)
+        built = build_request(dict(base_params))
+        page = await self._request_page(
+            built.url,
+            method,
+            built.query,
+            records_ref,
+            headers=built.headers,
+            body=built.body,
+        )
         if page.records:
             yield page.records
 
@@ -1174,6 +1247,7 @@ class APIConnector(BaseConnector):
         params: dict[str, Any],
         records_ref: str,
         *,
+        headers: Mapping[str, str] | None = None,
         body: Any = None,
     ) -> _Page:
         if self.session is None:
@@ -1185,6 +1259,11 @@ class APIConnector(BaseConnector):
             await self.rate_limiter.acquire()
         logger.debug("API %s %s params=%s", method, url, params)
         request_kwargs: dict[str, Any] = {"params": params}
+        if headers:
+            # Endpoint-declared headers only. The session already carries the
+            # connection's own (auth, defaults); these merge over them per the
+            # contract's header-resolution order.
+            request_kwargs["headers"] = dict(headers)
         if body is not None:
             # Resolved ``operations.read.request.body``; only sent when the
             # endpoint declares one, so plain GET reads stay body-less.
@@ -1423,7 +1502,9 @@ def _target_url(url: str) -> URL:
         raise ReadError(f"not a usable request URL: {url!r} ({err})") from err
 
 
-def _canonical_wire(url: str, query: Mapping[str, Any], body: Any) -> _Wire:
+def _canonical_wire(
+    url: str, query: Mapping[str, Any], headers: Mapping[str, str], body: Any
+) -> _Wire:
     """Reduce a request to the identity the provider will actually see.
 
     The same request target reaches the wire two ways: as a bare URL plus a
@@ -1466,8 +1547,13 @@ def _canonical_wire(url: str, query: Mapping[str, Any], body: Any) -> _Wire:
     # Digested rather than kept whole: a long read holds one entry per page,
     # and 16 bytes each keeps that bounded whatever the page count. `default`
     # covers Decimals from the lossless JSON parse.
+    # Headers are part of the identity because a param can be bound to one:
+    # a provider paginating by `X-Page` changes nothing else about the
+    # request, and leaving headers out would read that as no progress.
     identity = json.dumps(
-        [str(canonical.with_fragment(None)), body], sort_keys=True, default=str
+        [str(canonical.with_fragment(None)), sorted(headers.items()), body],
+        sort_keys=True,
+        default=str,
     )
     return hashlib.blake2b(identity.encode(), digest_size=16).digest()
 
@@ -1606,7 +1692,7 @@ def _as_positive_int(value: Any, label: str) -> int:
 
 def _build_offset_advance(block: dict[str, Any], state: _RequestState) -> _Advance:
     """Offset/start-index pagination."""
-    params, resolver, full_url = state.params, state.resolver, state.url
+    params, resolver = state.params, state.resolver
     param = _required_setting(block, "offset", "param")
     position = _int_setting(block, "offset", "initial", resolver, default=0)
     # An authored step wins (a provider that counts offsets in pages declares
@@ -1626,14 +1712,14 @@ def _build_offset_advance(block: dict[str, Any], state: _RequestState) -> _Advan
         nonlocal position
         position += step if step is not None else len(page.records)
         params[param] = position
-        return _NextRequest(full_url, dict(params), True)
+        return _NextRequest(None, dict(params), True)
 
     return advance
 
 
 def _build_page_advance(block: dict[str, Any], state: _RequestState) -> _Advance:
     """Page-number pagination."""
-    params, resolver, full_url = state.params, state.resolver, state.url
+    params, resolver = state.params, state.resolver
     param = _required_setting(block, "page", "param")
     number = _int_setting(block, "page", "initial", resolver, default=1)
     # A zero step would re-request the same page forever.
@@ -1646,14 +1732,14 @@ def _build_page_advance(block: dict[str, Any], state: _RequestState) -> _Advance
         nonlocal number
         number += step
         params[param] = number
-        return _NextRequest(full_url, dict(params), True)
+        return _NextRequest(None, dict(params), True)
 
     return advance
 
 
 def _build_cursor_advance(block: dict[str, Any], state: _RequestState) -> _Advance:
     """Opaque-cursor pagination."""
-    params, full_url = state.params, state.url
+    params = state.params
     param = _required_setting(block, "cursor", "param")
     next_cursor = block.get("next_cursor")
     if next_cursor is None:
@@ -1684,7 +1770,7 @@ def _build_cursor_advance(block: dict[str, Any], state: _RequestState) -> _Advan
                 "the token when it is done"
             ),
         )
-        return _NextRequest(full_url, dict(params), True)
+        return _NextRequest(None, dict(params), True)
 
     return advance
 
@@ -1743,7 +1829,7 @@ def _build_link_advance(block: dict[str, Any], state: _RequestState) -> _Advance
 
 def _build_keyset_advance(block: dict[str, Any], state: _RequestState) -> _Advance:
     """Keyset (advance-from-last-key) pagination."""
-    params, resolver, full_url = state.params, state.resolver, state.url
+    params, resolver = state.params, state.resolver
     param = _required_setting(block, "keyset", "param")
     order_by_field = block.get("order_by_field")
     if not order_by_field or not isinstance(order_by_field, str):
@@ -1798,7 +1884,7 @@ def _build_keyset_advance(block: dict[str, Any], state: _RequestState) -> _Advan
         params[param] = _require_scalar(
             last_key, f"keyset pagination: record field {order_by_field!r}"
         )
-        return _NextRequest(full_url, dict(params), True)
+        return _NextRequest(None, dict(params), True)
 
     return advance
 

@@ -85,6 +85,8 @@ class _FakeSession:
         # JSON body per request (None when the connector sent none),
         # parallel to ``calls``.
         self.bodies: list[Any] = []
+        # Endpoint-declared headers per request, parallel to ``calls``.
+        self.headers: list[dict[str, Any]] = []
 
     def request(
         self,
@@ -93,6 +95,7 @@ class _FakeSession:
         *,
         params: dict[str, Any],
         json: Any = None,
+        headers: dict[str, Any] | None = None,
         allow_redirects: bool = True,
     ):
         # The connector turns redirect-following off and handles 3xx itself, so
@@ -100,6 +103,7 @@ class _FakeSession:
         assert allow_redirects is False, "the connector must not follow redirects"
         self.calls.append((method, url, dict(params)))
         self.bodies.append(json)
+        self.headers.append(dict(headers or {}))
         if not self._responses:
             raise AssertionError(f"unexpected extra request: {method} {url} {params}")
         return self._responses.pop(0)
@@ -133,7 +137,22 @@ def _endpoint_doc_with_records(
     request_body: Any = None,
     params: dict[str, Any] | None = None,
     path: str = "/items",
+    query: dict[str, Any] | None = None,
+    path_params: dict[str, Any] | None = None,
+    headers: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """Build a read endpoint document the published contract would accept.
+
+    The contract requires every declared param to be bound by exactly one
+    request binding, and pagination/replication params to be declared with
+    ``controlled_by``. Rather than repeat that wiring in every test, the
+    helper derives it: pagination and replication params are declared from
+    the blocks that name them, and anything not otherwise bound gets an
+    identity ``request.query`` entry (wire key == param name). Pass *query*,
+    *path_params* or *headers* explicitly to bind a param somewhere else --
+    which is the only way to tell a document that honours the binding maps
+    from one that just echoes param names.
+    """
     record_properties: dict[str, Any] = {
         "id": {"type": "integer", "arrow_type": "Int64"},
         "name": {"type": "string", "arrow_type": "Utf8"},
@@ -159,19 +178,70 @@ def _endpoint_doc_with_records(
     }
     if request_body is not None:
         read_block["request"]["body"] = request_body
-    if params:
-        read_block["params"] = params
     if metadata:
         read_block["response"]["metadata"] = metadata
     if pagination:
         read_block["pagination"] = pagination
     if replication:
         read_block["replication"] = replication
+
+    declared: dict[str, Any] = dict(params or {})
+    for name in _controlled_param_names(pagination, "pagination"):
+        declared.setdefault(name, {"in": "query", "controlled_by": "pagination"})
+    for name in _controlled_param_names(replication, "replication"):
+        declared.setdefault(name, {"in": "query", "controlled_by": "replication"})
+    if declared:
+        read_block["params"] = declared
+
+    bound = {
+        node["from_param"]
+        for spec in (query, path_params, headers)
+        for node in (spec or {}).values()
+        if isinstance(node, dict) and "from_param" in node
+    }
+    bound |= _body_bound_params(request_body)
+    identity = {name: {"from_param": name} for name in declared if name not in bound}
+    if query or identity:
+        read_block["request"]["query"] = {**identity, **(query or {})}
+    if path_params:
+        read_block["request"]["path_params"] = path_params
+    if headers:
+        read_block["request"]["headers"] = headers
     return {
         "$schema": "https://schemas.analitiq.ai/api-endpoint/latest.json",
         "endpoint_id": "items",
         "operations": {"read": read_block},
     }
+
+
+def _controlled_param_names(block: dict[str, Any] | None, kind: str) -> set[str]:
+    """Param names a pagination or replication block puts under engine control."""
+    if not block:
+        return set()
+    names: set[str] = set()
+    if kind == "pagination":
+        for key in ("offset", "page", "cursor", "keyset", "limit"):
+            param = (block.get(key) or {}).get("param")
+            if isinstance(param, str) and param:
+                names.add(param)
+    else:
+        for mapping in block.get("cursor_mappings") or []:
+            for key in ("param", "start_param", "end_param"):
+                param = mapping.get(key)
+                if isinstance(param, str) and param:
+                    names.add(param)
+    return names
+
+
+def _body_bound_params(spec: Any) -> set[str]:
+    """Every param a request body binds via ``from_param``."""
+    if isinstance(spec, dict):
+        if "from_param" in spec:
+            return {spec["from_param"]}
+        return {n for v in spec.values() for n in _body_bound_params(v)}
+    if isinstance(spec, list):
+        return {n for item in spec for n in _body_bound_params(item)}
+    return set()
 
 
 def _stream_source(
@@ -282,21 +352,35 @@ class TestReadBatchesNoPagination:
 
 
 def _endpoint_doc_with_ref(
-    records_ref: str, response_schema: dict[str, Any]
+    records_ref: str,
+    response_schema: dict[str, Any],
+    pagination: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Endpoint document with an explicit ``records.ref`` + response schema."""
+    """Endpoint document with an explicit ``records.ref`` + response schema.
+
+    Params and their query bindings are derived exactly as in
+    `_endpoint_doc_with_records`, so a document from either helper is one the
+    contract would accept.
+    """
+    read_block: dict[str, Any] = {
+        "request": {"method": "GET", "path": "/items"},
+        "response": {"schema": response_schema, "records": {"ref": records_ref}},
+    }
+    if pagination:
+        read_block["pagination"] = pagination
+        declared = {
+            name: {"in": "query", "controlled_by": "pagination"}
+            for name in _controlled_param_names(pagination, "pagination")
+        }
+        if declared:
+            read_block["params"] = declared
+            read_block["request"]["query"] = {
+                name: {"from_param": name} for name in declared
+            }
     return {
         "$schema": "https://schemas.analitiq.ai/api-endpoint/latest.json",
         "endpoint_id": "items",
-        "operations": {
-            "read": {
-                "request": {"method": "GET", "path": "/items"},
-                "response": {
-                    "schema": response_schema,
-                    "records": {"ref": records_ref},
-                },
-            },
-        },
+        "operations": {"read": read_block},
     }
 
 
@@ -1310,6 +1394,10 @@ class TestReadBatchesParamDefaults:
                 },
             },
         }
+        endpoint["operations"]["read"]["request"]["query"] = {
+            name: {"from_param": name}
+            for name in endpoint["operations"]["read"]["params"]
+        }
         await _consume(
             connector,
             runtime,
@@ -1341,6 +1429,10 @@ class TestReadBatchesParamDefaults:
                 "default": {"ref": "connection.parameters.missing_team"},
             },
         }
+        endpoint["operations"]["read"]["request"]["query"] = {
+            name: {"from_param": name}
+            for name in endpoint["operations"]["read"]["params"]
+        }
         await _consume(
             connector,
             runtime,
@@ -1370,6 +1462,10 @@ class TestReadBatchesParamDefaults:
                 "required": False,
                 "default": {"ref": "runtime.batch_size"},
             },
+        }
+        endpoint["operations"]["read"]["request"]["query"] = {
+            name: {"from_param": name}
+            for name in endpoint["operations"]["read"]["params"]
         }
         await _consume(
             connector,
@@ -1404,6 +1500,10 @@ class TestReadBatchesParamDefaults:
                     )
                 },
             },
+        }
+        endpoint["operations"]["read"]["request"]["query"] = {
+            name: {"from_param": name}
+            for name in endpoint["operations"]["read"]["params"]
         }
         await _consume(
             connector,
@@ -1513,6 +1613,8 @@ class TestReadBatchesRequestBody:
             "method": "POST",
             "path": "/items/search",
             "body": {"region": {"ref": "connection.parameters.region"}},
+            # The pagination params stay query-bound; only the body changes.
+            "query": {name: {"from_param": name} for name in ("offset", "limit")},
         }
         await _consume(
             connector,
@@ -1554,7 +1656,10 @@ class TestReadBatchesRequestBody:
         endpoint["operations"]["read"]["request"] = {
             "method": "POST",
             "path": "/items/search",
+            # `team` is bound by the body, `verbose` by the query: the
+            # contract wants each declared param bound exactly once.
             "body": {"filter": {"team": {"from_param": "team"}}},
+            "query": {"verbose": {"from_param": "verbose"}},
         }
         await _consume(
             connector,
@@ -1692,6 +1797,10 @@ class TestReadBatchesRequestBody:
                 "controlled_by": "pagination",
             },
         }
+        endpoint["operations"]["read"]["request"]["query"] = {
+            name: {"from_param": name}
+            for name in endpoint["operations"]["read"]["params"]
+        }
         endpoint["operations"]["read"]["request"] = {
             "method": "POST",
             "path": "/items/search",
@@ -1815,6 +1924,14 @@ class TestReadBatchesDecimalPrecision:
                 "lt": [{"ref": "response.record_count"}, {"ref": "runtime.batch_size"}]
             },
         }
+        read = endpoint["operations"]["read"]
+        read["params"] = {
+            name: {"in": "query", "controlled_by": "pagination"}
+            for name in ("after", "limit")
+        }
+        read["request"]["query"] = {
+            name: {"from_param": name} for name in ("after", "limit")
+        }
         await _consume(
             connector,
             runtime,
@@ -1859,6 +1976,10 @@ class TestReadBatchesDecimalPrecision:
         )
         endpoint["operations"]["read"]["params"] = {
             "after": {"in": "body", "type": "integer", "required": False},
+        }
+        endpoint["operations"]["read"]["request"]["query"] = {
+            name: {"from_param": name}
+            for name in endpoint["operations"]["read"]["params"]
         }
         endpoint["operations"]["read"]["request"] = {
             "method": "POST",
@@ -1913,6 +2034,10 @@ class TestReadBatchesDecimalPrecision:
         )
         endpoint["operations"]["read"]["params"] = {
             "after": {"in": "body", "type": "number", "required": False},
+        }
+        endpoint["operations"]["read"]["request"]["query"] = {
+            name: {"from_param": name}
+            for name in endpoint["operations"]["read"]["params"]
         }
         endpoint["operations"]["read"]["request"] = {
             "method": "POST",
@@ -2815,6 +2940,156 @@ class TestPaginationSilentTruncationRegressions:
             )
 
 
+class TestRequestBindingMaps:
+    """The wire names come from the request bindings, never from param names.
+
+    A declared param is a value; `request.query` / `path_params` / `headers`
+    say where it lands and under what name. The contract requires every param
+    to be bound exactly once, so a document binding `page_size` to
+    `page[size]` is ordinary — and reading the param name instead sends a key
+    the provider does not know, which is silent truncation: it serves its own
+    default page size and the short first page trips `stop_when`.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_query_binding_renames_the_param_on_the_wire(self):
+        session = _FakeSession(
+            [_FakeResponse(status=200, body={"records": [{"id": 1, "name": "a"}]})]
+        )
+        endpoint = _endpoint_doc_with_records(
+            params={"page_size": {"in": "query", "default": {"literal": 50}}},
+            query={"page[size]": {"from_param": "page_size"}},
+        )
+        await _consume(
+            APIConnector("test"),
+            _runtime_with_session(session),
+            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=10,
+        )
+        assert session.calls[0][2] == {"page[size]": 50}
+
+    @pytest.mark.asyncio
+    async def test_a_paginated_query_binding_advances_under_the_wire_name(self):
+        """The renamed key is what changes page to page, not the param name."""
+        pages = [
+            {"records": [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]},
+            {"records": [{"id": 3, "name": "c"}]},
+        ]
+        session = _FakeSession([_FakeResponse(status=200, body=p) for p in pages])
+        endpoint = _endpoint_doc_with_records(
+            pagination={
+                "type": "page",
+                "page": {"param": "page_number", "initial": 1},
+                "limit": {"param": "page_size"},
+                "stop_when": {
+                    "lt": [
+                        {"ref": "response.record_count"},
+                        {"ref": "runtime.batch_size"},
+                    ]
+                },
+            },
+            query={
+                "page[number]": {"from_param": "page_number"},
+                "page[size]": {"from_param": "page_size"},
+            },
+        )
+        await _consume(
+            APIConnector("test"),
+            _runtime_with_session(session),
+            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=2,
+        )
+        assert [call[2] for call in session.calls] == [
+            {"page[number]": 1, "page[size]": 2},
+            {"page[number]": 2, "page[size]": 2},
+        ]
+
+    @pytest.mark.asyncio
+    async def test_a_path_binding_is_substituted_into_the_url(self):
+        session = _FakeSession(
+            [_FakeResponse(status=200, body={"records": [{"id": 1, "name": "a"}]})]
+        )
+        endpoint = _endpoint_doc_with_records(
+            path="/teams/{team_id}/items",
+            params={
+                "team_id": {
+                    "in": "path",
+                    "default": {"ref": "connection.parameters.team"},
+                }
+            },
+            path_params={"team_id": {"from_param": "team_id"}},
+        )
+        await _consume(
+            APIConnector("test"),
+            _runtime_with_session(session, parameters={"team": "t-9"}),
+            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=10,
+        )
+        assert session.calls[0][1] == "https://api.example.test/teams/t-9/items"
+        assert session.calls[0][2] == {}, "a path param must not also be a query key"
+
+    @pytest.mark.asyncio
+    async def test_a_header_binding_is_sent_as_a_header(self):
+        session = _FakeSession(
+            [_FakeResponse(status=200, body={"records": [{"id": 1, "name": "a"}]})]
+        )
+        endpoint = _endpoint_doc_with_records(
+            params={
+                "tenant": {
+                    "in": "header",
+                    "default": {"ref": "connection.parameters.tenant"},
+                }
+            },
+            headers={"X-Tenant": {"from_param": "tenant"}},
+        )
+        await _consume(
+            APIConnector("test"),
+            _runtime_with_session(session, parameters={"tenant": "acme"}),
+            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=10,
+        )
+        assert session.headers[0] == {"X-Tenant": "acme"}
+        assert session.calls[0][2] == {}, "a header param must not also be a query key"
+
+    @pytest.mark.asyncio
+    async def test_an_unfillable_path_placeholder_stops_the_read(self):
+        """A dropped path value would send a literal `{team_id}` and 404."""
+        session = _FakeSession([])
+        endpoint = _endpoint_doc_with_records(
+            path="/teams/{team_id}/items",
+            params={
+                "team_id": {
+                    "in": "path",
+                    "default": {"ref": "connection.parameters.absent"},
+                }
+            },
+            path_params={"team_id": {"from_param": "team_id"}},
+        )
+        with pytest.raises(
+            ReadError, match=r"path_params\.team_id resolved to no value"
+        ):
+            await _consume(
+                APIConnector("test"),
+                _runtime_with_session(session, parameters={}),
+                config={
+                    "endpoint_document": endpoint,
+                    "stream_source": _stream_source(),
+                },
+                state_manager=MagicMock(),
+                stream_name="items",
+                batch_size=10,
+            )
+        assert session.calls == []
+
+
 class TestPaginationInvariants:
     """One test per invariant, covering every site the invariant reaches.
 
@@ -3364,11 +3639,13 @@ class TestPaginationInvariants:
     async def test_progress_is_judged_on_the_wire_not_the_param_table(self):
         """A param that never reaches the request is not progress.
 
-        `offset` is declared `in: body`, so it is kept out of the query string
-        — but the body binds nothing, so it never reaches the request either.
-        The param table advances 0, 2, 4 while the wire request stays
-        byte-identical, and comparing param tables would call that progress and
-        page forever, re-yielding the same records to the destination.
+        `offset` is body-bound, and the contract counts the binding — but the
+        `from_param` sits inside a `literal` subtree, which the resolver
+        treats as opaque data and never substitutes. So the document is valid
+        and the param still never reaches the wire: the table advances 0, 2, 4
+        while the request stays byte-identical. Comparing param tables would
+        call that progress and page forever, re-yielding the same records to
+        the destination.
         """
         page = {"records": [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]}
         session = _FakeSession([_FakeResponse(status=200, body=page) for _ in range(6)])
@@ -3377,7 +3654,7 @@ class TestPaginationInvariants:
 
         endpoint = _endpoint_doc_with_records(
             params={"offset": {"in": "body", "controlled_by": "pagination"}},
-            request_body={"static": {"literal": 1}},
+            request_body={"static": {"literal": {"off": {"from_param": "offset"}}}},
             pagination={
                 "type": "offset",
                 "offset": {"param": "offset", "initial": 0},
