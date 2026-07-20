@@ -138,11 +138,76 @@ class _RequestState:
     url: str
 
 
+@dataclass(frozen=True)
+class _ReadPlan:
+    """What one read draws from its endpoint document, resolved once up front.
+
+    Every field here is fixed for the whole read — the document never changes
+    between pages — so it is validated before the first request rather than
+    re-derived per page.
+    """
+
+    stream_source: dict[str, Any]
+    read_spec: dict[str, Any]
+    schema_contract: SchemaContract
+    method: str
+    url: str
+    records_ref: str
+    metadata_spec: dict[str, Any]
+    raw_body: Any
+
+
 # What a strategy answers each page: where the following request comes from,
 # or None when the strategy itself has run out.
 _Advance = Callable[[_Page, Resolver], "_NextRequest | None"]
 # What builds one, given the strategy's own block plus the request state.
 _AdvanceBuilder = Callable[[dict[str, Any], _RequestState], _Advance]
+# Turns one page's param table into the (query, body) actually sent.
+_RequestBuilder = Callable[[dict[str, Any]], "tuple[dict[str, Any], Any]"]
+
+
+def _make_request_builder(
+    param_placements: Mapping[str, str],
+    raw_body: Any,
+    resolver: Resolver,
+) -> _RequestBuilder:
+    """Build the per-page ``params -> (query, body)`` step for one read.
+
+    Each page request materializes from the full per-page param table
+    (declared defaults + filters + replication + whatever the pagination loop
+    set): the query string carries every param not declared ``in: body``,
+    while the body binds ``{"from_param": ...}`` nodes against that same
+    table. Rebuilt per page so controlled params (limit, offset, cursor)
+    reach a body-paginated endpoint instead of freezing at their first-page
+    values.
+    """
+
+    def build_request(page_params: dict[str, Any]) -> tuple[dict[str, Any], Any]:
+        # A fractional value from the lossless JSON parse (e.g. a keyset key)
+        # arrives as a Decimal, which neither sink takes as-is, so each
+        # placement converts it to the form its serializer needs; int/str stay
+        # native.
+        query = {
+            # yarl truncates a Decimal in the query string; stringify it
+            # (full precision).
+            name: str(value) if isinstance(value, Decimal) else value
+            for name, value in page_params.items()
+            if param_placements.get(name) != "body"
+        }
+        if raw_body is None:
+            return query, None
+        # aiohttp serializes the body via stdlib json.dumps, which cannot
+        # encode a Decimal. Narrow body Decimals to float so the value stays a
+        # JSON number a numeric body schema accepts -- the same float the body
+        # carried before the lossless parse.
+        body_params = {
+            name: float(value) if isinstance(value, Decimal) else value
+            for name, value in page_params.items()
+        }
+        body = resolver.resolve_for_request(bind_param_refs(raw_body, body_params))
+        return query, body
+
+    return build_request
 
 
 class APIConnector(BaseConnector):
@@ -247,32 +312,9 @@ class APIConnector(BaseConnector):
                 "the runtime"
             )
 
-        endpoint_doc = config.get("endpoint_document")
-        if not endpoint_doc:
-            raise ReadError("APIConnector: source config missing 'endpoint_document'")
-        stream_source = config.get("stream_source") or {}
-        endpoint_ref = stream_source.get("endpoint_ref")
-        if not endpoint_ref:
-            raise ReadError(
-                "APIConnector: stream_source missing 'endpoint_ref'; "
-                "the source contract requires it to declare per-field types"
-            )
-        read_spec = (endpoint_doc.get("operations") or {}).get("read") or {}
-        records_items_schema = self._resolve_records_items_schema(
-            endpoint_doc,
-            read_spec,
-        )
-        self._apply_read_type_map(records_items_schema, endpoint_ref)
-        schema_contract = SchemaContract(records_items_schema)
-        request = read_spec.get("request") or {}
-        path = request.get("path")
-        method = (request.get("method") or "GET").upper()
-        if not isinstance(path, str) or not path:
-            raise ReadError(
-                f"endpoint {endpoint_doc.get('endpoint_id')!r}: "
-                f"operations.read.request.path is required"
-            )
-        full_url = join_url(self.base_url, path)
+        plan = self._plan_read(config, self.base_url)
+        read_spec = plan.read_spec
+        stream_source = plan.stream_source
 
         # One resolver covers everything this read materializes per request:
         # declared param defaults and the optional request body. Expression
@@ -312,86 +354,100 @@ class APIConnector(BaseConnector):
                 safety_window,
             )
 
-        # Each page request materializes from the full per-page param
-        # table (declared defaults + filters + replication + the values
-        # the pagination loop sets): the query string carries params not
-        # declared ``in: body``; the body binds ``{"from_param": ...}``
-        # nodes against the same table and resolves expressions. Built
-        # per page so controlled params (limit, offset, cursor) reach a
-        # body-paginated endpoint instead of freezing at their initial
-        # values.
-        raw_body = request.get("body")
-
-        def build_request(
-            page_params: dict[str, Any],
-        ) -> tuple[dict[str, Any], Any]:
-            # A fractional value from the lossless JSON parse (e.g. a keyset
-            # key) arrives as a Decimal, which neither sink takes as-is, so each
-            # placement converts it to the form its serializer needs; int/str
-            # stay native.
-            query = {
-                # yarl truncates a Decimal in the query string; stringify it
-                # (full precision).
-                name: str(value) if isinstance(value, Decimal) else value
-                for name, value in page_params.items()
-                if param_placements.get(name) != "body"
-            }
-            if raw_body is not None:
-                # aiohttp serializes the body via stdlib json.dumps, which
-                # cannot encode a Decimal. Narrow body Decimals to float so the
-                # value stays a JSON number a numeric body schema accepts --
-                # the same float the body carried before the lossless parse.
-                body_params = {
-                    name: float(value) if isinstance(value, Decimal) else value
-                    for name, value in page_params.items()
-                }
-                body = resolver.resolve_for_request(
-                    bind_param_refs(raw_body, body_params)
-                )
-            else:
-                body = None
-            return query, body
-
-        records_ref = ((read_spec.get("response") or {}).get("records") or {}).get(
-            "ref", "response.body"
-        )
+        build_request = _make_request_builder(param_placements, plan.raw_body, resolver)
 
         batch_count = 0
-        total_records = 0
         async for batch in self._iterate_pages(
-            full_url=full_url,
-            method=method,
+            full_url=plan.url,
+            method=plan.method,
             base_params=param_values,
             pagination=read_spec.get("pagination") or {},
             batch_size=batch_size,
-            records_ref=records_ref,
-            metadata_spec=(read_spec.get("response") or {}).get("metadata") or {},
+            records_ref=plan.records_ref,
+            metadata_spec=plan.metadata_spec,
             resolver=resolver,
             build_request=build_request,
         ):
             if not batch:
                 continue
-            yield schema_contract.from_pylist(batch)
+            yield plan.schema_contract.from_pylist(batch)
 
             batch_count += 1
-            total_records += len(batch)
             if cursor_field:
-                cursor_value = batch[-1].get(cursor_field)
-                if cursor_value is not None:
-                    await checkpoint.save_cursor(
-                        stream_name, partition, {"cursor": cursor_value}
-                    )
-                else:
-                    # Safe under at-least-once + upsert (resume re-reads),
-                    # but visible: an author debugging "incremental stream
-                    # keeps re-reading its tail" needs this signal.
-                    logger.debug(
-                        "stream %r: last record has no %r value; "
-                        "cursor not advanced for batch %d",
-                        stream_name,
-                        cursor_field,
-                        batch_count,
-                    )
+                await self._advance_cursor(
+                    batch, checkpoint, stream_name, partition, cursor_field, batch_count
+                )
+
+    @staticmethod
+    async def _advance_cursor(
+        batch: list[dict[str, Any]],
+        checkpoint: CheckpointStore,
+        stream_name: str,
+        partition: dict[str, Any],
+        cursor_field: str,
+        batch_count: int,
+    ) -> None:
+        """Checkpoint the cursor at the last record of *batch*."""
+        cursor_value = batch[-1].get(cursor_field)
+        if cursor_value is None:
+            # Safe under at-least-once + upsert (resume re-reads), but
+            # visible: an author debugging "incremental stream keeps
+            # re-reading its tail" needs this signal.
+            logger.debug(
+                "stream %r: last record has no %r value; "
+                "cursor not advanced for batch %d",
+                stream_name,
+                cursor_field,
+                batch_count,
+            )
+            return
+        await checkpoint.save_cursor(stream_name, partition, {"cursor": cursor_value})
+
+    def _plan_read(self, config: dict[str, Any], base_url: str) -> _ReadPlan:
+        """Validate the endpoint document once and pull out what a read needs.
+
+        Everything here is fixed for the whole read: which document, which
+        record schema, which URL and method, where the records and metadata
+        live in a response. Resolving it up front keeps the read loop about
+        paging rather than about document shape, and means a malformed
+        document fails before the first request goes out.
+        """
+        endpoint_doc = config.get("endpoint_document")
+        if not endpoint_doc:
+            raise ReadError("APIConnector: source config missing 'endpoint_document'")
+        stream_source = config.get("stream_source") or {}
+        endpoint_ref = stream_source.get("endpoint_ref")
+        if not endpoint_ref:
+            raise ReadError(
+                "APIConnector: stream_source missing 'endpoint_ref'; "
+                "the source contract requires it to declare per-field types"
+            )
+        read_spec = (endpoint_doc.get("operations") or {}).get("read") or {}
+        records_items_schema = self._resolve_records_items_schema(
+            endpoint_doc, read_spec
+        )
+        self._apply_read_type_map(records_items_schema, endpoint_ref)
+
+        request = read_spec.get("request") or {}
+        path = request.get("path")
+        if not isinstance(path, str) or not path:
+            raise ReadError(
+                f"endpoint {endpoint_doc.get('endpoint_id')!r}: "
+                f"operations.read.request.path is required"
+            )
+        response_block = read_spec.get("response") or {}
+        return _ReadPlan(
+            stream_source=stream_source,
+            read_spec=read_spec,
+            schema_contract=SchemaContract(records_items_schema),
+            method=(request.get("method") or "GET").upper(),
+            url=join_url(base_url, path),
+            records_ref=(response_block.get("records") or {}).get(
+                "ref", "response.body"
+            ),
+            metadata_spec=response_block.get("metadata") or {},
+            raw_body=request.get("body"),
+        )
 
     @staticmethod
     def _resolve_records_items_schema(
