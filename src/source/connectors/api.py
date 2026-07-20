@@ -43,11 +43,11 @@ from dataclasses import dataclass, replace
 from datetime import timezone
 from decimal import Decimal
 from typing import Any, NamedTuple
-from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
 import aiohttp
 import pyarrow as pa
 from multidict import CIMultiDict
+from yarl import URL
 
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.exceptions import TransportSpecError, UnresolvedValueError
@@ -1332,8 +1332,24 @@ def _require_scalar(value: Any, label: str) -> Any:
     return value
 
 
+def _target_url(url: str) -> URL:
+    """Parse *url* into the object the transport will send.
+
+    Every judgement this module makes about a URL -- is it the same origin, is
+    it the same request -- has to be made on the object aiohttp actually puts
+    on the socket, or it judges a request the engine never makes. aiohttp turns
+    each request URL into a ``yarl.URL``, so parsing it here rather than by
+    hand leaves host casing, default ports and percent-encoding decided in one
+    place: the transport's.
+    """
+    try:
+        return URL(url)
+    except ValueError as err:
+        raise ReadError(f"not a usable request URL: {url!r} ({err})") from err
+
+
 def _canonical_wire(url: str, query: Mapping[str, Any], body: Any) -> _Wire:
-    """Reduce a request to what the provider will actually receive.
+    """Reduce a request to the identity the provider will actually see.
 
     The same request target reaches the wire two ways: as a bare URL plus a
     declared param table, or as a URL that already carries those params in its
@@ -1341,55 +1357,60 @@ def _canonical_wire(url: str, query: Mapping[str, Any], body: Any) -> _Wire:
     ``(base, {"limit": 50})`` and a self-referential next link is
     ``(base?limit=50, {})``. Compared literally those look like progress, so a
     provider returning its own URL would get one duplicate page emitted before
-    the repeat was noticed on the iteration after. Folding the query into the
-    param table makes both spellings compare equal, so the repeat is caught
-    before anything duplicate is emitted.
+    the repeat was noticed on the iteration after.
+
+    The merge is ``update_query``, the exact call aiohttp makes on the way to
+    the socket, so the two spellings collapse the way the transport collapses
+    them and no other way. That matters in both directions: a self link
+    differing only in host casing or an explicit ``:443`` is the same request
+    and must not read as progress, while a link carrying a genuinely repeated
+    key (``?cursor=a&cursor=b``) is a different request from ``?cursor=b`` and
+    must not be flattened into it. Query order is not part of the identity --
+    a provider reordering its params is not a new page.
 
     Values are stringified because the query string only carries text: a
     declared ``{"limit": 50}`` and a link's ``limit=50`` are the same request.
     """
-    parts = urlsplit(url)
-    merged = {name: str(value) for name, value in parse_qsl(parts.query, True)}
-    merged.update({name: str(value) for name, value in query.items()})
-    target = urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+    target = _target_url(url).update_query(
+        {name: str(value) for name, value in query.items()}
+    )
     # Digested rather than kept whole: a long read holds one entry per page,
     # and 16 bytes each keeps that bounded whatever the page count. `default`
     # covers Decimals from the lossless JSON parse.
-    canonical = json.dumps([target, merged, body], sort_keys=True, default=str)
+    canonical = json.dumps(
+        [
+            str(target.with_query(None).with_fragment(None)),
+            sorted(target.query.items()),
+            body,
+        ],
+        sort_keys=True,
+        default=str,
+    )
     return hashlib.blake2b(canonical.encode(), digest_size=16).digest()
 
 
-_DEFAULT_PORTS = {"http": 80, "https": 443}
-
-
 def _origin(url: str) -> str:
-    """Scheme/host/port of *url*, normalized for same-origin comparison.
+    """Scheme, host and port of *url*, as the transport compares them.
 
-    Scheme and host are case-insensitive per RFC 3986, and an explicit
-    default port names the same origin as an omitted one, so ``HTTPS://API.x``
-    and ``https://api.x:443`` must not read as different hosts. A URL with no
-    scheme or host has no origin and returns ``""``, which never matches a
-    real one.
+    Normalization is yarl's, the same authority `_canonical_wire` defers to:
+    scheme and host are lowercased and a default port dropped, so
+    ``HTTPS://API.x:443`` and ``https://api.x`` name one origin. A URL this
+    function will not vouch for -- relative, or carrying userinfo -- has no
+    origin and returns ``""``, which never matches a real one.
     """
-    parts = urlsplit(url)
-    if not parts.scheme or not parts.hostname:
-        return ""
-    if parts.username is not None or parts.password is not None:
+    parsed = _target_url(url)
+    if parsed.user is not None or parsed.password is not None:
         # Userinfo is not part of the origin, so a link like
         # `http://evil:pw@api.provider.com/x` would pass a same-origin check
         # and then be turned into an outgoing `Authorization: Basic ...` --
         # credentials the provider chose for a request the engine makes. No
         # origin at all rather than a match.
         return ""
-    scheme = parts.scheme.lower()
     try:
-        port = parts.port
+        return str(parsed.origin())
     except ValueError:
-        # Unparseable port: no origin rather than a spurious match.
+        # Not absolute: nothing to compare an origin against.
         return ""
-    return (
-        f"{scheme}://{parts.hostname.lower()}:{port or _DEFAULT_PORTS.get(scheme, 0)}"
-    )
 
 
 def _required_setting(block: dict[str, Any], strategy: str, key: str) -> str:

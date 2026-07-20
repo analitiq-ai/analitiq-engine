@@ -3092,17 +3092,31 @@ class TestPaginationInvariants:
             )
         assert session.calls == [], "a fabricated setting reached the wire"
 
+    # Page 1 is `(https://api.example.test/items, {"limit": 50})`. Each of
+    # these is a link back to that same request wearing different clothes:
+    # scheme and host are case-insensitive, `:443` is what `https` means
+    # anyway, and a fragment never leaves the client. The transport folds all
+    # of them into one set of bytes, so the repeat check has to as well.
+    EQUIVALENT_SELF_LINKS = [
+        pytest.param("https://api.example.test/items?limit=50", id="verbatim"),
+        pytest.param("https://API.EXAMPLE.TEST/items?limit=50", id="host-case"),
+        pytest.param("https://api.example.test:443/items?limit=50", id="default-port"),
+        pytest.param("https://api.example.test/items?limit=50#top", id="fragment"),
+    ]
+
     @pytest.mark.asyncio
-    async def test_a_self_referential_link_emits_no_duplicate(self):
+    @pytest.mark.parametrize("self_link", EQUIVALENT_SELF_LINKS)
+    async def test_a_self_referential_link_emits_no_duplicate(self, self_link):
         """`(base, {limit: 50})` and `(base?limit=50, {})` are the same request.
 
         Compared literally they look like progress, so a provider returning its
         own URL would get one duplicate page emitted before the repeat was
-        noticed on the following iteration.
+        noticed on the following iteration. Every spelling here reaches the
+        socket as those same bytes, so every one of them is a repeat.
         """
         body = {
             "records": [{"id": 1, "name": "a"}],
-            "next": "https://api.example.test/items?limit=50",
+            "next": self_link,
         }
         session = _FakeSession([_FakeResponse(status=200, body=body) for _ in range(4)])
         runtime = _runtime_with_session(session)
@@ -3132,6 +3146,57 @@ class TestPaginationInvariants:
 
         assert len(session.calls) == 1
         assert len(emitted) == 1, "the same page was emitted twice"
+
+    @pytest.mark.asyncio
+    async def test_a_repeated_query_key_is_not_a_repeated_request(self):
+        """`?tag=a&tag=b` and `?tag=b` are two pages, not one.
+
+        The repeat check is only safe if it distinguishes every request the
+        transport distinguishes. Collapsing a link's query into a plain dict
+        keeps the last value for a repeated key, which makes these two URLs
+        identical and aborts a perfectly valid read on its third page.
+        """
+        pages = [
+            {
+                "records": [{"id": 1, "name": "a"}],
+                "next": "https://api.example.test/items?limit=50&tag=a&tag=b",
+            },
+            {
+                "records": [{"id": 2, "name": "b"}],
+                "next": "https://api.example.test/items?limit=50&tag=b",
+            },
+            {"records": [{"id": 3, "name": "c"}]},
+        ]
+        session = _FakeSession([_FakeResponse(status=200, body=p) for p in pages])
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(
+            params={"limit": {"in": "query", "default": {"literal": 50}}},
+            pagination={
+                "type": "link",
+                "link": {"next_url": {"ref": "response.body.next"}},
+                "stop_when": {"missing": {"ref": "response.body.next"}},
+            },
+        )
+        batches = await _consume(
+            connector,
+            runtime,
+            config={
+                "endpoint_document": endpoint,
+                "stream_source": _stream_source(),
+            },
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=10,
+        )
+
+        assert len(session.calls) == 3
+        assert [row["id"] for batch in batches for row in batch.to_pylist()] == [
+            1,
+            2,
+            3,
+        ]
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("pagination", CONTROL_EXPRESSIONS)
