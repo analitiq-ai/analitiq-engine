@@ -41,7 +41,7 @@ from dataclasses import dataclass, replace
 from datetime import timezone
 from decimal import Decimal
 from typing import Any, NamedTuple
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
 import aiohttp
 import pyarrow as pa
@@ -827,7 +827,7 @@ class APIConnector(BaseConnector):
         while True:
             query, body = build_request(params)
             sent_query = query if send_params else {}
-            wire = (url, sent_query, body)
+            wire = _canonical_wire(url, sent_query, body)
             self._require_progress(wire, previous_wire, p_type, pages, url)
             previous_wire = wire
 
@@ -1062,7 +1062,7 @@ class APIConnector(BaseConnector):
         declared = limit_block.get("default")
         value: Any = batch_size
         if declared is not None:
-            resolved = resolver.resolve_for_request(declared)
+            resolved = _resolve_control(declared, resolver)
             if resolved is None:
                 raise ReadError(
                     "pagination.limit.default is declared but did not resolve. "
@@ -1268,13 +1268,17 @@ def _is_blank(value: Any) -> bool:
 
 
 def _resolve_control(expr: Any, resolver: Resolver) -> Any:
-    """Resolve a next-page control expression, strictly.
+    """Resolve an expression that decides what to request, strictly.
 
-    Request params are resolved leniently: an unresolved node is dropped so a
-    partly-known request still goes out. Control expressions cannot use that
-    policy. Lenient resolution renders `{"template": "p-${response.body.next}"}`
-    as ``"p-"`` when the field is absent, which is not blank -- so the engine
-    would send a cursor it invented from a field the provider never sent.
+    Two resolution policies, split by what the value governs. A request
+    *param* resolves leniently: an unresolved node is dropped so a
+    partly-known request still goes out. Anything that decides *what is
+    requested or where the read starts* cannot use that policy -- the page
+    size, the initial offset or page, the per-page step, the keyset seed, the
+    next cursor, the next link. Lenient resolution renders
+    `{"template": "p-${response.body.next}"}` as ``"p-"`` when the field is
+    absent, which is not blank, so the engine would read from a position it
+    invented out of configuration that was never there.
 
     Strict resolution answers the question actually being asked: did the
     declared next-page value resolve at all. A field that is present and null
@@ -1306,6 +1310,29 @@ def _require_scalar(value: Any, label: str) -> Any:
             f"or number"
         )
     return value
+
+
+def _canonical_wire(url: str, query: Mapping[str, Any], body: Any) -> _Wire:
+    """Render the request as the provider sees it, for comparing page to page.
+
+    The same request target reaches the wire two ways: as a bare URL plus a
+    declared param table, or as a URL that already carries those params in its
+    query string. `link` pagination switches between them -- page 1 is
+    ``(base, {"limit": 50})`` and a self-referential next link is
+    ``(base?limit=50, {})``. Compared literally those look like progress, so a
+    provider returning its own URL would get one duplicate page emitted before
+    the repeat was noticed on the iteration after. Folding the query into the
+    param table makes both spellings compare equal, so the repeat is caught
+    before anything duplicate is emitted.
+
+    Values are stringified because the query string only carries text: a
+    declared ``{"limit": 50}`` and a link's ``limit=50`` are the same request.
+    """
+    parts = urlsplit(url)
+    merged = {name: str(value) for name, value in parse_qsl(parts.query, True)}
+    merged.update({name: str(value) for name, value in query.items()})
+    target = urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+    return target, merged, body
 
 
 _DEFAULT_PORTS = {"http": 80, "https": 443}
@@ -1391,7 +1418,7 @@ def _optional_int_setting(
     if declared is None:
         return None
     label = f"pagination.{strategy}.{key}"
-    resolved = resolver.resolve_for_request(declared)
+    resolved = _resolve_control(declared, resolver)
     if resolved is None:
         raise ReadError(
             f"{label} is declared but did not resolve. It anchors where the "
@@ -1598,7 +1625,7 @@ def _build_keyset_advance(block: dict[str, Any], state: _RequestState) -> _Advan
     field_path = order_by_field.split(".")
     initial = block.get("initial")
     if initial is not None:
-        seed = resolver.resolve_for_request(initial)
+        seed = _resolve_control(initial, resolver)
         if seed is not None:
             seed = _require_scalar(seed, "keyset pagination: keyset.initial")
         if seed is None:

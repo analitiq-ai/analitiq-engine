@@ -3006,6 +3006,133 @@ class TestPaginationInvariants:
         ),
     ]
 
+    # Settings that decide where the read starts or how far it steps. Same
+    # invariant as CONTROL_EXPRESSIONS, resolved before the first request
+    # rather than per page — the strictness has to reach here too, which is
+    # what the round-5 fix missed by defining the invariant too narrowly.
+    SETTING_EXPRESSIONS = [
+        pytest.param(
+            {
+                "type": "offset",
+                "offset": {
+                    "param": "offset",
+                    "initial": {"template": "${connection.parameters.start}0"},
+                },
+                "stop_when": {"empty": {"ref": "response.body.records"}},
+            },
+            id="offset.initial",
+        ),
+        pytest.param(
+            {
+                "type": "page",
+                "page": {
+                    "param": "page",
+                    "initial": 1,
+                    "increment_by": {"template": "${connection.parameters.step}1"},
+                },
+                "stop_when": {"empty": {"ref": "response.body.records"}},
+            },
+            id="page.increment_by",
+        ),
+        pytest.param(
+            {
+                "type": "keyset",
+                "keyset": {
+                    "param": "since",
+                    "order_by_field": "id",
+                    "initial": {"template": "tok-${connection.parameters.seed}"},
+                },
+                "stop_when": {"empty": {"ref": "response.body.records"}},
+            },
+            id="keyset.initial",
+        ),
+        pytest.param(
+            {
+                "type": "offset",
+                "offset": {"param": "offset", "initial": 0},
+                "limit": {
+                    "param": "limit",
+                    "default": {"template": "${connection.parameters.size}0"},
+                },
+                "stop_when": {"empty": {"ref": "response.body.records"}},
+            },
+            id="limit.default",
+        ),
+    ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("pagination", SETTING_EXPRESSIONS)
+    async def test_no_setting_is_fabricated_from_absent_config(self, pagination):
+        """A template over missing config must fail, not render a usable value.
+
+        Lenient resolution turns `${connection.parameters.start}0` into `"0"`,
+        which passes the integer check — so the read would start, step or size
+        its pages from a number invented out of configuration that was never
+        supplied. These settings decide which records are read.
+        """
+        session = _FakeSession(
+            [_FakeResponse(status=200, body={"records": [{"id": 1, "name": "a"}]})]
+        )
+        # No `start` / `step` / `seed` / `size` anywhere in the connection.
+        runtime = _runtime_with_session(session, parameters={})
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(pagination=pagination)
+        with pytest.raises(ReadError, match="did not resolve|not resolvable"):
+            await _consume(
+                connector,
+                runtime,
+                config={
+                    "endpoint_document": endpoint,
+                    "stream_source": _stream_source(),
+                },
+                state_manager=MagicMock(),
+                stream_name="items",
+                batch_size=10,
+            )
+        assert session.calls == [], "a fabricated setting reached the wire"
+
+    @pytest.mark.asyncio
+    async def test_a_self_referential_link_emits_no_duplicate(self):
+        """`(base, {limit: 50})` and `(base?limit=50, {})` are the same request.
+
+        Compared literally they look like progress, so a provider returning its
+        own URL would get one duplicate page emitted before the repeat was
+        noticed on the following iteration.
+        """
+        body = {
+            "records": [{"id": 1, "name": "a"}],
+            "next": "https://api.example.test/items?limit=50",
+        }
+        session = _FakeSession([_FakeResponse(status=200, body=body) for _ in range(4)])
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(
+            params={"limit": {"in": "query", "default": {"literal": 50}}},
+            pagination={
+                "type": "link",
+                "link": {"next_url": {"ref": "response.body.next"}},
+                "stop_when": {"missing": {"ref": "response.body.next"}},
+            },
+        )
+        emitted: list[Any] = []
+        with pytest.raises(ReadError, match="would send the identical request again"):
+            async for batch in connector.read_batches(
+                runtime,
+                {
+                    "endpoint_document": endpoint,
+                    "stream_source": _stream_source(),
+                },
+                checkpoint=MagicMock(),
+                stream_name="items",
+                batch_size=10,
+            ):
+                emitted.append(batch)
+
+        assert len(session.calls) == 1
+        assert len(emitted) == 1, "the same page was emitted twice"
+
     @pytest.mark.asyncio
     @pytest.mark.parametrize("pagination", CONTROL_EXPRESSIONS)
     async def test_no_control_expression_fabricates_a_value(self, pagination):
