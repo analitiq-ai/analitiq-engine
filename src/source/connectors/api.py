@@ -824,17 +824,29 @@ class APIConnector(BaseConnector):
         if not cursor_field:
             return
         mappings = (read_spec.get("replication") or {}).get("cursor_mappings") or []
-        param_name = next(
-            (m.get("param") for m in mappings if m.get("cursor_field") == cursor_field),
-            None,
+        mapping = next(
+            (m for m in mappings if m.get("cursor_field") == cursor_field), None
         )
-        if not param_name:
+        if mapping is None:
             logger.warning(
                 "No replication.cursor_mappings entry for cursor field %r; "
                 "running full replication",
                 cursor_field,
             )
             return
+        # Two mapping forms, distinguished by the contract on which param
+        # fields are present: a single bound (`param`) or a bounded window
+        # (`start_param`/`end_param`). Looking only for `param` matched the
+        # single form and left a window mapping reading as "no mapping" --
+        # every incremental run silently re-read the whole stream, at WARNING
+        # level, claiming a mapping did not exist when one did.
+        start_param = mapping.get("param") or mapping.get("start_param")
+        if not start_param:
+            raise ReadError(
+                f"replication.cursor_mappings entry for {cursor_field!r} names "
+                f"no param: expected 'param' (single bound) or 'start_param' "
+                f"(bounded window)"
+            )
         cursor_state = await checkpoint.get_cursor(stream_name, partition)
         cursor_value = (cursor_state or {}).get("cursor")
         if not cursor_value:
@@ -852,37 +864,91 @@ class APIConnector(BaseConnector):
                 safety_window_seconds,
             )
         effective_start = self._compute_effective_start(
-            cursor_value, safety_window_seconds
+            cursor_value, safety_window_seconds, mapping.get("format")
         )
-        params[param_name] = effective_start
+        params[start_param] = effective_start
+        if mapping.get("end_param"):
+            # The window's upper bound is the engine's to leave open: it has
+            # no clock reading the contract sanctions, and inventing "now"
+            # would silently fence off rows written during the run. An
+            # unbounded end reads the same records a single-bound mapping
+            # would, so nothing is lost by declining to guess.
+            logger.info(
+                "stream %r: cursor mapping declares end_param %r; leaving it "
+                "unset so the read is bounded only from below",
+                stream_name,
+                mapping["end_param"],
+            )
         logger.info(
             "Incremental replication: %s -> %s = %s",
             cursor_field,
-            param_name,
+            start_param,
             effective_start,
         )
 
     @staticmethod
-    def _compute_effective_start(cursor: Any, safety_window_seconds: int) -> str:
+    def _compute_effective_start(
+        cursor: Any, safety_window_seconds: int, declared_format: str | None
+    ) -> str:
+        """Step the stored cursor back by the safety window, in its own units.
+
+        *declared_format* is the contract's ``cursor_mappings[].format``, and
+        it is the only thing that says what the cursor's digits mean. Guessing
+        instead went wrong two ways. An ``epoch_milliseconds`` cursor took the
+        integer branch and had *seconds* subtracted, shrinking a 300-second
+        window to 0.3 of a second, so every row written inside the real window
+        -- the late arrivals the window exists to re-read -- was skipped while
+        the run reported success. And an integer id like ``"5000"`` parses as
+        an ISO timestamp (year 5000), so the next request asked for records
+        after the year 4999.
+
+        With no format declared the units are unknowable, so an all-digit
+        cursor is passed through untouched rather than shifted by a guess: the
+        read resumes exactly where it stopped, forgoing the safety margin
+        instead of inventing one. A non-numeric cursor is unambiguous and is
+        read as a timestamp.
+        """
         from datetime import datetime, timedelta
 
         from dateutil.parser import isoparse
 
-        cursor_str = str(cursor)
-        try:
-            cursor_dt: datetime = isoparse(cursor_str)
-        except (ValueError, TypeError):
+        cursor_str = str(cursor).strip()
+
+        if declared_format in ("epoch_seconds", "epoch_milliseconds"):
             try:
-                cursor_id = int(cursor_str)
+                ticks = int(cursor_str)
             except ValueError as err:
                 raise ReadError(
-                    f"cursor value {cursor!r} is neither an ISO timestamp nor "
-                    f"an integer; cannot apply safety window"
+                    f"cursor value {cursor!r} is declared "
+                    f"format={declared_format!r} but is not an integer"
                 ) from err
-            return str(max(0, cursor_id - safety_window_seconds))
+            per_second = 1000 if declared_format == "epoch_milliseconds" else 1
+            return str(max(0, ticks - safety_window_seconds * per_second))
+
+        if declared_format is None and cursor_str.lstrip("-").isdigit():
+            logger.info(
+                "cursor %r has no declared format; sending it unchanged, since "
+                "a safety window cannot be applied to digits of unknown units",
+                cursor_str,
+            )
+            return cursor_str
+
+        try:
+            cursor_dt: datetime = isoparse(cursor_str)
+        except (ValueError, TypeError) as err:
+            raise ReadError(
+                f"cursor value {cursor!r} is not a timestamp"
+                + (
+                    f" (declared format={declared_format!r})"
+                    if declared_format
+                    else " and is not an integer; cannot apply safety window"
+                )
+            ) from err
         if cursor_dt.tzinfo is None:
             cursor_dt = cursor_dt.replace(tzinfo=timezone.utc)
         effective_dt = cursor_dt - timedelta(seconds=safety_window_seconds)
+        if declared_format == "date":
+            return effective_dt.date().isoformat()
         return effective_dt.isoformat().replace("+00:00", "Z")
 
     # ------------------------------------------------------------------
@@ -1872,15 +1938,19 @@ def _build_keyset_advance(block: dict[str, Any], state: _RequestState) -> _Advan
             )
         last_key = walk_path(last_record, field_path)
         if last_key is None:
-            # Present but null: the provider has no further key to advance
-            # from. Visible, because a null ordering key in a keyset stream is
-            # anomalous rather than routine.
-            logger.warning(
-                "keyset pagination: last record has a null %r; ending read "
-                "after this page",
-                order_by_field,
+            # `advance` only runs when stop_when evaluated false, so the
+            # document says more pages exist and a null ordering key means the
+            # next request cannot be built. Cursor and link both raise here;
+            # keyset used to log and return None, which the loop reads as a
+            # clean ending -- so the stream truncated at this page and the run
+            # reported success. Same contradiction, same answer.
+            raise ReadError(
+                f"keyset pagination: stop_when did not fire, but the last "
+                f"record's {order_by_field!r} is null, so there is no key to "
+                f"advance from and the next page cannot be requested. Declare "
+                f"the ending in stop_when, or order by a field the provider "
+                f"never leaves null"
             )
-            return None
         params[param] = _require_scalar(
             last_key, f"keyset pagination: record field {order_by_field!r}"
         )

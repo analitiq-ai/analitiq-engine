@@ -1108,6 +1108,112 @@ class TestReadBatchesKeysetPagination:
 # ---------------------------------------------------------------------------
 
 
+class TestIncrementalCursorFormats:
+    """The declared `format` decides what a cursor's digits mean.
+
+    Guessing went wrong two ways: `epoch_milliseconds` had *seconds*
+    subtracted (a 300s window became 0.3s, skipping the late arrivals the
+    window exists to re-read), and an integer id like "5000" parsed as an ISO
+    timestamp in the year 5000.
+    """
+
+    @staticmethod
+    def _run(cursor, mapping, window=300):
+        session = _FakeSession(
+            [
+                _FakeResponse(
+                    status=200,
+                    body={"records": [{"id": 1, "updated_at": "2024-01-01T00:00:00Z"}]},
+                )
+            ]
+        )
+        state_manager = MagicMock()
+        state_manager.get_cursor = AsyncMock(return_value={"cursor": cursor})
+        state_manager.save_cursor = AsyncMock()
+        endpoint = _endpoint_doc_with_records(
+            replication={"cursor_mappings": [mapping]}
+        )
+        return session, state_manager, endpoint, window
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("cursor", "fmt", "expected"),
+        [
+            ("1700000000000", "epoch_milliseconds", "1699999700000"),
+            ("1700000000", "epoch_seconds", "1699999700"),
+            ("2024-01-01T12:00:00Z", "date-time", "2024-01-01T11:55:00Z"),
+            ("2024-01-02", "date", "2024-01-01"),
+            # No format: units are unknowable, so the cursor is passed through
+            # rather than shifted by a guess. Under the old code "5000" parsed
+            # as the year 5000 and 300 seconds came off that.
+            ("5000", None, "5000"),
+        ],
+    )
+    async def test_the_safety_window_is_applied_in_the_cursors_own_units(
+        self, cursor, fmt, expected
+    ):
+        mapping = {"cursor_field": "updated_at", "param": "since"}
+        if fmt is not None:
+            mapping["format"] = fmt
+        session, state_manager, endpoint, window = self._run(cursor, mapping)
+        await _consume(
+            APIConnector("test"),
+            _runtime_with_session(session),
+            config={
+                "endpoint_document": endpoint,
+                "stream_source": _stream_source(
+                    replication_method="incremental",
+                    cursor_field="updated_at",
+                    safety_window=window,
+                ),
+            },
+            state_manager=state_manager,
+            stream_name="items",
+            partition={},
+            batch_size=10,
+        )
+        assert session.calls[0][2]["since"] == expected
+
+    @pytest.mark.asyncio
+    async def test_a_window_mapping_binds_its_start_param(self):
+        """`start_param`/`end_param` is a mapping too, not a missing one.
+
+        Matching only on `param` left a window mapping reading as "no
+        mapping", so every incremental run silently re-read the whole stream
+        while warning that a mapping did not exist.
+        """
+        mapping = {
+            "cursor_field": "updated_at",
+            "start_param": "from",
+            "end_param": "to",
+            "start_operator": "gte",
+            "end_operator": "lt",
+            "format": "date-time",
+        }
+        session, state_manager, endpoint, window = self._run(
+            "2024-01-01T12:00:00Z", mapping, window=60
+        )
+        await _consume(
+            APIConnector("test"),
+            _runtime_with_session(session),
+            config={
+                "endpoint_document": endpoint,
+                "stream_source": _stream_source(
+                    replication_method="incremental",
+                    cursor_field="updated_at",
+                    safety_window=window,
+                ),
+            },
+            state_manager=state_manager,
+            stream_name="items",
+            partition={},
+            batch_size=10,
+        )
+        params = session.calls[0][2]
+        assert params["from"] == "2024-01-01T11:59:00Z"
+        assert "to" not in params, "the engine has no clock the contract sanctions"
+
+
 class TestReadBatchesIncrementalReplication:
     @pytest.mark.asyncio
     async def test_incremental_cursor_flows_into_params_with_safety_window(self):
@@ -2347,9 +2453,12 @@ class TestPaginationSilentTruncationRegressions:
             )
 
     @pytest.mark.asyncio
-    async def test_keyset_null_order_key_ends_the_read_without_raising(self):
-        # Present but null is the provider having no further key, not a
-        # mis-declaration — it ends the read rather than failing.
+    async def test_keyset_null_order_key_raises_like_cursor_and_link(self):
+        # `advance` only runs when stop_when evaluated false, so the document
+        # says more pages exist. A null ordering key then means the next
+        # request cannot be built — the same contradiction cursor and link
+        # already raise on. Ending quietly here truncated the stream at one
+        # page and reported success.
         session = _FakeSession(
             [
                 _FakeResponse(
@@ -2373,16 +2482,18 @@ class TestPaginationSilentTruncationRegressions:
                 "stop_when": {"empty": {"ref": "response.body.records"}},
             },
         )
-        batches = await _consume(
-            connector,
-            runtime,
-            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
-            state_manager=MagicMock(),
-            stream_name="items",
-            batch_size=10,
-        )
-
-        assert [b.num_rows for b in batches] == [2]
+        with pytest.raises(ReadError, match="is null, so there is no key"):
+            await _consume(
+                connector,
+                runtime,
+                config={
+                    "endpoint_document": endpoint,
+                    "stream_source": _stream_source(),
+                },
+                state_manager=MagicMock(),
+                stream_name="items",
+                batch_size=10,
+            )
 
     @pytest.mark.asyncio
     async def test_declared_but_unresolvable_initial_raises(self):
