@@ -2728,50 +2728,6 @@ class TestPaginationSilentTruncationRegressions:
         assert len(session.calls) == 2
 
     @pytest.mark.asyncio
-    async def test_a_non_scalar_cursor_fails_by_name(self):
-        """A dict/list cursor must not reach the HTTP layer as a bare TypeError.
-
-        A list is worse than a crash: yarl expands it into repeated query
-        values, letting a provider inject extra values for a declared param.
-        """
-        session = _FakeSession(
-            [
-                _FakeResponse(
-                    status=200,
-                    body={
-                        "records": [{"id": 1, "name": "a"}],
-                        "next": {"token": "abc"},
-                    },
-                )
-            ]
-        )
-        runtime = _runtime_with_session(session)
-        connector = APIConnector("test")
-
-        endpoint = _endpoint_doc_with_records(
-            pagination={
-                "type": "cursor",
-                "cursor": {
-                    "param": "cursor",
-                    "next_cursor": {"ref": "response.body.next"},
-                },
-                "stop_when": {"missing": {"ref": "response.body.next"}},
-            },
-        )
-        with pytest.raises(ReadError, match="cannot be sent as a single request"):
-            await _consume(
-                connector,
-                runtime,
-                config={
-                    "endpoint_document": endpoint,
-                    "stream_source": _stream_source(),
-                },
-                state_manager=MagicMock(),
-                stream_name="items",
-                batch_size=10,
-            )
-
-    @pytest.mark.asyncio
     async def test_next_cursor_with_an_unknown_scope_raises_read_error(self):
         """A typo in next_cursor classifies like the same typo in stop_when."""
         session = _FakeSession(
@@ -2808,80 +2764,6 @@ class TestPaginationSilentTruncationRegressions:
                 stream_name="items",
                 batch_size=10,
             )
-
-    @pytest.mark.asyncio
-    async def test_a_document_defect_emits_nothing_at_all(self):
-        """A stream that cannot run must not write its first page first.
-
-        The extract stage enqueues a yielded batch immediately, so emitting
-        before the page is fully decided lets a deterministically broken
-        document transform and write page 1 and only then fail. The defect
-        here (a keyset ordering field the records do not carry) is knowable
-        the moment the page arrives.
-        """
-        session = _FakeSession(
-            [
-                _FakeResponse(
-                    status=200,
-                    body={"records": [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]},
-                )
-            ]
-        )
-        runtime = _runtime_with_session(session)
-        connector = APIConnector("test")
-
-        endpoint = _endpoint_doc_with_records(
-            pagination={
-                "type": "keyset",
-                "keyset": {"param": "since", "order_by_field": "updated_at"},
-                "stop_when": {"empty": {"ref": "response.body.records"}},
-            },
-        )
-        emitted: list[Any] = []
-        with pytest.raises(ReadError, match="carries no 'updated_at'"):
-            async for batch in connector.read_batches(
-                runtime,
-                {
-                    "endpoint_document": endpoint,
-                    "stream_source": _stream_source(),
-                },
-                checkpoint=MagicMock(),
-                stream_name="items",
-                batch_size=10,
-            ):
-                emitted.append(batch)
-
-        assert (
-            emitted == []
-        ), "records reached the destination on a read that cannot run"
-
-    @pytest.mark.asyncio
-    async def test_incremental_cursor_defect_emits_nothing(self):
-        """A cursor_field the records lack must be caught before page 1 is emitted."""
-        session = _FakeSession(
-            [_FakeResponse(status=200, body={"records": [{"id": 1, "name": "a"}]})]
-        )
-        runtime = _runtime_with_session(session)
-        connector = APIConnector("test")
-
-        endpoint = _endpoint_doc_with_records()
-        emitted: list[Any] = []
-        with pytest.raises(ReadError, match="records carry no 'updated_at'"):
-            async for batch in connector.read_batches(
-                runtime,
-                {
-                    "endpoint_document": endpoint,
-                    "stream_source": _stream_source(
-                        replication_method="incremental", cursor_field="updated_at"
-                    ),
-                },
-                checkpoint=MagicMock(),
-                stream_name="items",
-                batch_size=10,
-            ):
-                emitted.append(batch)
-
-        assert emitted == []
 
     @pytest.mark.asyncio
     async def test_cursor_missing_while_stop_when_says_continue_raises(self):
@@ -2926,17 +2808,47 @@ class TestPaginationSilentTruncationRegressions:
                 batch_size=10,
             )
 
-    @pytest.mark.asyncio
-    async def test_non_scalar_keyset_initial_fails_by_name(self):
-        """The first-page seed gets the same scalar check as every later key."""
-        session = _FakeSession(
-            [_FakeResponse(status=200, body={"records": [{"id": 1, "name": "a"}]})]
-        )
-        runtime = _runtime_with_session(session, parameters={"since": ["a", "b"]})
-        connector = APIConnector("test")
 
-        endpoint = _endpoint_doc_with_records(
-            pagination={
+class TestPaginationInvariants:
+    """One test per invariant, covering every site the invariant reaches.
+
+    These replace the per-site tests they grew out of. Each defect in this PR
+    was a correct fix applied at one site while a sibling site kept the bug —
+    `_require_scalar` on the keyset advance key but not its seed,
+    validate-before-emit in the page loop but not the cursor path. A test
+    written per site passes while the gap stays open; a test written per
+    invariant fails the moment a site is added or missed.
+    """
+
+    # Every place a value the engine did not compute becomes a request param.
+    # `link` is absent deliberately: its resolved value is a URL, checked by
+    # `_origin` rather than by `_require_scalar`.
+    NON_SCALAR_SITES = [
+        pytest.param(
+            {
+                "type": "cursor",
+                "cursor": {
+                    "param": "cursor",
+                    "next_cursor": {"ref": "response.body.next"},
+                },
+                "stop_when": {"empty": {"ref": "response.body.records"}},
+            },
+            {"records": [{"id": 1, "name": "a"}], "next": {"token": "abc"}},
+            None,
+            id="cursor.next_cursor",
+        ),
+        pytest.param(
+            {
+                "type": "keyset",
+                "keyset": {"param": "since", "order_by_field": "id"},
+                "stop_when": {"empty": {"ref": "response.body.records"}},
+            },
+            {"records": [{"id": ["a", "b"], "name": "a"}]},
+            None,
+            id="keyset.advance_key",
+        ),
+        pytest.param(
+            {
                 "type": "keyset",
                 "keyset": {
                     "param": "since",
@@ -2945,7 +2857,28 @@ class TestPaginationSilentTruncationRegressions:
                 },
                 "stop_when": {"empty": {"ref": "response.body.records"}},
             },
-        )
+            {"records": [{"id": 1, "name": "a"}]},
+            {"since": ["a", "b"]},
+            id="keyset.initial_seed",
+        ),
+    ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("pagination,body,parameters", NON_SCALAR_SITES)
+    async def test_no_site_sends_a_non_scalar_as_a_request_param(
+        self, pagination, body, parameters
+    ):
+        """A dict/list/bool must never reach the query string.
+
+        A dict surfaces as a bare `TypeError` from inside yarl; a list is
+        worse, silently expanding into repeated query values so a provider can
+        inject extra values for a param the endpoint declared.
+        """
+        session = _FakeSession([_FakeResponse(status=200, body=body)])
+        runtime = _runtime_with_session(session, parameters=parameters)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(pagination=pagination)
         with pytest.raises(ReadError, match="cannot be sent as a single request"):
             await _consume(
                 connector,
@@ -2958,3 +2891,83 @@ class TestPaginationSilentTruncationRegressions:
                 stream_name="items",
                 batch_size=10,
             )
+
+    # Every deterministic document defect detectable once a page has arrived,
+    # across both places a batch is emitted (the page loop and the cursor path).
+    DOCUMENT_DEFECTS = [
+        pytest.param(
+            {
+                "type": "keyset",
+                "keyset": {"param": "since", "order_by_field": "updated_at"},
+                "stop_when": {"empty": {"ref": "response.body.records"}},
+            },
+            _stream_source(),
+            "carries no 'updated_at'",
+            id="keyset_order_by_field_absent",
+        ),
+        pytest.param(
+            {
+                "type": "offset",
+                "offset": {"param": "offset", "initial": 0},
+                "stop_when": {"missing": {"ref": "respones.body.next"}},
+            },
+            _stream_source(),
+            "not evaluable against this response",
+            id="stop_when_unknown_scope",
+        ),
+        pytest.param(
+            {
+                "type": "offset",
+                "offset": {"param": "offset", "initial": 0},
+                "stop_when": {"gte": [{"ref": "response.record_count"}]},
+            },
+            _stream_source(),
+            "not evaluable against this response",
+            id="stop_when_wrong_arity",
+        ),
+        pytest.param(
+            None,
+            _stream_source(replication_method="incremental", cursor_field="updated_at"),
+            "records carry no 'updated_at'",
+            id="incremental_cursor_field_absent",
+        ),
+    ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("pagination,stream_source,message", DOCUMENT_DEFECTS)
+    async def test_no_records_are_emitted_on_a_document_defect(
+        self, pagination, stream_source, message
+    ):
+        """A stream that cannot run must not write part of itself first.
+
+        The extract stage enqueues a yielded batch immediately, so emitting
+        before the page is fully decided lets a deterministically broken
+        document transform and write page 1 and only then fail. Every defect
+        here is knowable the moment the page arrives.
+        """
+        session = _FakeSession(
+            [
+                _FakeResponse(
+                    status=200,
+                    body={"records": [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]},
+                )
+            ]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(pagination=pagination)
+        emitted: list[Any] = []
+        with pytest.raises(ReadError, match=message):
+            async for batch in connector.read_batches(
+                runtime,
+                {"endpoint_document": endpoint, "stream_source": stream_source},
+                checkpoint=MagicMock(),
+                stream_name="items",
+                batch_size=10,
+            ):
+                emitted.append(batch)
+
+        assert (
+            emitted == []
+        ), "records reached the destination on a read that cannot run"
