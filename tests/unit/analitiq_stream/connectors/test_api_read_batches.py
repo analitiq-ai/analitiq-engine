@@ -131,6 +131,7 @@ def _endpoint_doc_with_records(
     extra_record_properties: dict[str, Any] | None = None,
     metadata: dict[str, Any] | None = None,
     request_body: Any = None,
+    params: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     record_properties: dict[str, Any] = {
         "id": {"type": "integer", "arrow_type": "Int64"},
@@ -157,6 +158,8 @@ def _endpoint_doc_with_records(
     }
     if request_body is not None:
         read_block["request"]["body"] = request_body
+    if params:
+        read_block["params"] = params
     if metadata:
         read_block["response"]["metadata"] = metadata
     if pagination:
@@ -2712,7 +2715,7 @@ class TestPaginationSilentTruncationRegressions:
                 "stop_when": {"missing": {"ref": "response.body.next"}},
             },
         )
-        with pytest.raises(ReadError, match="would repeat the previous request"):
+        with pytest.raises(ReadError, match="would send the identical request again"):
             await _consume(
                 connector,
                 runtime,
@@ -2971,3 +2974,152 @@ class TestPaginationInvariants:
         assert (
             emitted == []
         ), "records reached the destination on a read that cannot run"
+
+    # Every next-page control expression, in both strategies that have one.
+    # A template whose field is absent must read as "no value", not as the
+    # static text rendered around the hole.
+    CONTROL_EXPRESSIONS = [
+        pytest.param(
+            {
+                "type": "cursor",
+                "cursor": {
+                    "param": "cursor",
+                    "next_cursor": {"template": "tok-${response.body.next}"},
+                },
+                "stop_when": {"empty": {"ref": "response.body.records"}},
+            },
+            id="cursor.next_cursor",
+        ),
+        pytest.param(
+            {
+                "type": "link",
+                "link": {
+                    "next_url": {
+                        "template": (
+                            "https://api.example.test/items" "?c=${response.body.next}"
+                        )
+                    }
+                },
+                "stop_when": {"empty": {"ref": "response.body.records"}},
+            },
+            id="link.next_url",
+        ),
+    ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("pagination", CONTROL_EXPRESSIONS)
+    async def test_no_control_expression_fabricates_a_value(self, pagination):
+        """A missing template field must not become a made-up cursor or link.
+
+        Lenient resolution renders `tok-${response.body.next}` as `"tok-"` when
+        the field is absent — not blank, so the engine would request a page
+        using a token it invented from data the provider never sent.
+        """
+        session = _FakeSession(
+            [
+                _FakeResponse(
+                    status=200,
+                    body={"records": [{"id": 1, "name": "a"}]},  # no `next`
+                )
+            ]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(pagination=pagination)
+        with pytest.raises(ReadError, match="stop_when did not fire"):
+            await _consume(
+                connector,
+                runtime,
+                config={
+                    "endpoint_document": endpoint,
+                    "stream_source": _stream_source(),
+                },
+                state_manager=MagicMock(),
+                stream_name="items",
+                batch_size=10,
+            )
+        # The fabricated value never reached the wire.
+        assert len(session.calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_metadata_keeps_a_null_a_provider_actually_sent(self):
+        """`response.metadata.x` and a direct ref to the same field must agree.
+
+        A field present with JSON null resolves to None through a direct ref,
+        so `missing` is False. Routing it through `response.metadata` must not
+        flip that verdict to True — same data, same answer, whichever path the
+        author took.
+        """
+        session = _FakeSession(
+            [
+                _FakeResponse(
+                    status=200,
+                    body={"records": [{"id": 1, "name": "a"}], "cursor": None},
+                )
+            ]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(
+            metadata={"cursor": {"ref": "response.body.cursor"}},
+            pagination={
+                "type": "offset",
+                "offset": {"param": "offset", "initial": 0},
+                # Present-but-null, so this must NOT fire; the read ends on the
+                # empty second page instead.
+                "stop_when": {"missing": {"ref": "response.metadata.cursor"}},
+            },
+        )
+        session._responses.append(_FakeResponse(status=200, body={"records": []}))
+        batches = await _consume(
+            connector,
+            runtime,
+            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=10,
+        )
+
+        assert [r["id"] for b in batches for r in b.to_pylist()] == [1]
+        assert len(session.calls) == 2, "a null metadata value read as missing"
+
+    @pytest.mark.asyncio
+    async def test_progress_is_judged_on_the_wire_not_the_param_table(self):
+        """A param that never reaches the request is not progress.
+
+        `offset` is declared `in: body`, so it is kept out of the query string
+        — but the body binds nothing, so it never reaches the request either.
+        The param table advances 0, 2, 4 while the wire request stays
+        byte-identical, and comparing param tables would call that progress and
+        page forever, re-yielding the same records to the destination.
+        """
+        page = {"records": [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]}
+        session = _FakeSession([_FakeResponse(status=200, body=page) for _ in range(6)])
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(
+            params={"offset": {"in": "body", "controlled_by": "pagination"}},
+            request_body={"static": {"literal": 1}},
+            pagination={
+                "type": "offset",
+                "offset": {"param": "offset", "initial": 0},
+                "stop_when": {"empty": {"ref": "response.body.records"}},
+            },
+        )
+        with pytest.raises(ReadError, match="would send the identical request again"):
+            await _consume(
+                connector,
+                runtime,
+                config={
+                    "endpoint_document": endpoint,
+                    "stream_source": _stream_source(),
+                },
+                state_manager=MagicMock(),
+                stream_name="items",
+                batch_size=10,
+            )
+        # Caught on the second attempt, not after draining every response.
+        assert len(session.calls) == 1

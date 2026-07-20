@@ -48,7 +48,7 @@ import pyarrow as pa
 from multidict import CIMultiDict
 
 from cdk.connection_runtime import ConnectionRuntime
-from cdk.exceptions import TransportSpecError
+from cdk.exceptions import TransportSpecError, UnresolvedValueError
 from cdk.predicate import evaluate_predicate
 from cdk.rate_limiter import RateLimiter
 from cdk.request_binding import bind_param_refs, resolve_param_defaults
@@ -853,11 +853,25 @@ class APIConnector(BaseConnector):
         send_params = True
         pages = 0
         records = 0
+        previous_wire: tuple[str, dict[str, Any], Any] | None = None
         while True:
-            # Snapshot what this page actually asks for, before the strategy
-            # mutates the live param table to build the next one.
-            sent = (url, dict(params), send_params)
             query, body = build_request(params)
+            # Progress is judged on what actually goes out, not on the param
+            # table. A pagination param declared `in: body` whose `from_param`
+            # the body omits or misnames changes `params` every page while the
+            # wire request stays byte-identical -- so comparing param tables
+            # would call that progress and page forever.
+            wire = (url, query if send_params else {}, body)
+            if wire == previous_wire:
+                raise ReadError(
+                    f"{p_type!r} pagination: page {pages + 1} would send the "
+                    f"identical request again ({url!r}), so the read cannot "
+                    f"advance. Either the provider is returning a next-page "
+                    f"value that does not change, or the value never reaches "
+                    f"the request -- check that a param declared `in: body` is "
+                    f"bound by a matching `from_param` in the body"
+                )
+            previous_wire = wire
             page = await self._request_page(
                 url, method, query if send_params else {}, records_ref, body=body
             )
@@ -934,24 +948,6 @@ class APIConnector(BaseConnector):
                         f"{p_type!r} pagination: the next-page expression is "
                         f"not evaluable against this response: {err}"
                     ) from err
-
-                # A strategy that asks for the same request it just made will
-                # do so forever: a provider echoing one cursor, a `next_url`
-                # pointing at itself, a `{"template": ...}` next-page
-                # expression that renders a constant when its field is null.
-                # `stop_when` is the declared terminator, but it is written
-                # against provider data and cannot be trusted on a provider
-                # that is misbehaving -- and every page is emitted, so an
-                # unbounded loop feeds the destination the same records without
-                # limit. Identical consecutive requests mean no progress,
-                # whatever the strategy.
-                if following == sent:
-                    raise ReadError(
-                        f"{p_type!r} pagination: page {pages + 1} would repeat "
-                        f"the previous request exactly ({url!r}), so the read "
-                        f"cannot advance. The provider is returning a next-page "
-                        f"value that does not change"
-                    )
 
             yield page.records
 
@@ -1054,17 +1050,22 @@ class APIConnector(BaseConnector):
             metadata_resolver = resolver.with_context(
                 replace(resolver.context, response=scope)
             )
-            # Resolved as one dict, not key by key. Per-key resolution returns
-            # None for an unresolved expression, which would land in the scope
-            # as a *present* key holding None — and `missing`/`empty` would
-            # then answer backwards for exactly the field the author declared
-            # metadata to reach. Resolving the whole mapping applies the
-            # resolver's drop policy instead, so an unresolved entry is
-            # genuinely absent and reads identically to the same `{ref}`
-            # written straight into the predicate.
-            scope["metadata"] = metadata_resolver.resolve_for_request(
-                dict(metadata_spec)
-            )
+            # Per key, resolved strictly, because the two failure modes have
+            # to stay apart. Lenient whole-dict resolution drops any entry
+            # yielding None, so a provider field that is *present and null*
+            # vanishes and `missing` answers True -- while the same `{ref}`
+            # written straight into the predicate resolves to None and answers
+            # False. Same data, opposite verdicts, depending only on whether
+            # the author routed it through metadata. Strict resolution keeps a
+            # real null as a present None and omits only a path that genuinely
+            # does not resolve.
+            resolved: dict[str, Any] = {}
+            for name, expr in metadata_spec.items():
+                try:
+                    resolved[name] = metadata_resolver.resolve(expr)
+                except UnresolvedValueError:
+                    continue
+            scope["metadata"] = resolved
         return scope
 
     # ------------------------------------------------------------------
@@ -1211,6 +1212,28 @@ def _is_blank(value: Any) -> bool:
     test: a numeric cursor of ``0`` is a real token.
     """
     return value is None or (isinstance(value, str) and not value.strip())
+
+
+def _resolve_control(expr: Any, resolver: Resolver) -> Any:
+    """Resolve a next-page control expression, strictly.
+
+    Request params are resolved leniently: an unresolved node is dropped so a
+    partly-known request still goes out. Control expressions cannot use that
+    policy. Lenient resolution renders `{"template": "p-${response.body.next}"}`
+    as ``"p-"`` when the field is absent, which is not blank -- so the engine
+    would send a cursor it invented from a field the provider never sent.
+
+    Strict resolution answers the question actually being asked: did the
+    declared next-page value resolve at all. A field that is present and null
+    still comes back as ``None`` (and reads as blank); only a genuinely
+    unreachable path raises, and that is returned as "no value". An unknown
+    *scope* raises plain KeyError and is left to propagate -- that is a typo in
+    the document, not a provider omission, and the caller classifies it.
+    """
+    try:
+        return resolver.resolve(expr)
+    except UnresolvedValueError:
+        return None
 
 
 def _require_scalar(value: Any, label: str) -> Any:
@@ -1433,7 +1456,7 @@ def _build_cursor_advance(block: dict[str, Any], state: _RequestState) -> _Advan
     params.pop(param, None)
 
     def advance(_page: _Page, page_resolver: Resolver) -> _NextRequest | None:
-        token = page_resolver.resolve_for_request(next_cursor)
+        token = _resolve_control(next_cursor, page_resolver)
         if _is_blank(token):
             # `advance` only runs when stop_when evaluated false -- the document
             # said this is not the last page. A missing token then contradicts
@@ -1466,7 +1489,7 @@ def _build_link_advance(block: dict[str, Any], state: _RequestState) -> _Advance
         )
 
     def advance(_page: _Page, page_resolver: Resolver) -> _NextRequest | None:
-        target = page_resolver.resolve_for_request(next_url)
+        target = _resolve_control(next_url, page_resolver)
         if _is_blank(target):
             # Same reasoning as cursor: stop_when said this is not the last
             # page, so an absent link is a contradiction, not a quiet ending.
