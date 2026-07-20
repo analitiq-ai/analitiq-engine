@@ -1777,7 +1777,10 @@ class TestReadBatchesRequestBody:
         )
 
         params = session.calls[0][2]
-        assert params == {"verbose": True}  # in: body param not in query
+        # `true`, not Python's `True`: yarl refuses a bool outright, so the
+        # old expectation described a request the real client cannot send.
+        # The body param stays out of the query either way.
+        assert params == {"verbose": "true"}
         assert session.bodies[0] == {"filter": {"team": "t-9"}}
 
     @pytest.mark.asyncio
@@ -3257,6 +3260,164 @@ class TestRecordExtractionAndReplicationWiring:
                 config={
                     "endpoint_document": endpoint,
                     "stream_source": stream_source,
+                },
+                state_manager=MagicMock(),
+                stream_name="items",
+                batch_size=10,
+            )
+        assert session.calls == []
+
+
+class TestContractDeclarationsAreHonoured:
+    """Declarations the contract validates and the engine used to ignore."""
+
+    @pytest.mark.asyncio
+    async def test_an_empty_page_with_a_live_next_target_is_a_contradiction(self):
+        """The document owns the ending; an empty page alone is not one."""
+        pages = [
+            {"records": [{"id": 1, "name": "a"}], "next": "c2"},
+            {"records": [], "next": "c3"},
+        ]
+        session = _FakeSession([_FakeResponse(status=200, body=p) for p in pages])
+        endpoint = _endpoint_doc_with_records(
+            pagination={
+                "type": "cursor",
+                "cursor": {
+                    "param": "cursor",
+                    "next_cursor": {"ref": "response.body.next"},
+                },
+                "stop_when": {"missing": {"ref": "response.body.next"}},
+            },
+        )
+        with pytest.raises(ReadError, match="carried no records"):
+            await _consume(
+                APIConnector("test"),
+                _runtime_with_session(session),
+                config={
+                    "endpoint_document": endpoint,
+                    "stream_source": _stream_source(),
+                },
+                state_manager=MagicMock(),
+                stream_name="items",
+                batch_size=10,
+            )
+
+    @pytest.mark.asyncio
+    async def test_an_empty_last_page_the_document_declares_ends_cleanly(self):
+        """The same guard must not break a provider whose last page is empty."""
+        pages = [
+            {"records": [{"id": 1, "name": "a"}], "next": "c2"},
+            {"records": []},
+        ]
+        session = _FakeSession([_FakeResponse(status=200, body=p) for p in pages])
+        endpoint = _endpoint_doc_with_records(
+            pagination={
+                "type": "cursor",
+                "cursor": {
+                    "param": "cursor",
+                    "next_cursor": {"ref": "response.body.next"},
+                },
+                "stop_when": {"missing": {"ref": "response.body.next"}},
+            },
+        )
+        batches = await _consume(
+            APIConnector("test"),
+            _runtime_with_session(session),
+            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=10,
+        )
+        assert [b.num_rows for b in batches] == [1]
+
+    @pytest.mark.asyncio
+    async def test_a_boolean_param_reaches_the_wire_as_json_true(self):
+        """`type: boolean` is contract-valid; yarl refuses a Python bool."""
+        session = _FakeSession(
+            [_FakeResponse(status=200, body={"records": [{"id": 1, "name": "a"}]})]
+        )
+        endpoint = _endpoint_doc_with_records(
+            params={
+                "verbose": {
+                    "in": "query",
+                    "type": "boolean",
+                    "default": {"literal": True},
+                }
+            },
+        )
+        await _consume(
+            APIConnector("test"),
+            _runtime_with_session(session),
+            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=10,
+        )
+        assert session.calls[0][2] == {"verbose": "true"}
+
+    @pytest.mark.asyncio
+    async def test_a_foreign_transport_ref_is_refused(self):
+        """Dispatching to the default transport would use another host's credentials."""
+        session = _FakeSession([])
+        endpoint = _endpoint_doc_with_records()
+        endpoint["operations"]["read"]["request"]["transport_ref"] = "reports"
+        with pytest.raises(ReadError, match="transport_ref"):
+            await _consume(
+                APIConnector("test"),
+                _runtime_with_session(session),
+                config={
+                    "endpoint_document": endpoint,
+                    "stream_source": _stream_source(),
+                },
+                state_manager=MagicMock(),
+                stream_name="items",
+                batch_size=10,
+            )
+        assert session.calls == []
+
+    @pytest.mark.asyncio
+    async def test_an_unsupported_replication_method_is_refused(self):
+        """`supported_methods` is the endpoint's own capability declaration."""
+        session = _FakeSession([])
+        endpoint = _endpoint_doc_with_records(
+            replication={
+                "supported_methods": ["full_refresh"],
+                "cursor_mappings": [
+                    {"cursor_field": "updated_at", "param": "since", "operator": "gte"}
+                ],
+            },
+        )
+        with pytest.raises(ReadError, match="supported_methods"):
+            await _consume(
+                APIConnector("test"),
+                _runtime_with_session(session),
+                config={
+                    "endpoint_document": endpoint,
+                    "stream_source": _stream_source(
+                        replication_method="incremental", cursor_field="updated_at"
+                    ),
+                },
+                state_manager=MagicMock(),
+                stream_name="items",
+                batch_size=10,
+            )
+        assert session.calls == []
+
+    @pytest.mark.asyncio
+    async def test_headers_remove_is_refused_rather_than_ignored(self):
+        """The named headers would still be sent from the transport defaults."""
+        session = _FakeSession([])
+        endpoint = _endpoint_doc_with_records()
+        endpoint["operations"]["read"]["request"]["headers_remove"] = [
+            "Accept-Encoding"
+        ]
+        with pytest.raises(ReadError, match="headers_remove"):
+            await _consume(
+                APIConnector("test"),
+                _runtime_with_session(session),
+                config={
+                    "endpoint_document": endpoint,
+                    "stream_source": _stream_source(),
                 },
                 state_manager=MagicMock(),
                 stream_name="items",

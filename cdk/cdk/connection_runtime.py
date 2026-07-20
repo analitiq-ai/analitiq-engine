@@ -160,6 +160,16 @@ class ConnectionRuntime:
         self._connection_type_mapper = connection_type_mapper
         self._composed_connection_mapper: TypeMapper | None = None
 
+        # Secrets and auth state resolved during materialize(). The published
+        # value-expression contract lists `secrets` and `auth` as resolution
+        # scopes and its request-binding rules ban only `stream`/`state`/
+        # `runtime` from headers, query and body -- so a document declaring
+        # `{"ref": "secrets.api_key"}` on a request header is valid and has to
+        # resolve. Kept for the per-request resolver rather than falling out of
+        # scope when materialize() returns.
+        self._request_secrets: dict[str, Any] = {}
+        self._request_auth: dict[str, Any] = {}
+
         # Worker-side pre-resolved payload (set by from_resolved_payload):
         # materialize() builds straight from these and never loads secrets.
         self._pre_resolved_transport: dict[str, Any] | None = None
@@ -304,17 +314,22 @@ class ConnectionRuntime:
 
         The default derived functions are registered.
         Scopes: ``connection.{parameters,selections,discovered}`` from the
-        connection config, plus ``runtime`` (``connection_id`` and any
-        caller-supplied per-invocation values such as ``batch_size``).
+        connection config, ``runtime`` (``connection_id`` and any
+        caller-supplied per-invocation values such as ``batch_size``), and
+        ``secrets``/``auth`` as resolved during materialization.
 
-        Secrets are intentionally absent. Per-request resolution runs
-        connector-side, where the secret store is never available — secret
-        resolution happens once, on the trusted side, at transport
-        materialization (which uses the wider context from
-        :meth:`_build_resolution_context`). Keeping this request-time scope
-        set identical across the trusted engine and the sandboxed worker
-        means the same expression behaves the same wherever the connector
-        executes.
+        The published contract lists ``secrets`` and ``auth`` in its
+        resolution-scope vocabulary and its request-binding rules exclude
+        only ``stream``/``state``/``runtime`` from headers, query and body.
+        A document declaring ``{"ref": "secrets.api_key"}`` on a request
+        header therefore validates, and leaving the scope empty made it
+        resolve to nothing: the header was dropped, or -- for the template
+        form ``"Bearer ${secrets.token}"`` -- an empty credential went out
+        over the wire under the lenient request policy.
+
+        A runtime rebuilt worker-side from a resolved payload holds no
+        secrets, so these scopes stay empty there and such a ref fails rather
+        than resolving differently in the two runtimes.
         """
         runtime_scope: dict[str, Any] = {"connection_id": self._connection_id}
         if runtime_values:
@@ -325,6 +340,8 @@ class ConnectionRuntime:
                 "selections": dict(self._raw_config.get("selections") or {}),
                 "discovered": dict(self._raw_config.get("discovered") or {}),
             },
+            secrets=dict(self._request_secrets),
+            auth=dict(self._request_auth),
             runtime=runtime_scope,
         )
         return Resolver(context, functions=DEFAULT_FUNCTIONS)
@@ -835,6 +852,8 @@ class ConnectionRuntime:
         self, secrets: Mapping[str, Any]
     ) -> ResolutionContext:
         """Assemble a typed :class:`ResolutionContext` from the connection JSON."""
+        self._request_secrets = dict(secrets)
+        self._request_auth = dict(self._raw_config.get("auth") or {})
         connection_scope = {
             "parameters": dict(self._raw_config.get("parameters") or {}),
             "selections": dict(self._raw_config.get("selections") or {}),

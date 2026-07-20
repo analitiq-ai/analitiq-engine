@@ -280,10 +280,7 @@ def _make_request_builder(
         # both get the full-precision text; aiohttp serializes the body with
         # stdlib json.dumps, which cannot encode a Decimal at all, so a body
         # value narrows to the float it was before the lossless parse.
-        as_text = {
-            name: str(value) if isinstance(value, Decimal) else value
-            for name, value in page_params.items()
-        }
+        as_text = {name: _query_text(value) for name, value in page_params.items()}
         as_json = {
             name: float(value) if isinstance(value, Decimal) else value
             for name, value in page_params.items()
@@ -308,6 +305,23 @@ def _make_request_builder(
         return _Materialized(url, query, headers, body)
 
     return build_request
+
+
+def _query_text(value: Any) -> Any:
+    """Render a param value into the form a query string or path can carry.
+
+    ``bool`` is a declared param type in the contract, and yarl refuses one
+    outright -- a valid document failed with a bare ``TypeError`` from inside
+    the HTTP layer. It goes out as ``true``/``false``, the JSON spelling every
+    provider that declares a boolean param reads. ``Decimal`` is stringified
+    at full precision because yarl truncates it. Everything else is left to
+    the transport.
+    """
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, Decimal):
+        return str(value)
+    return value
 
 
 def _fill_path(path: str, segments: Mapping[str, Any], spec: Mapping[str, Any]) -> str:
@@ -610,6 +624,48 @@ class APIConnector(BaseConnector):
                 f"endpoint {endpoint_doc.get('endpoint_id')!r}: "
                 f"operations.read.request.path is required"
             )
+        # The contract lets an operation dispatch through a named transport;
+        # the runtime materializes the connector's `default_transport` and has
+        # no per-endpoint variant. Sending to the default anyway would put the
+        # request on another host's base_url carrying the default transport's
+        # credentials, so a divergent ref is refused rather than ignored.
+        transport_ref = request.get("transport_ref")
+        if transport_ref:
+            definition = self._runtime.connector_definition if self._runtime else None
+            default_ref = (definition or {}).get("default_transport")
+            if transport_ref != default_ref:
+                raise ReadError(
+                    f"endpoint {endpoint_doc.get('endpoint_id')!r} declares "
+                    f"request.transport_ref={transport_ref!r}, but this engine "
+                    f"materializes the connector's default transport "
+                    f"({default_ref!r}). Refusing to send the request to the "
+                    f"default transport's host with its credentials"
+                )
+
+        # `headers_remove` drops names inherited from the transport. The
+        # session carries those defaults, so removal has to be expressed as an
+        # explicit override at request time; aiohttp has no "unset" value.
+        if request.get("headers_remove"):
+            raise ReadError(
+                f"endpoint {endpoint_doc.get('endpoint_id')!r} declares "
+                f"request.headers_remove, which this connector does not "
+                f"implement: the named headers would still be sent from the "
+                f"transport defaults"
+            )
+
+        replication_block = read_spec.get("replication") or {}
+        supported = replication_block.get("supported_methods")
+        declared_method = (stream_source.get("replication") or {}).get(
+            "method"
+        ) or "full_refresh"
+        if supported and declared_method not in supported:
+            raise ReadError(
+                f"stream asks for {declared_method!r} replication but endpoint "
+                f"{endpoint_doc.get('endpoint_id')!r} declares "
+                f"supported_methods={sorted(supported)}. Running anyway would "
+                f"read a window the endpoint does not promise to serve"
+            )
+
         response_block = read_spec.get("response") or {}
         return _ReadPlan(
             stream_source=stream_source,
@@ -1089,8 +1145,27 @@ class APIConnector(BaseConnector):
                 body=built.body,
             )
             if not page.records:
+                # An empty page is not by itself an ending: the document owns
+                # that decision. Ask `stop_when` first -- a provider whose
+                # last page is empty declares it, and one that returns an
+                # empty page mid-run while still naming a next target is
+                # contradicting itself, the same contradiction `cursor` and
+                # `link` raise on. Ending quietly here truncated the stream
+                # and reported success.
                 self._report_empty_page(p_type, page, records_ref, pages, records)
-                return
+                stop, following = self._decide_page(
+                    page, resolver, stop_when, metadata_spec, advance, p_type
+                )
+                if stop or following is None:
+                    self._log_read_end(p_type, "empty page", pages, records)
+                    return
+                raise ReadError(
+                    f"{p_type!r} pagination: page {pages + 1} carried no "
+                    f"records at {records_ref!r}, but stop_when did not fire "
+                    f"and the document still names a following page. Declare "
+                    f"the ending in stop_when, or check that {records_ref!r} "
+                    f"matches the provider's response shape"
+                )
 
             pages += 1
             records += len(page.records)
@@ -1129,8 +1204,13 @@ class APIConnector(BaseConnector):
             headers=built.headers,
             body=built.body,
         )
-        if page.records:
-            yield page.records
+        if not page.records:
+            # The paginated path names the ref, the status and the body's
+            # top-level keys when a read comes back empty; this path had no
+            # signal at all, and it is the one with no other guard.
+            self._report_empty_page("none", page, records_ref, 0, 0)
+            return
+        yield page.records
 
     def _setup_pagination(
         self,
@@ -1883,6 +1963,19 @@ def _build_offset_advance(block: dict[str, Any], state: _RequestState) -> _Advan
     step = _optional_int_setting(
         block, "offset", "increment_by", resolver, positive=True
     )
+    if step is None:
+        # Said out loud rather than left as a silent divergence: the published
+        # field description defaults `increment_by` to the effective limit,
+        # and this steps by the records returned instead. Implementing the
+        # documented default would skip records whenever a provider clamps
+        # below the requested size, so the safer behaviour stands and the
+        # contradiction is logged until the contract settles it (engine
+        # issue #1011).
+        logger.info(
+            "offset pagination declares no increment_by; stepping by the "
+            "records each page returns rather than the requested page size, "
+            "which is what keeps a clamped page from skipping records"
+        )
     params[param] = position
 
     def advance(page: _Page, _page_resolver: Resolver) -> _NextRequest | None:
