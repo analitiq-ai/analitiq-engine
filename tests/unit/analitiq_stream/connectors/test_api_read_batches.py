@@ -2854,3 +2854,107 @@ class TestPaginationSilentTruncationRegressions:
         assert (
             emitted == []
         ), "records reached the destination on a read that cannot run"
+
+    @pytest.mark.asyncio
+    async def test_incremental_cursor_defect_emits_nothing(self):
+        """A cursor_field the records lack must be caught before page 1 is emitted."""
+        session = _FakeSession(
+            [_FakeResponse(status=200, body={"records": [{"id": 1, "name": "a"}]})]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records()
+        emitted: list[Any] = []
+        with pytest.raises(ReadError, match="records carry no 'updated_at'"):
+            async for batch in connector.read_batches(
+                runtime,
+                {
+                    "endpoint_document": endpoint,
+                    "stream_source": _stream_source(
+                        replication_method="incremental", cursor_field="updated_at"
+                    ),
+                },
+                checkpoint=MagicMock(),
+                stream_name="items",
+                batch_size=10,
+            ):
+                emitted.append(batch)
+
+        assert emitted == []
+
+    @pytest.mark.asyncio
+    async def test_cursor_missing_while_stop_when_says_continue_raises(self):
+        """The pager cannot continue but the document said it should: not a quiet end.
+
+        Ending here would drop every remaining page while the run reported
+        success — the #346 shape. A provider that omits its token on the last
+        page is declared through `stop_when`, which fires before `advance`.
+        """
+        session = _FakeSession(
+            [
+                _FakeResponse(
+                    status=200,
+                    body={"records": [{"id": 1, "name": "a"}], "next": None},
+                )
+            ]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(
+            pagination={
+                "type": "cursor",
+                "cursor": {
+                    "param": "cursor",
+                    "next_cursor": {"ref": "response.body.next"},
+                },
+                # Deliberately does not cover the token-absent case.
+                "stop_when": {"empty": {"ref": "response.body.records"}},
+            },
+        )
+        with pytest.raises(ReadError, match="stop_when did not fire"):
+            await _consume(
+                connector,
+                runtime,
+                config={
+                    "endpoint_document": endpoint,
+                    "stream_source": _stream_source(),
+                },
+                state_manager=MagicMock(),
+                stream_name="items",
+                batch_size=10,
+            )
+
+    @pytest.mark.asyncio
+    async def test_non_scalar_keyset_initial_fails_by_name(self):
+        """The first-page seed gets the same scalar check as every later key."""
+        session = _FakeSession(
+            [_FakeResponse(status=200, body={"records": [{"id": 1, "name": "a"}]})]
+        )
+        runtime = _runtime_with_session(session, parameters={"since": ["a", "b"]})
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(
+            pagination={
+                "type": "keyset",
+                "keyset": {
+                    "param": "since",
+                    "order_by_field": "id",
+                    "initial": {"ref": "connection.parameters.since"},
+                },
+                "stop_when": {"empty": {"ref": "response.body.records"}},
+            },
+        )
+        with pytest.raises(ReadError, match="cannot be sent as a single request"):
+            await _consume(
+                connector,
+                runtime,
+                config={
+                    "endpoint_document": endpoint,
+                    "stream_source": _stream_source(),
+                },
+                state_manager=MagicMock(),
+                stream_name="items",
+                batch_size=10,
+            )

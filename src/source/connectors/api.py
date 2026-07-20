@@ -338,9 +338,12 @@ class APIConnector(BaseConnector):
         # while the predicate judges against another silently mismatches what
         # the provider was told.
         pagination = read_spec.get("pagination") or {}
-        effective_limit = self._effective_limit(
-            pagination.get("limit") or {}, batch_size, resolver
-        )
+        try:
+            effective_limit = self._effective_limit(
+                pagination.get("limit") or {}, batch_size, resolver
+            )
+        except TransportSpecError as err:
+            raise ReadError(f"pagination.limit is not resolvable: {err}") from err
         resolver = resolver.with_context(
             replace(
                 resolver.context,
@@ -391,32 +394,41 @@ class APIConnector(BaseConnector):
             resolver=resolver,
             build_request=build_request,
         ):
+            batch_count += 1
+            # Read before emitting: a record set carrying no `cursor_field` is
+            # a document defect, knowable now, and nothing should reach the
+            # destination on a stream that cannot run. The *save* stays after
+            # the yield -- checkpointing a cursor for records that have not
+            # been emitted would let a resume skip them.
+            cursor_value = (
+                self._cursor_value(batch, cursor_field, stream_name, batch_count)
+                if cursor_field
+                else None
+            )
+
             yield plan.schema_contract.from_pylist(batch)
 
-            batch_count += 1
-            if cursor_field:
-                await self._advance_cursor(
-                    batch, checkpoint, stream_name, partition, cursor_field, batch_count
+            if cursor_value is not None:
+                await checkpoint.save_cursor(
+                    stream_name, partition, {"cursor": cursor_value}
                 )
 
     @staticmethod
-    async def _advance_cursor(
+    def _cursor_value(
         batch: list[dict[str, Any]],
-        checkpoint: CheckpointStore,
-        stream_name: str,
-        partition: dict[str, Any],
         cursor_field: str,
+        stream_name: str,
         batch_count: int,
-    ) -> None:
-        """Checkpoint the cursor at the last record of *batch*.
+    ) -> Any:
+        """Cursor to checkpoint at the end of *batch*, or None to leave it be.
 
         Absent and null are opposite situations here, the same way they are
         for a keyset ordering field. A record that carries no ``cursor_field``
         at all means the stream declared a field its records do not have: the
-        cursor then never advances, every run re-reads the whole stream from
-        the beginning, and nothing ever says so. A field that is present and
-        null is a record the provider has no cursor value for -- unusual, but
-        the stream is otherwise wired correctly.
+        cursor would never advance, every run would re-read the whole stream
+        from the beginning, and nothing would say so. A field that is present
+        and null is a record the provider has no cursor value for -- unusual,
+        but the stream is otherwise wired correctly.
         """
         last_record = batch[-1]
         if cursor_field not in last_record:
@@ -439,8 +451,7 @@ class APIConnector(BaseConnector):
                 cursor_field,
                 batch_count,
             )
-            return
-        await checkpoint.save_cursor(stream_name, partition, {"cursor": cursor_value})
+        return cursor_value
 
     def _plan_read(self, config: dict[str, Any], base_url: str) -> _ReadPlan:
         """Validate the endpoint document once and pull out what a read needs.
@@ -820,11 +831,23 @@ class APIConnector(BaseConnector):
             base_params[limit_param] = effective_limit
 
         params = dict(base_params)
-        advance = self._build_advance(
-            p_type,
-            pagination,
-            _RequestState(params=params, resolver=resolver, url=full_url),
-        )
+        # A malformed `offset.initial` / `increment_by` / `keyset.initial`
+        # expression raises TransportSpecError from the builder. That type
+        # derives from Exception alone, and the source worker's deterministic
+        # tuple does not list it, so leaving it unwrapped reports a document
+        # defect as retryable -- the run is retried until it exhausts its
+        # attempts on an error that will never resolve itself.
+        try:
+            advance = self._build_advance(
+                p_type,
+                pagination,
+                _RequestState(params=params, resolver=resolver, url=full_url),
+            )
+        except TransportSpecError as err:
+            raise ReadError(
+                f"{p_type!r} pagination: a setup expression is not resolvable: "
+                f"{err}"
+            ) from err
 
         url = full_url
         send_params = True
@@ -1412,12 +1435,20 @@ def _build_cursor_advance(block: dict[str, Any], state: _RequestState) -> _Advan
     def advance(_page: _Page, page_resolver: Resolver) -> _NextRequest | None:
         token = page_resolver.resolve_for_request(next_cursor)
         if _is_blank(token):
-            # The declared expression found no token, which is how a cursor
-            # provider says "last page". Note the difference from the old
-            # behaviour: the field consulted is the one the endpoint declared,
-            # never a hardcoded `next_cursor`.
-            logger.debug("cursor pagination: next_cursor expression yielded no token")
-            return None
+            # `advance` only runs when stop_when evaluated false -- the document
+            # said this is not the last page. A missing token then contradicts
+            # it, and ending quietly would drop every remaining page while the
+            # run reported success: the #346 failure shape. A cursor provider
+            # that omits the token on its last page is authored by making
+            # stop_when say so (`{"missing": {"ref": ...}}`), which fires before
+            # this point.
+            raise ReadError(
+                "cursor pagination: stop_when did not fire, but next_cursor "
+                "resolved to no token, so the next page cannot be requested. "
+                "Declare the last page in stop_when (for example "
+                '`{"missing": ...}` on the same field) if the provider omits '
+                "the token when it is done"
+            )
         params[param] = _require_scalar(token, "cursor pagination: next_cursor")
         return _NextRequest(full_url, dict(params), True)
 
@@ -1437,8 +1468,14 @@ def _build_link_advance(block: dict[str, Any], state: _RequestState) -> _Advance
     def advance(_page: _Page, page_resolver: Resolver) -> _NextRequest | None:
         target = page_resolver.resolve_for_request(next_url)
         if _is_blank(target):
-            logger.debug("link pagination: next_url expression yielded no link")
-            return None
+            # Same reasoning as cursor: stop_when said this is not the last
+            # page, so an absent link is a contradiction, not a quiet ending.
+            raise ReadError(
+                "link pagination: stop_when did not fire, but next_url "
+                "resolved to no link, so the next page cannot be requested. "
+                "Declare the last page in stop_when if the provider omits the "
+                "link when it is done"
+            )
         if not isinstance(target, str):
             raise ReadError(
                 f"link pagination: next_url resolved to "
@@ -1486,6 +1523,8 @@ def _build_keyset_advance(block: dict[str, Any], state: _RequestState) -> _Advan
     initial = block.get("initial")
     if initial is not None:
         seed = resolver.resolve_for_request(initial)
+        if seed is not None:
+            seed = _require_scalar(seed, "keyset pagination: keyset.initial")
         if seed is None:
             raise ReadError(
                 "keyset pagination: keyset.initial is declared but did not "
