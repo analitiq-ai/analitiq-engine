@@ -594,38 +594,21 @@ class APIConnector(BaseConnector):
             )
         return cursor_value
 
-    def _plan_read(self, config: dict[str, Any], base_url: str) -> _ReadPlan:
-        """Validate the endpoint document once and pull out what a read needs.
+    def _reject_unsupported_declarations(
+        self,
+        endpoint_doc: dict[str, Any],
+        request: dict[str, Any],
+        read_spec: dict[str, Any],
+        stream_source: dict[str, Any],
+    ) -> None:
+        """Refuse declarations the contract validates and this engine cannot honour.
 
-        Everything here is fixed for the whole read: which document, which
-        record schema, which URL and method, where the records and metadata
-        live in a response. Resolving it up front keeps the read loop about
-        paging rather than about document shape, and means a malformed
-        document fails before the first request goes out.
+        Separate from `_plan_read` because it answers a different question:
+        the plan pulls out what a read needs, this refuses what the engine
+        would otherwise silently ignore. Each of these is valid in the
+        document and, left unchecked, changes the request or the record set
+        without saying so.
         """
-        endpoint_doc = config.get("endpoint_document")
-        if not endpoint_doc:
-            raise ReadError("APIConnector: source config missing 'endpoint_document'")
-        stream_source = config.get("stream_source") or {}
-        endpoint_ref = stream_source.get("endpoint_ref")
-        if not endpoint_ref:
-            raise ReadError(
-                "APIConnector: stream_source missing 'endpoint_ref'; "
-                "the source contract requires it to declare per-field types"
-            )
-        read_spec = (endpoint_doc.get("operations") or {}).get("read") or {}
-        records_items_schema = self._resolve_records_items_schema(
-            endpoint_doc, read_spec
-        )
-        self._apply_read_type_map(records_items_schema, endpoint_ref)
-
-        request = read_spec.get("request") or {}
-        path = request.get("path")
-        if not isinstance(path, str) or not path:
-            raise ReadError(
-                f"endpoint {endpoint_doc.get('endpoint_id')!r}: "
-                f"operations.read.request.path is required"
-            )
         # The contract lets an operation dispatch through a named transport;
         # the runtime materializes the connector's `default_transport` and has
         # no per-endpoint variant. Sending to the default anyway would put the
@@ -667,6 +650,42 @@ class APIConnector(BaseConnector):
                 f"supported_methods={sorted(supported)}. Running anyway would "
                 f"read a window the endpoint does not promise to serve"
             )
+
+    def _plan_read(self, config: dict[str, Any], base_url: str) -> _ReadPlan:
+        """Validate the endpoint document once and pull out what a read needs.
+
+        Everything here is fixed for the whole read: which document, which
+        record schema, which URL and method, where the records and metadata
+        live in a response. Resolving it up front keeps the read loop about
+        paging rather than about document shape, and means a malformed
+        document fails before the first request goes out.
+        """
+        endpoint_doc = config.get("endpoint_document")
+        if not endpoint_doc:
+            raise ReadError("APIConnector: source config missing 'endpoint_document'")
+        stream_source = config.get("stream_source") or {}
+        endpoint_ref = stream_source.get("endpoint_ref")
+        if not endpoint_ref:
+            raise ReadError(
+                "APIConnector: stream_source missing 'endpoint_ref'; "
+                "the source contract requires it to declare per-field types"
+            )
+        read_spec = (endpoint_doc.get("operations") or {}).get("read") or {}
+        records_items_schema = self._resolve_records_items_schema(
+            endpoint_doc, read_spec
+        )
+        self._apply_read_type_map(records_items_schema, endpoint_ref)
+
+        request = read_spec.get("request") or {}
+        path = request.get("path")
+        if not isinstance(path, str) or not path:
+            raise ReadError(
+                f"endpoint {endpoint_doc.get('endpoint_id')!r}: "
+                f"operations.read.request.path is required"
+            )
+        self._reject_unsupported_declarations(
+            endpoint_doc, request, read_spec, stream_source
+        )
 
         response_block = read_spec.get("response") or {}
         return _ReadPlan(
@@ -1462,6 +1481,31 @@ class APIConnector(BaseConnector):
         """Strip resolved secret values out of a diagnostic string."""
         return self._runtime.redact_secrets(text) if self._runtime else text
 
+    @staticmethod
+    async def _decode_json(response: Any, method: str, url: str) -> Any:
+        """Decode a 200 response body, classifying the two ways it can fail.
+
+        They are opposites: an endpoint that does not serve JSON never will,
+        while a body that did not parse is a mangled transfer that retrying
+        fixes. Python's own class hierarchy gets both backwards --
+        ``ContentTypeError`` is a ``ClientError`` (read as transient) and
+        ``JSONDecodeError`` subclasses ``ValueError`` (read as fatal) -- so
+        each is restated here as what it actually is.
+        """
+        try:
+            return await response.json(loads=_loads_preserving_decimals)
+        except aiohttp.ContentTypeError as err:
+            raise ReadError(
+                f"API response is not JSON: {method} {url} -> "
+                f"{err.headers.get('Content-Type') if err.headers else 'no'} "
+                f"content type. Check the endpoint path and any Accept "
+                f"header the connector declares"
+            ) from err
+        except json.JSONDecodeError as err:
+            raise TransientReadError(
+                f"API response body did not parse as JSON: {method} {url}: {err}"
+            ) from err
+
     async def _request_page(
         self,
         url: str,
@@ -1525,31 +1569,7 @@ class APIConnector(BaseConnector):
                 if response.status in _TRANSIENT_HTTP_STATUSES:
                     raise TransientReadError(detail)
                 raise ReadError(detail)
-            try:
-                data = await response.json(loads=_loads_preserving_decimals)
-            except aiohttp.ContentTypeError as err:
-                # The endpoint does not serve JSON. Deterministic: the same
-                # request will answer the same way forever, and aiohttp's
-                # ContentTypeError is a ClientError, which the worker treats
-                # as transient -- so this burned the whole retry budget on a
-                # document defect and then reported a timeout.
-                raise ReadError(
-                    f"API response is not JSON: {method} {url} -> "
-                    f"{err.headers.get('Content-Type') if err.headers else 'no'} "
-                    f"content type. Check the endpoint path and any Accept "
-                    f"header the connector declares"
-                ) from err
-            except json.JSONDecodeError as err:
-                # A body that did not parse is a truncated or mangled
-                # transfer, which retrying can fix. JSONDecodeError subclasses
-                # ValueError, which the worker treats as deterministic, so
-                # this killed healthy runs -- while the identical failure
-                # arriving one layer down as ClientPayloadError was retried.
-                # Same cause, so the same classification.
-                raise TransientReadError(
-                    f"API response body did not parse as JSON: {method} {url} "
-                    f"-> status {response.status}: {err}"
-                ) from err
+            data = await self._decode_json(response, method, url)
             # Copied inside the context manager (the proxy is tied to the live
             # response) but kept case-insensitive: HTTP header names are
             # case-insensitive per RFC 9110, and pagination expressions address
