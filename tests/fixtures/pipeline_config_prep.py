@@ -127,9 +127,13 @@ def sample_wise_endpoint_config():
         },
         "pagination": {
             "type": "offset",
-            "limit_param": "limit",
-            "offset_param": "offset",
-            "max_limit": 1000,
+            "offset": {"param": "offset", "initial": 0},
+            "limit": {
+                "param": "limit",
+                "default": {"ref": "runtime.batch_size"},
+                "max": 1000,
+            },
+            "stop_when": {"empty": {"ref": "response.body.objects"}},
         },
     }
 

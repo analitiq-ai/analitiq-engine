@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from analitiq.contracts.connection import ConnectionInput
-from analitiq.contracts.connector import ConnectorConfig
+from analitiq.contracts.connector import Connector
 from analitiq.contracts.endpoints import ApiEndpointDoc, DatabaseEndpointDoc
 from analitiq.contracts.pipelines.config import PipelineInput
 from analitiq.contracts.stream import StreamInput
@@ -43,7 +43,7 @@ logger = logging.getLogger(__name__)
 # variant, matching what the engine loads from disk and what the published
 # ``{kind}/latest.json`` schema is rendered from.
 _MODELS: dict[str, type] = {
-    "connector": ConnectorConfig,
+    "connector": Connector,
     "connection": ConnectionInput,
     "pipeline": PipelineInput,
     "stream": StreamInput,

@@ -5,11 +5,10 @@ tests drive ``read_batches`` against a mocked aiohttp session and a
 pre-materialized ``ConnectionRuntime`` to verify:
 
 * request URL composition (base + endpoint path),
-* offset pagination loop terminates on a short page,
-* page pagination increments the page param and stops on a short page,
-* cursor pagination follows ``next_cursor`` until absent,
-* keyset pagination advances the key from the last record and stops on
-  a short page,
+* every contract pagination strategy (``offset``, ``page``, ``cursor``,
+  ``link``, ``keyset``) is executable, advances the way its block
+  declares, and terminates on its declared ``stop_when`` predicate,
+* the declared page size honours ``limit.default`` / ``limit.max``,
 * incremental replication reads cursor from state manager and applies
   the safety window to the outgoing request params,
 * non-200 responses raise :class:`ReadError`,
@@ -35,7 +34,7 @@ import pytest
 
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.secrets import InMemorySecretsResolver
-from src.source.connectors.api import APIConnector, _extract_next_cursor
+from src.source.connectors.api import APIConnector
 from src.source.connectors.base import ReadError, TransientReadError
 
 # ---------------------------------------------------------------------------
@@ -46,9 +45,14 @@ from src.source.connectors.base import ReadError, TransientReadError
 class _FakeResponse:
     """Drop-in for the ``aiohttp`` response object used by the connector."""
 
-    def __init__(self, *, status: int, body: Any):
+    def __init__(
+        self, *, status: int, body: Any, headers: dict[str, str] | None = None
+    ):
         self.status = status
         self._body = body
+        # The connector publishes response headers into the `response`
+        # resolution scope, so link pagination can follow a `Link` header.
+        self.headers = headers or {}
 
     async def __aenter__(self) -> _FakeResponse:
         return self
@@ -114,7 +118,14 @@ def _runtime_with_session(
 def _endpoint_doc_with_records(
     pagination: dict[str, Any] | None = None,
     replication: dict[str, Any] | None = None,
+    extra_record_properties: dict[str, Any] | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    record_properties: dict[str, Any] = {
+        "id": {"type": "integer", "arrow_type": "Int64"},
+        "name": {"type": "string", "arrow_type": "Utf8"},
+    }
+    record_properties.update(extra_record_properties or {})
     read_block: dict[str, Any] = {
         "request": {"method": "GET", "path": "/items"},
         "response": {
@@ -125,10 +136,7 @@ def _endpoint_doc_with_records(
                         "type": "array",
                         "items": {
                             "type": "object",
-                            "properties": {
-                                "id": {"type": "integer", "arrow_type": "Int64"},
-                                "name": {"type": "string", "arrow_type": "Utf8"},
-                            },
+                            "properties": record_properties,
                         },
                     },
                 },
@@ -136,6 +144,8 @@ def _endpoint_doc_with_records(
             "records": {"ref": "response.body.records"},
         },
     }
+    if metadata:
+        read_block["response"]["metadata"] = metadata
     if pagination:
         read_block["pagination"] = pagination
     if replication:
@@ -400,8 +410,9 @@ class TestReadBatchesRecordsRefShapes:
 
 class TestReadBatchesOffsetPagination:
     @pytest.mark.asyncio
-    async def test_offset_loop_advances_and_stops_on_short_page(self):
-        # batch_size=2; first page = 2 rows (full), second = 1 row (short -> stop)
+    async def test_offset_loop_advances_by_effective_limit_and_stops_on_predicate(self):
+        # batch_size=2; first page = 2 rows (full), second = 1 row. The stop
+        # predicate — not a hardcoded short-page rule — ends the read.
         session = _FakeSession(
             [
                 _FakeResponse(
@@ -419,6 +430,12 @@ class TestReadBatchesOffsetPagination:
                 "type": "offset",
                 "offset": {"param": "offset", "initial": 0},
                 "limit": {"param": "limit"},
+                "stop_when": {
+                    "lt": [
+                        {"ref": "response.record_count"},
+                        {"ref": "runtime.batch_size"},
+                    ]
+                },
             },
         )
         batches = await _consume(
@@ -437,6 +454,106 @@ class TestReadBatchesOffsetPagination:
         assert offsets == [0, 2]
         assert limits == [2, 2]
 
+    @pytest.mark.asyncio
+    async def test_offset_honours_declared_increment_by(self):
+        # A provider that counts offsets in pages, not records: increment_by
+        # overrides the "advance by the effective limit" default.
+        session = _FakeSession(
+            [
+                _FakeResponse(
+                    status=200,
+                    body={"records": [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]},
+                ),
+                _FakeResponse(status=200, body={"records": []}),
+            ]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(
+            pagination={
+                "type": "offset",
+                "offset": {"param": "start", "initial": 5, "increment_by": 1},
+                "limit": {"param": "limit"},
+                "stop_when": {"empty": {"ref": "response.body.records"}},
+            },
+        )
+        await _consume(
+            connector,
+            runtime,
+            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=2,
+        )
+
+        assert [c[2].get("start") for c in session.calls] == [5, 6]
+
+    @pytest.mark.asyncio
+    async def test_limit_default_expression_is_clamped_to_declared_max(self):
+        # The sevdesk/wise shape: default tracks the engine batch size, max is
+        # the provider ceiling and wins.
+        session = _FakeSession(
+            [_FakeResponse(status=200, body={"records": [{"id": 1, "name": "a"}]})]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(
+            pagination={
+                "type": "offset",
+                "offset": {"param": "offset", "initial": 0},
+                "limit": {
+                    "param": "limit",
+                    "default": {"ref": "runtime.batch_size"},
+                    "max": 100,
+                },
+                "stop_when": {
+                    "lt": [{"ref": "response.record_count"}, {"literal": 100}]
+                },
+            },
+        )
+        await _consume(
+            connector,
+            runtime,
+            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=5000,
+        )
+
+        assert session.calls[0][2]["limit"] == 100
+
+    @pytest.mark.asyncio
+    async def test_pagination_without_stop_when_raises_read_error(self):
+        # `stop_when` is contract-required on every strategy. Without it the
+        # loop has no declared end, so it fails loud rather than guessing.
+        session = _FakeSession(
+            [_FakeResponse(status=200, body={"records": [{"id": 1, "name": "a"}]})]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(
+            pagination={
+                "type": "offset",
+                "offset": {"param": "offset", "initial": 0},
+                "limit": {"param": "limit"},
+            },
+        )
+        with pytest.raises(ReadError, match="stop_when"):
+            await _consume(
+                connector,
+                runtime,
+                config={
+                    "endpoint_document": endpoint,
+                    "stream_source": _stream_source(),
+                },
+                state_manager=MagicMock(),
+                stream_name="items",
+                batch_size=2,
+            )
+
 
 # ---------------------------------------------------------------------------
 # Page pagination
@@ -445,15 +562,25 @@ class TestReadBatchesOffsetPagination:
 
 class TestReadBatchesPagePagination:
     @pytest.mark.asyncio
-    async def test_page_loop_increments_page_and_stops_on_short_page(self):
-        # batch_size=2; first page full (2 rows), second short (1 row -> stop).
+    async def test_page_loop_increments_page_and_stops_on_predicate(self):
+        # Both pages are full; only the declared `has_more` flag ends the read,
+        # which the old short-page heuristic could not express.
         session = _FakeSession(
             [
                 _FakeResponse(
                     status=200,
-                    body={"records": [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]},
+                    body={
+                        "records": [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}],
+                        "has_more": True,
+                    },
                 ),
-                _FakeResponse(status=200, body={"records": [{"id": 3, "name": "c"}]}),
+                _FakeResponse(
+                    status=200,
+                    body={
+                        "records": [{"id": 3, "name": "c"}, {"id": 4, "name": "d"}],
+                        "has_more": False,
+                    },
+                ),
             ]
         )
         runtime = _runtime_with_session(session)
@@ -464,6 +591,9 @@ class TestReadBatchesPagePagination:
                 "type": "page",
                 "page": {"param": "page", "initial": 1},
                 "limit": {"param": "limit"},
+                "stop_when": {
+                    "eq": [{"ref": "response.body.has_more"}, {"literal": False}]
+                },
             },
         )
         batches = await _consume(
@@ -475,10 +605,48 @@ class TestReadBatchesPagePagination:
             batch_size=2,
         )
 
-        assert [b.num_rows for b in batches] == [2, 1]
-        pages = [c[2].get("page") for c in session.calls]
-        # Starts at the declared initial page and increments by one.
-        assert pages == [1, 2]
+        assert [b.num_rows for b in batches] == [2, 2]
+        assert [c[2].get("page") for c in session.calls] == [1, 2]
+
+    @pytest.mark.asyncio
+    async def test_full_last_page_is_not_truncated_without_a_limit_param(self):
+        # Regression for the old `len(records) < batch_size` rule: with no
+        # limit param the provider picks the page size, so a first page that
+        # simply is not batch_size long used to end the read after one page.
+        session = _FakeSession(
+            [
+                _FakeResponse(
+                    status=200,
+                    body={"records": [{"id": 1, "name": "a"}], "has_more": True},
+                ),
+                _FakeResponse(
+                    status=200,
+                    body={"records": [{"id": 2, "name": "b"}], "has_more": False},
+                ),
+            ]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(
+            pagination={
+                "type": "page",
+                "page": {"param": "page", "initial": 1},
+                "stop_when": {
+                    "eq": [{"ref": "response.body.has_more"}, {"literal": False}]
+                },
+            },
+        )
+        batches = await _consume(
+            connector,
+            runtime,
+            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=1000,
+        )
+
+        assert [b.num_rows for b in batches] == [1, 1]
 
 
 # ---------------------------------------------------------------------------
@@ -488,20 +656,27 @@ class TestReadBatchesPagePagination:
 
 class TestReadBatchesCursorPagination:
     @pytest.mark.asyncio
-    async def test_cursor_pagination_follows_next_cursor_until_absent(self):
-        # First response carries next_cursor; second omits it -> loop stops.
+    async def test_cursor_reads_the_declared_next_cursor_expression(self):
+        # The declared field is `meta.continuation`, NOT `next_cursor`. The
+        # body also carries a decoy literally named `next_cursor` — the old
+        # hardcoded fallback read that one regardless of the declaration.
         session = _FakeSession(
             [
                 _FakeResponse(
                     status=200,
                     body={
                         "records": [{"id": 1, "name": "a"}],
-                        "next_cursor": "token-2",
+                        "meta": {"continuation": "token-2"},
+                        "next_cursor": "DECOY",
                     },
                 ),
                 _FakeResponse(
                     status=200,
-                    body={"records": [{"id": 2, "name": "b"}]},
+                    body={
+                        "records": [{"id": 2, "name": "b"}],
+                        "meta": {},
+                        "next_cursor": "DECOY",
+                    },
                 ),
             ]
         )
@@ -513,9 +688,10 @@ class TestReadBatchesCursorPagination:
                 "type": "cursor",
                 "cursor": {
                     "param": "page_token",
-                    "from": {"ref": "response.body.next_cursor"},
+                    "next_cursor": {"ref": "response.body.meta.continuation"},
                 },
                 "limit": {"param": "limit"},
+                "stop_when": {"missing": {"ref": "response.body.meta.continuation"}},
             },
         )
         batches = await _consume(
@@ -528,9 +704,149 @@ class TestReadBatchesCursorPagination:
         )
 
         assert [b.num_rows for b in batches] == [1, 1]
-        # First request has no page_token; second carries the returned token.
+        # First request has no token; second carries the declared field's
+        # value, never the decoy.
         assert "page_token" not in session.calls[0][2]
         assert session.calls[1][2]["page_token"] == "token-2"
+
+    @pytest.mark.asyncio
+    async def test_cursor_without_next_cursor_raises_read_error(self):
+        session = _FakeSession(
+            [_FakeResponse(status=200, body={"records": [{"id": 1, "name": "a"}]})]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(
+            pagination={
+                "type": "cursor",
+                "cursor": {"param": "page_token"},
+                "stop_when": {"missing": {"ref": "response.body.next"}},
+            },
+        )
+        with pytest.raises(ReadError, match="cursor.next_cursor"):
+            await _consume(
+                connector,
+                runtime,
+                config={
+                    "endpoint_document": endpoint,
+                    "stream_source": _stream_source(),
+                },
+                state_manager=MagicMock(),
+                stream_name="items",
+                batch_size=10,
+            )
+
+
+# ---------------------------------------------------------------------------
+# Link pagination
+# ---------------------------------------------------------------------------
+
+
+class TestReadBatchesLinkPagination:
+    @pytest.mark.asyncio
+    async def test_link_follows_next_url_from_the_body(self):
+        session = _FakeSession(
+            [
+                _FakeResponse(
+                    status=200,
+                    body={
+                        "records": [{"id": 1, "name": "a"}],
+                        "next": "https://api.example.test/items?cursor=abc&limit=50",
+                    },
+                ),
+                _FakeResponse(status=200, body={"records": [{"id": 2, "name": "b"}]}),
+            ]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(
+            pagination={
+                "type": "link",
+                "link": {"next_url": {"ref": "response.body.next"}},
+                "stop_when": {"missing": {"ref": "response.body.next"}},
+            },
+        )
+        batches = await _consume(
+            connector,
+            runtime,
+            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=10,
+        )
+
+        assert [b.num_rows for b in batches] == [1, 1]
+        assert session.calls[0][1] == "https://api.example.test/items"
+        # The follow-up goes to the provider's absolute URL, and the declared
+        # params are not re-appended — the link already carries the query.
+        assert session.calls[1][1] == (
+            "https://api.example.test/items?cursor=abc&limit=50"
+        )
+        assert session.calls[1][2] == {}
+
+    @pytest.mark.asyncio
+    async def test_link_follows_next_url_from_a_response_header(self):
+        session = _FakeSession(
+            [
+                _FakeResponse(
+                    status=200,
+                    body={"records": [{"id": 1, "name": "a"}]},
+                    headers={"X-Next-Page": "https://api.example.test/items?page=2"},
+                ),
+                _FakeResponse(status=200, body={"records": [{"id": 2, "name": "b"}]}),
+            ]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(
+            pagination={
+                "type": "link",
+                "link": {"next_url": {"ref": "response.headers.X-Next-Page"}},
+                "stop_when": {"missing": {"ref": "response.headers.X-Next-Page"}},
+            },
+        )
+        batches = await _consume(
+            connector,
+            runtime,
+            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=10,
+        )
+
+        assert [b.num_rows for b in batches] == [1, 1]
+        assert session.calls[1][1] == "https://api.example.test/items?page=2"
+
+    @pytest.mark.asyncio
+    async def test_link_without_next_url_raises_read_error(self):
+        session = _FakeSession(
+            [_FakeResponse(status=200, body={"records": [{"id": 1, "name": "a"}]})]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(
+            pagination={
+                "type": "link",
+                "link": {},
+                "stop_when": {"missing": {"ref": "response.body.next"}},
+            },
+        )
+        with pytest.raises(ReadError, match="link.next_url"):
+            await _consume(
+                connector,
+                runtime,
+                config={
+                    "endpoint_document": endpoint,
+                    "stream_source": _stream_source(),
+                },
+                state_manager=MagicMock(),
+                stream_name="items",
+                batch_size=10,
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -540,9 +856,7 @@ class TestReadBatchesCursorPagination:
 
 class TestReadBatchesKeysetPagination:
     @pytest.mark.asyncio
-    async def test_keyset_advances_key_from_last_record_and_stops_on_short_page(self):
-        # batch_size=2; first page full -> advance key from last record's id,
-        # second page short -> stop.
+    async def test_keyset_advances_key_from_last_record_and_stops_on_predicate(self):
         session = _FakeSession(
             [
                 _FakeResponse(
@@ -558,8 +872,9 @@ class TestReadBatchesKeysetPagination:
         endpoint = _endpoint_doc_with_records(
             pagination={
                 "type": "keyset",
-                "keyset": {"param": "after_id", "from_record": "id"},
+                "keyset": {"param": "after_id", "order_by_field": "id"},
                 "limit": {"param": "limit"},
+                "stop_when": {"lt": [{"ref": "response.record_count"}, {"literal": 2}]},
             },
         )
         batches = await _consume(
@@ -579,7 +894,85 @@ class TestReadBatchesKeysetPagination:
         assert session.calls[1][2]["after_id"] == 2
 
     @pytest.mark.asyncio
-    async def test_keyset_without_from_record_raises_read_error(self):
+    async def test_keyset_initial_seeds_the_first_request(self):
+        session = _FakeSession(
+            [_FakeResponse(status=200, body={"records": [{"id": 8, "name": "h"}]})]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(
+            pagination={
+                "type": "keyset",
+                "keyset": {
+                    "param": "after_id",
+                    "order_by_field": "id",
+                    "initial": 7,
+                },
+                "limit": {"param": "limit"},
+                "stop_when": {"lt": [{"ref": "response.record_count"}, {"literal": 2}]},
+            },
+        )
+        await _consume(
+            connector,
+            runtime,
+            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=2,
+        )
+
+        assert session.calls[0][2]["after_id"] == 7
+
+    @pytest.mark.asyncio
+    async def test_keyset_order_by_field_walks_a_dotted_record_path(self):
+        # The contract types order_by_field as a dotted record path, so the key
+        # can live on a nested object rather than at the record's top level.
+        session = _FakeSession(
+            [
+                _FakeResponse(
+                    status=200,
+                    body={
+                        "records": [
+                            {"id": 1, "name": "a", "meta": {"seq": 11}},
+                            {"id": 2, "name": "b", "meta": {"seq": 12}},
+                        ]
+                    },
+                ),
+                _FakeResponse(status=200, body={"records": [{"id": 3, "name": "c"}]}),
+            ]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(
+            pagination={
+                "type": "keyset",
+                "keyset": {"param": "after", "order_by_field": "meta.seq"},
+                "limit": {"param": "limit"},
+                "stop_when": {"lt": [{"ref": "response.record_count"}, {"literal": 2}]},
+            },
+            extra_record_properties={
+                "meta": {
+                    "type": "object",
+                    "arrow_type": "Object",
+                    "properties": {"seq": {"type": "integer", "arrow_type": "Int64"}},
+                }
+            },
+        )
+        await _consume(
+            connector,
+            runtime,
+            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=2,
+        )
+
+        assert session.calls[1][2]["after"] == 12
+
+    @pytest.mark.asyncio
+    async def test_keyset_without_order_by_field_raises_read_error(self):
         session = _FakeSession(
             [
                 _FakeResponse(status=200, body={"records": [{"id": 1, "name": "a"}]}),
@@ -589,9 +982,13 @@ class TestReadBatchesKeysetPagination:
         connector = APIConnector("test")
 
         endpoint = _endpoint_doc_with_records(
-            pagination={"type": "keyset", "keyset": {"param": "after_id"}},
+            pagination={
+                "type": "keyset",
+                "keyset": {"param": "after_id"},
+                "stop_when": {"empty": {"ref": "response.body.records"}},
+            },
         )
-        with pytest.raises(ReadError, match="keyset.from_record"):
+        with pytest.raises(ReadError, match="keyset.order_by_field"):
             await _consume(
                 connector,
                 runtime,
@@ -1087,6 +1484,12 @@ class TestReadBatchesRequestBody:
                 "type": "offset",
                 "offset": {"param": "offset", "initial": 0},
                 "limit": {"param": "limit"},
+                "stop_when": {
+                    "lt": [
+                        {"ref": "response.record_count"},
+                        {"ref": "runtime.batch_size"},
+                    ]
+                },
             },
         )
         endpoint["operations"]["read"]["request"] = {
@@ -1250,6 +1653,12 @@ class TestReadBatchesRequestBody:
                 "type": "offset",
                 "offset": {"param": "offset", "initial": 0},
                 "limit": {"param": "limit"},
+                "stop_when": {
+                    "lt": [
+                        {"ref": "response.record_count"},
+                        {"ref": "runtime.batch_size"},
+                    ]
+                },
             },
         )
         endpoint["operations"]["read"]["params"] = {
@@ -1292,37 +1701,6 @@ class TestReadBatchesRequestBody:
             {"paging": {"offset": 0, "limit": 2}},
             {"paging": {"offset": 2, "limit": 2}},
         ]
-
-
-class TestExtractNextCursor:
-    """``_extract_next_cursor`` is exercised end-to-end by the cursor-pagination
-    tests above; these pin its edge cases directly, restoring the direct
-    coverage that moved out with the removed dedup-helper test module."""
-
-    @pytest.mark.unit
-    def test_extracts_token_from_body_path(self):
-        assert _extract_next_cursor({"next": "abc"}, "response.body.next") == "abc"
-
-    @pytest.mark.unit
-    def test_non_dict_data_returns_none(self):
-        assert _extract_next_cursor("not-a-dict", "response.body.next") is None
-
-    @pytest.mark.unit
-    def test_none_token_returns_none(self):
-        assert _extract_next_cursor({"next": None}, "response.body.next") is None
-
-    @pytest.mark.unit
-    def test_empty_string_token_returns_none(self):
-        assert _extract_next_cursor({"next": ""}, "response.body.next") is None
-
-    @pytest.mark.unit
-    def test_body_only_ref_returns_none(self):
-        # ``response.body`` with no trailing field can never name a cursor.
-        assert _extract_next_cursor({"next": "abc"}, "response.body") is None
-
-    @pytest.mark.unit
-    def test_integer_token_coerced_to_str(self):
-        assert _extract_next_cursor({"next": 42}, "response.body.next") == "42"
 
 
 # ---------------------------------------------------------------------------
@@ -1414,8 +1792,11 @@ class TestReadBatchesDecimalPrecision:
         )
         endpoint["operations"]["read"]["pagination"] = {
             "type": "keyset",
-            "keyset": {"param": "after", "from_record": "score"},
+            "keyset": {"param": "after", "order_by_field": "score"},
             "limit": {"param": "limit"},
+            "stop_when": {
+                "lt": [{"ref": "response.record_count"}, {"ref": "runtime.batch_size"}]
+            },
         }
         await _consume(
             connector,
@@ -1449,8 +1830,14 @@ class TestReadBatchesDecimalPrecision:
         endpoint = _endpoint_doc_with_records(
             pagination={
                 "type": "keyset",
-                "keyset": {"param": "after", "from_record": "id"},
+                "keyset": {"param": "after", "order_by_field": "id"},
                 "limit": {"param": "limit"},
+                "stop_when": {
+                    "lt": [
+                        {"ref": "response.record_count"},
+                        {"ref": "runtime.batch_size"},
+                    ]
+                },
             },
         )
         endpoint["operations"]["read"]["params"] = {
@@ -1517,8 +1904,11 @@ class TestReadBatchesDecimalPrecision:
         }
         endpoint["operations"]["read"]["pagination"] = {
             "type": "keyset",
-            "keyset": {"param": "after", "from_record": "score"},
+            "keyset": {"param": "after", "order_by_field": "score"},
             "limit": {"param": "limit"},
+            "stop_when": {
+                "lt": [{"ref": "response.record_count"}, {"ref": "runtime.batch_size"}]
+            },
         }
         await _consume(
             connector,

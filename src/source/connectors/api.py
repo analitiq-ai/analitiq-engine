@@ -13,11 +13,17 @@ This connector consumes the published API-endpoint contract directly:
   ``function``) resolved against the connection scopes
   (``connection.parameters``/``selections``/``discovered``) and runtime
   scopes (``runtime.batch_size``).
-* ``operations.read.pagination`` — offset / page / cursor / keyset
-  loops driven by their respective ``.param`` + ``.initial`` / ``.max``
-  declarations.
+* ``operations.read.pagination`` — the five contract strategies
+  (``offset``, ``page``, ``cursor``, ``link``, ``keyset``). Each declares
+  how to reach the next page and a required ``stop_when`` predicate that
+  decides when the read is done; the engine contributes no termination
+  heuristic of its own.
 * ``operations.read.response.records`` — record extraction path
   (e.g. ``response.body`` or ``response.body.<field>``).
+* ``operations.read.response.metadata`` — named extractions published
+  into the ``response`` resolution scope alongside ``body`` / ``records``
+  / ``record_count`` / ``status`` / ``headers``, so pagination
+  expressions and stop predicates can address them.
 * ``operations.read.replication.cursor_mappings`` — cursor-field ↔
   query-param map used to build incremental ``WHERE`` filters.
 
@@ -30,15 +36,18 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Mapping
+from dataclasses import dataclass, replace
 from datetime import timezone
 from decimal import Decimal
-from typing import Any
+from typing import Any, NamedTuple
 
 import aiohttp
 import pyarrow as pa
 
 from cdk.connection_runtime import ConnectionRuntime
+from cdk.exceptions import TransportSpecError
+from cdk.predicate import evaluate_predicate
 from cdk.rate_limiter import RateLimiter
 from cdk.request_binding import bind_param_refs, resolve_param_defaults
 from cdk.resolver import Resolver
@@ -77,6 +86,35 @@ def _loads_preserving_decimals(payload: str) -> Any:
     parses them as arbitrary-precision ``int``.
     """
     return json.loads(payload, parse_float=Decimal)
+
+
+@dataclass(frozen=True)
+class _Page:
+    """One page response, in the shape the ``response`` scope is built from.
+
+    Carries more than the records because pagination expressions and stop
+    predicates address the whole contract response vocabulary — a next-page
+    link often lives in a header, a stop condition often in a body field
+    that sits beside the records rather than in them.
+    """
+
+    body: Any
+    records: list[dict[str, Any]]
+    status: int
+    headers: dict[str, str]
+
+
+class _NextRequest(NamedTuple):
+    """Where the following page comes from.
+
+    ``send_params`` is False only for ``link`` pagination, whose next URL
+    already carries the provider's own query string; re-appending the
+    declared params there would duplicate keys.
+    """
+
+    url: str
+    params: dict[str, Any]
+    send_params: bool
 
 
 class APIConnector(BaseConnector):
@@ -299,6 +337,8 @@ class APIConnector(BaseConnector):
             pagination=read_spec.get("pagination") or {},
             batch_size=batch_size,
             records_ref=records_ref,
+            metadata_spec=(read_spec.get("response") or {}).get("metadata") or {},
+            resolver=resolver,
             build_request=build_request,
         ):
             if not batch:
@@ -616,6 +656,8 @@ class APIConnector(BaseConnector):
         pagination: dict[str, Any],
         batch_size: int,
         records_ref: str,
+        metadata_spec: dict[str, Any],
+        resolver: Resolver,
         build_request: Callable[[dict[str, Any]], tuple[dict[str, Any], Any]],
     ) -> AsyncIterator[list[dict[str, Any]]]:
         """Drive the pagination loop, building each page request.
@@ -623,126 +665,299 @@ class APIConnector(BaseConnector):
         Each page request is built via ``build_request``: it maps the page's
         full param table to the ``(query_params, body)`` actually sent,
         applying declared param placement and per-page body binding.
+
+        Every strategy runs the same loop: read a page, emit it, evaluate the
+        contract's ``stop_when`` predicate against that page's ``response``
+        scope, then ask the strategy where the next page comes from. The
+        engine contributes exactly one termination rule of its own — a page
+        with no records ends the read — because a strategy whose predicate
+        never fires would otherwise request forever, and "the provider
+        returned nothing" is the one signal that means done under every
+        strategy.
         """
         p_type = pagination.get("type")
         if not p_type:
             query, body = build_request(dict(base_params))
-            records = await self._request_records(
+            page = await self._request_page(
                 full_url, method, query, records_ref, body=body
             )
-            if records:
-                yield records
+            if page.records:
+                yield page.records
             return
 
+        stop_when = pagination.get("stop_when")
+        if not isinstance(stop_when, Mapping) or not stop_when:
+            raise ReadError(
+                f"{p_type!r} pagination requires a stop_when predicate; "
+                f"the endpoint declares none"
+            )
+
         limit_block = pagination.get("limit") or {}
+        effective_limit = self._effective_limit(limit_block, batch_size, resolver)
         limit_param = limit_block.get("param")
         if limit_param:
-            base_params[limit_param] = batch_size
+            base_params[limit_param] = effective_limit
 
-        if p_type == "offset":
-            offset_block = pagination.get("offset") or {}
-            offset_param = offset_block.get("param")
-            if not offset_param:
-                raise ReadError("offset pagination requires offset.param")
-            offset = int(offset_block.get("initial", 0))
-            while True:
-                params = dict(base_params)
-                params[offset_param] = offset
-                query, body = build_request(params)
-                records = await self._request_records(
-                    full_url, method, query, records_ref, body=body
-                )
-                if not records:
-                    return
-                yield records
-                if len(records) < batch_size:
-                    return
-                offset += batch_size
+        params = dict(base_params)
+        advance = self._build_advance(
+            p_type, pagination, params, effective_limit, resolver, full_url
+        )
 
-        elif p_type == "page":
-            page_block = pagination.get("page") or {}
-            page_param = page_block.get("param")
-            if not page_param:
-                raise ReadError("page pagination requires page.param")
-            page = int(page_block.get("initial", 1))
-            while True:
-                params = dict(base_params)
-                params[page_param] = page
-                query, body = build_request(params)
-                records = await self._request_records(
-                    full_url, method, query, records_ref, body=body
-                )
-                if not records:
-                    return
-                yield records
-                if len(records) < batch_size:
-                    return
-                page += 1
-
-        elif p_type == "cursor":
-            cursor_block = pagination.get("cursor") or {}
-            cursor_param = cursor_block.get("param")
-            if not cursor_param:
-                raise ReadError("cursor pagination requires cursor.param")
-            cursor_field_in_response = (
-                (cursor_block.get("from") or {}).get("ref")
-                or cursor_block.get("response_field")
-                or "next_cursor"
+        url = full_url
+        send_params = True
+        while True:
+            query, body = build_request(params)
+            page = await self._request_page(
+                url, method, query if send_params else {}, records_ref, body=body
             )
-            cursor_token: str | None = None
-            while True:
-                params = dict(base_params)
-                if cursor_token:
-                    params[cursor_param] = cursor_token
-                query, body = build_request(params)
-                data, records = await self._request_payload(
-                    full_url, method, query, records_ref, body=body
-                )
-                if not records:
-                    return
-                yield records
-                cursor_token = _extract_next_cursor(data, cursor_field_in_response)
-                if not cursor_token:
-                    return
+            if not page.records:
+                return
+            yield page.records
 
-        elif p_type == "keyset":
-            keyset_block = pagination.get("keyset") or {}
-            keyset_param = keyset_block.get("param")
-            if not keyset_param:
-                raise ReadError("keyset pagination requires keyset.param")
-            key_field_in_record = keyset_block.get("from_record")
-            if not key_field_in_record:
+            page_resolver = resolver.with_context(
+                replace(
+                    resolver.context,
+                    response=self._response_scope(page, metadata_spec, resolver),
+                )
+            )
+            try:
+                if evaluate_predicate(stop_when, page_resolver):
+                    return
+            except TransportSpecError as err:
                 raise ReadError(
-                    "keyset pagination requires keyset.from_record (record field)"
-                )
-            # Holds the raw record value (int/str/Decimal). It feeds both the
-            # query string and any body binding through build_request, so it
-            # stays native here; build_request stringifies Decimals only for the
-            # query (where yarl would truncate them) and keeps the body numeric.
-            last_key: Any = None
-            while True:
-                params = dict(base_params)
-                if last_key:
-                    params[keyset_param] = last_key
-                query, body = build_request(params)
-                records = await self._request_records(
-                    full_url, method, query, records_ref, body=body
-                )
-                if not records:
-                    return
-                yield records
-                last_key = records[-1].get(key_field_in_record)
-                if not last_key or len(records) < batch_size:
-                    return
+                    f"{p_type!r} pagination: stop_when predicate is not "
+                    f"evaluable against this response: {err}"
+                ) from err
 
-        else:
-            raise ReadError(f"Unsupported pagination type: {p_type!r}")
+            following = advance(page, page_resolver)
+            if following is None:
+                return
+            url, params, send_params = following
+
+    def _build_advance(
+        self,
+        p_type: str,
+        pagination: dict[str, Any],
+        params: dict[str, Any],
+        effective_limit: int,
+        resolver: Resolver,
+        full_url: str,
+    ) -> Callable[[_Page, Resolver], _NextRequest | None]:
+        """Seed *params* for the first page and return the per-strategy step.
+
+        The returned callable receives the page just read plus a resolver
+        scoped to it, and answers where the following page comes from —
+        ``None`` when the strategy itself has run out (an unresolvable next
+        cursor / next link, a last record carrying no key). ``stop_when``
+        remains the declared stop condition; this is only the mechanical
+        "can I even build another request" question.
+        """
+        if p_type == "offset":
+            block = pagination.get("offset") or {}
+            param = _required_setting(block, "offset", "param")
+            position = _int_setting(block, "offset", "initial", resolver, default=0)
+            # The contract defines the offset step as the effective page size
+            # unless the author overrides it, so a provider that counts in
+            # records and one that counts in pages both stay expressible.
+            step = _int_setting(
+                block, "offset", "increment_by", resolver, default=effective_limit
+            )
+            params[param] = position
+
+            def advance_offset(
+                page: _Page, page_resolver: Resolver
+            ) -> _NextRequest | None:
+                nonlocal position
+                position += step
+                params[param] = position
+                return _NextRequest(full_url, params, True)
+
+            return advance_offset
+
+        if p_type == "page":
+            block = pagination.get("page") or {}
+            param = _required_setting(block, "page", "param")
+            number = _int_setting(block, "page", "initial", resolver, default=1)
+            step = _int_setting(block, "page", "increment_by", resolver, default=1)
+            params[param] = number
+
+            def advance_page(
+                page: _Page, page_resolver: Resolver
+            ) -> _NextRequest | None:
+                nonlocal number
+                number += step
+                params[param] = number
+                return _NextRequest(full_url, params, True)
+
+            return advance_page
+
+        if p_type == "cursor":
+            block = pagination.get("cursor") or {}
+            param = _required_setting(block, "cursor", "param")
+            next_cursor = block.get("next_cursor")
+            if next_cursor is None:
+                raise ReadError(
+                    "cursor pagination requires cursor.next_cursor (a value "
+                    "expression resolving to the next page's token)"
+                )
+            # No first-page cursor: the token only exists once a response has
+            # produced one. The param stays absent rather than being sent empty.
+            params.pop(param, None)
+
+            def advance_cursor(
+                page: _Page, page_resolver: Resolver
+            ) -> _NextRequest | None:
+                token = page_resolver.resolve_for_request(next_cursor)
+                if _is_blank(token):
+                    # The declared expression found no token, which is how a
+                    # cursor provider says "last page". Note the difference
+                    # from the old behaviour: the field consulted is the one
+                    # the endpoint declared, never a hardcoded `next_cursor`.
+                    logger.debug(
+                        "cursor pagination: next_cursor expression yielded no "
+                        "token; ending read"
+                    )
+                    return None
+                params[param] = token
+                return _NextRequest(full_url, params, True)
+
+            return advance_cursor
+
+        if p_type == "link":
+            block = pagination.get("link") or {}
+            next_url = block.get("next_url")
+            if next_url is None:
+                raise ReadError(
+                    "link pagination requires link.next_url (a value "
+                    "expression resolving to the next page's absolute URL)"
+                )
+
+            def advance_link(
+                page: _Page, page_resolver: Resolver
+            ) -> _NextRequest | None:
+                target = page_resolver.resolve_for_request(next_url)
+                if _is_blank(target):
+                    logger.debug(
+                        "link pagination: next_url expression yielded no link; "
+                        "ending read"
+                    )
+                    return None
+                if not isinstance(target, str):
+                    raise ReadError(
+                        f"link pagination: next_url resolved to "
+                        f"{type(target).__name__}, expected a URL string"
+                    )
+                # The provider's link already carries the full query, so the
+                # declared params must not be appended again — doing so
+                # duplicates keys (`?limit=100&limit=100`). The body, which
+                # the link cannot express, is still built and sent.
+                return _NextRequest(target, params, False)
+
+            return advance_link
+
+        if p_type == "keyset":
+            block = pagination.get("keyset") or {}
+            param = _required_setting(block, "keyset", "param")
+            order_by_field = block.get("order_by_field")
+            if not order_by_field or not isinstance(order_by_field, str):
+                raise ReadError(
+                    "keyset pagination requires keyset.order_by_field (the "
+                    "dotted record field path the pages are ordered by)"
+                )
+            field_path = order_by_field.split(".")
+            initial = block.get("initial")
+            if initial is not None:
+                params[param] = resolver.resolve_for_request(initial)
+            else:
+                params.pop(param, None)
+
+            def advance_keyset(
+                page: _Page, page_resolver: Resolver
+            ) -> _NextRequest | None:
+                # The raw record value (int/str/Decimal) feeds both the query
+                # string and any body binding through build_request, so it
+                # stays native here; build_request stringifies Decimals only
+                # for the query (where yarl would truncate them) and keeps the
+                # body numeric.
+                last_key = walk_path(page.records[-1], field_path)
+                if last_key is None:
+                    logger.debug(
+                        "keyset pagination: last record has no %r value; "
+                        "ending read",
+                        order_by_field,
+                    )
+                    return None
+                params[param] = last_key
+                return _NextRequest(full_url, params, True)
+
+            return advance_keyset
+
+        raise ReadError(f"Unsupported pagination type: {p_type!r}")
+
+    def _effective_limit(
+        self, limit_block: dict[str, Any], batch_size: int, resolver: Resolver
+    ) -> int:
+        """Page size for this read: the declared default, clamped to the max.
+
+        ``limit.default`` is a value expression (commonly
+        ``{"ref": "runtime.batch_size"}``), so the author decides whether the
+        provider page size tracks the engine's batch size or is fixed. With no
+        default declared the engine's batch size stands in. ``limit.max`` is
+        the provider's ceiling and always wins.
+        """
+        declared = limit_block.get("default")
+        value: Any = batch_size
+        if declared is not None:
+            resolved = resolver.resolve_for_request(declared)
+            if resolved is None:
+                logger.warning(
+                    "pagination.limit.default did not resolve; falling back to "
+                    "the engine batch size of %d",
+                    batch_size,
+                )
+            else:
+                value = resolved
+        limit = _as_positive_int(value, "pagination.limit.default")
+
+        max_limit = limit_block.get("max")
+        if max_limit is not None:
+            limit = min(limit, _as_positive_int(max_limit, "pagination.limit.max"))
+        return limit
+
+    @staticmethod
+    def _response_scope(
+        page: _Page, metadata_spec: dict[str, Any], resolver: Resolver
+    ) -> dict[str, Any]:
+        """Build the ``response`` resolution scope for one page.
+
+        The key set is the contract's reserved response vocabulary, so a
+        ``stop_when`` predicate or a ``next_cursor`` / ``next_url`` expression
+        can address any of it. ``metadata`` resolves last, against the scope
+        the other keys already form, because metadata expressions are
+        themselves written in terms of ``response.body``.
+        """
+        scope: dict[str, Any] = {
+            "body": page.body,
+            "records": page.records,
+            "record_count": len(page.records),
+            "status": page.status,
+            "headers": page.headers,
+        }
+        if metadata_spec:
+            metadata_resolver = resolver.with_context(
+                replace(resolver.context, response=scope)
+            )
+            scope["metadata"] = {
+                name: metadata_resolver.resolve_for_request(expression)
+                for name, expression in metadata_spec.items()
+            }
+        return scope
 
     # ------------------------------------------------------------------
     # HTTP
     # ------------------------------------------------------------------
 
-    async def _request_records(
+    async def _request_page(
         self,
         url: str,
         method: str,
@@ -750,21 +965,7 @@ class APIConnector(BaseConnector):
         records_ref: str,
         *,
         body: Any = None,
-    ) -> list[dict[str, Any]]:
-        _, records = await self._request_payload(
-            url, method, params, records_ref, body=body
-        )
-        return records
-
-    async def _request_payload(
-        self,
-        url: str,
-        method: str,
-        params: dict[str, Any],
-        records_ref: str,
-        *,
-        body: Any = None,
-    ) -> tuple[Any, list[dict[str, Any]]]:
+    ) -> _Page:
         if self.session is None:
             raise ReadError(
                 "APIConnector: HTTP request attempted before connect() opened "
@@ -795,12 +996,16 @@ class APIConnector(BaseConnector):
                     raise TransientReadError(detail)
                 raise ReadError(detail)
             data = await response.json(loads=_loads_preserving_decimals)
-        self.metrics["records_read"] += 0  # incremented below per page
+            # Read inside the context manager: the headers proxy is tied to the
+            # live response, and pagination expressions address it as
+            # `response.headers.<name>` (a `Link` header, typically).
+            headers = dict(response.headers)
+            status = response.status
         records = _extract_records(data, records_ref)
         if records:
             self.metrics["records_read"] += len(records)
             self.metrics["batches_read"] += 1
-        return data, records
+        return _Page(body=data, records=records, status=status, headers=headers)
 
     # ------------------------------------------------------------------
     # Base interface stubs
@@ -847,18 +1052,73 @@ def _extract_records(data: Any, records_ref: str) -> list[dict[str, Any]]:
     return []
 
 
-def _extract_next_cursor(data: Any, response_field_ref: str) -> str | None:
-    """Walk a ``response.body[.<dotted.path>]`` ref to a string cursor."""
-    if not isinstance(data, dict):
-        return None
-    prefix = "response.body"
-    if response_field_ref == prefix:
-        return None
-    if response_field_ref.startswith(prefix + "."):
-        segments = response_field_ref[len(prefix) + 1 :].split(".")
-    else:
-        segments = response_field_ref.split(".")
-    cursor = walk_path(data, segments)
-    if cursor in (None, ""):
-        return None
-    return str(cursor)
+def _is_blank(value: Any) -> bool:
+    """Report whether a resolved next-page token / link carries nothing usable.
+
+    Absent, or a string that is empty or all whitespace — which is how a
+    provider signals "no further pages". Deliberately not a plain falsiness
+    test: a numeric cursor of ``0`` is a real token.
+    """
+    return value is None or (isinstance(value, str) and not value.strip())
+
+
+def _required_setting(block: dict[str, Any], strategy: str, key: str) -> str:
+    """Read a required non-empty string setting off a pagination strategy block."""
+    value = block.get(key)
+    if not isinstance(value, str) or not value:
+        raise ReadError(f"{strategy} pagination requires {strategy}.{key}")
+    return value
+
+
+def _int_setting(
+    block: dict[str, Any],
+    strategy: str,
+    key: str,
+    resolver: Resolver,
+    *,
+    default: int,
+) -> int:
+    """Read an integer pagination setting that may be authored as an expression.
+
+    The contract types these ``Any`` because ``{"ref": "..."}`` is as valid an
+    initial offset as ``0``. An authored value that resolves to something
+    non-integral is a defect worth naming rather than coercing.
+    """
+    declared = block.get(key)
+    if declared is None:
+        return default
+    resolved = resolver.resolve_for_request(declared)
+    if resolved is None:
+        logger.warning(
+            "pagination.%s.%s did not resolve; falling back to %d",
+            strategy,
+            key,
+            default,
+        )
+        return default
+    return _as_int(resolved, f"pagination.{strategy}.{key}")
+
+
+def _as_int(value: Any, label: str) -> int:
+    """Coerce a resolved pagination setting to ``int``, or fail naming it."""
+    if isinstance(value, bool) or not isinstance(value, (int, float, Decimal, str)):
+        raise ReadError(
+            f"{label} must be an integer, got {type(value).__name__}: {value!r}"
+        )
+    try:
+        return int(value)
+    except (TypeError, ValueError) as err:
+        raise ReadError(f"{label} must be an integer, got {value!r}") from err
+
+
+def _as_positive_int(value: Any, label: str) -> int:
+    """Coerce a resolved page-size setting to a positive ``int``.
+
+    A non-positive page size would either send ``limit=0`` upstream or make
+    the offset loop never advance, so it fails here rather than at the
+    provider (or not at all).
+    """
+    number = _as_int(value, label)
+    if number < 1:
+        raise ReadError(f"{label} must be >= 1, got {number}")
+    return number

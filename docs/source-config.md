@@ -301,7 +301,9 @@ connection).
   },
   "pagination": {
     "type": "offset",
-    "params": { "limit_param": "limit", "offset_param": "offset" }
+    "offset": { "param": "offset", "initial": 0 },
+    "limit": { "param": "limit", "default": { "ref": "runtime.batch_size" }, "max": 1000 },
+    "stop_when": { "empty": { "ref": "response.body.objects" } }
   },
   "replication_filter_mapping": {
     "created": "createdDateStart"
@@ -315,7 +317,9 @@ connection).
 | `method` | HTTP method (default `GET`) |
 | `endpoint_schema` | JSON Schema describing the response payload |
 | `filters` | Per-filter type, allowed operators, default values (defaults can reference `connection.selections` via `${name}` placeholders) |
-| `pagination.type` | `offset`, `cursor`, `page`, `time`, or `link` |
+| `pagination.type` | `offset`, `page`, `cursor`, `link`, or `keyset`. Each type declares its own block (`offset`/`page`/`cursor`/`link`/`keyset`) naming the param it drives and, for `cursor`/`link`, the value expression that yields the next token or URL. The authoritative field list is the api-endpoint JSON Schema. |
+| `pagination.stop_when` | Required predicate deciding when the read is done, evaluated against each page's `response` scope (`body`, `records`, `record_count`, `status`, `headers`, `metadata`). The engine adds no termination heuristic of its own — it only stops early on a page with no records. |
+| `pagination.limit` | Optional page size: `param` plus a `default` value expression and the provider's `max`, which clamps it |
 | `replication_filter_mapping` | Maps a stream's `cursor_field` to an API filter name |
 
 ### Database endpoint (private example)

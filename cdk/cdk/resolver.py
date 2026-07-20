@@ -162,6 +162,16 @@ class Resolver:
     def context(self) -> ResolutionContext:
         return self._ctx
 
+    def with_context(self, context: ResolutionContext) -> Resolver:
+        """Return a resolver over *context* carrying the same function registry.
+
+        Lets a caller that has already built the connection-phase resolver
+        layer a short-lived scope onto it — the ``response`` scope of the page
+        that just came back, say — without re-registering the derived
+        functions or reaching into private state.
+        """
+        return Resolver(context, functions=self._functions)
+
     def register(self, name: str, fn: DerivedFunction) -> None:
         if name in self._functions:
             raise ValueError(f"Derived function {name!r} already registered")

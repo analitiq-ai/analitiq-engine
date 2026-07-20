@@ -44,9 +44,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from analitiq.contracts.pipelines.config import RuntimeConfig as ContractRuntimeConfig
-from analitiq.contracts.stream import ReplicationConfig as ContractReplicationConfig
-from pydantic import BaseModel
+from analitiq.contracts.pipelines.config import Runtime as ContractRuntime
+from analitiq.contracts.stream import IncrementalReplication
+from analitiq.contracts.stream import Replication as ContractReplication
+from pydantic import BaseModel, TypeAdapter
 
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.secrets import SchemeSecretsResolver, SecretsResolver
@@ -105,7 +106,7 @@ def _parse_runtime_config(raw: Mapping[str, Any]) -> RuntimeConfig:
     than the contract's (``dlq``), so it must forward author-set values only, not
     the contract's defaults. Precedence: pipeline config > env var > engine default.
     """
-    contract = ContractRuntimeConfig.model_validate(dict(raw))
+    contract = ContractRuntime.model_validate(dict(raw))
     return RuntimeConfig(
         batching=BatchingConfig(
             **_author_set(contract.batching, ("batch_size", "max_concurrent_batches"))
@@ -120,6 +121,12 @@ def _parse_runtime_config(raw: Mapping[str, Any]) -> RuntimeConfig:
     )
 
 
+# Replication is a `method`-discriminated union in the contract (full_refresh
+# forbids `cursor_field`, incremental requires it), so it validates through an
+# adapter rather than a single model's `model_validate`. Built once at import.
+_CONTRACT_REPLICATION: TypeAdapter[Any] = TypeAdapter(ContractReplication)
+
+
 def _parse_replication(raw_source: Mapping[str, Any]) -> ReplicationConfig | None:
     """Build the engine's :class:`ReplicationConfig` from a stream's source block.
 
@@ -128,14 +135,22 @@ def _parse_replication(raw_source: Mapping[str, Any]) -> ReplicationConfig | Non
     contract-required; the optional cursor/tie-breaker fields carry through as
     ``None`` when absent (the engine has no settings default for these, so no
     author-intent filtering is needed).
+
+    The contract models replication as a ``method``-discriminated union in
+    which ``cursor_field`` exists only on the incremental variant, so the
+    field is read off that variant rather than assumed present.
     """
     raw = raw_source.get("replication")
     if not raw:
         return None
-    contract = ContractReplicationConfig.model_validate(dict(raw))
+    contract = _CONTRACT_REPLICATION.validate_python(dict(raw))
     return ReplicationConfig(
         method=contract.method,
-        cursor_field=contract.cursor_field,
+        cursor_field=(
+            contract.cursor_field
+            if isinstance(contract, IncrementalReplication)
+            else None
+        ),
         tie_breaker_fields=contract.tie_breaker_fields,
     )
 
