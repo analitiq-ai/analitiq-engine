@@ -849,6 +849,17 @@ class ConnectionRuntime:
                 f"connector's connection contract"
             )
 
+    @property
+    def has_request_secrets(self) -> bool:
+        """Whether this runtime can resolve `secrets.*` / `auth.*` at all.
+
+        False in a worker-rebuilt runtime: the resolved payload deliberately
+        carries no secret material, so those scopes stay empty there. A caller
+        that would otherwise let the ref drop silently can ask first and fail
+        instead of sending a request with the credential missing.
+        """
+        return bool(self._request_secrets or self._request_auth)
+
     def redact_secrets(self, text: str) -> str:
         """Replace any resolved secret or auth value appearing in *text*.
 
@@ -881,7 +892,14 @@ class ConnectionRuntime:
     ) -> ResolutionContext:
         """Assemble a typed :class:`ResolutionContext` from the connection JSON."""
         self._request_secrets = dict(secrets)
-        self._request_auth = dict(self._raw_config.get("auth") or {})
+        # `auth_state` is where a connection keeps OAuth/session material; the
+        # bare `auth` key is the static configuration. A contract-valid
+        # `{"ref": "auth.access_token"}` means the live token, so both feed
+        # the scope with the live state winning.
+        self._request_auth = {
+            **(self._raw_config.get("auth") or {}),
+            **(self._raw_config.get("auth_state") or {}),
+        }
         connection_scope = {
             "parameters": dict(self._raw_config.get("parameters") or {}),
             "selections": dict(self._raw_config.get("selections") or {}),

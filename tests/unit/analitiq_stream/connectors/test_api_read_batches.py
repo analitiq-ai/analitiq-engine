@@ -3736,6 +3736,119 @@ class TestSecretRedaction:
         assert "s3cr3t-token-value" not in str(caught.value)
 
 
+class TestBindingEdges:
+    """Cases where a valid document met an engine assumption."""
+
+    @pytest.mark.asyncio
+    async def test_a_wire_key_named_like_an_expression_marker_still_binds(self):
+        """Binding-map keys are provider names, not structure.
+
+        A provider whose query key is literally `ref` made the whole map read
+        as an expression node, so it resolved to that one value and every
+        other param vanished from the request.
+        """
+        session = _FakeSession(
+            [_FakeResponse(status=200, body={"records": [{"id": 1, "name": "a"}]})]
+        )
+        endpoint = _endpoint_doc_with_records(
+            params={
+                "kind": {
+                    "in": "query",
+                    "type": "string",
+                    "required": False,
+                    "default": {"literal": "full"},
+                },
+                "size": {
+                    "in": "query",
+                    "type": "integer",
+                    "required": False,
+                    "default": {"literal": 50},
+                },
+            },
+            query={"ref": {"from_param": "kind"}, "limit": {"from_param": "size"}},
+        )
+        await _consume(
+            APIConnector("test"),
+            _runtime_with_session(session),
+            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=10,
+        )
+        assert session.calls[0][2] == {"ref": "full", "limit": 50}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("key", ["operator", "op"])
+    async def test_a_non_equality_filter_is_refused_under_either_key(self, key):
+        """Streams spell the comparison `operator` or `op`; both must be seen."""
+        session = _FakeSession([])
+        stream_source = _stream_source()
+        stream_source["filters"] = [{"field": "amount", key: "gte", "value": 100}]
+        endpoint = _endpoint_doc_with_records(
+            params={"amount": {"in": "query", "type": "integer", "required": False}},
+        )
+        with pytest.raises(ReadError, match="cannot express"):
+            await _consume(
+                APIConnector("test"),
+                _runtime_with_session(session),
+                config={
+                    "endpoint_document": endpoint,
+                    "stream_source": stream_source,
+                },
+                state_manager=MagicMock(),
+                stream_name="items",
+                batch_size=10,
+            )
+
+    @pytest.mark.asyncio
+    async def test_a_filter_on_an_undeclared_param_is_refused(self):
+        """It would reach no binding map, so it would narrow nothing."""
+        session = _FakeSession([])
+        stream_source = _stream_source()
+        stream_source["filters"] = [{"field": "nope", "value": 1}]
+        with pytest.raises(ReadError, match="does not declare"):
+            await _consume(
+                APIConnector("test"),
+                _runtime_with_session(session),
+                config={
+                    "endpoint_document": _endpoint_doc_with_records(),
+                    "stream_source": stream_source,
+                },
+                state_manager=MagicMock(),
+                stream_name="items",
+                batch_size=10,
+            )
+
+    @pytest.mark.asyncio
+    async def test_a_secret_ref_without_resolvable_secrets_fails_loudly(self):
+        """A worker runtime holds none; dropping it would send no credential."""
+        session = _FakeSession([])
+        endpoint = _endpoint_doc_with_records(
+            params={
+                "key": {
+                    "in": "header",
+                    "type": "string",
+                    "required": True,
+                    "default": {"ref": "secrets.api_key"},
+                }
+            },
+            headers={"X-Api-Key": {"from_param": "key"}},
+        )
+        with pytest.raises(ReadError, match="holds no resolved secrets"):
+            await _consume(
+                APIConnector("test"),
+                _runtime_with_session(session),
+                config={
+                    "endpoint_document": endpoint,
+                    "stream_source": _stream_source(),
+                },
+                state_manager=MagicMock(),
+                stream_name="items",
+                batch_size=10,
+            )
+        assert session.calls == []
+
+
 class TestRequestBindingMaps:
     """The wire names come from the request bindings, never from param names.
 

@@ -37,6 +37,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
@@ -66,6 +67,9 @@ from ...shared.http_utils import join_url
 from .base import BaseConnector, ConnectionError, ReadError, TransientReadError
 
 logger = logging.getLogger(__name__)
+
+# `${scope.path}` placeholders, as the resolver strips them.
+_TEMPLATE_TOKEN = re.compile(r"\$\{([^}]+)\}")
 
 # HTTP statuses retrying can heal: request timeout, rate limit, upstream
 # outages. Everything else non-200 is a deterministic contract/config error.
@@ -290,23 +294,76 @@ def _make_request_builder(
 
         url = join_url(
             base_url,
-            _fill_path(path, bound(path_spec, as_text, "path_params"), path_spec)
+            _fill_path(
+                path,
+                _bound_map(path_spec, as_text, bound, "path_params"),
+                path_spec,
+            )
             if path_spec
             else path,
         )
-        query = bound(query_spec, as_text, "query") if query_spec else {}
-        headers = (
-            {
-                name: str(value)
-                for name, value in bound(header_spec, as_text, "headers").items()
-            }
-            if header_spec
-            else {}
-        )
+        query = _bound_map(query_spec, as_text, bound, "query")
+        headers = {
+            name: str(value)
+            for name, value in _bound_map(
+                header_spec, as_text, bound, "headers"
+            ).items()
+        }
         body = bound(raw_body, as_json, "body") if raw_body is not None else None
         return _Materialized(url, query, headers, body)
 
     return build_request
+
+
+def _bound_map(
+    spec: Mapping[str, Any],
+    values: Mapping[str, Any],
+    bind: Any,
+    where: str,
+) -> dict[str, Any]:
+    """Resolve a binding map one wire key at a time.
+
+    The keys are provider names, not structure. Handing the whole map to the
+    resolver made a provider whose key is literally ``ref``, ``template``,
+    ``literal``, ``function`` or ``from_param`` read as an expression node --
+    the map would resolve to that one entry's value and every other param
+    would vanish from the request. Per entry, only the value is an
+    expression, which is what the contract says it is.
+    """
+    resolved: dict[str, Any] = {}
+    for name, node in (spec or {}).items():
+        value = bind(node, values, where)
+        if value is not None:
+            resolved[name] = value
+    return resolved
+
+
+def _first_ref_into(node: Any, prefixes: tuple[str, ...]) -> str | None:
+    """First `{ref}` or `${...}` placeholder addressing one of *prefixes*."""
+    if isinstance(node, Mapping):
+        ref = node.get("ref")
+        if isinstance(ref, str) and ref.startswith(prefixes):
+            return ref
+        template = node.get("template")
+        if isinstance(template, str):
+            for token in _TEMPLATE_TOKEN.findall(template):
+                if str(token).strip().startswith(prefixes):
+                    return str(token).strip()
+        for value in node.values():
+            found = _first_ref_into(value, prefixes)
+            if found is not None:
+                return found
+        return None
+    if isinstance(node, list):
+        for item in node:
+            found = _first_ref_into(item, prefixes)
+            if found is not None:
+                return found
+    if isinstance(node, str):
+        for token in _TEMPLATE_TOKEN.findall(node):
+            if str(token).strip().startswith(prefixes):
+                return str(token).strip()
+    return None
 
 
 def _query_text(value: Any) -> Any:
@@ -594,6 +651,28 @@ class APIConnector(BaseConnector):
             )
         return cursor_value
 
+    def _reject_unresolvable_secret_refs(self, read_spec: dict[str, Any]) -> None:
+        """Refuse a `secrets.*`/`auth.*` ref this runtime cannot resolve.
+
+        The contract admits both scopes in request bindings, and in-process
+        they resolve. A worker-rebuilt runtime deliberately carries no secret
+        material, so the same document would resolve the credential to
+        nothing there -- and the per-request policy drops what does not
+        resolve, sending the request with the header missing or, for a
+        template, with an empty credential in it. Fail on the document rather
+        than on the provider's 401.
+        """
+        if self._runtime is not None and self._runtime.has_request_secrets:
+            return
+        found = _first_ref_into(read_spec, ("secrets.", "auth."))
+        if found is not None:
+            raise ReadError(
+                f"operations.read references {found!r}, but this runtime "
+                f"holds no resolved secrets -- a connector worker receives "
+                f"none by design. The credential would be dropped from the "
+                f"request rather than sent"
+            )
+
     def _reject_unsupported_declarations(
         self,
         endpoint_doc: dict[str, Any],
@@ -687,6 +766,7 @@ class APIConnector(BaseConnector):
                 f"endpoint {endpoint_doc.get('endpoint_id')!r}: "
                 f"operations.read.request.path is required"
             )
+        self._reject_unresolvable_secret_refs(read_spec)
         self._reject_unsupported_declarations(
             endpoint_doc, request, read_spec, stream_source
         )
@@ -899,7 +979,18 @@ class APIConnector(BaseConnector):
                     f"bound to a param and the read would silently return "
                     f"more records than the stream asked for"
                 )
-            operator = f.get("operator")
+            operator = f.get("operator") or f.get("op")
+            if target not in declared:
+                # Since the binding maps became authoritative, a param table
+                # entry with no declared param is serialized nowhere. The
+                # filter would narrow nothing and the read would return more
+                # records than the stream asked for, reporting success.
+                raise ReadError(
+                    f"stream filter targets {target!r}, which the endpoint "
+                    f"does not declare in operations.read.params, so it can "
+                    f"reach no part of the request and would silently widen "
+                    f"the read"
+                )
             if operator not in (None, "eq"):
                 # A filter reaches the provider as a param value, which
                 # carries no operator of its own -- so `gte` and `lt` on the

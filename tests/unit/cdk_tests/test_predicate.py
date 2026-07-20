@@ -329,9 +329,12 @@ def test_and_short_circuits_on_a_false_guard():
 def test_a_nan_operand_is_a_document_error_not_an_internal_one(operator):
     """`json.loads` accepts a bare NaN; ordering a Decimal against it raises.
 
-    `decimal.InvalidOperation` is an ArithmeticError, so the previous
-    `except TypeError` let it escape unclassified and the read was retried to
-    exhaustion on a response that will never parse differently.
+    NaN is rejected before the comparison rather than after: it orders
+    against nothing, so `lt` and `gte` on the same pair are both False and a
+    stop predicate quietly answers "keep going" forever. Reaching the
+    comparison only raised for the Decimal pairing (as
+    `decimal.InvalidOperation`, an ArithmeticError the old `except TypeError`
+    missed); a float NaN against an int answered silently.
     """
     body = json.loads('{"score": NaN, "threshold": 1.5}', parse_float=Decimal)
     resolver = _resolver(body=body)
@@ -341,7 +344,7 @@ def test_a_nan_operand_is_a_document_error_not_an_internal_one(operator):
             {"ref": "response.body.threshold"},
         ]
     }
-    with pytest.raises(TransportSpecError, match="cannot order"):
+    with pytest.raises(TransportSpecError, match="NaN"):
         evaluate_predicate(predicate, resolver)
 
 

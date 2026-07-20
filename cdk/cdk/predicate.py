@@ -202,6 +202,17 @@ def _align_numbers(left: Any, right: Any) -> tuple[Any, Any]:
     literal the value its digits spell. Non-numbers, and int/Decimal pairs
     (already exact together), are returned untouched.
     """
+    for side, value in (("left", left), ("right", right)):
+        # NaN compares False against everything, so `lt` and `gte` on the same
+        # pair are both False and a stop predicate quietly answers "keep
+        # going" forever. Only the Decimal pairing raised before; a float NaN
+        # against an int answered silently. Neither is a comparison.
+        if isinstance(value, float) and value != value:
+            raise TransportSpecError(
+                f"predicate operand ({side}) is NaN, which orders against "
+                f"nothing: every comparison with it is False, so the "
+                f"predicate can never fire"
+            )
     if isinstance(left, float) and isinstance(right, Decimal):
         return Decimal(str(left)), right
     if isinstance(left, Decimal) and isinstance(right, float):
