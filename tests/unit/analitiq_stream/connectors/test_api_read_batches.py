@@ -3410,12 +3410,14 @@ class TestContractDeclarationsAreHonoured:
     async def test_a_foreign_transport_ref_is_refused(self):
         """Dispatching to the default transport would use another host's credentials."""
         session = _FakeSession([])
+        runtime = _runtime_with_session(session)
+        runtime._connector_definition = {"default_transport": "api"}
         endpoint = _endpoint_doc_with_records()
         endpoint["operations"]["read"]["request"]["transport_ref"] = "reports"
         with pytest.raises(ReadError, match="transport_ref"):
             await _consume(
                 APIConnector("test"),
-                _runtime_with_session(session),
+                runtime,
                 config={
                     "endpoint_document": endpoint,
                     "stream_source": _stream_source(),
@@ -3425,6 +3427,30 @@ class TestContractDeclarationsAreHonoured:
                 batch_size=10,
             )
         assert session.calls == []
+
+    @pytest.mark.asyncio
+    async def test_a_transport_ref_is_allowed_when_it_names_the_default(self):
+        """And when the default is unknowable, the check cannot be applied.
+
+        A worker-rebuilt runtime carries no connector definition. Refusing on
+        that would reject an endpoint naming the connector's actual default --
+        working in-process and failing in a worker, for one document.
+        """
+        session = _FakeSession(
+            [_FakeResponse(status=200, body={"records": [{"id": 1, "name": "a"}]})]
+        )
+        runtime = _runtime_with_session(session)  # no connector definition
+        endpoint = _endpoint_doc_with_records()
+        endpoint["operations"]["read"]["request"]["transport_ref"] = "api"
+        batches = await _consume(
+            APIConnector("test"),
+            runtime,
+            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=10,
+        )
+        assert [b.num_rows for b in batches] == [1]
 
     @pytest.mark.asyncio
     async def test_an_unsupported_replication_method_is_refused(self):
@@ -3621,6 +3647,69 @@ class TestSecretRedaction:
             )
         assert "s3cr3t-token-value" not in str(caught.value)
         assert "***" in str(caught.value)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "make_response",
+        [
+            pytest.param(
+                lambda: _FakeResponse(status=401, body={"e": "bad"}), id="non-200"
+            ),
+            pytest.param(
+                lambda: _FakeResponse(
+                    status=200,
+                    body={},
+                    raise_json=aiohttp.ContentTypeError(None, (), message="text/html"),
+                ),
+                id="content-type",
+            ),
+            pytest.param(
+                lambda: _FakeResponse(
+                    status=302, body={}, headers={"Location": "https://elsewhere/x"}
+                ),
+                id="redirect",
+            ),
+        ],
+    )
+    async def test_a_path_bound_secret_is_redacted_in_every_failure(
+        self, make_response
+    ):
+        """The URL carries it, and every one of these messages carries the URL.
+
+        A path segment is percent-encoded on the way in, so the raw value
+        never appears — only the encoded spelling — which is why redaction
+        has to cover both.
+        """
+        session = _FakeSession([make_response()])
+        runtime = _runtime_with_session(session, parameters={})
+        runtime._request_secrets = {"token": "ab/c+d=zzzz"}
+        endpoint = _endpoint_doc_with_records(
+            path="/t/{token}/items",
+            params={
+                "token": {
+                    "in": "path",
+                    "type": "string",
+                    "required": True,
+                    "default": {"literal": "ab/c+d=zzzz"},
+                }
+            },
+            path_params={"token": {"from_param": "token"}},
+        )
+        with pytest.raises((ReadError, TransientReadError)) as caught:
+            await _consume(
+                APIConnector("test"),
+                runtime,
+                config={
+                    "endpoint_document": endpoint,
+                    "stream_source": _stream_source(),
+                },
+                state_manager=MagicMock(),
+                stream_name="items",
+                batch_size=10,
+            )
+        message = str(caught.value)
+        assert "ab/c+d=zzzz" not in message
+        assert "ab%2Fc%2Bd%3Dzzzz" not in message
 
     @pytest.mark.asyncio
     async def test_a_secret_echoed_by_the_provider_body_is_redacted_too(self):

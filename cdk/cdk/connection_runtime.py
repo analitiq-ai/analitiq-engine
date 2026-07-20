@@ -30,6 +30,7 @@ import copy
 import logging
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, cast
+from urllib.parse import quote, quote_plus
 
 from sqlalchemy.engine import Engine
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -864,8 +865,15 @@ class ConnectionRuntime:
         blanking them would eat ordinary digits out of every message.
         """
         for value in (*self._request_secrets.values(), *self._request_auth.values()):
-            if isinstance(value, str) and len(value) >= 4:
-                text = text.replace(value, "***")
+            if not isinstance(value, str) or len(value) < 4:
+                continue
+            # The percent-encoded form too: a credential bound into a path
+            # segment is quoted before it reaches the URL, and a query value
+            # is encoded by yarl, so `ab/c+d=` reads as `ab%2Fc%2Bd%3D` in
+            # the very diagnostics this is meant to clean. Both spellings are
+            # the same secret.
+            for form in {value, quote(value, safe=""), quote_plus(value)}:
+                text = text.replace(form, "***")
         return text
 
     def _build_resolution_context(

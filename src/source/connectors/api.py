@@ -618,7 +618,11 @@ class APIConnector(BaseConnector):
         if transport_ref:
             definition = self._runtime.connector_definition if self._runtime else None
             default_ref = (definition or {}).get("default_transport")
-            if transport_ref != default_ref:
+            # A worker-rebuilt runtime carries no connector definition, so the
+            # default is unknowable there. Refusing on that would reject an
+            # endpoint naming the connector's actual default -- working
+            # in-process and failing in a worker, for the same document.
+            if default_ref is not None and transport_ref != default_ref:
                 raise ReadError(
                     f"endpoint {endpoint_doc.get('endpoint_id')!r} declares "
                     f"request.transport_ref={transport_ref!r}, but this engine "
@@ -1310,9 +1314,8 @@ class APIConnector(BaseConnector):
         ):
             return False, advance(page, page_resolver)
 
-    @staticmethod
     def _require_progress(
-        wire: _Wire, sent_wires: set[_Wire], p_type: str, pages: int, url: str
+        self, wire: _Wire, sent_wires: set[_Wire], p_type: str, pages: int, url: str
     ) -> None:
         """Refuse to send a request this read has already sent.
 
@@ -1326,12 +1329,14 @@ class APIConnector(BaseConnector):
         if wire not in sent_wires:
             return
         raise ReadError(
-            f"{p_type!r} pagination: page {pages + 1} would send the "
-            f"identical request again ({url!r}), so the read cannot "
-            f"advance. Either the provider is cycling between next-page "
-            f"values it has already given, or the value never reaches "
-            f"the request -- check that a param declared `in: body` is "
-            f"bound by a matching `from_param` in the body"
+            self._safe(
+                f"{p_type!r} pagination: page {pages + 1} would send the "
+                f"identical request again ({url!r}), so the read cannot "
+                f"advance. Either the provider is cycling between next-page "
+                f"values it has already given, or the value never reaches "
+                f"the request -- check that a param declared `in: body` is "
+                f"bound by a matching `from_param` in the body"
+            )
         )
 
     @staticmethod
@@ -1481,8 +1486,7 @@ class APIConnector(BaseConnector):
         """Strip resolved secret values out of a diagnostic string."""
         return self._runtime.redact_secrets(text) if self._runtime else text
 
-    @staticmethod
-    async def _decode_json(response: Any, method: str, url: str) -> Any:
+    async def _decode_json(self, response: Any, method: str, url: str) -> Any:
         """Decode a 200 response body, classifying the two ways it can fail.
 
         They are opposites: an endpoint that does not serve JSON never will,
@@ -1496,14 +1500,18 @@ class APIConnector(BaseConnector):
             return await response.json(loads=_loads_preserving_decimals)
         except aiohttp.ContentTypeError as err:
             raise ReadError(
-                f"API response is not JSON: {method} {url} -> "
-                f"{err.headers.get('Content-Type') if err.headers else 'no'} "
-                f"content type. Check the endpoint path and any Accept "
-                f"header the connector declares"
+                self._safe(
+                    f"API response is not JSON: {method} {url} -> "
+                    f"{err.headers.get('Content-Type') if err.headers else 'no'} "
+                    f"content type. Check the endpoint path and any Accept "
+                    f"header the connector declares"
+                )
             ) from err
         except json.JSONDecodeError as err:
             raise TransientReadError(
-                f"API response body did not parse as JSON: {method} {url}: {err}"
+                self._safe(
+                    f"API response body did not parse as JSON: {method} {url}: {err}"
+                )
             ) from err
 
     async def _request_page(
@@ -1549,11 +1557,13 @@ class APIConnector(BaseConnector):
             if response.status in _REDIRECT_HTTP_STATUSES:
                 location = response.headers.get("Location")
                 raise ReadError(
-                    f"API request redirected: {method} {url} -> "
-                    f"{response.status} {location!r}. Redirects are not "
-                    f"followed: this request carries the connection's "
-                    f"credentials, and a redirect can move it to another host. "
-                    f"Point the endpoint at the final URL instead"
+                    self._safe(
+                        f"API request redirected: {method} {url} -> "
+                        f"{response.status} {location!r}. Redirects are not "
+                        f"followed: this request carries the connection's "
+                        f"credentials, and a redirect can move it to another host. "
+                        f"Point the endpoint at the final URL instead"
+                    )
                 )
             if response.status != 200:
                 error_text = await response.text()
