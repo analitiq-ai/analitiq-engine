@@ -2275,7 +2275,7 @@ class TestPaginationSilentTruncationRegressions:
                 "stop_when": {"empty": {"ref": "response.body.records"}},
             },
         )
-        with pytest.raises(ReadError, match="declared but did not resolve"):
+        with pytest.raises(ReadError, match="declared but resolved to no value"):
             await _consume(
                 connector,
                 runtime,
@@ -2755,7 +2755,9 @@ class TestPaginationSilentTruncationRegressions:
                 "stop_when": {"missing": {"ref": "response.body.records"}},
             },
         )
-        with pytest.raises(ReadError, match="next-page expression is not evaluable"):
+        with pytest.raises(
+            ReadError, match=r"pagination\.cursor\.next_cursor is not resolvable"
+        ):
             await _consume(
                 connector,
                 runtime,
@@ -3078,7 +3080,7 @@ class TestPaginationInvariants:
         connector = APIConnector("test")
 
         endpoint = _endpoint_doc_with_records(pagination=pagination)
-        with pytest.raises(ReadError, match="did not resolve|not resolvable"):
+        with pytest.raises(ReadError, match="resolved to no value|not resolvable"):
             await _consume(
                 connector,
                 runtime,

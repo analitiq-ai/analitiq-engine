@@ -42,7 +42,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import timezone
 from decimal import Decimal
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, TypeVar
 
 import aiohttp
 import pyarrow as pa
@@ -196,6 +196,26 @@ _AdvanceBuilder = Callable[[dict[str, Any], _RequestState], _Advance]
 _Wire = bytes
 # Turns one page's param table into the (query, body) actually sent.
 _RequestBuilder = Callable[[dict[str, Any]], "tuple[dict[str, Any], Any]"]
+_T = TypeVar("_T")
+# Where a resolved control value has to land -- an integer step, a request
+# param, a URL. Takes (value, label) and returns it, or raises ReadError
+# naming the field. Every control expression names one; see _control_value.
+_Sink = Callable[[Any, str], _T]
+
+# Every field of the contract's pagination blocks whose value is a value
+# expression that decides what to request. Kept as data so the drift guard in
+# tests/unit/analitiq_stream/connectors/test_pagination_contract_drift.py can
+# check it against the published models: a strategy that grows a field the
+# engine does not classify fails there rather than being silently ignored at
+# read time. `keyset.initial` is the one the contract lets an author omit.
+_CONTROL_FIELDS: dict[str, frozenset[str]] = {
+    "offset": frozenset({"initial", "increment_by"}),
+    "page": frozenset({"initial", "increment_by"}),
+    "cursor": frozenset({"next_cursor"}),
+    "link": frozenset({"next_url"}),
+    "keyset": frozenset({"initial"}),
+    "limit": frozenset({"default"}),
+}
 
 
 def _make_request_builder(
@@ -1080,17 +1100,19 @@ class APIConnector(BaseConnector):
         the provider's ceiling and always wins.
         """
         declared = limit_block.get("default")
-        value: Any = batch_size
-        if declared is not None:
-            resolved = _resolve_control(declared, resolver)
-            if resolved is None:
-                raise ReadError(
-                    "pagination.limit.default is declared but did not resolve. "
+        if declared is None:
+            limit = _as_positive_int(batch_size, "runtime.batch_size")
+        else:
+            limit = _control_value(
+                declared,
+                resolver,
+                "pagination.limit.default",
+                _as_positive_int,
+                absent_hint=(
                     "Falling back to the engine batch size would request a "
                     "page size the endpoint never declared"
-                )
-            value = resolved
-        limit = _as_positive_int(value, "pagination.limit.default")
+                ),
+            )
 
         max_limit = limit_block.get("max")
         if max_limit is not None:
@@ -1287,30 +1309,68 @@ def _is_blank(value: Any) -> bool:
     return value is None or (isinstance(value, str) and not value.strip())
 
 
-def _resolve_control(expr: Any, resolver: Resolver) -> Any:
-    """Resolve an expression that decides what to request, strictly.
+def _control_value(
+    expr: Any,
+    resolver: Resolver,
+    label: str,
+    sink: _Sink[_T],
+    *,
+    absent_hint: str = "",
+) -> _T:
+    """Resolve an expression that decides what to request.
 
-    Two resolution policies, split by what the value governs. A request
-    *param* resolves leniently: an unresolved node is dropped so a
-    partly-known request still goes out. Anything that decides *what is
-    requested or where the read starts* cannot use that policy -- the page
-    size, the initial offset or page, the per-page step, the keyset seed, the
-    next cursor, the next link. Lenient resolution renders
-    `{"template": "p-${response.body.next}"}` as ``"p-"`` when the field is
-    absent, which is not blank, so the engine would read from a position it
-    invented out of configuration that was never there.
+    Every expression in an endpoint document has one of two roles, and the
+    role -- not the call site -- settles how it is resolved, how a failure is
+    classified, and what the result is allowed to be:
 
-    Strict resolution answers the question actually being asked: did the
-    declared next-page value resolve at all. A field that is present and null
-    still comes back as ``None`` (and reads as blank); only a genuinely
-    unreachable path raises, and that is returned as "no value". An unknown
-    *scope* raises plain KeyError and is left to propagate -- that is a typo in
-    the document, not a provider omission, and the caller classifies it.
+    * *payload* -- a request param or body field. Resolved leniently, so an
+      unresolved node is dropped and a partly-known request still goes out.
+    * *control* -- decides what is requested or where the read starts: the
+      page size, the initial offset or page, the per-page step, the keyset
+      seed, the next cursor, the next link. Handled here.
+
+    The three policies a control value needs are applied together because
+    applying only two of them is a silent-data-loss bug, and the previous
+    shape -- three helpers each site had to remember to compose -- is what
+    let one site at a time miss one of them through eight review rounds:
+
+    1. *Strict resolution.* Lenient resolution renders
+       ``{"template": "p-${response.body.next}"}`` as ``"p-"`` when the field
+       is absent. That is not blank, so the read would continue from a
+       position invented out of configuration that was never there.
+    2. *Deterministic classification.* A malformed node raises
+       ``TransportSpecError`` and a typo'd scope (``runtme.batch_size``) a
+       plain ``KeyError``; neither is in the source worker's deterministic
+       set, so an unwrapped one is retried until the attempts run out on a
+       defect that cannot fix itself. Both become ``ReadError`` naming the
+       field.
+    3. *A sink.* A control value ends up somewhere specific -- a query param,
+       an integer step, a URL -- and *sink* is the guard for that
+       destination. There is no way to resolve a control value without
+       choosing one.
+
+    Whether the *field* may be omitted is the caller's question -- several are
+    optional in the contract -- but once declared, an expression that resolves
+    to nothing is always a defect: there is no control value the engine may
+    invent. *absent_hint* adds the site's advice on authoring it properly.
     """
-    try:
-        return resolver.resolve(expr)
-    except UnresolvedValueError:
-        return None
+    with _document_errors(label):
+        try:
+            resolved = resolver.resolve(expr)
+        except UnresolvedValueError:
+            # Missing data, not a malformed document: `None` here means the
+            # declared path led nowhere. A field that is present and null
+            # resolves to `None` too, and reads the same -- both are "the
+            # value the document points at is not there".
+            resolved = None
+    if _is_blank(resolved):
+        raise ReadError(
+            f"{label} is declared but resolved to no value, so the read "
+            f"cannot continue from where the document says. Falling back to "
+            f"anything else would silently change which records are read"
+            + (f". {absent_hint}" if absent_hint else "")
+        )
+    return sink(resolved, label)
 
 
 def _require_scalar(value: Any, label: str) -> Any:
@@ -1328,6 +1388,21 @@ def _require_scalar(value: Any, label: str) -> Any:
             f"{label} resolved to {type(value).__name__} ({value!r}), which "
             f"cannot be sent as a single request parameter; expected a string "
             f"or number"
+        )
+    return value
+
+
+def _require_url(value: Any, label: str) -> str:
+    """Reject a next-page link that is not a URL string.
+
+    The sink for ``link.next_url``. Only the type is settled here; whether the
+    URL may be *followed* is a trust question answered against the endpoint's
+    own origin at the call site, which is the only place that knows it.
+    """
+    if not isinstance(value, str):
+        raise ReadError(
+            f"{label} resolved to {type(value).__name__} ({value!r}), "
+            f"expected a URL string"
         )
     return value
 
@@ -1359,9 +1434,13 @@ def _canonical_wire(url: str, query: Mapping[str, Any], body: Any) -> _Wire:
     provider returning its own URL would get one duplicate page emitted before
     the repeat was noticed on the iteration after.
 
-    The merge is ``update_query``, the exact call aiohttp makes on the way to
-    the socket, so the two spellings collapse the way the transport collapses
-    them and no other way. That matters in both directions: a self link
+    The merge is ``extend_query`` because that is what aiohttp does on the way
+    to the socket (``client_reqrep.py``: ``url = url.extend_query(params)``),
+    so the two spellings collapse the way the transport collapses them and no
+    other way. ``extend_query`` *appends*: a param whose name the request URL
+    already carries is sent twice, not replaced, and the identity has to say
+    so or a read that never advances would look like it does. That matters in
+    both directions: a self link
     differing only in host casing or an explicit ``:443`` is the same request
     and must not read as progress, while a link carrying a genuinely repeated
     key (``?cursor=a&cursor=b``) is a different request from ``?cursor=b`` and
@@ -1371,7 +1450,7 @@ def _canonical_wire(url: str, query: Mapping[str, Any], body: Any) -> _Wire:
     Values are stringified because the query string only carries text: a
     declared ``{"limit": 50}`` and a link's ``limit=50`` are the same request.
     """
-    target = _target_url(url).update_query(
+    target = _target_url(url).extend_query(
         {name: str(value) for name, value in query.items()}
     )
     # Digested rather than kept whole: a long read holds one entry per page,
@@ -1462,15 +1541,17 @@ def _optional_int_setting(
     declared = block.get(key)
     if declared is None:
         return None
-    label = f"pagination.{strategy}.{key}"
-    resolved = _resolve_control(declared, resolver)
-    if resolved is None:
-        raise ReadError(
-            f"{label} is declared but did not resolve. It anchors where the "
-            f"read starts or how far each page steps, so it cannot fall back "
-            f"to a default without silently changing which records are read"
-        )
-    return _as_positive_int(resolved, label) if positive else _as_int(resolved, label)
+    return _control_value(
+        declared,
+        resolver,
+        f"pagination.{strategy}.{key}",
+        _as_positive_int if positive else _as_int,
+        absent_hint=(
+            "It anchors where the read starts or how far each page steps, so "
+            "it cannot fall back to a default without silently changing which "
+            "records are read"
+        ),
+    )
 
 
 def _as_int(value: Any, label: str) -> int:
@@ -1581,23 +1662,24 @@ def _build_cursor_advance(block: dict[str, Any], state: _RequestState) -> _Advan
     params.pop(param, None)
 
     def advance(_page: _Page, page_resolver: Resolver) -> _NextRequest | None:
-        token = _resolve_control(next_cursor, page_resolver)
-        if _is_blank(token):
-            # `advance` only runs when stop_when evaluated false -- the document
-            # said this is not the last page. A missing token then contradicts
-            # it, and ending quietly would drop every remaining page while the
-            # run reported success: the #346 failure shape. A cursor provider
-            # that omits the token on its last page is authored by making
-            # stop_when say so (`{"missing": {"ref": ...}}`), which fires before
-            # this point.
-            raise ReadError(
-                "cursor pagination: stop_when did not fire, but next_cursor "
-                "resolved to no token, so the next page cannot be requested. "
-                "Declare the last page in stop_when (for example "
+        # `advance` only runs when stop_when evaluated false -- the document
+        # said this is not the last page. A missing token then contradicts it,
+        # and ending quietly would drop every remaining page while the run
+        # reported success: the #346 failure shape. A cursor provider that
+        # omits the token on its last page is authored by making stop_when say
+        # so, which fires before this point.
+        params[param] = _control_value(
+            next_cursor,
+            page_resolver,
+            "pagination.cursor.next_cursor",
+            _require_scalar,
+            absent_hint=(
+                "stop_when did not fire, so the document says this is not the "
+                "last page. Declare the ending in stop_when (for example "
                 '`{"missing": ...}` on the same field) if the provider omits '
                 "the token when it is done"
-            )
-        params[param] = _require_scalar(token, "cursor pagination: next_cursor")
+            ),
+        )
         return _NextRequest(full_url, dict(params), True)
 
     return advance
@@ -1614,21 +1696,19 @@ def _build_link_advance(block: dict[str, Any], state: _RequestState) -> _Advance
         )
 
     def advance(_page: _Page, page_resolver: Resolver) -> _NextRequest | None:
-        target = _resolve_control(next_url, page_resolver)
-        if _is_blank(target):
-            # Same reasoning as cursor: stop_when said this is not the last
-            # page, so an absent link is a contradiction, not a quiet ending.
-            raise ReadError(
-                "link pagination: stop_when did not fire, but next_url "
-                "resolved to no link, so the next page cannot be requested. "
-                "Declare the last page in stop_when if the provider omits the "
-                "link when it is done"
-            )
-        if not isinstance(target, str):
-            raise ReadError(
-                f"link pagination: next_url resolved to "
-                f"{type(target).__name__}, expected a URL string"
-            )
+        # Same reasoning as cursor: stop_when said this is not the last page,
+        # so an absent link is a contradiction, not a quiet ending.
+        target = _control_value(
+            next_url,
+            page_resolver,
+            "pagination.link.next_url",
+            _require_url,
+            absent_hint=(
+                "stop_when did not fire, so the document says this is not the "
+                "last page. Declare the ending in stop_when if the provider "
+                "omits the link when it is done"
+            ),
+        )
         # This is the one place a *response* decides where the next request
         # goes, and the session carries the connection's auth headers on every
         # request it makes. An absolute link to another host would therefore
@@ -1670,17 +1750,17 @@ def _build_keyset_advance(block: dict[str, Any], state: _RequestState) -> _Advan
     field_path = order_by_field.split(".")
     initial = block.get("initial")
     if initial is not None:
-        seed = _resolve_control(initial, resolver)
-        if seed is not None:
-            seed = _require_scalar(seed, "keyset pagination: keyset.initial")
-        if seed is None:
-            raise ReadError(
-                "keyset pagination: keyset.initial is declared but did not "
-                "resolve. Sending it as an empty value would start the read "
-                "from an arbitrary point; omit keyset.initial to start from "
-                "the beginning"
-            )
-        params[param] = seed
+        params[param] = _control_value(
+            initial,
+            resolver,
+            "pagination.keyset.initial",
+            _require_scalar,
+            absent_hint=(
+                "Sending it as an empty value would start the read from an "
+                "arbitrary point; omit keyset.initial to start from the "
+                "beginning"
+            ),
+        )
     else:
         params.pop(param, None)
 

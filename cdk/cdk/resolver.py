@@ -33,15 +33,24 @@ class ResolutionContext:
     ``runtime.batch_size``. Scopes intentionally use plain ``Mapping``
     values rather than nested objects so connector authors can model
     arbitrary provider context shapes without bespoke schemas.
+
+    The names are the published contract's resolution-scope vocabulary,
+    restated here because ``cdk`` carries no dependency on the contract
+    package — connectors build against the CDK, so that dependency would
+    point the wrong way. A drift guard compares the two from the one layer
+    that can import both
+    (``tests/unit/analitiq_stream/connectors/test_pagination_contract_drift.py``);
+    a scope the contract validates but this tuple omits makes a clean
+    document die at read time.
     """
 
     connector: Mapping[str, Any] = field(default_factory=dict)
     connection: Mapping[str, Any] = field(default_factory=dict)
     secrets: Mapping[str, Any] = field(default_factory=dict)
     auth: Mapping[str, Any] = field(default_factory=dict)
+    stream: Mapping[str, Any] = field(default_factory=dict)
     runtime: Mapping[str, Any] = field(default_factory=dict)
     state: Mapping[str, Any] = field(default_factory=dict)
-    derived: Mapping[str, Any] = field(default_factory=dict)
     request: Mapping[str, Any] = field(default_factory=dict)
     response: Mapping[str, Any] = field(default_factory=dict)
 
@@ -50,9 +59,9 @@ class ResolutionContext:
         "connection",
         "secrets",
         "auth",
+        "stream",
         "runtime",
         "state",
-        "derived",
         "request",
         "response",
     )
@@ -109,9 +118,9 @@ class ResolutionContext:
             connection=self.connection,
             secrets=self.secrets,
             auth=self.auth,
+            stream=self.stream,
             runtime=runtime,
             state=self.state,
-            derived=self.derived,
             request=self.request,
             response=self.response,
         )
