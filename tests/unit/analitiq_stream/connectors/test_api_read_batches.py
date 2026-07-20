@@ -2808,3 +2808,49 @@ class TestPaginationSilentTruncationRegressions:
                 stream_name="items",
                 batch_size=10,
             )
+
+    @pytest.mark.asyncio
+    async def test_a_document_defect_emits_nothing_at_all(self):
+        """A stream that cannot run must not write its first page first.
+
+        The extract stage enqueues a yielded batch immediately, so emitting
+        before the page is fully decided lets a deterministically broken
+        document transform and write page 1 and only then fail. The defect
+        here (a keyset ordering field the records do not carry) is knowable
+        the moment the page arrives.
+        """
+        session = _FakeSession(
+            [
+                _FakeResponse(
+                    status=200,
+                    body={"records": [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]},
+                )
+            ]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(
+            pagination={
+                "type": "keyset",
+                "keyset": {"param": "since", "order_by_field": "updated_at"},
+                "stop_when": {"empty": {"ref": "response.body.records"}},
+            },
+        )
+        emitted: list[Any] = []
+        with pytest.raises(ReadError, match="carries no 'updated_at'"):
+            async for batch in connector.read_batches(
+                runtime,
+                {
+                    "endpoint_document": endpoint,
+                    "stream_source": _stream_source(),
+                },
+                checkpoint=MagicMock(),
+                stream_name="items",
+                batch_size=10,
+            ):
+                emitted.append(batch)
+
+        assert (
+            emitted == []
+        ), "records reached the destination on a read that cannot run"

@@ -862,12 +862,20 @@ class APIConnector(BaseConnector):
                 return
             pages += 1
             records += len(page.records)
-            yield page.records
 
-            # Built inside the try so a malformed `response.metadata`
-            # expression surfaces as the same ReadError a malformed
-            # `stop_when` does — both are authoring defects in the same
-            # document, and they should not classify differently.
+            # This page is decided in full -- stop condition and next request
+            # both -- before any of it is emitted. A yielded batch is enqueued
+            # by the extract stage immediately, so emitting first would let a
+            # stream with a deterministic document defect (a malformed
+            # stop_when, a keyset order_by_field the records do not carry)
+            # transform and write its first page and only then fail. The
+            # defect is in the document, not the data: it is knowable now, and
+            # nothing should reach the destination on a read that cannot run.
+            #
+            # `response.metadata` resolves inside the same guard as the
+            # predicate: both are authoring defects in the same document and
+            # should not classify differently. `stage` names which one failed,
+            # so the message points at the actual culprit.
             stage = "response.metadata"
             try:
                 page_resolver = resolver.with_context(
@@ -877,9 +885,7 @@ class APIConnector(BaseConnector):
                     )
                 )
                 stage = "the stop_when predicate"
-                if evaluate_predicate(stop_when, page_resolver):
-                    self._log_read_end(p_type, "stop_when", pages, records)
-                    return
+                stop = evaluate_predicate(stop_when, page_resolver)
             except (TransportSpecError, KeyError) as err:
                 # KeyError is how the resolver reports an unknown scope name
                 # (`respones.body.next`) — an authoring defect in this same
@@ -892,36 +898,46 @@ class APIConnector(BaseConnector):
                     f"this response: {err}"
                 ) from err
 
-            # Inside the same guard: `next_cursor` / `next_url` are expressions
-            # from the same document, resolved against the same page scope, so
-            # a typo in one has to classify like a typo in the other.
-            try:
-                following = advance(page, page_resolver)
-            except (TransportSpecError, KeyError) as err:
-                raise ReadError(
-                    f"{p_type!r} pagination: the next-page expression is not "
-                    f"evaluable against this response: {err}"
-                ) from err
+            following: _NextRequest | None = None
+            if not stop:
+                # Same guard, same reason: `next_cursor` / `next_url` are
+                # expressions from the same document, resolved against the same
+                # page scope, so a typo in one classifies like a typo in the
+                # other.
+                try:
+                    following = advance(page, page_resolver)
+                except (TransportSpecError, KeyError) as err:
+                    raise ReadError(
+                        f"{p_type!r} pagination: the next-page expression is "
+                        f"not evaluable against this response: {err}"
+                    ) from err
+
+                # A strategy that asks for the same request it just made will
+                # do so forever: a provider echoing one cursor, a `next_url`
+                # pointing at itself, a `{"template": ...}` next-page
+                # expression that renders a constant when its field is null.
+                # `stop_when` is the declared terminator, but it is written
+                # against provider data and cannot be trusted on a provider
+                # that is misbehaving -- and every page is emitted, so an
+                # unbounded loop feeds the destination the same records without
+                # limit. Identical consecutive requests mean no progress,
+                # whatever the strategy.
+                if following == sent:
+                    raise ReadError(
+                        f"{p_type!r} pagination: page {pages + 1} would repeat "
+                        f"the previous request exactly ({url!r}), so the read "
+                        f"cannot advance. The provider is returning a next-page "
+                        f"value that does not change"
+                    )
+
+            yield page.records
+
+            if stop:
+                self._log_read_end(p_type, "stop_when", pages, records)
+                return
             if following is None:
                 self._log_read_end(p_type, "no further page", pages, records)
                 return
-
-            # A strategy that asks for the same request it just made will do so
-            # forever: a provider echoing one cursor, a `next_url` pointing at
-            # itself, a `{"template": ...}` next-page expression that renders a
-            # constant when its field is null. `stop_when` is the declared
-            # terminator, but it is written against provider data and cannot be
-            # trusted to fire on a provider that is misbehaving -- and every
-            # page is yielded downstream, so an unbounded loop feeds the
-            # destination the same records without limit. Identical consecutive
-            # requests mean no progress, whatever the strategy.
-            if following == sent:
-                raise ReadError(
-                    f"{p_type!r} pagination: page {pages + 1} would repeat the "
-                    f"previous request exactly ({url!r}), so the read cannot "
-                    f"advance. The provider is returning a next-page value that "
-                    f"does not change"
-                )
             url, params, send_params = following
 
     @staticmethod
