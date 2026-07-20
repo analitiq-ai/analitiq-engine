@@ -8,6 +8,8 @@ there, comparison operators refuse to.
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 import pytest
 
 from cdk.exceptions import TransportSpecError
@@ -224,3 +226,54 @@ def test_unresolved_sentinel_is_a_singleton():
     from cdk.predicate import _Unresolved
 
     assert _Unresolved() is UNRESOLVED
+
+
+# ---------------------------------------------------------------------------
+# Decimal / float operands
+# ---------------------------------------------------------------------------
+
+
+# Every comparison, over the pairing that actually occurs: the provider's value
+# arrives as Decimal (response bodies are parsed with `parse_float=Decimal` so
+# digits survive to Arrow), the document's literal as a float. Comparing them
+# raw widens the Decimal to the float's binary value, so `Decimal("0.1")` is
+# neither equal to nor >= `0.1` and a stop predicate on a fractional field can
+# never fire.
+@pytest.mark.parametrize(
+    ("operator", "literal", "expected"),
+    [
+        ("eq", 0.1, True),
+        ("neq", 0.1, False),
+        ("gte", 0.1, True),
+        ("lte", 0.1, True),
+        ("lt", 0.1, False),
+        ("gt", 0.1, False),
+        ("lt", 0.2, True),
+        ("gt", 0.05, True),
+    ],
+)
+def test_a_decimal_response_compares_against_a_float_literal(
+    operator, literal, expected
+):
+    """A provider value and a document literal spelling the same number agree."""
+    resolver = _resolver(body={"ratio": Decimal("0.1")})
+    predicate = {operator: [{"ref": "response.body.ratio"}, {"literal": literal}]}
+    assert evaluate_predicate(predicate, resolver) is expected
+
+
+def test_float_response_against_decimal_literal_is_aligned_too():
+    """The pairing holds whichever side carries the Decimal."""
+    resolver = _resolver(body={"ratio": 0.1})
+    predicate = {"eq": [{"ref": "response.body.ratio"}, {"literal": Decimal("0.1")}]}
+    assert evaluate_predicate(predicate, resolver) is True
+
+
+def test_exact_decimal_digits_are_not_rounded_to_the_float_literal():
+    """Alignment must not flatten the provider's value to the literal's precision.
+
+    `0.1` as a float is `0.1000000000000000055511151231257827`, so widening the
+    Decimal side would make a genuinely larger provider value compare equal.
+    """
+    resolver = _resolver(body={"ratio": Decimal("0.10000000000000001")})
+    predicate = {"eq": [{"ref": "response.body.ratio"}, {"literal": 0.1}]}
+    assert evaluate_predicate(predicate, resolver) is False

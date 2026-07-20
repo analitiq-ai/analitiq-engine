@@ -28,6 +28,7 @@ from analitiq.contracts.endpoints import RESERVED_RESPONSE_SCOPES, Pagination, P
 from analitiq.contracts.value_expression import RESOLUTION_SCOPES
 from pydantic import Tag
 
+from cdk.exceptions import UnresolvedValueError
 from cdk.predicate import PREDICATE_OPERATORS
 from cdk.resolver import ResolutionContext, Resolver
 from src.source.connectors.api import (
@@ -83,17 +84,45 @@ def test_response_scope_keys_match_the_contract():
     assert frozenset(scope) == RESERVED_RESPONSE_SCOPES
 
 
+# Contract scopes the engine knowingly does not serve yet. A ref into one of
+# these is reported as an unknown scope, which is a document defect rather
+# than missing data — deliberately, because a *known but empty* scope reads as
+# missing data and the per-request policy drops that silently. Nothing
+# populates `stream`, and what belongs in it is the contract's call, not the
+# engine's; listing it here keeps the gap visible instead of implied by a
+# vocabulary mismatch.
+_SCOPES_AWAITING_ENGINE_SUPPORT = frozenset({"stream"})
+
+
 def test_resolution_scopes_match_the_contract():
-    """The engine addresses exactly the scope vocabulary the contract validates.
+    """The engine addresses the contract's scope vocabulary, minus a named gap.
 
     Both sides police this list and neither can see the other. A scope the
     contract accepts but the resolver does not is the worst direction: the
     document validates clean, ships, and every ref into that scope dies at
-    read time as an unknown-scope defect. One the resolver accepts but the
-    contract does not can never appear in a validated document, so it is dead
-    vocabulary that reads as supported.
+    read time. One the resolver accepts but the contract does not can never
+    appear in a validated document, so it is dead vocabulary that reads as
+    supported. A *new* contract scope therefore has to be either implemented
+    or added to the list above, by hand, with a reason.
     """
-    assert frozenset(ResolutionContext._SCOPES) == frozenset(RESOLUTION_SCOPES)
+    engine = frozenset(ResolutionContext._SCOPES)
+    contract = frozenset(RESOLUTION_SCOPES)
+    assert engine <= contract, f"engine invents {sorted(engine - contract)}"
+    assert contract - engine == _SCOPES_AWAITING_ENGINE_SUPPORT
+
+
+def test_an_unserved_contract_scope_fails_loudly_rather_than_dropping():
+    """The gap above must surface as a defect, never as a quietly absent value.
+
+    This is why the scope is withheld rather than declared empty: `lookup`
+    raises a plain `KeyError` for an unknown scope, which the read path
+    reports as a document error, while `UnresolvedValueError` is missing data
+    that a request param is allowed to drop.
+    """
+    for scope in _SCOPES_AWAITING_ENGINE_SUPPORT:
+        with pytest.raises(KeyError) as caught:
+            ResolutionContext().lookup(f"{scope}.anything")
+        assert not isinstance(caught.value, UnresolvedValueError)
 
 
 # Fields of a contract pagination block that carry a plain scalar rather than

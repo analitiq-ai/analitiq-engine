@@ -39,16 +39,22 @@ class ResolutionContext:
     package — connectors build against the CDK, so that dependency would
     point the wrong way. A drift guard compares the two from the one layer
     that can import both
-    (``tests/unit/analitiq_stream/connectors/test_pagination_contract_drift.py``);
-    a scope the contract validates but this tuple omits makes a clean
-    document die at read time.
+    (``tests/unit/analitiq_stream/connectors/test_pagination_contract_drift.py``).
+
+    ``stream`` is the contract's one scope this tuple deliberately omits:
+    nothing engine-side populates it yet, and admitting a scope with no data
+    behind it is worse than rejecting it. An unknown scope raises ``KeyError``
+    and is reported as a document defect, whereas a *known but empty* scope
+    reads as missing data, which the per-request policy silently drops — a
+    payload param referencing ``stream.x`` would vanish from the request
+    instead of failing. It stays out until the contract settles what the
+    scope contains; the drift guard names it so it cannot be forgotten.
     """
 
     connector: Mapping[str, Any] = field(default_factory=dict)
     connection: Mapping[str, Any] = field(default_factory=dict)
     secrets: Mapping[str, Any] = field(default_factory=dict)
     auth: Mapping[str, Any] = field(default_factory=dict)
-    stream: Mapping[str, Any] = field(default_factory=dict)
     runtime: Mapping[str, Any] = field(default_factory=dict)
     state: Mapping[str, Any] = field(default_factory=dict)
     request: Mapping[str, Any] = field(default_factory=dict)
@@ -59,7 +65,6 @@ class ResolutionContext:
         "connection",
         "secrets",
         "auth",
-        "stream",
         "runtime",
         "state",
         "request",
@@ -118,7 +123,6 @@ class ResolutionContext:
             connection=self.connection,
             secrets=self.secrets,
             auth=self.auth,
-            stream=self.stream,
             runtime=runtime,
             state=self.state,
             request=self.request,

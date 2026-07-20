@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping
+from decimal import Decimal
 from typing import Any
 
 from cdk.exceptions import TransportSpecError, UnresolvedValueError
@@ -162,6 +163,30 @@ def _branches(operand: Any, operator: str) -> list[Any]:
     return operand
 
 
+def _align_numbers(left: Any, right: Any) -> tuple[Any, Any]:
+    """Put a Decimal and a float on one scale before they are compared.
+
+    Response bodies are parsed with ``parse_float=Decimal`` so a provider's
+    digits survive to Arrow exactly, while a literal in the endpoint document
+    arrives from ordinary JSON parsing as a ``float``. Python then compares
+    the two by widening the Decimal to the float's binary value, so operands
+    that are identical in JSON are not equal here: ``Decimal("0.1") == 0.1``
+    is False, and ``Decimal("0.1") >= 0.1`` is False as well. A stop predicate
+    written against a fractional field would never fire, and the read would
+    run past its real last page.
+
+    Converting the float side rather than the Decimal side keeps the
+    provider's value exact -- it is the one being tested -- and gives the
+    literal the value its digits spell. Non-numbers, and int/Decimal pairs
+    (already exact together), are returned untouched.
+    """
+    if isinstance(left, float) and isinstance(right, Decimal):
+        return Decimal(str(left)), right
+    if isinstance(left, Decimal) and isinstance(right, float):
+        return left, Decimal(str(right))
+    return left, right
+
+
 def _compare(operator: str, operand: Any, resolver: Any) -> bool:
     """Evaluate one two-operand comparison."""
     if not isinstance(operand, list) or len(operand) != 2:
@@ -181,6 +206,7 @@ def _compare(operator: str, operand: Any, resolver: Any) -> bool:
                 f"the provider may omit"
             )
 
+    left, right = _align_numbers(left, right)
     if operator == "eq":
         return bool(left == right)
     if operator == "neq":
