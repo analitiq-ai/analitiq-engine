@@ -68,6 +68,9 @@ logger = logging.getLogger(__name__)
 # outages. Everything else non-200 is a deterministic contract/config error.
 _TRANSIENT_HTTP_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
 
+# Redirect statuses. Refused rather than followed -- see _request_page.
+_REDIRECT_HTTP_STATUSES = frozenset({301, 302, 303, 307, 308})
+
 # Lookback subtracted from the stored cursor on an incremental read when the
 # stream has a prior cursor but declares no safety window of its own. It is an
 # operational safety default, not a per-connector attribute, so connectors
@@ -388,8 +391,6 @@ class APIConnector(BaseConnector):
             resolver=resolver,
             build_request=build_request,
         ):
-            if not batch:
-                continue
             yield plan.schema_contract.from_pylist(batch)
 
             batch_count += 1
@@ -407,14 +408,32 @@ class APIConnector(BaseConnector):
         cursor_field: str,
         batch_count: int,
     ) -> None:
-        """Checkpoint the cursor at the last record of *batch*."""
-        cursor_value = batch[-1].get(cursor_field)
+        """Checkpoint the cursor at the last record of *batch*.
+
+        Absent and null are opposite situations here, the same way they are
+        for a keyset ordering field. A record that carries no ``cursor_field``
+        at all means the stream declared a field its records do not have: the
+        cursor then never advances, every run re-reads the whole stream from
+        the beginning, and nothing ever says so. A field that is present and
+        null is a record the provider has no cursor value for -- unusual, but
+        the stream is otherwise wired correctly.
+        """
+        last_record = batch[-1]
+        if cursor_field not in last_record:
+            raise ReadError(
+                f"stream {stream_name!r}: records carry no {cursor_field!r} "
+                f"field, so the incremental cursor can never advance and every "
+                f"run would re-read the whole stream. Declared keys on the "
+                f"record: {sorted(last_record)}"
+            )
+        cursor_value = last_record[cursor_field]
         if cursor_value is None:
-            # Safe under at-least-once + upsert (resume re-reads), but
-            # visible: an author debugging "incremental stream keeps
-            # re-reading its tail" needs this signal.
-            logger.debug(
-                "stream %r: last record has no %r value; "
+            # Safe under at-least-once + upsert (a resume re-reads), but said
+            # out loud: an author debugging "incremental stream keeps
+            # re-reading its tail" needs this signal, and the worker logs at
+            # INFO so debug would never reach them.
+            logger.warning(
+                "stream %r: last record has a null %r; "
                 "cursor not advanced for batch %d",
                 stream_name,
                 cursor_field,
@@ -812,6 +831,9 @@ class APIConnector(BaseConnector):
         pages = 0
         records = 0
         while True:
+            # Snapshot what this page actually asks for, before the strategy
+            # mutates the live param table to build the next one.
+            sent = (url, dict(params), send_params)
             query, body = build_request(params)
             page = await self._request_page(
                 url, method, query if send_params else {}, records_ref, body=body
@@ -846,6 +868,7 @@ class APIConnector(BaseConnector):
             # expression surfaces as the same ReadError a malformed
             # `stop_when` does — both are authoring defects in the same
             # document, and they should not classify differently.
+            stage = "response.metadata"
             try:
                 page_resolver = resolver.with_context(
                     replace(
@@ -853,6 +876,7 @@ class APIConnector(BaseConnector):
                         response=self._response_scope(page, metadata_spec, resolver),
                     )
                 )
+                stage = "the stop_when predicate"
                 if evaluate_predicate(stop_when, page_resolver):
                     self._log_read_end(p_type, "stop_when", pages, records)
                     return
@@ -864,14 +888,40 @@ class APIConnector(BaseConnector):
                 # it as an internal failure, pointing whoever reads the log at
                 # the engine instead of at the typo.
                 raise ReadError(
-                    f"{p_type!r} pagination: stop_when predicate is not "
-                    f"evaluable against this response: {err}"
+                    f"{p_type!r} pagination: {stage} is not evaluable against "
+                    f"this response: {err}"
                 ) from err
 
-            following = advance(page, page_resolver)
+            # Inside the same guard: `next_cursor` / `next_url` are expressions
+            # from the same document, resolved against the same page scope, so
+            # a typo in one has to classify like a typo in the other.
+            try:
+                following = advance(page, page_resolver)
+            except (TransportSpecError, KeyError) as err:
+                raise ReadError(
+                    f"{p_type!r} pagination: the next-page expression is not "
+                    f"evaluable against this response: {err}"
+                ) from err
             if following is None:
                 self._log_read_end(p_type, "no further page", pages, records)
                 return
+
+            # A strategy that asks for the same request it just made will do so
+            # forever: a provider echoing one cursor, a `next_url` pointing at
+            # itself, a `{"template": ...}` next-page expression that renders a
+            # constant when its field is null. `stop_when` is the declared
+            # terminator, but it is written against provider data and cannot be
+            # trusted to fire on a provider that is misbehaving -- and every
+            # page is yielded downstream, so an unbounded loop feeds the
+            # destination the same records without limit. Identical consecutive
+            # requests mean no progress, whatever the strategy.
+            if following == sent:
+                raise ReadError(
+                    f"{p_type!r} pagination: page {pages + 1} would repeat the "
+                    f"previous request exactly ({url!r}), so the read cannot "
+                    f"advance. The provider is returning a next-page value that "
+                    f"does not change"
+                )
             url, params, send_params = following
 
     @staticmethod
@@ -1004,7 +1054,25 @@ class APIConnector(BaseConnector):
             # Resolved ``operations.read.request.body``; only sent when the
             # endpoint declares one, so plain GET reads stay body-less.
             request_kwargs["json"] = body
+        # Redirects are followed here rather than by aiohttp, which strips only
+        # `Authorization` when a redirect crosses origins and forwards every
+        # other default header. Connection auth is regularly a custom header
+        # (`X-Api-Key`, `Private-Token`, a session `Cookie`), so a provider
+        # answering 302 with a foreign Location would hand those credentials
+        # over -- on any request, under any strategy. Checking a next_url
+        # string is no defence against that; the redirect is the mechanism, so
+        # the check belongs here.
+        request_kwargs["allow_redirects"] = False
         async with self.session.request(method, url, **request_kwargs) as response:
+            if response.status in _REDIRECT_HTTP_STATUSES:
+                location = response.headers.get("Location")
+                raise ReadError(
+                    f"API request redirected: {method} {url} -> "
+                    f"{response.status} {location!r}. Redirects are not "
+                    f"followed: this request carries the connection's "
+                    f"credentials, and a redirect can move it to another host. "
+                    f"Point the endpoint at the final URL instead"
+                )
             if response.status != 200:
                 error_text = await response.text()
                 body_snippet = error_text[:500]
@@ -1106,6 +1174,25 @@ def _is_blank(value: Any) -> bool:
     return value is None or (isinstance(value, str) and not value.strip())
 
 
+def _require_scalar(value: Any, label: str) -> Any:
+    """Reject a page-advance value that cannot be sent as a single param.
+
+    A provider-supplied token or key reaches the query string, where yarl
+    accepts only str/int/float. A dict or bool raises a bare ``TypeError``
+    from inside the HTTP layer, and a *list* is silently expanded into
+    repeated query values -- letting a provider inject extra values for a
+    param the endpoint declared. Both are provider data crossing into a
+    request, so both are named here rather than left to the transport.
+    """
+    if isinstance(value, bool) or not isinstance(value, (str, int, float, Decimal)):
+        raise ReadError(
+            f"{label} resolved to {type(value).__name__} ({value!r}), which "
+            f"cannot be sent as a single request parameter; expected a string "
+            f"or number"
+        )
+    return value
+
+
 _DEFAULT_PORTS = {"http": 80, "https": 443}
 
 
@@ -1120,6 +1207,13 @@ def _origin(url: str) -> str:
     """
     parts = urlsplit(url)
     if not parts.scheme or not parts.hostname:
+        return ""
+    if parts.username is not None or parts.password is not None:
+        # Userinfo is not part of the origin, so a link like
+        # `http://evil:pw@api.provider.com/x` would pass a same-origin check
+        # and then be turned into an outgoing `Authorization: Basic ...` --
+        # credentials the provider chose for a request the engine makes. No
+        # origin at all rather than a match.
         return ""
     scheme = parts.scheme.lower()
     try:
@@ -1308,7 +1402,7 @@ def _build_cursor_advance(block: dict[str, Any], state: _RequestState) -> _Advan
             # never a hardcoded `next_cursor`.
             logger.debug("cursor pagination: next_cursor expression yielded no token")
             return None
-        params[param] = token
+        params[param] = _require_scalar(token, "cursor pagination: next_cursor")
         return _NextRequest(full_url, dict(params), True)
 
     return advance
@@ -1414,7 +1508,9 @@ def _build_keyset_advance(block: dict[str, Any], state: _RequestState) -> _Advan
                 order_by_field,
             )
             return None
-        params[param] = last_key
+        params[param] = _require_scalar(
+            last_key, f"keyset pagination: record field {order_by_field!r}"
+        )
         return _NextRequest(full_url, dict(params), True)
 
     return advance

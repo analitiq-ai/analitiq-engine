@@ -87,8 +87,17 @@ class _FakeSession:
         self.bodies: list[Any] = []
 
     def request(
-        self, method: str, url: str, *, params: dict[str, Any], json: Any = None
+        self,
+        method: str,
+        url: str,
+        *,
+        params: dict[str, Any],
+        json: Any = None,
+        allow_redirects: bool = True,
     ):
+        # The connector turns redirect-following off and handles 3xx itself, so
+        # the fake has to accept the flag the real session takes.
+        assert allow_redirects is False, "the connector must not follow redirects"
         self.calls.append((method, url, dict(params)))
         self.bodies.append(json)
         if not self._responses:
@@ -2582,6 +2591,212 @@ class TestPaginationSilentTruncationRegressions:
             },
         )
         with pytest.raises(ReadError, match="not evaluable against this response"):
+            await _consume(
+                connector,
+                runtime,
+                config={
+                    "endpoint_document": endpoint,
+                    "stream_source": _stream_source(),
+                },
+                state_manager=MagicMock(),
+                stream_name="items",
+                batch_size=10,
+            )
+
+    @pytest.mark.asyncio
+    async def test_redirect_is_refused_rather_than_followed(self):
+        """A redirect must not carry the connection's credentials to a new host.
+
+        aiohttp follows redirects by default and strips only `Authorization`,
+        forwarding every other default header — and connection auth is
+        routinely a custom header. Checking a `next_url` string is no defence:
+        the redirect works on any request under any strategy, so the engine
+        stops following redirects entirely.
+        """
+        session = _FakeSession(
+            [
+                _FakeResponse(
+                    status=302,
+                    body={},
+                    headers={"Location": "https://evil.example.com/collect"},
+                )
+            ]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records()
+        with pytest.raises(ReadError, match="Redirects are not"):
+            await _consume(
+                connector,
+                runtime,
+                config={
+                    "endpoint_document": endpoint,
+                    "stream_source": _stream_source(),
+                },
+                state_manager=MagicMock(),
+                stream_name="items",
+                batch_size=10,
+            )
+
+    @pytest.mark.asyncio
+    async def test_link_rejects_a_next_url_carrying_userinfo(self):
+        """Userinfo is not part of the origin, so it must not ride through the check.
+
+        `http://evil:pw@api.provider.com/x` is same-origin by hostname, but
+        aiohttp turns the userinfo into an outgoing `Authorization: Basic`
+        header — credentials the provider chose for a request the engine makes.
+        """
+        session = _FakeSession(
+            [
+                _FakeResponse(
+                    status=200,
+                    body={
+                        "records": [{"id": 1, "name": "a"}],
+                        "next": "https://evil:pw@api.example.test/items?page=2",
+                    },
+                )
+            ]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(
+            pagination={
+                "type": "link",
+                "link": {"next_url": {"ref": "response.body.next"}},
+                "stop_when": {"missing": {"ref": "response.body.next"}},
+            },
+        )
+        with pytest.raises(ReadError, match="not an absolute URL|outside the endpoint"):
+            await _consume(
+                connector,
+                runtime,
+                config={
+                    "endpoint_document": endpoint,
+                    "stream_source": _stream_source(),
+                },
+                state_manager=MagicMock(),
+                stream_name="items",
+                batch_size=10,
+            )
+
+    @pytest.mark.asyncio
+    async def test_a_cursor_that_never_changes_stops_the_read(self):
+        """A provider echoing one cursor would otherwise page forever.
+
+        `stop_when` is the declared terminator, but it is written against
+        provider data and cannot be trusted on a provider that misbehaves. Each
+        page is yielded downstream, so an unbounded loop feeds the destination
+        the same records without limit.
+        """
+        session = _FakeSession(
+            [
+                _FakeResponse(
+                    status=200,
+                    body={"records": [{"id": 1, "name": "a"}], "next": "SAME"},
+                )
+                for _ in range(6)
+            ]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(
+            pagination={
+                "type": "cursor",
+                "cursor": {
+                    "param": "cursor",
+                    "next_cursor": {"ref": "response.body.next"},
+                },
+                "stop_when": {"missing": {"ref": "response.body.next"}},
+            },
+        )
+        with pytest.raises(ReadError, match="would repeat the previous request"):
+            await _consume(
+                connector,
+                runtime,
+                config={
+                    "endpoint_document": endpoint,
+                    "stream_source": _stream_source(),
+                },
+                state_manager=MagicMock(),
+                stream_name="items",
+                batch_size=10,
+            )
+        # Stopped on the repeat, not after draining every queued response.
+        assert len(session.calls) == 2
+
+    @pytest.mark.asyncio
+    async def test_a_non_scalar_cursor_fails_by_name(self):
+        """A dict/list cursor must not reach the HTTP layer as a bare TypeError.
+
+        A list is worse than a crash: yarl expands it into repeated query
+        values, letting a provider inject extra values for a declared param.
+        """
+        session = _FakeSession(
+            [
+                _FakeResponse(
+                    status=200,
+                    body={
+                        "records": [{"id": 1, "name": "a"}],
+                        "next": {"token": "abc"},
+                    },
+                )
+            ]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(
+            pagination={
+                "type": "cursor",
+                "cursor": {
+                    "param": "cursor",
+                    "next_cursor": {"ref": "response.body.next"},
+                },
+                "stop_when": {"missing": {"ref": "response.body.next"}},
+            },
+        )
+        with pytest.raises(ReadError, match="cannot be sent as a single request"):
+            await _consume(
+                connector,
+                runtime,
+                config={
+                    "endpoint_document": endpoint,
+                    "stream_source": _stream_source(),
+                },
+                state_manager=MagicMock(),
+                stream_name="items",
+                batch_size=10,
+            )
+
+    @pytest.mark.asyncio
+    async def test_next_cursor_with_an_unknown_scope_raises_read_error(self):
+        """A typo in next_cursor classifies like the same typo in stop_when."""
+        session = _FakeSession(
+            [
+                _FakeResponse(
+                    status=200,
+                    body={"records": [{"id": 1, "name": "a"}], "next": "abc"},
+                )
+            ]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(
+            pagination={
+                "type": "cursor",
+                "cursor": {
+                    "param": "cursor",
+                    "next_cursor": {"ref": "respones.body.next"},
+                },
+                # Must not fire, or `advance` never runs and the typo is unseen.
+                "stop_when": {"missing": {"ref": "response.body.records"}},
+            },
+        )
+        with pytest.raises(ReadError, match="next-page expression is not evaluable"):
             await _consume(
                 connector,
                 runtime,

@@ -62,9 +62,9 @@ class _Unresolved:
 
 UNRESOLVED = _Unresolved()
 
-# Comparison operators, mapped to the operand count the contract fixes for
-# them. Ordering comparisons additionally require mutually comparable
-# operands, which Python enforces for us (a TypeError is caught below).
+# Two-operand comparisons. Ordering comparisons additionally require mutually
+# comparable operands, which Python enforces for us (a TypeError is caught in
+# :func:`_compare`).
 _COMPARISONS: frozenset[str] = frozenset({"eq", "neq", "lt", "lte", "gt", "gte"})
 _ABSENCE: frozenset[str] = frozenset({"exists", "missing", "empty", "not_empty"})
 _NESTING: frozenset[str] = frozenset({"and", "or", "not"})
