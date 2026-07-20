@@ -248,6 +248,23 @@ def _make_request_builder(
     base_url: str,
     resolver: Resolver,
 ) -> _RequestBuilder:
+    pagination = request.get("pagination")
+    if isinstance(pagination, Mapping):
+        strategy = pagination.get("strategy")
+        if isinstance(strategy, str):
+            allowed_control_fields = _CONTROL_FIELDS.get(strategy)
+            if allowed_control_fields is not None:
+                unknown_control_fields = sorted(
+                    key
+                    for key, value in pagination.items()
+                    if key not in {"strategy", "stop_when"} and isinstance(value, Mapping) and key not in allowed_control_fields
+                )
+                if unknown_control_fields:
+                    logger.debug(
+                        "Pagination strategy '%s' has unclassified control fields: %s",
+                        strategy,
+                        ", ".join(unknown_control_fields),
+                    )
     """Build the per-page ``params -> materialized request`` step for one read.
 
     A declared param is a *value*; where that value goes on the wire is said
