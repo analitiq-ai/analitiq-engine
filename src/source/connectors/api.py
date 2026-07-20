@@ -34,9 +34,11 @@ per-stream overrides; nothing else.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import timezone
 from decimal import Decimal
@@ -77,6 +79,31 @@ _REDIRECT_HTTP_STATUSES = frozenset({301, 302, 303, 307, 308})
 # never declare it. Sourced from ReplicationConfig; SourceConfig carries the
 # same default independently (models/state.py), so the two move separately.
 _DEFAULT_SAFETY_WINDOW_SECONDS: int = ReplicationConfig.safety_window_seconds
+
+
+@contextmanager
+def _document_errors(context: str, suffix: str = "is not resolvable") -> Iterator[None]:
+    """Classify any failure resolving a document expression as a config error.
+
+    Everything the endpoint document declares -- param defaults, the request
+    body, the page size, a strategy's setup values, the stop predicate, the
+    next-page expression -- is resolved through the same grammar and fails the
+    same two ways: ``TransportSpecError`` for a malformed node, and a plain
+    ``KeyError`` from the resolver for an unknown scope name (``runtme``,
+    ``respones``). Neither derives from anything the source worker treats as
+    deterministic, so an unwrapped one is reported as an internal, retryable
+    failure: the run is retried until it exhausts its attempts on a typo that
+    cannot fix itself, and the log points at the engine rather than at the
+    document.
+
+    One guard rather than a ``try`` at each call site, so the set of places
+    this applies is greppable and a new resolution point is an obvious
+    omission.
+    """
+    try:
+        yield
+    except (TransportSpecError, KeyError) as err:
+        raise ReadError(f"{context} {suffix}: {err}") from err
 
 
 def _loads_preserving_decimals(payload: str) -> Any:
@@ -165,8 +192,8 @@ class _ReadPlan:
 _Advance = Callable[[_Page, Resolver], "_NextRequest | None"]
 # What builds one, given the strategy's own block plus the request state.
 _AdvanceBuilder = Callable[[dict[str, Any], _RequestState], _Advance]
-# One materialized request: where it goes, and what it carries.
-_Wire = tuple[str, dict[str, Any], Any]
+# One materialized request, reduced to a comparable identity.
+_Wire = bytes
 # Turns one page's param table into the (query, body) actually sent.
 _RequestBuilder = Callable[[dict[str, Any]], "tuple[dict[str, Any], Any]"]
 
@@ -340,12 +367,10 @@ class APIConnector(BaseConnector):
         # while the predicate judges against another silently mismatches what
         # the provider was told.
         pagination = read_spec.get("pagination") or {}
-        try:
+        with _document_errors("pagination.limit"):
             effective_limit = self._effective_limit(
                 pagination.get("limit") or {}, batch_size, resolver
             )
-        except TransportSpecError as err:
-            raise ReadError(f"pagination.limit is not resolvable: {err}") from err
         resolver = resolver.with_context(
             replace(
                 resolver.context,
@@ -690,7 +715,8 @@ class APIConnector(BaseConnector):
             for n, d in declared.items()
             if isinstance(d, dict) and not d.get("controlled_by")
         }
-        param_values = resolve_param_defaults(uncontrolled, resolver)
+        with _document_errors("operations.read.params"):
+            param_values = resolve_param_defaults(uncontrolled, resolver)
 
         for f in stream_filters:
             target = f.get("field")
@@ -823,13 +849,18 @@ class APIConnector(BaseConnector):
         send_params = True
         pages = 0
         records = 0
-        previous_wire: _Wire | None = None
+        # Every request already sent, not just the last one: a provider that
+        # alternates between two next targets (A -> B -> A) passes a
+        # compare-with-previous check on every page while making no progress at
+        # all, re-emitting the same pages for as long as stop_when stays false.
+        sent_wires: set[_Wire] = set()
         while True:
-            query, body = build_request(params)
+            with _document_errors(f"{p_type!r} pagination: the request body"):
+                query, body = build_request(params)
             sent_query = query if send_params else {}
             wire = _canonical_wire(url, sent_query, body)
-            self._require_progress(wire, previous_wire, p_type, pages, url)
-            previous_wire = wire
+            self._require_progress(wire, sent_wires, p_type, pages, url)
+            sent_wires.add(wire)
 
             page = await self._request_page(
                 url, method, sent_query, records_ref, body=body
@@ -867,7 +898,8 @@ class APIConnector(BaseConnector):
         build_request: _RequestBuilder,
     ) -> AsyncIterator[list[dict[str, Any]]]:
         """Read an endpoint that declares no pagination: one request, one page."""
-        query, body = build_request(dict(base_params))
+        with _document_errors("operations.read.request.body"):
+            query, body = build_request(dict(base_params))
         page = await self._request_page(url, method, query, records_ref, body=body)
         if page.records:
             yield page.records
@@ -904,17 +936,12 @@ class APIConnector(BaseConnector):
         # tuple does not list it, so leaving it unwrapped reports a document
         # defect as retryable -- the run is retried until it exhausts its
         # attempts on an error that will never resolve itself.
-        try:
+        with _document_errors(f"{p_type!r} pagination: a setup expression"):
             advance = self._build_advance(
                 p_type,
                 pagination,
                 _RequestState(params=params, resolver=resolver, url=full_url),
             )
-        except TransportSpecError as err:
-            raise ReadError(
-                f"{p_type!r} pagination: a setup expression is not resolvable: "
-                f"{err}"
-            ) from err
         return stop_when, advance, params
 
     def _decide_page(
@@ -934,37 +961,30 @@ class APIConnector(BaseConnector):
         which of them failed, so the message points at the actual culprit
         rather than always blaming ``stop_when``.
         """
-        stage = "response.metadata"
-        try:
+        against = "is not evaluable against this response"
+        with _document_errors(f"{p_type!r} pagination: response.metadata", against):
             page_resolver = resolver.with_context(
                 replace(
                     resolver.context,
                     response=self._response_scope(page, metadata_spec, resolver),
                 )
             )
-            stage = "the stop_when predicate"
+        with _document_errors(
+            f"{p_type!r} pagination: the stop_when predicate", against
+        ):
             stop = evaluate_predicate(stop_when, page_resolver)
-            if stop:
-                return True, None
-            stage = "the next-page expression"
+        if stop:
+            return True, None
+        with _document_errors(
+            f"{p_type!r} pagination: the next-page expression", against
+        ):
             return False, advance(page, page_resolver)
-        except (TransportSpecError, KeyError) as err:
-            # KeyError is how the resolver reports an unknown scope name
-            # (`respones.body.next`) -- an authoring defect in this same
-            # document, not an engine fault. Left unwrapped it escapes the
-            # connector as a bare KeyError and the extract boundary files it
-            # as an internal failure, pointing whoever reads the log at the
-            # engine instead of at the typo.
-            raise ReadError(
-                f"{p_type!r} pagination: {stage} is not evaluable against "
-                f"this response: {err}"
-            ) from err
 
     @staticmethod
     def _require_progress(
-        wire: _Wire, previous_wire: _Wire | None, p_type: str, pages: int, url: str
+        wire: _Wire, sent_wires: set[_Wire], p_type: str, pages: int, url: str
     ) -> None:
-        """Refuse to send a request identical to the one just sent.
+        """Refuse to send a request this read has already sent.
 
         Progress is judged on what actually goes out, not on the param table.
         A pagination param declared ``in: body`` whose ``from_param`` the body
@@ -973,13 +993,13 @@ class APIConnector(BaseConnector):
         and page forever, feeding the destination the same records without
         limit.
         """
-        if wire != previous_wire:
+        if wire not in sent_wires:
             return
         raise ReadError(
             f"{p_type!r} pagination: page {pages + 1} would send the "
             f"identical request again ({url!r}), so the read cannot "
-            f"advance. Either the provider is returning a next-page "
-            f"value that does not change, or the value never reaches "
+            f"advance. Either the provider is cycling between next-page "
+            f"values it has already given, or the value never reaches "
             f"the request -- check that a param declared `in: body` is "
             f"bound by a matching `from_param` in the body"
         )
@@ -1313,7 +1333,7 @@ def _require_scalar(value: Any, label: str) -> Any:
 
 
 def _canonical_wire(url: str, query: Mapping[str, Any], body: Any) -> _Wire:
-    """Render the request as the provider sees it, for comparing page to page.
+    """Reduce a request to what the provider will actually receive.
 
     The same request target reaches the wire two ways: as a bare URL plus a
     declared param table, or as a URL that already carries those params in its
@@ -1332,7 +1352,11 @@ def _canonical_wire(url: str, query: Mapping[str, Any], body: Any) -> _Wire:
     merged = {name: str(value) for name, value in parse_qsl(parts.query, True)}
     merged.update({name: str(value) for name, value in query.items()})
     target = urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
-    return target, merged, body
+    # Digested rather than kept whole: a long read holds one entry per page,
+    # and 16 bytes each keeps that bounded whatever the page count. `default`
+    # covers Decimals from the lossless JSON parse.
+    canonical = json.dumps([target, merged, body], sort_keys=True, default=str)
+    return hashlib.blake2b(canonical.encode(), digest_size=16).digest()
 
 
 _DEFAULT_PORTS = {"http": 80, "https": 443}

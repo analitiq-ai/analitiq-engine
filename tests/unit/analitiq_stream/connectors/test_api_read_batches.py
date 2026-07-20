@@ -3250,3 +3250,120 @@ class TestPaginationInvariants:
             )
         # Caught on the second attempt, not after draining every response.
         assert len(session.calls) == 1
+
+    # Every place the endpoint document resolves an expression. A typo'd scope
+    # raises a plain KeyError from the resolver, which the source worker does
+    # not treat as deterministic -- so an unwrapped one is retried until the
+    # attempts run out on a typo that cannot fix itself.
+    TYPOED_SCOPE_SITES = [
+        pytest.param(
+            {"params": {"q": {"in": "query", "default": {"ref": "runtme.batch_size"}}}},
+            id="params.default",
+        ),
+        pytest.param(
+            {"request_body": {"size": {"ref": "runtme.batch_size"}}},
+            id="request.body",
+        ),
+        pytest.param(
+            {
+                "pagination": {
+                    "type": "offset",
+                    "offset": {"param": "offset", "initial": 0},
+                    "limit": {"param": "limit", "default": {"ref": "runtme.batch"}},
+                    "stop_when": {"empty": {"ref": "response.body.records"}},
+                }
+            },
+            id="limit.default",
+        ),
+        pytest.param(
+            {
+                "pagination": {
+                    "type": "offset",
+                    "offset": {
+                        "param": "offset",
+                        "initial": {"ref": "runtme.batch_size"},
+                    },
+                    "stop_when": {"empty": {"ref": "response.body.records"}},
+                }
+            },
+            id="offset.initial",
+        ),
+    ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("doc", TYPOED_SCOPE_SITES)
+    async def test_a_typoed_scope_is_a_config_error_everywhere(self, doc):
+        """A typo in the document must never surface as an engine failure.
+
+        `ReadError` is in the worker's deterministic set; a bare `KeyError`
+        from the resolver is not, so it is reported as retryable and the run
+        burns every attempt on a defect that cannot resolve itself.
+        """
+        session = _FakeSession(
+            [_FakeResponse(status=200, body={"records": [{"id": 1, "name": "a"}]})]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        with pytest.raises(ReadError):
+            await _consume(
+                connector,
+                runtime,
+                config={
+                    "endpoint_document": _endpoint_doc_with_records(**doc),
+                    "stream_source": _stream_source(),
+                },
+                state_manager=MagicMock(),
+                stream_name="items",
+                batch_size=10,
+            )
+
+    @pytest.mark.asyncio
+    async def test_a_two_step_link_cycle_is_caught(self):
+        """A -> B -> A makes no progress, but never repeats consecutively.
+
+        Comparing each request only against the one before it calls every page
+        progress, so the read re-emits the same two pages for as long as
+        `stop_when` stays false.
+        """
+        base = "https://api.example.test/items"
+        session = _FakeSession(
+            [
+                _FakeResponse(
+                    status=200,
+                    body={"records": [{"id": 1, "name": "a"}], "next": f"{base}?p=B"},
+                ),
+                _FakeResponse(
+                    status=200,
+                    body={"records": [{"id": 2, "name": "b"}], "next": f"{base}?p=A"},
+                ),
+                _FakeResponse(
+                    status=200,
+                    body={"records": [{"id": 1, "name": "a"}], "next": f"{base}?p=B"},
+                ),
+            ]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(
+            pagination={
+                "type": "link",
+                "link": {"next_url": {"ref": "response.body.next"}},
+                "stop_when": {"missing": {"ref": "response.body.next"}},
+            },
+        )
+        with pytest.raises(ReadError, match="would send the identical request again"):
+            await _consume(
+                connector,
+                runtime,
+                config={
+                    "endpoint_document": endpoint,
+                    "stream_source": _stream_source(),
+                },
+                state_manager=MagicMock(),
+                stream_name="items",
+                batch_size=10,
+            )
+        # Caught when A came round again, not left to cycle.
+        assert len(session.calls) == 3
