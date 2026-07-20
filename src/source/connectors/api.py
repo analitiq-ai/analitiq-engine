@@ -118,13 +118,30 @@ class _NextRequest(NamedTuple):
     send_params: bool
 
 
+@dataclass(frozen=True)
+class _RequestState:
+    """The request-building context a pagination strategy draws on.
+
+    Bundled rather than passed as separate positional arguments because each
+    strategy needs a different subset — a link strategy has no use for the base
+    URL, a cursor strategy resolves against the page rather than this resolver
+    — and a uniform signature would otherwise carry dead parameters into every
+    builder.
+
+    ``params`` is the live param table: a builder seeds it with its strategy's
+    first-page values and owns it thereafter.
+    """
+
+    params: dict[str, Any]
+    resolver: Resolver
+    url: str
+
+
 # What a strategy answers each page: where the following request comes from,
 # or None when the strategy itself has run out.
 _Advance = Callable[[_Page, Resolver], "_NextRequest | None"]
-# What builds one, given the strategy's own block plus the shared request state.
-_AdvanceBuilder = Callable[
-    [dict[str, Any], dict[str, Any], int, Resolver, str], _Advance
-]
+# What builds one, given the strategy's own block plus the request state.
+_AdvanceBuilder = Callable[[dict[str, Any], _RequestState], _Advance]
 
 
 class APIConnector(BaseConnector):
@@ -710,7 +727,9 @@ class APIConnector(BaseConnector):
 
         params = dict(base_params)
         advance = self._build_advance(
-            p_type, pagination, params, effective_limit, resolver, full_url
+            p_type,
+            pagination,
+            _RequestState(params=params, resolver=resolver, url=full_url),
         )
 
         url = full_url
@@ -793,12 +812,7 @@ class APIConnector(BaseConnector):
 
     @staticmethod
     def _build_advance(
-        p_type: str,
-        pagination: dict[str, Any],
-        params: dict[str, Any],
-        effective_limit: int,
-        resolver: Resolver,
-        full_url: str,
+        p_type: str, pagination: dict[str, Any], state: _RequestState
     ) -> _Advance:
         """Seed *params* for the first page and return the per-strategy step.
 
@@ -812,9 +826,7 @@ class APIConnector(BaseConnector):
         builder = _ADVANCE_BUILDERS.get(p_type)
         if builder is None:
             raise ReadError(f"Unsupported pagination type: {p_type!r}")
-        return builder(
-            pagination.get(p_type) or {}, params, effective_limit, resolver, full_url
-        )
+        return builder(pagination.get(p_type) or {}, state)
 
     @staticmethod
     def _effective_limit(
@@ -864,6 +876,9 @@ class APIConnector(BaseConnector):
             "record_count": len(page.records),
             "status": page.status,
             "headers": page.headers,
+            # Always present, even with nothing declared, so the scope offers
+            # the contract's reserved vocabulary uniformly.
+            "metadata": {},
         }
         if metadata_spec:
             metadata_resolver = resolver.with_context(
@@ -1038,10 +1053,28 @@ def _int_setting(
     steps, so quietly substituting a guess can skip the first page or stride
     past records — the difference is invisible in the output.
     """
-    label = f"pagination.{strategy}.{key}"
+    value = _optional_int_setting(block, strategy, key, resolver, positive=positive)
+    return default if value is None else value
+
+
+def _optional_int_setting(
+    block: dict[str, Any],
+    strategy: str,
+    key: str,
+    resolver: Resolver,
+    *,
+    positive: bool = False,
+) -> int | None:
+    """Resolve an integer setting, or ``None`` when the endpoint omits it.
+
+    Lets a caller whose fallback is not a number — the offset step, which falls
+    back to the record count of the page just read — distinguish "undeclared"
+    without inventing a placeholder default it would never use.
+    """
     declared = block.get(key)
     if declared is None:
-        return default
+        return None
+    label = f"pagination.{strategy}.{key}"
     resolved = resolver.resolve_for_request(declared)
     if resolved is None:
         raise ReadError(
@@ -1087,14 +1120,9 @@ def _as_positive_int(value: Any, label: str) -> int:
 # a builder ignores the arguments its strategy has no use for.
 
 
-def _build_offset_advance(
-    block: dict[str, Any],
-    params: dict[str, Any],
-    effective_limit: int,
-    resolver: Resolver,
-    full_url: str,
-) -> _Advance:
+def _build_offset_advance(block: dict[str, Any], state: _RequestState) -> _Advance:
     """Offset/start-index pagination."""
+    params, resolver, full_url = state.params, state.resolver, state.url
     param = _required_setting(block, "offset", "param")
     position = _int_setting(block, "offset", "initial", resolver, default=0)
     # An authored step wins (a provider that counts offsets in pages declares
@@ -1105,17 +1133,8 @@ def _build_offset_advance(
     # jumps over every record in between, losing records from the middle of a
     # stream with no error — worse than the truncation it replaces, because it
     # survives re-runs and passes a row-count glance.
-    step = (
-        _int_setting(
-            block,
-            "offset",
-            "increment_by",
-            resolver,
-            default=effective_limit,
-            positive=True,
-        )
-        if block.get("increment_by") is not None
-        else None
+    step = _optional_int_setting(
+        block, "offset", "increment_by", resolver, positive=True
     )
     params[param] = position
 
@@ -1123,19 +1142,14 @@ def _build_offset_advance(
         nonlocal position
         position += step if step is not None else len(page.records)
         params[param] = position
-        return _NextRequest(full_url, params, True)
+        return _NextRequest(full_url, dict(params), True)
 
     return advance
 
 
-def _build_page_advance(
-    block: dict[str, Any],
-    params: dict[str, Any],
-    effective_limit: int,
-    resolver: Resolver,
-    full_url: str,
-) -> _Advance:
+def _build_page_advance(block: dict[str, Any], state: _RequestState) -> _Advance:
     """Page-number pagination."""
+    params, resolver, full_url = state.params, state.resolver, state.url
     param = _required_setting(block, "page", "param")
     number = _int_setting(block, "page", "initial", resolver, default=1)
     # A zero step would re-request the same page forever.
@@ -1148,19 +1162,14 @@ def _build_page_advance(
         nonlocal number
         number += step
         params[param] = number
-        return _NextRequest(full_url, params, True)
+        return _NextRequest(full_url, dict(params), True)
 
     return advance
 
 
-def _build_cursor_advance(
-    block: dict[str, Any],
-    params: dict[str, Any],
-    effective_limit: int,
-    resolver: Resolver,
-    full_url: str,
-) -> _Advance:
+def _build_cursor_advance(block: dict[str, Any], state: _RequestState) -> _Advance:
     """Opaque-cursor pagination."""
+    params, full_url = state.params, state.url
     param = _required_setting(block, "cursor", "param")
     next_cursor = block.get("next_cursor")
     if next_cursor is None:
@@ -1182,19 +1191,14 @@ def _build_cursor_advance(
             logger.debug("cursor pagination: next_cursor expression yielded no token")
             return None
         params[param] = token
-        return _NextRequest(full_url, params, True)
+        return _NextRequest(full_url, dict(params), True)
 
     return advance
 
 
-def _build_link_advance(
-    block: dict[str, Any],
-    params: dict[str, Any],
-    effective_limit: int,
-    resolver: Resolver,
-    full_url: str,
-) -> _Advance:
+def _build_link_advance(block: dict[str, Any], state: _RequestState) -> _Advance:
     """Next-URL pagination."""
+    params = state.params
     next_url = block.get("next_url")
     if next_url is None:
         raise ReadError(
@@ -1216,19 +1220,14 @@ def _build_link_advance(
         # params must not be appended again — doing so duplicates keys
         # (`?limit=100&limit=100`). The body, which the link cannot express, is
         # still built and sent.
-        return _NextRequest(target, params, False)
+        return _NextRequest(target, dict(params), False)
 
     return advance
 
 
-def _build_keyset_advance(
-    block: dict[str, Any],
-    params: dict[str, Any],
-    effective_limit: int,
-    resolver: Resolver,
-    full_url: str,
-) -> _Advance:
+def _build_keyset_advance(block: dict[str, Any], state: _RequestState) -> _Advance:
     """Keyset (advance-from-last-key) pagination."""
+    params, resolver, full_url = state.params, state.resolver, state.url
     param = _required_setting(block, "keyset", "param")
     order_by_field = block.get("order_by_field")
     if not order_by_field or not isinstance(order_by_field, str):
@@ -1279,7 +1278,7 @@ def _build_keyset_advance(
             )
             return None
         params[param] = last_key
-        return _NextRequest(full_url, params, True)
+        return _NextRequest(full_url, dict(params), True)
 
     return advance
 
