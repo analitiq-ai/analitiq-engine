@@ -121,6 +121,7 @@ def _endpoint_doc_with_records(
     replication: dict[str, Any] | None = None,
     extra_record_properties: dict[str, Any] | None = None,
     metadata: dict[str, Any] | None = None,
+    request_body: Any = None,
 ) -> dict[str, Any]:
     record_properties: dict[str, Any] = {
         "id": {"type": "integer", "arrow_type": "Int64"},
@@ -145,6 +146,8 @@ def _endpoint_doc_with_records(
             "records": {"ref": "response.body.records"},
         },
     }
+    if request_body is not None:
+        read_block["request"]["body"] = request_body
     if metadata:
         read_block["response"]["metadata"] = metadata
     if pagination:
@@ -2496,6 +2499,89 @@ class TestPaginationSilentTruncationRegressions:
             },
         )
         with pytest.raises(ReadError, match="not an absolute URL"):
+            await _consume(
+                connector,
+                runtime,
+                config={
+                    "endpoint_document": endpoint,
+                    "stream_source": _stream_source(),
+                },
+                state_manager=MagicMock(),
+                stream_name="items",
+                batch_size=10,
+            )
+
+    @pytest.mark.asyncio
+    async def test_request_body_sees_the_same_clamped_page_size(self):
+        """The body and the stop predicate must agree on the page size.
+
+        A body-paginated endpoint asks for its page size in the JSON body. If
+        the body sends the unclamped engine batch size while `stop_when`
+        judges against the clamped one, the read requests a size it never
+        reasons about — the provider either rejects it or returns pages larger
+        than the loop believes it asked for.
+        """
+        session = _FakeSession(
+            [
+                _FakeResponse(
+                    status=200,
+                    body={"records": [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]},
+                ),
+                _FakeResponse(status=200, body={"records": [{"id": 3, "name": "c"}]}),
+            ]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(
+            pagination={
+                "type": "offset",
+                "offset": {"param": "offset", "initial": 0},
+                "limit": {"param": "limit", "max": 2},
+                "stop_when": {
+                    "lt": [
+                        {"ref": "response.record_count"},
+                        {"ref": "runtime.batch_size"},
+                    ]
+                },
+            },
+            request_body={"page_size": {"ref": "runtime.batch_size"}},
+        )
+        await _consume(
+            connector,
+            runtime,
+            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=10,
+        )
+
+        # Every body carries the clamped size, matching what stop_when judges.
+        assert [b["page_size"] for b in session.bodies] == [2, 2]
+
+    @pytest.mark.asyncio
+    async def test_stop_when_with_an_unknown_scope_raises_read_error(self):
+        """A typo'd scope is an authoring defect, so it must not escape as KeyError.
+
+        The resolver reports an unknown scope name as a bare `KeyError`. Left
+        unwrapped it reaches the extract boundary as an internal engine
+        failure, sending whoever reads the log after the engine rather than
+        after the typo in their own document.
+        """
+        session = _FakeSession(
+            [_FakeResponse(status=200, body={"records": [{"id": 1, "name": "a"}]})]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(
+            pagination={
+                "type": "offset",
+                "offset": {"param": "offset", "initial": 0},
+                "stop_when": {"missing": {"ref": "respones.body.next"}},
+            },
+        )
+        with pytest.raises(ReadError, match="not evaluable against this response"):
             await _consume(
                 connector,
                 runtime,

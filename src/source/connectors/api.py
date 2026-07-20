@@ -317,12 +317,32 @@ class APIConnector(BaseConnector):
         stream_source = plan.stream_source
 
         # One resolver covers everything this read materializes per request:
-        # declared param defaults and the optional request body. Expression
-        # nodes that do not resolve are omitted (with a warning) instead of
-        # being serialized verbatim onto the wire. ``runtime.batch_size`` is
-        # the effective page size driving the pagination loops.
+        # declared param defaults, the optional request body, the stop
+        # predicate and every pagination expression. Expression nodes that do
+        # not resolve are omitted (with a warning) instead of being serialized
+        # verbatim onto the wire.
         resolver = self._runtime.request_resolver(
             runtime_values={"batch_size": batch_size}
+        )
+
+        # `runtime.batch_size` means the page size actually requested, for the
+        # whole read. `limit.default` resolves first, against the engine batch
+        # size — that is what "track the engine batch size" means — and
+        # `limit.max` may then clamp it below. Everything downstream sees the
+        # clamped result: the stop predicate, the strategy expressions, and the
+        # request body alike. Binding it once here rather than per consumer is
+        # what keeps them from disagreeing — a body that asks for one page size
+        # while the predicate judges against another silently mismatches what
+        # the provider was told.
+        pagination = read_spec.get("pagination") or {}
+        effective_limit = self._effective_limit(
+            pagination.get("limit") or {}, batch_size, resolver
+        )
+        resolver = resolver.with_context(
+            replace(
+                resolver.context,
+                runtime={**resolver.context.runtime, "batch_size": effective_limit},
+            )
         )
 
         replication_block = stream_source.get("replication") or {}
@@ -361,8 +381,8 @@ class APIConnector(BaseConnector):
             full_url=plan.url,
             method=plan.method,
             base_params=param_values,
-            pagination=read_spec.get("pagination") or {},
-            batch_size=batch_size,
+            pagination=pagination,
+            effective_limit=effective_limit,
             records_ref=plan.records_ref,
             metadata_spec=plan.metadata_spec,
             resolver=resolver,
@@ -738,7 +758,7 @@ class APIConnector(BaseConnector):
         method: str,
         base_params: dict[str, Any],
         pagination: dict[str, Any],
-        batch_size: int,
+        effective_limit: int,
         records_ref: str,
         metadata_spec: dict[str, Any],
         resolver: Resolver,
@@ -776,28 +796,9 @@ class APIConnector(BaseConnector):
                 f"the endpoint declares none"
             )
 
-        limit_block = pagination.get("limit") or {}
-        effective_limit = self._effective_limit(limit_block, batch_size, resolver)
-        limit_param = limit_block.get("param")
+        limit_param = (pagination.get("limit") or {}).get("param")
         if limit_param:
             base_params[limit_param] = effective_limit
-
-        # From here on `runtime.batch_size` reports the page size actually
-        # requested, not the engine's batch size. `limit.default` has already
-        # resolved against the unclamped value (that is what "track the engine
-        # batch size" means), and `limit.max` may have clamped it below. The
-        # standard stop idiom
-        # `{"lt": [response.record_count, runtime.batch_size]}` means "the page
-        # came back short of what we asked for"; leaving the unclamped size
-        # visible makes every full max-sized page satisfy it, stopping the read
-        # after page one. Rebinding once here covers stop_when and every
-        # strategy expression, which all resolve through this resolver.
-        resolver = resolver.with_context(
-            replace(
-                resolver.context,
-                runtime={**resolver.context.runtime, "batch_size": effective_limit},
-            )
-        )
 
         params = dict(base_params)
         advance = self._build_advance(
@@ -855,7 +856,13 @@ class APIConnector(BaseConnector):
                 if evaluate_predicate(stop_when, page_resolver):
                     self._log_read_end(p_type, "stop_when", pages, records)
                     return
-            except TransportSpecError as err:
+            except (TransportSpecError, KeyError) as err:
+                # KeyError is how the resolver reports an unknown scope name
+                # (`respones.body.next`) — an authoring defect in this same
+                # document, not an engine fault. Left unwrapped it escapes the
+                # connector as a bare KeyError and the extract boundary files
+                # it as an internal failure, pointing whoever reads the log at
+                # the engine instead of at the typo.
                 raise ReadError(
                     f"{p_type!r} pagination: stop_when predicate is not "
                     f"evaluable against this response: {err}"
