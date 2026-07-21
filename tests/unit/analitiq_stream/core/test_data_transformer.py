@@ -242,7 +242,7 @@ class TestFunctionCatalog:
     def _v1(self, name):
         return _FUNCTION_CATALOG[name][1]
 
-    def test_catalog_has_the_expected_thirteen_functions(self):
+    def test_catalog_has_the_expected_eleven_functions(self):
         assert set(_FUNCTION_CATALOG) == {
             "iso_to_date",
             "iso_to_datetime",
@@ -255,8 +255,6 @@ class TestFunctionCatalog:
             "to_string",
             "abs",
             "now",
-            "default",
-            "coalesce",
         }
 
     def test_trim_lower_upper(self):
@@ -296,14 +294,6 @@ class TestFunctionCatalog:
     def test_abs_raises_on_non_numeric(self):
         with pytest.raises(TransformationError, match="abs"):
             self._v1("abs")(pa.array(["hello"]))
-
-    def test_default_fills_nulls_with_literal(self):
-        out = self._v1("default")(pa.array([1, None, 3], pa.int64()), 99).to_pylist()
-        assert out == [1, 99, 3]
-
-    def test_coalesce_kernel_uses_literal_alternatives(self):
-        out = self._v1("coalesce")(pa.array([None, 2], pa.int64()), 99).to_pylist()
-        assert out == [99, 2]
 
     def test_iso_to_date_renders_naive_date_part(self):
         out = self._v1("iso_to_date")(
@@ -606,21 +596,12 @@ class TestPerRecordParity:
         )
         assert out == [{"r": "missing"}, {"r": "present"}]
 
-    def test_default_fills_a_missing_source_column(self):
-        node = {
-            "op": "pipe",
-            "args": [_get("absent"), {"op": "fn", "name": "default", "args": ["N/A"]}],
-        }
+    def test_coalesce_op_fills_a_missing_source_column(self):
+        # A missing column infers Arrow null type; it must adopt the fallback's
+        # concrete type instead of failing on a missing kernel.
+        node = {"op": "coalesce", "args": [_get("absent"), _const_node("N/A")]}
         out = _run([{"x": 1}], [_assignment("v", "Utf8", _expr(node))])
         assert out == [{"v": "N/A"}]
-
-    def test_coalesce_fn_emits_fallback_for_all_null_input(self):
-        node = {
-            "op": "pipe",
-            "args": [_get("absent"), {"op": "fn", "name": "coalesce", "args": ["fb"]}],
-        }
-        out = _run([{"x": 1}], [_assignment("v", "Utf8", _expr(node))])
-        assert out == [{"v": "fb"}]
 
     def test_iso_to_date_rejects_trailing_junk(self):
         with pytest.raises(TransformationError, match="iso_to_date"):
