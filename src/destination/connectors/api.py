@@ -43,6 +43,10 @@ from ...shared.http_utils import join_url
 logger = logging.getLogger(__name__)
 
 
+# Retry attempts used when the connection declares no ``max_retries``.
+_DEFAULT_MAX_RETRIES = 3
+
+
 # Proto WriteMode int -> contract operations.write.<mode> key. The
 # api-endpoint contract's ``operations.write`` is a closed map keyed by
 # mode name (v1 keys: ``insert``, ``upsert``); the destination handler
@@ -404,6 +408,7 @@ class ApiDestinationHandler(BaseDestinationHandler):
         # classified FATAL by _classify_http_error; 5xx outside this set
         # (e.g. 502) are single-attempt but remain RETRYABLE.
         self._retry_statuses: set = {429, 500, 503, 504}
+        self._max_retries: int = _DEFAULT_MAX_RETRIES
 
         # Lowercased default-header names the connection's session sends on
         # every request (auth and friends), captured at connect() time. An
@@ -508,7 +513,7 @@ class ApiDestinationHandler(BaseDestinationHandler):
         await runtime.materialize()
         self._base_url = runtime.base_url
         self._rate_limiter = runtime.rate_limiter
-        self._max_retries = runtime.raw_config.get("max_retries", 3)
+        self._max_retries = runtime.raw_config.get("max_retries", _DEFAULT_MAX_RETRIES)
         # Resolves value expressions in declared body specs at write time
         # (connection parameters/selections/discovered; no secrets — those
         # are consumed engine-side at transport materialization).

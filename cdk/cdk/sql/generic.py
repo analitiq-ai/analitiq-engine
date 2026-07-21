@@ -126,10 +126,7 @@ _FATAL_ADBC_ERROR_NAMES = frozenset(
 
 def _is_fatal_adbc_error(exc: BaseException) -> bool:
     """Return ``True`` when *exc* is a failure class retries cannot heal."""
-    for cls in type(exc).__mro__:
-        if cls.__name__ in _FATAL_ADBC_ERROR_NAMES:
-            return True
-    return False
+    return any(cls.__name__ in _FATAL_ADBC_ERROR_NAMES for cls in type(exc).__mro__)
 
 
 def _reclassify_as_fatal(exc: BaseException) -> AdbcConfigurationError:

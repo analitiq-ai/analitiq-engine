@@ -66,7 +66,7 @@ from cdk.types import CheckpointStore, EndpointScope
 from ...models.state import ReplicationConfig
 from ...shared.dict_path import walk_path
 from ...shared.http_utils import join_url
-from .base import BaseConnector, ConnectionError, ReadError, TransientReadError
+from .base import BaseConnector, ConnectorConnectionError, ReadError, TransientReadError
 
 logger = logging.getLogger(__name__)
 
@@ -118,7 +118,7 @@ class APIConnector(BaseConnector):
             logger.debug("Connected to API: %s", self.base_url)
         except Exception as e:
             logger.error("Failed to connect to API: %s", e)
-            raise ConnectionError(f"API connection failed: {e}") from e
+            raise ConnectorConnectionError(f"API connection failed: {e}") from e
 
     async def disconnect(self) -> None:
         if self._runtime:

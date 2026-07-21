@@ -5,11 +5,16 @@ various sources including APIs and databases.
 """
 
 from .connectors.api import APIConnector
-from .connectors.base import BaseConnector, ConnectionError, ReadError, WriteError
+from .connectors.base import (
+    BaseConnector,
+    ConnectorConnectionError,
+    ReadError,
+    WriteError,
+)
 
 __all__ = [
     "BaseConnector",
-    "ConnectionError",
+    "ConnectorConnectionError",
     "ReadError",
     "WriteError",
     "APIConnector",
