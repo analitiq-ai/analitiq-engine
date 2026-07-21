@@ -22,6 +22,7 @@ resolver's own error surface.
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Any
 
 from analitiq.contracts.endpoints import (
@@ -100,6 +101,21 @@ def evaluate_predicate(pred: Any, resolver: Resolver) -> bool:
     if isinstance(pred, PredNotEmpty):
         return not _is_empty(resolve_response_expr(pred.not_empty, resolver))
 
+    def _normalized(left: Any, right: Any) -> tuple[Any, Any]:
+        """Align mixed Decimal/float operands so they compare by value.
+
+        Response numbers arrive as ``Decimal`` (the lossless JSON parse)
+        while authored document literals are floats; the float's shortest
+        decimal rendering IS the authored value, so it converts via
+        ``str`` — ``Decimal("0.1") == 0.1`` is False, but the author
+        meant 0.1 the decimal.
+        """
+        if isinstance(left, Decimal) and isinstance(right, float):
+            return left, Decimal(str(right))
+        if isinstance(right, Decimal) and isinstance(left, float):
+            return Decimal(str(left)), right
+        return left, right
+
     comparisons = (
         (PredEq, "eq", lambda a, b: a == b),
         (PredNeq, "neq", lambda a, b: a != b),
@@ -110,9 +126,11 @@ def evaluate_predicate(pred: Any, resolver: Resolver) -> bool:
     )
     for cls, op, compare in comparisons:
         if isinstance(pred, cls):
-            left, right = (
-                resolve_response_expr(operand, resolver)
-                for operand in getattr(pred, op)
+            left, right = _normalized(
+                *(
+                    resolve_response_expr(operand, resolver)
+                    for operand in getattr(pred, op)
+                )
             )
             try:
                 return bool(compare(left, right))

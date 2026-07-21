@@ -168,6 +168,23 @@ class TestEvaluatePredicate:
             _pred({"neq": [{"ref": "response.body.page"}, 4]}), resolver
         )
 
+    def test_decimal_response_values_compare_with_float_literals(self):
+        """Response numbers arrive as Decimal (lossless parse); an authored
+        float literal must compare by value, not by binary representation —
+        Decimal("0.1") == 0.1 is False without normalization."""
+        from decimal import Decimal
+
+        resolver = _resolver({"rate": Decimal("0.1")})
+        assert evaluate_predicate(
+            _pred({"eq": [{"ref": "response.body.rate"}, 0.1]}), resolver
+        )
+        assert evaluate_predicate(
+            _pred({"lt": [{"ref": "response.body.rate"}, 0.2]}), resolver
+        )
+        assert not evaluate_predicate(
+            _pred({"neq": [0.1, {"ref": "response.body.rate"}]}), resolver
+        )
+
     def test_incomparable_operands_raise(self):
         """Ordering ``None`` against a number is unanswerable — fail loud."""
         with pytest.raises(ValueError, match="cannot compare"):
