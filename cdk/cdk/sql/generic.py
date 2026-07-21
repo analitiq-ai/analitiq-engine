@@ -1056,20 +1056,13 @@ class GenericSQLConnector(BaseDestinationHandler):
         with engine.begin() as conn:
             return self._run_ddl_and_reflect(conn, state, target_ddl)
 
-    async def write_batch(
-        self,
-        run_id: str,
-        stream_id: str,
-        batch_seq: int,
-        record_batch: pa.RecordBatch,
-        record_ids: list[str],
-        cursor: Cursor,
-    ) -> BatchWriteResult:
-        """Write an Arrow record batch to the database.
+    def _reject_if_not_ready(
+        self, run_id: str, stream_id: str, batch_seq: int
+    ) -> BatchWriteResult | None:
+        """Return a rejection for a batch this handler cannot write, else None.
 
-        The batch is realigned to the destination schema in Arrow space
-        (``cast_arrow_batch``) and only materialized to dicts at the very
-        last SQLAlchemy boundary.
+        ``None`` means ``self._streams[stream_id]`` exists and is writable
+        on the active transport.
         """
         if not self._connected:
             return reject_batch(
@@ -1089,18 +1082,105 @@ class GenericSQLConnector(BaseDestinationHandler):
             )
 
         state = self._streams.get(stream_id)
-        if state is None or (not self._adbc_only and state.table is None):
-            # ADBC writes never build SQLAlchemy table objects; readiness
-            # there is the configured state + schema contract.
+        if state is None:
             return reject_batch(
                 logger,
-                "Schema not configured"
-                if state is None
-                else "Schema not configured: no table object for the stream",
+                "Schema not configured",
                 run_id=run_id,
                 stream_id=stream_id,
                 batch_seq=batch_seq,
             )
+        # ADBC writes never build SQLAlchemy table objects; readiness there
+        # is the configured state + schema contract.
+        if not self._adbc_only and state.table is None:
+            return reject_batch(
+                logger,
+                "Schema not configured: no table object for the stream",
+                run_id=run_id,
+                stream_id=stream_id,
+                batch_seq=batch_seq,
+            )
+        return None
+
+    def _timeout_failure(
+        self,
+        state: _StreamState,
+        e: TimeoutError,
+        *,
+        run_id: str,
+        stream_id: str,
+        batch_seq: int,
+    ) -> BatchWriteResult:
+        """Log and classify a ``TimeoutError`` raised out of the write attempt.
+
+        Only the async-SQLAlchemy path is wrapped in ``asyncio.timeout``. The
+        ADBC and sync-engine paths run in a worker thread (and a handler with
+        no budget set is never bounded), so a TimeoutError from those is a
+        driver/socket timeout, not our cancellation - classify it generically
+        rather than claiming a statement was cancelled.
+        """
+        if (
+            self._adbc_only
+            or self._sync_engine is not None
+            or self._statement_timeout_seconds is None
+        ):
+            logger.error(
+                "Error writing batch (run=%s, stream=%s, seq=%s): %s",
+                run_id,
+                stream_id,
+                batch_seq,
+                e,
+                exc_info=True,
+            )
+            # A bare TimeoutError often stringifies empty; never ack a
+            # reason-less failure.
+            return BatchWriteResult(
+                status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
+                records_written=0,
+                failure_summary=str(e) or f"driver timeout ({type(e).__name__})",
+            )
+        # The bounded SQLAlchemy statement was cancelled (issue #231). A lock
+        # or slow write may clear, so stay retryable; carry the reason so it
+        # surfaces instead of an empty str(TimeoutError).
+        summary = (
+            f"destination write for {state.schema_name}.{state.table_name} "
+            f"did not complete within the {self._statement_timeout_seconds:g}s "
+            f"statement timeout (likely a lock or slow write); the statement "
+            f"was cancelled"
+        )
+        logger.error(
+            "Timeout writing batch (run=%s, stream=%s, seq=%s): %s",
+            run_id,
+            stream_id,
+            batch_seq,
+            summary,
+        )
+        return BatchWriteResult(
+            status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
+            records_written=0,
+            failure_summary=summary,
+        )
+
+    async def write_batch(
+        self,
+        run_id: str,
+        stream_id: str,
+        batch_seq: int,
+        record_batch: pa.RecordBatch,
+        record_ids: list[str],
+        cursor: Cursor,
+    ) -> BatchWriteResult:
+        """Write an Arrow record batch to the database.
+
+        The batch is realigned to the destination schema in Arrow space
+        (``cast_arrow_batch``) and only materialized to dicts at the very
+        last SQLAlchemy boundary.
+        """
+        rejection = self._reject_if_not_ready(run_id, stream_id, batch_seq)
+        if rejection is not None:
+            return rejection
+        # _reject_if_not_ready proved the stream is configured.
+        state = self._streams[stream_id]
 
         try:
             # One deadline for the whole SQLAlchemy attempt so the write stays
@@ -1240,51 +1320,12 @@ class GenericSQLConnector(BaseDestinationHandler):
                 failure_summary=f"adbc: {e}",
             )
         except TimeoutError as e:
-            if (
-                self._adbc_only
-                or self._sync_engine is not None
-                or self._statement_timeout_seconds is None
-            ):
-                # Only the async-SQLAlchemy path is wrapped in asyncio.timeout.
-                # The ADBC and sync-engine paths run in a worker thread (and a
-                # handler with no budget set is never bounded), so a
-                # TimeoutError here is a driver/socket timeout, not our
-                # cancellation - classify it generically rather than claiming
-                # a statement was cancelled. A bare TimeoutError often
-                # stringifies empty; never ack a reason-less failure.
-                logger.error(
-                    "Error writing batch (run=%s, stream=%s, seq=%s): %s",
-                    run_id,
-                    stream_id,
-                    batch_seq,
-                    e,
-                    exc_info=True,
-                )
-                return BatchWriteResult(
-                    status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
-                    records_written=0,
-                    failure_summary=str(e) or f"driver timeout ({type(e).__name__})",
-                )
-            # The bounded SQLAlchemy statement was cancelled (issue #231). A lock
-            # or slow write may clear, so stay retryable; carry the reason so it
-            # surfaces instead of an empty str(TimeoutError).
-            summary = (
-                f"destination write for {state.schema_name}.{state.table_name} "
-                f"did not complete within the {self._statement_timeout_seconds:g}s "
-                f"statement timeout (likely a lock or slow write); the statement "
-                f"was cancelled"
-            )
-            logger.error(
-                "Timeout writing batch (run=%s, stream=%s, seq=%s): %s",
-                run_id,
-                stream_id,
-                batch_seq,
-                summary,
-            )
-            return BatchWriteResult(
-                status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
-                records_written=0,
-                failure_summary=summary,
+            return self._timeout_failure(
+                state,
+                e,
+                run_id=run_id,
+                stream_id=stream_id,
+                batch_seq=batch_seq,
             )
         except Exception as e:
             # The transport (ADBC vs SQLAlchemy) decides which driver raised,
