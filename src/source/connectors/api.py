@@ -1,6 +1,9 @@
 """Contract-native REST API source connector.
 
-This connector consumes the published API-endpoint contract directly:
+This connector consumes the published API-endpoint contract as its typed
+model: the ``endpoint_document`` from the source config is re-validated
+into :class:`~analitiq.contracts.endpoints.ApiEndpointDoc` once per read
+(issue #349), and every declaration is read as a model attribute:
 
 * ``operations.read.request.{method, path}`` — URL + HTTP verb.
 * ``operations.read.request.body`` — optional JSON body; built per page
@@ -13,9 +16,10 @@ This connector consumes the published API-endpoint contract directly:
   ``function``) resolved against the connection scopes
   (``connection.parameters``/``selections``/``discovered``) and runtime
   scopes (``runtime.batch_size``).
-* ``operations.read.pagination`` — offset / page / cursor / keyset
-  loops driven by their respective ``.param`` + ``.initial`` / ``.max``
-  declarations.
+* ``operations.read.pagination`` — offset / page / cursor loops driven
+  by their respective ``.param`` + ``.initial`` declarations (``keyset``
+  and ``link``, and the declared ``stop_when`` / ``next_cursor``
+  expressions, are read-path behavior tracked in #346).
 * ``operations.read.response.records`` — record extraction path
   (e.g. ``response.body`` or ``response.body.<field>``).
 * ``operations.read.replication.cursor_mappings`` — cursor-field ↔
@@ -37,6 +41,19 @@ from typing import Any
 
 import aiohttp
 import pyarrow as pa
+from analitiq.contracts.endpoints import (
+    ApiEndpointDoc,
+    KeysetPagination,
+    LinkPagination,
+    OffsetPagination,
+    PagePagination,
+    Pagination,
+    ReadOperation,
+    Replication,
+    ResponseExtraction,
+    SingleCursorMapping,
+)
+from pydantic import ValidationError
 
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.rate_limiter import RateLimiter
@@ -163,7 +180,10 @@ class APIConnector(BaseConnector):
         finally:
             await self.disconnect()
 
-    async def _read_batches_impl(
+    # Complexity is inherent to the single read pass (validate, resolve
+    # params, replication, pagination); the pre-#349 dict version carried the
+    # same branching and is a tolerated occurrence on the default branch.
+    async def _read_batches_impl(  # skipcq: PY-R1000
         self,
         config: dict[str, Any],
         *,
@@ -172,6 +192,7 @@ class APIConnector(BaseConnector):
         partition: dict[str, Any] | None = None,
         batch_size: int = 1000,
     ) -> AsyncIterator[pa.RecordBatch]:
+        """Drive the contract-typed read: validate, page, and yield batches."""
         if partition is None:
             partition = {}
 
@@ -181,9 +202,18 @@ class APIConnector(BaseConnector):
                 "the runtime"
             )
 
-        endpoint_doc = config.get("endpoint_document")
-        if not endpoint_doc:
+        raw_endpoint = config.get("endpoint_document")
+        if not raw_endpoint:
             raise ReadError("APIConnector: source config missing 'endpoint_document'")
+        try:
+            endpoint_doc = ApiEndpointDoc.model_validate(raw_endpoint)
+        except ValidationError as err:
+            # A document that fails the contract is a deterministic config
+            # defect: fail fast instead of hand-parsing an unknown shape.
+            raise ReadError(
+                f"APIConnector: endpoint document failed api-endpoint "
+                f"contract validation: {err}"
+            ) from err
         stream_source = config.get("stream_source") or {}
         endpoint_ref = stream_source.get("endpoint_ref")
         if not endpoint_ref:
@@ -191,22 +221,20 @@ class APIConnector(BaseConnector):
                 "APIConnector: stream_source missing 'endpoint_ref'; "
                 "the source contract requires it to declare per-field types"
             )
-        read_spec = (endpoint_doc.get("operations") or {}).get("read") or {}
+        read = endpoint_doc.operations.read
+        if read is None:
+            raise ReadError(
+                f"endpoint {endpoint_doc.endpoint_id!r}: operations.read is "
+                f"required to read this endpoint as a source"
+            )
         records_items_schema = self._resolve_records_items_schema(
-            endpoint_doc,
-            read_spec,
+            endpoint_doc.endpoint_id,
+            read.response,
         )
         self._apply_read_type_map(records_items_schema, endpoint_ref)
         schema_contract = SchemaContract(records_items_schema)
-        request = read_spec.get("request") or {}
-        path = request.get("path")
-        method = (request.get("method") or "GET").upper()
-        if not isinstance(path, str) or not path:
-            raise ReadError(
-                f"endpoint {endpoint_doc.get('endpoint_id')!r}: "
-                f"operations.read.request.path is required"
-            )
-        full_url = join_url(self.base_url, path)
+        full_url = join_url(self.base_url, read.request.path)
+        method = read.request.method
 
         # One resolver covers everything this read materializes per request:
         # declared param defaults and the optional request body. Expression
@@ -229,7 +257,7 @@ class APIConnector(BaseConnector):
         # overrides. ``controlled_by: pagination|replication`` params are
         # filled by their respective loops.
         param_values, param_placements = self._build_base_params(
-            read_spec, resolver, stream_source.get("filters") or []
+            read, resolver, stream_source.get("filters") or []
         )
 
         # Set up incremental replication: subtract safety window from the
@@ -238,7 +266,7 @@ class APIConnector(BaseConnector):
         if replication_method == "incremental":
             await self._apply_incremental_replication(
                 param_values,
-                read_spec,
+                read.replication,
                 checkpoint,
                 stream_name,
                 partition,
@@ -254,7 +282,7 @@ class APIConnector(BaseConnector):
         # per page so controlled params (limit, offset, cursor) reach a
         # body-paginated endpoint instead of freezing at their initial
         # values.
-        raw_body = request.get("body")
+        raw_body = read.request.body
 
         def build_request(
             page_params: dict[str, Any],
@@ -286,9 +314,7 @@ class APIConnector(BaseConnector):
                 body = None
             return query, body
 
-        records_ref = ((read_spec.get("response") or {}).get("records") or {}).get(
-            "ref", "response.body"
-        )
+        records_ref = read.response.records.ref
 
         batch_count = 0
         total_records = 0
@@ -296,7 +322,7 @@ class APIConnector(BaseConnector):
             full_url=full_url,
             method=method,
             base_params=param_values,
-            pagination=read_spec.get("pagination") or {},
+            pagination=read.pagination,
             batch_size=batch_size,
             records_ref=records_ref,
             build_request=build_request,
@@ -327,18 +353,18 @@ class APIConnector(BaseConnector):
 
     @staticmethod
     def _resolve_records_items_schema(
-        endpoint_doc: dict[str, Any],
-        read_spec: dict[str, Any],
+        endpoint_id: str,
+        response: ResponseExtraction,
     ) -> dict[str, Any]:
         """Walk operations.read.response.schema via records.ref to per-record items.
 
         Accepted records.ref forms: ``response.body`` and
-        ``response.body.<field>[.<field>...]``.
+        ``response.body.<field>[.<field>...]``. The response schema itself
+        is free-form JSON Schema in the contract (``dict[str, Any]``), so
+        the walk below stays dict-shaped.
         """
-        endpoint_id = endpoint_doc.get("endpoint_id")
-        response_block = read_spec.get("response") or {}
-        response_schema = response_block.get("schema") or {}
-        records_ref = (response_block.get("records") or {}).get("ref", "response.body")
+        response_schema = response.schema_
+        records_ref = response.records.ref
 
         if records_ref == "response.body":
             node = response_schema
@@ -484,7 +510,7 @@ class APIConnector(BaseConnector):
 
     def _build_base_params(
         self,
-        read_spec: dict[str, Any],
+        read: ReadOperation,
         resolver: Resolver,
         stream_filters: list[dict[str, Any]],
     ) -> tuple[dict[str, Any], dict[str, str]]:
@@ -502,17 +528,18 @@ class APIConnector(BaseConnector):
         ``in`` location. Params declared ``controlled_by`` pagination or
         replication are left out of the defaults so their loops set them.
         """
-        placements: dict[str, str] = {}
-        declared = read_spec.get("params") or {}
-        for name, decl in declared.items():
-            if not isinstance(decl, dict):
-                continue
-            placements[name] = decl.get("in") or "query"
+        declared = read.params or {}
+        placements: dict[str, str] = {
+            name: decl.location for name, decl in declared.items()
+        }
 
+        # ``resolve_param_defaults`` is a CDK helper and consumes the
+        # authored JSON shape, so the uncontrolled params are dumped back
+        # to dicts at this boundary.
         uncontrolled = {
-            n: d
+            n: d.model_dump(mode="json", by_alias=True, exclude_unset=True)
             for n, d in declared.items()
-            if isinstance(d, dict) and not d.get("controlled_by")
+            if not d.controlled_by
         }
         param_values = resolve_param_defaults(uncontrolled, resolver)
 
@@ -532,18 +559,27 @@ class APIConnector(BaseConnector):
     async def _apply_incremental_replication(
         self,
         params: dict[str, Any],
-        read_spec: dict[str, Any],
+        replication: Replication | None,
         checkpoint: CheckpointStore,
         stream_name: str,
         partition: dict[str, Any],
         cursor_field: str | None,
         safety_window_seconds: int | None,
     ) -> None:
+        """Write the stored cursor (minus safety window) into its mapped param."""
         if not cursor_field:
             return
-        mappings = (read_spec.get("replication") or {}).get("cursor_mappings") or []
+        mappings = replication.cursor_mappings if replication is not None else []
+        # Only single-param mappings drive the incremental filter; a window
+        # mapping (start/end params) matching the cursor field falls through
+        # to the full-replication warning below, as before (read-path
+        # behavior tracked in #346).
         param_name = next(
-            (m.get("param") for m in mappings if m.get("cursor_field") == cursor_field),
+            (
+                m.param
+                for m in mappings
+                if isinstance(m, SingleCursorMapping) and m.cursor_field == cursor_field
+            ),
             None,
         )
         if not param_name:
@@ -607,13 +643,16 @@ class APIConnector(BaseConnector):
     # Pagination
     # ------------------------------------------------------------------
 
-    async def _iterate_pages(
+    # One loop per pagination strategy; the pre-#349 dict version carried the
+    # same branching and is a tolerated occurrence on the default branch. The
+    # strategy dispatch is restructured with the #346 contract work.
+    async def _iterate_pages(  # skipcq: PY-R1000
         self,
         *,
         full_url: str,
         method: str,
         base_params: dict[str, Any],
-        pagination: dict[str, Any],
+        pagination: Pagination | None,
         batch_size: int,
         records_ref: str,
         build_request: Callable[[dict[str, Any]], tuple[dict[str, Any], Any]],
@@ -623,9 +662,12 @@ class APIConnector(BaseConnector):
         Each page request is built via ``build_request``: it maps the page's
         full param table to the ``(query_params, body)`` actually sent,
         applying declared param placement and per-page body binding.
+
+        Loops stop on an empty page (or a short page for the count-driven
+        strategies); the contract's declared ``stop_when`` predicate is not
+        evaluated yet (read-path behavior tracked in #346).
         """
-        p_type = pagination.get("type")
-        if not p_type:
+        if pagination is None:
             query, body = build_request(dict(base_params))
             records = await self._request_records(
                 full_url, method, query, records_ref, body=body
@@ -634,17 +676,17 @@ class APIConnector(BaseConnector):
                 yield records
             return
 
-        limit_block = pagination.get("limit") or {}
-        limit_param = limit_block.get("param")
-        if limit_param:
-            base_params[limit_param] = batch_size
+        if isinstance(pagination, KeysetPagination | LinkPagination):
+            # Declared by the contract but not implemented by this read
+            # path yet (#346).
+            raise ReadError(f"Unsupported pagination type: {pagination.type!r}")
 
-        if p_type == "offset":
-            offset_block = pagination.get("offset") or {}
-            offset_param = offset_block.get("param")
-            if not offset_param:
-                raise ReadError("offset pagination requires offset.param")
-            offset = int(offset_block.get("initial", 0))
+        if pagination.limit is not None and pagination.limit.param:
+            base_params[pagination.limit.param] = batch_size
+
+        if isinstance(pagination, OffsetPagination):
+            offset_param = pagination.offset.param
+            offset = int(pagination.offset.initial)
             while True:
                 params = dict(base_params)
                 params[offset_param] = offset
@@ -659,12 +701,9 @@ class APIConnector(BaseConnector):
                     return
                 offset += batch_size
 
-        elif p_type == "page":
-            page_block = pagination.get("page") or {}
-            page_param = page_block.get("param")
-            if not page_param:
-                raise ReadError("page pagination requires page.param")
-            page = int(page_block.get("initial", 1))
+        elif isinstance(pagination, PagePagination):
+            page_param = pagination.page.param
+            page = int(pagination.page.initial)
             while True:
                 params = dict(base_params)
                 params[page_param] = page
@@ -679,16 +718,15 @@ class APIConnector(BaseConnector):
                     return
                 page += 1
 
-        elif p_type == "cursor":
-            cursor_block = pagination.get("cursor") or {}
-            cursor_param = cursor_block.get("param")
-            if not cursor_param:
-                raise ReadError("cursor pagination requires cursor.param")
-            cursor_field_in_response = (
-                (cursor_block.get("from") or {}).get("ref")
-                or cursor_block.get("response_field")
-                or "next_cursor"
-            )
+        else:
+            # CursorPagination: the pinned contract's pagination union is
+            # closed, and keyset/link raised above, so narrowing makes this
+            # the only remaining strategy.
+            cursor_param = pagination.cursor.param
+            # The declared ``cursor.next_cursor`` value expression is not
+            # evaluated yet: the next-page token is read from the response
+            # field literally named ``next_cursor`` (read-path behavior
+            # tracked in #346).
             cursor_token: str | None = None
             while True:
                 params = dict(base_params)
@@ -701,42 +739,9 @@ class APIConnector(BaseConnector):
                 if not records:
                     return
                 yield records
-                cursor_token = _extract_next_cursor(data, cursor_field_in_response)
+                cursor_token = _extract_next_cursor(data, "next_cursor")
                 if not cursor_token:
                     return
-
-        elif p_type == "keyset":
-            keyset_block = pagination.get("keyset") or {}
-            keyset_param = keyset_block.get("param")
-            if not keyset_param:
-                raise ReadError("keyset pagination requires keyset.param")
-            key_field_in_record = keyset_block.get("from_record")
-            if not key_field_in_record:
-                raise ReadError(
-                    "keyset pagination requires keyset.from_record (record field)"
-                )
-            # Holds the raw record value (int/str/Decimal). It feeds both the
-            # query string and any body binding through build_request, so it
-            # stays native here; build_request stringifies Decimals only for the
-            # query (where yarl would truncate them) and keeps the body numeric.
-            last_key: Any = None
-            while True:
-                params = dict(base_params)
-                if last_key:
-                    params[keyset_param] = last_key
-                query, body = build_request(params)
-                records = await self._request_records(
-                    full_url, method, query, records_ref, body=body
-                )
-                if not records:
-                    return
-                yield records
-                last_key = records[-1].get(key_field_in_record)
-                if not last_key or len(records) < batch_size:
-                    return
-
-        else:
-            raise ReadError(f"Unsupported pagination type: {p_type!r}")
 
     # ------------------------------------------------------------------
     # HTTP

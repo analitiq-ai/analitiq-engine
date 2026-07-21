@@ -24,6 +24,7 @@ logger = logging.getLogger("src.worker")
 
 
 async def _run_destination(bootstrap: WorkerBootstrap) -> int:
+    """Serve the destination role for the bootstrap's connector."""
     from src.destination.server import DestinationGRPCServer
 
     _, destination_registry = build_worker_registries()
@@ -37,6 +38,7 @@ async def _run_destination(bootstrap: WorkerBootstrap) -> int:
     )
     handler.set_endpoint_refs(bootstrap.endpoint_refs)
     handler.set_stream_endpoints(bootstrap.stream_endpoints)
+    handler.set_stream_conflict_keys(bootstrap.stream_conflict_keys)
 
     runtime = bootstrap.build_runtime()
     await handler.connect(runtime)

@@ -3,10 +3,12 @@
 These dataclasses own all raw-JSON access.  ``PipelineConfigPrep`` builds
 them once; ``StreamingEngine`` consumes typed attributes throughout (via the
 translation helpers in ``src.runner``), and only at the ``WorkerReadable``
-boundary are the contract documents serialised back to JSON-safe dicts.
+boundary are the contract documents serialised back to JSON-safe dicts
+(:func:`dump_endpoint_document`).
 
-``ConnectionRuntime`` and the resolved endpoint document live as explicit
-typed fields rather than ``_runtime`` / ``_endpoint`` magic dict keys.
+``ConnectionRuntime`` and the resolved endpoint document (a typed contract
+model) live as explicit typed fields rather than ``_runtime`` /
+``_endpoint`` magic dict keys.
 """
 
 from __future__ import annotations
@@ -16,7 +18,22 @@ from typing import Any
 
 from cdk.connection_runtime import ConnectionRuntime
 from src.config import settings
+from src.config.schema_validator import EndpointDocument
 from src.models.stream import EndpointRef
+
+
+def dump_endpoint_document(document: EndpointDocument) -> dict[str, Any]:
+    """Serialise a typed endpoint document back to its authored JSON shape.
+
+    This is the one dump used everywhere a contract endpoint document
+    crosses the engine boundary (worker bootstrap, CDK handlers).
+    ``by_alias`` restores contract field names (``$schema``, ``schema``);
+    ``exclude_unset`` keeps fields the author omitted out of the payload,
+    so the dumped document round-trips the authored one instead of baking
+    the model's defaults into the wire shape.
+    """
+    return document.model_dump(mode="json", by_alias=True, exclude_unset=True)
+
 
 # Mirrors the published stream contract's replication-method enum.
 _VALID_REPLICATION_METHODS = frozenset({"full_refresh", "incremental"})
@@ -63,7 +80,7 @@ class ResolvedSource:
     endpoint_ref: EndpointRef
     connection_ref: str
     runtime: ConnectionRuntime
-    endpoint_document: dict[str, Any]
+    endpoint_document: EndpointDocument
     stream_source: dict[str, Any]
     replication: ReplicationConfig | None = None
     primary_keys: list[str] = field(default_factory=list)
@@ -71,14 +88,15 @@ class ResolvedSource:
     def to_source_config(self) -> dict[str, Any]:
         """JSON-safe source config dict for the worker bootstrap.
 
-        Returns only the contract documents; the ``ConnectionRuntime``
-        object travels as a separate argument to ``build_bootstrap`` and is
-        never embedded in the JSON payload.
+        Returns only the contract documents (the endpoint document dumped
+        back to its authored JSON shape); the ``ConnectionRuntime`` object
+        travels as a separate argument to ``build_bootstrap`` and is never
+        embedded in the JSON payload.
         """
         return {
             "endpoint_ref": self.endpoint_ref.to_dict(),
             "connection_ref": self.connection_ref,
-            "endpoint_document": self.endpoint_document,
+            "endpoint_document": dump_endpoint_document(self.endpoint_document),
             "stream_source": self.stream_source,
         }
 
@@ -90,7 +108,7 @@ class ResolvedDestination:
     endpoint_ref: EndpointRef
     connection_ref: str
     runtime: ConnectionRuntime
-    endpoint_document: dict[str, Any]
+    endpoint_document: EndpointDocument
     write: dict[str, Any]
 
 

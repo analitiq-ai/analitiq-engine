@@ -50,10 +50,12 @@ class WorkerProxyHandler(BaseDestinationHandler):
     """Forwards the destination handler contract to a connector worker."""
 
     def __init__(self, *, connectors_dir: Path, connections_dir: Path) -> None:
+        """Wire the shell-side proxy with the config directories it forwards."""
         self._connectors_dir = connectors_dir
         self._connections_dir = connections_dir
         self._endpoint_refs: dict[str, Any] = {}
         self._stream_endpoints: dict[str, Any] = {}
+        self._stream_conflict_keys: dict[str, list[str]] = {}
         self._handle: WorkerHandle | None = None
         self._control: DestinationGRPCClient | None = None
         # One forwarded StreamRecords stream per stream_id. The client caches
@@ -91,11 +93,20 @@ class WorkerProxyHandler(BaseDestinationHandler):
     ) -> None:
         self._stream_endpoints = {k: dict(v) for k, v in stream_endpoints.items()}
 
+    def set_stream_conflict_keys(
+        self, stream_conflict_keys: Mapping[str, list[str]]
+    ) -> None:
+        """Record stream_id -> upsert conflict keys for the worker bootstrap."""
+        self._stream_conflict_keys = {
+            k: list(v) for k, v in stream_conflict_keys.items()
+        }
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     async def connect(self, runtime: ConnectionRuntime) -> None:
+        """Spawn the connector worker and open its control channel."""
         self._label = f"dest-worker:{runtime.connector_id}"
         bootstrap = await build_bootstrap(
             runtime,
@@ -104,6 +115,7 @@ class WorkerProxyHandler(BaseDestinationHandler):
             connections_dir=self._connections_dir,
             endpoint_refs=self._endpoint_refs,
             stream_endpoints=self._stream_endpoints,
+            stream_conflict_keys=self._stream_conflict_keys,
         )
         self._handle = await spawn_worker(bootstrap, label=self._label)
         control = DestinationGRPCClient(target=self._handle.target)

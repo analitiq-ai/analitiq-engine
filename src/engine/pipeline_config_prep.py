@@ -44,6 +44,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from analitiq.contracts.endpoints import ApiEndpointDoc, DatabaseEndpointDoc
 from analitiq.contracts.pipelines.config import RuntimeConfig as ContractRuntimeConfig
 from analitiq.contracts.stream import ReplicationConfig as ContractReplicationConfig
 from pydantic import BaseModel
@@ -59,7 +60,7 @@ from cdk.type_map import (
 from src.config import settings
 from src.config.connection_loader import load_connection_file, load_connector_definition
 from src.config.endpoint_resolver import ConnectionLookup, resolve_endpoint_ref
-from src.config.schema_validator import ContractValidationError
+from src.config.schema_validator import ContractValidationError, EndpointDocument
 from src.config.schema_validator import validate as validate_artifact
 from src.config.schema_validator import validate_bundle
 from src.config.utils import load_json_file
@@ -199,6 +200,7 @@ class PipelineConfigPrep:
     """Loads, validates, and assembles a pipeline's runtime configuration."""
 
     def __init__(self) -> None:
+        """Resolve project paths and the PIPELINE_ID this run executes."""
         self._paths = self._discover_paths()
 
         self.pipeline_id_input = os.getenv("PIPELINE_ID", "")
@@ -218,7 +220,7 @@ class PipelineConfigPrep:
         self._resolved_connections: dict[
             str, ConnectionRuntime
         ] = {}  # by connection_id
-        self._resolved_endpoints: dict[EndpointRef, dict[str, Any]] = {}
+        self._resolved_endpoints: dict[EndpointRef, EndpointDocument] = {}
         self._loaded_connectors: dict[str, dict[str, Any]] = {}  # by connector_id
         self._connector_type_mappers: dict[str, TypeMapper] = {}
         self._connection_type_mappers: dict[str, TypeMapper | None] = {}
@@ -503,7 +505,8 @@ class PipelineConfigPrep:
     # Endpoint resolution
     # ------------------------------------------------------------------
 
-    def _resolve_endpoint(self, endpoint_ref: Any) -> dict[str, Any]:
+    def _resolve_endpoint(self, endpoint_ref: Any) -> EndpointDocument:
+        """Resolve one endpoint reference to its typed contract document."""
         ref = EndpointRef.from_dict(endpoint_ref)
         if ref in self._resolved_endpoints:
             return self._resolved_endpoints[ref]
@@ -524,7 +527,7 @@ class PipelineConfigPrep:
             )
         endpoint_kind = match.group(1)
         try:
-            validate_artifact(endpoint_kind, document, source=str(ref))
+            model = validate_artifact(endpoint_kind, document, source=str(ref))
         except ContractValidationError:
             # ContractValidationError already embeds str(ref) as its source and
             # carries structured per-field errors; re-raise as-is to preserve type.
@@ -536,22 +539,30 @@ class PipelineConfigPrep:
                 f"Endpoint {ref!s} ($schema={schema_url!r}, "
                 f"kind={endpoint_kind!r}): {exc}"
             ) from exc
+        if not isinstance(model, ApiEndpointDoc | DatabaseEndpointDoc):
+            # A *-endpoint kind that maps to a non-endpoint contract model is
+            # a wiring defect in the artifact-kind registry, not a document
+            # problem; fail loud rather than carry an unexpected type.
+            raise ValueError(
+                f"Endpoint {ref!s}: artifact kind {endpoint_kind!r} validated "
+                f"to {type(model).__name__}, not an endpoint document model"
+            )
         # For a connection-scoped ref the endpoint_id is the server-derived
         # handle over database_object (the table identity the SQL source/
         # destination consumes). The bundle validator only proves a file named
         # {endpoint_id}.json exists; guard against a stale/mismatched file whose
         # contents point at a different table by requiring the loaded document's
         # own endpoint_id to equal the ref's.
-        if ref.scope == "connection" and document.get("endpoint_id") != ref.endpoint_id:
+        if ref.scope == "connection" and model.endpoint_id != ref.endpoint_id:
             raise ValueError(
                 f"Endpoint {ref!s}: on-disk document declares endpoint_id "
-                f"{document.get('endpoint_id')!r}, which does not match the "
+                f"{model.endpoint_id!r}, which does not match the "
                 f"reference's server-derived {ref.endpoint_id!r}; the endpoint "
                 f"file does not describe the referenced table."
             )
-        self._resolved_endpoints[ref] = document
+        self._resolved_endpoints[ref] = model
         logger.info("Resolved endpoint: %s", ref)
-        return document
+        return model
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -563,7 +574,7 @@ class PipelineConfigPrep:
         ResolvedPipeline,
         list[ResolvedStream],
         dict[str, ConnectionRuntime],
-        dict[EndpointRef, dict[str, Any]],
+        dict[EndpointRef, EndpointDocument],
         list[dict[str, Any]],
     ]:
         """Load and return the validated, resolved pipeline configuration.
@@ -573,11 +584,13 @@ class PipelineConfigPrep:
         * ``pipeline``: :class:`ResolvedPipeline` with pipeline-level config.
         * ``streams``: list of :class:`ResolvedStream` with typed
           source/destinations — ``ConnectionRuntime`` and the resolved
-          endpoint document live as explicit fields, not dict keys.
+          endpoint document (a typed contract model) live as explicit
+          fields, not dict keys.
         * ``resolved_connections``: dict keyed by ``connection_id`` of
           :class:`ConnectionRuntime` (one per saved connection used by
           the pipeline).
-        * ``resolved_endpoints``: dict keyed by :class:`EndpointRef`.
+        * ``resolved_endpoints``: dict keyed by :class:`EndpointRef` of
+          typed endpoint documents.
         * ``connectors``: list of connector documents loaded.
         """
         pipeline_doc = self._load_pipeline_document()
@@ -734,7 +747,7 @@ class PipelineConfigPrep:
 
     def _resolve_endpoint_block(
         self, block: Mapping[str, Any]
-    ) -> tuple[EndpointRef, ConnectionRuntime, dict[str, Any]]:
+    ) -> tuple[EndpointRef, ConnectionRuntime, EndpointDocument]:
         """Resolve one stream side's ``endpoint_ref`` into its parts.
 
         ``endpoint_ref`` presence is guaranteed by per-document stream

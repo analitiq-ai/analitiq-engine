@@ -3,6 +3,7 @@
 from unittest.mock import MagicMock
 
 import pytest
+from analitiq.contracts.endpoints import ApiEndpointDoc, DatabaseEndpointDoc
 
 from src.models.resolved import (
     BatchingConfig,
@@ -13,15 +14,59 @@ from src.models.resolved import (
     ResolvedSource,
     ResolvedStream,
     RuntimeConfig,
+    dump_endpoint_document,
 )
 from src.models.stream import EndpointRef
 from src.runner import (
     _build_config_dict,
     _build_destination_config,
-    _translate_api_source,
-    _translate_database_source,
     _translate_source_config,
 )
+
+
+def _database_endpoint_doc(endpoint_id="orders-ep", **extra):
+    """Minimal contract-valid database endpoint document model."""
+    return DatabaseEndpointDoc.model_validate(
+        {
+            "endpoint_id": endpoint_id,
+            "$schema": "https://schemas.analitiq.ai/database-endpoint/latest.json",
+            "database_object": {
+                "schema": "public",
+                "name": "orders",
+                "object_type": "table",
+            },
+            "columns": [
+                {"name": "id", "native_type": "integer", "arrow_type": "Int32"}
+            ],
+            "primary_keys": ["id"],
+            **extra,
+        }
+    )
+
+
+def _api_endpoint_doc(endpoint_id="invoices-ep"):
+    """Minimal contract-valid API endpoint document model."""
+    return ApiEndpointDoc.model_validate(
+        {
+            "endpoint_id": endpoint_id,
+            "$schema": "https://schemas.analitiq.ai/api-endpoint/latest.json",
+            "operations": {
+                "read": {
+                    "request": {"path": "/invoices", "method": "GET"},
+                    "response": {
+                        "records": {"ref": "response.body"},
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {"id": {"type": "integer"}},
+                            },
+                        },
+                    },
+                }
+            },
+        }
+    )
 
 
 def _make_endpoint_ref(scope="connector", connection_id="conn", endpoint_id="ep"):
@@ -37,18 +82,24 @@ def _make_runtime(connector_type="database"):
 
 
 def _make_source(connector_type="database", stream_source=None, endpoint_document=None):
+    """ResolvedSource over a typed endpoint document and mock runtime."""
     ref = _make_endpoint_ref()
     rt = _make_runtime(connector_type)
+    if endpoint_document is None:
+        endpoint_document = (
+            _api_endpoint_doc() if connector_type == "api" else _database_endpoint_doc()
+        )
     return ResolvedSource(
         endpoint_ref=ref,
         connection_ref="conn-1",
         runtime=rt,
-        endpoint_document=endpoint_document or {"database_object": "orders"},
+        endpoint_document=endpoint_document,
         stream_source=stream_source or {"replication": {"cursor_field": "updated_at"}},
     )
 
 
 def _make_destination(write=None):
+    """ResolvedDestination over a typed endpoint document."""
     ref = _make_endpoint_ref(
         scope="connection", connection_id="dest", endpoint_id="orders"
     )
@@ -57,7 +108,7 @@ def _make_destination(write=None):
         endpoint_ref=ref,
         connection_ref="dest-1",
         runtime=rt,
-        endpoint_document={"table": "orders"},
+        endpoint_document=_database_endpoint_doc(),
         write=write or {"mode": "upsert"},
     )
 
@@ -96,6 +147,29 @@ def _make_pipeline(
     )
 
 
+class TestDumpEndpointDocument:
+    """dump_endpoint_document restores the authored JSON shape."""
+
+    def test_round_trips_authored_shape(self):
+        """The dump restores aliases, omits unset fields, and revalidates."""
+        doc = _database_endpoint_doc()
+        dumped = dump_endpoint_document(doc)
+        # Aliases restored, unset fields omitted, revalidates to the same
+        # model.
+        assert dumped["$schema"] == (
+            "https://schemas.analitiq.ai/database-endpoint/latest.json"
+        )
+        assert "display_name" not in dumped
+        assert DatabaseEndpointDoc.model_validate(dumped) == doc
+
+    def test_api_doc_round_trips(self):
+        """An API document round-trips through the dump unchanged."""
+        doc = _api_endpoint_doc()
+        dumped = dump_endpoint_document(doc)
+        assert dumped["operations"]["read"]["request"]["path"] == "/invoices"
+        assert ApiEndpointDoc.model_validate(dumped) == doc
+
+
 class TestBuildDestinationConfig:
     def test_explicit_write_mode(self):
         dest = _make_destination(write={"mode": "insert"})
@@ -113,113 +187,57 @@ class TestBuildDestinationConfig:
         assert result == {"write_mode": "truncate_insert"}
 
 
-class TestTranslateDatabaseSource:
-    def test_attaches_endpoint_and_stream_source(self):
-        endpoint = {"database_object": "invoices", "columns": ["id", "amount"]}
-        stream_source = {"replication": {"cursor_field": "updated_at"}}
-        source = _make_source(stream_source=stream_source, endpoint_document=endpoint)
-
-        result = _translate_database_source(source, endpoint)
-
-        assert result["endpoint_document"] is endpoint
-        assert result["stream_source"] is stream_source
-
-    def test_passes_documents_through_verbatim(self):
-        endpoint = {
-            "primary_keys": ["id"],
-            "filters": [{"field": "active", "value": True}],
-        }
-        source = _make_source(endpoint_document=endpoint)
-
-        result = _translate_database_source(source, endpoint)
-
-        assert result["endpoint_document"]["filters"][0]["field"] == "active"
-
-
-class TestTranslateApiSource:
-    def test_attaches_endpoint_stream_source_and_filters(self):
-        filters = [{"field": "status", "op": "eq", "value": "active"}]
-        stream_source = {"filters": filters, "replication": {}}
-        endpoint = {"operations": {"read": {"request": {"path": "/invoices"}}}}
-        source = _make_source(
-            connector_type="api",
-            stream_source=stream_source,
-            endpoint_document=endpoint,
-        )
-        rt = source.runtime
-
-        result = _translate_api_source(source, endpoint, rt)
-
-        assert result["endpoint_document"] is endpoint
-        assert result["stream_source"] is stream_source
-        assert result["stream_filters"] == filters
-
-    def test_empty_filters_when_absent(self):
-        stream_source = {}
-        endpoint = {}
-        source = _make_source(
-            connector_type="api",
-            stream_source=stream_source,
-            endpoint_document=endpoint,
-        )
-
-        result = _translate_api_source(source, endpoint, source.runtime)
-
-        assert result["stream_filters"] == []
-
-    def test_none_filters_normalised_to_empty_list(self):
-        stream_source = {"filters": None}
-        source = _make_source(connector_type="api", stream_source=stream_source)
-
-        result = _translate_api_source(source, {}, source.runtime)
-
-        assert result["stream_filters"] == []
-
-
 class TestTranslateSourceConfig:
     def test_database_kind_adds_endpoint_and_stream_source(self):
+        """The wire dict carries the dumped contract documents."""
         source = _make_source(connector_type="database")
         stream = _make_stream(connector_type="database")
-        endpoint = source.endpoint_document
 
         result = _translate_source_config(
-            stream=stream, source=source, endpoint=endpoint, runtime=source.runtime
+            stream=stream, source=source, runtime=source.runtime
         )
 
         assert result["connector_type"] == "database"
         assert result["_resolved_source"] is source
         assert result["connection_ref"] == "conn-1"
-        assert result["endpoint_document"] is endpoint
+        # The wire carries the dumped contract document, not the model.
+        assert result["endpoint_document"] == dump_endpoint_document(
+            source.endpoint_document
+        )
         assert "stream_source" in result
 
-    def test_api_kind_adds_stream_filters(self):
+    def test_api_kind_gets_same_pass_through(self):
+        """The api kind carries the identical contract-document shape; the
+        connector reads filters directly off ``stream_source``."""
         stream_source = {"filters": [{"field": "x"}]}
         source = _make_source(connector_type="api", stream_source=stream_source)
         stream = _make_stream(connector_type="api")
-        endpoint = source.endpoint_document
 
         result = _translate_source_config(
-            stream=stream, source=source, endpoint=endpoint, runtime=source.runtime
+            stream=stream, source=source, runtime=source.runtime
         )
 
         assert result["connector_type"] == "api"
-        assert result["stream_filters"] == [{"field": "x"}]
+        assert result["endpoint_document"] == dump_endpoint_document(
+            source.endpoint_document
+        )
+        assert result["stream_source"] is stream_source
 
     def test_non_built_in_kind_passes_through_database_shape(self):
         """Non-built-in connector kinds pass through the same contract-document
         shape as database without raising (#165)."""
         source = _make_source(connector_type="nosql")
         stream = _make_stream()
-        endpoint = source.endpoint_document
 
         result = _translate_source_config(
-            stream=stream, source=source, endpoint=endpoint, runtime=source.runtime
+            stream=stream, source=source, runtime=source.runtime
         )
 
         assert result["connector_type"] == "nosql"
-        assert result["endpoint_document"] is endpoint
+        assert result["endpoint_document"] == dump_endpoint_document(
+            source.endpoint_document
+        )
         assert result["stream_source"] is source.stream_source
-        assert "stream_filters" not in result
 
     @pytest.mark.parametrize("kind", ["nosql", "graphql", "file", "sftp", "custom-db"])
     def test_non_built_in_kind_never_raises(self, kind):
@@ -228,7 +246,6 @@ class TestTranslateSourceConfig:
         result = _translate_source_config(
             stream=_make_stream(),
             source=source,
-            endpoint=source.endpoint_document,
             runtime=source.runtime,
         )
         assert result["connector_type"] == kind
@@ -241,17 +258,17 @@ class TestTranslateSourceConfig:
             _translate_source_config(
                 stream=_make_stream(),
                 source=source,
-                endpoint=source.endpoint_document,
                 runtime=source.runtime,
             )
         assert any("nosql" in r.message for r in caplog.records)
 
     def test_endpoint_ref_is_serialised(self):
+        """The endpoint_ref is serialised to its dict payload."""
         source = _make_source(connector_type="database")
         stream = _make_stream()
 
         result = _translate_source_config(
-            stream=stream, source=source, endpoint={}, runtime=source.runtime
+            stream=stream, source=source, runtime=source.runtime
         )
 
         assert isinstance(result["endpoint_ref"], dict)
