@@ -228,6 +228,44 @@ def test_classify_destination_failure_reads_declared_category(category, expected
     assert classify_destination_failure(exc) is expected
 
 
+def test_code_for_declared_category_mirrors_classification():
+    # The non-raising dlq/skip partial-run path maps a declared category via
+    # this helper; it must agree with what classify_destination_failure would
+    # return for the same declaration, or the reported code would depend on
+    # the error strategy (#351).
+    from src.engine.exceptions import StreamProcessingError
+    from src.state.error_classification import (
+        classify_destination_failure,
+        code_for_declared_category,
+    )
+
+    for category in FailureCategory:
+        code = code_for_declared_category(category)
+        if category is FailureCategory.FAILURE_CATEGORY_UNSPECIFIED:
+            assert code is None
+            continue
+        exc = StreamProcessingError("opaque", failure_category=category)
+        assert code is classify_destination_failure(exc)
+
+
+def test_dominant_error_code_prefers_actionable_cause():
+    from src.state.error_classification import dominant_error_code
+
+    assert dominant_error_code([]) is None
+    # The same rule an ExceptionGroup resolves with: config outranks a write
+    # failure, and both outrank an unclassifiable INTERNAL leaf.
+    assert (
+        dominant_error_code([ErrorCode.INTERNAL, ErrorCode.DESTINATION_WRITE_FAILED])
+        is ErrorCode.DESTINATION_WRITE_FAILED
+    )
+    assert (
+        dominant_error_code(
+            [ErrorCode.DESTINATION_WRITE_FAILED, ErrorCode.CONFIG_INVALID]
+        )
+        is ErrorCode.CONFIG_INVALID
+    )
+
+
 def test_declared_category_outranks_conflicting_text():
     # The near-miss from issue #351: a readiness-guard summary phrased as
     # "Handler could not connect" would phrase-match SOURCE_UNREACHABLE

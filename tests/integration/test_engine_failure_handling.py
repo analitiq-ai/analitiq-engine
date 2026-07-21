@@ -679,6 +679,84 @@ class TestEngineFatalFailureHandling:
         assert tag.stage is FailureStage.DESTINATION_LOAD
 
     @pytest.mark.asyncio
+    async def test_dlq_exhaustion_records_declared_code_for_partial_run(
+        self,
+        engine: StreamingEngine,
+        mock_grpc_client: AsyncMock,
+        sample_stream_config: dict[str, Any],
+        temp_dir: str,
+    ):
+        """The dlq strategy breaks without raising, so the ack's declared
+        category must be stashed for the partial-run classification --
+        otherwise the same NOT_READY failure reports INTERNAL under
+        strategy=fail but DESTINATION_WRITE_FAILED under dlq/skip (#351)."""
+        from src.state.dead_letter_queue import DeadLetterQueue
+
+        input_queue = asyncio.Queue()
+        output_queue = asyncio.Queue()
+        await input_queue.put(pa.RecordBatch.from_pylist([{"id": 1}]))
+        await input_queue.put(None)
+
+        not_ready_result = MockBatchResult(
+            success=False,
+            status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
+            records_written=0,
+            committed_cursor=None,
+            failed_record_ids=[],
+            failure_summary="Handler not connected",
+            failure_category=FailureCategory.FAILURE_CATEGORY_NOT_READY,
+        )
+        mock_grpc_client.send_batch = AsyncMock(return_value=not_ready_result)
+
+        stream_dlq = DeadLetterQueue(f"{temp_dir}/dlq")
+        engine.error_strategy = "dlq"
+        engine.retry_delay = 0.01
+
+        stream_metrics: dict[str, Any] = {
+            "records_processed": 0,
+            "records_failed": 0,
+            "records_skipped": 0,
+            "batches_processed": 0,
+            "batches_failed": 0,
+        }
+
+        await engine._load_stage(
+            input_queue=input_queue,
+            output_queue=output_queue,
+            grpc_client=mock_grpc_client,
+            config=dict(sample_stream_config),
+            stream_dlq=stream_dlq,
+            run_id="test-run-001",
+            stream_metrics=stream_metrics,
+        )
+
+        assert stream_metrics["_declared_failure_codes"] == [ErrorCode.INTERNAL]
+        # An undeclared exhaustion must record nothing, keeping the partial
+        # path on its DESTINATION_WRITE_FAILED default.
+        undeclared = MockBatchResult(
+            success=False,
+            status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
+            records_written=0,
+            committed_cursor=None,
+            failed_record_ids=[],
+            failure_summary="connection reset by peer",
+        )
+        mock_grpc_client.send_batch = AsyncMock(return_value=undeclared)
+        await input_queue.put(pa.RecordBatch.from_pylist([{"id": 2}]))
+        await input_queue.put(None)
+        stream_metrics.pop("_declared_failure_codes")
+        await engine._load_stage(
+            input_queue=input_queue,
+            output_queue=output_queue,
+            grpc_client=mock_grpc_client,
+            config=dict(sample_stream_config),
+            stream_dlq=stream_dlq,
+            run_id="test-run-001",
+            stream_metrics=stream_metrics,
+        )
+        assert "_declared_failure_codes" not in stream_metrics
+
+    @pytest.mark.asyncio
     async def test_load_stage_retryable_exhaustion_skips_with_skip_strategy(
         self,
         engine: StreamingEngine,

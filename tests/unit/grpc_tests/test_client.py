@@ -138,13 +138,11 @@ class TestProcessAckFailureCategory:
         from cdk.types import FailureCategory
         from src.grpc.generated.analitiq.v1 import BatchAck
 
-        ack = BatchAck(status=AckStatus.ACK_STATUS_FATAL_FAILURE)
-        # Simulate a worker sending an integer this engine build does not
-        # know. proto3 enums are open, so an unknown value survives the wire;
-        # assign via the serialized form to bypass the setter's range check.
-        raw = BatchAck.FromString(ack.SerializeToString() + b"\x48\x63")  # field 9 = 99
-        assert raw.failure_category == 99
-        result = DestinationGRPCClient()._process_ack(raw)
+        # A worker sending an integer this engine build does not know:
+        # proto3 enums are open, so 99 survives assignment and the wire.
+        ack = BatchAck(status=AckStatus.ACK_STATUS_FATAL_FAILURE, failure_category=99)
+        assert ack.failure_category == 99
+        result = DestinationGRPCClient()._process_ack(ack)
         assert result.failure_category is FailureCategory.FAILURE_CATEGORY_UNSPECIFIED
 
     def test_category_on_success_ack_is_zeroed(self):

@@ -34,8 +34,10 @@ from ..state.error_classification import (
     classify_for_metrics,
     classify_handshake_failure,
     classify_source_extract,
+    code_for_declared_category,
     customer_message,
     detail_for_code,
+    dominant_error_code,
     tag_failure,
 )
 from ..state.metrics_storage import create_metrics_record, emit_metrics_log
@@ -268,7 +270,7 @@ class StreamingEngine:
         stream_dlq = None
         tasks = []
         stream_start_time = datetime.now(timezone.utc)
-        stream_metrics = {
+        stream_metrics: dict[str, Any] = {
             "records_processed": 0,
             "records_failed": 0,
             "records_skipped": 0,
@@ -451,8 +453,17 @@ class StreamingEngine:
                 # The dlq/skip strategies complete the stream without raising
                 # after exhausting retries; reflect that it only partly succeeded
                 # and carry the destination cause rather than reporting success.
+                # A category the destination declared on the exhausted acks wins
+                # (dominant across batches, the read_failure_tag rule), so the
+                # same failure classifies identically under fail and dlq/skip
+                # (#351); undeclared failures keep the load-stage default.
                 status = "partial"
-                error_code = ErrorCode.DESTINATION_WRITE_FAILED
+                error_code = (
+                    dominant_error_code(
+                        stream_metrics.pop("_declared_failure_codes", [])
+                    )
+                    or ErrorCode.DESTINATION_WRITE_FAILED
+                )
                 error_message = customer_message(error_code)
                 # 'skip' drops exhausted batches without a DLQ entry, so those
                 # records are NOT recoverable; do not imply dead-lettering. The
@@ -640,7 +651,7 @@ class StreamingEngine:
         input_queue: Queue[Any],
         output_queue: Queue[Any],
         config: dict[str, Any],
-        stream_metrics: dict[str, int],
+        stream_metrics: dict[str, Any],
     ) -> None:
         """Transform data with field mappings and validation."""
         stream_name = config["stream_name"]
@@ -744,7 +755,7 @@ class StreamingEngine:
         config: dict[str, Any],
         stream_dlq: "DeadLetterQueue",
         run_id: str,
-        stream_metrics: dict[str, int],
+        stream_metrics: dict[str, Any],
     ) -> None:
         """
         Load transformed data to destination via gRPC streaming.
@@ -901,6 +912,19 @@ class StreamingEngine:
                             self.metrics.increment_batches_failed()
                             stream_metrics["records_failed"] += record_count
                             stream_metrics["batches_failed"] += 1
+                            # The dlq/skip strategies break without raising, so
+                            # the declared category would die with this scope.
+                            # Stash its code for the partial-run classification
+                            # -- the same mapping the raise path gets via
+                            # classify_destination_failure, so the reported
+                            # code cannot depend on the error strategy (#351).
+                            declared = code_for_declared_category(
+                                result.failure_category
+                            )
+                            if declared is not None:
+                                stream_metrics.setdefault(
+                                    "_declared_failure_codes", []
+                                ).append(declared)
                             if batch_seq == 1 and self._is_truncate_insert(config):
                                 # The destination truncates on batch_seq 1
                                 # (issue #307). Dropping the first batch via
@@ -1104,7 +1128,7 @@ class StreamingEngine:
         stream_dlq: DeadLetterQueue,
         stream_name: str,
         run_id: str,
-        stream_metrics: dict[str, int],
+        stream_metrics: dict[str, Any],
     ) -> list[asyncio.Task[None]]:
         """Create all pipeline stage tasks using factory pattern."""
         return [

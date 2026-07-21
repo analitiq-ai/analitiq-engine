@@ -98,10 +98,12 @@ enum AckStatus {
 // failure_summary (which stays the human-readable "what went wrong").
 // The category answers "who owns the fix" so the engine maps it to a
 // customer-facing error code without parsing summary text (issue #351).
-// Engine-owned vocabulary: only CDK base-class / engine-owned handler code
-// sets it. A thick connector that overrides write_batch leaves it
-// UNSPECIFIED and the engine falls back to summary matching - the engine
-// does not believe a connector's self-classification.
+// Engine-owned vocabulary: connectors are not asked to self-classify.
+// The CDK base classes, the engine-owned handlers, and the destination
+// servicer's own pre-schema rejection set it; a thick connector that
+// overrides write_batch leaves it UNSPECIFIED and the engine falls back
+// to summary matching. The value is range-checked off the wire (an
+// unrecognised integer degrades to UNSPECIFIED).
 enum FailureCategory {
   FAILURE_CATEGORY_UNSPECIFIED = 0;    // Nothing declared; engine falls back to summary matching
   FAILURE_CATEGORY_CONFIG_DEFECT = 1;  // Deterministic, user-fixable configuration defect

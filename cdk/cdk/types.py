@@ -44,10 +44,12 @@ class FailureCategory(IntEnum):
     passes a value straight into a protobuf ``BatchAck`` without a lookup
     table.
 
-    Engine-owned vocabulary: only CDK base-class / engine-owned handler
-    code sets it. A thick connector that overrides ``write_batch`` leaves
-    it UNSPECIFIED and the engine falls back to summary matching — the
-    engine does not believe a connector's self-classification.
+    Engine-owned vocabulary: connectors are not asked to self-classify.
+    The CDK base classes and engine-owned handler code set it; a thick
+    connector that overrides ``write_batch`` leaves it UNSPECIFIED and
+    the engine falls back to summary matching. Off the wire the value is
+    range-checked (an unrecognised integer degrades to UNSPECIFIED); an
+    in-range value is used as declared.
     """
 
     FAILURE_CATEGORY_UNSPECIFIED = 0  # Nothing declared; engine matches summary text

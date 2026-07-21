@@ -127,7 +127,7 @@ message BatchAck {
 
 There is no `PARTIAL_SUCCESS` — batches are all-or-nothing (below).
 
-`failure_summary` answers *what went wrong* (human-readable, free text); `failure_category` answers *who owns the fix* (machine-readable), so the engine maps a failed batch to a customer-facing error code without parsing summary text. The vocabulary is engine-owned: only CDK base-class / engine-owned handler code sets a category (the config-defect excepts and write-failure excepts in `cdk/sql/generic.py`, and every pre-flight guard via `reject_batch`). A thick connector that overrides `write_batch` leaves it `UNSPECIFIED` and the engine falls back to matching the summary — the engine does not believe a connector's self-classification, and the value is bounds-checked when read off the wire (an unrecognised integer degrades to `UNSPECIFIED`).
+`failure_summary` answers *what went wrong* (human-readable, free text); `failure_category` answers *who owns the fix* (machine-readable), so the engine maps a failed batch to a customer-facing error code without parsing summary text. The vocabulary is engine-owned: connectors are not asked to self-classify. It is set by the config-defect and write-failure excepts in `cdk/sql/generic.py`, by every pre-flight guard via `reject_batch`, and by the destination servicer's own batch-before-schema rejection. A thick connector that overrides `write_batch` leaves it `UNSPECIFIED` and the engine falls back to matching the summary. The value is range-checked when read off the wire — an unrecognised integer degrades to `UNSPECIFIED` — and an in-range value is used as declared.
 
 ## Key Design Decisions
 

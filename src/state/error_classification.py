@@ -36,7 +36,11 @@ The name/phrase heuristics below remain only as:
    :func:`classify_source_extract` does that one narrow, *source-only* split when
    the extract boundary tags a stream. There is no cross-stage ambiguity left,
    because only the source boundary ever runs it.
-2. A defensive fallback (:func:`classify_exception`) for any exception that
+2. The destination-load fallback for an undeclared failure
+   (:func:`classify_destination_failure` when the batch ack carries no
+   ``FailureCategory`` -- a thick connector's own ack, or a failure with no
+   ack at all).
+3. A defensive fallback (:func:`classify_exception`) for any exception that
    reaches the runner with no tag at all. It mirrors the existing name-based
    pattern in ``cdk.sql.generic._is_fatal_adbc_error``.
 
@@ -54,6 +58,7 @@ engine-side in the logs (``logger.exception``), not in the metrics record.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import Enum
 
@@ -605,6 +610,30 @@ if _unmapped:
     )
 
 
+def code_for_declared_category(category: FailureCategory) -> ErrorCode | None:
+    """Return the engine-side :class:`ErrorCode` for a declared category.
+
+    None for UNSPECIFIED -- nothing was declared, so the caller falls back to
+    its own default (text matching, or the load-stage default code). Defined
+    once so the raise path (:func:`classify_destination_failure`) and the
+    non-raising dlq/skip partial-run path map a declared category identically.
+    """
+    return _CATEGORY_TO_CODE.get(category)
+
+
+def dominant_error_code(codes: Iterable[ErrorCode]) -> ErrorCode | None:
+    """Return the highest-priority code among ``codes``, or None when empty.
+
+    The same dominance rule :func:`read_failure_tag` applies across an
+    ``ExceptionGroup``'s leaves, for callers aggregating per-batch codes
+    instead of exceptions (the dlq/skip partial-run path).
+    """
+    ranked = list(codes)
+    if not ranked:
+        return None
+    return min(ranked, key=_CODE_PRIORITY.index)
+
+
 def _read_failure_category(exc: BaseException) -> FailureCategory:
     """Return the first declared failure category in the exception chain.
 
@@ -638,7 +667,7 @@ def classify_destination_failure(exc: BaseException) -> ErrorCode:
     permission, transport) still routes there. Only the load boundary calls
     it, so a source-side cause can never reach it.
     """
-    declared = _CATEGORY_TO_CODE.get(_read_failure_category(exc))
+    declared = code_for_declared_category(_read_failure_category(exc))
     if declared is not None:
         return declared
     names, text = _signature(exc)
