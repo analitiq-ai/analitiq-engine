@@ -145,8 +145,9 @@ class FileDestinationHandler(BaseDestinationHandler):
 
         self._connected = True
         logger.info(
-            f"FileDestinationHandler connected: "
-            f"storage={storage_type}, format={file_format}"
+            "FileDestinationHandler connected: storage=%s, format=%s",
+            storage_type,
+            file_format,
         )
 
     async def disconnect(self) -> None:
@@ -267,8 +268,11 @@ class FileDestinationHandler(BaseDestinationHandler):
             )
 
             logger.info(
-                f"Wrote batch {batch_seq}: {len(records)} records, "
-                f"{len(data)} bytes to {written_path}"
+                "Wrote batch %s: %s records, %s bytes to %s",
+                batch_seq,
+                len(records),
+                len(data),
+                written_path,
             )
 
             return BatchWriteResult(
