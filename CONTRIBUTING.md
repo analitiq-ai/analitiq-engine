@@ -87,10 +87,11 @@ A PR can merge into `main` only when every required status check on its head
 commit is green:
 
 1. **Codex review is clean** -- the `codex-review` status, posted by
-   `.github/workflows/codex-gate.yml`. It turns green when Codex either posts
-   "Didn't find any major issues" for the PR's current head commit or reacts +1
-   on the latest `@codex review` request. Pushing new commits resets it until
-   Codex reviews again.
+   `.github/workflows/codex-gate.yml`. It turns green only when Codex's newest
+   verdict naming the PR's current head commit says "Didn't find any major
+   issues". A bare +1 reaction does not count -- re-request the review so Codex
+   posts a verdict comment. Pushing new commits resets the gate until Codex
+   reviews the new head.
 2. **CI is green** -- `pytest`, `pre-commit (all files)`, and
    `Scan for secrets`.
 3. **DeepSource Code Review Summary is all passed** -- the `DeepSource: Docker`,

@@ -2,11 +2,14 @@ name: codex-gate
 
 # Translates the Codex review verdict into a `codex-review` commit status on
 # the PR head so branch protection can require a clean Codex review before
-# merge (issue #355). Codex signals a clean PR in one of two ways: a comment or
-# review saying "Didn't find any major issues" that names the reviewed commit,
-# or a +1 reaction -- on the latest "@codex review" request, or on the PR
-# itself for auto-triggered reviews. Reactions emit no webhook events, so a
-# scheduled sweep re-evaluates open PRs to catch that form.
+# merge (issue #355). The only honored signal is Codex's verdict comment or
+# review saying "Didn't find any major issues" and naming the reviewed commit;
+# the newest verdict naming the current head decides. Codex's +1-reaction form
+# is deliberately not honored: a reaction names no commit, so tying it to a
+# head requires timestamp heuristics that are either forgeable or wedge valid
+# approvals. When Codex answers with a bare +1, re-request the review so it
+# posts a verdict comment. A scheduled sweep retries PRs whose event-triggered
+# runs failed or were never delivered.
 #
 # pull_request_target (not pull_request) because posting a commit status needs
 # a write token even for fork PRs; it is safe here because the job never checks
@@ -27,7 +30,6 @@ permissions:
   statuses: write
   pull-requests: read
   issues: read
-  checks: read
 
 concurrency:
   group: codex-gate-${{ github.event.pull_request.number || github.event.issue.number || 'sweep' }}
@@ -40,14 +42,12 @@ jobs:
   # reporter.
   gate:
     runs-on: ubuntu-latest
-    # Comment events fire for every comment on the repo; only Codex's own
-    # comments and "@codex review" requests can change the verdict, so skip the
-    # rest. Review events matter only when Codex is the reviewer.
+    # Comment and review events fire for every author; only Codex's own
+    # comments and reviews can change the verdict, so skip the rest.
     if: >-
       (github.event_name != 'issue_comment' ||
        (github.event.issue.pull_request &&
-        (github.event.comment.user.login == 'chatgpt-codex-connector[bot]' ||
-         contains(github.event.comment.body, '@codex review')))) &&
+        github.event.comment.user.login == 'chatgpt-codex-connector[bot]')) &&
       (github.event_name != 'pull_request_review' ||
        github.event.review.user.login == 'chatgpt-codex-connector[bot]')
     steps:
@@ -66,7 +66,6 @@ jobs:
             // Codex renders the commit marker both bolded and plain depending
             // on surface, so the asterisks are optional.
             const REVIEWED_COMMIT = /\*{0,2}Reviewed commit:\*{0,2}\s*`([0-9a-f]{7,40})`/i;
-            const RE_REQUEST = /@codex review/;
 
             async function evaluate(prNumber) {
               const { owner, repo } = context.repo;
@@ -102,81 +101,37 @@ jobs:
               const { owner, repo } = context.repo;
               const prNumber = pr.number;
 
-              const { data: combined } = await github.rest.repos.getCombinedStatusForRef({ owner, repo, ref: head });
-              const existing = combined.statuses.find((s) => s.context === CONTEXT);
-
-              // Statuses are keyed to the immutable head SHA, so a success
-              // earned for this exact commit cannot become less reviewed --
-              // never demote it. Without this exit a reaction-earned success
-              // would flap back: posting it advances the latest-status
-              // timestamp past the request that earned it, so the next sweep
-              // would fail the watermark test and revert to pending.
-              if (existing && existing.state === 'success') {
-                core.info(`PR #${prNumber} @ ${head.slice(0, 10)}: already success`);
-                return;
-              }
-
               const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number: prNumber, per_page: 100 });
               const reviews = await github.paginate(github.rest.pulls.listReviews, { owner, repo, pull_number: prNumber, per_page: 100 });
 
-              const codexBodies = comments
+              const codexResponses = comments
                 .filter((c) => c.user.login === CODEX)
-                .map((c) => c.body || '')
-                .concat(reviews.filter((r) => r.user.login === CODEX).map((r) => r.body || ''));
+                .map((c) => ({ body: c.body || '', at: c.created_at }))
+                .concat(reviews
+                  .filter((r) => r.user.login === CODEX)
+                  .map((r) => ({ body: r.body || '', at: r.submitted_at })));
 
-              // A clean verdict counts only for the exact commit Codex says it
-              // reviewed; a verdict for an older commit is stale once new
-              // commits are pushed.
-              let approved = codexBodies.some((body) => {
-                if (!CLEAN.test(body) || FINDINGS.test(body)) return false;
-                const match = body.match(REVIEWED_COMMIT);
-                return match !== null && head.startsWith(match[1]);
-              });
-
-              if (!approved) {
-                // The reaction form: Codex reacts +1 instead of commenting --
-                // on the request comment when triggered by "@codex review", or
-                // on the PR itself when auto-triggered by open/ready (no
-                // request comment exists then). A reaction names no commit, so
-                // it speaks for the current head only if it postdates the
-                // head's arrival. The arrival watermark is the earliest
-                // server-side timestamp attached to this SHA: check runs start
-                // seconds after any push -- before this gate's own first
-                // status, so a request posted right after a push is not
-                // wrongly rejected. Commit dates are not usable here: authors
-                // can backdate them to smuggle unpushed commits under a stale
-                // +1.
-                const checkRuns = await github.paginate(github.rest.checks.listForRef, { owner, repo, ref: head, per_page: 100 });
-                const timestamps = checkRuns.map((c) => c.started_at).filter(Boolean);
-                if (existing) timestamps.push(existing.created_at);
-                const arrivedAt = timestamps.length > 0
-                  ? new Date(Math.min(...timestamps.map((t) => new Date(t).getTime())))
-                  : null;
-
-                if (arrivedAt) {
-                  // Codex's own comments quote the trigger phrase in their
-                  // boilerplate, so they must not count as requests.
-                  const requests = comments.filter((c) => c.user.login !== CODEX && RE_REQUEST.test(c.body || ''));
-                  const latest = requests[requests.length - 1];
-                  if (latest && new Date(latest.created_at) > arrivedAt) {
-                    const reactions = await github.paginate(github.rest.reactions.listForIssueComment, { owner, repo, comment_id: latest.id, per_page: 100 });
-                    approved = reactions.some((r) => r.user.login === CODEX && r.content === '+1');
-                  }
-                  if (!approved) {
-                    const prReactions = await github.paginate(github.rest.reactions.listForIssue, { owner, repo, issue_number: prNumber, per_page: 100 });
-                    approved = prReactions.some((r) => r.user.login === CODEX && r.content === '+1' && new Date(r.created_at) > arrivedAt);
-                  }
-                }
-              }
+              // A verdict counts only for the exact commit Codex says it
+              // reviewed, and the newest verdict for that commit decides: a
+              // clean verdict is void if a later re-review of the same commit
+              // raised findings.
+              const verdicts = codexResponses
+                .filter((v) => {
+                  const match = v.body.match(REVIEWED_COMMIT);
+                  return match !== null && head.startsWith(match[1]);
+                })
+                .sort((a, b) => new Date(a.at) - new Date(b.at));
+              const latest = verdicts[verdicts.length - 1];
+              const approved = latest !== undefined && CLEAN.test(latest.body) && !FINDINGS.test(latest.body);
 
               const state = approved ? 'success' : 'pending';
               const description = approved
                 ? `Codex found no major issues in ${head.slice(0, 10)}`
-                : codexBodies.length > 0
+                : codexResponses.length > 0
                   ? `No clean Codex verdict for ${head.slice(0, 10)} yet`
                   : `Waiting for a Codex review of ${head.slice(0, 10)}`;
 
-              if (!approved && codexBodies.length > 0) {
+              if (!approved && codexResponses.length > 0) {
                 // Distinguishes "findings open or verdict stale" from template
                 // drift: if Codex rewords its verdict, this is the only trace
                 // that it responded at all.
@@ -186,6 +141,8 @@ jobs:
               // GitHub caps statuses per commit and context, and the scheduled
               // sweep would otherwise re-post an identical status every run;
               // skip when the latest status for this context already matches.
+              const { data: combined } = await github.rest.repos.getCombinedStatusForRef({ owner, repo, ref: head });
+              const existing = combined.statuses.find((s) => s.context === CONTEXT);
               if (existing && existing.state === state) {
                 core.info(`PR #${prNumber} @ ${head.slice(0, 10)}: already ${state}`);
                 return;
@@ -216,7 +173,7 @@ jobs:
                   await evaluate(pr.number);
                 } catch (error) {
                   // One broken PR must not starve the rest: the sweep is the
-                  // only observer of reactions, which emit no webhook events.
+                  // retry net for event runs that failed or never arrived.
                   failures.push(`#${pr.number}: ${error}`);
                   core.error(`PR #${pr.number}: ${error}`);
                 }
