@@ -7,6 +7,13 @@ version = 1
 # grouping for collection).
 test_patterns = ["tests/**"]
 
+# protoc writes everything under src/grpc/generated/. It is not hand-edited and
+# is overwritten on every regeneration, so findings there are unactionable --
+# any fix is discarded by the next protoc run. Analysing it also buries the
+# findings in first-party code: the generated stubs alone accounted for roughly
+# 110 of ~345 live occurrences (PYL-W0212, PYL-R0205, PTC-W0068, PY-W2000).
+exclude_patterns = ["src/grpc/generated/**"]
+
 [[analyzers]]
 name = "python"
 
