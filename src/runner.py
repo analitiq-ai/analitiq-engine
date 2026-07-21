@@ -104,12 +104,10 @@ def _translate_source_config(
 
     All kinds — built-ins (``api``, ``database``, ``file``, ``stdout``)
     and non-built-in kinds — receive the same contract-document
-    pass-through. ``api`` additionally gets ``stream_filters``,
-    materialised from the nested filters inside ``stream_source`` so the
-    connector can iterate a flat list without re-reading the document
-    structure. The worker registry raises ``ConnectorNotRegisteredError``
-    at class-resolution time if no connector is registered for the given
-    kind.
+    pass-through; the connectors read the stream's filters directly off
+    ``stream_source``. The worker registry raises
+    ``ConnectorNotRegisteredError`` at class-resolution time if no
+    connector is registered for the given kind.
     """
     _ = stream  # received from _build_config_dict but not needed at this layer
     kind = runtime.connector_type
@@ -118,9 +116,7 @@ def _translate_source_config(
         "_resolved_source": source,
         **source.to_source_config(),
     }
-    if kind == "api":
-        base["stream_filters"] = list(source.stream_source.get("filters") or [])
-    elif kind not in ("database", "file", "stdout"):
+    if kind not in ("api", "database", "file", "stdout"):
         logger.warning(
             "Connector kind %r is not a recognised built-in kind; passing "
             "contract documents through as endpoint_document + stream_source. "

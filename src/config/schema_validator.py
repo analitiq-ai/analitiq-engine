@@ -30,6 +30,7 @@ from analitiq.contracts.connection import ConnectionInput
 from analitiq.contracts.connector import ConnectorConfig
 from analitiq.contracts.endpoints import ApiEndpointDoc, DatabaseEndpointDoc
 from analitiq.contracts.pipelines.config import PipelineInput
+from analitiq.contracts.shared.common import schema_url_for
 from analitiq.contracts.stream import StreamInput
 from analitiq.validator import validate_pipeline_bundle
 from pydantic import BaseModel, TypeAdapter, ValidationError
@@ -105,12 +106,15 @@ def validate(
 
     Errors anchored at the top-level ``$schema`` field are dropped. The
     ``$schema`` value is an informational pointer to the contract URL;
-    whether a document advertises ``schemas.analitiq.ai`` or another host
-    is independent of the contract body, which is what actually governs
-    correctness. When ``$schema`` is the only failing field, validation
-    retries with the field set to the kind's canonical URL so a typed
-    model can still be produced; the model then carries the canonical URL
-    instead of the document's advertised one.
+    whether a document advertises this environment's host or another
+    (e.g. a connector authored against the canonical ``.ai`` URL running
+    on a ``.dev`` engine) is independent of the contract body, which is
+    what actually governs correctness. When ``$schema`` is the only
+    failing field, validation retries with the environment's canonical
+    URL for the kind (``schema_url_for``, the same constructor the
+    contract models pin their ``$schema`` Literal with) so a typed model
+    can still be produced; the substitution is logged and the model then
+    carries the canonical URL instead of the document's advertised one.
     """
     adapter = _adapter_for(kind)
     try:
@@ -119,16 +123,23 @@ def validate(
         errors = [e for e in exc.errors() if tuple(e["loc"]) != ("$schema",)]
         if errors:
             raise ContractValidationError(kind, source, errors) from exc
-        patched = {
-            **document,
-            "$schema": f"https://schemas.analitiq.ai/{kind}/latest.json",
-        }
+        canonical_url = schema_url_for(kind)
+        patched = {**document, "$schema": canonical_url}
         try:
             model = adapter.validate_python(patched)
         except ValidationError:
             # The canonical URL did not satisfy the model either — surface
             # the original findings rather than the retry's.
             raise ContractValidationError(kind, source, exc.errors()) from exc
+        logger.warning(
+            "Contract %r: %s advertises $schema %r; validated with this "
+            "environment's canonical URL %r instead ($schema is an "
+            "informational pointer, the contract body governs correctness)",
+            kind,
+            source,
+            document.get("$schema"),
+            canonical_url,
+        )
     logger.debug("Contract %r validated %s", kind, source)
     return model
 

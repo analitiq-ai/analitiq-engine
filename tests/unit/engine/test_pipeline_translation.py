@@ -197,7 +197,9 @@ class TestTranslateSourceConfig:
         )
         assert "stream_source" in result
 
-    def test_api_kind_adds_stream_filters(self):
+    def test_api_kind_gets_same_pass_through(self):  # skipcq: PYL-R0201
+        """The api kind carries the identical contract-document shape; the
+        connector reads filters directly off ``stream_source``."""
         stream_source = {"filters": [{"field": "x"}]}
         source = _make_source(connector_type="api", stream_source=stream_source)
         stream = _make_stream(connector_type="api")
@@ -207,31 +209,10 @@ class TestTranslateSourceConfig:
         )
 
         assert result["connector_type"] == "api"
-        assert result["stream_filters"] == [{"field": "x"}]
-
-    def test_api_kind_empty_filters_when_absent(self):  # skipcq: PYL-R0201
-        source = _make_source(connector_type="api", stream_source={})
-
-        result = _translate_source_config(
-            stream=_make_stream(connector_type="api"),
-            source=source,
-            runtime=source.runtime,
+        assert result["endpoint_document"] == dump_endpoint_document(
+            source.endpoint_document
         )
-
-        assert result["stream_filters"] == []
-
-    def test_api_kind_none_filters_normalised_to_empty_list(  # skipcq: PYL-R0201
-        self,
-    ):
-        source = _make_source(connector_type="api", stream_source={"filters": None})
-
-        result = _translate_source_config(
-            stream=_make_stream(connector_type="api"),
-            source=source,
-            runtime=source.runtime,
-        )
-
-        assert result["stream_filters"] == []
+        assert result["stream_source"] is stream_source
 
     def test_non_built_in_kind_passes_through_database_shape(self):
         """Non-built-in connector kinds pass through the same contract-document
@@ -248,7 +229,6 @@ class TestTranslateSourceConfig:
             source.endpoint_document
         )
         assert result["stream_source"] is source.stream_source
-        assert "stream_filters" not in result
 
     @pytest.mark.parametrize("kind", ["nosql", "graphql", "file", "sftp", "custom-db"])
     def test_non_built_in_kind_never_raises(self, kind):
