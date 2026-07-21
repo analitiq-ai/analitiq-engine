@@ -1,0 +1,133 @@
+name: codex-gate
+
+# Translates the Codex review verdict into a `codex-review` commit status on
+# the PR head so branch protection can require a clean Codex review before
+# merge (issue #355). Codex signals a clean PR in one of two ways: a comment or
+# review saying "Didn't find any major issues" that names the reviewed commit,
+# or a +1 reaction on the latest "@codex review" request. Reactions emit no
+# webhook events, so a scheduled sweep re-evaluates open PRs to catch that
+# form.
+#
+# pull_request_target (not pull_request) because posting a commit status needs
+# a write token even for fork PRs; it is safe here because the job never checks
+# out or executes PR code -- it only reads PR metadata and posts a status.
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, ready_for_review]
+  issue_comment:
+    types: [created, edited]
+  pull_request_review:
+    types: [submitted, edited]
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  statuses: write
+  pull-requests: read
+  issues: read
+
+concurrency:
+  group: codex-gate-${{ github.event.pull_request.number || github.event.issue.number || 'sweep' }}
+
+jobs:
+  gate:
+    name: codex-review
+    runs-on: ubuntu-latest
+    # Comment events fire for every comment on the repo; only Codex's own
+    # comments and "@codex review" requests can change the verdict, so skip the
+    # rest. Review events matter only when Codex is the reviewer.
+    if: >-
+      (github.event_name != 'issue_comment' ||
+       (github.event.issue.pull_request &&
+        (github.event.comment.user.login == 'chatgpt-codex-connector[bot]' ||
+         contains(github.event.comment.body, '@codex review')))) &&
+      (github.event_name != 'pull_request_review' ||
+       github.event.review.user.login == 'chatgpt-codex-connector[bot]')
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const CODEX = 'chatgpt-codex-connector[bot]';
+            const CLEAN = /didn.t find any major issues/i;
+            const REVIEWED_COMMIT = /\*\*Reviewed commit:\*\*\s*`([0-9a-f]{7,40})`/i;
+            const RE_REQUEST = /@codex review/;
+
+            async function evaluate(prNumber) {
+              const { owner, repo } = context.repo;
+              const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number: prNumber });
+              if (pr.state !== 'open') return;
+              const head = pr.head.sha;
+
+              const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number: prNumber, per_page: 100 });
+              const reviews = await github.paginate(github.rest.pulls.listReviews, { owner, repo, pull_number: prNumber, per_page: 100 });
+
+              const codexBodies = comments
+                .filter((c) => c.user.login === CODEX)
+                .map((c) => c.body || '')
+                .concat(reviews.filter((r) => r.user.login === CODEX).map((r) => r.body || ''));
+
+              // A clean verdict counts only for the exact commit Codex says it
+              // reviewed; a verdict for an older commit is stale once new
+              // commits are pushed.
+              let approved = codexBodies.some((body) => {
+                if (!CLEAN.test(body)) return false;
+                const match = body.match(REVIEWED_COMMIT);
+                return match !== null && head.startsWith(match[1]);
+              });
+
+              if (!approved) {
+                // The reaction form: Codex reacts +1 on the latest "@codex
+                // review" request instead of commenting. A reaction names no
+                // commit, so it speaks for the current head only if the
+                // request it sits on was posted after the last commit.
+                const requests = comments.filter((c) => RE_REQUEST.test(c.body || ''));
+                const latest = requests[requests.length - 1];
+                if (latest) {
+                  const commits = await github.paginate(github.rest.pulls.listCommits, { owner, repo, pull_number: prNumber, per_page: 100 });
+                  const lastCommitAt = new Date(commits[commits.length - 1].commit.committer.date);
+                  if (new Date(latest.created_at) > lastCommitAt) {
+                    const reactions = await github.paginate(github.rest.reactions.listForIssueComment, { owner, repo, comment_id: latest.id, per_page: 100 });
+                    approved = reactions.some((r) => r.user.login === CODEX && r.content === '+1');
+                  }
+                }
+              }
+
+              const state = approved ? 'success' : 'pending';
+
+              // GitHub caps statuses per commit, and the scheduled sweep would
+              // otherwise re-post an identical status every run; skip when the
+              // latest status for this context already matches.
+              const { data: combined } = await github.rest.repos.getCombinedStatusForRef({ owner, repo, ref: head });
+              const existing = combined.statuses.find((s) => s.context === 'codex-review');
+              if (existing && existing.state === state) {
+                core.info(`PR #${prNumber} @ ${head.slice(0, 10)}: already ${state}`);
+                return;
+              }
+
+              await github.rest.repos.createCommitStatus({
+                owner,
+                repo,
+                sha: head,
+                context: 'codex-review',
+                state,
+                description: approved
+                  ? `Codex found no major issues in ${head.slice(0, 10)}`
+                  : `Waiting for a clean Codex review of ${head.slice(0, 10)}`,
+                target_url: pr.html_url,
+              });
+              core.info(`PR #${prNumber} @ ${head.slice(0, 10)}: ${state}`);
+            }
+
+            if (context.payload.pull_request) {
+              await evaluate(context.payload.pull_request.number);
+            } else if (context.payload.issue) {
+              await evaluate(context.payload.issue.number);
+            } else {
+              const { owner, repo } = context.repo;
+              const open = await github.paginate(github.rest.pulls.list, { owner, repo, state: 'open', per_page: 100 });
+              for (const pr of open) {
+                await evaluate(pr.number);
+              }
+            }
