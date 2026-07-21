@@ -58,7 +58,7 @@ class _UpperSchemaDialect(SqlDialect):
 
     # Overrides an instance method of the dialect interface; a staticmethod
     # would diverge from the shape connector dialects implement.
-    def normalize_schema(self, schema: str) -> str:  # skipcq: PYL-R0201
+    def normalize_schema(self, schema: str) -> str:
         return schema.upper()
 
 
