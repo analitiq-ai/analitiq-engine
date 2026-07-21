@@ -68,12 +68,7 @@ from cdk.types import CheckpointStore, EndpointScope
 from ...models.state import ReplicationConfig
 from ...shared.dict_path import walk_path
 from ...shared.http_utils import join_url
-from .base import (
-    BaseConnector,
-    ConnectorConnectionError,
-    ReadError,
-    TransientReadError,
-)
+from .base import BaseConnector, ConnectorConnectionError, ReadError, TransientReadError
 from .response_expr import evaluate_predicate, resolve_response_expr
 
 logger = logging.getLogger(__name__)

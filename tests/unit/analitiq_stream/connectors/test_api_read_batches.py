@@ -1955,10 +1955,13 @@ class TestReadBatchesDecimalPrecision:
         Decimal and would raise on page 2)."""
         page1 = '{"records": [{"score": 1.5}, {"score": 2.5}]}'
         page2 = '{"records": [{"score": 3.5}]}'
+        # No limit param is declared, so a short page does not stop the
+        # loop; the empty third page does.
         session = _FakeSession(
             [
                 _FakeResponse(status=200, body=page1),
                 _FakeResponse(status=200, body=page2),
+                _FakeResponse(status=200, body='{"records": []}'),
             ]
         )
         runtime = _runtime_with_session(session)
