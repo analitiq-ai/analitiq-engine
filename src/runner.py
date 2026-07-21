@@ -33,6 +33,7 @@ from .state.error_classification import (
     classify_for_metrics,
     customer_message,
     detail_for_code,
+    dominant_error_code,
     is_local_io_error,
     tag_failure,
 )
@@ -300,6 +301,17 @@ class PipelineRunner:
                 error_code, error_message, error_detail = classify_for_metrics(
                     stream_error
                 )
+                # Another stream may have completed partial (dlq/skip) in the
+                # same run; its recorded cause competes on the same dominance
+                # rule, so a raised-but-unclassifiable stream (INTERNAL) does
+                # not mask a partial stream's actionable code (#351).
+                # error_detail stays the raised failure's structured detail.
+                partial_code = engine.get_partial_error_code()
+                if partial_code is not None:
+                    error_code = (
+                        dominant_error_code([error_code, partial_code]) or error_code
+                    )
+                    error_message = customer_message(error_code)
                 logger.warning(
                     f"Partial run: {streams_failed} stream(s) failed "
                     f"[{error_code.value}]"
