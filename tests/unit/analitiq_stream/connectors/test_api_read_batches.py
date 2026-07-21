@@ -901,6 +901,17 @@ class TestReadBatchesLinkPagination:
     """Link pagination per the contract: the resolved next_url replaces the
     entire request, no params traverse."""
 
+    def test_contract_declares_no_link_limit_field(self):
+        """Drift guard for the early link dispatch: LinkPagination carries
+        no limit field in the published contract, so no limit injection is
+        needed (or possible) before dispatching it — a link endpoint's
+        first-request page size is an ordinary param default over
+        runtime.batch_size. If the contract ever adds link.limit, this
+        fails and the dispatch must start injecting batch_size."""
+        from analitiq.contracts.endpoints import LinkPagination
+
+        assert set(LinkPagination.model_fields) == {"type", "link", "stop_when"}
+
     def _link_pagination(self):
         """Link block following ``response.body.next`` until absent."""
         return {

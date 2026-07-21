@@ -742,6 +742,13 @@ class APIConnector(BaseConnector):
             return
 
         if isinstance(pagination, LinkPagination):
+            # LinkPagination is dispatched before the limit injection below
+            # because the contract gives it NO limit field (its shape is
+            # type/link/stop_when, extra="forbid") — a link endpoint's
+            # first-request page size is authored as an ordinary param
+            # default over runtime.batch_size instead. A drift-guard test
+            # pins this; if the contract ever adds link.limit, that test
+            # fails and this dispatch must start injecting batch_size.
             async for records in self._iterate_link_pages(
                 full_url=full_url,
                 method=method,
