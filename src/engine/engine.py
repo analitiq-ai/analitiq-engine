@@ -11,7 +11,7 @@ from typing import Any
 import pyarrow as pa
 
 from cdk.contract import Readable
-from cdk.types import CheckpointStore
+from cdk.types import CheckpointStore, FailureCategory
 
 # gRPC imports for destination streaming
 from ..grpc.client import (
@@ -36,6 +36,7 @@ from ..state.error_classification import (
     classify_source_extract,
     customer_message,
     detail_for_code,
+    dominant_error_code,
     tag_failure,
 )
 from ..state.metrics_storage import create_metrics_record, emit_metrics_log
@@ -130,6 +131,13 @@ class StreamingEngine:
         # runner classifies it so a partial run with a failed stream is not
         # reported as success.
         self._dominant_stream_error: BaseException | None = None
+
+        # Classified cause of each stream that completed PARTIAL (dlq/skip
+        # exhausted batches without raising). The exception channel above
+        # never sees these -- nothing raised -- so the runner reads the
+        # dominant of this list for its no-exception partial classification
+        # (issue #351).
+        self._partial_error_codes: list[ErrorCode] = []
 
         # Connector code never runs in the engine process: every source read
         # goes through an isolated worker subprocess that owns the connector
@@ -268,7 +276,7 @@ class StreamingEngine:
         stream_dlq = None
         tasks = []
         stream_start_time = datetime.now(timezone.utc)
-        stream_metrics = {
+        stream_metrics: dict[str, Any] = {
             "records_processed": 0,
             "records_failed": 0,
             "records_skipped": 0,
@@ -436,12 +444,25 @@ class StreamingEngine:
                         )
                         await asyncio.sleep(delay)
                         continue
-                    raise tag_failure(
-                        StreamProcessingError(
-                            f"Stream {stream_name}: zero-batch truncate failed: "
-                            f"{result.failure_summary}"
+                    # An ack whose status the engine cannot interpret must not
+                    # have its advisory category trusted -- the same rule as
+                    # the unknown-status branch of the regular batch loop.
+                    known_failure_status = result.status in (
+                        AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
+                        AckStatus.ACK_STATUS_FATAL_FAILURE,
+                    )
+                    truncate_failure = StreamProcessingError(
+                        f"Stream {stream_name}: zero-batch truncate failed: "
+                        f"{result.failure_summary}",
+                        failure_category=(
+                            result.failure_category
+                            if known_failure_status
+                            else FailureCategory.FAILURE_CATEGORY_UNSPECIFIED
                         ),
-                        code=ErrorCode.DESTINATION_WRITE_FAILED,
+                    )
+                    raise tag_failure(
+                        truncate_failure,
+                        code=classify_destination_failure(truncate_failure),
                         stage=FailureStage.DESTINATION_LOAD,
                     )
 
@@ -449,8 +470,23 @@ class StreamingEngine:
                 # The dlq/skip strategies complete the stream without raising
                 # after exhausting retries; reflect that it only partly succeeded
                 # and carry the destination cause rather than reporting success.
+                # Every exhausted batch was classified when it broke, exactly
+                # as the fail strategy's raise path would have classified it;
+                # the dominant code across them (the read_failure_tag rule)
+                # names the run, so the same failure classifies identically
+                # under fail and dlq/skip (#351).
                 status = "partial"
-                error_code = ErrorCode.DESTINATION_WRITE_FAILED
+                error_code = (
+                    dominant_error_code(
+                        stream_metrics.pop("_exhausted_failure_codes", [])
+                    )
+                    or ErrorCode.DESTINATION_WRITE_FAILED
+                )
+                # Surface the stream's partial cause at pipeline level too:
+                # nothing raises on this path, so this list is the only way
+                # the runner's no-exception partial classification can see
+                # the cause instead of hardcoding a write failure (#351).
+                self._partial_error_codes.append(error_code)
                 error_message = customer_message(error_code)
                 # 'skip' drops exhausted batches without a DLQ entry, so those
                 # records are NOT recoverable; do not imply dead-lettering. The
@@ -638,7 +674,7 @@ class StreamingEngine:
         input_queue: Queue[Any],
         output_queue: Queue[Any],
         config: dict[str, Any],
-        stream_metrics: dict[str, int],
+        stream_metrics: dict[str, Any],
     ) -> None:
         """Transform data with field mappings and validation."""
         stream_name = config["stream_name"]
@@ -742,7 +778,7 @@ class StreamingEngine:
         config: dict[str, Any],
         stream_dlq: "DeadLetterQueue",
         run_id: str,
-        stream_metrics: dict[str, int],
+        stream_metrics: dict[str, Any],
     ) -> None:
         """
         Load transformed data to destination via gRPC streaming.
@@ -899,6 +935,21 @@ class StreamingEngine:
                             self.metrics.increment_batches_failed()
                             stream_metrics["records_failed"] += record_count
                             stream_metrics["batches_failed"] += 1
+                            # The dlq/skip strategies break without raising, so
+                            # this batch's cause would die with this scope.
+                            # Classify it exactly as the fail strategy's raise
+                            # would -- declared category first, text fallback
+                            # for an undeclared ack -- and stash the code for
+                            # the partial-run classification, so the reported
+                            # code cannot depend on the error strategy (#351).
+                            exhausted_failure = StreamProcessingError(
+                                f"Batch {batch_seq} failed after {max_retries} "
+                                f"retries: {result.failure_summary}",
+                                failure_category=result.failure_category,
+                            )
+                            stream_metrics.setdefault(
+                                "_exhausted_failure_codes", []
+                            ).append(classify_destination_failure(exhausted_failure))
                             if batch_seq == 1 and self._is_truncate_insert(config):
                                 # The destination truncates on batch_seq 1
                                 # (issue #307). Dropping the first batch via
@@ -912,7 +963,8 @@ class StreamingEngine:
                                     f"failed after {max_retries} retries; "
                                     f"dropping it would append the rest of "
                                     f"the refresh onto the previous run's "
-                                    f"rows: {result.failure_summary}"
+                                    f"rows: {result.failure_summary}",
+                                    failure_category=result.failure_category,
                                 )
                             if error_strategy == "dlq":
                                 await stream_dlq.send_batch(
@@ -924,7 +976,8 @@ class StreamingEngine:
                             elif error_strategy == "fail":
                                 raise StreamProcessingError(
                                     f"Batch {batch_seq} failed after {max_retries} "
-                                    f"retries: {result.failure_summary}"
+                                    f"retries: {result.failure_summary}",
+                                    failure_category=result.failure_category,
                                 )
                             elif error_strategy == "skip":
                                 # Skipped batches are dropped, NOT dead-lettered,
@@ -979,7 +1032,9 @@ class StreamingEngine:
 
                         # Raise exception to mark stream as failed
                         raise StreamProcessingError(
-                            f"Batch {batch_seq} fatal failure: {result.failure_summary}"
+                            f"Batch {batch_seq} fatal failure: "
+                            f"{result.failure_summary}",
+                            failure_category=result.failure_category,
                         )
 
                     else:
@@ -1026,10 +1081,10 @@ class StreamingEngine:
             await output_queue.put(None)
             # A load-stage failure is destination-side by construction; tag it so
             # a driver/HTTP code in the cause can never be misread as source auth.
-            # A deterministic destination write-config defect (a type-map/dialect/
-            # write-config/adbc fatal-ack summary) still routes to CONFIG_INVALID
-            # so it stays user-fixable. tag_failure is no-overwrite, so a deeper
-            # tag still wins.
+            # A defect the destination declared on the ack (a failure_category
+            # the raise site stamped onto the exception, #351) still routes to
+            # its own code -- e.g. CONFIG_DEFECT -> CONFIG_INVALID stays
+            # user-fixable. tag_failure is no-overwrite, so a deeper tag wins.
             tag_failure(
                 e,
                 code=classify_destination_failure(e),
@@ -1098,7 +1153,7 @@ class StreamingEngine:
         stream_dlq: DeadLetterQueue,
         stream_name: str,
         run_id: str,
-        stream_metrics: dict[str, int],
+        stream_metrics: dict[str, Any],
     ) -> list[asyncio.Task[None]]:
         """Create all pipeline stage tasks using factory pattern."""
         return [
@@ -1207,6 +1262,16 @@ class StreamingEngine:
         cause across all failed streams to classify the partial run.
         """
         return self._dominant_stream_error
+
+    def get_partial_error_code(self) -> ErrorCode | None:
+        """Return the dominant classified cause across partial streams.
+
+        A dlq/skip stream exhausts batches without raising, so no exception
+        reaches the runner; each such stream's already-classified code lands
+        here instead. None when no stream completed partial -- the runner
+        then keeps its load-stage default (issue #351).
+        """
+        return dominant_error_code(self._partial_error_codes)
 
     def get_state_manager(self) -> StateManager:
         """Get the state manager instance."""

@@ -16,6 +16,7 @@ from .types import (
     AckStatus,
     BatchWriteResult,
     Cursor,
+    FailureCategory,
     RetrySemantics,
     RetryVerdict,
     SchemaSpec,
@@ -52,7 +53,11 @@ def reject_batch(
     that made it (issue #327).
 
     Routing every guard through one function keeps the log and the returned
-    status in step, and means a new guard cannot be added without one.
+    status in step, and means a new guard cannot be added without one. It
+    also stamps the NOT_READY failure category once for every guard: a
+    pre-flight rejection by definition attempted nothing, and the engine
+    must be able to tell that apart from a write the destination actually
+    rejected (issue #351).
 
     *logger* is the calling handler's module logger, so the record names the
     handler that rejected the batch.
@@ -68,6 +73,7 @@ def reject_batch(
         status=status,
         records_written=0,
         failure_summary=reason,
+        failure_category=FailureCategory.FAILURE_CATEGORY_NOT_READY,
     )
 
 

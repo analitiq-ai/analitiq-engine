@@ -401,6 +401,19 @@ class TestEnumWireAlignment:
             ), f"WriteMode.{member.name} drifted from proto"
         assert {m.name for m in CdkWriteMode} == set(ProtoWriteMode.keys())
 
+    @pytest.mark.unit
+    def test_failure_category_values_match_proto(self):
+        from cdk.types import FailureCategory as CdkFailureCategory
+        from src.grpc.generated.analitiq.v1 import (
+            FailureCategory as ProtoFailureCategory,
+        )
+
+        for member in CdkFailureCategory:
+            assert int(member) == getattr(
+                ProtoFailureCategory, member.name
+            ), f"FailureCategory.{member.name} drifted from proto"
+        assert {m.name for m in CdkFailureCategory} == set(ProtoFailureCategory.keys())
+
 
 class TestEndpointRefResolver:
     """Test suite for endpoint reference resolution."""

@@ -19,6 +19,7 @@ import pytest
 from cdk.base_handler import BatchWriteResult
 from cdk.type_map import InvalidTypeMapError, UnmappedTypeError
 from cdk.types import Cursor as CdkCursor
+from cdk.types import FailureCategory as CdkFailureCategory
 from cdk.types import RetrySemantics, RetryVerdict
 from src.destination.connectors.api import ApiDestinationHandler
 from src.destination.server import DestinationServicer
@@ -592,6 +593,61 @@ class TestWireToCdkTranslation:
         # A None CDK cursor must not materialize a committed_cursor on the wire
         # (a checkpoint advance on a failed batch).
         assert not ack.HasField("committed_cursor")
+
+    @pytest.mark.asyncio
+    async def test_failure_category_crosses_the_wire(self):
+        # The category declared on the CDK result must land on the BatchAck
+        # unchanged (issue #351): the CDK IntEnum values mirror the proto
+        # enum 1:1, so a mistranslation here would silently change the
+        # customer-facing error code the engine derives from it.
+        from src.grpc.generated.analitiq.v1 import FailureCategory
+
+        handler = MagicMock()
+        handler.configure_schema = AsyncMock(return_value=True)
+        handler.write_batch = AsyncMock(
+            return_value=BatchWriteResult(
+                status=AckStatus.ACK_STATUS_FATAL_FAILURE,
+                records_written=0,
+                failure_summary="type-map: no rule for FANCYTYPE",
+                failure_category=CdkFailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT,
+            )
+        )
+        _stub_retry_semantics(handler)
+        servicer = DestinationServicer(handler, server=MagicMock())
+
+        responses = []
+        async for resp in servicer.StreamRecords(
+            _iter_many(_schema_request("s1"), _batch_request(stream_id="s1")),
+            context=MagicMock(),
+        ):
+            responses.append(resp)
+
+        ack = responses[-1].ack
+        assert ack.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+        assert ack.failure_category == FailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT
+
+    @pytest.mark.asyncio
+    async def test_batch_before_schema_acks_not_ready(self):
+        # A batch that arrives before any schema handshake attempted nothing;
+        # the servicer's own rejection must declare NOT_READY like every
+        # handler pre-flight guard does (issue #351).
+        from src.grpc.generated.analitiq.v1 import FailureCategory
+
+        handler = MagicMock()
+        servicer = DestinationServicer(handler, server=MagicMock())
+
+        responses = []
+        async for resp in servicer.StreamRecords(
+            _iter_once(_batch_request(stream_id="s1")),
+            context=MagicMock(),
+        ):
+            responses.append(resp)
+
+        ack = responses[-1].ack
+        assert ack.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+        assert ack.failure_summary == "Schema not configured"
+        assert ack.failure_category == FailureCategory.FAILURE_CATEGORY_NOT_READY
+        handler.write_batch.assert_not_called()
 
 
 class TestServerPingProtection:

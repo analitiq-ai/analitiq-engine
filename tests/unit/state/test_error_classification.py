@@ -21,6 +21,7 @@ import json
 
 import pytest
 
+from cdk.types import FailureCategory
 from src.state.error_classification import (
     ErrorCode,
     FailureStage,
@@ -202,26 +203,132 @@ def test_classify_source_extract_local_io_is_internal_not_auth():
 
 
 @pytest.mark.parametrize(
+    "category,expected",
+    [
+        # The declared category is authoritative (issue #351): the destination
+        # stamped it where the failure happened, so no text is consulted.
+        (FailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT, ErrorCode.CONFIG_INVALID),
+        (
+            FailureCategory.FAILURE_CATEGORY_WRITE_REJECTED,
+            ErrorCode.DESTINATION_WRITE_FAILED,
+        ),
+        # NOT_READY: nothing was attempted -- an orchestration fault, not a
+        # destination rejection; INTERNAL is the interim mapping from #351.
+        (FailureCategory.FAILURE_CATEGORY_NOT_READY, ErrorCode.INTERNAL),
+    ],
+)
+def test_classify_destination_failure_reads_declared_category(category, expected):
+    from src.engine.exceptions import StreamProcessingError
+    from src.state.error_classification import classify_destination_failure
+
+    exc = StreamProcessingError(
+        "Batch 3 failed after 3 retries: opaque driver text",
+        failure_category=category,
+    )
+    assert classify_destination_failure(exc) is expected
+
+
+def test_code_for_declared_category_mirrors_classification():
+    # The non-raising dlq/skip partial-run path maps a declared category via
+    # this helper; it must agree with what classify_destination_failure would
+    # return for the same declaration, or the reported code would depend on
+    # the error strategy (#351).
+    from src.engine.exceptions import StreamProcessingError
+    from src.state.error_classification import (
+        classify_destination_failure,
+        code_for_declared_category,
+    )
+
+    for category in FailureCategory:
+        code = code_for_declared_category(category)
+        if category is FailureCategory.FAILURE_CATEGORY_UNSPECIFIED:
+            assert code is None
+            continue
+        exc = StreamProcessingError("opaque", failure_category=category)
+        assert code is classify_destination_failure(exc)
+
+
+def test_dominant_error_code_prefers_actionable_cause():
+    from src.state.error_classification import dominant_error_code
+
+    assert dominant_error_code([]) is None
+    # The same rule an ExceptionGroup resolves with: config outranks a write
+    # failure, and both outrank an unclassifiable INTERNAL leaf.
+    assert (
+        dominant_error_code([ErrorCode.INTERNAL, ErrorCode.DESTINATION_WRITE_FAILED])
+        is ErrorCode.DESTINATION_WRITE_FAILED
+    )
+    assert (
+        dominant_error_code(
+            [ErrorCode.DESTINATION_WRITE_FAILED, ErrorCode.CONFIG_INVALID]
+        )
+        is ErrorCode.CONFIG_INVALID
+    )
+
+
+def test_declared_category_outranks_conflicting_text():
+    # The near-miss from issue #351: a readiness-guard summary phrased as
+    # "Handler could not connect" would phrase-match SOURCE_UNREACHABLE
+    # vocabulary. The declared category makes the wording irrelevant.
+    from src.engine.exceptions import StreamProcessingError
+    from src.state.error_classification import classify_destination_failure
+
+    exc = StreamProcessingError(
+        "Batch 3 failed after 3 retries: Handler could not connect",
+        failure_category=FailureCategory.FAILURE_CATEGORY_NOT_READY,
+    )
+    assert classify_destination_failure(exc) is ErrorCode.INTERNAL
+
+
+def test_declared_category_survives_wrapping():
+    # The category rides the chain like a FailureTag: a wrapped or aggregated
+    # failure still surfaces the leaf's declared category.
+    from src.engine.exceptions import StreamProcessingError
+    from src.state.error_classification import classify_destination_failure
+
+    inner = StreamProcessingError(
+        "Batch 1 fatal failure: type-map: no reverse rule",
+        failure_category=FailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT,
+    )
+    wrapped = ExceptionGroup("All streams failed", [inner])
+    assert classify_destination_failure(wrapped) is ErrorCode.CONFIG_INVALID
+
+
+def test_aggregated_categories_resolve_to_dominant_not_traversal_order():
+    # A group with several declared categories must resolve by the
+    # read_failure_tag dominance rule (a config defect outranks not-ready),
+    # not by whichever leaf _walk_chain happens to visit first -- so the
+    # verdict is order-independent.
+    from src.engine.exceptions import StreamProcessingError
+    from src.state.error_classification import classify_destination_failure
+
+    not_ready = StreamProcessingError(
+        "Batch 2 failed after 3 retries: Handler not connected",
+        failure_category=FailureCategory.FAILURE_CATEGORY_NOT_READY,
+    )
+    config_defect = StreamProcessingError(
+        "Batch 5 fatal failure: type-map: no reverse rule",
+        failure_category=FailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT,
+    )
+    for leaves in ([not_ready, config_defect], [config_defect, not_ready]):
+        group = ExceptionGroup("All streams failed", leaves)
+        assert classify_destination_failure(group) is ErrorCode.CONFIG_INVALID
+
+
+@pytest.mark.parametrize(
     "summary,expected",
     [
-        # Deterministic destination write-config defects (controlled fatal-ack
-        # prefixes) must stay user-fixable config, not a generic write failure.
-        ("Batch 3 fatal failure: type-map: no reverse rule", ErrorCode.CONFIG_INVALID),
-        (
-            "Batch 3 fatal failure: dialect: upsert not supported",
-            ErrorCode.CONFIG_INVALID,
-        ),
-        (
-            "Batch 3 fatal failure: write-config: invalid conflict key",
-            ErrorCode.CONFIG_INVALID,
-        ),
-        (
-            "Batch 3 fatal failure: adbc: missing driver package",
-            ErrorCode.CONFIG_INVALID,
-        ),
+        # Undeclared (UNSPECIFIED) failures fall back to the name/phrase rules:
+        # our own controlled class names still recover a config defect...
         (
             "Batch 3 fatal failure: SchemaConfigurationError: unsupported write mode",
             ErrorCode.CONFIG_INVALID,
+        ),
+        # ...but the deleted fatal-ack prefixes no longer classify by text --
+        # cdk/sql/generic.py declares CONFIG_DEFECT on the ack instead (#351).
+        (
+            "Batch 3 fatal failure: type-map: no reverse rule",
+            ErrorCode.DESTINATION_WRITE_FAILED,
         ),
         # A genuine write failure (constraint / permission / transport) stays
         # a write failure.
@@ -239,7 +346,7 @@ def test_classify_source_extract_local_io_is_internal_not_auth():
         ),
     ],
 )
-def test_classify_destination_failure_preserves_config_causes(summary, expected):
+def test_classify_destination_failure_fallback_for_undeclared(summary, expected):
     from src.state.error_classification import classify_destination_failure
 
     assert (
@@ -487,15 +594,20 @@ def test_destination_write_failed(name, message):
 @pytest.mark.parametrize(
     "summary,expected",
     [
-        # A destination batch write that fails with a CONFIG-typed cause (forwarded
-        # in the fatal-ack summary) is a config defect, not a write failure. These
-        # cover write_batch's controlled prefixes (cdk/sql/generic.py).
+        # A destination batch write that fails with a CONFIG-typed cause (a
+        # controlled class name forwarded in the fatal-ack summary) is a config
+        # defect, not a write failure.
         ("UnmappedTypeError: no rule for 'geography'", ErrorCode.CONFIG_INVALID),
         ("SchemaConfigurationError: unsupported write mode", ErrorCode.CONFIG_INVALID),
-        ("type-map: no reverse rule", ErrorCode.CONFIG_INVALID),
-        ("dialect: upsert not supported", ErrorCode.CONFIG_INVALID),
-        ("write-config: invalid conflict key", ErrorCode.CONFIG_INVALID),
-        ("adbc: missing driver package", ErrorCode.CONFIG_INVALID),
+        # The old fatal-ack prose prefixes no longer classify by text: the
+        # sites that produce them declare FAILURE_CATEGORY_CONFIG_DEFECT on
+        # the ack instead, and the tagged path uses that (issue #351). An
+        # untagged exception carrying only the prose falls to the load-stage
+        # default.
+        ("type-map: no reverse rule", ErrorCode.DESTINATION_WRITE_FAILED),
+        ("dialect: upsert not supported", ErrorCode.DESTINATION_WRITE_FAILED),
+        ("write-config: invalid conflict key", ErrorCode.DESTINATION_WRITE_FAILED),
+        ("adbc: missing driver package", ErrorCode.DESTINATION_WRITE_FAILED),
         # A genuine write failure (constraint / permission on the destination) stays
         # a write failure.
         (

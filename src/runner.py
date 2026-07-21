@@ -33,6 +33,7 @@ from .state.error_classification import (
     classify_for_metrics,
     customer_message,
     detail_for_code,
+    dominant_error_code,
     is_local_io_error,
     tag_failure,
 )
@@ -300,16 +301,35 @@ class PipelineRunner:
                 error_code, error_message, error_detail = classify_for_metrics(
                     stream_error
                 )
+                # Another stream may have completed partial (dlq/skip) in the
+                # same run; its recorded cause competes on the same dominance
+                # rule, so a raised-but-unclassifiable stream (INTERNAL) does
+                # not mask a partial stream's actionable code (#351).
+                # error_detail stays the raised failure's structured detail.
+                partial_code = engine.get_partial_error_code()
+                if partial_code is not None:
+                    error_code = (
+                        dominant_error_code([error_code, partial_code]) or error_code
+                    )
+                    error_message = customer_message(error_code)
                 logger.warning(
                     f"Partial run: {streams_failed} stream(s) failed "
                     f"[{error_code.value}]"
                 )
             elif records_failed > 0:
                 status = "partial"
-                # A destination write rejection completed without a raised
-                # exception. error_detail carries only allowlisted-safe fields;
-                # any DLQ failure_summary stays in the dead-letter queue and logs.
-                error_code = ErrorCode.DESTINATION_WRITE_FAILED
+                # A destination failure completed without a raised exception.
+                # The engine classified each exhausted batch where it broke
+                # (declared category first, text fallback -- issue #351); the
+                # dominant across partial streams names the run, so the
+                # pipeline-level code matches what the fail strategy would
+                # report for the same cause. error_detail carries only
+                # allowlisted-safe fields; any DLQ failure_summary stays in
+                # the dead-letter queue and logs.
+                error_code = (
+                    engine.get_partial_error_code()
+                    or ErrorCode.DESTINATION_WRITE_FAILED
+                )
                 error_message = customer_message(error_code)
                 # 'skip' drops exhausted batches without a DLQ entry, so those
                 # records are NOT recoverable; do not point operators at the DLQ.

@@ -215,6 +215,7 @@ class TestProxyWriteBatch:
     async def test_connector_fatal_verdict_stays_fatal(self):
         import pyarrow as pa
 
+        from cdk.types import FailureCategory
         from src.grpc.client import BatchResult
         from src.grpc.generated.analitiq.v1 import AckStatus as ProtoAckStatus
 
@@ -228,6 +229,7 @@ class TestProxyWriteBatch:
                 committed_cursor=None,
                 failed_record_ids=["a"],
                 failure_summary="type-map: no rule for FANCYTYPE",
+                failure_category=FailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT,
             )
         )
         proxy._streams["s1"] = stream_client
@@ -241,6 +243,10 @@ class TestProxyWriteBatch:
             cursor=None,
         )
         assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+        # The declared category is forwarded across the hop like the summary
+        # (issue #351); dropping it here would put the engine back on text
+        # matching for every worker-run connector.
+        assert result.failure_category == FailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT
 
     async def test_cursor_on_failure_ack_is_dropped_not_fatal_to_stream(self):
         # The ack crosses an untrusted process boundary: a worker pairing
