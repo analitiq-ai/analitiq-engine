@@ -48,6 +48,7 @@ async def build_bootstrap(
     connections_dir: Path,
     endpoint_refs: dict[str, Any] | None = None,
     stream_endpoints: dict[str, Any] | None = None,
+    stream_conflict_keys: dict[str, list[str]] | None = None,
     source_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Resolve *runtime* and assemble the worker bootstrap for *role*.
@@ -70,5 +71,6 @@ async def build_bootstrap(
         ),
         "endpoint_refs": endpoint_refs or {},
         "stream_endpoints": stream_endpoints or {},
+        "stream_conflict_keys": stream_conflict_keys or {},
         "source_config": source_config or {},
     }

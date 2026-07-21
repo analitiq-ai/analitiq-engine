@@ -336,6 +336,7 @@ def pipeline_tree(
 
 class TestCreateConfigHappyPath:
     def test_returns_five_tuple_with_expected_shapes(self, pipeline_tree: Path) -> None:
+        """create_config returns the typed five-tuple with resolved shapes."""
         prep = PipelineConfigPrep()
         (
             pipeline_config,
@@ -358,11 +359,11 @@ class TestCreateConfigHappyPath:
         assert stream.stream_version == 1
         assert stream.source.connection_ref == CONNECTION_SRC_ID
         assert stream.source.runtime is connections[CONNECTION_SRC_ID]
-        assert stream.source.endpoint_document["endpoint_id"] == ENDPOINT_SRC
+        assert stream.source.endpoint_document.endpoint_id == ENDPOINT_SRC
         assert stream.source.primary_keys == ["id"]
         assert stream.source.replication is None  # fixture stream omits replication
         assert stream.destinations[0].runtime is connections[CONNECTION_DST_ID]
-        assert stream.destinations[0].endpoint_document["endpoint_id"] == ENDPOINT_DST
+        assert stream.destinations[0].endpoint_document.endpoint_id == ENDPOINT_DST
 
         assert set(connections) == {CONNECTION_SRC_ID, CONNECTION_DST_ID}
         assert len(endpoints) == 2
@@ -850,7 +851,7 @@ class TestEndpointSchemaDispatch:
         prep = PipelineConfigPrep()
         _, stream_configs, _, _, _ = prep.create_config()
         src = stream_configs[0].source
-        assert "api-endpoint" in (src.endpoint_document.get("$schema") or "")
+        assert "api-endpoint" in src.endpoint_document.schema_url
 
     def test_url_without_schema_key_rejected(self, pipeline_tree: Path) -> None:
         """An endpoint document with no $schema key must raise."""
@@ -920,6 +921,7 @@ class TestConnectionScopedEndpoints:
     def test_destination_endpoint_resolves_from_connection_tree(
         self, connection_scoped_tree: Path
     ) -> None:
+        """A connection-scoped ref resolves the private endpoint document."""
         prep = PipelineConfigPrep()
         _, stream_configs, connections, _, _ = prep.create_config()
 
@@ -928,17 +930,16 @@ class TestConnectionScopedEndpoints:
         # endpoint_id is server-derived from database_object.
         assert dest.endpoint_ref.endpoint_id == ENDPOINT_DST_CONNECTION
         assert dest.endpoint_ref.database_object is not None
-        assert dest.endpoint_document["endpoint_id"] == ENDPOINT_DST_CONNECTION
+        assert dest.endpoint_document.endpoint_id == ENDPOINT_DST_CONNECTION
         # The marker proves the connection-scoped file was read, not a
         # same-named connector endpoint.
         assert (
-            dest.endpoint_document["description"]
-            == "connection-scoped private endpoint"
+            dest.endpoint_document.description == "connection-scoped private endpoint"
         )
         # The source side still resolves from the connector tree.
         source = stream_configs[0].source
         assert source.endpoint_ref.scope == "connector"
-        assert "description" not in source.endpoint_document
+        assert source.endpoint_document.description is None
 
     def test_connection_type_map_preferred_for_connection_scope(
         self, connection_scoped_tree: Path

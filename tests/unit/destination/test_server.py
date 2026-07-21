@@ -442,11 +442,41 @@ class TestGetCapabilitiesApiHandlerIntegration:
     """
 
     def _doc(self, *, modes):
-        write = {
-            mode: {"request": {"method": "POST", "path": f"/v1/{mode}"}}
-            for mode in modes
+        """Minimal contract-valid api-endpoint document with write modes.
+
+        ``set_stream_endpoints`` validates into ``ApiEndpointDoc``
+        (issue #349), so the blocks carry the contract-required input
+        schema, ``from_input`` body, and (for upsert) ``conflict_keys``.
+        """
+        write: dict = {}
+        for mode in modes:
+            block = {
+                "request": {
+                    "method": "POST",
+                    "path": f"/v1/{mode}",
+                    "body": {"from_input": "record"},
+                },
+                "input": {
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "id": {
+                                "type": "integer",
+                                "native_type": "integer",
+                                "arrow_type": "Int64",
+                            }
+                        },
+                    }
+                },
+            }
+            if mode == "upsert":
+                block["conflict_keys"] = ["id"]
+            write[mode] = block
+        return {
+            "endpoint_id": "things",
+            "$schema": "https://schemas.analitiq.ai/api-endpoint/latest.json",
+            "operations": {"write": write},
         }
-        return {"operations": {"write": write}}
 
     @pytest.mark.asyncio
     async def test_upsert_advertised_when_endpoint_declares_it(self):

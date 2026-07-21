@@ -7,13 +7,17 @@ pre-materialized ``ConnectionRuntime`` to verify:
 * request URL composition (base + endpoint path),
 * offset pagination loop terminates on a short page,
 * page pagination increments the page param and stops on a short page,
-* cursor pagination follows ``next_cursor`` until absent,
-* keyset pagination advances the key from the last record and stops on
-  a short page,
+* cursor pagination follows the ``next_cursor`` response field until absent,
+* keyset and link pagination fail loud as unsupported (contract-declared
+  strategies pending #346),
 * incremental replication reads cursor from state manager and applies
   the safety window to the outgoing request params,
 * non-200 responses raise :class:`ReadError`,
-* missing ``endpoint_document`` raises :class:`ReadError`.
+* missing or contract-invalid ``endpoint_document`` raises
+  :class:`ReadError`.
+
+Every fixture document is contract-valid: the connector validates the
+endpoint document into ``ApiEndpointDoc`` before reading (issue #349).
 
 ``read_batches`` now owns the connection lifecycle: it is handed the runtime
 and connects/disconnects internally, so these tests pass the runtime directly
@@ -111,12 +115,87 @@ def _runtime_with_session(
     return runtime
 
 
-def _endpoint_doc_with_records(
+def _collect_from_params(node: Any) -> set[str]:
+    """Every param name referenced by a ``{"from_param": ...}`` node."""
+    names: set[str] = set()
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key == "from_param" and isinstance(value, str):
+                names.add(value)
+            else:
+                names.update(_collect_from_params(value))
+    elif isinstance(node, list):
+        for item in node:
+            names.update(_collect_from_params(item))
+    return names
+
+
+def _endpoint_doc_with_records(  # skipcq: PY-R1000
     pagination: dict[str, Any] | None = None,
     replication: dict[str, Any] | None = None,
+    params: dict[str, Any] | None = None,
+    request: dict[str, Any] | None = None,
+    extra_properties: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """Build a contract-valid api-endpoint document around ``/items``.
+
+    The connector validates the document into ``ApiEndpointDoc`` before
+    reading, so every fixture must satisfy the contract's cross-field
+    rules. This builder wires the boilerplate those rules demand:
+
+    * every pagination/replication-referenced param the test did not
+      declare explicitly is declared as a ``controlled_by`` query param;
+    * every declared non-body param the request does not already bind is
+      bound exactly once via ``request.query.{name}.from_param``;
+    * ``pagination.stop_when`` and ``replication.supported_methods`` get
+      contract-required defaults when the test omits them.
+    """
+    declared: dict[str, Any] = dict(params or {})
+
+    if pagination is not None:
+        pagination = dict(pagination)
+        pagination.setdefault("stop_when", {"empty": {"ref": "response.body.records"}})
+        for key in ("offset", "page", "cursor", "keyset", "limit"):
+            block = pagination.get(key)
+            if isinstance(block, dict) and block.get("param"):
+                declared.setdefault(
+                    block["param"],
+                    {
+                        "in": "query",
+                        "type": "integer",
+                        "required": False,
+                        "controlled_by": "pagination",
+                    },
+                )
+    if replication is not None:
+        replication = {
+            "supported_methods": ["full_refresh", "incremental"],
+            **replication,
+        }
+        for mapping in replication.get("cursor_mappings") or []:
+            if mapping.get("param"):
+                declared.setdefault(
+                    mapping["param"],
+                    {
+                        "in": "query",
+                        "type": "string",
+                        "required": False,
+                        "controlled_by": "replication",
+                    },
+                )
+
+    request = dict(request or {"method": "GET", "path": "/items"})
+    already_bound = _collect_from_params(request)
+    query_bindings = dict(request.get("query") or {})
+    for name, decl in declared.items():
+        if name in already_bound or decl.get("in") == "body":
+            continue
+        query_bindings[name] = {"from_param": name}
+    if query_bindings:
+        request["query"] = query_bindings
+
     read_block: dict[str, Any] = {
-        "request": {"method": "GET", "path": "/items"},
+        "request": request,
         "response": {
             "schema": {
                 "type": "object",
@@ -126,8 +205,17 @@ def _endpoint_doc_with_records(
                         "items": {
                             "type": "object",
                             "properties": {
-                                "id": {"type": "integer", "arrow_type": "Int64"},
-                                "name": {"type": "string", "arrow_type": "Utf8"},
+                                "id": {
+                                    "type": "integer",
+                                    "native_type": "integer",
+                                    "arrow_type": "Int64",
+                                },
+                                "name": {
+                                    "type": "string",
+                                    "native_type": "string",
+                                    "arrow_type": "Utf8",
+                                },
+                                **(extra_properties or {}),
                             },
                         },
                     },
@@ -136,6 +224,8 @@ def _endpoint_doc_with_records(
             "records": {"ref": "response.body.records"},
         },
     }
+    if declared:
+        read_block["params"] = declared
     if pagination:
         read_block["pagination"] = pagination
     if replication:
@@ -273,11 +363,18 @@ def _endpoint_doc_with_ref(
     }
 
 
+# Record property declaring the incremental cursor field; the contract
+# requires the cursor_field of every replication mapping to exist in the
+# record shape.
+_UPDATED_AT_PROPERTY: dict[str, Any] = {
+    "updated_at": {"type": "string", "native_type": "string", "arrow_type": "Utf8"},
+}
+
 _RECORD_ITEMS_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "id": {"type": "integer", "arrow_type": "Int64"},
-        "name": {"type": "string", "arrow_type": "Utf8"},
+        "id": {"type": "integer", "native_type": "integer", "arrow_type": "Int64"},
+        "name": {"type": "string", "native_type": "string", "arrow_type": "Utf8"},
     },
 }
 
@@ -364,8 +461,9 @@ class TestReadBatchesRecordsRefShapes:
     @pytest.mark.asyncio
     async def test_ref_to_undeclared_field_raises_listing_available(self):
         # The ref points at a field the response schema does not declare:
-        # fail before any HTTP request, naming the bad field and listing
-        # what IS declared so the author can fix the endpoint document.
+        # the contract model's own cross-field validation rejects the
+        # document at the connector's parse point, before any HTTP request.
+        """A records.ref naming an undeclared field fails at the parse point."""
         session = _FakeSession([])
         runtime = _runtime_with_session(session)
         connector = APIConnector("test")
@@ -376,8 +474,7 @@ class TestReadBatchesRecordsRefShapes:
         ] = "response.body.does_not_exist"
         with pytest.raises(
             ReadError,
-            match=r"does_not_exist.*not declared under properties.*"
-            r"available: \['records'\]",
+            match=r"(?s)contract validation.*does_not_exist",
         ):
             await _consume(
                 connector,
@@ -490,6 +587,7 @@ class TestReadBatchesCursorPagination:
     @pytest.mark.asyncio
     async def test_cursor_pagination_follows_next_cursor_until_absent(self):
         # First response carries next_cursor; second omits it -> loop stops.
+        """The cursor loop follows the next_cursor response field until absent."""
         session = _FakeSession(
             [
                 _FakeResponse(
@@ -513,7 +611,7 @@ class TestReadBatchesCursorPagination:
                 "type": "cursor",
                 "cursor": {
                     "param": "page_token",
-                    "from": {"ref": "response.body.next_cursor"},
+                    "next_cursor": {"ref": "response.body.next_cursor"},
                 },
                 "limit": {"param": "limit"},
             },
@@ -539,59 +637,26 @@ class TestReadBatchesCursorPagination:
 
 
 class TestReadBatchesKeysetPagination:
+    """Contract-declared strategies this read path does not implement."""
+
     @pytest.mark.asyncio
-    async def test_keyset_advances_key_from_last_record_and_stops_on_short_page(self):
-        # batch_size=2; first page full -> advance key from last record's id,
-        # second page short -> stop.
-        session = _FakeSession(
-            [
-                _FakeResponse(
-                    status=200,
-                    body={"records": [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]},
-                ),
-                _FakeResponse(status=200, body={"records": [{"id": 3, "name": "c"}]}),
-            ]
-        )
+    async def test_contract_valid_keyset_raises_unsupported(self):
+        """A contract-valid keyset document fails loud before any request."""
+        # The keyset strategy is declared by the contract but not
+        # implemented by this read path yet (#346): a contract-valid
+        # keyset document fails loud before any HTTP request.
+        session = _FakeSession([])
         runtime = _runtime_with_session(session)
         connector = APIConnector("test")
 
         endpoint = _endpoint_doc_with_records(
             pagination={
                 "type": "keyset",
-                "keyset": {"param": "after_id", "from_record": "id"},
+                "keyset": {"param": "after_id", "order_by_field": "id", "initial": 0},
                 "limit": {"param": "limit"},
             },
         )
-        batches = await _consume(
-            connector,
-            runtime,
-            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
-            state_manager=MagicMock(),
-            stream_name="items",
-            batch_size=2,
-        )
-
-        assert [b.num_rows for b in batches] == [2, 1]
-        # First request carries no key; second carries the last id of page 1.
-        # An int key stays native (yarl renders it faithfully); only Decimals
-        # are stringified at the query boundary.
-        assert "after_id" not in session.calls[0][2]
-        assert session.calls[1][2]["after_id"] == 2
-
-    @pytest.mark.asyncio
-    async def test_keyset_without_from_record_raises_read_error(self):
-        session = _FakeSession(
-            [
-                _FakeResponse(status=200, body={"records": [{"id": 1, "name": "a"}]}),
-            ]
-        )
-        runtime = _runtime_with_session(session)
-        connector = APIConnector("test")
-
-        endpoint = _endpoint_doc_with_records(
-            pagination={"type": "keyset", "keyset": {"param": "after_id"}},
-        )
-        with pytest.raises(ReadError, match="keyset.from_record"):
+        with pytest.raises(ReadError, match="Unsupported pagination type: 'keyset'"):
             await _consume(
                 connector,
                 runtime,
@@ -603,6 +668,36 @@ class TestReadBatchesKeysetPagination:
                 stream_name="items",
                 batch_size=2,
             )
+        assert session.calls == []
+
+    @pytest.mark.asyncio
+    async def test_contract_valid_link_raises_unsupported(self):
+        """A contract-valid link document fails loud before any request."""
+        # Same for the link strategy: declared by the contract, not
+        # implemented yet (#346).
+        session = _FakeSession([])
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(
+            pagination={
+                "type": "link",
+                "link": {"next_url": {"ref": "response.body.next"}},
+            },
+        )
+        with pytest.raises(ReadError, match="Unsupported pagination type: 'link'"):
+            await _consume(
+                connector,
+                runtime,
+                config={
+                    "endpoint_document": endpoint,
+                    "stream_source": _stream_source(),
+                },
+                state_manager=MagicMock(),
+                stream_name="items",
+                batch_size=2,
+            )
+        assert session.calls == []
 
 
 # ---------------------------------------------------------------------------
@@ -613,6 +708,7 @@ class TestReadBatchesKeysetPagination:
 class TestReadBatchesIncrementalReplication:
     @pytest.mark.asyncio
     async def test_incremental_cursor_flows_into_params_with_safety_window(self):
+        """The stored cursor minus the safety window rides the mapped param."""
         session = _FakeSession(
             [
                 _FakeResponse(
@@ -634,9 +730,10 @@ class TestReadBatchesIncrementalReplication:
         endpoint = _endpoint_doc_with_records(
             replication={
                 "cursor_mappings": [
-                    {"cursor_field": "updated_at", "param": "since"},
+                    {"cursor_field": "updated_at", "param": "since", "operator": "gte"},
                 ],
             },
+            extra_properties=_UPDATED_AT_PROPERTY,
         )
         await _consume(
             connector,
@@ -666,6 +763,7 @@ class TestReadBatchesIncrementalReplication:
 
     @pytest.mark.asyncio
     async def test_first_run_with_no_prior_cursor_skips_filter(self):
+        """With no prior cursor the first run sends no incremental filter."""
         session = _FakeSession(
             [
                 _FakeResponse(
@@ -683,8 +781,11 @@ class TestReadBatchesIncrementalReplication:
 
         endpoint = _endpoint_doc_with_records(
             replication={
-                "cursor_mappings": [{"cursor_field": "updated_at", "param": "since"}]
+                "cursor_mappings": [
+                    {"cursor_field": "updated_at", "param": "since", "operator": "gte"}
+                ]
             },
+            extra_properties=_UPDATED_AT_PROPERTY,
         )
         await _consume(
             connector,
@@ -876,6 +977,7 @@ class TestReadBatchesParamDefaults:
     async def test_function_form_default_resolves(self):
         # The pre-#166 lightweight resolver only knew literal/ref/template;
         # a function-form default fell through as the raw expression dict.
+        """A function-form param default resolves through the expression grammar."""
         import base64
 
         session = _FakeSession(
@@ -884,18 +986,19 @@ class TestReadBatchesParamDefaults:
         runtime = _runtime_with_session(session, parameters={"api_token": "tok-123"})
         connector = APIConnector("test")
 
-        endpoint = _endpoint_doc_with_records()
-        endpoint["operations"]["read"]["params"] = {
-            "auth": {
-                "in": "query",
-                "type": "string",
-                "required": True,
-                "default": {
-                    "function": "base64_encode",
-                    "input": {"ref": "connection.parameters.api_token"},
+        endpoint = _endpoint_doc_with_records(
+            params={
+                "auth": {
+                    "in": "query",
+                    "type": "string",
+                    "required": True,
+                    "default": {
+                        "function": "base64_encode",
+                        "input": {"ref": "connection.parameters.api_token"},
+                    },
                 },
-            },
-        }
+            }
+        )
         await _consume(
             connector,
             runtime,
@@ -912,21 +1015,23 @@ class TestReadBatchesParamDefaults:
     async def test_unresolved_default_omits_param(self):
         # Contract rule 7: a default that cannot resolve omits the
         # parameter instead of sending the raw expression structure.
+        """A default that cannot resolve omits the param from the request."""
         session = _FakeSession(
             [_FakeResponse(status=200, body={"records": [{"id": 1, "name": "a"}]})]
         )
         runtime = _runtime_with_session(session)
         connector = APIConnector("test")
 
-        endpoint = _endpoint_doc_with_records()
-        endpoint["operations"]["read"]["params"] = {
-            "team": {
-                "in": "query",
-                "type": "string",
-                "required": False,
-                "default": {"ref": "connection.parameters.missing_team"},
-            },
-        }
+        endpoint = _endpoint_doc_with_records(
+            params={
+                "team": {
+                    "in": "query",
+                    "type": "string",
+                    "required": False,
+                    "default": {"ref": "connection.parameters.missing_team"},
+                },
+            }
+        )
         await _consume(
             connector,
             runtime,
@@ -942,21 +1047,23 @@ class TestReadBatchesParamDefaults:
     async def test_runtime_batch_size_ref_resolves_to_effective_page_size(self):
         # ``runtime.batch_size`` is the effective page size driving the
         # pagination loops — the ``batch_size`` argument, not a config key.
+        """A runtime.batch_size ref resolves to the effective page size."""
         session = _FakeSession(
             [_FakeResponse(status=200, body={"records": [{"id": 1, "name": "a"}]})]
         )
         runtime = _runtime_with_session(session)
         connector = APIConnector("test")
 
-        endpoint = _endpoint_doc_with_records()
-        endpoint["operations"]["read"]["params"] = {
-            "page_size": {
-                "in": "query",
-                "type": "integer",
-                "required": False,
-                "default": {"ref": "runtime.batch_size"},
-            },
-        }
+        endpoint = _endpoint_doc_with_records(
+            params={
+                "page_size": {
+                    "in": "query",
+                    "type": "integer",
+                    "required": False,
+                    "default": {"ref": "runtime.batch_size"},
+                },
+            }
+        )
         await _consume(
             connector,
             runtime,
@@ -972,25 +1079,28 @@ class TestReadBatchesParamDefaults:
     async def test_template_default_with_missing_placeholder_is_kept_partial(self):
         # Plain template defaults resolve leniently: the missing placeholder
         # renders empty and the partially-resolved param still goes out.
+        """A template default with a missing placeholder resolves partially."""
         session = _FakeSession(
             [_FakeResponse(status=200, body={"records": [{"id": 1, "name": "a"}]})]
         )
         runtime = _runtime_with_session(session, parameters={"org": "acme"})
         connector = APIConnector("test")
 
-        endpoint = _endpoint_doc_with_records()
-        endpoint["operations"]["read"]["params"] = {
-            "scope": {
-                "in": "query",
-                "type": "string",
-                "required": False,
-                "default": {
-                    "template": (
-                        "${connection.parameters.org}/" "${connection.parameters.gone}"
-                    )
+        endpoint = _endpoint_doc_with_records(
+            params={
+                "scope": {
+                    "in": "query",
+                    "type": "string",
+                    "required": False,
+                    "default": {
+                        "template": (
+                            "${connection.parameters.org}/"
+                            "${connection.parameters.gone}"
+                        )
+                    },
                 },
-            },
-        }
+            }
+        )
         await _consume(
             connector,
             runtime,
@@ -1014,22 +1124,24 @@ class TestReadBatchesRequestBody:
         # POST-read endpoints declare ``request.body``; expression nodes
         # inside it resolve against the connection scopes, unresolved
         # fields are omitted, and the result rides as the JSON body.
+        """A declared POST-read body resolves and rides as the JSON body."""
         session = _FakeSession(
             [_FakeResponse(status=200, body={"records": [{"id": 1, "name": "a"}]})]
         )
         runtime = _runtime_with_session(session, parameters={"region": "eu"})
         connector = APIConnector("test")
 
-        endpoint = _endpoint_doc_with_records()
-        endpoint["operations"]["read"]["request"] = {
-            "method": "POST",
-            "path": "/items/search",
-            "body": {
-                "region": {"ref": "connection.parameters.region"},
-                "missing": {"ref": "connection.parameters.not_there"},
-                "static": "all",
-            },
-        }
+        endpoint = _endpoint_doc_with_records(
+            request={
+                "method": "POST",
+                "path": "/items/search",
+                "body": {
+                    "region": {"ref": "connection.parameters.region"},
+                    "missing": {"ref": "connection.parameters.not_there"},
+                    "static": "all",
+                },
+            }
+        )
         await _consume(
             connector,
             runtime,
@@ -1070,6 +1182,7 @@ class TestReadBatchesRequestBody:
     async def test_body_is_sent_on_every_page(self):
         # Pagination loops must carry the body on each page request, not
         # just the first.
+        """Pagination re-sends the declared body on every page request."""
         session = _FakeSession(
             [
                 _FakeResponse(
@@ -1088,12 +1201,12 @@ class TestReadBatchesRequestBody:
                 "offset": {"param": "offset", "initial": 0},
                 "limit": {"param": "limit"},
             },
+            request={
+                "method": "POST",
+                "path": "/items/search",
+                "body": {"region": {"ref": "connection.parameters.region"}},
+            },
         )
-        endpoint["operations"]["read"]["request"] = {
-            "method": "POST",
-            "path": "/items/search",
-            "body": {"region": {"ref": "connection.parameters.region"}},
-        }
         await _consume(
             connector,
             runtime,
@@ -1110,32 +1223,34 @@ class TestReadBatchesRequestBody:
         # Bodies may mix literals with {"from_param": ...} per the contract;
         # a param declared ``in: body`` lands in the body via its binding
         # and stays out of the query string.
+        """An in-body param binds via from_param and stays out of the query."""
         session = _FakeSession(
             [_FakeResponse(status=200, body={"records": [{"id": 1, "name": "a"}]})]
         )
         runtime = _runtime_with_session(session, parameters={"team_id": "t-9"})
         connector = APIConnector("test")
 
-        endpoint = _endpoint_doc_with_records()
-        endpoint["operations"]["read"]["params"] = {
-            "team": {
-                "in": "body",
-                "type": "string",
-                "required": True,
-                "default": {"ref": "connection.parameters.team_id"},
+        endpoint = _endpoint_doc_with_records(
+            params={
+                "team": {
+                    "in": "body",
+                    "type": "string",
+                    "required": True,
+                    "default": {"ref": "connection.parameters.team_id"},
+                },
+                "verbose": {
+                    "in": "query",
+                    "type": "boolean",
+                    "required": False,
+                    "default": {"literal": True},
+                },
             },
-            "verbose": {
-                "in": "query",
-                "type": "boolean",
-                "required": False,
-                "default": {"literal": True},
+            request={
+                "method": "POST",
+                "path": "/items/search",
+                "body": {"filter": {"team": {"from_param": "team"}}},
             },
-        }
-        endpoint["operations"]["read"]["request"] = {
-            "method": "POST",
-            "path": "/items/search",
-            "body": {"filter": {"team": {"from_param": "team"}}},
-        }
+        )
         await _consume(
             connector,
             runtime,
@@ -1151,20 +1266,24 @@ class TestReadBatchesRequestBody:
 
     @pytest.mark.asyncio
     async def test_from_param_for_missing_param_drops_field(self):
-        # A from_param naming a param with no resolved value binds None,
-        # which the expression pass omits — never the raw binding dict.
+        # A from_param naming a param with no resolved value (declared but
+        # no default) binds None, which the expression pass omits — never
+        # the raw binding dict.
+        """A from_param over an unresolved param drops the body field."""
         session = _FakeSession(
             [_FakeResponse(status=200, body={"records": [{"id": 1, "name": "a"}]})]
         )
         runtime = _runtime_with_session(session)
         connector = APIConnector("test")
 
-        endpoint = _endpoint_doc_with_records()
-        endpoint["operations"]["read"]["request"] = {
-            "method": "POST",
-            "path": "/items/search",
-            "body": {"q": {"from_param": "undeclared"}, "static": "all"},
-        }
+        endpoint = _endpoint_doc_with_records(
+            params={"q": {"in": "body", "type": "string", "required": False}},
+            request={
+                "method": "POST",
+                "path": "/items/search",
+                "body": {"q": {"from_param": "q"}, "static": "all"},
+            },
+        )
         await _consume(
             connector,
             runtime,
@@ -1180,6 +1299,7 @@ class TestReadBatchesRequestBody:
     async def test_replication_param_binds_into_body(self):
         # Incremental POST-search endpoints carry the cursor filter in the
         # body: the replication-derived param value must reach from_param.
+        """The replication-derived param value binds into the request body."""
         session = _FakeSession(
             [
                 _FakeResponse(
@@ -1200,15 +1320,24 @@ class TestReadBatchesRequestBody:
         endpoint = _endpoint_doc_with_records(
             replication={
                 "cursor_mappings": [
-                    {"cursor_field": "updated_at", "param": "since"},
+                    {"cursor_field": "updated_at", "param": "since", "operator": "gte"},
                 ],
             },
+            params={
+                "since": {
+                    "in": "body",
+                    "type": "string",
+                    "required": False,
+                    "controlled_by": "replication",
+                },
+            },
+            request={
+                "method": "POST",
+                "path": "/items/search",
+                "body": {"updated_after": {"from_param": "since"}},
+            },
+            extra_properties=_UPDATED_AT_PROPERTY,
         )
-        endpoint["operations"]["read"]["request"] = {
-            "method": "POST",
-            "path": "/items/search",
-            "body": {"updated_after": {"from_param": "since"}},
-        }
         await _consume(
             connector,
             runtime,
@@ -1233,6 +1362,7 @@ class TestReadBatchesRequestBody:
         # Pagination params declared ``in: body`` ride inside the body via
         # from_param — rebuilt per page so the offset actually advances —
         # and never appear in the query string.
+        """Body-placed pagination params advance per page and skip the query."""
         session = _FakeSession(
             [
                 _FakeResponse(
@@ -1251,31 +1381,31 @@ class TestReadBatchesRequestBody:
                 "offset": {"param": "offset", "initial": 0},
                 "limit": {"param": "limit"},
             },
-        )
-        endpoint["operations"]["read"]["params"] = {
-            "offset": {
-                "in": "body",
-                "type": "integer",
-                "required": True,
-                "controlled_by": "pagination",
-            },
-            "limit": {
-                "in": "body",
-                "type": "integer",
-                "required": True,
-                "controlled_by": "pagination",
-            },
-        }
-        endpoint["operations"]["read"]["request"] = {
-            "method": "POST",
-            "path": "/items/search",
-            "body": {
-                "paging": {
-                    "offset": {"from_param": "offset"},
-                    "limit": {"from_param": "limit"},
+            params={
+                "offset": {
+                    "in": "body",
+                    "type": "integer",
+                    "required": True,
+                    "controlled_by": "pagination",
+                },
+                "limit": {
+                    "in": "body",
+                    "type": "integer",
+                    "required": True,
+                    "controlled_by": "pagination",
                 },
             },
-        }
+            request={
+                "method": "POST",
+                "path": "/items/search",
+                "body": {
+                    "paging": {
+                        "offset": {"from_param": "offset"},
+                        "limit": {"from_param": "limit"},
+                    },
+                },
+            },
+        )
         await _consume(
             connector,
             runtime,
@@ -1337,8 +1467,16 @@ _HIGH_PRECISION_RECORDS_SCHEMA: dict[str, Any] = {
         "properties": {
             # 18 significant digits -- more than a float64 can represent, so a
             # default json.loads would round it before Arrow ever sees it.
-            "amount": {"type": "number", "arrow_type": "Decimal128(20,8)"},
-            "rate": {"type": "number", "arrow_type": "Float64"},
+            "amount": {
+                "type": "number",
+                "native_type": "number",
+                "arrow_type": "Decimal128(20,8)",
+            },
+            "rate": {
+                "type": "number",
+                "native_type": "number",
+                "arrow_type": "Float64",
+            },
         },
     },
 }
@@ -1379,156 +1517,8 @@ class TestReadBatchesDecimalPrecision:
             3.14159265358979
         )
 
-    @pytest.mark.asyncio
-    async def test_keyset_decimal_key_sent_with_full_precision(self):
-        # A fractional keyset key parses to Decimal; it must reach the next
-        # request as its full-precision string. yarl would otherwise truncate
-        # the Decimal to its integer part and silently skip rows.
-        page1 = '{"records": [{"score": 10.5}, {"score": 1234567890.12345678}]}'
-        page2 = '{"records": [{"score": 1234567890.99999999}]}'
-        session = _FakeSession(
-            [
-                _FakeResponse(status=200, body=page1),
-                _FakeResponse(status=200, body=page2),
-            ]
-        )
-        runtime = _runtime_with_session(session)
-        connector = APIConnector("test")
-
-        endpoint = _endpoint_doc_with_ref(
-            "response.body.records",
-            {
-                "type": "object",
-                "properties": {
-                    "records": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "score": {"type": "number", "arrow_type": "Float64"},
-                            },
-                        },
-                    },
-                },
-            },
-        )
-        endpoint["operations"]["read"]["pagination"] = {
-            "type": "keyset",
-            "keyset": {"param": "after", "from_record": "score"},
-            "limit": {"param": "limit"},
-        }
-        await _consume(
-            connector,
-            runtime,
-            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
-            state_manager=MagicMock(),
-            stream_name="items",
-            batch_size=2,
-        )
-
-        assert "after" not in session.calls[0][2]
-        assert session.calls[1][2]["after"] == "1234567890.12345678"
-
-    @pytest.mark.asyncio
-    async def test_keyset_body_param_keeps_native_numeric_type(self):
-        # A keyset param declared ``in: body`` must reach the JSON body as its
-        # native type. Stringifying it (to dodge yarl in the query) would send
-        # an integer key as a string, which a numeric body schema can reject.
-        session = _FakeSession(
-            [
-                _FakeResponse(
-                    status=200,
-                    body={"records": [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]},
-                ),
-                _FakeResponse(status=200, body={"records": [{"id": 3, "name": "c"}]}),
-            ]
-        )
-        runtime = _runtime_with_session(session)
-        connector = APIConnector("test")
-
-        endpoint = _endpoint_doc_with_records(
-            pagination={
-                "type": "keyset",
-                "keyset": {"param": "after", "from_record": "id"},
-                "limit": {"param": "limit"},
-            },
-        )
-        endpoint["operations"]["read"]["params"] = {
-            "after": {"in": "body", "type": "integer", "required": False},
-        }
-        endpoint["operations"]["read"]["request"] = {
-            "method": "POST",
-            "path": "/items/search",
-            "body": {"after": {"from_param": "after"}},
-        }
-        await _consume(
-            connector,
-            runtime,
-            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
-            state_manager=MagicMock(),
-            stream_name="items",
-            batch_size=2,
-        )
-
-        # Body param stays out of the query and keeps its native int type.
-        assert "after" not in session.calls[1][2]
-        assert session.bodies[1] == {"after": 2}
-
-    @pytest.mark.asyncio
-    async def test_keyset_body_param_narrows_fractional_decimal_to_float(self):
-        # A fractional keyset key parses to Decimal. In the body it must become
-        # a float (a JSON number) -- stdlib json.dumps, which aiohttp uses for
-        # the body, cannot serialize a Decimal and would raise on page 2.
-        page1 = '{"records": [{"score": 1.5}, {"score": 2.5}]}'
-        page2 = '{"records": [{"score": 3.5}]}'
-        session = _FakeSession(
-            [
-                _FakeResponse(status=200, body=page1),
-                _FakeResponse(status=200, body=page2),
-            ]
-        )
-        runtime = _runtime_with_session(session)
-        connector = APIConnector("test")
-
-        endpoint = _endpoint_doc_with_ref(
-            "response.body.records",
-            {
-                "type": "object",
-                "properties": {
-                    "records": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "score": {"type": "number", "arrow_type": "Float64"},
-                            },
-                        },
-                    },
-                },
-            },
-        )
-        endpoint["operations"]["read"]["params"] = {
-            "after": {"in": "body", "type": "number", "required": False},
-        }
-        endpoint["operations"]["read"]["request"] = {
-            "method": "POST",
-            "path": "/items/search",
-            "body": {"after": {"from_param": "after"}},
-        }
-        endpoint["operations"]["read"]["pagination"] = {
-            "type": "keyset",
-            "keyset": {"param": "after", "from_record": "score"},
-            "limit": {"param": "limit"},
-        }
-        await _consume(
-            connector,
-            runtime,
-            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
-            state_manager=MagicMock(),
-            stream_name="items",
-            batch_size=2,
-        )
-
-        body = session.bodies[1]
-        assert body == {"after": 2.5}
-        assert isinstance(body["after"], float)
+    # The keyset-driven Decimal tests (full-precision query key, native body
+    # key, Decimal->float body narrowing) were removed with the dict-based
+    # keyset loop: the contract's keyset strategy is not implemented by this
+    # read path yet. Restore that coverage when #346 lands keyset per the
+    # contract's order_by_field shape.

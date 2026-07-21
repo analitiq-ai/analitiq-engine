@@ -21,6 +21,7 @@ Shape::
       # destination role:
       "endpoint_refs":   {stream_id: {...}},
       "stream_endpoints": {stream_id: {...}},
+      "stream_conflict_keys": {stream_id: ["col", ...]},
       # source role:
       "source_config": {...}      # endpoint_document, stream_source, ...
     }
@@ -51,6 +52,7 @@ class WorkerBootstrap:
     connection_type_mapper: TypeMapper | None
     endpoint_refs: dict[str, Any]
     stream_endpoints: dict[str, Any]
+    stream_conflict_keys: dict[str, list[str]]
     source_config: dict[str, Any]
 
     def build_runtime(self) -> ConnectionRuntime:
@@ -92,6 +94,7 @@ def parse_bootstrap(raw: dict[str, Any]) -> WorkerBootstrap:
         ),
         endpoint_refs=dict(raw.get("endpoint_refs") or {}),
         stream_endpoints=dict(raw.get("stream_endpoints") or {}),
+        stream_conflict_keys=dict(raw.get("stream_conflict_keys") or {}),
         source_config=dict(raw.get("source_config") or {}),
     )
 

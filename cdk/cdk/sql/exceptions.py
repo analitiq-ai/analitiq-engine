@@ -46,7 +46,7 @@ class SchemaConfigurationError(Exception):
 
     Raised for caller-actionable configuration failures: an unsupported
     proto write mode, an endpoint column missing its ``name`` or
-    ``native_type``, or a stream state with no endpoint document to build
+    ``arrow_type``, or a stream state with no endpoint document to build
     DDL from. Deterministic: the same input always fails, so the gRPC
     layer surfaces it in the SchemaAck instead of retrying. Replaces the
     bare ``ValueError`` these paths used to raise (issue #153) so an
